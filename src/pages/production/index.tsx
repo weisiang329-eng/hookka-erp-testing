@@ -877,6 +877,22 @@ export default function ProductionPage({
     wipLabel?: string;
     // Sofa-only: the SO-wide leg height summary (string for display).
     legsInfo?: string;
+    // Sofa: per-line "Special order" note from the SO (free-text).
+    specialOrder?: string;
+    // Bedframe: divan height in inches (used both as a body field and to
+    // build the Divan box's "Code" line "{N}\" Divan {sizeLabel}").
+    divanHeightInches?: number | null;
+    // The "Code" line on the sticker body — describes what's physically in
+    // THIS box (vs the top header which shows the product/WIP). Set by
+    // the aggregator per piece-type:
+    //   BF HB:    "{productCode} {sizeCode} HB"     (e.g. "1013 Q HB")
+    //   BF Divan: "{divanH}\" Divan {sizeLabel}"    (e.g. "8\" Divan 6FT")
+    //   Sofa:     {fullCompartment}                 (SO-wide concat)
+    //   Pillow:   {productName}                     (e.g. "Square Pillow")
+    boxLabel?: string;
+    // Synthetic Pillow sticker — same pairing pattern as legs but pinned
+    // to the LAST compartment as a 2-in-1.
+    isSyntheticPillow?: boolean;
     pieceNo: number;
     totalPieces: number;
     pieceName: string;
@@ -2846,6 +2862,8 @@ export default function ProductionPage({
             mfdDate: u.mfdDate,
             itemCategory: (o.itemCategory as "BEDFRAME" | "SOFA" | "ACCESSORY" | undefined),
             legHeightInches: o.legHeightInches ?? null,
+            divanHeightInches: o.divanHeightInches ?? null,
+            specialOrder: o.specialOrder ?? "",
           });
         }
       }
@@ -2855,34 +2873,64 @@ export default function ProductionPage({
       return [];
     }
     // SO-level sofa pack aggregation. Sofa pack count is computed across
-    // every sofa PO in the same SO (not per PO), and a synthetic Legs
-    // sticker is injected when the SO has any sofa line with legs taller
-    // than LEG_PACK_THRESHOLD_INCHES. Compartment 1 + Legs share a single
-    // physical 2-in-1 sticker (paired via comboPairKey).
+    // every sofa PO in the same SO (not per PO). Within a sofa SO we also:
+    //   - Inject a synthetic Legs sticker as 2-in-1 with Compartment 1
+    //     when any sofa line has legs > LEG_PACK_THRESHOLD_INCHES.
+    //   - Pull the SO's pillow stickers (ACCESSORY POs whose productName
+    //     contains "pillow") out of nonSofa and append them as the LAST
+    //     pack — last sofa compartment becomes 2-in-1 with the pillow.
+    // The pillow is its own real fg_unit (not synthetic like legs) so its
+    // QR scans normally; it just gets renumbered + paired into the
+    // compartment chain.
+    const isPillowSticker = (s: FgSticker): boolean =>
+      s.itemCategory === "ACCESSORY" &&
+      /pillow/i.test(s.productName + " " + s.productCode);
+
     const sofaBySo = new Map<string, FgSticker[]>();
+    const pillowsBySo = new Map<string, FgSticker[]>();
     const nonSofa: FgSticker[] = [];
     for (const s of all) {
       if (s.itemCategory === "SOFA" && s.salesOrderId) {
         const list = sofaBySo.get(s.salesOrderId) ?? [];
         list.push(s);
         sofaBySo.set(s.salesOrderId, list);
+      } else if (isPillowSticker(s) && s.salesOrderId) {
+        const list = pillowsBySo.get(s.salesOrderId) ?? [];
+        list.push(s);
+        pillowsBySo.set(s.salesOrderId, list);
       } else {
         nonSofa.push(s);
       }
     }
-    // Bedframe WIP label = "{size} | {fabric}" — simpler than the FAB_CUT
-    // FC label, but enough to connect a sticker back to its production
-    // batch. (FAB_CUT label needs server-side joining; the on-sticker
-    // version is for QC eyeballing, not for scanning.)
+    // Pillows belonging to a SO that has NO sofa go back into nonSofa
+    // (they print as standalone 1/1 stickers, no aggregation).
+    for (const [soId, pillows] of pillowsBySo) {
+      if (!sofaBySo.has(soId)) {
+        nonSofa.push(...pillows);
+        pillowsBySo.delete(soId);
+      }
+    }
+
+    // Bedframe boxLabel + WIP label + short pieceName for the pack badge.
+    //   pieceNo === 1 → HB box  → boxLabel "{productCode} {size} HB", badge "HB"
+    //   pieceNo > 1   → Divan   → boxLabel "{divanH}\" Divan {sizeLabel}", badge "Divan"
     for (const s of nonSofa) {
       if (s.itemCategory === "BEDFRAME") {
         const parts = [s.sizeLabel, s.fabricCode].filter(Boolean);
         s.wipLabel = parts.join(" | ");
+        if (s.pieceNo === 1) {
+          s.boxLabel = [s.productCode, s.sizeLabel, "HB"].filter(Boolean).join(" ");
+          s.pieceName = "HB";
+        } else {
+          const divanH = s.divanHeightInches != null ? `${s.divanHeightInches}"` : "";
+          s.boxLabel = [divanH, "Divan", s.sizeLabel].filter(Boolean).join(" ");
+          s.pieceName = "Divan";
+        }
       }
     }
 
     const aggregated: FgSticker[] = [...nonSofa];
-    for (const [, group] of sofaBySo) {
+    for (const [soId, group] of sofaBySo) {
       // Deterministic order so renumbering is stable across loads.
       group.sort((a, b) =>
         a.poNo.localeCompare(b.poNo) ||
@@ -2892,8 +2940,11 @@ export default function ProductionPage({
       const hasLegs = group.some(
         (s) => (s.legHeightInches ?? 0) > LEG_PACK_THRESHOLD_INCHES,
       );
+      const pillows = pillowsBySo.get(soId) ?? [];
+      const hasPillow = pillows.length > 0;
       const compartmentCount = group.length;
-      const totalPacks = compartmentCount + (hasLegs ? 1 : 0);
+      const totalPacks =
+        compartmentCount + (hasLegs ? 1 : 0) + (hasPillow ? pillows.length : 0);
 
       // Sofa fullCompartment label — joined productCodes of every sofa PO
       // in the SO (preserving order + duplicates) with shared-prefix
@@ -2914,19 +2965,34 @@ export default function ProductionPage({
           ? ""
           : legHeights.map((h) => `${h}"`).join(", ");
 
-      // Renumber: position 1 = compartment 1, position 2 = legs (if any),
-      // positions 3..N = remaining compartments.
+      // Renumber sofa compartments. Layout:
+      //   idx 0 (Compartment 1) → pieceNo 1
+      //   if hasLegs → Legs at pieceNo 2 (2-in-1 with Compartment 1)
+      //   idx 1..N-1 (Compartments 2..N) → pieceNo 2+legShift..N+legShift
+      //   if hasPillow → Pillow at pieceNo N+legShift+1 (2-in-1 with last comp)
+      const legShift = hasLegs ? 1 : 0;
       group.forEach((s, idx) => {
-        // idx 0 → pieceNo 1; idx 1+ → pieceNo (idx+1) + (hasLegs ? 1 : 0)
-        const renumbered = idx === 0 ? 1 : idx + 1 + (hasLegs ? 1 : 0);
-        s.pieceNo = renumbered;
+        s.pieceNo = idx === 0 ? 1 : idx + 1 + legShift;
         s.totalPieces = totalPacks;
         s.wipLabel = fullCompartment;
+        s.boxLabel = fullCompartment;
+        s.pieceName = "sofa";
         if (legsInfo) s.legsInfo = legsInfo;
       });
 
-      if (hasLegs && group.length > 0) {
-        const compartment1 = group[0];
+      // Build the output in physical box order:
+      // [Compartment 1, Legs?, Compartment 2..N-1, last(Compartment N), Pillow?]
+      // Pairing direction: secondary.comboPairKey → primary. The primary
+      // doesn't track its secondaries — render-time lookup walks the
+      // sticker list and finds any secondary whose comboPairKey points
+      // back. This handles single-compartment SOs where one compartment
+      // is BOTH the first AND last (legs + pillow on the same card).
+      const compartment1 = group[0];
+      const lastCompartment = group[group.length - 1];
+
+      const outputForSo: FgSticker[] = [];
+      outputForSo.push(compartment1);
+      if (hasLegs) {
         const legsKey = `legs-${compartment1.salesOrderId}`;
         const legsSticker: FgSticker = {
           ...compartment1,
@@ -2935,19 +3001,42 @@ export default function ProductionPage({
           shortCode: "LEGS",
           pieceNo: 2,
           totalPieces: totalPacks,
-          pieceName: "Legs (separate pack)",
+          pieceName: "leg",
+          boxLabel: fullCompartment,
           isSyntheticLegs: true,
           comboPairKey: compartment1.key,
           wipLabel: fullCompartment,
           legsInfo: legsInfo || compartment1.legsInfo,
         };
-        compartment1.comboPairKey = legsKey;
-
-        // Insert legs at position 2 (after compartment 1 in the group).
-        aggregated.push(compartment1, legsSticker, ...group.slice(1));
-      } else {
-        aggregated.push(...group);
+        outputForSo.push(legsSticker);
       }
+      // Middle compartments (between 1 and last).
+      for (let i = 1; i < group.length - (group.length > 1 ? 1 : 0); i++) {
+        outputForSo.push(group[i]);
+      }
+      if (group.length > 1) {
+        outputForSo.push(lastCompartment);
+      }
+      if (hasPillow) {
+        // Pillows are real fg_units (not synthetic). Renumber + 2-in-1 with
+        // last compartment. If multiple pillow units, chain them after —
+        // only the FIRST pillow pairs into the last compartment's card; the
+        // rest stand alone.
+        pillows.forEach((p, i) => {
+          p.pieceNo = compartmentCount + legShift + 1 + i;
+          p.totalPieces = totalPacks;
+          p.wipLabel = fullCompartment;
+          p.boxLabel = p.productName || "Pillow";
+          p.pieceName = "pillow";
+          if (i === 0) {
+            p.comboPairKey = lastCompartment.key;
+            p.isSyntheticPillow = true; // render-skip flag — paired sticker
+          }
+        });
+        outputForSo.push(...pillows);
+      }
+
+      aggregated.push(...outputForSo);
     }
 
     setJobCardStickers([]);
@@ -4776,35 +4865,33 @@ export default function ProductionPage({
             <div className="overflow-x-auto">
               <div className="flex gap-3 p-3 min-w-min">
                 {fgStickers.map((s) => {
-                  // The synthetic Legs sticker is rendered inside its pair
-                  // partner's card (Compartment 1's 2-in-1 layout) — skip
-                  // standalone rendering so it doesn't appear twice.
-                  if (s.isSyntheticLegs) return null;
+                  // Paired secondary stickers (Legs after Compartment 1,
+                  // Pillow after the LAST Compartment) render inside their
+                  // pair partner's card — skip standalone.
+                  if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
                   const origin =
                     typeof window !== "undefined" && window.location?.origin
                       ? window.location.origin
                       : "";
                   const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
-                  const mfd = (() => {
-                    if (!s.mfdDate) return "-";
-                    const d = new Date(s.mfdDate);
-                    if (Number.isNaN(d.getTime())) return s.mfdDate.slice(0, 10);
-                    const yy = String(d.getFullYear()).slice(-2);
-                    const mm = String(d.getMonth() + 1).padStart(2, "0");
-                    const dd = String(d.getDate()).padStart(2, "0");
-                    return `${yy}-${mm}-${dd}`;
-                  })();
                   const customerLine = s.customerHub
                     ? `${s.customerName} (${s.customerHub})`
                     : s.customerName;
-                  // Pair lookup: when this sticker is Compartment 1 of a
-                  // SO with legs, render the Legs sub-block on the same
-                  // card (2-in-1 sticker design).
-                  const legsPair = s.comboPairKey
-                    ? fgStickers.find((x) => x.key === s.comboPairKey && x.isSyntheticLegs)
-                    : null;
+                  // Pair lookup — back-direction. Each secondary (Legs /
+                  // Pillow) carries comboPairKey pointing to its primary;
+                  // we find them by walking the list. Single-compartment
+                  // SOs may pair the same primary with BOTH secondaries.
+                  const legsPair = fgStickers.find(
+                    (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
+                  );
+                  const pillowPair = fgStickers.find(
+                    (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
+                  );
                   const legsTrackUrl = legsPair
                     ? `${origin}/track?s=${encodeURIComponent(legsPair.unitSerial)}`
+                    : "";
+                  const pillowTrackUrl = pillowPair
+                    ? `${origin}/track?s=${encodeURIComponent(pillowPair.unitSerial)}`
                     : "";
                   return (
                     <div
@@ -4818,29 +4905,28 @@ export default function ProductionPage({
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[2px] text-[9px] leading-tight text-[#1F1D1B]">
-                        <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">SIZE</span>: {s.sizeLabel}</div>
-                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">COLOR</span>: {s.fabricColor || "-"}</div>
-                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">PO NO</span>: {s.poNo}</div>
-                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">CUST</span>: {customerLine}</div>
-                        <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">MFD</span>: {mfd}</div>
-                        {s.itemCategory === "SOFA" && s.wipLabel && (
-                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">COMP</span>: {s.wipLabel}</div>
+                        {s.boxLabel && (
+                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
                         )}
-                        {s.itemCategory === "SOFA" && s.legsInfo && (
-                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">LEGS</span>: {s.legsInfo}</div>
+                        <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel}</div>
+                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Color</span>: {s.fabricColor || "-"}</div>
+                        {s.itemCategory === "BEDFRAME" && s.divanHeightInches != null && (
+                          <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches}"</div>
                         )}
-                        {s.itemCategory === "BEDFRAME" && s.wipLabel && (
-                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">WIP</span>: {s.wipLabel}</div>
+                        {s.legHeightInches != null && s.legHeightInches > 0 && (
+                          <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches}"</div>
                         )}
+                        {s.itemCategory === "SOFA" && s.specialOrder && (
+                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
+                        )}
+                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">PO No</span>: {s.poNo}</div>
+                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Customer</span>: {customerLine}</div>
                       </div>
                       <div className="flex items-end gap-2 mt-2">
-                        <QRImg data={trackUrl} size={legsPair ? 80 : 110} alt="FG unit QR" className="block" />
+                        <QRImg data={trackUrl} size={legsPair || pillowPair ? 80 : 110} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center">
                           <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                            {s.pieceNo}/{s.totalPieces}
-                          </div>
-                          <div className="leading-tight truncate" style={{ fontSize: "8px" }}>
-                            {s.pieceName}
+                            {s.pieceNo}/{s.totalPieces} {s.pieceName}
                           </div>
                           <div className="font-semibold mt-1 leading-tight" style={{ fontSize: "10px" }}>
                             {s.shortCode}
@@ -4850,31 +4936,36 @@ export default function ProductionPage({
                           </div>
                         </div>
                       </div>
-                      {/* 2-in-1 legs section — physically printed on the
-                          same sticker as Compartment 1 because the legs
-                          pack lives inside Compartment 1's box. Operator
-                          can scan either QR independently. */}
+                      {/* 2-in-1 legs section — same physical sticker as
+                          Compartment 1 (legs pack lives inside Comp 1's box). */}
                       {legsPair && (
-                        <>
-                          <div className="border-t-2 border-dashed border-[#6B5C32] my-2" />
-                          <div className="text-center text-[8px] font-semibold text-[#6B5C32] uppercase tracking-wide">
-                            + Legs (separate pack inside)
-                          </div>
-                          <div className="flex items-end gap-2 mt-1">
-                            <QRImg data={legsTrackUrl} size={80} alt="Legs QR" className="block" />
-                            <div className="flex-1 text-center">
-                              <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                                {legsPair.pieceNo}/{legsPair.totalPieces}
-                              </div>
-                              <div className="leading-tight truncate" style={{ fontSize: "8px" }}>
-                                Legs
-                              </div>
-                              <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
-                                {legsPair.shortCode}
-                              </div>
+                        <div className="flex items-end gap-2 mt-2 pt-2 border-t border-dashed border-[#6B5C32]">
+                          <QRImg data={legsTrackUrl} size={80} alt="Legs QR" className="block" />
+                          <div className="flex-1 text-center">
+                            <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
+                              {legsPair.pieceNo}/{legsPair.totalPieces} {legsPair.pieceName}
+                            </div>
+                            <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
+                              {legsPair.shortCode}
                             </div>
                           </div>
-                        </>
+                        </div>
+                      )}
+                      {/* 2-in-1 pillow section — same physical sticker as
+                          the LAST Compartment (pillow lives inside last
+                          compartment's box). */}
+                      {pillowPair && (
+                        <div className="flex items-end gap-2 mt-2 pt-2 border-t border-dashed border-[#6B5C32]">
+                          <QRImg data={pillowTrackUrl} size={80} alt="Pillow QR" className="block" />
+                          <div className="flex-1 text-center">
+                            <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
+                              {pillowPair.pieceNo}/{pillowPair.totalPieces} {pillowPair.pieceName}
+                            </div>
+                            <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
+                              {pillowPair.shortCode}
+                            </div>
+                          </div>
+                        </div>
                       )}
                     </div>
                   );
@@ -5023,29 +5114,26 @@ export default function ProductionPage({
           `}</style>
           <div id="batch-fg-print" className="hidden print:block">
             {fgStickers.map((s) => {
-              // Synthetic Legs sticker prints inside its pair partner's
-              // page (Compartment 1 of the SO) — skip standalone print.
-              if (s.isSyntheticLegs) return null;
+              // Paired secondaries (Legs / Pillow) print inside their
+              // primary's page — skip standalone.
+              if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
               const origin =
                 typeof window !== "undefined" && window.location?.origin
                   ? window.location.origin
                   : "";
               const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
-              const mfd = (() => {
-                if (!s.mfdDate) return "-";
-                const d = new Date(s.mfdDate);
-                if (Number.isNaN(d.getTime())) return s.mfdDate.slice(0, 10);
-                const yy = String(d.getFullYear()).slice(-2);
-                const mm = String(d.getMonth() + 1).padStart(2, "0");
-                const dd = String(d.getDate()).padStart(2, "0");
-                return `${yy}-${mm}-${dd}`;
-              })();
               const customerLine = s.customerHub ? `${s.customerName} (${s.customerHub})` : s.customerName;
-              const legsPair = s.comboPairKey
-                ? fgStickers.find((x) => x.key === s.comboPairKey && x.isSyntheticLegs)
-                : null;
+              const legsPair = fgStickers.find(
+                (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
+              );
+              const pillowPair = fgStickers.find(
+                (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
+              );
               const legsTrackUrl = legsPair
                 ? `${origin}/track?s=${encodeURIComponent(legsPair.unitSerial)}`
+                : "";
+              const pillowTrackUrl = pillowPair
+                ? `${origin}/track?s=${encodeURIComponent(pillowPair.unitSerial)}`
                 : "";
               return (
                 <div
@@ -5059,28 +5147,29 @@ export default function ProductionPage({
                     </div>
                     <div className="border-t border-black my-[1.5mm]" />
                     <div className="flex-1 space-y-[0.6mm]" style={{ fontSize: "9pt", lineHeight: 1.25 }}>
-                      <div><span className="inline-block w-[22mm] font-semibold">SIZE</span>: {s.sizeLabel}</div>
-                      <div><span className="inline-block w-[22mm] font-semibold">COLOR</span>: {s.fabricColor || "-"}</div>
-                      <div><span className="inline-block w-[22mm] font-semibold">PO NO</span>: {s.poNo}</div>
-                      <div><span className="inline-block w-[22mm] font-semibold">CUSTOMER</span>: {customerLine}</div>
-                      <div><span className="inline-block w-[22mm] font-semibold">MFD</span>: {mfd}</div>
-                      {s.itemCategory === "SOFA" && s.wipLabel && (
-                        <div><span className="inline-block w-[22mm] font-semibold">COMP</span>: {s.wipLabel}</div>
+                      {s.boxLabel && (
+                        <div><span className="inline-block w-[22mm] font-semibold">Code</span>: {s.boxLabel}</div>
                       )}
-                      {s.itemCategory === "SOFA" && s.legsInfo && (
-                        <div><span className="inline-block w-[22mm] font-semibold">LEGS</span>: {s.legsInfo}</div>
+                      <div><span className="inline-block w-[22mm] font-semibold">Size</span>: {s.sizeLabel}</div>
+                      <div><span className="inline-block w-[22mm] font-semibold">Color</span>: {s.fabricColor || "-"}</div>
+                      {s.itemCategory === "BEDFRAME" && s.divanHeightInches != null && (
+                        <div><span className="inline-block w-[22mm] font-semibold">Divan</span>: {s.divanHeightInches}"</div>
                       )}
-                      {s.itemCategory === "BEDFRAME" && s.wipLabel && (
-                        <div><span className="inline-block w-[22mm] font-semibold">WIP</span>: {s.wipLabel}</div>
+                      {s.legHeightInches != null && s.legHeightInches > 0 && (
+                        <div><span className="inline-block w-[22mm] font-semibold">Leg</span>: {s.legHeightInches}"</div>
                       )}
+                      {s.itemCategory === "SOFA" && s.specialOrder && (
+                        <div><span className="inline-block w-[22mm] font-semibold">Special</span>: {s.specialOrder}</div>
+                      )}
+                      <div><span className="inline-block w-[22mm] font-semibold">PO No</span>: {s.poNo}</div>
+                      <div><span className="inline-block w-[22mm] font-semibold">Customer</span>: {customerLine}</div>
                     </div>
                     <div className="flex items-end gap-[2mm] mt-[1mm]">
-                      <QRImg data={trackUrl} size={legsPair ? 380 : 500} alt="FG unit QR" className="block" />
+                      <QRImg data={trackUrl} size={legsPair || pillowPair ? 380 : 500} alt="FG unit QR" className="block" />
                       <div className="flex-1 text-center">
                         <div className="font-bold" style={{ fontSize: "14pt" }}>
-                          {s.pieceNo} of {s.totalPieces}
+                          {s.pieceNo}/{s.totalPieces} {s.pieceName}
                         </div>
-                        <div className="text-[8pt] mt-[1mm]">{s.pieceName}</div>
                         <div className="font-semibold mt-[2mm]" style={{ fontSize: "11pt" }}>
                           {s.shortCode}
                         </div>
@@ -5089,28 +5178,31 @@ export default function ProductionPage({
                         </div>
                       </div>
                     </div>
-                    {/* 2-in-1 Legs section — same physical sticker as
-                        Compartment 1 (the legs pack lives inside this
-                        compartment's box). */}
                     {legsPair && (
-                      <>
-                        <div className="border-t border-dashed border-black mt-[2mm] pt-[1.5mm]" />
-                        <div className="text-center font-semibold uppercase tracking-wide" style={{ fontSize: "8pt" }}>
-                          + Legs (separate pack inside)
-                        </div>
-                        <div className="flex items-end gap-[2mm] mt-[1mm]">
-                          <QRImg data={legsTrackUrl} size={300} alt="Legs QR" className="block" />
-                          <div className="flex-1 text-center">
-                            <div className="font-bold" style={{ fontSize: "13pt" }}>
-                              {legsPair.pieceNo} of {legsPair.totalPieces}
-                            </div>
-                            <div className="text-[8pt] mt-[1mm]">Legs</div>
-                            <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
-                              {legsPair.shortCode}
-                            </div>
+                      <div className="flex items-end gap-[2mm] mt-[2mm] pt-[1.5mm] border-t border-dashed border-black">
+                        <QRImg data={legsTrackUrl} size={300} alt="Legs QR" className="block" />
+                        <div className="flex-1 text-center">
+                          <div className="font-bold" style={{ fontSize: "13pt" }}>
+                            {legsPair.pieceNo}/{legsPair.totalPieces} {legsPair.pieceName}
+                          </div>
+                          <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
+                            {legsPair.shortCode}
                           </div>
                         </div>
-                      </>
+                      </div>
+                    )}
+                    {pillowPair && (
+                      <div className="flex items-end gap-[2mm] mt-[2mm] pt-[1.5mm] border-t border-dashed border-black">
+                        <QRImg data={pillowTrackUrl} size={300} alt="Pillow QR" className="block" />
+                        <div className="flex-1 text-center">
+                          <div className="font-bold" style={{ fontSize: "13pt" }}>
+                            {pillowPair.pieceNo}/{pillowPair.totalPieces} {pillowPair.pieceName}
+                          </div>
+                          <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
+                            {pillowPair.shortCode}
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>

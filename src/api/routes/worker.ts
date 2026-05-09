@@ -821,18 +821,35 @@ app.get("/payslips", async (c) => {
   const daysInMonth = worker.workingDaysPerMonth ?? 26;
   const hoursPerDay = worker.workingHoursPerDay ?? 8;
 
-  // Worked days + OT minutes this month from attendance.
+  // Worked days + OT minutes this month — prefer working_hour_entries
+  // (the manual fill office uses) over attendance_records (clock-in flow,
+  // not yet rolled out to workers; was also pointing at non-existent
+  // table `attendance`). A day counts as worked if the worker has any
+  // hours entered for it.
+  const wheRes = await c.var.DB.prepare(
+    `SELECT DISTINCT date FROM working_hour_entries
+      WHERE workerId = ? AND date LIKE ?`,
+  )
+    .bind(workerId, `${monthPrefix}%`)
+    .all<{ date: string }>();
+  const workedDaysFromEntries = new Set((wheRes.results ?? []).map((r) => r.date)).size;
+
   const attRes = await c.var.DB.prepare(
     `SELECT date, status, overtimeMinutes
-       FROM attendance
+       FROM attendance_records
       WHERE employeeId = ? AND date LIKE ?`,
   )
     .bind(workerId, `${monthPrefix}%`)
     .all<{ date: string; status: string; overtimeMinutes: number }>();
   const monthAtt = attRes.results ?? [];
-  const workedDays = monthAtt.filter(
+  const workedDaysFromAtt = monthAtt.filter(
     (r) => r.status === "PRESENT" || r.status === "HALF_DAY",
   ).length;
+
+  // Prefer the larger of the two so we don't undercount: working_hour_entries
+  // is canonical for hours-paid days, but attendance_records still wins for
+  // historical PRESENT-with-no-entries days.
+  const workedDays = Math.max(workedDaysFromEntries, workedDaysFromAtt);
   const otMinutes = monthAtt.reduce((s, r) => s + (r.overtimeMinutes ?? 0), 0);
 
   const basicEarnedSen =

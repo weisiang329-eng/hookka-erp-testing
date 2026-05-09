@@ -371,45 +371,37 @@ export default function WorkerPayPage() {
         </div>
       )}
 
-      {/* Attendance table */}
+      {/* Daily breakdown — Hours pulled from working_hour_entries via /history.
+          Clock-in/out column dropped (flow not yet live). */}
       {hist && (
-        <TableSection title="Clock records">
+        <TableSection title="Daily breakdown">
           <TableHeader
-            cols={["Date", "In → Out", "Hrs", "OT"]}
-            align={["left", "left", "right", "right"]}
+            cols={["Date", "Work hrs", "OT"]}
+            align={["left", "right", "right"]}
           />
           {hist.attendance.length === 0 ? (
             <EmptyRow />
           ) : (
-            hist.attendance.map((a) => {
-              const inOut =
-                a.clockIn || a.clockOut
-                  ? `${a.clockIn || "—"} → ${a.clockOut || "—"}`
-                  : "—";
-              return (
-                <div
-                  key={a.date}
-                  className="grid grid-cols-[auto_1fr_auto_auto] gap-2 py-2 text-sm border-t border-[#F0ECE9] items-center"
+            hist.attendance.map((a) => (
+              <div
+                key={a.date}
+                className="grid grid-cols-[auto_1fr_1fr] gap-3 py-2.5 text-sm border-t border-[#F0ECE9] items-center"
+              >
+                <span className="text-[#1F1D1B] font-medium">
+                  {fmtDay(a.date)}
+                </span>
+                <span className="tabular-nums text-right font-semibold">
+                  {mins2hrs(a.workingMinutes)}
+                </span>
+                <span
+                  className={`tabular-nums text-right font-semibold ${
+                    a.overtimeMinutes > 0 ? "text-[#9C6F1E]" : "text-[#8A8680]"
+                  }`}
                 >
-                  <span className="tabular-nums text-xs text-[#5A5550]">
-                    {fmtDay(a.date)}
-                  </span>
-                  <span className="tabular-nums text-xs text-[#5A5550] truncate">
-                    {inOut}
-                  </span>
-                  <span className="tabular-nums text-right font-semibold">
-                    {mins2hrs(a.workingMinutes)}
-                  </span>
-                  <span
-                    className={`tabular-nums text-right font-semibold ${
-                      a.overtimeMinutes > 0 ? "text-[#9C6F1E]" : "text-[#8A8680]"
-                    }`}
-                  >
-                    {a.overtimeMinutes > 0 ? mins2hrs(a.overtimeMinutes) : "—"}
-                  </span>
-                </div>
-              );
-            })
+                  {a.overtimeMinutes > 0 ? mins2hrs(a.overtimeMinutes) : "—"}
+                </span>
+              </div>
+            ))
           )}
         </TableSection>
       )}

@@ -496,8 +496,8 @@ export default function WorkerHomePage() {
       {hist && (
         <TableSection title={`Completed products (${hist.completed.length})`}>
           <TableHeader
-            cols={["Date", "Department", "Product", "Mins"]}
-            align={["left", "left", "left", "right"]}
+            cols={["Date · Dept", "Mins"]}
+            align={["left", "right"]}
           />
           {hist.completed.length === 0 ? (
             <EmptyRow />
@@ -511,21 +511,27 @@ export default function WorkerHomePage() {
                 itemCategory: c.itemCategory,
                 sizeLabel: c.sizeLabel,
               });
+              // Two-line row: top has Date | Dept badge | Mins; bottom is the
+              // product label, allowed to wrap so long WIP names don't get
+              // clipped on narrow mobile viewports.
               return (
                 <div
                   key={c.jobCardId}
-                  className="grid grid-cols-[auto_auto_1fr_auto] gap-2 py-2 text-sm border-t border-[#F0ECE9] items-center"
+                  className="py-2.5 text-sm border-t border-[#F0ECE9]"
                 >
-                  <span className="tabular-nums text-xs text-[#5A5550] whitespace-nowrap">
-                    {fmtDay(c.completedDate || "")}
-                  </span>
-                  <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
-                    {c.departmentCode}
-                  </span>
-                  <span
-                    className="text-xs truncate"
-                    title={`${label} · ${c.productCode}${c.totalPieces > 1 ? ` · ${c.piecesWorked}/${c.totalPieces} pcs` : ""}${c.piecesShared > 0 ? ` · ${c.piecesShared} shared` : ""}`}
-                  >
+                  <div className="flex items-center gap-2">
+                    <span className="tabular-nums text-xs text-[#5A5550] whitespace-nowrap">
+                      {fmtDay(c.completedDate || "")}
+                    </span>
+                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
+                      {c.departmentCode}
+                    </span>
+                    <span className="flex-1" />
+                    <span className="tabular-nums text-right font-semibold">
+                      {c.myMinutes} min
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-[#1F1D1B] break-words">
                     {label}
                     {c.totalPieces > 1 && (
                       <span className="ml-1 text-[10px] text-[#8A8680]">
@@ -537,10 +543,7 @@ export default function WorkerHomePage() {
                         · share
                       </span>
                     )}
-                  </span>
-                  <span className="tabular-nums text-right font-semibold">
-                    {c.myMinutes}
-                  </span>
+                  </div>
                 </div>
               );
             })

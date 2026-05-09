@@ -862,7 +862,7 @@ export default function ProductionPage({
     poId: string;
     productName: string;
     productCode: string;
-    sku: string;                // product.skuCode (fallback to productCode)
+    sku: string;                // product.skuCode (fallback to productCode) — kept for compatibility, header now uses productCode directly per Wei Siang spec 2026-05-09
     sizeLabel: string;          // product.sizeCode (e.g. "5 FTS") or order.sizeLabel
     fabricCode: string;
     fabricColor: string;
@@ -870,6 +870,13 @@ export default function ProductionPage({
     customerHub: string;
     salesOrderNo: string;
     salesOrderId: string;       // for SO-level sofa pack aggregation
+    // WIP-style label shown on the sticker body. For SOFA this is the SO-
+    // wide joined compartment string (e.g. "5530-1A(LHF)+1NA+1A(RHF)") so
+    // packers see the full sofa configuration on every compartment box.
+    // For BEDFRAME this is the per-PO size+fabric WIP label.
+    wipLabel?: string;
+    // Sofa-only: the SO-wide leg height summary (string for display).
+    legsInfo?: string;
     pieceNo: number;
     totalPieces: number;
     pieceName: string;
@@ -2773,6 +2780,26 @@ export default function ProductionPage({
     // shared with Compartment 1.
     const LEG_PACK_THRESHOLD_INCHES = 0.5;
 
+    // Mirror of joinModelLabel from src/api/routes/_shared/production-builder.ts:
+    // join multiple sofa productCodes into a single composite "fullcompartment"
+    // string with shared-prefix stripping. Preserves order + duplicates so the
+    // packer sees every component on the sticker.
+    //   ["5530-1A(LHF)", "5530-1NA", "5530-1A(RHF)"]
+    //     → "5530-1A(LHF)+1NA+1A(RHF)"
+    const joinModelLabel = (codes: string[]): string => {
+      const all = codes.filter(Boolean);
+      if (all.length === 0) return "";
+      if (all.length === 1) return all[0];
+      const firstDash = all[0].indexOf("-");
+      if (firstDash > 0) {
+        const prefix = all[0].slice(0, firstDash + 1);
+        if (all.every((m) => m.startsWith(prefix))) {
+          return prefix + all.map((m) => m.slice(prefix.length)).join("+");
+        }
+      }
+      return all.join("+");
+    };
+
     const all: FgSticker[] = [];
     setLoadingFgPreview(true);
     try {
@@ -2843,6 +2870,17 @@ export default function ProductionPage({
         nonSofa.push(s);
       }
     }
+    // Bedframe WIP label = "{size} | {fabric}" — simpler than the FAB_CUT
+    // FC label, but enough to connect a sticker back to its production
+    // batch. (FAB_CUT label needs server-side joining; the on-sticker
+    // version is for QC eyeballing, not for scanning.)
+    for (const s of nonSofa) {
+      if (s.itemCategory === "BEDFRAME") {
+        const parts = [s.sizeLabel, s.fabricCode].filter(Boolean);
+        s.wipLabel = parts.join(" | ");
+      }
+    }
+
     const aggregated: FgSticker[] = [...nonSofa];
     for (const [, group] of sofaBySo) {
       // Deterministic order so renumbering is stable across loads.
@@ -2857,6 +2895,25 @@ export default function ProductionPage({
       const compartmentCount = group.length;
       const totalPacks = compartmentCount + (hasLegs ? 1 : 0);
 
+      // Sofa fullCompartment label — joined productCodes of every sofa PO
+      // in the SO (preserving order + duplicates) with shared-prefix
+      // stripping. Same string lives on every compartment sticker so the
+      // packer sees the full sofa config on each box.
+      const fullCompartment = joinModelLabel(group.map((s) => s.productCode));
+      // Sofa legs summary — distinct heights across the SO. Usually one
+      // height; multi-height SOs surface all values.
+      const legHeights = Array.from(
+        new Set(
+          group
+            .map((s) => s.legHeightInches)
+            .filter((h): h is number => h !== null && h !== undefined && h > 0),
+        ),
+      ).sort((a, b) => a - b);
+      const legsInfo =
+        legHeights.length === 0
+          ? ""
+          : legHeights.map((h) => `${h}"`).join(", ");
+
       // Renumber: position 1 = compartment 1, position 2 = legs (if any),
       // positions 3..N = remaining compartments.
       group.forEach((s, idx) => {
@@ -2864,6 +2921,8 @@ export default function ProductionPage({
         const renumbered = idx === 0 ? 1 : idx + 1 + (hasLegs ? 1 : 0);
         s.pieceNo = renumbered;
         s.totalPieces = totalPacks;
+        s.wipLabel = fullCompartment;
+        if (legsInfo) s.legsInfo = legsInfo;
       });
 
       if (hasLegs && group.length > 0) {
@@ -2879,6 +2938,8 @@ export default function ProductionPage({
           pieceName: "Legs (separate pack)",
           isSyntheticLegs: true,
           comboPairKey: compartment1.key,
+          wipLabel: fullCompartment,
+          legsInfo: legsInfo || compartment1.legsInfo,
         };
         compartment1.comboPairKey = legsKey;
 
@@ -4750,10 +4811,10 @@ export default function ProductionPage({
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
                       style={{ width: "230px" }}
-                      title={`${s.sku} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
+                      title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       <div className="text-center font-bold leading-tight" style={{ fontSize: "11px" }}>
-                        {s.sku}
+                        {s.productCode}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[2px] text-[9px] leading-tight text-[#1F1D1B]">
@@ -4762,6 +4823,15 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">PO NO</span>: {s.poNo}</div>
                         <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">CUST</span>: {customerLine}</div>
                         <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">MFD</span>: {mfd}</div>
+                        {s.itemCategory === "SOFA" && s.wipLabel && (
+                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">COMP</span>: {s.wipLabel}</div>
+                        )}
+                        {s.itemCategory === "SOFA" && s.legsInfo && (
+                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">LEGS</span>: {s.legsInfo}</div>
+                        )}
+                        {s.itemCategory === "BEDFRAME" && s.wipLabel && (
+                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">WIP</span>: {s.wipLabel}</div>
+                        )}
                       </div>
                       <div className="flex items-end gap-2 mt-2">
                         <QRImg data={trackUrl} size={legsPair ? 80 : 110} alt="FG unit QR" className="block" />
@@ -4985,7 +5055,7 @@ export default function ProductionPage({
                 >
                   <div className="w-full h-full flex flex-col" style={{ fontSize: "9pt" }}>
                     <div className="text-center font-bold" style={{ fontSize: "13pt", lineHeight: 1.1 }}>
-                      {s.sku}
+                      {s.productCode}
                     </div>
                     <div className="border-t border-black my-[1.5mm]" />
                     <div className="flex-1 space-y-[0.6mm]" style={{ fontSize: "9pt", lineHeight: 1.25 }}>
@@ -4994,6 +5064,15 @@ export default function ProductionPage({
                       <div><span className="inline-block w-[22mm] font-semibold">PO NO</span>: {s.poNo}</div>
                       <div><span className="inline-block w-[22mm] font-semibold">CUSTOMER</span>: {customerLine}</div>
                       <div><span className="inline-block w-[22mm] font-semibold">MFD</span>: {mfd}</div>
+                      {s.itemCategory === "SOFA" && s.wipLabel && (
+                        <div><span className="inline-block w-[22mm] font-semibold">COMP</span>: {s.wipLabel}</div>
+                      )}
+                      {s.itemCategory === "SOFA" && s.legsInfo && (
+                        <div><span className="inline-block w-[22mm] font-semibold">LEGS</span>: {s.legsInfo}</div>
+                      )}
+                      {s.itemCategory === "BEDFRAME" && s.wipLabel && (
+                        <div><span className="inline-block w-[22mm] font-semibold">WIP</span>: {s.wipLabel}</div>
+                      )}
                     </div>
                     <div className="flex items-end gap-[2mm] mt-[1mm]">
                       <QRImg data={trackUrl} size={legsPair ? 380 : 500} alt="FG unit QR" className="block" />

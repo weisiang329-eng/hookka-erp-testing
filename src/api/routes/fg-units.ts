@@ -189,7 +189,9 @@ function bedframeSizeDefault(
   // Strip storage / option suffixes (e.g. "K-S", "Q (HF)") — first word wins
   const base = norm.split(/[\s\-_(]/)[0];
   if (base === "K" || base === "Q") {
-    return { count: 3, names: ["Headboard", "Divan L", "Divan R"] };
+    // Wei Siang spec 2026-05-09: don't differentiate L vs R — both halves
+    // are just "Divan". Operator visually identifies by box position.
+    return { count: 3, names: ["Headboard", "Divan", "Divan"] };
   }
   if (base === "S" || base === "SS") {
     return { count: 2, names: ["Headboard", "Divan"] };

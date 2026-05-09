@@ -709,6 +709,13 @@ export default function generateCustomerQuotationPdfV2(
   const usedScope =
     maintenanceConfig.customer != null ? "Customer override" : "Master";
 
+  // Customer Maintenance Config gets its own page with a fresh letterhead
+  // so the bedframe / sofa / config portions can each be detached and handed
+  // out standalone. — Wei Siang 2026-05-09
+  doc.addPage();
+  renderLetterhead();
+  y = 42;
+
   sectionHeader(
     "Customer Maintenance Config",
     usedFrom

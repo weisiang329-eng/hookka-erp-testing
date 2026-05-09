@@ -879,6 +879,11 @@ export default function ProductionPage({
     legsInfo?: string;
     // Sofa: per-line "Special order" note from the SO (free-text).
     specialOrder?: string;
+    // Customer-facing references shown on the body, between Company SO
+    // and Special. customerPOId = customer's own PO number; customerRef =
+    // customer's free-text reference (e.g. ship-to dept code).
+    customerPOId?: string;
+    customerRef?: string;
     // Bedframe: divan height in inches (used both as a body field and to
     // build the Divan box's "Code" line "{N}\" Divan {sizeLabel}").
     divanHeightInches?: number | null;
@@ -2864,6 +2869,8 @@ export default function ProductionPage({
             legHeightInches: o.legHeightInches ?? null,
             divanHeightInches: o.divanHeightInches ?? null,
             specialOrder: o.specialOrder ?? "",
+            customerPOId: o.customerPOId ?? "",
+            customerRef: o.customerReference ?? "",
           });
         }
       }
@@ -4912,21 +4919,27 @@ export default function ProductionPage({
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[2px] text-[9px] leading-tight text-[#1F1D1B]">
                         {s.boxLabel && (
-                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
+                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
                         )}
-                        <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel}</div>
-                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Color</span>: {s.fabricColor || "-"}</div>
+                        <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel}</div>
+                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Color</span>: {s.fabricColor || "-"}</div>
                         {s.itemCategory === "BEDFRAME" && s.divanHeightInches != null && (
-                          <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches}"</div>
+                          <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches}"</div>
                         )}
                         {s.legHeightInches != null && s.legHeightInches > 0 && (
-                          <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches}"</div>
+                          <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches}"</div>
+                        )}
+                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Comp SO</span>: {s.salesOrderNo}</div>
+                        {s.customerPOId && (
+                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId}</div>
+                        )}
+                        {s.customerRef && (
+                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef}</div>
                         )}
                         {s.specialOrder && (
-                          <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
+                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
                         )}
-                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">PO No</span>: {s.poNo}</div>
-                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Customer</span>: {customerLine}</div>
+                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Customer</span>: {customerLine}</div>
                       </div>
                       <div className="flex items-end gap-2 mt-2">
                         <QRImg data={trackUrl} size={legsPair || pillowPair ? 80 : 110} alt="FG unit QR" className="block" />
@@ -4936,9 +4949,6 @@ export default function ProductionPage({
                           </div>
                           <div className="font-semibold mt-1 leading-tight" style={{ fontSize: "10px" }}>
                             {s.shortCode}
-                          </div>
-                          <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
-                            Unit {s.unitNo}/{s.totalUnits}
                           </div>
                         </div>
                       </div>
@@ -5154,21 +5164,27 @@ export default function ProductionPage({
                     <div className="border-t border-black my-[1.5mm]" />
                     <div className="flex-1 space-y-[0.6mm]" style={{ fontSize: "9pt", lineHeight: 1.25 }}>
                       {s.boxLabel && (
-                        <div><span className="inline-block w-[22mm] font-semibold">Code</span>: {s.boxLabel}</div>
+                        <div><span className="inline-block w-[26mm] font-semibold">Code</span>: {s.boxLabel}</div>
                       )}
-                      <div><span className="inline-block w-[22mm] font-semibold">Size</span>: {s.sizeLabel}</div>
-                      <div><span className="inline-block w-[22mm] font-semibold">Color</span>: {s.fabricColor || "-"}</div>
+                      <div><span className="inline-block w-[26mm] font-semibold">Size</span>: {s.sizeLabel}</div>
+                      <div><span className="inline-block w-[26mm] font-semibold">Color</span>: {s.fabricColor || "-"}</div>
                       {s.itemCategory === "BEDFRAME" && s.divanHeightInches != null && (
-                        <div><span className="inline-block w-[22mm] font-semibold">Divan</span>: {s.divanHeightInches}"</div>
+                        <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches}"</div>
                       )}
                       {s.legHeightInches != null && s.legHeightInches > 0 && (
-                        <div><span className="inline-block w-[22mm] font-semibold">Leg</span>: {s.legHeightInches}"</div>
+                        <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.legHeightInches}"</div>
+                      )}
+                      <div><span className="inline-block w-[26mm] font-semibold">Comp SO</span>: {s.salesOrderNo}</div>
+                      {s.customerPOId && (
+                        <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId}</div>
+                      )}
+                      {s.customerRef && (
+                        <div><span className="inline-block w-[26mm] font-semibold">Cust Ref</span>: {s.customerRef}</div>
                       )}
                       {s.specialOrder && (
-                        <div><span className="inline-block w-[22mm] font-semibold">Special</span>: {s.specialOrder}</div>
+                        <div><span className="inline-block w-[26mm] font-semibold">Special</span>: {s.specialOrder}</div>
                       )}
-                      <div><span className="inline-block w-[22mm] font-semibold">PO No</span>: {s.poNo}</div>
-                      <div><span className="inline-block w-[22mm] font-semibold">Customer</span>: {customerLine}</div>
+                      <div><span className="inline-block w-[26mm] font-semibold">Customer</span>: {customerLine}</div>
                     </div>
                     <div className="flex items-end gap-[2mm] mt-[1mm]">
                       <QRImg data={trackUrl} size={legsPair || pillowPair ? 380 : 500} alt="FG unit QR" className="block" />
@@ -5178,9 +5194,6 @@ export default function ProductionPage({
                         </div>
                         <div className="font-semibold mt-[2mm]" style={{ fontSize: "11pt" }}>
                           {s.shortCode}
-                        </div>
-                        <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
-                          Unit {s.unitNo}/{s.totalUnits}
                         </div>
                       </div>
                     </div>

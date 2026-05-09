@@ -279,27 +279,31 @@ export async function checkRawMaterialDeleteLocked(
   db: D1Database,
   itemCode: string,
 ): Promise<string | null> {
-  // bom_components subquery removed 2026-05-09: original query JOINed
-  // bom_templates.id = bc.bomTemplateId and filtered bc.materialCode, but
-  // neither column exists on bom_components (schema: id, productId,
-  // materialCategory, materialName, qtyPerUnit, unit, wastePct). The broken
-  // query 500'd every DELETE since commit 0408e01. For fabrics the SO-line
-  // guard in raw-materials.ts already covers active references; for
-  // non-fabric raw materials a proper BOM check would need either a JSON
-  // search over bom_templates.wipComponents (modern path) or a text match
-  // on bom_components.materialName (legacy). Deferred — surface separately.
+  // 2026-05-09: original query referenced 3 non-existent columns and 500'd
+  // every DELETE since commit 0408e01:
+  //   - bom_components.bomTemplateId / .materialCode — neither exists
+  //     (schema: id, productId, materialCategory, materialName, qtyPerUnit,
+  //     unit, wastePct)
+  //   - purchase_order_items.materialCode — doesn't exist (schema has
+  //     materialName + supplierSKU; no clean itemCode link)
+  //   - rm_batches.itemCode — doesn't exist (schema has rmId FK to
+  //     raw_materials.id)
+  // BOM + PO checks dropped (no working column to match itemCode). Stock
+  // guard rewritten to JOIN rm_batches via rmId so it actually runs.
+  // Fabrics: sales_order_items.fabricCode guard is kept inline in
+  // raw-materials.ts. Surface a proper BOM-reference guard separately if
+  // needed (would require JSON search over bom_templates.wipComponents).
   const refs = await db
     .prepare(
-      `SELECT
-         (SELECT COUNT(*) FROM purchase_order_items
-            WHERE materialCode = ?) AS po,
-         (SELECT COUNT(*) FROM rm_batches WHERE itemCode = ?) AS batches`,
+      `SELECT COUNT(*) AS batches
+         FROM rm_batches rb
+         JOIN raw_materials rm ON rm.id = rb.rmId
+        WHERE rm.itemCode = ? AND rb.remainingQty > 0`,
     )
-    .bind(itemCode, itemCode)
-    .first<{ po: number; batches: number }>();
-  const counts = refs ?? { po: 0, batches: 0 };
+    .bind(itemCode)
+    .first<{ batches: number }>();
+  const counts = refs ?? { batches: 0 };
   const parts: string[] = [];
-  if (counts.po) parts.push(`${counts.po} purchase order line(s)`);
   if (counts.batches)
     parts.push(`${counts.batches} batch(es) on hand (delete those first)`);
   if (parts.length === 0) return null;

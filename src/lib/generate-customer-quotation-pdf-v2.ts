@@ -453,8 +453,27 @@ export default function generateCustomerQuotationPdfV2(
               if (pair.rhf) modelRows.push(pair.rhf);
             }
           }
-          // Stable order by code for readability.
-          modelRows.sort((a, b) => a.code.localeCompare(b.code));
+          // Custom order per Wei Siang 2026-05-09: 1S, 2S, 3S, 1A, 2A, 1B,
+          // 2B, 1NA, 2NA, L, CNR, STOOL. The (LHF/RHF) suffix is stripped
+          // for ordering; merged pair rows already collapse both sides.
+          const SUFFIX_ORDER = [
+            "1S", "2S", "3S",
+            "1A", "2A",
+            "1B", "2B",
+            "1NA", "2NA",
+            "L", "CNR", "STOOL",
+          ];
+          const orderIdx = (code: string) => {
+            const suffix = code.replace(/^\d+-/, "").replace(/\(LHF\/?RHF?\)$/, "");
+            const i = SUFFIX_ORDER.indexOf(suffix);
+            return i === -1 ? 999 : i;
+          };
+          modelRows.sort((a, b) => {
+            const ai = orderIdx(a.code);
+            const bi = orderIdx(b.code);
+            if (ai !== bi) return ai - bi;
+            return a.code.localeCompare(b.code);
+          });
 
           // Build matrix body (all 5 heights), then drop empty columns.
           // Wei Siang 2026-05-09: Code column dropped — Description already
@@ -602,6 +621,16 @@ export default function generateCustomerQuotationPdfV2(
 
     for (const model of orderedModels) {
       const modelCombos = byModel.get(model)!;
+      // Sort combos cheap → expensive within the model (Wei Siang 2026-05-09).
+      // Use the lowest seat-height price as the sort key — falls back to
+      // any present price when 24" is absent. Empty/0 prices treated as
+      // Infinity so they sort last.
+      const cheapestPrice = (c: typeof modelCombos[number]) => {
+        const vals = Object.values(c.pricesByHeight)
+          .filter((v): v is number => typeof v === "number" && v > 0);
+        return vals.length === 0 ? Infinity : Math.min(...vals);
+      };
+      modelCombos.sort((a, b) => cheapestPrice(a) - cheapestPrice(b));
       // Heights actually present across THIS model's combos.
       const heightsSet = new Set<string>();
       for (const c of modelCombos) {

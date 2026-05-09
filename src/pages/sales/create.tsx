@@ -8,7 +8,12 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { calculateUnitPrice, calculateLineTotal } from "@/lib/pricing";
-import { hasMixedSofaBedframe, SO_MIXED_CATEGORY_ERROR } from "@/lib/so-category";
+import {
+  hasMixedSofaBedframe,
+  SO_MIXED_CATEGORY_ERROR,
+  findInvalidSofaQty,
+  formatSofaQtyError,
+} from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, ChevronDown, ChevronUp, Check, AlertTriangle, X } from "lucide-react";
 import type { Customer, Product, FabricItem } from "@/types";
 import {
@@ -1429,6 +1434,21 @@ function CreateSalesOrderPage() {
     if (hasMixedSofaBedframe(items)) {
       toast.error(SO_MIXED_CATEGORY_ERROR);
       return;
+    }
+    // Sofa qty>1 — must use 1 unit per line. Server enforces too.
+    {
+      const offending = findInvalidSofaQty(
+        items.map((it, i) => ({
+          itemCategory: it.itemCategory,
+          quantity: it.quantity,
+          productCode: it.productCode,
+          lineNo: i + 1,
+        })),
+      );
+      if (offending) {
+        toast.error(formatSofaQtyError(offending));
+        return;
+      }
     }
 
     setPendingStatus(status);

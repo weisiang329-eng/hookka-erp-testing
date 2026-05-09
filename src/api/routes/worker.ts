@@ -861,81 +861,60 @@ app.get("/payslips", async (c) => {
   const daysInMonth = worker.workingDaysPerMonth ?? 26;
   const hoursPerDay = worker.workingHoursPerDay ?? 8;
 
-  // Worked days + OT minutes this month — prefer working_hour_entries
-  // (the manual fill office uses) over attendance_records (clock-in flow,
-  // not yet rolled out to workers; was also pointing at non-existent
-  // table `attendance`). A day counts as worked if the worker has any
-  // hours entered for it.
+  // ---------------------------------------------------------------
+  // Salary model (Wei Siang 2026-05-10):
+  //   • Workers see FULL monthly salary (e.g. RM 2050) as the baseline
+  //     unless they're absent.
+  //   • Each absent workday inside the month-to-date window deducts
+  //     one daily rate (basicSalarySen / workingDaysPerMonth).
+  //   • A workday is "absent" when no working_hour_entries row exists
+  //     for that date — workers no longer clock in/out, so the office
+  //     fill-in IS the source of truth.
+  //   • OT comes from working_hour_entries too: hours in excess of
+  //     workingHoursPerDay per date count as OT (1.5× hourly rate).
+  //   • Piece bonus has been retired.  Replaced by an efficiency
+  //     allowance line (formula pending — currently 0).
+  // ---------------------------------------------------------------
   const wheRes = await c.var.DB.prepare(
-    `SELECT DISTINCT date FROM working_hour_entries
+    `SELECT date, hours FROM working_hour_entries
       WHERE workerId = ? AND date LIKE ?`,
   )
     .bind(workerId, `${monthPrefix}%`)
-    .all<{ date: string }>();
-  const workedDaysFromEntries = new Set((wheRes.results ?? []).map((r) => r.date)).size;
+    .all<{ date: string; hours: number }>();
+  const hoursByDate = new Map<string, number>();
+  for (const r of wheRes.results ?? []) {
+    hoursByDate.set(r.date, (hoursByDate.get(r.date) ?? 0) + Number(r.hours));
+  }
+  const workedDays = hoursByDate.size;
 
-  const attRes = await c.var.DB.prepare(
-    `SELECT date, status, overtimeMinutes
-       FROM attendance_records
-      WHERE employeeId = ? AND date LIKE ?`,
-  )
-    .bind(workerId, `${monthPrefix}%`)
-    .all<{ date: string; status: string; overtimeMinutes: number }>();
-  const monthAtt = attRes.results ?? [];
-  const workedDaysFromAtt = monthAtt.filter(
-    (r) => r.status === "PRESENT" || r.status === "HALF_DAY",
-  ).length;
+  // Count workdays elapsed in this month up to today (Mon–Sat).
+  const monthYear = now.getFullYear();
+  const monthIdx = now.getMonth(); // 0-based
+  const todayDate = now.getDate();
+  let workdaysElapsed = 0;
+  for (let d = 1; d <= todayDate; d++) {
+    const dow = new Date(monthYear, monthIdx, d).getDay(); // 0 = Sun
+    if (dow !== 0) workdaysElapsed++; // Mon–Sat counted
+  }
+  const absentDays = Math.max(0, workdaysElapsed - workedDays);
 
-  // Prefer the larger of the two so we don't undercount: working_hour_entries
-  // is canonical for hours-paid days, but attendance_records still wins for
-  // historical PRESENT-with-no-entries days.
-  const workedDays = Math.max(workedDaysFromEntries, workedDaysFromAtt);
-  const otMinutes = monthAtt.reduce((s, r) => s + (r.overtimeMinutes ?? 0), 0);
+  const dailyRateSen = daysInMonth > 0 ? basicSalarySen / daysInMonth : 0;
+  const hourlyRateSen = hoursPerDay > 0 ? dailyRateSen / hoursPerDay : 0;
+  const basicEarnedSen = Math.max(
+    0,
+    Math.round(basicSalarySen - absentDays * dailyRateSen),
+  );
 
-  const basicEarnedSen =
-    daysInMonth > 0 ? Math.round((basicSalarySen / daysInMonth) * workedDays) : 0;
-  const hourlyRateSen =
-    daysInMonth > 0 && hoursPerDay > 0
-      ? basicSalarySen / daysInMonth / hoursPerDay
-      : 0;
+  // OT = hours per date above the standard workingHoursPerDay.
+  let otMinutes = 0;
+  for (const h of hoursByDate.values()) {
+    if (h > hoursPerDay) otMinutes += Math.round((h - hoursPerDay) * 60);
+  }
   const otSen = Math.round((otMinutes / 60) * hourlyRateSen * 1.5);
 
-  // Piece bonus this month — sum of PIECE_RATE_SEN[deptCode] for every
-  // completed/transferred JC where this worker is pic1/pic2/piecePic.
-  // The legacy path here queried `production_orders.jobCards` (a JSON
-  // text column) but that column was retired during the job_cards-table
-  // migration — `column "jobcards" does not exist` 500s the entire
-  // /payslips response. Read job_cards + piece_pics directly instead.
-  let pieceBonusSen = 0;
-  const monthJcRes = await c.var.DB.prepare(
-    `SELECT id, departmentCode, pic1Id, pic2Id
-       FROM job_cards
-      WHERE status IN ('COMPLETED','TRANSFERRED')
-        AND completedDate LIKE ?
-        AND (pic1Id = ? OR pic2Id = ?)`,
-  )
-    .bind(`${monthPrefix}%`, workerId, workerId)
-    .all<{ id: string; departmentCode: string; pic1Id: string | null; pic2Id: string | null }>();
-  const legacyJcIds = new Set<string>();
-  for (const jc of monthJcRes.results ?? []) {
-    pieceBonusSen += PIECE_RATE_SEN[jc.departmentCode ?? ""] ?? 0;
-    legacyJcIds.add(jc.id);
-  }
-  // Also count JCs the worker only touched via piece_pics, not pic1/2.
-  const pieceJcRes = await c.var.DB.prepare(
-    `SELECT DISTINCT jc.id, jc.departmentCode
-       FROM job_cards jc
-       JOIN piece_pics pp ON pp.jobCardId = jc.id
-      WHERE jc.status IN ('COMPLETED','TRANSFERRED')
-        AND jc.completedDate LIKE ?
-        AND (pp.pic1Id = ? OR pp.pic2Id = ?)`,
-  )
-    .bind(`${monthPrefix}%`, workerId, workerId)
-    .all<{ id: string; departmentCode: string }>();
-  for (const jc of pieceJcRes.results ?? []) {
-    if (legacyJcIds.has(jc.id)) continue; // already counted via pic1/2
-    pieceBonusSen += PIECE_RATE_SEN[jc.departmentCode ?? ""] ?? 0;
-  }
+  // Efficiency allowance — placeholder until Wei Siang specifies the
+  // formula (likely: efficiency % thresholds → flat allowance).
+  const efficiencyAllowanceSen = 0;
 
   return c.json({
     success: true,
@@ -943,11 +922,12 @@ app.get("/payslips", async (c) => {
       current: {
         period,
         workedDays,
+        absentDays,
         otMinutes,
         basicEarnedSen,
         otSen,
-        pieceBonusSen,
-        estimatedGrossSen: basicEarnedSen + otSen + pieceBonusSen,
+        efficiencyAllowanceSen,
+        estimatedGrossSen: basicEarnedSen + otSen + efficiencyAllowanceSen,
       },
       history,
     },

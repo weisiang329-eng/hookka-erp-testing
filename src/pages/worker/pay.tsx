@@ -66,10 +66,11 @@ type PayData = {
   current: {
     period: string;
     workedDays: number;
+    absentDays: number;
     otMinutes: number;
     basicEarnedSen: number;
     otSen: number;
-    pieceBonusSen: number;
+    efficiencyAllowanceSen: number;
     estimatedGrossSen: number;
   };
   history: Array<{
@@ -162,20 +163,22 @@ function asPayData(v: unknown): PayData | null {
   if (!isRecord(v) || !isRecord(v.current) || !Array.isArray(v.history)) return null;
   const period = asString(v.current.period);
   const workedDays = asNumber(v.current.workedDays);
+  const absentDays = asNumber(v.current.absentDays) ?? 0;
   const otMinutes = asNumber(v.current.otMinutes);
   const basicEarnedSen = asNumber(v.current.basicEarnedSen);
   const otSen = asNumber(v.current.otSen);
-  const pieceBonusSen = asNumber(v.current.pieceBonusSen);
+  const efficiencyAllowanceSen = asNumber(v.current.efficiencyAllowanceSen) ?? 0;
   const estimatedGrossSen = asNumber(v.current.estimatedGrossSen);
-  if (!period || workedDays === null || otMinutes === null || basicEarnedSen === null || otSen === null || pieceBonusSen === null || estimatedGrossSen === null) return null;
+  if (!period || workedDays === null || otMinutes === null || basicEarnedSen === null || otSen === null || estimatedGrossSen === null) return null;
   return {
     current: {
       period,
       workedDays,
+      absentDays,
       otMinutes,
       basicEarnedSen,
       otSen,
-      pieceBonusSen,
+      efficiencyAllowanceSen,
       estimatedGrossSen,
     },
     history: v.history
@@ -299,16 +302,17 @@ export default function WorkerPayPage() {
 
         <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
           <Row
-            label={`${t("pay.basicEarned")} · ${pay.current.workedDays}d`}
+            label={
+              pay.current.absentDays > 0
+                ? `Basic · ${pay.current.absentDays}d absent`
+                : "Basic (full month)"
+            }
             value={rm(pay.current.basicEarnedSen)}
           />
+          <Row label={`OT · ${otHours}h`} value={rm(pay.current.otSen)} />
           <Row
-            label={`${t("pay.ot")} · ${otHours}h`}
-            value={rm(pay.current.otSen)}
-          />
-          <Row
-            label={t("pay.pieceBonus")}
-            value={rm(pay.current.pieceBonusSen)}
+            label="Efficiency allowance"
+            value={rm(pay.current.efficiencyAllowanceSen)}
           />
           <div className="pt-2 mt-2 border-t border-white/10">
             <Row

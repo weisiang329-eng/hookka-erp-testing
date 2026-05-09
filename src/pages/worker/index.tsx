@@ -382,7 +382,7 @@ export default function WorkerHomePage() {
           Employee Detail Dashboard
         </p>
 
-        <div className="grid grid-cols-2 gap-2 mt-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
           <label className="block">
             <span className="text-[11px] text-white/60">From</span>
             <input

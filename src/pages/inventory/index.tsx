@@ -1530,7 +1530,8 @@ export default function InventoryPage() {
 
   // Edit FG dialog state
   const [editFG, setEditFG] = useState<FGItem | null>(null);
-  const [editFGForm, setEditFGForm] = useState({ costPriceSen: 0, stockQty: 0, unitM3: 0, fabricUsage: 0, productionTimeMinutes: 0 });
+  const [editFGForm, setEditFGForm] = useState<CreateFGForm>(EMPTY_FG_FORM);
+  const [editFGSaving, setEditFGSaving] = useState(false);
   // FG source-PO drilldown — populated when the dialog opens (2026-04-27).
   // Lists every production_order that produced this FG, qty + mfdDate per
   // PO. Mirrors the WIP detail dialog's "Job Cards" section.
@@ -1548,12 +1549,25 @@ export default function InventoryPage() {
 
   const handleDoubleClickFG = async (row: FGItem) => {
     setEditFG(row);
+    // Pre-populate every editable field. Mirrors the Create form so the
+    // operator sees exactly the same surface for both flows.
     setEditFGForm({
-      costPriceSen: row.costPriceSen,
-      stockQty: row.stockQty,
+      code: row.code,
+      name: row.name,
+      category: row.category,
+      baseModel: row.baseModel || "",
+      sizeCode: row.sizeCode || "",
+      sizeLabel: row.sizeLabel || "",
+      description: row.description || "",
+      basePriceSen: row.basePriceSen,
+      price1Sen: row.price1Sen,
       unitM3: row.unitM3,
       fabricUsage: row.fabricUsage,
-      productionTimeMinutes: row.productionTimeMinutes,
+      subAssemblies: row.subAssemblies,
+      pieces: row.pieces,
+      seatHeightPrices: row.seatHeightPrices,
+      skuCode: row.skuCode || "",
+      fabricColor: row.fabricColor || "",
     });
     // Fire the source-PO lookup in the background so the dialog opens
     // instantly and the table fills in when ready.
@@ -2342,90 +2356,99 @@ export default function InventoryPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-              {/* Read-only info */}
-              <div className="grid grid-cols-3 gap-3">
+              {/* Editable fields — same surface as the Add Finished Product
+                  form. Operator can revise any product attribute, not just
+                  the price/qty subset the legacy dialog allowed. */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs text-[#6B7280] mb-1">Code *</label>
+                  <input value={editFGForm.code} onChange={e => setEditFGForm(f => ({ ...f, code: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 2050(A)-(K)" />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#6B7280] mb-1">Name *</label>
+                  <input value={editFGForm.name} onChange={e => setEditFGForm(f => ({ ...f, name: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. ROMA BEDFRAME (6FT)" />
+                </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Category</label>
-                  <div className="h-[34px] flex items-center px-3 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm">
-                    <Badge>{editFG.category}</Badge>
-                  </div>
+                  <select value={editFGForm.category} onChange={e => setEditFGForm(f => ({ ...f, category: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
+                    <option value="BEDFRAME">Bedframe</option>
+                    <option value="SOFA">Sofa</option>
+                    <option value="ACCESSORY">Accessory</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Base Model</label>
-                  <div className="h-[34px] flex items-center px-3 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm text-[#111827]">
-                    {editFG.baseModel}
-                  </div>
+                  <input value={editFGForm.baseModel} onChange={e => setEditFGForm(f => ({ ...f, baseModel: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 1003(A)" />
                 </div>
                 <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Size / Model</label>
-                  <div className="h-[34px] flex items-center px-3 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm text-[#111827]">
-                    {editFG.category === "BEDFRAME" ? editFG.sizeLabel : editFG.baseModel}
-                  </div>
+                  <label className="block text-xs text-[#6B7280] mb-1">Size Code</label>
+                  <input value={editFGForm.sizeCode} onChange={e => setEditFGForm(f => ({ ...f, sizeCode: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. K, Q, S" />
                 </div>
-              </div>
-
-              {/* Editable fields */}
-              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-[#6B7280] mb-1">Size Label</label>
+                  <input value={editFGForm.sizeLabel} onChange={e => setEditFGForm(f => ({ ...f, sizeLabel: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 6FT" />
+                </div>
+                <div className="sm:col-span-3">
+                  <label className="block text-xs text-[#6B7280] mb-1">Description</label>
+                  <input value={editFGForm.description ?? ""} onChange={e => setEditFGForm(f => ({ ...f, description: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="Optional description / notes" />
+                </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
-                  <Input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    value={(editFGForm.costPriceSen / 100).toFixed(2)}
-                    onChange={(e) => setEditFGForm(f => ({ ...f, costPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) }))}
-                    className="h-[34px]"
-                    step="0.01"
-                    min="0"
+                  <input
+                    type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
+                    value={editFGForm.basePriceSen !== undefined ? (editFGForm.basePriceSen / 100).toFixed(2) : ""}
+                    onChange={e => setEditFGForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                    className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                    placeholder="0.00"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Stock Qty</label>
-                  <Input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    value={editFGForm.stockQty}
-                    onChange={(e) => setEditFGForm(f => ({ ...f, stockQty: parseInt(e.target.value) || 0 }))}
-                    className="h-[34px]"
-                    min="0"
+                  <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM)</label>
+                  <input
+                    type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
+                    value={editFGForm.price1Sen !== undefined && editFGForm.price1Sen !== null ? (editFGForm.price1Sen / 100).toFixed(2) : ""}
+                    onChange={e => setEditFGForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                    className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                    placeholder="Optional (bedframe tier 1)"
                   />
                 </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Unit M3</label>
-                  <Input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    value={editFGForm.unitM3}
-                    onChange={(e) => setEditFGForm(f => ({ ...f, unitM3: parseFloat(e.target.value) || 0 }))}
-                    className="h-[34px]"
-                    step="0.01"
-                    min="0"
+                  <input
+                    type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
+                    value={editFGForm.unitM3 !== undefined ? String(editFGForm.unitM3) : ""}
+                    onChange={e => setEditFGForm(f => ({ ...f, unitM3: e.target.value === "" ? undefined : parseFloat(e.target.value || "0") }))}
+                    className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                    placeholder="e.g. 0.69"
                   />
                 </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Fabric Usage (m)</label>
-                  <Input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    value={editFGForm.fabricUsage}
-                    onChange={(e) => setEditFGForm(f => ({ ...f, fabricUsage: parseFloat(e.target.value) || 0 }))}
-                    className="h-[34px]"
-                    step="0.1"
-                    min="0"
+                  <input
+                    type="number" onFocus={(e) => e.currentTarget.select()} step="0.1" min={0}
+                    value={editFGForm.fabricUsage !== undefined ? String(editFGForm.fabricUsage) : ""}
+                    onChange={e => setEditFGForm(f => ({ ...f, fabricUsage: e.target.value === "" ? undefined : parseFloat(e.target.value || "0") }))}
+                    className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                    placeholder="e.g. 6"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Production Time (min)</label>
-                  <Input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    value={editFGForm.productionTimeMinutes}
-                    onChange={(e) => setEditFGForm(f => ({ ...f, productionTimeMinutes: parseInt(e.target.value) || 0 }))}
-                    className="h-[34px]"
-                    min="0"
-                  />
+                  <label className="block text-xs text-[#6B7280] mb-1">SKU Code</label>
+                  <input value={editFGForm.skuCode ?? ""} onChange={e => setEditFGForm(f => ({ ...f, skuCode: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 5530-1NA-SIZE-BASE" />
                 </div>
                 <div>
-                  <label className="block text-xs text-[#6B7280] mb-1">Status</label>
-                  <div className="h-[34px] flex items-center px-3 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm">
-                    <Badge>{editFG.status}</Badge>
-                  </div>
+                  <label className="block text-xs text-[#6B7280] mb-1">Fabric Colour</label>
+                  <input value={editFGForm.fabricColor ?? ""} onChange={e => setEditFGForm(f => ({ ...f, fabricColor: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="Optional" />
                 </div>
               </div>
+              {Boolean(editFGForm.seatHeightPrices || editFGForm.subAssemblies || editFGForm.pieces) && (
+                <div className="text-xs text-[#6B7280] bg-[#FAF9F7] border border-[#E2DDD8] rounded px-3 py-2">
+                  This product also carries advanced configuration that's preserved on save:
+                  {editFGForm.seatHeightPrices ? <div>· Seat-height price ladder (sofa tier JSON)</div> : null}
+                  {editFGForm.subAssemblies ? <div>· Sub-assemblies</div> : null}
+                  {editFGForm.pieces ? <div>· Pieces breakdown</div> : null}
+                </div>
+              )}
 
               {/* Source POs — which production orders produced this FG.
                   Mirrors the WIP detail dialog's PO breakdown. Backend
@@ -2472,11 +2495,64 @@ export default function InventoryPage() {
             </div>
 
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setEditFG(null)}>Cancel</Button>
-              <Button variant="primary" size="sm" onClick={() => {
-                toast.success("Saved: " + editFG.code + " — Base Price: RM " + (editFGForm.costPriceSen / 100).toFixed(2));
-                setEditFG(null);
-              }}>Save</Button>
+              <Button variant="outline" size="sm" onClick={() => setEditFG(null)} disabled={editFGSaving}>Cancel</Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={!editFGForm.code || !editFGForm.name || editFGSaving}
+                onClick={async () => {
+                  setEditFGSaving(true);
+                  try {
+                    const body: Record<string, unknown> = {
+                      code: editFGForm.code,
+                      name: editFGForm.name,
+                      category: editFGForm.category,
+                      baseModel: editFGForm.baseModel || editFGForm.code,
+                      sizeCode: editFGForm.sizeCode,
+                      sizeLabel: editFGForm.sizeLabel,
+                    };
+                    if (editFGForm.description !== undefined) body.description = editFGForm.description;
+                    if (editFGForm.basePriceSen !== undefined) body.basePriceSen = editFGForm.basePriceSen;
+                    if (editFGForm.price1Sen !== undefined) body.price1Sen = editFGForm.price1Sen;
+                    if (editFGForm.unitM3 !== undefined) body.unitM3 = editFGForm.unitM3;
+                    if (editFGForm.fabricUsage !== undefined) body.fabricUsage = editFGForm.fabricUsage;
+                    if (editFGForm.subAssemblies !== undefined) body.subAssemblies = editFGForm.subAssemblies;
+                    if (editFGForm.pieces !== undefined) body.pieces = editFGForm.pieces;
+                    if (editFGForm.seatHeightPrices !== undefined) body.seatHeightPrices = editFGForm.seatHeightPrices;
+                    if (editFGForm.skuCode !== undefined) body.skuCode = editFGForm.skuCode;
+                    if (editFGForm.fabricColor !== undefined) body.fabricColor = editFGForm.fabricColor;
+
+                    const res = await fetch(`/api/products/${encodeURIComponent(editFG.id)}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(body),
+                    });
+                    const json = (await res.json().catch(() => null)) as
+                      | { success?: boolean; data?: Product; error?: string }
+                      | null;
+                    if (!res.ok || !json?.success) {
+                      toast.error(json?.error || `Failed to update product (HTTP ${res.status})`);
+                      return;
+                    }
+                    // Optimistic local update so the row reflects the new
+                    // values without a full refetch. Cache invalidation
+                    // covers any other page that mounts /api/products.
+                    if (json.data) {
+                      setProducts((prev) => prev.map((p) => p.id === editFG.id ? (json.data as Product) : p));
+                    }
+                    invalidateCachePrefix("/api/products");
+                    invalidateCachePrefix("/api/inventory");
+                    toast.success(`Saved: ${editFGForm.code}`);
+                    setEditFG(null);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Failed to update product");
+                  } finally {
+                    setEditFGSaving(false);
+                  }
+                }}
+              >
+                {editFGSaving ? "Saving…" : "Save Product"}
+              </Button>
             </div>
           </div>
         </div>

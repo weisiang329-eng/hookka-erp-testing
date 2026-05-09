@@ -1602,6 +1602,11 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS customerPOImageB64 TEXT",
       // 0073 (D1 legacy, not auto-applied to Postgres) — Project Order flag.
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS isProjectOrder INTEGER NOT NULL DEFAULT 0",
+      // 0113 — drop fabric_id (UI-only artifact; canonical reference is
+      // fabric_code). See migrations-postgres/0113_drop_fabric_id_from_order_items.sql
+      // for the full rationale. Idempotent — DROP IF EXISTS no-ops once applied.
+      "ALTER TABLE sales_order_items DROP COLUMN IF EXISTS fabric_id",
+      "ALTER TABLE consignment_order_items DROP COLUMN IF EXISTS fabric_id",
     ];
     for (const sql of stmts) {
       try {
@@ -1980,10 +1985,10 @@ app.post("/", async (c) => {
         c.var.DB.prepare(
           `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
-             fabricId, fabricCode, quantity, gapInches, divanHeightInches,
+             fabricCode, quantity, gapInches, divanHeightInches,
              divanPriceSen, legHeightInches, legPriceSen, specialOrder,
              specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           soId,
@@ -1995,7 +2000,6 @@ app.post("/", async (c) => {
           item.itemCategory,
           item.sizeCode,
           item.sizeLabel,
-          item.fabricId,
           item.fabricCode,
           item.quantity,
           item.gapInches,
@@ -2923,10 +2927,10 @@ app.put("/:id", async (c) => {
           c.var.DB.prepare(
             `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
-               fabricId, fabricCode, quantity, gapInches, divanHeightInches,
+               fabricCode, quantity, gapInches, divanHeightInches,
                divanPriceSen, legHeightInches, legPriceSen, specialOrder,
                specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -2938,7 +2942,6 @@ app.put("/:id", async (c) => {
             item.itemCategory,
             item.sizeCode,
             item.sizeLabel,
-            item.fabricId,
             item.fabricCode,
             item.quantity,
             item.gapInches,

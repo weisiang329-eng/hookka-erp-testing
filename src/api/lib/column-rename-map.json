@@ -214,7 +214,6 @@
   "fabricCode": "fabric_code",
   "fabricColor": "fabric_color",
   "fabricDescription": "fabric_description",
-  "fabricId": "fabric_id",
   "fabricTier": "fabric_tier",
   "fabricUsage": "fabric_usage",
   "fgUnitId": "fg_unit_id",

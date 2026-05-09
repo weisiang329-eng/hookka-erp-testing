@@ -4064,10 +4064,10 @@ app.post("/stock", async (c) => {
       .prepare(
         `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
            productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
-           fabricId, fabricCode, quantity, gapInches, divanHeightInches,
+           fabricCode, quantity, gapInches, divanHeightInches,
            divanPriceSen, legHeightInches, legPriceSen, specialOrder,
            specialOrderPriceSen, basePriceSen, unitPriceSen, lineTotalSen, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         newItem.id,
@@ -4080,7 +4080,6 @@ app.post("/stock", async (c) => {
         newItem.itemCategory,
         newItem.sizeCode,
         newItem.sizeLabel,
-        newItem.fabricId,
         newItem.fabricCode,
         newItem.quantity,
         newItem.gapInches,

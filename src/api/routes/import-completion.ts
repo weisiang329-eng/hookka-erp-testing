@@ -13205,13 +13205,15 @@ app.post("/correct-so-line-qty-cascade", async (c) => {
 
   if (dryRun) return c.json(result);
 
+  // sales_order_items has no updated_at column (postgres schema 0001_init).
+  // sales_orders + production_orders do — keep their timestamps fresh.
   const now = new Date().toISOString();
   const stmts: D1PreparedStatement[] = [
     db
       .prepare(
-        "UPDATE sales_order_items SET quantity = ?, lineTotalSen = ?, updated_at = ? WHERE id = ?",
+        "UPDATE sales_order_items SET quantity = ?, lineTotalSen = ? WHERE id = ?",
       )
-      .bind(newQty, newLineTotal, now, line.id),
+      .bind(newQty, newLineTotal, line.id),
     db
       .prepare(
         "UPDATE sales_orders SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?",

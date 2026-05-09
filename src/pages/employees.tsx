@@ -666,6 +666,8 @@ function WorkingHoursTab({
   }, [rows, sortColumn, sortDir, workerNameById]);
 
   return (
+    <div className="space-y-4">
+      <PublicHolidaysCard />
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -927,6 +929,133 @@ function WorkingHoursTab({
             </tbody>
           </table>
         </div>
+      </CardContent>
+    </Card>
+    </div>
+  );
+}
+
+// ========== Public Holidays panel ==========
+//
+// Stored in kv_config['public_holidays'] as a JSON array of YYYY-MM-DD
+// strings. /api/worker/payslips reads this list and excludes the dates
+// from the elapsed-workdays count, so a worker isn't charged an absent
+// day for not coming on a public holiday. — Wei Siang 2026-05-10
+function PublicHolidaysCard() {
+  const [dates, setDates] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/kv-config/public_holidays");
+      const j = await r.json();
+      const data = j?.data;
+      if (Array.isArray(data)) {
+        setDates(
+          data
+            .filter((d): d is string => typeof d === "string")
+            .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+            .sort(),
+        );
+      } else {
+        setDates([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot load on mount; the setState happens inside `load`'s try/finally, not a tight render loop */
+  useEffect(() => {
+    load();
+  }, [load]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const save = useCallback(async (next: string[]) => {
+    setSaving(true);
+    try {
+      const r = await fetch("/api/kv-config/public_holidays", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setDates(next);
+    } catch (e) {
+      alert(`Save failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  const addOne = () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(adding)) return;
+    if (dates.includes(adding)) {
+      setAdding("");
+      return;
+    }
+    save([...dates, adding].sort()).then(() => setAdding(""));
+  };
+
+  const removeOne = (d: string) => {
+    if (!confirm(`Remove ${d} from public holidays?`)) return;
+    save(dates.filter((x) => x !== d));
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          Public Holidays
+        </CardTitle>
+        <p className="text-xs text-[#6B7280] mt-1">
+          Mark dates so workers aren't deducted for not working that day.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-2 mb-3">
+          <Input
+            type="date"
+            value={adding}
+            onChange={(e) => setAdding(e.target.value)}
+            className="w-44"
+          />
+          <Button
+            variant="primary"
+            onClick={addOne}
+            disabled={!adding || saving}
+          >
+            <Plus className="h-4 w-4" /> Add
+          </Button>
+        </div>
+        {loading ? (
+          <p className="text-sm text-[#6B7280]">Loading…</p>
+        ) : dates.length === 0 ? (
+          <p className="text-sm text-[#6B7280]">No public holidays set.</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {dates.map((d) => (
+              <span
+                key={d}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#F0ECE9] border border-[#D8D2CC] text-sm"
+              >
+                <span className="tabular-nums">{d}</span>
+                <button
+                  type="button"
+                  onClick={() => removeOne(d)}
+                  disabled={saving}
+                  className="text-[#9A3A2D] hover:text-[#7A2E24] font-bold leading-none"
+                  title="Remove this date"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

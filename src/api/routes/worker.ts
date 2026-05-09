@@ -887,14 +887,40 @@ app.get("/payslips", async (c) => {
   }
   const workedDays = hoursByDate.size;
 
-  // Count workdays elapsed in this month up to today (Mon–Sat).
+  // Public holidays — stored in kv_config['public_holidays'] as a JSON
+  // array of YYYY-MM-DD strings. Office fills these via the Working Hours
+  // tab so that 1 May / Hari Raya / etc. don't get charged as absences.
+  const phRes = await c.var.DB.prepare(
+    "SELECT value FROM kv_config WHERE key = ?",
+  )
+    .bind("public_holidays")
+    .first<{ value: string }>();
+  const publicHolidays = new Set<string>();
+  if (phRes?.value) {
+    try {
+      const parsed = JSON.parse(phRes.value);
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) {
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+            publicHolidays.add(d);
+          }
+        }
+      }
+    } catch { /* malformed payload — treat as no holidays */ }
+  }
+
+  // Count workdays elapsed in this month up to today (Mon–Sat),
+  // excluding declared public holidays.
   const monthYear = now.getFullYear();
   const monthIdx = now.getMonth(); // 0-based
   const todayDate = now.getDate();
   let workdaysElapsed = 0;
   for (let d = 1; d <= todayDate; d++) {
     const dow = new Date(monthYear, monthIdx, d).getDay(); // 0 = Sun
-    if (dow !== 0) workdaysElapsed++; // Mon–Sat counted
+    if (dow === 0) continue; // Sunday off
+    const iso = `${monthYear}-${String(monthIdx + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    if (publicHolidays.has(iso)) continue; // public holiday
+    workdaysElapsed++;
   }
   const absentDays = Math.max(0, workdaysElapsed - workedDays);
 

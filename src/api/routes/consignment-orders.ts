@@ -21,6 +21,10 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
+import {
+  snapItemToCatalog,
+  loadProductCatalog,
+} from "./_shared/item-catalog-snap";
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
@@ -466,6 +470,11 @@ app.post("/", async (c) => {
       }
     }
 
+    // OCR back-door closure (BUG-002 fix, 2026-05-09): catalog wins on CO
+    // POST. Same shape as SO POST/PUT — when productCode resolves to a
+    // catalog product, productId/productName/itemCategory/sizeLabel(BF/ACC)/
+    // sizeCode(BF/ACC) all come from the catalog, NOT the request body.
+    const productByCodeForCoPost = await loadProductCatalog(c.var.DB);
     const itemRows: ConsignmentOrderItemRow[] = rawItems.map(
       (it: Record<string, unknown>, idx: number) => {
         const qty = Number(it.quantity) || 1;
@@ -474,17 +483,28 @@ app.post("/", async (c) => {
         const legPrice = Number(it.legPriceSen) || 0;
         const specialPrice = Number(it.specialOrderPriceSen) || 0;
         const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+        const snapped = snapItemToCatalog(
+          {
+            productCode: it.productCode,
+            productId: it.productId,
+            productName: it.productName,
+            itemCategory: it.itemCategory,
+            sizeCode: it.sizeCode,
+            sizeLabel: it.sizeLabel,
+          },
+          productByCodeForCoPost,
+        );
         return {
           id: genItemId(),
           consignmentOrderId: id,
           lineNo: Number(it.lineNo) || idx + 1,
           lineSuffix: (it.lineSuffix as string) ?? null,
-          productId: (it.productId as string) ?? null,
-          productCode: (it.productCode as string) ?? null,
-          productName: (it.productName as string) ?? null,
-          itemCategory: (it.itemCategory as string) ?? null,
-          sizeCode: (it.sizeCode as string) ?? null,
-          sizeLabel: (it.sizeLabel as string) ?? null,
+          productId: snapped.productId || null,
+          productCode: snapped.productCode || null,
+          productName: snapped.productName || null,
+          itemCategory: snapped.itemCategory || null,
+          sizeCode: snapped.sizeCode || null,
+          sizeLabel: snapped.sizeLabel || null,
           fabricCode: (it.fabricCode as string) ?? null,
           quantity: qty,
           gapInches: it.gapInches != null ? Number(it.gapInches) : null,
@@ -1416,6 +1436,11 @@ app.put("/:id", async (c) => {
           "DELETE FROM consignment_order_items WHERE consignmentOrderId = ?",
         ).bind(id),
       );
+      // OCR back-door closure (BUG-002 fix, 2026-05-09): catalog wins on CO
+      // PUT. Same shape as SO PUT — when productCode resolves to a catalog
+      // product, that product is the source of truth for productId/productName/
+      // itemCategory/sizeLabel(BF/ACC)/sizeCode(BF/ACC).
+      const productByCodeForCoPut = await loadProductCatalog(c.var.DB);
       let runningSubtotal = 0;
       for (let idx = 0; idx < body.items.length; idx++) {
         const it = body.items[idx] as Record<string, unknown>;
@@ -1430,6 +1455,17 @@ app.put("/:id", async (c) => {
         const lineNo = Number(it.lineNo) || idx + 1;
         const itemId =
           (it.id as string) || `coi-${crypto.randomUUID().slice(0, 8)}`;
+        const snapped = snapItemToCatalog(
+          {
+            productCode: it.productCode,
+            productId: it.productId,
+            productName: it.productName,
+            itemCategory: it.itemCategory,
+            sizeCode: it.sizeCode,
+            sizeLabel: it.sizeLabel,
+          },
+          productByCodeForCoPut,
+        );
         stmts.push(
           c.var.DB.prepare(
             `INSERT INTO consignment_order_items (id, consignmentOrderId, lineNo, lineSuffix,
@@ -1443,12 +1479,12 @@ app.put("/:id", async (c) => {
             id,
             lineNo,
             (it.lineSuffix as string) ?? null,
-            (it.productId as string) ?? null,
-            (it.productCode as string) ?? null,
-            (it.productName as string) ?? null,
-            (it.itemCategory as string) ?? null,
-            (it.sizeCode as string) ?? null,
-            (it.sizeLabel as string) ?? null,
+            snapped.productId || null,
+            snapped.productCode || null,
+            snapped.productName || null,
+            snapped.itemCategory || null,
+            snapped.sizeCode || null,
+            snapped.sizeLabel || null,
             (it.fabricCode as string) ?? null,
             qty,
             it.gapInches != null ? Number(it.gapInches) : null,

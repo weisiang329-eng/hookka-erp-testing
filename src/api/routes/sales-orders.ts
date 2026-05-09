@@ -26,7 +26,12 @@ import {
   loadHookkaDDBuffer,
   hookkaDDBufferFor,
 } from "../lib/lead-times";
+import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { resolveCustomerPriceAsOf } from "./customer-products";
+import {
+  snapItemToCatalog,
+  loadProductCatalog,
+} from "./_shared/item-catalog-snap";
 import { withOrgScope } from "../lib/tenant";
 import {
   createProductionOrdersForOrder,
@@ -73,10 +78,6 @@ export type SalesOrderRow = {
   totalSen: number;
   status: string;
   overdue: string | null;
-  // Project Order flag — when 1, SOFA items split per-piece (one PO per qty)
-  // and the FAB_CUT cross-PO merge is disabled. Default 0 = legacy behavior
-  // (SOFA × N stays as one PO with quantity=N). See migration 0073.
-  isProjectOrder: number | null;
   notes: string | null;
   // Base64-encoded PNG of the original customer PO page(s) when this SO was
   // created from a Scan PO upload. Nullable — populated only by PO_SCAN_CLAUDE.
@@ -259,7 +260,6 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     totalSen: row.totalSen,
     status: row.status,
     overdue: row.overdue ?? "PENDING",
-    isProjectOrder: row.isProjectOrder === 1,
     notes: row.notes ?? "",
     customerPOImageB64: row.customerPOImageB64 ?? null,
     createdAt: row.createdAt ?? "",
@@ -418,9 +418,6 @@ export async function createProductionOrdersForSO(
       customerState: so.customerState,
       hookkaExpectedDD: so.hookkaExpectedDD,
       customerDeliveryDate: so.customerDeliveryDate,
-      // 1 = SO opted into Project Order on the create page; SOFA fans out
-      // per-piece. 0 / null = legacy (SOFA stays merged as one PO).
-      isProjectOrder: so.isProjectOrder === 1,
     },
     items.map((it) => ({
       lineNo: it.lineNo,
@@ -1237,13 +1234,16 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
     const stmts = [
       // 0108 — customer PO PNG attachment for dispute proof.
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS customerPOImageB64 TEXT",
-      // 0073 (D1 legacy, not auto-applied to Postgres) — Project Order flag.
-      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS isProjectOrder INTEGER NOT NULL DEFAULT 0",
       // 0113 — drop fabric_id (UI-only artifact; canonical reference is
       // fabric_code). See migrations-postgres/0113_drop_fabric_id_from_order_items.sql
       // for the full rationale. Idempotent — DROP IF EXISTS no-ops once applied.
       "ALTER TABLE sales_order_items DROP COLUMN IF EXISTS fabric_id",
       "ALTER TABLE consignment_order_items DROP COLUMN IF EXISTS fabric_id",
+      // 0114 — drop sales_orders.is_project_order. Toggle removed 2026-05-09
+      // because SOFA qty>1 is now rejected (commit 7302f0f) so the per-piece
+      // SOFA fan-out the toggle controlled is moot; FAB_CUT cross-PO merge
+      // becomes unconditional. See migrations-postgres/0114_drop_so_is_project_order.sql.
+      "ALTER TABLE sales_orders DROP COLUMN IF EXISTS is_project_order",
     ];
     for (const sql of stmts) {
       try {
@@ -1616,9 +1616,9 @@ app.post("/", async (c) => {
            customerSO, customerSOId, reference, customerId, customerName,
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
-           subtotalSen, totalSen, status, overdue, isProjectOrder, notes,
+           subtotalSen, totalSen, status, overdue, notes,
            customerPOImageB64, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -1642,10 +1642,6 @@ app.post("/", async (c) => {
         subtotalSen,
         "DRAFT",
         "PENDING",
-        // SO header toggle (2026-05-06): when true, SOFA items fan out
-        // per-piece in the production cascade (mirrors BEDFRAME). Default
-        // false preserves legacy single-PO-per-sofa-set behavior.
-        body.isProjectOrder === true ? 1 : 0,
         body.notes ?? "",
         customerPOImageB64,
         now,
@@ -1988,12 +1984,43 @@ app.post("/:id/confirm", async (c) => {
     // the promise still runs; we just don't await it.
   }
 
+  // PO ↔ SO line alignment validation (defense-in-depth, warn-only).
+  // Multiset-based: compares (productCode, size, fabric, divan, ...) tuple
+  // bag from sales_order_items vs production_orders. Surplus / missing
+  // tuples surface attribute-shuffle bugs (see SO-2605-027). Warn-only;
+  // operator can run /api/import/audit-po-alignment for full details.
+  const alignmentValidation = await loadAndValidatePOAlignment(c.var.DB, id);
+  const alignmentWarnings: string[] = [];
+  if (!alignmentValidation.ok) {
+    if (alignmentValidation.actualPoCount !== alignmentValidation.expectedPoCount) {
+      alignmentWarnings.push(
+        `PO count mismatch: expected ${alignmentValidation.expectedPoCount} (sum of line qty), got ${alignmentValidation.actualPoCount}`,
+      );
+    }
+    if (alignmentValidation.surplusTuples.length > 0) {
+      alignmentWarnings.push(
+        `${alignmentValidation.surplusTuples.length} attribute tuple(s) over-represented in POs — possible attribute shuffle, see alignmentValidation.surplusTuples`,
+      );
+    }
+    if (alignmentValidation.missingTuples.length > 0) {
+      alignmentWarnings.push(
+        `${alignmentValidation.missingTuples.length} attribute tuple(s) expected from SO lines but not found in POs — see alignmentValidation.missingTuples`,
+      );
+    }
+    console.warn(
+      `[sales-orders/confirm] PO alignment validation FAILED for soId=${id}:`,
+      JSON.stringify(alignmentValidation, null, 2).slice(0, 2000),
+    );
+  }
+
   return c.json({
     success: true,
     data: order,
     productionOrders,
     bomFallbacks: [],
     bomWarnings: [],
+    alignmentWarnings,
+    alignmentValidation,
     message: preExisting
       ? `Order confirmed. ${productionOrders.length} existing production order(s) reused.`
       : `Order confirmed. ${productionOrders.length} production order(s) created.`,
@@ -2408,19 +2435,6 @@ app.put("/:id", async (c) => {
     }
 
     // --- Merge scalar fields ---
-    // isProjectOrder: only mutable while the SO is still DRAFT — once
-    // confirmed, the production cascade has already fanned POs out per the
-    // current setting and flipping the flag would leave the data in an
-    // inconsistent split state (the existing POs wouldn't match what the
-    // new flag implies). Confirmed/in-prod SOs ignore body.isProjectOrder
-    // and keep the existing value.
-    const canEditProjectFlag = existing.status === "DRAFT" || existing.status === "PENDING";
-    const incomingIsProject = typeof body.isProjectOrder === "boolean"
-      ? body.isProjectOrder
-      : existing.isProjectOrder === 1;
-    const mergedIsProjectOrder = canEditProjectFlag
-      ? incomingIsProject
-      : existing.isProjectOrder === 1;
     const merged = {
       customerPO: body.customerPO ?? existing.customerPO ?? "",
       customerPOId: body.customerPOId ?? existing.customerPOId ?? "",
@@ -2437,7 +2451,6 @@ app.put("/:id", async (c) => {
       hookkaDeliveryOrder:
         body.hookkaDeliveryOrder ?? existing.hookkaDeliveryOrder ?? "",
       overdue: body.overdue ?? existing.overdue ?? "PENDING",
-      isProjectOrder: mergedIsProjectOrder,
       notes: body.notes ?? existing.notes ?? "",
     };
 
@@ -2524,6 +2537,9 @@ app.put("/:id", async (c) => {
         typeof merged.companySODate === "string" && merged.companySODate
           ? merged.companySODate.slice(0, 10)
           : new Date().toISOString().slice(0, 10);
+      // OCR back-door closure (BUG-001 fix): catalog wins on every PUT just
+      // like POST. Loaded once here, reused for every line via snapItemToCatalog.
+      const productByCodeForPut = await loadProductCatalog(c.var.DB);
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         let basePriceSen = incomingBase;
@@ -2586,15 +2602,35 @@ app.put("/:id", async (c) => {
 
         // 2026-05-09: fabricId resolve removed (matches POST path). Persist
         // null — column being dropped in a follow-up migration.
-        const itemCategory = (item.itemCategory as string) || "BEDFRAME";
         const incomingFabricCode = String(item.fabricCode ?? "");
-        // sizeLabel + sizeCode pass through verbatim. The previous
-        // normalize-add-quote logic at this site (mirror of the POST path)
-        // disagreed with the kv_config.sofaSizes dropdown source (bare
-        // numerics) — see the matching POST comment + DUP-001 backfill
-        // commit af372e8 (2026-05-09).
-        const normalizedSizeLabel = (item.sizeLabel as string) || "";
-        const normalizedSizeCode = (item.sizeCode as string) || "";
+
+        // OCR back-door closure (BUG-001 fix, 2026-05-09): catalog wins on
+        // every PUT just like POST (cd6a417). When productCode resolves to a
+        // catalog product, that product is the source of truth for productId,
+        // productName, itemCategory, and (BF/ACC) sizeLabel/sizeCode. Prevents
+        // PDF text from sneaking back in via the Edit page when an OCR'd SO
+        // gets re-saved.
+        //
+        // SOFA size pass-through: the SOFA-quote-add fallback that lived
+        // here pre-merge (DUP-001 commit f2fa7a9 deleted it) made bare
+        // dropdown values diverge from kv_config.sofaSizes canonical. The
+        // strict reject gate at the top of this PUT handler
+        // (validateSofaSizeLabels) now ensures only canonical values reach
+        // here, so snapped.sizeLabel/sizeCode pass through verbatim.
+        const snapped = snapItemToCatalog(
+          {
+            productCode: item.productCode,
+            productId: item.productId,
+            productName: item.productName,
+            itemCategory: item.itemCategory,
+            sizeCode: item.sizeCode,
+            sizeLabel: item.sizeLabel,
+          },
+          productByCodeForPut,
+        );
+        const itemCategory = snapped.itemCategory;
+        const normalizedSizeLabel = snapped.sizeLabel;
+        const normalizedSizeCode = snapped.sizeCode;
 
         // Free-text custom specials per line (migration 0074). Same
         // sanitization as the POST path — empty descriptions dropped, the
@@ -2606,9 +2642,9 @@ app.put("/:id", async (c) => {
           id: (item.id as string) || genItemId(),
           lineNo,
           lineSuffix,
-          productId: (item.productId as string) || "",
-          productCode: (item.productCode as string) || "",
-          productName: (item.productName as string) || "",
+          productId: snapped.productId,
+          productCode: snapped.productCode,
+          productName: snapped.productName,
           itemCategory,
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,
@@ -2709,7 +2745,7 @@ app.put("/:id", async (c) => {
            hubId = ?, hubName = ?, companySO = ?, companySODate = ?,
            customerDeliveryDate = ?, hookkaExpectedDD = ?, hookkaDeliveryOrder = ?,
            subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
-           isProjectOrder = ?, notes = ?,
+           notes = ?,
            updated_at = ?
          WHERE id = ?`,
       ).bind(
@@ -2733,7 +2769,6 @@ app.put("/:id", async (c) => {
         totalSen,
         newStatus,
         merged.overdue,
-        merged.isProjectOrder ? 1 : 0,
         merged.notes,
         now,
         id,
@@ -2964,7 +2999,6 @@ app.put("/:id", async (c) => {
             customerState: freshSO.customerState,
             hookkaExpectedDD: freshSO.hookkaExpectedDD,
             customerDeliveryDate: freshSO.customerDeliveryDate,
-            isProjectOrder: freshSO.isProjectOrder === 1,
           },
           freshItems.map((it) => ({
             lineNo: it.lineNo,

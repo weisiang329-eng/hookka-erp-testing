@@ -724,17 +724,6 @@ export default function SalesOrderDetailPage() {
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.companySOId}</h1>
             <Badge variant="status" status={order.status} />
-            {/* Project Order chip — flag set on the SO header. Indicates
-                SOFA items in this order were split per-piece in the
-                production cascade (each sofa = its own PO). */}
-            {order.isProjectOrder && (
-              <span
-                className="inline-flex items-center rounded-full border border-[#E8D38A] bg-[#FBF1D6] px-2 py-0.5 text-xs font-medium text-[#8A6D1B]"
-                title="Sofa items in this SO are split per-piece into individual production orders"
-              >
-                Project Order
-              </span>
-            )}
           </div>
           <p className="text-xs text-[#6B7280]">{order.customerName} &middot; {order.customerState}</p>
         </div>

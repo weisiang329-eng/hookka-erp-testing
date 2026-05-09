@@ -35,6 +35,10 @@ import {
   unknownFabricCodeError,
 } from "../lib/fabric-validation";
 import {
+  validateSofaSizeLabels,
+  unknownSofaSizeLabelError,
+} from "../lib/sofa-size-validation";
+import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
   findInvalidSofaQty,
@@ -441,6 +445,24 @@ app.post("/", async (c) => {
       );
       if (!fabCheck.valid) {
         return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+      }
+    }
+
+    // SOFA seat-size gate (DUP-001 phase 1 commit C, 2026-05-09). Mirrors
+    // the SO POST guard.
+    {
+      const sofaCheck = await validateSofaSizeLabels(
+        c.var.DB,
+        rawItems.map((it: Record<string, unknown>) => ({
+          itemCategory: typeof it.itemCategory === "string" ? it.itemCategory : null,
+          sizeLabel: typeof it.sizeLabel === "string" ? it.sizeLabel : null,
+        })),
+      );
+      if (!sofaCheck.valid) {
+        return c.json(
+          unknownSofaSizeLabelError(sofaCheck.unknown, sofaCheck.allowed),
+          400,
+        );
       }
     }
 
@@ -1369,6 +1391,23 @@ app.put("/:id", async (c) => {
         );
         if (!fabCheck.valid) {
           return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+        }
+      }
+
+      // SOFA seat-size gate — see the POST handler.
+      {
+        const sofaCheck = await validateSofaSizeLabels(
+          c.var.DB,
+          itemsArr.map((it) => ({
+            itemCategory: typeof it.itemCategory === "string" ? it.itemCategory : null,
+            sizeLabel: typeof it.sizeLabel === "string" ? it.sizeLabel : null,
+          })),
+        );
+        if (!sofaCheck.valid) {
+          return c.json(
+            unknownSofaSizeLabelError(sofaCheck.unknown, sofaCheck.allowed),
+            400,
+          );
         }
       }
 

@@ -43,6 +43,10 @@ import {
   validateFabricCodes,
   unknownFabricCodeError,
 } from "../lib/fabric-validation";
+import {
+  validateSofaSizeLabels,
+  unknownSofaSizeLabelError,
+} from "../lib/sofa-size-validation";
 
 const app = new Hono<Env>();
 
@@ -1358,6 +1362,26 @@ app.post("/", async (c) => {
       }
     }
 
+    // SOFA seat-size gate (DUP-001 phase 1 commit C, 2026-05-09). Every
+    // SOFA item's sizeLabel must be in kv_config.variants-config.sofaSizes
+    // — the same list the frontend dropdown reads. Rejects "28\"" when
+    // canonical is "28" (and vice versa) instead of silently normalizing.
+    {
+      const sofaCheck = await validateSofaSizeLabels(
+        c.var.DB,
+        rawItems.map((it) => ({
+          itemCategory: typeof it.itemCategory === "string" ? it.itemCategory : null,
+          sizeLabel: typeof it.sizeLabel === "string" ? it.sizeLabel : null,
+        })),
+      );
+      if (!sofaCheck.valid) {
+        return c.json(
+          unknownSofaSizeLabelError(sofaCheck.unknown, sofaCheck.allowed),
+          400,
+        );
+      }
+    }
+
     // Price-resolution date: use companySODate (may be future-dated) when given,
     // fall back to today so price history resolves correctly on confirm.
     const priceAsOf =
@@ -2470,6 +2494,23 @@ app.put("/:id", async (c) => {
         );
         if (!fabCheck.valid) {
           return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+        }
+      }
+
+      // SOFA seat-size gate — see the POST handler for the rationale.
+      {
+        const sofaCheck = await validateSofaSizeLabels(
+          c.var.DB,
+          rawItems.map((it) => ({
+            itemCategory: typeof it.itemCategory === "string" ? it.itemCategory : null,
+            sizeLabel: typeof it.sizeLabel === "string" ? it.sizeLabel : null,
+          })),
+        );
+        if (!sofaCheck.valid) {
+          return c.json(
+            unknownSofaSizeLabelError(sofaCheck.unknown, sofaCheck.allowed),
+            400,
+          );
         }
       }
 

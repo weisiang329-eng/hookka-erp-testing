@@ -18,6 +18,8 @@ import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
 import {
   hasMixedSofaBedframe,
   SO_MIXED_CATEGORY_ERROR,
+  findInvalidSofaQty,
+  formatSofaQtyError,
 } from "../../lib/so-category";
 import {
   ensureLeadTimesSeeded,
@@ -1679,6 +1681,32 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
     }
 
+    // Hard restriction: SOFA lines must use 1 unit each. Multiple sofas =
+    // multiple lines (each qty=1). Per Wei Siang 2026-05-09 — sofa BOM is
+    // per-piece and a single PO with qty=N is harder to track unit-by-unit
+    // than N separate POs. BEDFRAME / ACCESSORY are unaffected (their
+    // generator already expands qty>1 into per-unit POs).
+    {
+      const offending = findInvalidSofaQty(
+        rawItems.map((it, i) => ({
+          itemCategory:
+            typeof it.itemCategory === "string" ? it.itemCategory : null,
+          quantity:
+            typeof it.quantity === "number" ? it.quantity : Number(it.quantity ?? 1),
+          productCode:
+            typeof it.productCode === "string" ? it.productCode : null,
+          lineNo:
+            typeof it.lineNo === "number" ? it.lineNo : i + 1,
+        })),
+      );
+      if (offending) {
+        return c.json(
+          { success: false, error: formatSofaQtyError(offending) },
+          400,
+        );
+      }
+    }
+
     // Fabric integrity gate — every non-empty incoming fabricCode must
     // resolve to a row in raw_materials with a fabric itemGroup. Closes
     // the door on operators saving stale/typo codes (e.g. M2402-04 when
@@ -2188,6 +2216,22 @@ app.post("/:id/confirm", async (c) => {
   // mixed-category SO.
   if (hasMixedSofaBedframe(items)) {
     return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+  }
+
+  // Sofa qty>1 re-check — same rationale as the mixed-category guard:
+  // POST + PUT block this upstream, but legacy SOs (e.g. SO-2604-307
+  // with sofa qty=10 created before the rule shipped) need a
+  // confirm-time gate to prevent the production cascade from emitting
+  // a single PO with qty=10 — which would violate the "1 sofa = 1 PO"
+  // production-tracking rule.
+  {
+    const offending = findInvalidSofaQty(items);
+    if (offending) {
+      return c.json(
+        { success: false, error: formatSofaQtyError(offending) },
+        400,
+      );
+    }
   }
 
   // BOM completeness guard — blocks confirm if any line's product has an
@@ -2793,6 +2837,28 @@ app.put("/:id", async (c) => {
         )
       ) {
         return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+      }
+
+      // Sofa qty>1 — same rule as POST.
+      {
+        const offending = findInvalidSofaQty(
+          rawItems.map((it, i) => ({
+            itemCategory:
+              typeof it.itemCategory === "string" ? it.itemCategory : null,
+            quantity:
+              typeof it.quantity === "number" ? it.quantity : Number(it.quantity ?? 1),
+            productCode:
+              typeof it.productCode === "string" ? it.productCode : null,
+            lineNo:
+              typeof it.lineNo === "number" ? it.lineNo : i + 1,
+          })),
+        );
+        if (offending) {
+          return c.json(
+            { success: false, error: formatSofaQtyError(offending) },
+            400,
+          );
+        }
       }
 
       // Fabric integrity gate — see the POST handler for the rationale.

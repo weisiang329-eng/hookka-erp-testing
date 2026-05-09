@@ -22,21 +22,14 @@ import {
   formatSofaQtyError,
 } from "../../lib/so-category";
 import {
-  ensureLeadTimesSeeded,
-  loadLeadTimes,
-  leadDaysFor,
   addDays,
-  DEPT_ORDER,
-  ensureHookkaDDBufferSeeded,
   loadHookkaDDBuffer,
   hookkaDDBufferFor,
 } from "../lib/lead-times";
-import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
 import { resolveCustomerPriceAsOf } from "./customer-products";
 import { withOrgScope } from "../lib/tenant";
 import {
   createProductionOrdersForOrder,
-  parseL1Processes,
   type CreatedProductionOrder,
 } from "./_shared/production-builder";
 import { checkSalesOrderLocked, lockedResponse } from "../lib/lock-helpers";
@@ -270,10 +263,6 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
   };
 }
 
-// L1Process / parseL1Processes moved to _shared/production-builder.ts so
-// the consignment-order path can share the same FG-level job-card logic.
-// Re-imported above; backfillJobCardsForPo (below) still uses parseL1Processes.
-
 function parseAutoActions(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -449,333 +438,18 @@ export async function createProductionOrdersForSO(
   );
 }
 
-// ---------------------------------------------------------------------------
-// backfillJobCardsForPo — build the job_cards batch for an already-existing
-// production_orders row that has zero job_cards. Used by the one-shot
-// admin backfill endpoint below. Idempotent: checks for existing job_cards
-// and returns [] if any are present.
-//
-// opts.force = true (NEW): blow away any existing job_cards for the PO and
-// regenerate them from the current BOM template + Production Time master.
-// Used by the bulk regen endpoint in production-orders.ts (added 2026-04-29
-// so the user can wipe the snapshotted JC values across every PO after
-// editing the BOM/PT master). The DELETE statement is prepended to the
-// returned `statements` array so the caller's `db.batch([...])` runs
-// DELETE + re-insert atomically — no window where the PO is JC-less.
-// User confirmed there is NO scan history / completion data on the existing
-// job_cards (small shop, freshly-spun-up data set), so the wipe is lossless.
-// ---------------------------------------------------------------------------
-export async function backfillJobCardsForPo(
-  db: D1Database,
-  poId: string,
-  opts?: { force?: boolean },
-): Promise<{ statements: D1PreparedStatement[]; jcCount: number; currentDept: string | null }> {
-  await ensureLeadTimesSeeded(db);
-  await ensureHookkaDDBufferSeeded(db);
-  const leadTimes = await loadLeadTimes(db);
-  const hookkaDDBuffer = await loadHookkaDDBuffer(db);
+// (Removed 2026-05-09) backfillJobCardsForPo + the ProductionOrderRow type +
+// POST /api/sales-orders/backfill-job-cards endpoint were a parallel JC
+// generator that diverged from createProductionOrdersForOrder over time
+// (no FAB_CUT cross-PO merge, no CO source-context, ignored isProjectOrder).
+// See DUP-004 in bug_audit_duplicate_logic.md for the full diff. The
+// related regen endpoints in production-orders.ts have been deleted in the
+// same commit. No frontend consumer was wired (verified by grep across
+// src/), and the live data audit showed POs with zero JCs is currently
+// empty, so deletion is safe. Future regen/backfill needs should route
+// through createProductionOrdersForOrder({ appendOnly: true }) so all
+// merge logic flows in.
 
-  const force = opts?.force === true;
-
-  // Skip if any job_cards already exist (unless force-mode says wipe-and-redo).
-  if (!force) {
-    const existingJc = await db
-      .prepare("SELECT id FROM job_cards WHERE productionOrderId = ? LIMIT 1")
-      .bind(poId)
-      .first<{ id: string }>();
-    if (existingJc) {
-      return { statements: [], jcCount: 0, currentDept: null };
-    }
-  }
-
-  const po = await db
-    .prepare("SELECT * FROM production_orders WHERE id = ?")
-    .bind(poId)
-    .first<ProductionOrderRow>();
-  if (!po) {
-    return { statements: [], jcCount: 0, currentDept: null };
-  }
-  const so = po.salesOrderId
-    ? await db
-        .prepare("SELECT * FROM sales_orders WHERE id = ?")
-        .bind(po.salesOrderId)
-        .first<SalesOrderRow>()
-    : null;
-
-  const category = po.itemCategory ?? "BEDFRAME";
-  const productCode = po.productCode ?? "";
-  // Prefer explicit hookkaExpectedDD; else customerDD − buffer; else
-  // po.targetEndDate (already internal target from prior cascades).
-  const explicitHookkaDD = so?.hookkaExpectedDD || "";
-  const customerDD = so?.customerDeliveryDate || "";
-  const bufferDays = hookkaDDBufferFor(hookkaDDBuffer, category);
-  const packingAnchor = explicitHookkaDD
-    ? explicitHookkaDD
-    : customerDD
-    ? addDays(customerDD, -bufferDays)
-    : po.targetEndDate || "";
-  const startDate = so?.companySODate || po.startDate || new Date().toISOString().split("T")[0];
-
-  const deptRes = await db
-    .prepare("SELECT id, code, name FROM departments").all<{ id: string; code: string; name: string }>();
-  const deptByCode = new Map<string, { id: string; name: string }>();
-  for (const d of deptRes.results ?? []) {
-    deptByCode.set(d.code, { id: d.id, name: d.name });
-  }
-
-  let bomRow = await db
-    .prepare(
-      `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
-         WHERE productCode = ? AND versionStatus = 'ACTIVE'
-         ORDER BY effectiveFrom DESC LIMIT 1`,
-    )
-    .bind(productCode)
-    .first<{
-      wipComponents: string | null;
-      l1Processes: string | null;
-      baseModel: string | null;
-    }>();
-  if (!bomRow) {
-    bomRow = await db
-      .prepare(
-        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
-           WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
-      )
-      .bind(productCode)
-      .first<{
-        wipComponents: string | null;
-        l1Processes: string | null;
-        baseModel: string | null;
-      }>();
-  }
-  const backfillVariants: BomVariantContext = {
-    productCode: po.productCode ?? "",
-    // Parent model — see BUG-2026-04-27-004.
-    model: bomRow?.baseModel ?? (po.productCode ?? ""),
-    sizeLabel: po.sizeLabel ?? "",
-    sizeCode: po.sizeCode ?? "",
-    fabricCode: po.fabricCode ?? "",
-    divanHeightInches: po.divanHeightInches ?? null,
-    legHeightInches: po.legHeightInches ?? null,
-    gapInches: po.gapInches ?? null,
-  };
-  const wips = breakBomIntoWips(
-    bomRow?.wipComponents ?? null,
-    productCode,
-    backfillVariants,
-  );
-
-  const statements: D1PreparedStatement[] = [];
-  // Force-mode: prepend a DELETE so any pre-existing job_cards for this PO
-  // are wiped in the same atomic batch as the re-insert. Caller passes the
-  // returned `statements` straight into db.batch([...]).
-  if (force) {
-    statements.push(
-      db.prepare("DELETE FROM job_cards WHERE productionOrderId = ?").bind(poId),
-    );
-  }
-  let currentDept = po.currentDepartment ?? "FAB_CUT";
-  let currentDeptIdx = 999;
-  let jcCount = 0;
-
-  for (const wip of wips) {
-    const wipQty = Math.max(1, Math.floor((po.quantity || 1) * wip.quantityMultiplier));
-    const chain = wip.processes;
-
-    const planned: Array<{
-      deptCode: string;
-      deptId: string;
-      deptName: string;
-      sequence: number;
-      dueDate: string;
-      category: string;
-      minutes: number;
-      branchKey: string;
-    }> = [];
-
-    if (packingAnchor) {
-      // Same parallel-dept semantics as the confirm path above:
-      // dueDate = anchor - leadDays[dept] for every dept independently.
-      const anchor = explicitHookkaDD || customerDD || packingAnchor;
-      for (let i = 0; i < chain.length; i++) {
-        const p = chain[i];
-        const deptMeta = deptByCode.get(p.deptCode);
-        if (!deptMeta) continue;
-        const leadDays = leadDaysFor(leadTimes, category, p.deptCode);
-        planned.push({
-          deptCode: p.deptCode,
-          deptId: deptMeta.id,
-          deptName: deptMeta.name,
-          sequence: i,
-          dueDate: addDays(anchor, -leadDays),
-          category: p.category,
-          minutes: p.minutes,
-          branchKey: p.branchKey ?? "",
-        });
-      }
-    } else {
-      let cursor = startDate;
-      for (let i = 0; i < chain.length; i++) {
-        const p = chain[i];
-        const deptMeta = deptByCode.get(p.deptCode);
-        const leadDays = leadDaysFor(leadTimes, category, p.deptCode);
-        cursor = addDays(cursor, leadDays);
-        if (!deptMeta) continue;
-        planned.push({
-          deptCode: p.deptCode,
-          deptId: deptMeta.id,
-          deptName: deptMeta.name,
-          sequence: i,
-          dueDate: cursor,
-          category: p.category,
-          minutes: p.minutes,
-          branchKey: p.branchKey ?? "",
-        });
-      }
-    }
-
-    for (const p of planned) {
-      const idx = DEPT_ORDER.indexOf(p.deptCode as (typeof DEPT_ORDER)[number]);
-      if (idx >= 0 && idx < currentDeptIdx) {
-        currentDeptIdx = idx;
-        currentDept = p.deptCode;
-      }
-      const deptWipCode = chain[p.sequence]?.wipCode || wip.wipCode;
-      const deptWipLabel = chain[p.sequence]?.wipLabel || wip.wipLabel;
-      // Scope jcId by wipKey (stable per top-level WIP) not wipCode, so two
-      // WIPs that share a leaf node name (e.g. both DIVAN and HEADBOARD carry
-      // a "Frame" node) don't collapse into a single job_card row.
-      const jcId = `jc-${poId}-${wip.wipKey}-${p.deptCode}`
-        .replace(/[^a-zA-Z0-9_-]/g, "_")
-        .slice(0, 128);
-      statements.push(
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
-               departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
-               wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            jcId,
-            poId,
-            p.deptId,
-            p.deptCode,
-            p.deptName,
-            p.sequence,
-            "WAITING",
-            p.dueDate,
-            wip.wipKey,
-            deptWipCode,
-            wip.wipType,
-            deptWipLabel,
-            wipQty,
-            p.sequence === 0 ? 1 : 0,
-            null,
-            "",
-            null,
-            "",
-            null,
-            p.minutes,
-            null,
-            p.category,
-            p.minutes,
-            "PENDING",
-            null,
-            // BOM-walker emitted branchKey on each process — use it
-            // directly; no category lookup needed.
-            p.branchKey ?? "",
-          ),
-      );
-      jcCount++;
-    }
-  }
-
-  // ------ job_cards — FG-level (one per l1Process) ------
-  // Matches createProductionOrdersForSO: anything the BOM declares at
-  // FG level (l1Processes JSON) becomes a single job card attached to
-  // the PO, with wipKey="FG" and wipQty=po.quantity so the sticker
-  // renderer treats it as one assembled unit (see generate-sticker-pdf
-  // for the piece-counting logic).
-  const l1Procs = parseL1Processes(bomRow?.l1Processes ?? null);
-  const packingDue = po.targetEndDate || po.startDate || "";
-  for (const l1p of l1Procs) {
-    const deptMeta = deptByCode.get(l1p.deptCode);
-    if (!deptMeta) continue;
-    const jcId = `jc-${po.id}-FG-${l1p.deptCode}`
-      .replace(/[^a-zA-Z0-9_-]/g, "_")
-      .slice(0, 128);
-    statements.push(
-      db
-        .prepare(
-          `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
-             departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
-             wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-             estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          jcId,
-          po.id,
-          deptMeta.id,
-          l1p.deptCode,
-          deptMeta.name,
-          99,
-          "WAITING",
-          packingDue,
-          "FG",
-          productCode,
-          "FG",
-          productCode,
-          po.quantity || 1,
-          0,
-          null,
-          "",
-          null,
-          "",
-          null,
-          l1p.minutes,
-          null,
-          l1p.category,
-          l1p.minutes,
-          "PENDING",
-          null,
-          // FG-level UPHOLSTERY/PACKING — joint terminal, branchKey="".
-          "",
-        ),
-    );
-    jcCount++;
-  }
-
-  if (statements.length > 0) {
-    statements.push(
-      db
-        .prepare("UPDATE production_orders SET currentDepartment = ? WHERE id = ?")
-        .bind(currentDept, poId),
-    );
-  }
-
-  return { statements, jcCount, currentDept };
-}
-
-// Minimal inline type used by backfillJobCardsForPo.
-type ProductionOrderRow = {
-  id: string;
-  salesOrderId: string | null;
-  productCode: string | null;
-  itemCategory: string | null;
-  sizeLabel: string | null;
-  sizeCode: string | null;
-  fabricCode: string | null;
-  divanHeightInches: number | null;
-  legHeightInches: number | null;
-  gapInches: number | null;
-  quantity: number;
-  currentDepartment: string | null;
-  targetEndDate: string | null;
-  startDate: string | null;
-};
 
 // Generate next SO number by scanning existing companySOId values for the
 // current YYMM prefix and incrementing the max sequence. Falls back to 001.
@@ -1203,49 +877,6 @@ app.get("/stats", async (c) => {
     total,
     totalRevenueSen,
     csRevenueSen,
-  });
-});
-
-// ---------------------------------------------------------------------------
-// POST /api/sales-orders/backfill-job-cards — admin one-shot backfill.
-//
-// Walks every production_orders row that has zero job_cards and runs the
-// BOM → WIP → job_cards cascade against it, using the same helper as the
-// main SO-confirm path. Idempotent per-PO (skips POs that already have jcs).
-//
-// Intended for one-time recovery of the stuck PO (SO-2604-001-01) that was
-// created before this cascade existed. Safe to re-invoke — it's a no-op on
-// any PO that already has at least one job_cards row.
-// ---------------------------------------------------------------------------
-app.post("/backfill-job-cards", async (c) => {
-  const denied = await requirePermission(c, "sales-orders", "update");
-  if (denied) return denied;
-  const db = c.var.DB;
-  const empties = await db
-    .prepare(
-      `SELECT p.id FROM production_orders p
-         LEFT JOIN job_cards j ON j.productionOrderId = p.id
-         WHERE j.id IS NULL`,
-    )
-    .all<{ id: string }>();
-  const ids = (empties.results ?? []).map((r) => r.id);
-
-  const results: Array<{ poId: string; jcCount: number; currentDept: string | null }> = [];
-  for (const poId of ids) {
-    const { statements, jcCount, currentDept } = await backfillJobCardsForPo(db, poId);
-    if (statements.length > 0) {
-      await db.batch(statements);
-    }
-    results.push({ poId, jcCount, currentDept });
-  }
-  const total = results.reduce((sum, r) => sum + r.jcCount, 0);
-  return c.json({
-    success: true,
-    data: {
-      posScanned: ids.length,
-      jobCardsInserted: total,
-      details: results,
-    },
   });
 });
 

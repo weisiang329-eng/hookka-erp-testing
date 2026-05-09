@@ -34,6 +34,12 @@ import {
   validateFabricCodes,
   unknownFabricCodeError,
 } from "../lib/fabric-validation";
+import {
+  hasMixedSofaBedframe,
+  SO_MIXED_CATEGORY_ERROR,
+  findInvalidSofaQty,
+  formatSofaQtyError,
+} from "../../lib/so-category";
 
 const app = new Hono<Env>();
 
@@ -348,6 +354,51 @@ app.post("/", async (c) => {
     const id = genCoId();
 
     const rawItems = Array.isArray(body.items) ? body.items : [];
+
+    // Hard restriction: SOFA + BEDFRAME may NOT coexist on a single CO.
+    // Mirrors the SO POST guard — they run on entirely separate
+    // production lines (Fab Cut merge keys, BF qty from HB, parallel
+    // lead times). Frontend has the check too; this is the curl/API
+    // backdoor close.
+    if (
+      hasMixedSofaBedframe(
+        rawItems.map((it: Record<string, unknown>) => ({
+          itemCategory:
+            typeof it.itemCategory === "string" ? it.itemCategory : null,
+        })),
+      )
+    ) {
+      return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+    }
+
+    // Hard restriction: SOFA lines must use 1 unit each. Per the
+    // sales-orders.ts gate added 2026-05-09 (Wei Siang) — sofa BOM is
+    // per-piece + a single PO with qty=N is harder to track than N
+    // separate POs. Same rule applies to consignment orders since they
+    // share the production_orders generator (createProductionOrdersForOrder
+    // with sourceType: 'CO').
+    {
+      const offending = findInvalidSofaQty(
+        rawItems.map((it: Record<string, unknown>, i: number) => ({
+          itemCategory:
+            typeof it.itemCategory === "string" ? it.itemCategory : null,
+          quantity:
+            typeof it.quantity === "number"
+              ? it.quantity
+              : Number(it.quantity ?? 1),
+          productCode:
+            typeof it.productCode === "string" ? it.productCode : null,
+          lineNo:
+            typeof it.lineNo === "number" ? it.lineNo : i + 1,
+        })),
+      );
+      if (offending) {
+        return c.json(
+          { success: false, error: formatSofaQtyError(offending) },
+          400,
+        );
+      }
+    }
 
     // Fabric integrity gate — every non-empty incoming fabricCode must
     // resolve to a row in raw_materials with a fabric itemGroup. Mirrors
@@ -905,6 +956,26 @@ app.post("/:id/confirm", async (c) => {
     );
   }
 
+  // Hard restriction re-check at confirm. POST + PUT block this upstream,
+  // but legacy / pre-rule rows still need the gate so the production
+  // cascade never sees a mixed-category CO.
+  if (hasMixedSofaBedframe(itemRows)) {
+    return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+  }
+
+  // Sofa qty>1 re-check — same rationale: legacy CO rows that pre-date
+  // the rule still need to be blocked here so the production cascade
+  // doesn't emit a single PO with sofa qty=N.
+  {
+    const offending = findInvalidSofaQty(itemRows);
+    if (offending) {
+      return c.json(
+        { success: false, error: formatSofaQtyError(offending) },
+        400,
+      );
+    }
+  }
+
   // Build production orders via the shared service. The same function SO
   // confirm uses — sourceType discriminates which FK column gets written.
   const result = await createProductionOrdersForOrder(
@@ -1195,13 +1266,53 @@ app.put("/:id", async (c) => {
     let subtotalSen = existing.subtotalSen;
     let totalSen = existing.totalSen;
     if (Array.isArray(body.items)) {
+      const itemsArr = body.items as Array<Record<string, unknown>>;
+
+      // Hard restriction: SOFA + BEDFRAME may NOT coexist on a single CO.
+      // Same rule as POST — see helper for the why. Validate before any
+      // DB writes are queued.
+      if (
+        hasMixedSofaBedframe(
+          itemsArr.map((it) => ({
+            itemCategory:
+              typeof it.itemCategory === "string" ? it.itemCategory : null,
+          })),
+        )
+      ) {
+        return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+      }
+
+      // Sofa qty>1 — same rule as POST.
+      {
+        const offending = findInvalidSofaQty(
+          itemsArr.map((it, i) => ({
+            itemCategory:
+              typeof it.itemCategory === "string" ? it.itemCategory : null,
+            quantity:
+              typeof it.quantity === "number"
+                ? it.quantity
+                : Number(it.quantity ?? 1),
+            productCode:
+              typeof it.productCode === "string" ? it.productCode : null,
+            lineNo:
+              typeof it.lineNo === "number" ? it.lineNo : i + 1,
+          })),
+        );
+        if (offending) {
+          return c.json(
+            { success: false, error: formatSofaQtyError(offending) },
+            400,
+          );
+        }
+      }
+
       // Fabric integrity gate — see the POST handler. Validate before
       // queuing the DELETE so a bad payload can't wipe the existing
       // items and leave the CO with no lines.
       {
         const fabCheck = await validateFabricCodes(
           c.var.DB,
-          (body.items as Array<Record<string, unknown>>).map(
+          itemsArr.map(
             (it) => (it.fabricCode as string | null | undefined),
           ),
         );

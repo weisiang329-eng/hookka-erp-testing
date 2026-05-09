@@ -54,6 +54,7 @@ import {
   postJobCardLabor,
 } from "../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
+import { generateFGUnitsForPO } from "./fg-units";
 import {
   loadLeadTimes,
   loadHookkaDDBuffer,
@@ -13784,6 +13785,160 @@ app.post("/backfill-po-line-no", async (c) => {
     affectedSoCount: new Set(fixes.map((f) => f.companySOId)).size,
     fixes,
     skipped,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/regen-fg-units
+//
+// One-shot regenerator for fg_units rows. Use case: pieces logic changed
+// (e.g. bedframe size auto-derive landed 2026-05-09) and existing fg_units
+// were generated under the old logic. This endpoint deletes the in-stock
+// fg_units (status='PACKED') for the given PO/SO scope and re-runs
+// generateFGUnitsForPO so the new pieces config takes effect.
+//
+// Safety:
+//   - Only deletes status='PACKED' rows. LOADED / DELIVERED / RETURNED
+//     fg_units are physical state and must not be regenerated — caller
+//     gets a `skipped` entry per PO that had non-PACKED units.
+//   - fg_unit_events is FK CASCADE → automatic cleanup when an fg_unit
+//     row is deleted.
+//   - dryRun mode lists what would be done without writing.
+//
+// Body: { poIds?: string[], soIds?: string[], dryRun?: boolean }
+//   - At least one of poIds / soIds must be provided.
+//   - soIds resolved into the matching production_orders' poIds.
+//   - dryRun defaults true.
+//
+// Per project_migration_in_progress: this is a one-shot tool, will be
+// removed post-migration. Don't generalize.
+// ---------------------------------------------------------------------------
+app.post("/regen-fg-units", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { poIds?: unknown; soIds?: unknown; dryRun?: unknown } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    // empty body OK
+  }
+  const dryRun = body.dryRun !== false;
+  const poIdsIn = Array.isArray(body.poIds)
+    ? body.poIds.filter((x): x is string => typeof x === "string" && x.length > 0)
+    : [];
+  const soIdsIn = Array.isArray(body.soIds)
+    ? body.soIds.filter((x): x is string => typeof x === "string" && x.length > 0)
+    : [];
+  if (poIdsIn.length === 0 && soIdsIn.length === 0) {
+    return c.json(
+      { success: false, error: "Provide at least one of body.poIds or body.soIds" },
+      400,
+    );
+  }
+
+  const db = c.var.DB;
+
+  // Resolve SO ids → PO ids. Accept both internal id and companySOId.
+  const resolvedPoIds = new Set<string>(poIdsIn);
+  for (const soIdRaw of soIdsIn) {
+    let soId: string | null = null;
+    const direct = await db
+      .prepare("SELECT id FROM sales_orders WHERE id = ? LIMIT 1")
+      .bind(soIdRaw)
+      .first<{ id: string }>();
+    if (direct) {
+      soId = direct.id;
+    } else {
+      const byCompany = await db
+        .prepare("SELECT id FROM sales_orders WHERE companySOId = ? LIMIT 1")
+        .bind(soIdRaw)
+        .first<{ id: string }>();
+      if (byCompany) soId = byCompany.id;
+    }
+    if (!soId) continue;
+    const posRes = await db
+      .prepare("SELECT id FROM production_orders WHERE salesOrderId = ?")
+      .bind(soId)
+      .all<{ id: string }>();
+    for (const r of posRes.results ?? []) resolvedPoIds.add(r.id);
+  }
+
+  type PoResult = {
+    poId: string;
+    poNo?: string;
+    status: "regenerated" | "skipped" | "error";
+    deletedCount?: number;
+    createdCount?: number;
+    blockedByStatuses?: string[];
+    error?: string;
+  };
+  const results: PoResult[] = [];
+
+  for (const poId of resolvedPoIds) {
+    try {
+      // Bail if any fg_unit on this PO is past PACKED.
+      const unitsRes = await db
+        .prepare("SELECT id, status FROM fg_units WHERE poId = ?")
+        .bind(poId)
+        .all<{ id: string; status: string }>();
+      const units = unitsRes.results ?? [];
+      const blocked = units.filter((u) => u.status !== "PACKED");
+      if (blocked.length > 0) {
+        results.push({
+          poId,
+          status: "skipped",
+          blockedByStatuses: Array.from(new Set(blocked.map((b) => b.status))),
+        });
+        continue;
+      }
+
+      const poRow = await db
+        .prepare("SELECT poNo FROM production_orders WHERE id = ?")
+        .bind(poId)
+        .first<{ poNo: string }>();
+
+      if (dryRun) {
+        results.push({
+          poId,
+          poNo: poRow?.poNo,
+          status: "regenerated",
+          deletedCount: units.length,
+          createdCount: -1, // unknown until live run
+        });
+        continue;
+      }
+
+      // Live: delete then regen.
+      await db
+        .prepare("DELETE FROM fg_units WHERE poId = ?")
+        .bind(poId)
+        .run();
+      const gen = await generateFGUnitsForPO(db, poId);
+      results.push({
+        poId,
+        poNo: poRow?.poNo,
+        status: "regenerated",
+        deletedCount: units.length,
+        createdCount: gen.units.length,
+      });
+    } catch (err) {
+      results.push({
+        poId,
+        status: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    scanned: resolvedPoIds.size,
+    regenerated: results.filter((r) => r.status === "regenerated").length,
+    skipped: results.filter((r) => r.status === "skipped").length,
+    errors: results.filter((r) => r.status === "error").length,
+    results,
   });
 });
 

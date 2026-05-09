@@ -855,7 +855,7 @@ export default function ProductionPage({
   // Each FgSticker now = one FG unit (one physical box), NOT one PO.
   // A PO with qty=3 and 3 pieces/set produces 9 FgSticker rows.
   type FgSticker = {
-    key: string;                // fgUnit.id
+    key: string;                // fgUnit.id (or synthetic id for leg-pack)
     unitSerial: string;         // full canonical serial for QR
     shortCode: string;          // human-readable batch+piece
     poNo: string;
@@ -869,12 +869,28 @@ export default function ProductionPage({
     customerName: string;
     customerHub: string;
     salesOrderNo: string;
+    salesOrderId: string;       // for SO-level sofa pack aggregation
     pieceNo: number;
     totalPieces: number;
     pieceName: string;
     unitNo: number;
     totalUnits: number;
     mfdDate: string | null;
+    // Category + leg height — needed by the SO-level sofa aggregator that
+    // renumbers pieceNo across all sofa POs in the same SO and inserts a
+    // synthetic Legs sticker when any sofa line in the SO has
+    // legHeightInches > 0.5". Not persisted; populated from the source PO
+    // when stickers are loaded.
+    itemCategory?: "BEDFRAME" | "SOFA" | "ACCESSORY";
+    legHeightInches?: number | null;
+    // Combined-sticker pairing. When set, this sticker shares a physical
+    // card with `comboPairKey`. The aggregator pairs Compartment 1 with
+    // the Legs sticker so they print on a single 2-in-1 label.
+    comboPairKey?: string;
+    // True when this sticker is a synthetic leg-pack injected by the
+    // aggregator (no fg_units row backing it). Used by the renderer to
+    // skip standalone rendering — the combined card carries both.
+    isSyntheticLegs?: boolean;
   };
   const [jobCardStickers, setJobCardStickers] = useState<JobCardSticker[]>([]);
   const [fgStickers, setFgStickers] = useState<FgSticker[]>([]);
@@ -2751,6 +2767,12 @@ export default function ProductionPage({
       customerName: string; customerHub?: string;
       mfdDate: string | null;
     };
+    // Threshold: sofa legs <= 0.5" sit inside the compartment box (no
+    // separate pack). Anything taller gets its own pack, physically placed
+    // inside Compartment 1 of the SO and labelled with a 2-in-1 sticker
+    // shared with Compartment 1.
+    const LEG_PACK_THRESHOLD_INCHES = 0.5;
+
     const all: FgSticker[] = [];
     setLoadingFgPreview(true);
     try {
@@ -2786,12 +2808,17 @@ export default function ProductionPage({
               o.companySOId ||
               o.companyCOId ||
               "",
+            // SO id used by aggregateSofaStickers to group sofa POs of
+            // the same SO so pieceNo / totalPieces span the whole SO.
+            salesOrderId: o.salesOrderId || o.consignmentOrderId || "",
             pieceNo: u.pieceNo,
             totalPieces: u.totalPieces,
             pieceName: u.pieceName,
             unitNo: u.unitNo,
             totalUnits: u.totalUnits,
             mfdDate: u.mfdDate,
+            itemCategory: (o.itemCategory as "BEDFRAME" | "SOFA" | "ACCESSORY" | undefined),
+            legHeightInches: o.legHeightInches ?? null,
           });
         }
       }
@@ -2800,10 +2827,72 @@ export default function ProductionPage({
       setLoadingFgPreview(false);
       return [];
     }
+    // SO-level sofa pack aggregation. Sofa pack count is computed across
+    // every sofa PO in the same SO (not per PO), and a synthetic Legs
+    // sticker is injected when the SO has any sofa line with legs taller
+    // than LEG_PACK_THRESHOLD_INCHES. Compartment 1 + Legs share a single
+    // physical 2-in-1 sticker (paired via comboPairKey).
+    const sofaBySo = new Map<string, FgSticker[]>();
+    const nonSofa: FgSticker[] = [];
+    for (const s of all) {
+      if (s.itemCategory === "SOFA" && s.salesOrderId) {
+        const list = sofaBySo.get(s.salesOrderId) ?? [];
+        list.push(s);
+        sofaBySo.set(s.salesOrderId, list);
+      } else {
+        nonSofa.push(s);
+      }
+    }
+    const aggregated: FgSticker[] = [...nonSofa];
+    for (const [, group] of sofaBySo) {
+      // Deterministic order so renumbering is stable across loads.
+      group.sort((a, b) =>
+        a.poNo.localeCompare(b.poNo) ||
+        a.unitNo - b.unitNo ||
+        a.pieceNo - b.pieceNo,
+      );
+      const hasLegs = group.some(
+        (s) => (s.legHeightInches ?? 0) > LEG_PACK_THRESHOLD_INCHES,
+      );
+      const compartmentCount = group.length;
+      const totalPacks = compartmentCount + (hasLegs ? 1 : 0);
+
+      // Renumber: position 1 = compartment 1, position 2 = legs (if any),
+      // positions 3..N = remaining compartments.
+      group.forEach((s, idx) => {
+        // idx 0 → pieceNo 1; idx 1+ → pieceNo (idx+1) + (hasLegs ? 1 : 0)
+        const renumbered = idx === 0 ? 1 : idx + 1 + (hasLegs ? 1 : 0);
+        s.pieceNo = renumbered;
+        s.totalPieces = totalPacks;
+      });
+
+      if (hasLegs && group.length > 0) {
+        const compartment1 = group[0];
+        const legsKey = `legs-${compartment1.salesOrderId}`;
+        const legsSticker: FgSticker = {
+          ...compartment1,
+          key: legsKey,
+          unitSerial: `${compartment1.salesOrderNo || compartment1.salesOrderId}-LEGS`,
+          shortCode: "LEGS",
+          pieceNo: 2,
+          totalPieces: totalPacks,
+          pieceName: "Legs (separate pack)",
+          isSyntheticLegs: true,
+          comboPairKey: compartment1.key,
+        };
+        compartment1.comboPairKey = legsKey;
+
+        // Insert legs at position 2 (after compartment 1 in the group).
+        aggregated.push(compartment1, legsSticker, ...group.slice(1));
+      } else {
+        aggregated.push(...group);
+      }
+    }
+
     setJobCardStickers([]);
-    setFgStickers(all);
+    setFgStickers(aggregated);
     setLoadingFgPreview(false);
-    return all;
+    return aggregated;
   }, [filteredOrders]);
 
   const handlePrintFgStickers = useCallback(async () => {
@@ -4626,6 +4715,10 @@ export default function ProductionPage({
             <div className="overflow-x-auto">
               <div className="flex gap-3 p-3 min-w-min">
                 {fgStickers.map((s) => {
+                  // The synthetic Legs sticker is rendered inside its pair
+                  // partner's card (Compartment 1's 2-in-1 layout) — skip
+                  // standalone rendering so it doesn't appear twice.
+                  if (s.isSyntheticLegs) return null;
                   const origin =
                     typeof window !== "undefined" && window.location?.origin
                       ? window.location.origin
@@ -4643,12 +4736,21 @@ export default function ProductionPage({
                   const customerLine = s.customerHub
                     ? `${s.customerName} (${s.customerHub})`
                     : s.customerName;
+                  // Pair lookup: when this sticker is Compartment 1 of a
+                  // SO with legs, render the Legs sub-block on the same
+                  // card (2-in-1 sticker design).
+                  const legsPair = s.comboPairKey
+                    ? fgStickers.find((x) => x.key === s.comboPairKey && x.isSyntheticLegs)
+                    : null;
+                  const legsTrackUrl = legsPair
+                    ? `${origin}/track?s=${encodeURIComponent(legsPair.unitSerial)}`
+                    : "";
                   return (
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
                       style={{ width: "230px" }}
-                      title={`${s.sku} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}`}
+                      title={`${s.sku} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       <div className="text-center font-bold leading-tight" style={{ fontSize: "11px" }}>
                         {s.sku}
@@ -4662,7 +4764,7 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">MFD</span>: {mfd}</div>
                       </div>
                       <div className="flex items-end gap-2 mt-2">
-                        <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
+                        <QRImg data={trackUrl} size={legsPair ? 80 : 110} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center">
                           <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
                             {s.pieceNo}/{s.totalPieces}
@@ -4678,6 +4780,32 @@ export default function ProductionPage({
                           </div>
                         </div>
                       </div>
+                      {/* 2-in-1 legs section — physically printed on the
+                          same sticker as Compartment 1 because the legs
+                          pack lives inside Compartment 1's box. Operator
+                          can scan either QR independently. */}
+                      {legsPair && (
+                        <>
+                          <div className="border-t-2 border-dashed border-[#6B5C32] my-2" />
+                          <div className="text-center text-[8px] font-semibold text-[#6B5C32] uppercase tracking-wide">
+                            + Legs (separate pack inside)
+                          </div>
+                          <div className="flex items-end gap-2 mt-1">
+                            <QRImg data={legsTrackUrl} size={80} alt="Legs QR" className="block" />
+                            <div className="flex-1 text-center">
+                              <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
+                                {legsPair.pieceNo}/{legsPair.totalPieces}
+                              </div>
+                              <div className="leading-tight truncate" style={{ fontSize: "8px" }}>
+                                Legs
+                              </div>
+                              <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
+                                {legsPair.shortCode}
+                              </div>
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                   );
                 })}
@@ -4825,6 +4953,9 @@ export default function ProductionPage({
           `}</style>
           <div id="batch-fg-print" className="hidden print:block">
             {fgStickers.map((s) => {
+              // Synthetic Legs sticker prints inside its pair partner's
+              // page (Compartment 1 of the SO) — skip standalone print.
+              if (s.isSyntheticLegs) return null;
               const origin =
                 typeof window !== "undefined" && window.location?.origin
                   ? window.location.origin
@@ -4840,6 +4971,12 @@ export default function ProductionPage({
                 return `${yy}-${mm}-${dd}`;
               })();
               const customerLine = s.customerHub ? `${s.customerName} (${s.customerHub})` : s.customerName;
+              const legsPair = s.comboPairKey
+                ? fgStickers.find((x) => x.key === s.comboPairKey && x.isSyntheticLegs)
+                : null;
+              const legsTrackUrl = legsPair
+                ? `${origin}/track?s=${encodeURIComponent(legsPair.unitSerial)}`
+                : "";
               return (
                 <div
                   key={s.key}
@@ -4859,7 +4996,7 @@ export default function ProductionPage({
                       <div><span className="inline-block w-[22mm] font-semibold">MFD</span>: {mfd}</div>
                     </div>
                     <div className="flex items-end gap-[2mm] mt-[1mm]">
-                      <QRImg data={trackUrl} size={500} alt="FG unit QR" className="block" />
+                      <QRImg data={trackUrl} size={legsPair ? 380 : 500} alt="FG unit QR" className="block" />
                       <div className="flex-1 text-center">
                         <div className="font-bold" style={{ fontSize: "14pt" }}>
                           {s.pieceNo} of {s.totalPieces}
@@ -4873,6 +5010,29 @@ export default function ProductionPage({
                         </div>
                       </div>
                     </div>
+                    {/* 2-in-1 Legs section — same physical sticker as
+                        Compartment 1 (the legs pack lives inside this
+                        compartment's box). */}
+                    {legsPair && (
+                      <>
+                        <div className="border-t border-dashed border-black mt-[2mm] pt-[1.5mm]" />
+                        <div className="text-center font-semibold uppercase tracking-wide" style={{ fontSize: "8pt" }}>
+                          + Legs (separate pack inside)
+                        </div>
+                        <div className="flex items-end gap-[2mm] mt-[1mm]">
+                          <QRImg data={legsTrackUrl} size={300} alt="Legs QR" className="block" />
+                          <div className="flex-1 text-center">
+                            <div className="font-bold" style={{ fontSize: "13pt" }}>
+                              {legsPair.pieceNo} of {legsPair.totalPieces}
+                            </div>
+                            <div className="text-[8pt] mt-[1mm]">Legs</div>
+                            <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
+                              {legsPair.shortCode}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               );

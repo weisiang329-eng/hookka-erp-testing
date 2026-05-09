@@ -78,6 +78,8 @@ type ProductRow = {
   id: string;
   code: string;
   pieces: string | null;
+  category: string | null;
+  sizeCode: string | null;
 };
 
 type WorkerRow = {
@@ -170,20 +172,54 @@ function genFGUnitId(poId: string, unitNo: number, pieceNo: number): string {
   return `fgu-${poId}-${unitNo}-${pieceNo}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * Default piece configuration for bedframes when product.pieces JSON is
+ * empty. Wei Siang's spec (2026-05-09):
+ *   K, Q   → 3 packs (1 Headboard + 2 Divan halves)
+ *   S, SS  → 2 packs (1 Headboard + 1 Divan)
+ *
+ * sizeCode normalisation: case-insensitive; trims whitespace; ignores
+ * variants like "K-S" (king with storage) → still K family.
+ */
+function bedframeSizeDefault(
+  sizeCode: string | null,
+): { count: number; names: string[] } | null {
+  if (!sizeCode) return null;
+  const norm = sizeCode.trim().toUpperCase();
+  // Strip storage / option suffixes (e.g. "K-S", "Q (HF)") — first word wins
+  const base = norm.split(/[\s\-_(]/)[0];
+  if (base === "K" || base === "Q") {
+    return { count: 3, names: ["Headboard", "Divan L", "Divan R"] };
+  }
+  if (base === "S" || base === "SS") {
+    return { count: 2, names: ["Headboard", "Divan"] };
+  }
+  return null;
+}
+
 function parsePieces(
   raw: string | null,
+  product?: { category?: string | null; sizeCode?: string | null } | null,
 ): { count: number; names: string[] } {
-  if (!raw) return { count: 1, names: ["Full Product"] };
-  try {
-    const parsed = JSON.parse(raw) as { count?: number; names?: string[] };
-    if (parsed?.count && parsed.count > 0) {
-      return {
-        count: parsed.count,
-        names: Array.isArray(parsed.names) ? parsed.names : ["Full Product"],
-      };
+  // Operator-set pieces config wins. Empty → category-aware fallback.
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { count?: number; names?: string[] };
+      if (parsed?.count && parsed.count > 0) {
+        return {
+          count: parsed.count,
+          names: Array.isArray(parsed.names) ? parsed.names : ["Full Product"],
+        };
+      }
+    } catch {
+      // fall through
     }
-  } catch {
-    // fall through
+  }
+  // BEDFRAME size-based default — covers 99% of bedframe SKUs without
+  // requiring per-SKU pieces JSON config in the catalog.
+  if (product?.category === "BEDFRAME") {
+    const def = bedframeSizeDefault(product.sizeCode ?? null);
+    if (def) return def;
   }
   return { count: 1, names: ["Full Product"] };
 }
@@ -238,18 +274,18 @@ export async function generateFGUnitsForPO(
   let product: ProductRow | null = null;
   if (po.productId) {
     product = await db
-      .prepare("SELECT id, code, pieces FROM products WHERE id = ? LIMIT 1")
+      .prepare("SELECT id, code, pieces, category, sizeCode FROM products WHERE id = ? LIMIT 1")
       .bind(po.productId)
       .first<ProductRow>();
   }
   if (!product && po.productCode) {
     product = await db
-      .prepare("SELECT id, code, pieces FROM products WHERE code = ? LIMIT 1")
+      .prepare("SELECT id, code, pieces, category, sizeCode FROM products WHERE code = ? LIMIT 1")
       .bind(po.productCode)
       .first<ProductRow>();
   }
 
-  const pieces = parsePieces(product?.pieces ?? null);
+  const pieces = parsePieces(product?.pieces ?? null, product ?? null);
   const totalUnits = Math.max(1, po.quantity || 1);
   const totalPieces = pieces.count;
 

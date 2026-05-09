@@ -13100,62 +13100,77 @@ app.post("/correct-so-line-qty-cascade", async (c) => {
     });
   }
 
-  // Surface untouched cascade tables as warnings
+  // Surface untouched cascade tables as warnings. These tables use varying
+  // column names (po_id, production_order_id, ref_id polymorphic) — wrap
+  // each in try/catch so a column-name mismatch doesn't abort the whole
+  // dry-run.
   const warnings: string[] = [];
-  const wipItemsCountRow = await db
-    .prepare("SELECT COUNT(*) AS n FROM wip_items WHERE poId = ?")
-    .bind(targetPo.id)
-    .first<{ n: number }>();
-  const wipItemsCount = Number(wipItemsCountRow?.n ?? 0);
-  if (wipItemsCount > 0) {
-    warnings.push(
-      `${wipItemsCount} wip_items rows reference this PO — RM consumption tracking remains at oldQty=${oldQty} scale.`,
-    );
-  }
   try {
-    const ledgerCountRow = await db
-      .prepare("SELECT COUNT(*) AS n FROM cost_ledger WHERE poId = ?")
-      .bind(targetPo.id)
-      .first<{ n: number }>();
-    const ledgerCount = Number(ledgerCountRow?.n ?? 0);
-    if (ledgerCount > 0) {
-      warnings.push(
-        `${ledgerCount} cost_ledger rows reference this PO — labor + RM cost remain at oldQty=${oldQty} scale.`,
-      );
-    }
-  } catch {
-    // table may not exist
-  }
-  try {
-    const fgUnitsRow = await db
-      .prepare("SELECT COUNT(*) AS n FROM fg_units WHERE poId = ?")
-      .bind(targetPo.id)
-      .first<{ n: number }>();
-    const fgUnitsCount = Number(fgUnitsRow?.n ?? 0);
-    if (fgUnitsCount > 0) {
-      warnings.push(
-        `${fgUnitsCount} fg_units exist for this PO — operator may need to DELETE the over-counted units (expected ${newQty}).`,
-      );
-    }
-  } catch {
-    // skip silently
-  }
-  try {
-    const doCountRow = await db
+    const fgRow = await db
       .prepare(
-        "SELECT COUNT(*) AS n FROM delivery_order_items WHERE poId = ?",
+        "SELECT COUNT(*) AS n FROM fg_units WHERE production_order_id = ?",
       )
       .bind(targetPo.id)
       .first<{ n: number }>();
-    const doCount = Number(doCountRow?.n ?? 0);
-    if (doCount > 0) {
+    const n = Number(fgRow?.n ?? 0);
+    if (n > 0) {
       warnings.push(
-        `${doCount} delivery_order_items reference this PO — DO line qty may need manual adjustment.`,
+        `${n} fg_units exist for this PO — operator may need to DELETE over-counted units (expected ${newQty}).`,
       );
     }
   } catch {
-    // skip silently
+    // alt column name; fall through
+    try {
+      const fgRow2 = await db
+        .prepare("SELECT COUNT(*) AS n FROM fg_units WHERE po_id = ?")
+        .bind(targetPo.id)
+        .first<{ n: number }>();
+      const n = Number(fgRow2?.n ?? 0);
+      if (n > 0) {
+        warnings.push(
+          `${n} fg_units exist for this PO — operator may need to DELETE over-counted units (expected ${newQty}).`,
+        );
+      }
+    } catch {
+      // skip
+    }
   }
+  try {
+    const doRow = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM delivery_order_items WHERE production_order_id = ?",
+      )
+      .bind(targetPo.id)
+      .first<{ n: number }>();
+    const n = Number(doRow?.n ?? 0);
+    if (n > 0) {
+      warnings.push(
+        `${n} delivery_order_items reference this PO — DO line qty may need manual adjustment.`,
+      );
+    }
+  } catch {
+    // skip
+  }
+  try {
+    const ledgerRow = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM cost_ledger WHERE ref_id = ? AND ref_type = 'PO'",
+      )
+      .bind(targetPo.id)
+      .first<{ n: number }>();
+    const n = Number(ledgerRow?.n ?? 0);
+    if (n > 0) {
+      warnings.push(
+        `${n} cost_ledger rows reference this PO — labor + RM cost remain at oldQty=${oldQty} scale.`,
+      );
+    }
+  } catch {
+    // skip
+  }
+  // wip_items has no direct PO FK (only `code` field) — emit generic warning
+  warnings.push(
+    `wip_items has no direct PO link — RM consumption tracking via stock_qty was not adjusted. Operator must reverse-consume manually if inventory accuracy matters.`,
+  );
 
   const result = {
     success: true,

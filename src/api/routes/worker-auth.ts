@@ -90,9 +90,9 @@ type PinRow = {
   pin: string;
   updatedAt: string | null;
   // Sprint 2: PIN length grew from 4 → 6 digits. Existing 4-digit PINs are
-  // flagged must_reset=1 by migration 0079; they must reset to a 6-digit PIN
-  // before they can sign in again.
-  must_reset: number | null;
+  // flagged must_reset=true by migration 0079; they must reset to a 6-digit PIN
+  // before they can sign in again. (Postgres boolean — old D1/SQLite era used 0/1.)
+  must_reset: boolean | number | null;
 };
 type TokenRow = { token: string; workerId: string; issuedAt: number };
 
@@ -167,7 +167,7 @@ app.post("/login", async (c) => {
     }
     const hashed = await hashPin(firstTimePin);
     await c.var.DB.prepare(
-      "INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)",
+      "INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, false)",
     )
       .bind(worker.id, hashed, new Date().toISOString())
       .run();
@@ -176,7 +176,7 @@ app.post("/login", async (c) => {
     // 4-digit era (must_reset=1, set by migration 0079) must run the reset
     // flow before logging in. The portal UI handles this by surfacing the
     // reset-PIN screen when needsReset=true comes back.
-    if (existing.must_reset === 1) {
+    if (existing.must_reset === 1 || existing.must_reset === true) {
       return c.json(
         {
           success: false,
@@ -278,8 +278,8 @@ app.post("/reset-pin", async (c) => {
 
   const hashedNew = await hashPin(newPin);
   await c.var.DB.prepare(
-    `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)
-     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = 0`,
+    `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, false)
+     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = false`,
   )
     .bind(worker.id, hashedNew, new Date().toISOString())
     .run();

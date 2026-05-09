@@ -456,11 +456,11 @@ app.post("/:id/set-pin", async (c) => {
   const hashed = await hashPin(cleartext);
   const now = new Date().toISOString();
 
-  // UPSERT — admin sets must_reset = 0 (no forced reset on first login;
+  // UPSERT — admin sets must_reset = false (no forced reset on first login;
   // worker can use the PIN directly).
   await c.var.DB.prepare(
-    `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)
-     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = 0`,
+    `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, false)
+     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = false`,
   )
     .bind(worker.id, hashed, now)
     .run();
@@ -543,8 +543,8 @@ app.post("/bulk-generate-pins", async (c) => {
     const cleartext = generateRandomPin();
     const hashed = await hashPin(cleartext);
     await c.var.DB.prepare(
-      `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)
-       ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = 0`,
+      `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, false)
+       ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = false`,
     )
       .bind(t.id, hashed, now)
       .run();

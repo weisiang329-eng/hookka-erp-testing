@@ -35,6 +35,11 @@ import {
   snapItemToCatalog,
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
+import {
+  loadSpecialOrderCatalog,
+  validateSpecialOrders,
+  unknownSpecialOrderError,
+} from "../lib/special-order-validation";
 import { withOrgScope } from "../lib/tenant";
 import {
   createProductionOrdersForOrder,
@@ -1696,6 +1701,24 @@ app.post("/", async (c) => {
       }
     }
 
+    // specialOrder catalog gate (BUG-2026-05-09-010 / arch_ocr_backdoors §6).
+    // Every non-OTHER: token on a line must exist in the per-category
+    // maintenance_config specials catalog. "OTHER: <free text>" tokens are
+    // freeform custom specials — passed through unchanged.
+    {
+      const cfg = await loadSpecialOrderCatalog(c.var.DB);
+      const check = validateSpecialOrders(
+        rawItems.map((it) => ({
+          specialOrder: it.specialOrder as string | null | undefined,
+          itemCategory: it.itemCategory as string | null | undefined,
+        })),
+        cfg,
+      );
+      if (!check.valid) {
+        return c.json(unknownSpecialOrderError(check.unknown), 400);
+      }
+    }
+
     // Price-resolution date: use companySODate (may be future-dated) when given,
     // fall back to today so price history resolves correctly on confirm.
     const priceAsOf =
@@ -2764,6 +2787,21 @@ app.put("/:id", async (c) => {
         );
         if (!fabCheck.valid) {
           return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+        }
+      }
+
+      // specialOrder catalog gate (mirrors POST). OTHER: tokens pass through.
+      {
+        const cfg = await loadSpecialOrderCatalog(c.var.DB);
+        const check = validateSpecialOrders(
+          rawItems.map((it) => ({
+            specialOrder: it.specialOrder as string | null | undefined,
+            itemCategory: it.itemCategory as string | null | undefined,
+          })),
+          cfg,
+        );
+        if (!check.valid) {
+          return c.json(unknownSpecialOrderError(check.unknown), 400);
         }
       }
 

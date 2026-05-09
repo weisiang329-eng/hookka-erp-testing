@@ -31,6 +31,10 @@ import {
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
 import { resolveCustomerPriceAsOf } from "./customer-products";
+import {
+  snapItemToCatalog,
+  loadProductCatalog,
+} from "./_shared/item-catalog-snap";
 import { withOrgScope } from "../lib/tenant";
 import {
   createProductionOrdersForOrder,
@@ -2773,6 +2777,9 @@ app.put("/:id", async (c) => {
         typeof merged.companySODate === "string" && merged.companySODate
           ? merged.companySODate.slice(0, 10)
           : new Date().toISOString().slice(0, 10);
+      // OCR back-door closure (BUG-001 fix): catalog wins on every PUT just
+      // like POST. Loaded once here, reused for every line via snapItemToCatalog.
+      const productByCodeForPut = await loadProductCatalog(c.var.DB);
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         let basePriceSen = incomingBase;
@@ -2835,10 +2842,28 @@ app.put("/:id", async (c) => {
 
         // 2026-05-09: fabricId resolve removed (matches POST path). Persist
         // null — column being dropped in a follow-up migration.
-        const itemCategory = (item.itemCategory as string) || "BEDFRAME";
-        const isSofaItem = itemCategory === "SOFA";
         const incomingFabricCode = String(item.fabricCode ?? "");
-        let normalizedSizeLabel = (item.sizeLabel as string) || "";
+
+        // OCR back-door closure (BUG-001 fix, 2026-05-09): catalog wins on
+        // every PUT just like POST (cd6a417). When productCode resolves to a
+        // catalog product, that product is the source of truth for productId,
+        // productName, itemCategory, and (BF/ACC) sizeLabel/sizeCode. Prevents
+        // PDF text from sneaking back in via the Edit page when an OCR'd SO
+        // gets re-saved.
+        const snapped = snapItemToCatalog(
+          {
+            productCode: item.productCode,
+            productId: item.productId,
+            productName: item.productName,
+            itemCategory: item.itemCategory,
+            sizeCode: item.sizeCode,
+            sizeLabel: item.sizeLabel,
+          },
+          productByCodeForPut,
+        );
+        const itemCategory = snapped.itemCategory;
+        const isSofaItem = itemCategory === "SOFA";
+        let normalizedSizeLabel = snapped.sizeLabel;
         if (
           isSofaItem &&
           normalizedSizeLabel &&
@@ -2846,7 +2871,7 @@ app.put("/:id", async (c) => {
         ) {
           normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
         }
-        let normalizedSizeCode = (item.sizeCode as string) || "";
+        let normalizedSizeCode = snapped.sizeCode;
         if (isSofaItem && !normalizedSizeCode && normalizedSizeLabel) {
           normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
         }
@@ -2861,9 +2886,9 @@ app.put("/:id", async (c) => {
           id: (item.id as string) || genItemId(),
           lineNo,
           lineSuffix,
-          productId: (item.productId as string) || "",
-          productCode: (item.productCode as string) || "",
-          productName: (item.productName as string) || "",
+          productId: snapped.productId,
+          productCode: snapped.productCode,
+          productName: snapped.productName,
           itemCategory,
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,

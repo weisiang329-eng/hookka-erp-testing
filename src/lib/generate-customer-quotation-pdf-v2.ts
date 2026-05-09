@@ -396,31 +396,67 @@ export default function generateCustomerQuotationPdfV2(
       y += 2;
 
       if (cat === "SOFA") {
-        // Sofa: only the seat-height tier matrix — the bare Code/Desc/Size/
-        // Price 2/Price 1 table duplicates info already in the matrix
-        // (Price 2 == matrix P2 column for legacy 5-cell rows). Operator
-        // asked to drop the duplicate so the quotation stays compact.
-        const matrixHead: string[] = [
-          "Code",
-          "Description",
-          "Tier",
-          ...SEAT_HEIGHTS.map((h) => `${h}"`),
-        ];
-        const matrixBody: string[][] = [];
+        // Sofa: tier matrix grouped by base model (5531/5535/5539/...).
+        // Per Wei Siang 2026-05-09: separate models with their own sub-table
+        // so 40-row quotations stay readable. Also auto-hide seat-height
+        // columns where every row in the model is dash (e.g. customers
+        // restricted to 24/28/30 don't see empty 32"/35" columns).
+        //
+        // Base-model extraction: split on first "-" (e.g. "5531-1A(LHF)" →
+        // "5531"). Falls back to the whole code if no dash.
+        const sofaByModel = new Map<string, typeof rows>();
         for (const p of rows) {
-          if (!p.seatHeightPrices || p.seatHeightPrices.length === 0) continue;
-          for (const tier of TIERS_ORDER) {
-            const row: string[] = [p.code, p.name, TIER_LABEL[tier] ?? tier];
-            let any = false;
-            for (const h of SEAT_HEIGHTS) {
-              const sen = nthTierForHeight(p.seatHeightPrices, h, tier);
-              if (sen != null && sen > 0) any = true;
-              row.push(sen != null && sen > 0 ? fmtRM(sen) : DASH);
-            }
-            if (any) matrixBody.push(row);
-          }
+          const model = p.code.split("-")[0] || p.code;
+          if (!sofaByModel.has(model)) sofaByModel.set(model, []);
+          sofaByModel.get(model)!.push(p);
         }
-        if (matrixBody.length > 0) {
+        const orderedModels = [...sofaByModel.keys()].sort();
+
+        for (const model of orderedModels) {
+          const modelRows = sofaByModel.get(model)!;
+
+          // Build matrix body (all 5 heights), then drop empty columns.
+          const fullBody: string[][] = [];
+          for (const p of modelRows) {
+            if (!p.seatHeightPrices || p.seatHeightPrices.length === 0) continue;
+            for (const tier of TIERS_ORDER) {
+              const row: string[] = [p.code, p.name, TIER_LABEL[tier] ?? tier];
+              let any = false;
+              for (const h of SEAT_HEIGHTS) {
+                const sen = nthTierForHeight(p.seatHeightPrices, h, tier);
+                if (sen != null && sen > 0) any = true;
+                row.push(sen != null && sen > 0 ? fmtRM(sen) : DASH);
+              }
+              if (any) fullBody.push(row);
+            }
+          }
+          if (fullBody.length === 0) continue;
+
+          // Drop seat-height columns whose every body cell is DASH. Indices
+          // 0/1/2 are Code/Description/Tier — always kept.
+          const heightColUsed = SEAT_HEIGHTS.map((_, i) => {
+            const colIdx = 3 + i;
+            return fullBody.some((r) => r[colIdx] !== DASH);
+          });
+          const visibleHeights = SEAT_HEIGHTS.filter((_, i) => heightColUsed[i]);
+          const matrixBody = fullBody.map((r) => [
+            r[0], r[1], r[2],
+            ...SEAT_HEIGHTS.map((_, i) => r[3 + i]).filter((_, i) => heightColUsed[i]),
+          ]);
+          const matrixHead = [
+            "Code", "Description", "Tier",
+            ...visibleHeights.map((h) => `${h}"`),
+          ];
+
+          // Sub-header for this model + a small gap before the table.
+          ensureRoom(14);
+          y += 1.5;
+          doc.setFontSize(8);
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(80, 80, 80);
+          doc.text(`${model}  (${modelRows.length})`, margin, y);
+          y += 1.5;
+
           autoTable(doc, {
             startY: y,
             margin: { left: margin, right: margin },
@@ -441,6 +477,8 @@ export default function generateCustomerQuotationPdfV2(
             },
           });
           advanceYAfterTable();
+          // Extra gap between model sub-tables for visual separation.
+          y += 2;
         }
       } else if (cat === "BEDFRAME") {
         autoTable(doc, {

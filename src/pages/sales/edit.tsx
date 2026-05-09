@@ -45,7 +45,6 @@ type LineItem = {
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   basePriceSen: number;
@@ -64,7 +63,7 @@ type LineItem = {
 
 const EMPTY_LINE: LineItem = {
   productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
-  sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
+  sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0,
@@ -573,7 +572,6 @@ export default function EditSalesOrderPage() {
               // sofa items so the Seat Size dropdown reads the same value
               // it pre-selected against. Bedframes keep sizeLabel verbatim.
               sizeLabel: isSofa && seatHeight ? seatHeight : rawSizeLabel,
-              fabricId: (item.fabricId as string) || "",
               fabricCode: (item.fabricCode as string) || "",
               quantity: item.quantity as number,
               basePriceSen: item.basePriceSen as number,
@@ -1173,7 +1171,15 @@ export default function EditSalesOrderPage() {
                             const t = h.trim();
                             return /^\d+(\.\d+)?$/.test(t) ? `${t}"` : t;
                           });
-                          return normalized.map(h => ({ value: h, label: h }));
+                          const opts = normalized.map(h => ({ value: h, label: h }));
+                          // 2026-05-09: if the SO's stored seatHeight isn't in
+                          // current config (operator may have removed an option),
+                          // surface it as a legacy entry so the dropdown still
+                          // pre-fills instead of going blank.
+                          if (item.seatHeight && !opts.some(o => o.value === item.seatHeight)) {
+                            opts.unshift({ value: item.seatHeight, label: `${item.seatHeight} (legacy)` });
+                          }
+                          return opts;
                         })()}
                         placeholder="Select size..."
                         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8"
@@ -1203,7 +1209,16 @@ export default function EditSalesOrderPage() {
                           const arr = Array.isArray(cfg)
                             ? cfg.map((v) => typeof v === "object" && v && "value" in v ? (v as { value: string }).value : String(v))
                             : legHeightOptions.map(o => o.height);
-                          return arr.map(h => ({ value: h, label: h }));
+                          const opts = arr.map(h => ({ value: h, label: h }));
+                          // Same legacy-tolerant fallback as Seat Size above.
+                          const current =
+                            item.legHeightInches == null || item.legHeightInches === 0
+                              ? "No Leg"
+                              : `${item.legHeightInches}"`;
+                          if (current && !opts.some(o => o.value === current)) {
+                            opts.unshift({ value: current, label: `${current} (legacy)` });
+                          }
+                          return opts;
                         })()}
                         placeholder="Select leg..."
                         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8"

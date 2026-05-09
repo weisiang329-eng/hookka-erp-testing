@@ -511,7 +511,6 @@ export default function SalesOrderDetailPage() {
         itemCategory: item.itemCategory,
         sizeCode: item.sizeCode,
         sizeLabel: item.sizeLabel,
-        fabricId: item.fabricId,
         fabricCode: item.fabricCode,
         quantity: item.quantity,
         basePriceSen: item.basePriceSen,

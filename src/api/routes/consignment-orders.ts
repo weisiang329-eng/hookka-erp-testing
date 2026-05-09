@@ -85,7 +85,6 @@ export type ConsignmentOrderItemRow = {
   itemCategory: string | null;
   sizeCode: string | null;
   sizeLabel: string | null;
-  fabricId: string | null;
   fabricCode: string | null;
   quantity: number;
   gapInches: number | null;
@@ -146,7 +145,6 @@ function rowToItem(it: ConsignmentOrderItemRow) {
     itemCategory: it.itemCategory ?? "",
     sizeCode: it.sizeCode ?? "",
     sizeLabel: it.sizeLabel ?? "",
-    fabricId: it.fabricId ?? "",
     fabricCode: it.fabricCode ?? "",
     quantity: it.quantity,
     gapInches: it.gapInches,
@@ -435,9 +433,6 @@ app.post("/", async (c) => {
           itemCategory: (it.itemCategory as string) ?? null,
           sizeCode: (it.sizeCode as string) ?? null,
           sizeLabel: (it.sizeLabel as string) ?? null,
-          // 2026-05-09: fabricId no longer authored from picker — column being
-          // dropped. Persist null; downstream keys on fabricCode.
-          fabricId: null,
           fabricCode: (it.fabricCode as string) ?? null,
           quantity: qty,
           gapInches: it.gapInches != null ? Number(it.gapInches) : null,

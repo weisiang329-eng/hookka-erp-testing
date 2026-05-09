@@ -55,7 +55,6 @@ type LineItem = {
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   basePriceSen: number;
@@ -84,7 +83,7 @@ type LineItem = {
 const makeEmptyLine = (): LineItem => ({
   _uid: crypto.randomUUID(),
   productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
-  sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
+  sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "", selectedModules: [],
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
@@ -448,7 +447,6 @@ function CreateConsignmentOrderPage() {
         sizeLabel: prod.sizeLabel,
         basePriceSen: priceSen,
         seatHeight: template.seatHeight,
-        fabricId: template.fabricId,
         fabricCode: template.fabricCode,
         quantity: 1,
         legHeightInches: isSofa ? template.legHeightInches : null,

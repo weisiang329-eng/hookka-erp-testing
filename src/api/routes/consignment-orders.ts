@@ -25,11 +25,6 @@ import {
   snapItemToCatalog,
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
-import {
-  loadSpecialOrderCatalog,
-  validateSpecialOrders,
-  unknownSpecialOrderError,
-} from "../lib/special-order-validation";
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
@@ -369,21 +364,6 @@ app.post("/", async (c) => {
       );
       if (!fabCheck.valid) {
         return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
-      }
-    }
-
-    // specialOrder catalog gate (mirrors SO POST/PUT). OTHER: tokens pass through.
-    {
-      const cfg = await loadSpecialOrderCatalog(c.var.DB);
-      const check = validateSpecialOrders(
-        rawItems.map((it: Record<string, unknown>) => ({
-          specialOrder: it.specialOrder as string | null | undefined,
-          itemCategory: it.itemCategory as string | null | undefined,
-        })),
-        cfg,
-      );
-      if (!check.valid) {
-        return c.json(unknownSpecialOrderError(check.unknown), 400);
       }
     }
 
@@ -1242,21 +1222,6 @@ app.put("/:id", async (c) => {
         );
         if (!fabCheck.valid) {
           return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
-        }
-      }
-
-      // specialOrder catalog gate (mirrors SO POST/PUT + CO POST). OTHER: tokens pass through.
-      {
-        const cfg = await loadSpecialOrderCatalog(c.var.DB);
-        const check = validateSpecialOrders(
-          (body.items as Array<Record<string, unknown>>).map((it) => ({
-            specialOrder: it.specialOrder as string | null | undefined,
-            itemCategory: it.itemCategory as string | null | undefined,
-          })),
-          cfg,
-        );
-        if (!check.valid) {
-          return c.json(unknownSpecialOrderError(check.unknown), 400);
         }
       }
 

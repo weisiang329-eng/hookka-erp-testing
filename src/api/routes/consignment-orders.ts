@@ -384,7 +384,9 @@ app.post("/", async (c) => {
           itemCategory: (it.itemCategory as string) ?? null,
           sizeCode: (it.sizeCode as string) ?? null,
           sizeLabel: (it.sizeLabel as string) ?? null,
-          fabricId: (it.fabricId as string) ?? null,
+          // 2026-05-09: fabricId no longer authored from picker — column being
+          // dropped. Persist null; downstream keys on fabricCode.
+          fabricId: null,
           fabricCode: (it.fabricCode as string) ?? null,
           quantity: qty,
           gapInches: it.gapInches != null ? Number(it.gapInches) : null,
@@ -1247,7 +1249,8 @@ app.put("/:id", async (c) => {
             (it.itemCategory as string) ?? null,
             (it.sizeCode as string) ?? null,
             (it.sizeLabel as string) ?? null,
-            (it.fabricId as string) ?? null,
+            // 2026-05-09: fabricId column being dropped — persist null.
+            null,
             (it.fabricCode as string) ?? null,
             qty,
             it.gapInches != null ? Number(it.gapInches) : null,

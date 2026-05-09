@@ -1803,34 +1803,11 @@ app.post("/", async (c) => {
         // (the existing flow does the same for predefined specials).
         const cleanedCustomSpecials = sanitizeCustomSpecials(item.customSpecials);
 
-        // Fabric ID resolution from fabricCode — Scan PO OCR only ships
-        // the snapshot fabricCode (e.g. "KN390-2"); we need fabricId so
-        // the Edit form's fabric dropdown (keyed by id) pre-selects.
-        // Best-effort: a missing fabric leaves fabricId blank (legacy
-        // behavior).
-        const incomingFabricId = String(item.fabricId ?? "");
+        // 2026-05-09: fabricId resolve removed. Picker now keys on fabricCode
+        // directly; sales_order_items.fabricId is being dropped in a follow-up
+        // migration. Persist null so existing rows aren't accidentally seeded
+        // with a fresh stale id.
         const incomingFabricCode = String(item.fabricCode ?? "");
-        // Resolve from the `fabrics` master catalog (same table the
-        // /sales/create + Edit dropdowns read from). NOT fabric_trackings
-        // — that's a per-roll tracker with `ft-` ids the dropdowns can't
-        // find. Also re-resolve when the incoming id has the legacy `ft-`
-        // prefix from older OCR runs so we heal stale references on edit.
-        let resolvedFabricId = incomingFabricId;
-        const needsResolve =
-          (!resolvedFabricId && incomingFabricCode) ||
-          (resolvedFabricId.startsWith("ft-") && incomingFabricCode);
-        if (needsResolve) {
-          try {
-            const fabRow = await c.var.DB.prepare(
-              "SELECT id FROM fabrics WHERE code = ? LIMIT 1",
-            )
-              .bind(incomingFabricCode)
-              .first<{ id: string }>();
-            if (fabRow?.id) resolvedFabricId = fabRow.id;
-          } catch {
-            // Non-fatal — leave fabricId blank, frontend has its own fallback.
-          }
-        }
 
         // Sofa seat-size normalization. The OCR pipeline ships sizeLabel
         // as a bare number (e.g. "28") matching the SOFA Sizes catalog
@@ -1892,7 +1869,7 @@ app.post("/", async (c) => {
             "BEDFRAME",
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,
-          fabricId: resolvedFabricId,
+          fabricId: null,
           fabricCode: incomingFabricCode,
           quantity,
           gapInches: item.gapInches ?? null,
@@ -2878,31 +2855,11 @@ app.put("/:id", async (c) => {
               }
             : null;
 
-        // Same fabricId / sofa-sizeLabel normalization as the POST path —
-        // ensures editing+saving an OCR-created SO writes back cleaned
-        // values (so subsequent re-edits don't have to re-derive them).
+        // 2026-05-09: fabricId resolve removed (matches POST path). Persist
+        // null — column being dropped in a follow-up migration.
         const itemCategory = (item.itemCategory as string) || "BEDFRAME";
         const isSofaItem = itemCategory === "SOFA";
-        const incomingFabricId = String(item.fabricId ?? "");
         const incomingFabricCode = String(item.fabricCode ?? "");
-        // Resolve from `fabrics` master (same as POST path) and heal any
-        // stale `ft-` ids from older OCR runs on edit.
-        let resolvedFabricId = incomingFabricId;
-        const needsResolve =
-          (!resolvedFabricId && incomingFabricCode) ||
-          (resolvedFabricId.startsWith("ft-") && incomingFabricCode);
-        if (needsResolve) {
-          try {
-            const fabRow = await c.var.DB.prepare(
-              "SELECT id FROM fabrics WHERE code = ? LIMIT 1",
-            )
-              .bind(incomingFabricCode)
-              .first<{ id: string }>();
-            if (fabRow?.id) resolvedFabricId = fabRow.id;
-          } catch {
-            // Non-fatal.
-          }
-        }
         let normalizedSizeLabel = (item.sizeLabel as string) || "";
         if (
           isSofaItem &&
@@ -2932,7 +2889,7 @@ app.put("/:id", async (c) => {
           itemCategory,
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,
-          fabricId: resolvedFabricId,
+          fabricId: null,
           fabricCode: incomingFabricCode,
           quantity,
           gapInches: item.gapInches ?? null,

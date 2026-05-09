@@ -44,6 +44,36 @@ import {
 const app = new Hono<Env>();
 
 // ---------------------------------------------------------------------------
+// Allowed CO status transitions — mirrors VALID_TRANSITIONS in
+// sales-orders.ts but adapted to the CO lifecycle (no SHIPPED step, no
+// INVOICED — CN-completion-cascade flips CO to DELIVERED, no manual
+// READY_TO_SHIP→DELIVERED PUT path per Wei Siang 2026-05-09).
+//
+// The legacy header comment mentions PARTIALLY_SOLD/FULLY_SOLD/RETURNED;
+// those are CN (consignment_notes) statuses, never set on consignment_orders
+// directly. Verified 2026-05-09 by grep `UPDATE consignment_orders SET status`
+// across src/api/ — only DRAFT, CONFIRMED, IN_PRODUCTION, READY_TO_SHIP,
+// DELIVERED, CLOSED, ON_HOLD, CANCELLED reach a CO row.
+//
+// Closes DUP-003 in bug_audit_duplicate_logic.md — CO PUT used to accept any
+// `body.status` verbatim, while SO has rejected illegal transitions for
+// months via VALID_TRANSITIONS at sales-orders.ts:984.
+// ---------------------------------------------------------------------------
+const CO_VALID_TRANSITIONS: Record<string, string[]> = {
+  DRAFT: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
+  CONFIRMED: ["IN_PRODUCTION", "ON_HOLD", "CANCELLED"],
+  IN_PRODUCTION: ["READY_TO_SHIP", "ON_HOLD", "CANCELLED"],
+  // READY_TO_SHIP → DELIVERED is NOT allowed via PUT — it must come from
+  // cascadeCNCompletionToCO once every CN under the CO is FULLY_SOLD/CLOSED.
+  // IN_PRODUCTION is the UPH-rollback target.
+  READY_TO_SHIP: ["ON_HOLD", "IN_PRODUCTION"],
+  DELIVERED: ["CLOSED"],
+  ON_HOLD: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
+  CLOSED: [],
+  CANCELLED: [],
+};
+
+// ---------------------------------------------------------------------------
 // Row types — match the consignment_orders / consignment_order_items
 // tables created in migration 0064.
 // ---------------------------------------------------------------------------
@@ -1177,6 +1207,32 @@ app.put("/:id", async (c) => {
             // Token consumed — fall through to the normal PUT flow.
           }
         }
+      }
+    }
+
+    // Reject illegal status transitions before any further work. CO-parity
+    // twin of sales-orders.ts:2624 — without this gate, CO PUT used to
+    // accept any string in body.status (verified by 2026-05-09 audit:
+    // DUP-003 in bug_audit_duplicate_logic.md). Empty/unchanged status
+    // bypasses the check; only same-status retries and explicit transitions
+    // hit it.
+    if (
+      typeof body.status === "string" &&
+      body.status &&
+      body.status !== existing.status
+    ) {
+      const requested = body.status;
+      const validNext = CO_VALID_TRANSITIONS[existing.status] ?? [];
+      if (!validNext.includes(requested)) {
+        return c.json(
+          {
+            success: false,
+            error: `Invalid status transition: ${existing.status} -> ${requested}. Valid transitions: ${
+              validNext.join(", ") || "none"
+            }`,
+          },
+          400,
+        );
       }
     }
 

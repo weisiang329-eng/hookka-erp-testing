@@ -2785,6 +2785,22 @@ export default function ProductionPage({
       setFgStickers([]);
       return [];
     }
+    // Match what the Production Sheet shows above. The grid does its
+    // own search + per-column filter on top of the page-level filters
+    // (filteredOrders). Without this scoping the FG preview balloons
+    // to "125 units" while the sheet only shows 11 rows. Pull the
+    // visible PO ids from gridFilteredDeptRows (which the DataGrid
+    // mirrors via setGridFilteredDeptRows on every filter/sort).
+    const visiblePoIds = gridFilteredDeptRows
+      ? new Set(gridFilteredDeptRows.map((r) => r.poId))
+      : null;
+    const ordersToProcess = visiblePoIds
+      ? filteredOrders.filter((o) => visiblePoIds.has(o.id))
+      : filteredOrders;
+    if (ordersToProcess.length === 0) {
+      setFgStickers([]);
+      return [];
+    }
     type ProductMini = {
       id: string; code: string;
       skuCode?: string; sizeCode?: string; fabricColor?: string;
@@ -2805,7 +2821,7 @@ export default function ProductionPage({
     // from companySOId). Used on bedframe stickers per Wei Siang spec.
     // production_orders does not carry customerSO so we fetch SOs directly.
     const uniqueSoIds = Array.from(
-      new Set(filteredOrders.map((o) => o.salesOrderId).filter(Boolean)),
+      new Set(ordersToProcess.map((o) => o.salesOrderId).filter(Boolean)),
     );
     const customerSOBySo = new Map<string, string>();
     await Promise.all(
@@ -2853,7 +2869,7 @@ export default function ProductionPage({
     const all: FgSticker[] = [];
     setLoadingFgPreview(true);
     try {
-      for (const o of filteredOrders) {
+      for (const o of ordersToProcess) {
         const [gRes, pRes] = await Promise.all([
           fetch(`/api/fg-units/generate/${encodeURIComponent(o.id)}`, { method: "POST" })
             .then((r) => r.json() as Promise<{ success?: boolean; data?: FGUnitMini[] }>),
@@ -3106,7 +3122,7 @@ export default function ProductionPage({
     setFgStickers(aggregated);
     setLoadingFgPreview(false);
     return aggregated;
-  }, [filteredOrders]);
+  }, [filteredOrders, gridFilteredDeptRows]);
 
   const handlePrintFgStickers = useCallback(async () => {
     if (filteredOrders.length === 0) {

@@ -13877,13 +13877,23 @@ app.post("/regen-fg-units", async (c) => {
 
   for (const poId of resolvedPoIds) {
     try {
-      // Bail if any fg_unit on this PO is past PACKED.
+      // Bail if any fg_unit on this PO is already physically out the
+      // door. PENDING / PENDING_UPHOLSTERY / UPHOLSTERED / PACKED all
+      // mean the unit is still in our control (not yet on a delivery)
+      // — safe to regen. LOADED / DELIVERED / RETURNED are physical
+      // state past the packing line — keep their serials stable.
+      const REGEN_SAFE = new Set([
+        "PENDING",
+        "PENDING_UPHOLSTERY",
+        "UPHOLSTERED",
+        "PACKED",
+      ]);
       const unitsRes = await db
         .prepare("SELECT id, status FROM fg_units WHERE poId = ?")
         .bind(poId)
         .all<{ id: string; status: string }>();
       const units = unitsRes.results ?? [];
-      const blocked = units.filter((u) => u.status !== "PACKED");
+      const blocked = units.filter((u) => !REGEN_SAFE.has(u.status));
       if (blocked.length > 0) {
         results.push({
           poId,

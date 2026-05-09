@@ -12900,4 +12900,334 @@ app.post("/backfill-po-from-so-lines", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/correct-so-line-qty-cascade
+//
+// Surgical "scale-down qty" cascade for an SO line whose quantity was
+// originally over-stated relative to actual production. Surfaced by
+// SO-2604-307: line entered as qty=10, only 1 sofa actually produced;
+// PO + JCs were created with qty=10 multiplier, so wipQty + financials
+// are 10× inflated.
+//
+// Scope (UPDATE only — no DELETE):
+//   1. sales_order_items: quantity, lineTotalSen
+//   2. sales_orders: subtotalSen, totalSen
+//   3. production_orders: quantity (the FIRST PO matching this line by
+//      productCode + qty, since salesOrderItemId is NULL on legacy POs)
+//   4. job_cards: wipQty for every JC of that PO, scaled by
+//      `newQuantity / oldQuantity`. Each JC's wipQty must divide
+//      cleanly (oldWipQty % oldQty === 0) — otherwise the BOM
+//      multiplier wasn't a clean integer of qty, abort.
+//
+// NOT touched (operator must handle separately if needed):
+//   - wip_items (RM consumption tracking — would need to reverse 9
+//     sofas worth of RM consume, complex and tied to FIFO batches)
+//   - cost_ledger LABOR_POSTED / RM_CONSUMED entries
+//   - fg_units / fg_batches (if any FG was generated)
+//   - delivery_order_items (if PO was DO'd)
+//   - invoices (if customer was invoiced)
+//
+// Body: { soLineItemId: string, newQuantity: number, dryRun: boolean }
+// Returns: full diff list + warnings about untouched cascades.
+//
+// Permission: sales-orders:update.
+// ---------------------------------------------------------------------------
+app.post("/correct-so-line-qty-cascade", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+
+  let body: {
+    soLineItemId?: unknown;
+    newQuantity?: unknown;
+    dryRun?: unknown;
+  };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const lineId =
+    typeof body.soLineItemId === "string" ? body.soLineItemId : "";
+  const newQty =
+    typeof body.newQuantity === "number" ? body.newQuantity : NaN;
+  const dryRun = body.dryRun === true;
+  if (!lineId) {
+    return c.json({ success: false, error: "soLineItemId required" }, 400);
+  }
+  if (!Number.isInteger(newQty) || newQty < 1) {
+    return c.json(
+      { success: false, error: "newQuantity must be a positive integer" },
+      400,
+    );
+  }
+  const db = c.var.DB;
+
+  const line = await db
+    .prepare(
+      `SELECT id, salesOrderId, productCode, quantity, unitPriceSen,
+              basePriceSen, lineTotalSen
+         FROM sales_order_items WHERE id = ? LIMIT 1`,
+    )
+    .bind(lineId)
+    .first<{
+      id: string;
+      salesOrderId: string;
+      productCode: string | null;
+      quantity: number;
+      unitPriceSen: number;
+      basePriceSen: number;
+      lineTotalSen: number;
+    }>();
+  if (!line) {
+    return c.json(
+      { success: false, error: `SO line item not found: ${lineId}` },
+      404,
+    );
+  }
+  if (line.quantity === newQty) {
+    return c.json({
+      success: true,
+      noOp: true,
+      message: "newQuantity equals current quantity — no changes",
+    });
+  }
+  const oldQty = line.quantity;
+  const so = await db
+    .prepare(
+      "SELECT id, companySOId, subtotalSen, totalSen FROM sales_orders WHERE id = ? LIMIT 1",
+    )
+    .bind(line.salesOrderId)
+    .first<{
+      id: string;
+      companySOId: string | null;
+      subtotalSen: number;
+      totalSen: number;
+    }>();
+  if (!so) {
+    return c.json({ success: false, error: "Parent SO not found" }, 404);
+  }
+
+  const newLineTotal = (line.unitPriceSen ?? 0) * newQty;
+  const lineTotalDelta = newLineTotal - line.lineTotalSen;
+  const newSoSubtotal = so.subtotalSen + lineTotalDelta;
+  const newSoTotal = so.totalSen + lineTotalDelta;
+
+  const posRes = await db
+    .prepare(
+      `SELECT id, poNo, quantity, productCode FROM production_orders
+         WHERE salesOrderId = ? AND productCode = ?
+            AND status <> 'CANCELLED'
+         ORDER BY id ASC`,
+    )
+    .bind(line.salesOrderId, line.productCode ?? "")
+    .all<{
+      id: string;
+      poNo: string;
+      quantity: number;
+      productCode: string | null;
+    }>();
+  const candidatePos = posRes.results ?? [];
+  const matchingPos = candidatePos.filter((p) => p.quantity === oldQty);
+  if (matchingPos.length === 0) {
+    return c.json(
+      {
+        success: false,
+        error: `No PO found with salesOrderId=${line.salesOrderId} AND productCode=${line.productCode} AND quantity=${oldQty}.`,
+      },
+      404,
+    );
+  }
+  if (matchingPos.length > 1) {
+    return c.json(
+      {
+        success: false,
+        error: `Multiple POs match (qty=${oldQty}): ${matchingPos.map((p) => p.id).join(", ")}. Ambiguous — refuse to auto-correct.`,
+      },
+      409,
+    );
+  }
+  const targetPo = matchingPos[0];
+
+  const jcsRes = await db
+    .prepare(
+      `SELECT id, departmentCode, wipKey, wipType, wipCode, wipLabel,
+              wipQty, status
+         FROM job_cards WHERE productionOrderId = ? ORDER BY id ASC`,
+    )
+    .bind(targetPo.id)
+    .all<{
+      id: string;
+      departmentCode: string | null;
+      wipKey: string | null;
+      wipType: string | null;
+      wipCode: string | null;
+      wipLabel: string | null;
+      wipQty: number;
+      status: string | null;
+    }>();
+  const jcs = jcsRes.results ?? [];
+
+  type JcDiff = {
+    jcId: string;
+    deptCode: string | null;
+    wipType: string | null;
+    oldWipQty: number;
+    newWipQty: number;
+    multiplier: number;
+  };
+  const jcDiffs: JcDiff[] = [];
+  for (const jc of jcs) {
+    if (jc.wipKey === "FG") continue;
+    if (jc.wipQty == null) continue;
+    if (jc.wipQty % oldQty !== 0) {
+      return c.json(
+        {
+          success: false,
+          error: `JC ${jc.id} wipQty=${jc.wipQty} is not divisible by oldQty=${oldQty}. BOM multiplier non-integer; refuse to auto-scale.`,
+        },
+        409,
+      );
+    }
+    const multiplier = jc.wipQty / oldQty;
+    const newWipQty = Math.max(1, multiplier * newQty);
+    jcDiffs.push({
+      jcId: jc.id,
+      deptCode: jc.departmentCode,
+      wipType: jc.wipType,
+      oldWipQty: jc.wipQty,
+      newWipQty,
+      multiplier,
+    });
+  }
+
+  // Surface untouched cascade tables as warnings
+  const warnings: string[] = [];
+  const wipItemsCountRow = await db
+    .prepare("SELECT COUNT(*) AS n FROM wip_items WHERE poId = ?")
+    .bind(targetPo.id)
+    .first<{ n: number }>();
+  const wipItemsCount = Number(wipItemsCountRow?.n ?? 0);
+  if (wipItemsCount > 0) {
+    warnings.push(
+      `${wipItemsCount} wip_items rows reference this PO — RM consumption tracking remains at oldQty=${oldQty} scale.`,
+    );
+  }
+  try {
+    const ledgerCountRow = await db
+      .prepare("SELECT COUNT(*) AS n FROM cost_ledger WHERE poId = ?")
+      .bind(targetPo.id)
+      .first<{ n: number }>();
+    const ledgerCount = Number(ledgerCountRow?.n ?? 0);
+    if (ledgerCount > 0) {
+      warnings.push(
+        `${ledgerCount} cost_ledger rows reference this PO — labor + RM cost remain at oldQty=${oldQty} scale.`,
+      );
+    }
+  } catch {
+    // table may not exist
+  }
+  try {
+    const fgUnitsRow = await db
+      .prepare("SELECT COUNT(*) AS n FROM fg_units WHERE poId = ?")
+      .bind(targetPo.id)
+      .first<{ n: number }>();
+    const fgUnitsCount = Number(fgUnitsRow?.n ?? 0);
+    if (fgUnitsCount > 0) {
+      warnings.push(
+        `${fgUnitsCount} fg_units exist for this PO — operator may need to DELETE the over-counted units (expected ${newQty}).`,
+      );
+    }
+  } catch {
+    // skip silently
+  }
+  try {
+    const doCountRow = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM delivery_order_items WHERE poId = ?",
+      )
+      .bind(targetPo.id)
+      .first<{ n: number }>();
+    const doCount = Number(doCountRow?.n ?? 0);
+    if (doCount > 0) {
+      warnings.push(
+        `${doCount} delivery_order_items reference this PO — DO line qty may need manual adjustment.`,
+      );
+    }
+  } catch {
+    // skip silently
+  }
+
+  const result = {
+    success: true,
+    dryRun,
+    line: {
+      id: line.id,
+      productCode: line.productCode,
+      oldQty,
+      newQty,
+      oldLineTotalSen: line.lineTotalSen,
+      newLineTotalSen: newLineTotal,
+      lineTotalDeltaSen: lineTotalDelta,
+    },
+    so: {
+      id: so.id,
+      companySOId: so.companySOId,
+      oldSubtotalSen: so.subtotalSen,
+      newSubtotalSen: newSoSubtotal,
+      oldTotalSen: so.totalSen,
+      newTotalSen: newSoTotal,
+    },
+    po: {
+      id: targetPo.id,
+      poNo: targetPo.poNo,
+      oldQty: targetPo.quantity,
+      newQty,
+    },
+    jcCount: jcDiffs.length,
+    jcDiffs,
+    warnings,
+  };
+
+  if (dryRun) return c.json(result);
+
+  const now = new Date().toISOString();
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        "UPDATE sales_order_items SET quantity = ?, lineTotalSen = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(newQty, newLineTotal, now, line.id),
+    db
+      .prepare(
+        "UPDATE sales_orders SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(newSoSubtotal, newSoTotal, now, so.id),
+    db
+      .prepare(
+        "UPDATE production_orders SET quantity = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(newQty, now, targetPo.id),
+  ];
+  for (const d of jcDiffs) {
+    stmts.push(
+      db
+        .prepare("UPDATE job_cards SET wipQty = ? WHERE id = ?")
+        .bind(d.newWipQty, d.jcId),
+    );
+  }
+  try {
+    await db.batch(stmts);
+  } catch (err) {
+    return c.json(
+      {
+        success: false,
+        error: `Batch failed: ${err instanceof Error ? err.message : String(err)}`,
+      },
+      500,
+    );
+  }
+
+  return c.json({ ...result, executedStatements: stmts.length });
+});
+
 export default app;

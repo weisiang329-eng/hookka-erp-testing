@@ -5260,11 +5260,12 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     label: "Payroll",
     icon: <DollarSign className="h-4 w-4" />,
   },
-  {
-    key: "leave",
-    label: "Leave Management",
-    icon: <FileText className="h-4 w-4" />,
-  },
+  // Wei Siang 2026-05-10: Leave Management hidden until rollout.
+  // {
+  //   key: "leave",
+  //   label: "Leave Management",
+  //   icon: <FileText className="h-4 w-4" />,
+  // },
   {
     key: "employee-master",
     label: "Employee Master",

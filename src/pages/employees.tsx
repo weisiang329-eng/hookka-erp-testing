@@ -951,7 +951,7 @@ function PublicHolidaysCard() {
     setLoading(true);
     try {
       const r = await fetch("/api/kv-config/public_holidays");
-      const j = await r.json();
+      const j = (await r.json()) as { data?: unknown };
       const data = j?.data;
       if (Array.isArray(data)) {
         setDates(

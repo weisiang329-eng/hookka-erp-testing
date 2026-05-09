@@ -9787,7 +9787,6 @@ app.post("/rebuild-production-orders-from-soi", async (c) => {
           customerState: string | null;
           hookkaExpectedDD: string | null;
           customerDeliveryDate: string | null;
-          isProjectOrder: number | null;
         }>();
       if (!so) {
         errors.push({ ...cr, error: "Sales order disappeared mid-run" });
@@ -9831,7 +9830,6 @@ app.post("/rebuild-production-orders-from-soi", async (c) => {
           customerState: so.customerState,
           hookkaExpectedDD: so.hookkaExpectedDD,
           customerDeliveryDate: so.customerDeliveryDate,
-          isProjectOrder: so.isProjectOrder === 1,
         },
         items.map((it) => ({
           lineNo: it.lineNo,

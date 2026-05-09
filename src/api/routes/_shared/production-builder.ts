@@ -107,9 +107,6 @@ type FcSlotInfo = {
   // BF/ACC per-PO). Distinct from `processCategory` which is what the JC
   // table's category column actually stores (BOM-process classification).
   itemCategory: string;
-  // When true, the parent SO opted into Project Order mode — SOFA slots are
-  // NOT cross-PO merged in FAB_CUT (mirroring BEDFRAME's per-PO behavior).
-  isProjectOrder: boolean;
   processCategory: string;
   totalH: number;
   divanHeightInches: number | null;
@@ -203,17 +200,17 @@ function joinModelLabel(productCodes: string[]): string {
 // configurations span multiple lines that cutter physically cuts together,
 // so they collapse across POs into one merged JC.
 //
-// Project Order exception (2026-05-06): when isProjectOrder=true the SO's
-// SOFA items behave like BEDFRAME — each PO gets its own FC JC, no cross-PO
-// merge. Caller flags this on each slot via slot.isProjectOrder so the
-// aggregator can decide per-slot without re-plumbing the SO context.
+// 2026-05-09: Project Order exception removed. Now that SOFA qty>1 is
+// rejected at SO save (commit 7302f0f), every SOFA line is qty=1 and the
+// per-piece-vs-merged distinction collapses: SOFA always cross-PO merges
+// at FAB_CUT (cutter physically cuts together), BF/ACC always per-PO.
 function aggregateFcSlots(
   slots: FcSlotInfo[],
   companySOId: string,
 ): FcMergedJc[] {
   const groups = new Map<string, FcSlotInfo[]>();
   for (const slot of slots) {
-    const mergeAsSofa = slot.itemCategory === "SOFA" && !slot.isProjectOrder;
+    const mergeAsSofa = slot.itemCategory === "SOFA";
     const key = mergeAsSofa
       ? `SOFA::${companySOId}::${slot.baseModel || slot.productCode}::${slot.fabricCode}`
       : `PO::${slot.poId}`;
@@ -278,7 +275,7 @@ function aggregateFcSlots(
       //     ×2 + 1S ×1 → wipQty=6, not 1). Each sibling PO contributes its
       //     own line qty.
       wipQty:
-        anchor.itemCategory === "SOFA" && !anchor.isProjectOrder
+        anchor.itemCategory === "SOFA"
           ? group.reduce((sum, s) => sum + s.wipQty, 0)
           : Math.min(...group.map((s) => s.wipQty)),
       category: anchor.processCategory,
@@ -308,10 +305,6 @@ export interface OrderForProduction {
   customerState: string | null;
   hookkaExpectedDD: string | null;
   customerDeliveryDate: string | null;
-  /** SO-only: when true, SOFA items split per-piece (like BEDFRAME) and the
-   *  FAB_CUT cross-PO merge is disabled. CO is always false (project-order is
-   *  an SO-creation-flow concept). */
-  isProjectOrder?: boolean;
 }
 
 export interface OrderItemForProduction {
@@ -436,17 +429,14 @@ export async function createProductionOrdersForOrder(
   // Fan-out counter — each piece of a BF/ACC item becomes its own PO. Sofa
   // stays as one PO per source line (one set per order by convention).
   //
-  // EXCEPTION: when the parent SO is flagged isProjectOrder, SOFA items also
-  // fan out per-piece (matching BEDFRAME behavior). User confirmed
-  // 2026-05-06: project-order SOFA must split into N independent POs so each
-  // piece can be tracked / shipped / packed independently — same way BF -01
-  // / -02 / -03 already work. This is the SO-header toggle exposed on the
-  // create page; the flag flows in via order.isProjectOrder.
-  const isProject = order.isProjectOrder === true;
+  // 2026-05-09: SOFA qty>1 is now rejected at SO save (commit 7302f0f) so
+  // every SOFA line is qty=1. The Project Order toggle that previously made
+  // SOFA fan out per-piece has been removed — collapsed into the single-PO
+  // path. Math is identical to before for all qty=1 SOFA lines.
   let poSequence = 0;
   for (const item of sortedItems) {
     const isSofa = (item.itemCategory ?? "BEDFRAME") === "SOFA";
-    const isSetItem = isSofa && !isProject;
+    const isSetItem = isSofa;
     const pieceCount = isSetItem ? 1 : Math.max(1, item.quantity || 1);
     const perPoQty = isSetItem ? item.quantity || 1 : 1;
     for (let pieceIdx = 0; pieceIdx < pieceCount; pieceIdx++) {
@@ -696,9 +686,6 @@ export async function createProductionOrdersForOrder(
             // item's itemCategory rather than the BOM-process category
             // which is something else entirely (sub-assembly classification).
             itemCategory: category,
-            // Project-Order flag (SO header toggle) — disables SOFA cross-PO
-            // FC merge so each piece behaves like BEDFRAME's per-PO cut.
-            isProjectOrder: isProject,
             processCategory: p.category,
             minutes: p.minutes,
             wipQty: p.wipQty,

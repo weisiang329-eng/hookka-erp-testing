@@ -406,7 +406,6 @@
   "isMandatory": "is_mandatory",
   "isParent": "is_parent",
   "isProduction": "is_production",
-  "isProjectOrder": "is_project_order",
   "isRead": "is_read",
   "isReconciled": "is_reconciled",
   "issueDescription": "issue_description",

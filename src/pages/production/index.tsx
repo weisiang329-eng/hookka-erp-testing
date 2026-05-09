@@ -891,6 +891,9 @@ export default function ProductionPage({
     // Bedframe: divan height in inches (used both as a body field and to
     // build the Divan box's "Code" line "{N}\" Divan {sizeLabel}").
     divanHeightInches?: number | null;
+    // Bedframe: gap height in inches (used in totalH = gap + divan + leg
+    // for the HB box's WIP label "{productCode}-HB{totalH}\"").
+    gapInches?: number | null;
     // The "Code" line on the sticker body — describes what's physically in
     // THIS box (vs the top header which shows the product/WIP). Set by
     // the aggregator per piece-type:
@@ -2913,6 +2916,7 @@ export default function ProductionPage({
             itemCategory: (o.itemCategory as "BEDFRAME" | "SOFA" | "ACCESSORY" | undefined),
             legHeightInches: o.legHeightInches ?? null,
             divanHeightInches: o.divanHeightInches ?? null,
+            gapInches: o.gapInches ?? null,
             specialOrder: o.specialOrder ?? "",
             customerPOId: o.customerPOId ?? "",
             customerRef: o.customerReference ?? "",
@@ -2964,25 +2968,28 @@ export default function ProductionPage({
       }
     }
 
-    // Bedframe boxLabel = complete WIP-style identification of THIS box.
-    // Includes product + size + fabric so QC / packer can trace the
-    // production batch from the sticker without scanning.
-    //   pieceNo === 1 → HB box  → "{productCode} {size} {fabric} HB"
-    //   pieceNo > 1   → Divan   → "{divanH}\" Divan {size} {fabric}"
+    // Bedframe boxLabel — matches Production Sheet's WIP column format
+    // (per Wei Siang spec 2026-05-10) so the sheet listing and the
+    // sticker show identical strings.
+    //   HB box    → "{productCode}-HB{totalH}\""    e.g. "1005-(Q)-HB22\""
+    //   Divan box → "{divanH}\" Divan-{sizeLabel}"  e.g. "8\" Divan-6FT"
+    //   totalH    = gapInches + divanHeightInches + legHeightInches
     for (const s of nonSofa) {
       if (s.itemCategory === "BEDFRAME") {
         const parts = [s.sizeLabel, s.fabricCode].filter(Boolean);
         s.wipLabel = parts.join(" | ");
         if (s.pieceNo === 1) {
-          s.boxLabel = [s.productCode, s.sizeLabel, s.fabricCode, "HB"]
-            .filter(Boolean)
-            .join(" ");
+          const totalH = (s.gapInches ?? 0) + (s.divanHeightInches ?? 0) + (s.legHeightInches ?? 0);
+          s.boxLabel = totalH > 0
+            ? `${s.productCode}-HB${totalH}"`
+            : `${s.productCode}-HB`;
           s.pieceName = "HB";
         } else {
           const divanH = s.divanHeightInches != null ? `${s.divanHeightInches}"` : "";
-          s.boxLabel = [divanH, "Divan", s.sizeLabel, s.fabricCode]
-            .filter(Boolean)
-            .join(" ");
+          const sizeLbl = s.sizeLabel || "";
+          s.boxLabel = divanH && sizeLbl
+            ? `${divanH} Divan-${sizeLbl}`
+            : `${divanH || sizeLbl} Divan`.trim() || (s.productCode + " Divan");
           s.pieceName = "Divan";
         }
       }

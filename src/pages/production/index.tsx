@@ -2953,11 +2953,22 @@ export default function ProductionPage({
       const hasLegs = group.some(
         (s) => (s.legHeightInches ?? 0) > LEG_PACK_THRESHOLD_INCHES,
       );
-      const pillows = pillowsBySo.get(soId) ?? [];
-      const hasPillow = pillows.length > 0;
+      const rawPillows = pillowsBySo.get(soId) ?? [];
+      // Group pillows by productCode so the badge shows
+      // "Square Pillow x3" instead of producing 3 separate stickers.
+      // Each group → 1 representative sticker (uses the first fg_unit's
+      // QR; others are dropped from rendering).
+      const pillowGroups = new Map<string, FgSticker[]>();
+      for (const p of rawPillows) {
+        const k = p.productCode || p.productName || "PILLOW";
+        const list = pillowGroups.get(k) ?? [];
+        list.push(p);
+        pillowGroups.set(k, list);
+      }
+      const hasPillow = pillowGroups.size > 0;
       const compartmentCount = group.length;
       const totalPacks =
-        compartmentCount + (hasLegs ? 1 : 0) + (hasPillow ? pillows.length : 0);
+        compartmentCount + (hasLegs ? 1 : 0) + pillowGroups.size;
 
       // Sofa fullCompartment label — joined productCodes of every sofa PO
       // in the SO (preserving order + duplicates) with shared-prefix
@@ -3007,6 +3018,9 @@ export default function ProductionPage({
       outputForSo.push(compartment1);
       if (hasLegs) {
         const legsKey = `legs-${compartment1.salesOrderId}`;
+        // Badge text includes leg height — "4\" leg" or "2\", 4\" leg"
+        // for multi-height SOs. Falls back to bare "leg" when no height.
+        const legBadge = legsInfo ? `${legsInfo} leg` : "leg";
         const legsSticker: FgSticker = {
           ...compartment1,
           key: legsKey,
@@ -3014,7 +3028,7 @@ export default function ProductionPage({
           shortCode: "LEGS",
           pieceNo: 2,
           totalPieces: totalPacks,
-          pieceName: "leg",
+          pieceName: legBadge,
           boxLabel: fullCompartment,
           isSyntheticLegs: true,
           comboPairKey: compartment1.key,
@@ -3031,22 +3045,28 @@ export default function ProductionPage({
         outputForSo.push(lastCompartment);
       }
       if (hasPillow) {
-        // Pillows are real fg_units (not synthetic). Renumber + 2-in-1 with
-        // last compartment. If multiple pillow units, chain them after —
-        // only the FIRST pillow pairs into the last compartment's card; the
-        // rest stand alone.
-        pillows.forEach((p, i) => {
-          p.pieceNo = compartmentCount + legShift + 1 + i;
-          p.totalPieces = totalPacks;
-          p.wipLabel = fullCompartment;
-          p.boxLabel = p.productName || "Pillow";
-          p.pieceName = "pillow";
-          if (i === 0) {
-            p.comboPairKey = lastCompartment.key;
-            p.isSyntheticPillow = true; // render-skip flag — paired sticker
+        // One representative sticker per pillow productCode. Badge shows
+        // "{productName} x{qty}" so 3 fg_units of "Square Pillow" merge
+        // into one sticker labelled "Square Pillow x3". The first group
+        // pairs into the last compartment's card as 2-in-1.
+        let pillowIdx = 0;
+        for (const [, pillowGroup] of pillowGroups) {
+          const rep = pillowGroup[0];
+          const qty = pillowGroup.length;
+          const name = rep.productName || rep.productCode || "Pillow";
+          rep.pieceNo = compartmentCount + legShift + 1 + pillowIdx;
+          rep.totalPieces = totalPacks;
+          rep.wipLabel = fullCompartment;
+          rep.boxLabel = `${name} x${qty}`;
+          rep.pieceName = `${name} x${qty}`;
+          if (pillowIdx === 0) {
+            rep.comboPairKey = lastCompartment.key;
+            rep.isSyntheticPillow = true;
           }
-        });
-        outputForSo.push(...pillows);
+          outputForSo.push(rep);
+          pillowIdx++;
+          // Other fg_units in this group are dropped — represented by `rep`.
+        }
       }
 
       aggregated.push(...outputForSo);
@@ -4941,48 +4961,65 @@ export default function ProductionPage({
                         )}
                         <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Customer</span>: {customerLine}</div>
                       </div>
+                      {/* QR + badge row — when paired (2-in-1 / 3-in-1)
+                          the secondary section sits to the RIGHT of the
+                          primary, separated by a vertical dashed line.
+                          Each section has its own QR + badge so operator
+                          can scan whichever is relevant. */}
                       <div className="flex items-end gap-2 mt-2">
-                        <QRImg data={trackUrl} size={legsPair || pillowPair ? 80 : 110} alt="FG unit QR" className="block" />
-                        <div className="flex-1 text-center">
-                          <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                            {s.pieceNo}/{s.totalPieces} {s.pieceName}
-                          </div>
-                          <div className="font-semibold mt-1 leading-tight" style={{ fontSize: "10px" }}>
-                            {s.shortCode}
+                        <div className="flex items-end gap-1 flex-1">
+                          <QRImg data={trackUrl} size={legsPair || pillowPair ? 70 : 110} alt="FG unit QR" className="block" />
+                          <div className="flex-1 text-center min-w-0">
+                            <div className="font-bold leading-tight" style={{ fontSize: "12px" }}>
+                              {s.pieceNo}/{s.totalPieces}
+                            </div>
+                            <div className="leading-tight truncate" style={{ fontSize: "9px" }}>
+                              {s.pieceName}
+                            </div>
+                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
+                              {s.shortCode}
+                            </div>
                           </div>
                         </div>
+                        {legsPair && (
+                          <>
+                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
+                            <div className="flex items-end gap-1 flex-1">
+                              <QRImg data={legsTrackUrl} size={70} alt="Legs QR" className="block" />
+                              <div className="flex-1 text-center min-w-0">
+                                <div className="font-bold leading-tight" style={{ fontSize: "12px" }}>
+                                  {legsPair.pieceNo}/{legsPair.totalPieces}
+                                </div>
+                                <div className="leading-tight truncate" style={{ fontSize: "9px" }}>
+                                  {legsPair.pieceName}
+                                </div>
+                                <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
+                                  {legsPair.shortCode}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                        {pillowPair && (
+                          <>
+                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
+                            <div className="flex items-end gap-1 flex-1">
+                              <QRImg data={pillowTrackUrl} size={70} alt="Pillow QR" className="block" />
+                              <div className="flex-1 text-center min-w-0">
+                                <div className="font-bold leading-tight" style={{ fontSize: "12px" }}>
+                                  {pillowPair.pieceNo}/{pillowPair.totalPieces}
+                                </div>
+                                <div className="leading-tight truncate" style={{ fontSize: "9px" }}>
+                                  {pillowPair.pieceName}
+                                </div>
+                                <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
+                                  {pillowPair.shortCode}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        )}
                       </div>
-                      {/* 2-in-1 legs section — same physical sticker as
-                          Compartment 1 (legs pack lives inside Comp 1's box). */}
-                      {legsPair && (
-                        <div className="flex items-end gap-2 mt-2 pt-2 border-t border-dashed border-[#6B5C32]">
-                          <QRImg data={legsTrackUrl} size={80} alt="Legs QR" className="block" />
-                          <div className="flex-1 text-center">
-                            <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                              {legsPair.pieceNo}/{legsPair.totalPieces} {legsPair.pieceName}
-                            </div>
-                            <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
-                              {legsPair.shortCode}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                      {/* 2-in-1 pillow section — same physical sticker as
-                          the LAST Compartment (pillow lives inside last
-                          compartment's box). */}
-                      {pillowPair && (
-                        <div className="flex items-end gap-2 mt-2 pt-2 border-t border-dashed border-[#6B5C32]">
-                          <QRImg data={pillowTrackUrl} size={80} alt="Pillow QR" className="block" />
-                          <div className="flex-1 text-center">
-                            <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                              {pillowPair.pieceNo}/{pillowPair.totalPieces} {pillowPair.pieceName}
-                            </div>
-                            <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
-                              {pillowPair.shortCode}
-                            </div>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -5186,43 +5223,65 @@ export default function ProductionPage({
                       )}
                       <div><span className="inline-block w-[26mm] font-semibold">Customer</span>: {customerLine}</div>
                     </div>
+                    {/* QR + badge row — paired secondaries sit to the
+                        RIGHT (vertical dashed dividers between sections).
+                        Two-in-one and three-in-one stickers fit in the
+                        same vertical space because they grow horizontally
+                        instead of stacking. */}
                     <div className="flex items-end gap-[2mm] mt-[1mm]">
-                      <QRImg data={trackUrl} size={legsPair || pillowPair ? 380 : 500} alt="FG unit QR" className="block" />
-                      <div className="flex-1 text-center">
-                        <div className="font-bold" style={{ fontSize: "14pt" }}>
-                          {s.pieceNo}/{s.totalPieces} {s.pieceName}
-                        </div>
-                        <div className="font-semibold mt-[2mm]" style={{ fontSize: "11pt" }}>
-                          {s.shortCode}
+                      <div className="flex items-end gap-[1mm] flex-1">
+                        <QRImg data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />
+                        <div className="flex-1 text-center min-w-0">
+                          <div className="font-bold" style={{ fontSize: "13pt" }}>
+                            {s.pieceNo}/{s.totalPieces}
+                          </div>
+                          <div style={{ fontSize: "9pt" }}>
+                            {s.pieceName}
+                          </div>
+                          <div className="font-semibold mt-[1.5mm]" style={{ fontSize: "10pt" }}>
+                            {s.shortCode}
+                          </div>
                         </div>
                       </div>
+                      {legsPair && (
+                        <>
+                          <div className="border-l border-dashed border-black self-stretch" />
+                          <div className="flex items-end gap-[1mm] flex-1">
+                            <QRImg data={legsTrackUrl} size={320} alt="Legs QR" className="block" />
+                            <div className="flex-1 text-center min-w-0">
+                              <div className="font-bold" style={{ fontSize: "13pt" }}>
+                                {legsPair.pieceNo}/{legsPair.totalPieces}
+                              </div>
+                              <div style={{ fontSize: "9pt" }}>
+                                {legsPair.pieceName}
+                              </div>
+                              <div className="text-[#4B5563] mt-[1.5mm]" style={{ fontSize: "8pt" }}>
+                                {legsPair.shortCode}
+                              </div>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                      {pillowPair && (
+                        <>
+                          <div className="border-l border-dashed border-black self-stretch" />
+                          <div className="flex items-end gap-[1mm] flex-1">
+                            <QRImg data={pillowTrackUrl} size={320} alt="Pillow QR" className="block" />
+                            <div className="flex-1 text-center min-w-0">
+                              <div className="font-bold" style={{ fontSize: "13pt" }}>
+                                {pillowPair.pieceNo}/{pillowPair.totalPieces}
+                              </div>
+                              <div style={{ fontSize: "9pt" }}>
+                                {pillowPair.pieceName}
+                              </div>
+                              <div className="text-[#4B5563] mt-[1.5mm]" style={{ fontSize: "8pt" }}>
+                                {pillowPair.shortCode}
+                              </div>
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
-                    {legsPair && (
-                      <div className="flex items-end gap-[2mm] mt-[2mm] pt-[1.5mm] border-t border-dashed border-black">
-                        <QRImg data={legsTrackUrl} size={300} alt="Legs QR" className="block" />
-                        <div className="flex-1 text-center">
-                          <div className="font-bold" style={{ fontSize: "13pt" }}>
-                            {legsPair.pieceNo}/{legsPair.totalPieces} {legsPair.pieceName}
-                          </div>
-                          <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
-                            {legsPair.shortCode}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    {pillowPair && (
-                      <div className="flex items-end gap-[2mm] mt-[2mm] pt-[1.5mm] border-t border-dashed border-black">
-                        <QRImg data={pillowTrackUrl} size={300} alt="Pillow QR" className="block" />
-                        <div className="flex-1 text-center">
-                          <div className="font-bold" style={{ fontSize: "13pt" }}>
-                            {pillowPair.pieceNo}/{pillowPair.totalPieces} {pillowPair.pieceName}
-                          </div>
-                          <div className="text-[7pt] text-[#4B5563] mt-[1mm]">
-                            {pillowPair.shortCode}
-                          </div>
-                        </div>
-                      </div>
-                    )}
                   </div>
                 </div>
               );

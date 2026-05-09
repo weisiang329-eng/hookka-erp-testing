@@ -5000,66 +5000,49 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D]">Special</span>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</div>
                       </div>
-                      {/* QR row + Customer footer — anchored to card
-                          bottom via mt-auto. QR is HORIZONTAL (QR left,
-                          badge right) at the original sizes — info is
-                          the focus, not the QR. Special order is in the
-                          body section above (not here). */}
-                      <div className="mt-auto flex flex-col gap-2">
-                        <div className="flex items-end gap-2">
-                          <div className="flex items-end gap-1 flex-1 min-w-0">
-                            <QRImg data={trackUrl} size={legsPair || pillowPair ? 70 : 110} alt="FG unit QR" className="block" />
-                            <div className="flex-1 text-center min-w-0">
-                              <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                                {s.pieceNo}/{s.totalPieces}
+                      {/* QR row — anchored to card bottom via mt-auto.
+                          VERTICAL stack per section: QR on top, badge
+                          (pieceNo/pieceName/shortCode) below. Sections
+                          (single / 2合1 / 3合1) split horizontally with
+                          dashed dividers. */}
+                      <div className="mt-auto flex items-stretch gap-2">
+                        <div className="flex flex-col items-center flex-1 min-w-0">
+                          <QRImg data={trackUrl} size={legsPair || pillowPair ? 80 : 110} alt="FG unit QR" className="block" />
+                          <div className="font-bold leading-tight mt-1 text-center" style={{ fontSize: "12px" }}>
+                            {s.pieceNo}/{s.totalPieces} {s.pieceName}
+                          </div>
+                          <div className="font-semibold leading-tight truncate w-full text-center" style={{ fontSize: "10px" }}>
+                            {s.shortCode}
+                          </div>
+                        </div>
+                        {legsPair && (
+                          <>
+                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
+                            <div className="flex flex-col items-center flex-1 min-w-0">
+                              <QRImg data={legsTrackUrl} size={80} alt="Legs QR" className="block" />
+                              <div className="font-bold leading-tight mt-1 text-center" style={{ fontSize: "12px" }}>
+                                {legsPair.pieceNo}/{legsPair.totalPieces} {legsPair.pieceName}
                               </div>
-                              <div className="leading-tight truncate" style={{ fontSize: "10px" }}>
-                                {s.pieceName}
-                              </div>
-                              <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
-                                {s.shortCode}
+                              <div className="text-[#6B7280] leading-tight truncate w-full text-center" style={{ fontSize: "10px" }}>
+                                {legsPair.shortCode}
                               </div>
                             </div>
-                          </div>
-                          {legsPair && (
-                            <>
-                              <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
-                              <div className="flex items-end gap-1 flex-1 min-w-0">
-                                <QRImg data={legsTrackUrl} size={70} alt="Legs QR" className="block" />
-                                <div className="flex-1 text-center min-w-0">
-                                  <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                                    {legsPair.pieceNo}/{legsPair.totalPieces}
-                                  </div>
-                                  <div className="leading-tight truncate" style={{ fontSize: "10px" }}>
-                                    {legsPair.pieceName}
-                                  </div>
-                                  <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
-                                    {legsPair.shortCode}
-                                  </div>
-                                </div>
+                          </>
+                        )}
+                        {pillowPair && (
+                          <>
+                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
+                            <div className="flex flex-col items-center flex-1 min-w-0">
+                              <QRImg data={pillowTrackUrl} size={80} alt="Pillow QR" className="block" />
+                              <div className="font-bold leading-tight mt-1 text-center" style={{ fontSize: "12px" }}>
+                                {pillowPair.pieceNo}/{pillowPair.totalPieces} {pillowPair.pieceName}
                               </div>
-                            </>
-                          )}
-                          {pillowPair && (
-                            <>
-                              <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
-                              <div className="flex items-end gap-1 flex-1 min-w-0">
-                                <QRImg data={pillowTrackUrl} size={70} alt="Pillow QR" className="block" />
-                                <div className="flex-1 text-center min-w-0">
-                                  <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
-                                    {pillowPair.pieceNo}/{pillowPair.totalPieces}
-                                  </div>
-                                  <div className="leading-tight truncate" style={{ fontSize: "10px" }}>
-                                    {pillowPair.pieceName}
-                                  </div>
-                                  <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
-                                    {pillowPair.shortCode}
-                                  </div>
-                                </div>
+                              <div className="text-[#6B7280] leading-tight truncate w-full text-center" style={{ fontSize: "10px" }}>
+                                {pillowPair.shortCode}
                               </div>
-                            </>
-                          )}
-                        </div>
+                            </div>
+                          </>
+                        )}
                       </div>
                       {/* Customer footer — full-width, always visible
                           even when customerName is missing (fallback "—"). */}
@@ -5261,65 +5244,46 @@ export default function ProductionPage({
                         {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                       </div>
                     </div>
-                    {/* QR row + Customer footer — anchored to bottom.
-                        Special is in body above (not here). QR is
-                        HORIZONTAL (QR left, badge right) at original
-                        sizes — info is the focus. */}
-                    <div className="mt-auto flex flex-col gap-[2mm]">
-                      <div className="flex items-end gap-[2mm]">
-                        <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                          <QRImg data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />
-                          <div className="flex-1 text-center min-w-0">
-                            <div className="font-bold" style={{ fontSize: "14pt" }}>
-                              {s.pieceNo}/{s.totalPieces}
+                    {/* QR row — anchored to bottom. VERTICAL stack per
+                        section: QR on top, badge below. */}
+                    <div className="mt-auto flex items-stretch gap-[2mm]">
+                      <div className="flex flex-col items-center flex-1 min-w-0">
+                        <QRImg data={trackUrl} size={legsPair || pillowPair ? 360 : 500} alt="FG unit QR" className="block" />
+                        <div className="font-bold mt-[1mm] text-center" style={{ fontSize: "13pt" }}>
+                          {s.pieceNo}/{s.totalPieces} {s.pieceName}
+                        </div>
+                        <div className="font-semibold" style={{ fontSize: "10pt" }}>
+                          {s.shortCode}
+                        </div>
+                      </div>
+                      {legsPair && (
+                        <>
+                          <div className="border-l border-dashed border-black self-stretch" />
+                          <div className="flex flex-col items-center flex-1 min-w-0">
+                            <QRImg data={legsTrackUrl} size={360} alt="Legs QR" className="block" />
+                            <div className="font-bold mt-[1mm] text-center" style={{ fontSize: "13pt" }}>
+                              {legsPair.pieceNo}/{legsPair.totalPieces} {legsPair.pieceName}
                             </div>
-                            <div style={{ fontSize: "9pt" }}>
-                              {s.pieceName}
-                            </div>
-                            <div className="font-semibold mt-[1.5mm]" style={{ fontSize: "10pt" }}>
-                              {s.shortCode}
+                            <div className="text-[#4B5563]" style={{ fontSize: "9pt" }}>
+                              {legsPair.shortCode}
                             </div>
                           </div>
-                        </div>
-                        {legsPair && (
-                          <>
-                            <div className="border-l border-dashed border-black self-stretch" />
-                            <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                              <QRImg data={legsTrackUrl} size={300} alt="Legs QR" className="block" />
-                              <div className="flex-1 text-center min-w-0">
-                                <div className="font-bold" style={{ fontSize: "13pt" }}>
-                                  {legsPair.pieceNo}/{legsPair.totalPieces}
-                                </div>
-                                <div style={{ fontSize: "9pt" }}>
-                                  {legsPair.pieceName}
-                                </div>
-                                <div className="text-[#4B5563] mt-[1mm]" style={{ fontSize: "8pt" }}>
-                                  {legsPair.shortCode}
-                                </div>
-                              </div>
+                        </>
+                      )}
+                      {pillowPair && (
+                        <>
+                          <div className="border-l border-dashed border-black self-stretch" />
+                          <div className="flex flex-col items-center flex-1 min-w-0">
+                            <QRImg data={pillowTrackUrl} size={360} alt="Pillow QR" className="block" />
+                            <div className="font-bold mt-[1mm] text-center" style={{ fontSize: "13pt" }}>
+                              {pillowPair.pieceNo}/{pillowPair.totalPieces} {pillowPair.pieceName}
                             </div>
-                          </>
-                        )}
-                        {pillowPair && (
-                          <>
-                            <div className="border-l border-dashed border-black self-stretch" />
-                            <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                              <QRImg data={pillowTrackUrl} size={300} alt="Pillow QR" className="block" />
-                              <div className="flex-1 text-center min-w-0">
-                                <div className="font-bold" style={{ fontSize: "13pt" }}>
-                                  {pillowPair.pieceNo}/{pillowPair.totalPieces}
-                                </div>
-                                <div style={{ fontSize: "9pt" }}>
-                                  {pillowPair.pieceName}
-                                </div>
-                                <div className="text-[#4B5563] mt-[1mm]" style={{ fontSize: "8pt" }}>
-                                  {pillowPair.shortCode}
-                                </div>
-                              </div>
+                            <div className="text-[#4B5563]" style={{ fontSize: "9pt" }}>
+                              {pillowPair.shortCode}
                             </div>
-                          </>
-                        )}
-                      </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                     {/* Customer footer — full-width, fallback when missing. */}
                     <div className="mt-[2mm] pt-[1mm] border-t border-black text-center font-semibold" style={{ fontSize: "11pt" }}>

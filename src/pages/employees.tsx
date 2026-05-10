@@ -2487,9 +2487,14 @@ type WorkerHoursSummary = {
 function EfficiencyOverviewTab({
   workers,
   departments,
+  onJumpToEmployeeDetail,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
+  // Double-clicking a row jumps to the Employee Performance tab with the
+  // chosen worker preselected. Wired up at the EmployeesPage level — here we
+  // just call back with the workerId.
+  onJumpToEmployeeDetail?: (workerId: string) => void;
 }) {
   const { toast } = useToast();
   // Date range — defaults to single-day (today) so the date picker pops open
@@ -2833,7 +2838,17 @@ function EfficiencyOverviewTab({
           keyField="workerId"
           gridId="employees-efficiency"
           contextMenuItems={contextMenuItems}
-          onDoubleClick={(row) => toast.info(`Viewing details for ${row.employeeName}`)}
+          onDoubleClick={(row) => {
+            // Jump straight to the Employee Performance tab with this worker
+            // preselected — saves a click vs. switching tabs + searching the
+            // dropdown. Falls back to the previous toast if the parent didn't
+            // wire the callback (defensive — shouldn't happen in practice).
+            if (onJumpToEmployeeDetail) {
+              onJumpToEmployeeDetail(row.workerId);
+            } else {
+              toast.info(`Viewing details for ${row.employeeName}`);
+            }
+          }}
           emptyMessage={summaryLoading ? "Loading…" : "No working hours recorded for the selected date range."}
         />
       </CardContent>
@@ -3268,10 +3283,18 @@ function EmployeeDetailTab({
   workers,
   allAttendance,
   departments,
+  initialWorkerId,
 }: {
   workers: Worker[];
   allAttendance: AttendanceRecord[];
   departments: DepartmentLite[];
+  // When the operator double-clicks a row on the Efficiency Overview tab the
+  // page passes the chosen workerId in here so the dropdown lands on that
+  // worker on first render. The parent gates this tab with
+  // {activeTab === "detail" && <EmployeeDetailTab ... />}, so switching away
+  // and back unmounts + remounts us — meaning a fresh initialWorkerId is
+  // always honored as the starting selection.
+  initialWorkerId?: string;
 }) {
   // Production dept codes for the Avg Efficiency denominator. Per user
   // 2026-04-28: only time spent in PRODUCTION depts counts as "available
@@ -3286,7 +3309,7 @@ function EmployeeDetailTab({
   }, [departments]);
   const { toast } = useToast();
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(
-    workers[0]?.id || ""
+    initialWorkerId || workers[0]?.id || ""
   );
   // Date range — defaults to single-day (today) so the picker lands on the
   // current month. Persisted per-tab in localStorage so reopening the tab
@@ -6134,6 +6157,12 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
 export default function EmployeesPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("working-hours");
   const [, setDateAttendance] = useState<AttendanceRecord[]>([]);
+  // When the operator double-clicks a row on Efficiency Overview we stash the
+  // workerId here and flip to the "detail" (Employee Performance) tab. The
+  // detail tab is guarded by {activeTab === "detail" && ...} so it unmounts
+  // when we leave it; on next entry the new initialWorkerId is honored as the
+  // dropdown's starting selection. No clear needed.
+  const [pendingDetailWorkerId, setPendingDetailWorkerId] = useState<string | undefined>(undefined);
 
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkersHook } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: attendanceResp, loading: attendanceLoading, refresh: refreshAttendanceHook } = useCachedJson<{ data?: AttendanceRecord[] }>("/api/attendance");
@@ -6337,6 +6366,10 @@ export default function EmployeesPage() {
         <EfficiencyOverviewTab
           workers={workers}
           departments={departments}
+          onJumpToEmployeeDetail={(workerId) => {
+            setPendingDetailWorkerId(workerId);
+            setActiveTab("detail");
+          }}
         />
       )}
 
@@ -6353,6 +6386,7 @@ export default function EmployeesPage() {
           workers={workers}
           allAttendance={allAttendance}
           departments={departments}
+          initialWorkerId={pendingDetailWorkerId}
         />
       )}
 

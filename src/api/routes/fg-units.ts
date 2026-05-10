@@ -70,6 +70,10 @@ type ProductionOrderRow = {
   productCode: string | null;
   productName: string | null;
   quantity: number;
+  // specialOrder mirrors the SO/CO line — drives the HB-only piece override
+  // (parsePieces below). Stored on production_orders by the production
+  // builder so the fg_units pipeline doesn't need to re-resolve back to SO.
+  specialOrder: string | null;
   startDate: string | null;
   completedDate: string | null;
 };
@@ -173,6 +177,22 @@ function genFGUnitId(poId: string, unitNo: number, pieceNo: number): string {
 }
 
 /**
+ * Detect "Headboard Only" special-order flag.
+ *
+ * Customer ordered just the headboard, no divans. Substring match on the
+ * lowercased specialOrder text — matches "Headboard Only", "★ Headboard
+ * Only", "OTHER: Headboard Only x", and any other future variant that
+ * contains the canonical phrase. Centralised here so SO confirm,
+ * production-builder, and the cleanup importer all use the same rule.
+ */
+export function isHeadboardOnlySpecial(
+  specialOrder: string | null | undefined,
+): boolean {
+  if (!specialOrder) return false;
+  return specialOrder.toLowerCase().includes("headboard only");
+}
+
+/**
  * Default piece configuration for bedframes when product.pieces JSON is
  * empty. Wei Siang's spec:
  *   Full bedframe (HB + Divan):
@@ -181,6 +201,10 @@ function genFGUnitId(poId: string, unitNo: number, pieceNo: number): string {
  *   Divan-only (productCode starts with "DIVAN"):
  *     K, Q   → 2 packs (2 Divan halves, no HB)
  *     S, SS  → 1 pack (1 Divan, no HB)
+ *
+ * Headboard-only (specialOrder "Headboard Only") is handled by the caller
+ * at parsePieces() level — it short-circuits to {count:1, names:["Headboard"]}
+ * before reaching this function. Don't add the flag here.
  *
  * sizeCode normalisation: case-insensitive; trims whitespace; ignores
  * variants like "K-S" (king with storage) → still K family.
@@ -207,7 +231,29 @@ function bedframeSizeDefault(
 function parsePieces(
   raw: string | null,
   product?: { category?: string | null; sizeCode?: string | null; code?: string | null } | null,
+  specialOrder?: string | null,
 ): { count: number; names: string[] } {
+  const isHeadboardOnly = isHeadboardOnlySpecial(specialOrder);
+
+  // HB-only override: ignore catalog pieces JSON entirely and ship 1 HB piece.
+  // The catalog's pieces config (e.g. {count: 3, ...}) is the SKU's default,
+  // but specialOrder is per-line and "Headboard Only" means the customer is
+  // ordering just the HB regardless of what the full-BF SKU's pieces config
+  // says. Mutually exclusive with divan-only — a DIVAN-* SKU can't also be
+  // HB-only; throw so the caller surfaces the bad data.
+  if (isHeadboardOnly) {
+    if (product?.category === "BEDFRAME") {
+      const code = (product.code ?? "").toUpperCase();
+      const isDivanOnly = code.startsWith("DIVAN");
+      if (isDivanOnly) {
+        throw new Error(
+          `parsePieces: contradictory flags — productCode "${product.code}" is divan-only but specialOrder requests Headboard Only`,
+        );
+      }
+    }
+    return { count: 1, names: ["Headboard"] };
+  }
+
   // Operator-set pieces config wins. Empty → category-aware fallback.
   if (raw) {
     try {
@@ -255,7 +301,8 @@ export async function generateFGUnitsForPO(
     .prepare(
       `SELECT id, poNo, salesOrderId, salesOrderNo, companySOId,
          consignmentOrderId, companyCOId, lineNo, customerName,
-         productId, productCode, productName, quantity, startDate, completedDate
+         productId, productCode, productName, quantity, specialOrder,
+         startDate, completedDate
        FROM production_orders WHERE id = ?`,
     )
     .bind(poId)
@@ -294,7 +341,11 @@ export async function generateFGUnitsForPO(
       .first<ProductRow>();
   }
 
-  const pieces = parsePieces(product?.pieces ?? null, product ?? null);
+  const pieces = parsePieces(
+    product?.pieces ?? null,
+    product ?? null,
+    po.specialOrder ?? null,
+  );
   const totalUnits = Math.max(1, po.quantity || 1);
   const totalPieces = pieces.count;
 

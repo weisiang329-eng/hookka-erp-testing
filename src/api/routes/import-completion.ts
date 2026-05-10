@@ -14448,4 +14448,184 @@ app.post("/backfill-supplier-sku-1to1", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// /cleanup-headboard-only-divans
+//
+// One-shot backfill: BEDFRAME SOs/COs with specialOrder "Headboard Only"
+// were generating full HB+DIVAN job_cards and fg_units before the fix
+// landed. Real customer order is HB only — DIVAN pieces should never have
+// been created. Sweep existing data and delete the orphaned DIVAN rows.
+//
+// Production-lock guard (per memory feedback_protect_completed_work.md):
+//   - DIVAN job_cards with status='COMPLETED' are NEVER deleted — that
+//     represents real completed factory work and is inviolate.
+//   - DIVAN fg_units with status != 'PENDING' are NEVER deleted — anything
+//     UPHOLSTERED / PACKED / LOADED / DELIVERED / RETURNED / etc. has
+//     downstream contracts and must be preserved.
+//
+// Idempotent: safe to call multiple times. Default ?dryRun=true.
+// ---------------------------------------------------------------------------
+app.post("/cleanup-headboard-only-divans", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { dryRun?: unknown } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    // empty body OK — defaults to dryRun=true
+  }
+  const dryRun = body.dryRun !== false;
+  const db = c.var.DB;
+
+  type Po = {
+    id: string;
+    poNo: string;
+    salesOrderId: string | null;
+    consignmentOrderId: string | null;
+    productCode: string | null;
+    specialOrder: string | null;
+  };
+
+  // Find every PO whose source line had specialOrder containing "Headboard
+  // Only". We match on production_orders.specialOrder directly (the column
+  // is denormalised from the SO/CO line at PO creation), so this works for
+  // both SO-origin and CO-origin POs.
+  const posRes = await db
+    .prepare(
+      `SELECT id, poNo, salesOrderId, consignmentOrderId, productCode, specialOrder
+         FROM production_orders
+        WHERE itemCategory = 'BEDFRAME'
+          AND LOWER(IFNULL(specialOrder, '')) LIKE '%headboard only%'`,
+    )
+    .all<Po>();
+  const pos = posRes.results ?? [];
+
+  type Jc = {
+    id: string;
+    productionOrderId: string;
+    wipType: string | null;
+    departmentCode: string | null;
+    status: string;
+  };
+  type Fgu = {
+    id: string;
+    poId: string | null;
+    pieceName: string | null;
+    status: string;
+  };
+
+  let scanned = 0;
+  let eligibleSOs = 0;
+  let deletedJCs = 0;
+  let deletedFgUnits = 0;
+  let skippedJcs = 0;
+  let skippedFgUnits = 0;
+  const sample: Array<{
+    soId: string | null;
+    coId: string | null;
+    poNo: string;
+    productCode: string | null;
+    deletedPieces: string[];
+  }> = [];
+
+  const deleteStmts: D1PreparedStatement[] = [];
+
+  for (const po of pos) {
+    scanned++;
+
+    // DIVAN job_cards on this PO. wipType is the canonical signal — every
+    // DIVAN-piece JC has wipType='DIVAN' (see bom-wip-breakdown.ts).
+    const jcRes = await db
+      .prepare(
+        `SELECT id, productionOrderId, wipType, departmentCode, status
+           FROM job_cards
+          WHERE productionOrderId = ?
+            AND UPPER(IFNULL(wipType, '')) = 'DIVAN'`,
+      )
+      .bind(po.id)
+      .all<Jc>();
+    const divanJcs = jcRes.results ?? [];
+
+    // DIVAN fg_units on this PO. pieceName 'Divan' (case-insensitive) is
+    // the marker the existing pieces config emits.
+    const fguRes = await db
+      .prepare(
+        `SELECT id, poId, pieceName, status
+           FROM fg_units
+          WHERE poId = ?
+            AND UPPER(IFNULL(pieceName, '')) LIKE '%DIVAN%'`,
+      )
+      .bind(po.id)
+      .all<Fgu>();
+    const divanFgus = fguRes.results ?? [];
+
+    if (divanJcs.length === 0 && divanFgus.length === 0) {
+      continue;
+    }
+    eligibleSOs++;
+
+    const deletedPieces: string[] = [];
+
+    for (const jc of divanJcs) {
+      // Production-lock: COMPLETED is real factory work — never delete.
+      if (jc.status === "COMPLETED") {
+        skippedJcs++;
+        continue;
+      }
+      deletedJCs++;
+      deletedPieces.push(`JC:${jc.departmentCode ?? "?"}`);
+      if (!dryRun) {
+        deleteStmts.push(
+          db.prepare(`DELETE FROM job_cards WHERE id = ?`).bind(jc.id),
+        );
+      }
+    }
+
+    for (const fg of divanFgus) {
+      // Production-lock: anything past PENDING (UPHOLSTERED, PACKED,
+      // LOADED, DELIVERED, RETURNED) has a downstream contract.
+      if (fg.status !== "PENDING") {
+        skippedFgUnits++;
+        continue;
+      }
+      deletedFgUnits++;
+      deletedPieces.push(`FG:${fg.pieceName ?? "?"}`);
+      if (!dryRun) {
+        deleteStmts.push(
+          db.prepare(`DELETE FROM fg_units WHERE id = ?`).bind(fg.id),
+        );
+      }
+    }
+
+    if (sample.length < 5 && deletedPieces.length > 0) {
+      sample.push({
+        soId: po.salesOrderId,
+        coId: po.consignmentOrderId,
+        poNo: po.poNo,
+        productCode: po.productCode,
+        deletedPieces,
+      });
+    }
+  }
+
+  if (!dryRun && deleteStmts.length > 0) {
+    const chunkSize = 80;
+    for (let i = 0; i < deleteStmts.length; i += chunkSize) {
+      await db.batch(deleteStmts.slice(i, i + chunkSize));
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    scanned,
+    eligibleSOs,
+    deletedJCs,
+    deletedFgUnits,
+    skippedDueToLocks: { jcs: skippedJcs, fgUnits: skippedFgUnits },
+    sample,
+  });
+});
+
 export default app;

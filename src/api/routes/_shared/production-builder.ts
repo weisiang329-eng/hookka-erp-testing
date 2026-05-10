@@ -38,6 +38,7 @@ import {
   breakBomIntoWips,
   type BomVariantContext,
 } from "../../lib/bom-wip-breakdown";
+import { isHeadboardOnlySpecial } from "../fg-units";
 
 // ---------------------------------------------------------------------------
 // L1 (FG-level) processes — BOM column shape:
@@ -501,11 +502,32 @@ export async function createProductionOrdersForOrder(
         legHeightInches: item.legHeightInches ?? null,
         gapInches: item.gapInches ?? null,
       };
-      const wips = breakBomIntoWips(
+      let wips = breakBomIntoWips(
         bomRow?.wipComponents ?? null,
         productCode,
         variants,
       );
+
+      // ---- Headboard-only filter ----
+      // When the SO/CO line carries specialOrder "Headboard Only", the
+      // customer is buying just the HB piece even though the SKU's BOM
+      // still describes the full bedframe (HB + DIVAN). Drop every DIVAN
+      // wip from the breakdown so no DIVAN job_cards are created. Mutually
+      // exclusive with divan-only (productCode starting "DIVAN") — that
+      // combo is nonsense; throw so the caller surfaces the bad data
+      // rather than silently emitting whichever flag wins.
+      const isHeadboardOnly =
+        category === "BEDFRAME" && isHeadboardOnlySpecial(item.specialOrder);
+      const isDivanOnlySku =
+        category === "BEDFRAME" && productCode.toUpperCase().startsWith("DIVAN");
+      if (isHeadboardOnly && isDivanOnlySku) {
+        throw new Error(
+          `production-builder: contradictory flags on line ${item.lineNo} — productCode "${productCode}" is divan-only but specialOrder requests Headboard Only`,
+        );
+      }
+      if (isHeadboardOnly) {
+        wips = wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN");
+      }
 
       // ---- Reverse-schedule dept dueDates ----
       type PlannedJc = {

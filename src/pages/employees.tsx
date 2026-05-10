@@ -1446,30 +1446,43 @@ function EmployeeMasterTab({
               )
               .join(", ");
           if (editingId === row.id) {
-            // Native multi-select: hold ⌘/Ctrl to toggle. Primary departmentId
-            // follows the first selected option.
+            // Tag-style multi-select: chips that toggle per click. Primary
+            // departmentId follows the first ticked entry. Wraps onto multiple
+            // lines so all departments stay visible without a scrolling listbox.
             return (
-              <select
-                multiple
-                size={Math.min(6, Math.max(3, allDepts.length))}
-                value={editForm.departmentCodes}
-                onChange={(e) => {
-                  const codes = Array.from(e.target.selectedOptions).map((o) => o.value);
-                  const primaryDept = allDepts.find((d) => d.code === codes[0]);
-                  setEditForm((f) => ({
-                    ...f,
-                    departmentCodes: codes,
-                    departmentId: primaryDept?.id ?? f.departmentId,
-                  }));
-                }}
-                className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32] min-w-[180px]"
-              >
-                {allDepts.map((d) => (
-                  <option key={d.id} value={d.code}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              <div className="flex flex-wrap gap-1 max-w-[260px]">
+                {allDepts.map((d) => {
+                  const checked = editForm.departmentCodes.includes(d.code);
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditForm((f) => {
+                          const set = new Set(f.departmentCodes);
+                          if (set.has(d.code)) set.delete(d.code);
+                          else set.add(d.code);
+                          const codes = Array.from(set);
+                          const primaryDept = allDepts.find((x) => x.code === codes[0]);
+                          return {
+                            ...f,
+                            departmentCodes: codes,
+                            departmentId: primaryDept?.id ?? f.departmentId,
+                          };
+                        });
+                      }}
+                      className={`inline-flex items-center px-2 py-0.5 rounded border text-[11px] whitespace-nowrap transition-colors ${
+                        checked
+                          ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                          : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
+                      }`}
+                    >
+                      {d.name}
+                    </button>
+                  );
+                })}
+              </div>
             );
           }
           const codes =

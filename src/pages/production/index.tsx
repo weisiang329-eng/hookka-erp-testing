@@ -2902,7 +2902,7 @@ export default function ProductionPage({
   // rendered into the hidden container via the useEffect below.
   const handlePrintJobCardStickers = useCallback(async () => {
     if (onScreenStickers.length === 0) {
-      alert(
+      toast.info(
         activeTab === "ALL"
           ? "No job-card stickers to print. Upholstery & Packing use FG Stickers instead."
           : "No job cards in the current filter.",
@@ -2931,7 +2931,7 @@ export default function ProductionPage({
     } finally {
       setPrintingJobCards(false);
     }
-  }, [onScreenStickers, activeTab]);
+  }, [onScreenStickers, activeTab, toast]);
 
   // Race-guard token — incremented on every loadFgStickers call so a slow
   // earlier fetch can't OVERWRITE a faster newer one. When user changes a
@@ -3305,18 +3305,18 @@ export default function ProductionPage({
 
   const handlePrintFgStickers = useCallback(async () => {
     if (filteredOrders.length === 0) {
-      alert("No orders in the current filter.");
+      toast.info("No orders in the current filter.");
       return;
     }
     // If tiles already populated (auto-loaded on tab entry), print directly.
     // Otherwise fetch first, then request print.
     const list = fgStickers.length > 0 ? fgStickers : await loadFgStickers();
     if (list.length === 0) {
-      alert("No FG units to print.");
+      toast.info("No FG units to print.");
       return;
     }
     setFgPrintRequested(true);
-  }, [filteredOrders, fgStickers, loadFgStickers]);
+  }, [filteredOrders, fgStickers, loadFgStickers, toast]);
 
   // Grid-filter scoped FG stickers — single source of truth shared by the
   // on-screen FG preview tiles AND the hidden print container, so what the
@@ -3437,18 +3437,18 @@ export default function ProductionPage({
         error?: string;
       };
       if (!res.ok || !json.success) {
-        alert(`Sync failed: ${json.error || res.statusText}`);
+        toast.error(`Sync failed: ${json.error || res.statusText}`);
         return;
       }
       const scanned = json.scannedPOs ?? 0;
       const created = json.createdJCs ?? 0;
-      alert(`Created ${created} job cards across ${scanned} orders`);
+      toast.success(`Created ${created} job cards across ${scanned} orders`);
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/job-cards");
     } catch (err) {
-      alert(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }, []);
+  }, [toast]);
 
   const handlePrintSchedule = useCallback(() => {
     const today = new Date().toLocaleDateString("en-MY", {

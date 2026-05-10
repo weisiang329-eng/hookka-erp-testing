@@ -1988,25 +1988,68 @@ export function DataGrid<T extends Record<string, any>>({
         </span>
       </div>
 
-      {/* Column Filter Dropdown */}
-      {filterDropdown && (
-        <ColumnFilterDropdown
-          columnKey={filterDropdown.key}
-          columnType={columns.find(c => c.key === filterDropdown.key)?.type}
-          filterAccessor={columns.find(c => c.key === filterDropdown.key)?.filterAccessor}
-          allData={data}
-          activeValues={columnValueFilters[filterDropdown.key] ?? null}
-          textFilter={columnFilters[filterDropdown.key] || ""}
-          onApplyValues={(values) => setColValueFilter(filterDropdown.key, values)}
-          onApplyText={(text, mode) => {
-            const val = mode && mode !== "contains" ? `${mode}:${text}` : text;
-            setColFilter(filterDropdown.key, val);
-          }}
-          onClear={() => clearColFilter(filterDropdown.key)}
-          onClose={() => setFilterDropdown(null)}
-          anchorRect={filterDropdown.rect}
-        />
-      )}
+      {/* Column Filter Dropdown — Excel-style: the Values list shows
+          only values that exist in the CURRENTLY FILTERED data
+          (excluding this column's own filter). So if the operator has
+          already filtered Customer = X, the Status dropdown only
+          shows statuses that exist for Customer X — not every status
+          in the entire dataset. */}
+      {filterDropdown && (() => {
+        const dropdownKey = filterDropdown.key;
+        // Apply all filters except the current dropdown's column.
+        let scopedData = data;
+        if (searchText) {
+          const lower = searchText.toLowerCase();
+          scopedData = scopedData.filter((row) =>
+            visibleColumns.some((col) => {
+              const val = getNestedValue(row, col.key);
+              return String(val ?? "").toLowerCase().includes(lower);
+            }),
+          );
+        }
+        const otherTextFilters = Object.entries(columnFilters).filter(
+          ([k, v]) => v && k !== dropdownKey,
+        );
+        if (otherTextFilters.length > 0) {
+          scopedData = scopedData.filter((row) =>
+            otherTextFilters.every(([k, v]) =>
+              matchesFilter(getNestedValue(row, k), v),
+            ),
+          );
+        }
+        const otherValueFilters = Object.entries(columnValueFilters).filter(
+          ([k]) => k !== dropdownKey,
+        );
+        if (otherValueFilters.length > 0) {
+          scopedData = scopedData.filter((row) =>
+            otherValueFilters.every(([k, allowed]) => {
+              const col = columns.find((c) => c.key === k);
+              const v = col?.filterAccessor
+                ? String(col.filterAccessor(row) ?? "")
+                : String(getNestedValue(row, k) ?? "");
+              return allowed.has(v);
+            }),
+          );
+        }
+        return (
+          <ColumnFilterDropdown
+            columnKey={dropdownKey}
+            columnType={columns.find((c) => c.key === dropdownKey)?.type}
+            filterAccessor={columns.find((c) => c.key === dropdownKey)?.filterAccessor}
+            allData={scopedData}
+            activeValues={columnValueFilters[dropdownKey] ?? null}
+            textFilter={columnFilters[dropdownKey] || ""}
+            onApplyValues={(values) => setColValueFilter(dropdownKey, values)}
+            onApplyText={(text, mode) => {
+              const val = mode && mode !== "contains" ? `${mode}:${text}` : text;
+              setColFilter(dropdownKey, val);
+            }}
+            onClear={() => clearColFilter(dropdownKey)}
+            onClose={() => setFilterDropdown(null)}
+            anchorRect={filterDropdown.rect}
+          />
+        );
+      })()}
 
       {/* Context Menu */}
       {ctxMenu && resolvedCtxItems.length > 0 && (

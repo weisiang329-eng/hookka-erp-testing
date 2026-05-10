@@ -211,9 +211,18 @@ function asObj(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
 }
 
-export function Sidebar() {
+// `collapsed` is owned by DashboardLayout so the main-content wrapper can
+// shrink its left padding (pl-60 → pl-14) in lockstep with the sidebar
+// width. Without lifting this, collapsing the sidebar leaves a ~180px
+// dead band between sidebar and content.
+export function Sidebar({
+  collapsed,
+  onToggleCollapsed,
+}: {
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+}) {
   const { pathname } = useLocation();
-  const [collapsed, setCollapsed] = useState(false);
   // Auto-expand only the menu group matching the current route. Per user
   // 2026-04-28: Consignment was hard-coded to always-open which made the
   // sidebar feel cluttered when the user was working in another module.
@@ -771,7 +780,7 @@ export function Sidebar() {
       {/* Collapse toggle */}
       <div className="border-t border-white/10 p-2 shrink-0">
         <button
-          onClick={() => setCollapsed(!collapsed)}
+          onClick={onToggleCollapsed}
           className="flex w-full items-center justify-center rounded-md p-1.5 text-gray-500 hover:bg-white/10 hover:text-white transition-colors"
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Routes, ScrollRestoration, useLocation } from "react-router-dom";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
@@ -32,8 +32,34 @@ function NewVersionWatcher() {
   return null;
 }
 
+const SIDEBAR_COLLAPSED_KEY = "hookka:sidebar:collapsed";
+
 export default function DashboardLayout() {
   const { pathname } = useLocation();
+
+  // Sidebar collapse state lives here (not inside <Sidebar/>) so the main
+  // content's left padding can stay synced with the sidebar's actual width.
+  // Persisted across reloads — operators who prefer the icons-only view
+  // shouldn't have to re-collapse on every page load.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore quota / disabled storage */
+      }
+      return next;
+    });
+  }, []);
 
   // Defer heavy startup work so first paint / page navigation stays responsive.
   // NOTE: We intentionally avoid static-importing `@/pages/bom` here because
@@ -88,8 +114,8 @@ export default function DashboardLayout() {
     <ToastProvider>
       <NewVersionWatcher />
       <div className="h-full">
-        <Sidebar />
-        <div className="pl-60 transition-all duration-300">
+        <Sidebar collapsed={sidebarCollapsed} onToggleCollapsed={toggleSidebar} />
+        <div className={`${sidebarCollapsed ? "pl-14" : "pl-60"} transition-all duration-300`}>
           <Topbar />
           <Breadcrumbs />
           <main className="p-6">

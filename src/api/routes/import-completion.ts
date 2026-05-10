@@ -14386,12 +14386,11 @@ app.post("/backfill-supplier-sku-1to1", async (c) => {
     materialCode: string | null;
     materialName: string | null;
     supplierSku: string | null;
-    supplierDescription: string | null;
   };
 
   const res = await db
     .prepare(
-      `SELECT id, materialCode, materialName, supplierSku, supplierDescription
+      `SELECT id, materialCode, materialName, supplierSku
          FROM supplier_material_bindings
          WHERE supplierSku IS NOT NULL
            AND materialCode IS NOT NULL

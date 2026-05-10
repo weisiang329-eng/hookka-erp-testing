@@ -4,6 +4,7 @@ import { formatCurrency } from "@/lib/utils";
 import type { FabricTracking } from "@/types";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
+import { useToast } from "@/components/ui/toast";
 import {
   Search,
   Package,
@@ -61,6 +62,7 @@ type Tab = "inventory";
 
 export default function FabricsPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const { data: fabricsResp, loading, refresh: refreshFabrics } = useCachedJson<{ success?: boolean; data?: FabricTracking[] }>("/api/fabric-tracking");
   const fabrics: FabricTracking[] = useMemo(
     () => (fabricsResp?.data ?? (Array.isArray(fabricsResp) ? (fabricsResp as FabricTracking[]) : [])),
@@ -158,13 +160,20 @@ export default function FabricsPage() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ [field]: tier }),
               });
-              if (res.ok) {
-                invalidateCachePrefix("/api/fabric-tracking");
-                invalidateCachePrefix("/api/raw-materials");
-                refreshFabrics();
+              if (!res.ok) {
+                const body = await res.json().catch(() => ({} as { error?: string }));
+                throw new Error(body?.error || `HTTP ${res.status}`);
               }
-            } catch {
-              // ignore
+              invalidateCachePrefix("/api/fabric-tracking");
+              invalidateCachePrefix("/api/raw-materials");
+              refreshFabrics();
+            } catch (err) {
+              const detail = err instanceof Error ? err.message : "try again";
+              toast.error(`Failed to update price tier: ${detail}`);
+              console.error(err);
+              // No local optimistic state here — the controlled <select>
+              // reads value straight from the cached fabric row, so the UI
+              // naturally reverts to the previous tier when the request fails.
             }
           }}
           onCreatePO={(fabricCode, qty) => {

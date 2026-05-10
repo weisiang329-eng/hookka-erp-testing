@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
+import { useToast } from "@/components/ui/toast";
 import { formatCurrency, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Customer } from "@/types";
@@ -3043,6 +3044,7 @@ function AssignSkuModal({
 // Main Page
 // =====================================================================
 export default function CustomersPage() {
+  const { toast } = useToast();
   const { data: customersResp, loading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const initialCustomers: Customer[] = useMemo(
     () => (customersResp?.success ? customersResp.data ?? [] : Array.isArray(customersResp) ? customersResp : []),
@@ -3092,7 +3094,13 @@ export default function CustomersPage() {
         invalidateCachePrefix("/api/customers");
         setAddForm({ code: "", name: "", contactName: "", phone: "", email: "", creditTerms: "NET30", creditLimitSen: 0 });
         setShowAdd(false);
+      } else {
+        toast.error(json?.error || `Failed to add customer (HTTP ${res.status})`);
       }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "network error";
+      toast.error(`Failed to add customer: ${detail}`);
+      console.error(err);
     } finally {
       setAddSaving(false);
     }
@@ -3124,17 +3132,35 @@ export default function CustomersPage() {
   };
 
   // ---------- Persist customer to API ----------
-  const persistCustomer = async (updated: Customer) => {
+  // Returns true on success, false on failure. Caller is responsible for
+  // rolling back local optimistic state on false (we already applied it
+  // before the network round-trip).
+  const persistCustomer = async (updated: Customer): Promise<boolean> => {
+    const previousData = data;
     setData((prev) => prev.map((c) => c.id === updated.id ? updated : c));
-    await fetch(`/api/customers/${updated.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updated),
-    });
-    // Only this customer changed — don't nuke the whole list cache. Hub
-    // add/edit/delete flows call persistCustomer multiple times in a row;
-    // per-id scoping keeps those flows cheap.
-    invalidateCache(`/api/customers/${updated.id}`);
+    try {
+      const res = await fetch(`/api/customers/${updated.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updated),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { error?: string }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      // Only this customer changed — don't nuke the whole list cache. Hub
+      // add/edit/delete flows call persistCustomer multiple times in a row;
+      // per-id scoping keeps those flows cheap.
+      invalidateCache(`/api/customers/${updated.id}`);
+      return true;
+    } catch (err) {
+      // Roll back optimistic update.
+      setData(previousData);
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to save customer: ${detail}`);
+      console.error(err);
+      return false;
+    }
   };
 
   // ---------- Edit Customer ----------
@@ -3153,11 +3179,13 @@ export default function CustomersPage() {
     });
   };
 
-  const saveEditCustomer = () => {
+  const saveEditCustomer = async () => {
     if (!editCustomer) return;
     const updated = { ...editCustomer, ...editCustForm };
-    persistCustomer(updated);
-    setEditCustomer(null);
+    const ok = await persistCustomer(updated);
+    if (ok) setEditCustomer(null);
+    // On failure persistCustomer already rolled back local state and toasted.
+    // Keep the dialog open so the operator can retry.
   };
 
   // ---------- KPI calculations ----------
@@ -3537,12 +3565,11 @@ export default function CustomersPage() {
                         </div>
                         <div className="flex justify-end gap-2">
                           <Button variant="outline" size="sm" onClick={() => setEditHubId(null)}>Cancel</Button>
-                          <Button variant="primary" size="sm" onClick={() => {
+                          <Button variant="primary" size="sm" onClick={async () => {
                             const cust = data.find(c => c.id === expandedCustomer);
-                            if (cust) {
-                              persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.map(h => h.id === editHubId ? { ...h, ...hubForm } : h) });
-                            }
-                            setEditHubId(null);
+                            if (!cust) { setEditHubId(null); return; }
+                            const ok = await persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.map(h => h.id === editHubId ? { ...h, ...hubForm } : h) });
+                            if (ok) setEditHubId(null);
                           }}>Save</Button>
                         </div>
                       </div>
@@ -3572,19 +3599,19 @@ export default function CustomersPage() {
                               setEditHubId(hub.id);
                               setHubForm({ shortName: hub.shortName, code: hub.code, state: hub.state, contactName: hub.contactName, phone: hub.phone, email: hub.email || "", address: hub.address });
                             }}
-                            className="p-1.5 rounded hover:bg-[#E2DDD8] opacity-0 group-hover:opacity-100 transition-opacity"
+                            className="p-1.5 rounded hover:bg-[#E2DDD8] transition-opacity"
                           >
                             <Pencil className="h-3.5 w-3.5 text-[#6B5C32]" />
                           </button>
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               if (!confirm(`Delete hub "${hub.shortName}"?`)) return;
                               const cust = data.find(c => c.id === expandedCustomer);
-                              if (cust) {
-                                persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.filter(h => h.id !== hub.id) });
-                              }
+                              if (!cust) return;
+                              await persistCustomer({ ...cust, deliveryHubs: cust.deliveryHubs.filter(h => h.id !== hub.id) });
+                              // persistCustomer toasts + rolls back on failure; nothing else to do here.
                             }}
-                            className="p-1.5 rounded hover:bg-[#F9E1DA] opacity-0 group-hover:opacity-100 transition-opacity"
+                            className="p-1.5 rounded hover:bg-[#F9E1DA] transition-opacity"
                           >
                             <Trash2 className="h-3.5 w-3.5 text-[#9A3A2D]" />
                           </button>
@@ -3645,13 +3672,12 @@ export default function CustomersPage() {
                   </div>
                   <div className="flex justify-end gap-2">
                     <Button variant="outline" size="sm" onClick={() => setShowAddHub(false)}>Cancel</Button>
-                    <Button variant="primary" size="sm" disabled={!hubForm.shortName || !hubForm.code || !hubForm.address} onClick={() => {
+                    <Button variant="primary" size="sm" disabled={!hubForm.shortName || !hubForm.code || !hubForm.address} onClick={async () => {
                       const newHub = { id: `hub-${Date.now()}`, ...hubForm, isDefault: false };
                       const cust = data.find(c => c.id === expandedCustomer);
-                      if (cust) {
-                        persistCustomer({ ...cust, deliveryHubs: [...(cust.deliveryHubs || []), newHub] });
-                      }
-                      setShowAddHub(false);
+                      if (!cust) { setShowAddHub(false); return; }
+                      const ok = await persistCustomer({ ...cust, deliveryHubs: [...(cust.deliveryHubs || []), newHub] });
+                      if (ok) setShowAddHub(false);
                     }}>Save Hub</Button>
                   </div>
                 </div>

@@ -4997,7 +4997,7 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D]">Special</span>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</div>
+                        <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D] shrink-0">Special</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
                       {/* QR row — HORIZONTAL per section (QR left, badge
                           right). Reverted from vertical per Wei Siang
@@ -5248,9 +5248,11 @@ export default function ProductionPage({
                       <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId || "—"}</div>
                       <div><span className="inline-block w-[26mm] font-semibold">SO Ref</span>: {s.customerRef || "—"}</div>
                       <div><span className="inline-block w-[26mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
-                      <div>
-                        <span className="inline-block w-[26mm] font-semibold" style={{ color: "#9A3A2D" }}>Special</span>:{" "}
-                        {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                      <div className="flex items-start gap-[1mm]">
+                        <span className="font-semibold shrink-0" style={{ width: "26mm", color: "#9A3A2D" }}>Special</span>
+                        <span className="flex-1 break-words">
+                          : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                        </span>
                       </div>
                     </div>
                     {/* QR row — HORIZONTAL per section (QR left, badge

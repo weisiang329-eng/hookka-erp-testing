@@ -1493,4 +1493,482 @@ app.get("/team-stats", async (c) => {
   });
 });
 
+// ============================================================
+// GET /api/worker/department-performance
+//        ?from=YYYY-MM-DD&to=YYYY-MM-DD
+//        &departmentCode=FAB_CUT&category=SOFA
+//
+// Operator Leader's full Department Performance view — same shape as the
+// admin /api/department-performance endpoint, but auth is X-Worker-Token
+// and scope is locked to the leader's own departments + categories.
+// Powers the /worker/team mobile page.
+//
+// Authorization: only Operator Leaders get real data. Non-leaders → 200 OK
+// with `{ isLeader: false, daily: [], totals: {…zero} }` so the frontend
+// can decide. The Team tab is hidden for non-leaders, but defense in depth.
+//
+// Filter clamping: ?departmentCode and ?category are intersected with the
+// leader's scope. Anything outside the scope is treated as "no filter" so
+// results stay scoped to the leader's full set instead of leaking other
+// teams' data.
+//
+// Aggregator logic (JC dedup + per-worker pro-rate) mirrors
+// src/api/routes/department-performance.ts:80-452. Inlined here on purpose:
+// the admin endpoint stays untouched, and the SQL diverges (`IN (...)` for
+// the leader's multi-dept scope vs `= ?` for the admin single-filter).
+// ============================================================
+type DeptPerfWheRow = {
+  workerId: string;
+  date: string;
+  departmentCode: string;
+  category: string | null;
+  hours: number | string | null;
+};
+type DeptPerfPoMetaRow = {
+  id: string;
+  poNo: string | null;
+  productCode: string | null;
+  productName: string | null;
+  sizeLabel: string | null;
+  itemCategory: string | null;
+};
+
+app.get("/department-performance", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { worker } = auth;
+
+  // Date defaults: last 7 days inclusive.
+  const today = new Date();
+  const defaultTo = today.toISOString().slice(0, 10);
+  const sixDaysAgo = new Date(today.getTime() - 6 * 86400000);
+  const defaultFrom = sixDaysAgo.toISOString().slice(0, 10);
+  const fromStr = (c.req.query("from") || defaultFrom).slice(0, 10);
+  const toStr = (c.req.query("to") || defaultTo).slice(0, 10);
+
+  const isLeader = (worker.position ?? "") === "Operator Leader";
+  if (!isLeader) {
+    return c.json({
+      success: true,
+      data: {
+        isLeader: false,
+        range: { from: fromStr, to: toStr },
+        departmentCode: null,
+        category: null,
+        availableDepartments: [],
+        availableCategories: [],
+        totals: {
+          workingMinutes: 0,
+          productionMinutes: 0,
+          efficiencyPct: 0,
+          workerCount: 0,
+        },
+        daily: [],
+      },
+    });
+  }
+
+  const leaderDepts = parseWorkerDepartmentCodes(
+    worker.departmentCodes,
+    worker.departmentCode,
+  );
+
+  // Leader's category restriction — same parse as team-stats above.
+  const leaderCats: Array<"SOFA" | "BEDFRAME"> | null = (() => {
+    const raw = (worker as { categories?: string | string[] | null })
+      .categories;
+    if (Array.isArray(raw)) {
+      const cleaned = raw.filter(
+        (x): x is "SOFA" | "BEDFRAME" => x === "SOFA" || x === "BEDFRAME",
+      );
+      return cleaned.length > 0 ? cleaned : null;
+    }
+    if (typeof raw === "string" && raw.length > 0) {
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          const cleaned = arr.filter(
+            (x): x is "SOFA" | "BEDFRAME" => x === "SOFA" || x === "BEDFRAME",
+          );
+          return cleaned.length > 0 ? cleaned : null;
+        }
+      } catch {
+        /* malformed → no restriction */
+      }
+    }
+    return null;
+  })();
+  const allowedCats: Array<"SOFA" | "BEDFRAME"> = leaderCats ?? [
+    "SOFA",
+    "BEDFRAME",
+  ];
+
+  // Filter clamping. Out-of-scope inputs fall back to "no filter" so the
+  // result stays scoped to the leader's full set rather than leaking.
+  const departmentCodeQ = (c.req.query("departmentCode") || "").trim();
+  const departmentCode =
+    departmentCodeQ.length > 0 && leaderDepts.includes(departmentCodeQ)
+      ? departmentCodeQ
+      : null;
+
+  const categoryQRaw = (c.req.query("category") || "").trim().toUpperCase();
+  const category =
+    (categoryQRaw === "SOFA" || categoryQRaw === "BEDFRAME") &&
+    allowedCats.includes(categoryQRaw as "SOFA" | "BEDFRAME")
+      ? (categoryQRaw as "SOFA" | "BEDFRAME")
+      : null;
+
+  const activeDepts = departmentCode ? [departmentCode] : leaderDepts;
+  const activeCats: Array<"SOFA" | "BEDFRAME"> = category
+    ? [category]
+    : allowedCats;
+
+  // Empty leader scope → empty result without hitting the DB.
+  if (activeDepts.length === 0 || activeCats.length === 0) {
+    return c.json({
+      success: true,
+      data: {
+        isLeader: true,
+        range: { from: fromStr, to: toStr },
+        departmentCode,
+        category,
+        availableDepartments: leaderDepts,
+        availableCategories: allowedCats,
+        totals: {
+          workingMinutes: 0,
+          productionMinutes: 0,
+          efficiencyPct: 0,
+          workerCount: 0,
+        },
+        daily: [],
+      },
+    });
+  }
+
+  // ---- Per-date accumulators (same shape as the admin endpoint).
+  type WorkerJobCell = {
+    jobCardId: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string | null;
+    poNo: string | null;
+    productionMinutes: number;
+  };
+  type WorkerCell = {
+    workerId: string;
+    workingMinutes: number;
+    productionMinutes: number;
+    jobs: WorkerJobCell[];
+  };
+  type JobCell = {
+    jobCardId: string;
+    poNo: string | null;
+    departmentCode: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string | null;
+    sizeLabel: string | null;
+    productionMinutes: number;
+    workerIds: Set<string>;
+  };
+  type DayCell = {
+    workingMinutes: number;
+    productionMinutes: number;
+    workersByWorker: Map<string, WorkerCell>;
+    jobs: JobCell[];
+  };
+  const byDate = new Map<string, DayCell>();
+  const ensure = (d: string): DayCell => {
+    let cell = byDate.get(d);
+    if (!cell) {
+      cell = {
+        workingMinutes: 0,
+        productionMinutes: 0,
+        workersByWorker: new Map(),
+        jobs: [],
+      };
+      byDate.set(d, cell);
+    }
+    return cell;
+  };
+
+  const workerIds = new Set<string>();
+
+  // ---- Working minutes from working_hour_entries.
+  {
+    const deptPh = activeDepts.map(() => "?").join(",");
+    const catPh = activeCats.map(() => "?").join(",");
+    const sql = `SELECT workerId, date, departmentCode, category, hours
+                   FROM working_hour_entries
+                  WHERE date >= ? AND date <= ?
+                    AND departmentCode IN (${deptPh})
+                    AND category IN (${catPh})`;
+    const wheRes = await c.var.DB.prepare(sql)
+      .bind(fromStr, toStr, ...activeDepts, ...activeCats)
+      .all<DeptPerfWheRow>();
+    for (const r of wheRes.results ?? []) {
+      const mins = Math.round((Number(r.hours) || 0) * 60);
+      const day = ensure(r.date);
+      day.workingMinutes += mins;
+      if (r.workerId) {
+        workerIds.add(r.workerId);
+        const wc = day.workersByWorker.get(r.workerId);
+        if (wc) {
+          wc.workingMinutes += mins;
+        } else {
+          day.workersByWorker.set(r.workerId, {
+            workerId: r.workerId,
+            workingMinutes: mins,
+            productionMinutes: 0,
+            jobs: [],
+          });
+        }
+      }
+    }
+  }
+
+  // ---- Production minutes: completed/transferred JCs in [from, to], scoped
+  // to leader depts. Category filter applied post-PO-join. Dedup per JC.
+  {
+    const deptPh = activeDepts.map(() => "?").join(",");
+    const jcSql = `SELECT id, productionOrderId, departmentCode, pic1Id, pic2Id,
+                          completedDate, estMinutes, actualMinutes, wipLabel
+                     FROM job_cards
+                    WHERE status IN ('COMPLETED','TRANSFERRED')
+                      AND completedDate >= ? AND completedDate <= ?
+                      AND departmentCode IN (${deptPh})`;
+    const jcRes = await c.var.DB.prepare(jcSql)
+      .bind(fromStr, toStr, ...activeDepts)
+      .all<JobCardRow>();
+    const candidateJcs = jcRes.results ?? [];
+
+    const poIds = Array.from(
+      new Set(
+        candidateJcs
+          .map((j) => j.productionOrderId)
+          .filter((id): id is string => typeof id === "string" && id.length > 0),
+      ),
+    );
+    const poMetaById = new Map<string, DeptPerfPoMetaRow>();
+    if (poIds.length > 0) {
+      const ph = poIds.map(() => "?").join(",");
+      const r = await c.var.DB.prepare(
+        `SELECT id, poNo, productCode, productName, sizeLabel, itemCategory
+           FROM production_orders WHERE id IN (${ph})`,
+      )
+        .bind(...poIds)
+        .all<DeptPerfPoMetaRow>();
+      for (const row of r.results ?? []) {
+        poMetaById.set(row.id, row);
+      }
+    }
+
+    const allowedCatSet = new Set<string>(activeCats);
+    const keptJcs = candidateJcs.filter((jc) => {
+      if (!jc.completedDate) return false;
+      const cat = poMetaById.get(jc.productionOrderId)?.itemCategory ?? null;
+      return cat !== null && allowedCatSet.has(cat);
+    });
+
+    let allPics: PiecePicRow[] = [];
+    if (keptJcs.length > 0) {
+      const ids = keptJcs.map((j) => j.id);
+      const ph = ids.map(() => "?").join(",");
+      const r = await c.var.DB.prepare(
+        `SELECT jobCardId, pieceNo, pic1Id, pic2Id
+           FROM piece_pics WHERE jobCardId IN (${ph})`,
+      )
+        .bind(...ids)
+        .all<PiecePicRow>();
+      allPics = r.results ?? [];
+    }
+    const picsByJc = new Map<string, PiecePicRow[]>();
+    for (const p of allPics) {
+      const arr = picsByJc.get(p.jobCardId) ?? [];
+      arr.push(p);
+      picsByJc.set(p.jobCardId, arr);
+    }
+
+    for (const jc of keptJcs) {
+      const date = jc.completedDate as string;
+      const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+      const day = ensure(date);
+      day.productionMinutes += mins;
+
+      const jcWorkerIds = new Set<string>();
+      if (jc.pic1Id) {
+        workerIds.add(jc.pic1Id);
+        jcWorkerIds.add(jc.pic1Id);
+      }
+      if (jc.pic2Id) {
+        workerIds.add(jc.pic2Id);
+        jcWorkerIds.add(jc.pic2Id);
+      }
+      for (const p of picsByJc.get(jc.id) ?? []) {
+        if (p.pic1Id) {
+          workerIds.add(p.pic1Id);
+          jcWorkerIds.add(p.pic1Id);
+        }
+        if (p.pic2Id) {
+          workerIds.add(p.pic2Id);
+          jcWorkerIds.add(p.pic2Id);
+        }
+      }
+
+      const meta = poMetaById.get(jc.productionOrderId);
+      day.jobs.push({
+        jobCardId: jc.id,
+        poNo: meta?.poNo ?? null,
+        departmentCode: jc.departmentCode ?? "",
+        productCode: meta?.productCode ?? "",
+        productName: meta?.productName ?? "",
+        wipLabel: jc.wipLabel ?? null,
+        sizeLabel: meta?.sizeLabel ?? null,
+        productionMinutes: mins,
+        workerIds: jcWorkerIds,
+      });
+
+      // Per-worker pro-rated share — same logic as the admin endpoint.
+      const jcMins = jc.estMinutes ?? jc.actualMinutes ?? 0;
+      const pieces = picsByJc.get(jc.id) ?? [];
+      const perWorkerMins = new Map<string, number>();
+      if (pieces.length > 0) {
+        for (const s of pieces) {
+          const picCount = (s.pic1Id ? 1 : 0) + (s.pic2Id ? 1 : 0);
+          const share = jcMins / Math.max(1, picCount);
+          if (s.pic1Id) {
+            perWorkerMins.set(
+              s.pic1Id,
+              (perWorkerMins.get(s.pic1Id) ?? 0) + share,
+            );
+          }
+          if (s.pic2Id) {
+            perWorkerMins.set(
+              s.pic2Id,
+              (perWorkerMins.get(s.pic2Id) ?? 0) + share,
+            );
+          }
+        }
+      } else {
+        const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
+        const share = jcMins / Math.max(1, picCount);
+        if (jc.pic1Id) perWorkerMins.set(jc.pic1Id, share);
+        if (jc.pic2Id) perWorkerMins.set(jc.pic2Id, share);
+      }
+
+      for (const [wid, rawMins] of perWorkerMins) {
+        const myMins = Math.round(rawMins);
+        let wc = day.workersByWorker.get(wid);
+        if (!wc) {
+          wc = {
+            workerId: wid,
+            workingMinutes: 0,
+            productionMinutes: 0,
+            jobs: [],
+          };
+          day.workersByWorker.set(wid, wc);
+        }
+        wc.productionMinutes += myMins;
+        wc.jobs.push({
+          jobCardId: jc.id,
+          productCode: meta?.productCode ?? "",
+          productName: meta?.productName ?? "",
+          wipLabel: jc.wipLabel ?? null,
+          poNo: meta?.poNo ?? null,
+          productionMinutes: myMins,
+        });
+      }
+    }
+  }
+
+  // ---- Resolve worker names in one batch.
+  const workerNameById = new Map<string, string>();
+  if (workerIds.size > 0) {
+    const ids = Array.from(workerIds);
+    const ph = ids.map(() => "?").join(",");
+    const r = await c.var.DB.prepare(
+      `SELECT id, name FROM workers WHERE id IN (${ph})`,
+    )
+      .bind(...ids)
+      .all<{ id: string; name: string }>();
+    for (const row of r.results ?? []) {
+      workerNameById.set(row.id, row.name);
+    }
+  }
+
+  const daily = Array.from(byDate.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([date, cell]) => {
+      const workers = Array.from(cell.workersByWorker.values())
+        .map((w) => ({
+          workerId: w.workerId,
+          workerName: workerNameById.get(w.workerId) ?? "",
+          workingMinutes: w.workingMinutes,
+          productionMinutes: w.productionMinutes,
+          efficiencyPct:
+            w.workingMinutes > 0
+              ? Math.round((w.productionMinutes / w.workingMinutes) * 100)
+              : 0,
+          jobs: w.jobs
+            .slice()
+            .sort((a, b) => b.productionMinutes - a.productionMinutes),
+        }))
+        .sort((a, b) => b.workingMinutes - a.workingMinutes);
+
+      const jobs = cell.jobs
+        .map((j) => ({
+          jobCardId: j.jobCardId,
+          poNo: j.poNo,
+          departmentCode: j.departmentCode,
+          productCode: j.productCode,
+          productName: j.productName,
+          wipLabel: j.wipLabel,
+          sizeLabel: j.sizeLabel,
+          productionMinutes: j.productionMinutes,
+          workers: Array.from(j.workerIds).map((id) => ({
+            id,
+            name: workerNameById.get(id) ?? "",
+          })),
+        }))
+        .sort((a, b) => b.productionMinutes - a.productionMinutes);
+
+      return {
+        date,
+        workingMinutes: cell.workingMinutes,
+        productionMinutes: cell.productionMinutes,
+        efficiencyPct:
+          cell.workingMinutes > 0
+            ? Math.round((cell.productionMinutes / cell.workingMinutes) * 100)
+            : 0,
+        workers,
+        jobs,
+      };
+    });
+
+  const totalWorking = daily.reduce((s, r) => s + r.workingMinutes, 0);
+  const totalProduction = daily.reduce((s, r) => s + r.productionMinutes, 0);
+
+  return c.json({
+    success: true,
+    data: {
+      isLeader: true,
+      range: { from: fromStr, to: toStr },
+      departmentCode,
+      category,
+      availableDepartments: leaderDepts,
+      availableCategories: allowedCats,
+      totals: {
+        workingMinutes: totalWorking,
+        productionMinutes: totalProduction,
+        efficiencyPct:
+          totalWorking > 0
+            ? Math.round((totalProduction / totalWorking) * 100)
+            : 0,
+        workerCount: workerIds.size,
+      },
+      daily,
+    },
+  });
+});
+
 export default app;

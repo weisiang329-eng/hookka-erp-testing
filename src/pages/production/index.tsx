@@ -2781,6 +2781,13 @@ export default function ProductionPage({
     }
   }, [onScreenStickers, activeTab]);
 
+  // Race-guard token — incremented on every loadFgStickers call so a slow
+  // earlier fetch can't OVERWRITE a faster newer one. When user changes a
+  // filter while the previous load is still in flight, the old fetch
+  // completes after the new one (returning stale, wrong-category data)
+  // and was clobbering the correct result. Bumping a ref-counter and
+  // checking it against the snapshot at finish-time discards stale writes.
+  const fgLoadVersion = useRef(0);
   // Populate `fgStickers` state without firing window.print(). Used in two
   // places: (1) auto-fired on entry to UPHOLSTERY/PACKING tabs so the preview
   // tiles render, (2) called by `handlePrintFgStickers` which then flips
@@ -2789,8 +2796,9 @@ export default function ProductionPage({
   // Returns the populated list (also stored in state) so callers can short-
   // circuit if nothing came back. Silent — no alerts.
   const loadFgStickers = useCallback(async (): Promise<FgSticker[]> => {
+    const myVersion = ++fgLoadVersion.current;
     if (filteredOrders.length === 0) {
-      setFgStickers([]);
+      if (myVersion === fgLoadVersion.current) setFgStickers([]);
       return [];
     }
     // Match what the Production Sheet shows above. The grid does its
@@ -2806,7 +2814,7 @@ export default function ProductionPage({
       ? filteredOrders.filter((o) => visiblePoIds.has(o.id))
       : filteredOrders;
     if (ordersToProcess.length === 0) {
-      setFgStickers([]);
+      if (myVersion === fgLoadVersion.current) setFgStickers([]);
       return [];
     }
     type ProductMini = {
@@ -3134,6 +3142,9 @@ export default function ProductionPage({
       aggregated.push(...outputForSo);
     }
 
+    // Guard: only commit if no newer load has started. Prevents the
+    // stale-overwrite race when filters change mid-fetch.
+    if (myVersion !== fgLoadVersion.current) return aggregated;
     setJobCardStickers([]);
     setFgStickers(aggregated);
     setLoadingFgPreview(false);

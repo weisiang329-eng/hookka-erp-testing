@@ -150,6 +150,7 @@
   "deliveryDate": "delivery_date",
   "deliveryOrderId": "delivery_order_id",
   "departmentCode": "department_code",
+  "departmentCodes": "department_codes",
   "departmentId": "department_id",
   "departmentName": "department_name",
   "deptBreakdown": "dept_breakdown",

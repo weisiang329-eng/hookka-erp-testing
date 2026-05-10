@@ -49,10 +49,11 @@ type Supplier = {
 type SupplierSKU = {
   id: string;
   internalRMCode: string;
-  materialName: string;
+  materialName: string; // = our internal description
   supplierId: string;
   supplierName?: string; // resolved for display/filter
-  supplierSku: string;
+  supplierSku: string; // = supplier's code
+  supplierDescription: string; // = supplier's description (Wei Siang 2026-05-10)
   unitPriceSen: number;
   currency: string;
   leadTimeDays: number;
@@ -431,6 +432,9 @@ function SKUFormDialog({
   };
   const [supplierId, setSupplierId] = useState(editData?.supplierId || "");
   const [supplierSku, setSupplierSku] = useState(editData?.supplierSku || "");
+  const [supplierDescription, setSupplierDescription] = useState(
+    editData?.supplierDescription || "",
+  );
   const [unitPrice, setUnitPrice] = useState(editData ? String(editData.unitPriceSen / 100) : "");
   const [currency] = useState(editData?.currency || "MYR");
   const [leadTimeDays, setLeadTimeDays] = useState(editData?.leadTimeDays || 7);
@@ -446,6 +450,7 @@ function SKUFormDialog({
       materialName,
       supplierId,
       supplierSku,
+      supplierDescription,
       unitPriceSen: Math.round(parseFloat(unitPrice) * 100),
       currency,
       leadTimeDays,
@@ -512,32 +517,36 @@ function SKUFormDialog({
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Material Name *</label>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Internal Description *</label>
               <Input value={materialName} onChange={(e) => setMaterialName(e.target.value)} required placeholder="Auto-filled from selection" />
             </div>
           </div>
+          <div>
+            <label className="block text-sm font-medium text-[#374151] mb-1">Supplier *</label>
+            <select
+              className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              required
+            >
+              <option value="">Select supplier...</option>
+              {suppliers
+                .filter((s) => s.status === "ACTIVE")
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.code} - {s.name}
+                  </option>
+                ))}
+            </select>
+          </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier *</label>
-              <select
-                className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
-                value={supplierId}
-                onChange={(e) => setSupplierId(e.target.value)}
-                required
-              >
-                <option value="">Select supplier...</option>
-                {suppliers
-                  .filter((s) => s.status === "ACTIVE")
-                  .map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.code} - {s.name}
-                    </option>
-                  ))}
-              </select>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Code *</label>
+              <Input value={supplierSku} onChange={(e) => setSupplierSku(e.target.value)} required placeholder="Supplier's SKU / part number" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier SKU *</label>
-              <Input value={supplierSku} onChange={(e) => setSupplierSku(e.target.value)} required placeholder="Supplier's code" />
+              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Description</label>
+              <Input value={supplierDescription} onChange={(e) => setSupplierDescription(e.target.value)} placeholder="As printed on supplier PI / quote" />
             </div>
           </div>
           <div className="grid grid-cols-3 gap-4">
@@ -661,6 +670,7 @@ export default function SupplierMaintenancePage() {
       supplierId: String(b.supplierId ?? ""),
       supplierName: b.supplierName ? String(b.supplierName) : undefined,
       supplierSku: String(b.supplierSku ?? ""),
+      supplierDescription: String(b.supplierDescription ?? ""),
       // The /api/supplier-materials route returns `unitPrice` already in sen
       // (the supplier_material_bindings.unitPrice column is INTEGER sen — see
       // migrations/0001_init.sql + scripts/import-historical-purchases.py
@@ -818,6 +828,7 @@ export default function SupplierMaintenancePage() {
           s.internalRMCode.toLowerCase().includes(q) ||
           s.materialName.toLowerCase().includes(q) ||
           s.supplierSku.toLowerCase().includes(q) ||
+          s.supplierDescription.toLowerCase().includes(q) ||
           (s.supplierName || "").toLowerCase().includes(q)
       );
     }
@@ -826,8 +837,8 @@ export default function SupplierMaintenancePage() {
 
   const skuColumns: Column<SupplierSKU>[] = useMemo(
     () => [
-      { key: "internalRMCode", label: "Internal RM Code", type: "docno", width: "130px", sortable: true },
-      { key: "materialName", label: "Material Name", type: "text", sortable: true },
+      { key: "internalRMCode", label: "Internal Code", type: "docno", width: "130px", sortable: true },
+      { key: "materialName", label: "Internal Description", type: "text", sortable: true },
       {
         key: "supplierName",
         label: "Supplier",
@@ -835,7 +846,8 @@ export default function SupplierMaintenancePage() {
         width: "160px",
         sortable: true,
       },
-      { key: "supplierSku", label: "Supplier SKU", type: "text", width: "140px", sortable: true },
+      { key: "supplierSku", label: "Supplier Code", type: "text", width: "140px", sortable: true },
+      { key: "supplierDescription", label: "Supplier Description", type: "text", sortable: true },
       {
         key: "unitPriceSen",
         label: "Unit Price",
@@ -1051,7 +1063,7 @@ export default function SupplierMaintenancePage() {
               </select>
               <div className="w-72">
                 <Input
-                  placeholder="Search RM code, material, supplier SKU..."
+                  placeholder="Search internal code, description, supplier code..."
                   value={skuSearch}
                   onChange={(e) => setSkuSearch(e.target.value)}
                 />

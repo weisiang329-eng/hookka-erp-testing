@@ -21,6 +21,11 @@ type BindingRow = {
   materialCode: string;
   materialName: string;
   supplierSku: string;
+  // Supplier-side description for the SKU. Internal materialName describes
+  // what we call the item; supplierDescription is what the supplier prints
+  // on their PI/quote (often more detailed: pack size, finish, etc).
+  // Wei Siang 2026-05-10: needed alongside Internal/Supplier code pair.
+  supplierDescription: string | null;
   unitPrice: number;
   currency: "MYR" | "RMB" | null;
   leadTimeDays: number;
@@ -38,6 +43,7 @@ function rowToBinding(r: BindingRow) {
     materialCode: r.materialCode,
     materialName: r.materialName,
     supplierSku: r.supplierSku,
+    supplierDescription: r.supplierDescription ?? "",
     unitPrice: r.unitPrice,
     currency: r.currency ?? "MYR",
     leadTimeDays: r.leadTimeDays,
@@ -107,6 +113,8 @@ app.post("/", async (c) => {
       materialCode: String(materialCode),
       materialName: String(materialName),
       supplierSku: String(supplierSku),
+      supplierDescription:
+        body.supplierDescription != null ? String(body.supplierDescription) : "",
       unitPrice: Number(unitPrice),
       currency: body.currency === "RMB" ? "RMB" : "MYR",
       leadTimeDays: Number(body.leadTimeDays) || 7,
@@ -119,9 +127,9 @@ app.post("/", async (c) => {
     };
     await c.var.DB.prepare(
       `INSERT INTO supplier_material_bindings (id, supplierId, materialCode,
-         materialName, supplierSku, unitPrice, currency, leadTimeDays,
+         materialName, supplierSku, supplierDescription, unitPrice, currency, leadTimeDays,
          paymentTerms, moq, priceValidFrom, priceValidTo, isMainSupplier)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         row.id,
@@ -129,6 +137,7 @@ app.post("/", async (c) => {
         row.materialCode,
         row.materialName,
         row.supplierSku,
+        row.supplierDescription,
         row.unitPrice,
         row.currency,
         row.leadTimeDays,
@@ -188,6 +197,10 @@ app.put("/:id", async (c) => {
       materialCode: body.materialCode ?? existing.materialCode,
       materialName: body.materialName ?? existing.materialName,
       supplierSku: body.supplierSku ?? existing.supplierSku,
+      supplierDescription:
+        body.supplierDescription !== undefined
+          ? String(body.supplierDescription)
+          : existing.supplierDescription ?? "",
       unitPrice:
         body.unitPrice !== undefined ? Number(body.unitPrice) : existing.unitPrice,
       currency:
@@ -212,8 +225,9 @@ app.put("/:id", async (c) => {
     await c.var.DB.prepare(
       `UPDATE supplier_material_bindings SET
          supplierId = ?, materialCode = ?, materialName = ?, supplierSku = ?,
-         unitPrice = ?, currency = ?, leadTimeDays = ?, paymentTerms = ?,
-         moq = ?, priceValidFrom = ?, priceValidTo = ?, isMainSupplier = ?
+         supplierDescription = ?, unitPrice = ?, currency = ?, leadTimeDays = ?,
+         paymentTerms = ?, moq = ?, priceValidFrom = ?, priceValidTo = ?,
+         isMainSupplier = ?
        WHERE id = ?`,
     )
       .bind(
@@ -221,6 +235,7 @@ app.put("/:id", async (c) => {
         merged.materialCode,
         merged.materialName,
         merged.supplierSku,
+        merged.supplierDescription,
         merged.unitPrice,
         merged.currency,
         merged.leadTimeDays,

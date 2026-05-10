@@ -14116,4 +14116,237 @@ app.post("/backfill-sofa-leg-heights", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-pillow-packing-jc
+//
+// Wei Siang spec (2026-05-10): pillow PACKING JCs should aggregate at
+// (salesOrderId, productCode, fabricCode) level — one operator scan
+// completes all matching pieces. Currently per-PO fan-out produces N
+// separate PACKING JCs (one per pillow piece); operators want ONE JC
+// with combined qty.
+//
+// Pillow detection: itemCategory='ACCESSORY' AND
+//   (productCode LIKE '%PILLOW%' OR productName LIKE '%PILLOW%').
+//
+// For each (soId, productCode, fabricCode) group of pillow POs:
+//   1. Find any existing PACKING JCs on those POs.
+//   2. If exactly one aggregated JC already exists on the anchor PO
+//      (wipKey starts with "pillow-pack-") → skip, idempotent.
+//   3. Else: DELETE all existing PACKING JCs in the group, INSERT one
+//      aggregated JC on the FIRST (anchor) PO with wipQty = sum.
+//
+// Body: { dryRun: boolean (default true) }
+//
+// Per project_migration_in_progress: one-shot, will be removed
+// post-migration.
+// ---------------------------------------------------------------------------
+app.post("/backfill-pillow-packing-jc", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { dryRun?: unknown } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    // empty body OK
+  }
+  const dryRun = body.dryRun !== false;
+  const db = c.var.DB;
+
+  // 1. Find PACKING department metadata.
+  const packingDept = await db
+    .prepare("SELECT id, code, name FROM departments WHERE code = 'PACKING' LIMIT 1")
+    .first<{ id: string; code: string; name: string }>();
+  if (!packingDept) {
+    return c.json({ success: false, error: "PACKING department not found" }, 500);
+  }
+
+  // 2. Find all pillow POs.
+  type PillowPO = {
+    id: string;
+    poNo: string;
+    salesOrderId: string | null;
+    productCode: string | null;
+    productName: string | null;
+    fabricCode: string | null;
+    quantity: number;
+    targetEndDate: string | null;
+  };
+  const posRes = await db
+    .prepare(
+      `SELECT id, poNo, salesOrderId, productCode, productName, fabricCode,
+              quantity, targetEndDate
+         FROM production_orders
+         WHERE itemCategory = 'ACCESSORY'
+           AND (UPPER(productCode) LIKE '%PILLOW%' OR UPPER(productName) LIKE '%PILLOW%')
+           AND status <> 'CANCELLED'`,
+    )
+    .all<PillowPO>();
+  const pillowPOs = posRes.results ?? [];
+
+  // 3. Group by (salesOrderId, productCode, fabricCode).
+  const groups = new Map<string, PillowPO[]>();
+  for (const po of pillowPOs) {
+    if (!po.salesOrderId) continue;
+    const key = `${po.salesOrderId}::${po.productCode}::${po.fabricCode || ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(po);
+  }
+
+  type GroupResult = {
+    groupKey: string;
+    soId: string;
+    productCode: string | null;
+    fabricCode: string | null;
+    poCount: number;
+    totalQty: number;
+    status: "skipped" | "created" | "would-create" | "error";
+    deletedJcCount?: number;
+    aggregatedWipKey?: string;
+    error?: string;
+  };
+  const results: GroupResult[] = [];
+
+  for (const [groupKey, pos] of groups) {
+    // Sort by id for deterministic anchor selection.
+    pos.sort((a, b) => a.id.localeCompare(b.id));
+    const anchor = pos[0];
+    const totalQty = pos.reduce((s, p) => s + (p.quantity || 1), 0);
+    const aggregatedWipKey =
+      `pillow-pack-${anchor.salesOrderId}-${anchor.productCode}-${anchor.fabricCode || ""}`
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 200);
+
+    // Find existing PACKING JCs on any PO in this group.
+    const placeholders = pos.map(() => "?").join(",");
+    const existingRes = await db
+      .prepare(
+        `SELECT id, productionOrderId, wipKey, wipQty
+           FROM job_cards
+           WHERE productionOrderId IN (${placeholders}) AND departmentCode = 'PACKING'`,
+      )
+      .bind(...pos.map((p) => p.id))
+      .all<{ id: string; productionOrderId: string; wipKey: string; wipQty: number }>();
+    const existing = existingRes.results ?? [];
+
+    // Already correctly aggregated? (one JC on anchor with our wipKey)
+    const hasAggregated =
+      existing.length === 1 &&
+      existing[0].productionOrderId === anchor.id &&
+      existing[0].wipKey === aggregatedWipKey &&
+      existing[0].wipQty === totalQty;
+    if (hasAggregated) {
+      results.push({
+        groupKey,
+        soId: anchor.salesOrderId!,
+        productCode: anchor.productCode,
+        fabricCode: anchor.fabricCode,
+        poCount: pos.length,
+        totalQty,
+        status: "skipped",
+      });
+      continue;
+    }
+
+    if (dryRun) {
+      results.push({
+        groupKey,
+        soId: anchor.salesOrderId!,
+        productCode: anchor.productCode,
+        fabricCode: anchor.fabricCode,
+        poCount: pos.length,
+        totalQty,
+        status: "would-create",
+        deletedJcCount: existing.length,
+        aggregatedWipKey,
+      });
+      continue;
+    }
+
+    try {
+      const stmts: D1PreparedStatement[] = [];
+      // DELETE existing per-PO PACKING JCs.
+      for (const jc of existing) {
+        stmts.push(db.prepare("DELETE FROM job_cards WHERE id = ?").bind(jc.id));
+      }
+      // INSERT aggregated JC on anchor PO.
+      const jcId = `jc-pilo-${anchor.id}`.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+      const wipLabel = `${anchor.productCode || ""} ${anchor.fabricCode || ""} x${totalQty}`.trim();
+      stmts.push(
+        db
+          .prepare(
+            `INSERT INTO job_cards (id, productionOrderId, departmentId, departmentCode,
+                departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
+                wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
+                estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            jcId,
+            anchor.id,
+            packingDept.id,
+            "PACKING",
+            packingDept.name,
+            99, // high sequence — same as l1Process default
+            "WAITING",
+            anchor.targetEndDate,
+            aggregatedWipKey,
+            anchor.productCode || "",
+            "FG",
+            wipLabel,
+            totalQty,
+            0,
+            null,
+            "",
+            null,
+            "",
+            null,
+            0,
+            null,
+            "",
+            0,
+            "PENDING",
+            null,
+            "",
+          ),
+      );
+      await db.batch(stmts);
+      results.push({
+        groupKey,
+        soId: anchor.salesOrderId!,
+        productCode: anchor.productCode,
+        fabricCode: anchor.fabricCode,
+        poCount: pos.length,
+        totalQty,
+        status: "created",
+        deletedJcCount: existing.length,
+        aggregatedWipKey,
+      });
+    } catch (err) {
+      results.push({
+        groupKey,
+        soId: anchor.salesOrderId!,
+        productCode: anchor.productCode,
+        fabricCode: anchor.fabricCode,
+        poCount: pos.length,
+        totalQty,
+        status: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    scannedPOs: pillowPOs.length,
+    scannedGroups: groups.size,
+    created: results.filter((r) => r.status === "created").length,
+    wouldCreate: results.filter((r) => r.status === "would-create").length,
+    skipped: results.filter((r) => r.status === "skipped").length,
+    errors: results.filter((r) => r.status === "error").length,
+    results,
+  });
+});
+
 export default app;

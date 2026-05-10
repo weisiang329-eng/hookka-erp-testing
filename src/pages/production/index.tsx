@@ -4977,7 +4977,7 @@ export default function ProductionPage({
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
-                      style={{ width: "230px", height: "420px" }}
+                      style={{ width: "230px", height: "380px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       {/* Top header = Product Code (this box's specific
@@ -4988,7 +4988,7 @@ export default function ProductionPage({
                         {s.productCode}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[3px] text-[11px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
                         {s.boxLabel && (
                           <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">WIP</span>: {s.boxLabel}</div>
                         )}
@@ -5011,15 +5011,15 @@ export default function ProductionPage({
                       <div className="mt-auto flex flex-col gap-2">
                         {/* Sofa — QR + badge */}
                         <div className="flex items-end gap-2">
-                          <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
+                          <QRImg data={trackUrl} size={90} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0">
-                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
+                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "12px" }}>
                               {s.pieceNo}/{s.totalPieces}
                             </div>
-                            <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
+                            <div className="leading-tight truncate uppercase" style={{ fontSize: "10px" }}>
                               {s.pieceName}
                             </div>
-                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
+                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "8px" }}>
                               {s.shortCode}
                             </div>
                           </div>
@@ -5028,10 +5028,10 @@ export default function ProductionPage({
                           <>
                             <div className="border-t border-dashed border-[#6B5C32]" />
                             <div className="flex flex-col items-center justify-center">
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
+                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "12px" }}>
                                 {legsPair.pieceNo}/{legsPair.totalPieces}
                               </div>
-                              <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
+                              <div className="leading-tight text-center uppercase" style={{ fontSize: "10px" }}>
                                 {legsPair.pieceName}
                               </div>
                             </div>
@@ -5041,10 +5041,10 @@ export default function ProductionPage({
                           <>
                             <div className="border-t border-dashed border-[#6B5C32]" />
                             <div className="flex flex-col items-center justify-center">
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
+                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "12px" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}
                               </div>
-                              <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
+                              <div className="leading-tight text-center uppercase" style={{ fontSize: "10px" }}>
                                 {pillowPair.pieceName}
                               </div>
                             </div>
@@ -5053,7 +5053,7 @@ export default function ProductionPage({
                       </div>
                       {/* Customer footer — full-width, always visible
                           even when customerName is missing (fallback "—"). */}
-                      <div className="mt-2 pt-1 border-t border-[#E6E0D9] text-[12px] leading-tight text-[#1F1D1B] truncate text-center font-medium">
+                      <div className="mt-1 pt-1 border-t border-[#E6E0D9] text-[11px] leading-tight text-[#1F1D1B] truncate text-center font-medium">
                         {customerLine || s.customerName || "—"}
                       </div>
                     </div>

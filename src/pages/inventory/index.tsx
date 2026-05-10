@@ -2116,6 +2116,7 @@ export default function InventoryPage() {
                 data={filteredFG}
                 keyField="id"
                 gridId="inventory-fg"
+                virtualize
                 contextMenuItems={fgContextMenu}
                 onDoubleClick={handleDoubleClickFG}
               />
@@ -2170,6 +2171,7 @@ export default function InventoryPage() {
                 data={filteredWIP}
                 keyField="id"
                 gridId="inventory-wip"
+                virtualize
                 contextMenuItems={wipContextMenu}
                 onDoubleClick={handleDoubleClickWIP}
               />
@@ -2334,6 +2336,7 @@ export default function InventoryPage() {
                 data={filteredRM}
                 keyField="id"
                 gridId="inventory-rm"
+                virtualize
                 contextMenuItems={rmContextMenu}
                 onDoubleClick={handleDoubleClickRM}
               />

@@ -879,6 +879,7 @@ export default function SalesPage() {
             keyField="id"
             loading={loading}
             stickyHeader={true}
+            virtualize
             maxHeight="calc(100vh - 320px)"
             emptyMessage={tab === "DRAFT" ? "No draft orders." : "No confirmed orders."}
             onDoubleClick={(row) => navigate(`/sales/${row.id}`)}

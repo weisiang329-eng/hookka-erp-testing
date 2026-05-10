@@ -2483,6 +2483,7 @@ export default function DeliveryPage() {
               keyField="id"
               loading={loading}
               stickyHeader
+              virtualize
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No items in planning."
               groupBy="customerState"
@@ -2546,6 +2547,7 @@ export default function DeliveryPage() {
               keyField="id"
               loading={loading}
               stickyHeader
+              virtualize
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No items pending delivery."
               groupBy="customerState"
@@ -2610,6 +2612,7 @@ export default function DeliveryPage() {
               keyField="id"
               loading={loading}
               stickyHeader
+              virtualize
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No delivery orders found."
               onDoubleClick={(row) => setDetailDO(row)}

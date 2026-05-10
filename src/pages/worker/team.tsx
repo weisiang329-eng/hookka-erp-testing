@@ -54,6 +54,12 @@ type DeptPerfData = {
   totals: {
     workingMinutes: number;
     productionMinutes: number;
+    // Working-hour split for the KPI subtitle. productionWorkingMinutes is
+    // the denominator behind Avg Efficiency; non-prod is the leftover
+    // (Warehousing / Repair / Maintenance / Production Shortfall) shown so
+    // the operator can reconcile the headline Working Hrs with the ratio.
+    productionWorkingMinutes: number;
+    nonProductionWorkingMinutes: number;
     efficiencyPct: number;
     workerCount: number;
   };
@@ -166,6 +172,26 @@ export default function WorkerTeamPage() {
       ? totals.efficiencyPct.toFixed(1)
       : null;
 
+  // Subtitle helpers — keep parity with desktop /employees commit 0a41a95.
+  // fmtHours returns "-" for ≤ 0; map that to "0h" inside subtitles so the
+  // operator sees a real number ("0h prod + 4h non-prod" beats "- prod +
+  // 4h non-prod"). Only render the prod-split subtitle when there ARE
+  // non-production minutes — otherwise the headline Working Hrs already
+  // equals prod hours and the extra line is just clutter.
+  const fmtHoursOrZero = (mins: number): string =>
+    mins > 0 ? fmtHours(mins) : "0h";
+  const prodMins = totals?.productionWorkingMinutes ?? 0;
+  const nonProdMins = totals?.nonProductionWorkingMinutes ?? 0;
+  const totalProdMins = totals?.productionMinutes ?? 0;
+  const workingHrsSubtitle =
+    totals && totals.workingMinutes > 0 && nonProdMins > 0
+      ? `${fmtHoursOrZero(prodMins)} prod + ${fmtHoursOrZero(nonProdMins)} non-prod`
+      : null;
+  const avgEffSubtitle =
+    avgEff !== null
+      ? `${fmtHoursOrZero(totalProdMins)} ÷ ${fmtHoursOrZero(prodMins)}`
+      : null;
+
   // Defense-in-depth: backend can flip isLeader:false even if the tab leaks.
   if (data && data.isLeader === false) {
     return (
@@ -254,6 +280,7 @@ export default function WorkerTeamPage() {
         <Kpi
           label={t("team.totalWorkingHrs")}
           value={fmtHours(totals?.workingMinutes ?? 0)}
+          subtitle={workingHrsSubtitle}
         />
         <Kpi
           label={t("team.totalProductionHrs")}
@@ -271,6 +298,7 @@ export default function WorkerTeamPage() {
                   : "bad"
               : null
           }
+          subtitle={avgEffSubtitle}
         />
       </div>
 
@@ -367,14 +395,22 @@ export default function WorkerTeamPage() {
 }
 
 // ---- Sub-components ----
+// `subtitle` (optional): a third line under the label, shown in a dim
+// secondary tone. Used by the Total Working Hrs / Avg Efficiency cards to
+// surface the prod / non-prod split + efficiency denominator — same
+// information the desktop /employees Employee Performance tab shows
+// (commit 0a41a95). Wraps + breaks-words so a long "34h 30m prod + 4h
+// non-prod" string still fits a 2-col KPI tile at 320px width.
 function Kpi({
   label,
   value,
   tone,
+  subtitle,
 }: {
   label: string;
   value: string;
   tone?: "good" | "warn" | "bad" | null;
+  subtitle?: string | null;
 }) {
   const valueClass =
     tone === "good"
@@ -390,6 +426,11 @@ function Kpi({
       <p className="text-[10px] text-[#8A8680] mt-0.5 leading-tight">
         {label}
       </p>
+      {subtitle && (
+        <p className="text-[10px] text-[#3E6570] mt-0.5 leading-tight tabular-nums break-words">
+          {subtitle}
+        </p>
+      )}
     </div>
   );
 }

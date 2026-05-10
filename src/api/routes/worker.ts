@@ -1560,6 +1560,8 @@ app.get("/department-performance", async (c) => {
         totals: {
           workingMinutes: 0,
           productionMinutes: 0,
+          productionWorkingMinutes: 0,
+          nonProductionWorkingMinutes: 0,
           efficiencyPct: 0,
           workerCount: 0,
         },
@@ -1637,6 +1639,8 @@ app.get("/department-performance", async (c) => {
         totals: {
           workingMinutes: 0,
           productionMinutes: 0,
+          productionWorkingMinutes: 0,
+          nonProductionWorkingMinutes: 0,
           efficiencyPct: 0,
           workerCount: 0,
         },
@@ -1694,6 +1698,26 @@ app.get("/department-performance", async (c) => {
 
   const workerIds = new Set<string>();
 
+  // ---- Production-dept lookup: needed to split totals.workingMinutes into
+  // production vs non-production for the KPI subtitle on /worker/team. Same
+  // source-of-truth (departments.isProduction) the desktop /employees page
+  // uses — Warehousing / Repair / Maintenance / Production Shortfall fall
+  // outside the production set and so don't dilute Avg Efficiency's denom.
+  const productionDeptCodes = new Set<string>();
+  {
+    const deptPh = activeDepts.map(() => "?").join(",");
+    const r = await c.var.DB.prepare(
+      `SELECT code, isProduction FROM departments WHERE code IN (${deptPh})`,
+    )
+      .bind(...activeDepts)
+      .all<{ code: string; isProduction: number }>();
+    for (const row of r.results ?? []) {
+      if (row.isProduction) productionDeptCodes.add(row.code);
+    }
+  }
+  let totalProductionWorkingMinutes = 0;
+  let totalNonProductionWorkingMinutes = 0;
+
   // ---- Working minutes from working_hour_entries.
   {
     const deptPh = activeDepts.map(() => "?").join(",");
@@ -1710,6 +1734,11 @@ app.get("/department-performance", async (c) => {
       const mins = Math.round((Number(r.hours) || 0) * 60);
       const day = ensure(r.date);
       day.workingMinutes += mins;
+      if (productionDeptCodes.has(r.departmentCode)) {
+        totalProductionWorkingMinutes += mins;
+      } else {
+        totalNonProductionWorkingMinutes += mins;
+      }
       if (r.workerId) {
         workerIds.add(r.workerId);
         const wc = day.workersByWorker.get(r.workerId);
@@ -1960,6 +1989,14 @@ app.get("/department-performance", async (c) => {
       totals: {
         workingMinutes: totalWorking,
         productionMinutes: totalProduction,
+        // Prod vs non-prod working-minute split for the /worker/team KPI
+        // subtitle. Production = WHE rows whose departmentCode has
+        // isProduction=1. Non-production = the rest (Warehousing / Repair
+        // / Maintenance / Production Shortfall). The Avg Efficiency
+        // denominator is productionWorkingMinutes; the headline Working
+        // Hrs card sums both so the operator can reconcile the two.
+        productionWorkingMinutes: totalProductionWorkingMinutes,
+        nonProductionWorkingMinutes: totalNonProductionWorkingMinutes,
         efficiencyPct:
           totalWorking > 0
             ? Math.round((totalProduction / totalWorking) * 100)

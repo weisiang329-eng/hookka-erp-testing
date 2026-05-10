@@ -1164,6 +1164,10 @@ function EmployeeMasterTab({
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
+  // Whether the per-row Departments multi-select popover is open. Only one
+  // row can be editing at a time so a single boolean is enough. Auto-closes
+  // when the row exits edit mode.
+  const [deptDropdownOpen, setDeptDropdownOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pinModal, setPinModal] = useState<PinModalState | null>(null);
   const [bulkModal, setBulkModal] = useState<BulkModalState | null>(null);
@@ -1383,6 +1387,7 @@ function EmployeeMasterTab({
         body: JSON.stringify(editForm),
       });
       setEditingId(null);
+      setDeptDropdownOpen(false);
       refreshWorkers();
     } catch {
       // handle error
@@ -1454,42 +1459,74 @@ function EmployeeMasterTab({
               )
               .join(", ");
           if (editingId === row.id) {
-            // Tag-style multi-select: chips that toggle per click. Primary
-            // departmentId follows the first ticked entry. Wraps onto multiple
-            // lines so all departments stay visible without a scrolling listbox.
+            // Multi-select disguised as a dropdown — looks like the Position
+            // <select> but the panel has tickable checkboxes. Wei Siang
+            // 2026-05-10: the chip wall was too tall and ugly inline.
+            const selected = editForm.departmentCodes;
+            const summary =
+              selected.length === 0
+                ? "— Select —"
+                : selected.length <= 2
+                  ? deptNamesOf(selected)
+                  : `${selected.length} departments`;
             return (
-              <div className="flex flex-wrap gap-1 max-w-[260px]">
-                {allDepts.map((d) => {
-                  const checked = editForm.departmentCodes.includes(d.code);
-                  return (
-                    <button
-                      key={d.id}
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditForm((f) => {
-                          const set = new Set(f.departmentCodes);
-                          if (set.has(d.code)) set.delete(d.code);
-                          else set.add(d.code);
-                          const codes = Array.from(set);
-                          const primaryDept = allDepts.find((x) => x.code === codes[0]);
-                          return {
-                            ...f,
-                            departmentCodes: codes,
-                            departmentId: primaryDept?.id ?? f.departmentId,
-                          };
-                        });
-                      }}
-                      className={`inline-flex items-center px-2 py-0.5 rounded border text-[11px] whitespace-nowrap transition-colors ${
-                        checked
-                          ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-                          : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
-                      }`}
-                    >
-                      {d.name}
-                    </button>
-                  );
-                })}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDeptDropdownOpen((v) => !v);
+                  }}
+                  className="h-8 w-44 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-6 text-left truncate flex items-center justify-between focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  title={selected.length > 0 ? deptNamesOf(selected) : ""}
+                >
+                  <span className="truncate">{summary}</span>
+                  <span className="text-[10px] text-[#9CA3AF] ml-1">▾</span>
+                </button>
+                {deptDropdownOpen && (
+                  <>
+                    {/* Click-outside backdrop */}
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setDeptDropdownOpen(false)}
+                    />
+                    <div className="absolute z-50 top-full left-0 mt-1 w-56 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
+                      {allDepts.map((d) => {
+                        const checked = editForm.departmentCodes.includes(d.code);
+                        return (
+                          <label
+                            key={d.id}
+                            className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-[#FAF9F7] ${
+                              checked ? "bg-[#FAF7EE]" : ""
+                            }`}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-[#6B5C32]"
+                              checked={checked}
+                              onChange={() => {
+                                setEditForm((f) => {
+                                  const set = new Set(f.departmentCodes);
+                                  if (set.has(d.code)) set.delete(d.code);
+                                  else set.add(d.code);
+                                  const codes = Array.from(set);
+                                  const primaryDept = allDepts.find((x) => x.code === codes[0]);
+                                  return {
+                                    ...f,
+                                    departmentCodes: codes,
+                                    departmentId: primaryDept?.id ?? f.departmentId,
+                                  };
+                                });
+                              }}
+                            />
+                            <span className="text-[#374151]">{d.name}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
               </div>
             );
           }
@@ -1760,7 +1797,7 @@ function EmployeeMasterTab({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setEditingId(null)}
+                onClick={() => { setEditingId(null); setDeptDropdownOpen(false); }}
               >
                 <X className="h-3 w-3" />
               </Button>

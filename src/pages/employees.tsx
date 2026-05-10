@@ -3488,6 +3488,13 @@ function EmployeeDetailTab({
     productionWorkMins > 0
       ? ((totalProdMins / productionWorkMins) * 100).toFixed(1)
       : null;
+  // Non-production hours = total working hours - production-dept hours.
+  // Surfaced as a subtitle on the Total Working Hrs card so the operator
+  // can reconcile the headline (incl. Warehousing / Repair / Maintenance /
+  // Production Shortfall) with the production-only denominator that drives
+  // Avg Efficiency. Mirrors the Prod Hrs / Non-Prod Hrs columns added on
+  // the Efficiency Overview tab in 93c3017.
+  const nonProductionWorkMins = Math.max(0, totalWorkMins - productionWorkMins);
   const totalOT = empRecords.reduce((s, r) => s + r.overtimeMinutes, 0);
   // Days Present — distinct dates the worker has any working_hour_entries
   // row for. Falls through attendance status entirely so workers entered
@@ -3801,6 +3808,11 @@ function EmployeeDetailTab({
               {totalWorkMins > 0 ? formatHours(totalWorkMins) : "-"}
             </p>
             <p className="text-xs text-[#6B7280]">Total Working Hrs</p>
+            {totalWorkMins > 0 && nonProductionWorkMins > 0 && (
+              <p className="mt-0.5 text-[10px] text-[#3E6570]">
+                {formatHours(productionWorkMins) === "-" ? "0h" : formatHours(productionWorkMins)} prod + {formatHours(nonProductionWorkMins)} non-prod
+              </p>
+            )}
             {jcCount > 0 && (
               <p className="mt-0.5 text-[10px] text-[#3E6570]">+{jcCount} JC completions</p>
             )}
@@ -3833,6 +3845,11 @@ function EmployeeDetailTab({
               </p>
             )}
             <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
+            {avgEff !== null && (
+              <p className="mt-0.5 text-[10px] text-[#3E6570]">
+                {formatHours(totalProdMins) === "-" ? "0h" : formatHours(totalProdMins)} ÷ {formatHours(productionWorkMins)}
+              </p>
+            )}
           </CardContent>
         </Card>
         <Card>

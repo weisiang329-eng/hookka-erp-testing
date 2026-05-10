@@ -219,7 +219,7 @@ export default function SupplierDetailPage() {
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
       alert(`Save failed: ${j?.error ?? res.status}`);
       return;
     }
@@ -232,7 +232,7 @@ export default function SupplierDetailPage() {
     if (!confirm(`Delete SKU mapping for ${b.materialCode}?`)) return;
     const res = await fetch(`/api/supplier-materials/${b.id}`, { method: "DELETE" });
     if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
       alert(`Delete failed: ${j?.error ?? res.status}`);
       return;
     }

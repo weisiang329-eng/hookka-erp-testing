@@ -4976,7 +4976,7 @@ export default function ProductionPage({
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
-                      style={{ width: "250px", height: "500px" }}
+                      style={{ width: "250px", height: "420px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       {/* Top header = Product Code (this box's specific
@@ -5002,25 +5002,13 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D] shrink-0">Special</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* QR + badge — VERTICAL stack. Order top→bottom:
-                          Legs (text only, no QR), Pillow (QR + badge),
-                          then Main sticker (QR + badge). Wei Siang spec
-                          2026-05-10: paired secondaries above the main
-                          (3/3 LEG above 1/3 SOFA). */}
+                      {/* QR + badge — Pillow is a separate section (has
+                          its own QR), Legs nests INSIDE the main
+                          sticker's right column above the 1/3 SOFA
+                          badge to fill the empty space next to the QR.
+                          One QR shared for legs+sofa (legs has no QR
+                          backing fg_unit anyway). */}
                       <div className="mt-auto flex flex-col gap-2">
-                        {legsPair && (
-                          <>
-                            <div className="flex flex-col items-center justify-center py-1">
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "20px" }}>
-                                {legsPair.pieceNo}/{legsPair.totalPieces}
-                              </div>
-                              <div className="font-bold leading-tight text-center mt-1 uppercase" style={{ fontSize: "16px" }}>
-                                {legsPair.pieceName}
-                              </div>
-                            </div>
-                            <div className="border-t border-dashed border-[#6B5C32]" />
-                          </>
-                        )}
                         {pillowPair && (
                           <>
                             <div className="flex items-end gap-2">
@@ -5040,10 +5028,24 @@ export default function ProductionPage({
                             <div className="border-t border-dashed border-[#6B5C32]" />
                           </>
                         )}
-                        {/* Main sticker — QR + badge horizontal. */}
+                        {/* Main sticker — QR on left, right column has
+                            legs above (if any) + sofa badge below. */}
                         <div className="flex items-end gap-2">
                           <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
-                          <div className="flex-1 text-center min-w-0">
+                          <div className="flex-1 text-center min-w-0 self-stretch flex flex-col">
+                            {legsPair && (
+                              <>
+                                <div className="flex flex-col items-center justify-center flex-1">
+                                  <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "18px" }}>
+                                    {legsPair.pieceNo}/{legsPair.totalPieces}
+                                  </div>
+                                  <div className="font-bold leading-tight text-center mt-1 uppercase" style={{ fontSize: "14px" }}>
+                                    {legsPair.pieceName}
+                                  </div>
+                                </div>
+                                <div className="border-t border-dashed border-[#6B5C32] my-1" />
+                              </>
+                            )}
                             <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
                               {s.pieceNo}/{s.totalPieces}
                             </div>

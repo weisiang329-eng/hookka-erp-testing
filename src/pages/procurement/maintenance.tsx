@@ -636,6 +636,7 @@ export default function SupplierMaintenancePage() {
   // fallback if the API is unreachable, so the page always renders.
   const [skuList, setSkuList] = useState<SupplierSKU[]>([]);
   const [skuSearch, setSkuSearch] = useState("");
+  const [skuSupplierFilter, setSkuSupplierFilter] = useState<string>("");
   const [showSKUForm, setShowSKUForm] = useState(false);
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
 
@@ -795,17 +796,33 @@ export default function SupplierMaintenancePage() {
   };
 
   // ---- SKU Tab ----
+  // Per-supplier counts for the dropdown — Wei Siang 2026-05-10:
+  // 969 rows in one flat list is unusable; pick a supplier to scope.
+  const skuCountBySupplierId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of resolvedSkuList) {
+      m.set(s.supplierId, (m.get(s.supplierId) ?? 0) + 1);
+    }
+    return m;
+  }, [resolvedSkuList]);
+
   const filteredSKU = useMemo(() => {
-    if (!skuSearch) return resolvedSkuList;
-    const q = skuSearch.toLowerCase();
-    return resolvedSkuList.filter(
-      (s) =>
-        s.internalRMCode.toLowerCase().includes(q) ||
-        s.materialName.toLowerCase().includes(q) ||
-        s.supplierSku.toLowerCase().includes(q) ||
-        (s.supplierName || "").toLowerCase().includes(q)
-    );
-  }, [resolvedSkuList, skuSearch]);
+    let rows = resolvedSkuList;
+    if (skuSupplierFilter) {
+      rows = rows.filter((s) => s.supplierId === skuSupplierFilter);
+    }
+    if (skuSearch) {
+      const q = skuSearch.toLowerCase();
+      rows = rows.filter(
+        (s) =>
+          s.internalRMCode.toLowerCase().includes(q) ||
+          s.materialName.toLowerCase().includes(q) ||
+          s.supplierSku.toLowerCase().includes(q) ||
+          (s.supplierName || "").toLowerCase().includes(q)
+      );
+    }
+    return rows;
+  }, [resolvedSkuList, skuSearch, skuSupplierFilter]);
 
   const skuColumns: Column<SupplierSKU>[] = useMemo(
     () => [
@@ -1010,13 +1027,35 @@ export default function SupplierMaintenancePage() {
       {/* ===== TAB 2: Supplier SKU & Costing ===== */}
       {activeTab === "sku-costing" && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="w-80">
-              <Input
-                placeholder="Search RM code, material, supplier SKU..."
-                value={skuSearch}
-                onChange={(e) => setSkuSearch(e.target.value)}
-              />
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={skuSupplierFilter}
+                onChange={(e) => setSkuSupplierFilter(e.target.value)}
+                className="h-10 px-3 rounded border border-[#D8D2CC] bg-white text-sm min-w-[260px]"
+                title="Filter SKU mappings by supplier"
+              >
+                <option value="">
+                  All suppliers ({resolvedSkuList.length})
+                </option>
+                {[...suppliers]
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((s) => {
+                    const n = skuCountBySupplierId.get(s.id) ?? 0;
+                    return (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({n})
+                      </option>
+                    );
+                  })}
+              </select>
+              <div className="w-72">
+                <Input
+                  placeholder="Search RM code, material, supplier SKU..."
+                  value={skuSearch}
+                  onChange={(e) => setSkuSearch(e.target.value)}
+                />
+              </div>
             </div>
             <Button variant="primary" onClick={() => { setEditingSKU(null); setShowSKUForm(true); }}>
               <Plus className="h-4 w-4" />

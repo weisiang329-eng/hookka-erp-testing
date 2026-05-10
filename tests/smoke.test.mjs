@@ -48,6 +48,11 @@ test('worker login has explicit loading phase UX on submit buttons', () => {
   assert.match(workerLogin, /loading \? t\("common\.loading"\)/);
 });
 
+test('worker team-stats endpoint is registered', () => {
+  const workerRoutes = read('src/api/routes/worker.ts');
+  assert.match(workerRoutes, /app\.get\(\s*["']\/team-stats["']/);
+});
+
 test('deploy workflow runs tests before build', () => {
   const deployWorkflow = read('.github/workflows/deploy.yml');
   const testStep = deployWorkflow.indexOf('- run: npm test');

@@ -52,6 +52,10 @@ type WorkerRow = {
   name: string;
   departmentId: string | null;
   departmentCode: string | null;
+  // Multi-department JSON array (e.g. '["FAB_CUT","FAB_SEW"]'). Added
+  // 2026-05-10 alongside the Operator Leader role; reads fall back to
+  // departmentCode when null/empty/unparseable.
+  departmentCodes: string | null;
   position: string | null;
   phone: string | null;
   status: string;
@@ -59,6 +63,28 @@ type WorkerRow = {
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
 };
+
+// Parse the workers.departmentCodes JSON array safely. Falls back to the
+// single primary departmentCode when the JSON is missing/invalid/empty.
+function parseWorkerDepartmentCodes(
+  raw: string | null,
+  fallback: string | null,
+): string[] {
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const cleaned = arr.filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        );
+        if (cleaned.length > 0) return cleaned;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return fallback ? [fallback] : [];
+}
 
 // Per-request resolver — every handler calls this once; the token + worker
 // row come from the DB on every hit, but `workers` reads are sub-ms via
@@ -79,7 +105,7 @@ async function getWorker(
     };
   }
   const w = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentId, departmentCode, position, phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth FROM workers WHERE id = ?",
+    "SELECT id, empNo, name, departmentId, departmentCode, departmentCodes, position, phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth FROM workers WHERE id = ?",
   )
     .bind(workerId)
     .first<WorkerRow>();
@@ -1188,6 +1214,257 @@ app.patch("/profile", async (c) => {
     return c.json({ success: true, data: { phone } });
   }
   return c.json({ success: true, data: { phone: worker.phone ?? "" } });
+});
+
+// ============================================================
+// GET /api/worker/team-stats?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Operator Leader dashboard aggregator. Returns a per-(department × category)
+// rollup of working minutes vs production minutes for every worker on the
+// leader's teams.
+//
+// Authorization: only Operator Leaders get real data. Anyone else gets
+// `{ isLeader: false, rows: [] }` (NOT 403) so the frontend can use this
+// single endpoint to decide whether to render the Team card at all.
+//
+// Defaults: last 7 days inclusive of today when from/to omitted.
+//
+// Production-minutes formula (MVP, deliberately simple): for each JC matched
+// by (departmentCode × itemCategory × completedDate in range), if ANY team
+// worker is on it (legacy pic1/pic2 OR via piece_pics), credit the JC's full
+// actualMinutes ?? estMinutes once. No double-counting per JC even when
+// multiple team members shared it. Frontend can refine later if needed.
+// ============================================================
+app.get("/team-stats", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { worker } = auth;
+
+  // Date defaults: last 7 days inclusive.
+  const today = new Date();
+  const defaultTo = today.toISOString().slice(0, 10);
+  const sixDaysAgo = new Date(today.getTime() - 6 * 86400000);
+  const defaultFrom = sixDaysAgo.toISOString().slice(0, 10);
+  const fromStr = (c.req.query("from") || defaultFrom).slice(0, 10);
+  const toStr = (c.req.query("to") || defaultTo).slice(0, 10);
+
+  // Non-leaders short-circuit. Frontend uses isLeader:false to skip rendering
+  // the Team card entirely; we still 200 OK so the request isn't an error.
+  if ((worker.position ?? "") !== "Operator Leader") {
+    return c.json({
+      success: true,
+      data: { isLeader: false, rows: [] },
+    });
+  }
+
+  const leaderDepts = parseWorkerDepartmentCodes(
+    worker.departmentCodes,
+    worker.departmentCode,
+  );
+  if (leaderDepts.length === 0) {
+    return c.json({
+      success: true,
+      data: { isLeader: true, range: { from: fromStr, to: toStr }, rows: [] },
+    });
+  }
+
+  // ---- Resolve every team worker (active workers whose dept set intersects
+  // the leader's). We pull ACTIVE workers and parse their JSON client-side
+  // (≤50 active workers, brute force is fine).
+  const allWorkersRes = await c.var.DB.prepare(
+    "SELECT id, departmentCode, departmentCodes FROM workers WHERE status = 'ACTIVE'",
+  ).all<{
+    id: string;
+    departmentCode: string | null;
+    departmentCodes: string | null;
+  }>();
+  const allWorkers = allWorkersRes.results ?? [];
+
+  // Map: deptCode -> Set of workerIds whose dept set contains it.
+  const workersByDept = new Map<string, Set<string>>();
+  for (const dc of leaderDepts) workersByDept.set(dc, new Set<string>());
+  for (const w of allWorkers) {
+    const codes = parseWorkerDepartmentCodes(
+      w.departmentCodes,
+      w.departmentCode,
+    );
+    for (const dc of leaderDepts) {
+      if (codes.includes(dc)) workersByDept.get(dc)!.add(w.id);
+    }
+  }
+
+  // Union of all team worker ids — used for the JC + WHE queries.
+  const allTeamIds = new Set<string>();
+  for (const set of workersByDept.values()) {
+    for (const id of set) allTeamIds.add(id);
+  }
+
+  type CellKey = string; // `${deptCode}::${category}`
+  const cellKey = (d: string, cat: string): CellKey => `${d}::${cat}`;
+  const CATEGORIES: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
+
+  type Cell = {
+    departmentCode: string;
+    category: "SOFA" | "BEDFRAME";
+    workingMinutes: number;
+    productionMinutes: number;
+    workerIds: Set<string>;
+  };
+  const cells = new Map<CellKey, Cell>();
+  for (const dc of leaderDepts) {
+    for (const cat of CATEGORIES) {
+      cells.set(cellKey(dc, cat), {
+        departmentCode: dc,
+        category: cat,
+        workingMinutes: 0,
+        productionMinutes: 0,
+        workerIds: new Set<string>(),
+      });
+    }
+  }
+
+  // ---- Working minutes: sum hours*60 from working_hour_entries.
+  // Skip the query entirely when the leader has no team members.
+  if (allTeamIds.size > 0) {
+    const idArr = Array.from(allTeamIds);
+    const idPh = idArr.map(() => "?").join(",");
+    const deptPh = leaderDepts.map(() => "?").join(",");
+    const wheRes = await c.var.DB.prepare(
+      `SELECT workerId, departmentCode, category, hours
+         FROM working_hour_entries
+        WHERE workerId IN (${idPh})
+          AND departmentCode IN (${deptPh})
+          AND date >= ? AND date <= ?`,
+    )
+      .bind(...idArr, ...leaderDepts, fromStr, toStr)
+      .all<{
+        workerId: string;
+        departmentCode: string;
+        category: string | null;
+        hours: number;
+      }>();
+    for (const r of wheRes.results ?? []) {
+      const cat = (r.category ?? "") as "SOFA" | "BEDFRAME";
+      if (cat !== "SOFA" && cat !== "BEDFRAME") continue;
+      const cell = cells.get(cellKey(r.departmentCode, cat));
+      if (!cell) continue;
+      cell.workingMinutes += Math.round((Number(r.hours) || 0) * 60);
+      cell.workerIds.add(r.workerId);
+    }
+  }
+
+  // ---- Production minutes: completed/transferred JCs in range whose dept
+  // matches a leader dept and whose linked PO has matching itemCategory.
+  // We pull every candidate JC by (departmentCode + status + completedDate),
+  // then filter by team membership and join to PO for itemCategory.
+  if (allTeamIds.size > 0) {
+    const deptPh = leaderDepts.map(() => "?").join(",");
+    const jcRes = await c.var.DB.prepare(
+      `SELECT id, productionOrderId, departmentCode, status, pic1Id, pic2Id,
+              completedDate, estMinutes, actualMinutes
+         FROM job_cards
+        WHERE departmentCode IN (${deptPh})
+          AND status IN ('COMPLETED','TRANSFERRED')
+          AND completedDate >= ? AND completedDate <= ?`,
+    )
+      .bind(...leaderDepts, fromStr, toStr)
+      .all<{
+        id: string;
+        productionOrderId: string;
+        departmentCode: string | null;
+        status: string;
+        pic1Id: string | null;
+        pic2Id: string | null;
+        completedDate: string | null;
+        estMinutes: number;
+        actualMinutes: number | null;
+      }>();
+    const candidateJcs = jcRes.results ?? [];
+
+    // Pull piece_pics for these JCs in one shot so we can detect team
+    // membership via the per-piece path too (not just legacy pic1/pic2).
+    let allPics: PiecePicRow[] = [];
+    if (candidateJcs.length > 0) {
+      const ids = candidateJcs.map((j) => j.id);
+      const ph = ids.map(() => "?").join(",");
+      const r = await c.var.DB.prepare(
+        `SELECT * FROM piece_pics WHERE jobCardId IN (${ph})`,
+      )
+        .bind(...ids)
+        .all<PiecePicRow>();
+      allPics = r.results ?? [];
+    }
+    const picsByJc = new Map<string, PiecePicRow[]>();
+    for (const p of allPics) {
+      const arr = picsByJc.get(p.jobCardId) ?? [];
+      arr.push(p);
+      picsByJc.set(p.jobCardId, arr);
+    }
+
+    // Resolve PO itemCategory in one batch.
+    const poIds = Array.from(
+      new Set(candidateJcs.map((j) => j.productionOrderId)),
+    );
+    const poCategoryById = new Map<string, string | null>();
+    if (poIds.length > 0) {
+      const ph = poIds.map(() => "?").join(",");
+      const r = await c.var.DB.prepare(
+        `SELECT id, itemCategory FROM production_orders WHERE id IN (${ph})`,
+      )
+        .bind(...poIds)
+        .all<{ id: string; itemCategory: string | null }>();
+      for (const row of r.results ?? []) {
+        poCategoryById.set(row.id, row.itemCategory);
+      }
+    }
+
+    for (const jc of candidateJcs) {
+      const dc = jc.departmentCode ?? "";
+      const cat = (poCategoryById.get(jc.productionOrderId) ?? "") as
+        | "SOFA"
+        | "BEDFRAME";
+      if (cat !== "SOFA" && cat !== "BEDFRAME") continue;
+      const cell = cells.get(cellKey(dc, cat));
+      if (!cell) continue;
+
+      // Identify the team workers on this JC (legacy + piece_pics paths).
+      const onJc = new Set<string>();
+      if (jc.pic1Id && allTeamIds.has(jc.pic1Id)) onJc.add(jc.pic1Id);
+      if (jc.pic2Id && allTeamIds.has(jc.pic2Id)) onJc.add(jc.pic2Id);
+      for (const p of picsByJc.get(jc.id) ?? []) {
+        if (p.pic1Id && allTeamIds.has(p.pic1Id)) onJc.add(p.pic1Id);
+        if (p.pic2Id && allTeamIds.has(p.pic2Id)) onJc.add(p.pic2Id);
+      }
+      if (onJc.size === 0) continue;
+
+      // Credit the JC's full minutes once (no double-count when multiple
+      // team workers share it). actualMinutes wins when populated.
+      const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+      cell.productionMinutes += mins;
+      for (const id of onJc) cell.workerIds.add(id);
+    }
+  }
+
+  const rows = Array.from(cells.values()).map((cell) => ({
+    departmentCode: cell.departmentCode,
+    category: cell.category,
+    workingMinutes: cell.workingMinutes,
+    productionMinutes: cell.productionMinutes,
+    efficiencyPct:
+      cell.workingMinutes > 0
+        ? Math.round((cell.productionMinutes / cell.workingMinutes) * 100)
+        : 0,
+    workerCount: cell.workerIds.size,
+  }));
+
+  return c.json({
+    success: true,
+    data: {
+      isLeader: true,
+      range: { from: fromStr, to: toStr },
+      rows,
+    },
+  });
 });
 
 export default app;

@@ -4976,7 +4976,7 @@ export default function ProductionPage({
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
-                      style={{ width: "250px", height: "420px" }}
+                      style={{ width: "230px", height: "380px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       {/* Top header = Product Code (this box's specific
@@ -5014,13 +5014,13 @@ export default function ProductionPage({
                             <div className="flex items-end gap-2">
                               <QRImg data={pillowTrackUrl} size={110} alt="Pillow QR" className="block" />
                               <div className="flex-1 text-center min-w-0">
-                                <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
+                                <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
                                   {pillowPair.pieceNo}/{pillowPair.totalPieces}
                                 </div>
-                                <div className="leading-tight truncate uppercase" style={{ fontSize: "12px" }}>
+                                <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
                                   {pillowPair.pieceName}
                                 </div>
-                                <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
+                                <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
                                   {pillowPair.shortCode}
                                 </div>
                               </div>
@@ -5036,23 +5036,23 @@ export default function ProductionPage({
                             {legsPair && (
                               <>
                                 <div className="flex flex-col items-center justify-center flex-1">
-                                  <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "18px" }}>
+                                  <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
                                     {legsPair.pieceNo}/{legsPair.totalPieces}
                                   </div>
-                                  <div className="font-bold leading-tight text-center mt-1 uppercase" style={{ fontSize: "14px" }}>
+                                  <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
                                     {legsPair.pieceName}
                                   </div>
                                 </div>
                                 <div className="border-t border-dashed border-[#6B5C32] my-1" />
                               </>
                             )}
-                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
+                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
                               {s.pieceNo}/{s.totalPieces}
                             </div>
-                            <div className="leading-tight truncate uppercase" style={{ fontSize: "12px" }}>
+                            <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
                               {s.pieceName}
                             </div>
-                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
+                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
                               {s.shortCode}
                             </div>
                           </div>

@@ -938,7 +938,7 @@ export default function ProductionPage({
   // is a noticeable hitch. Users who want to print or scan open the
   // section explicitly.
   const [showQRStrip, setShowQRStrip] = useState(false);
-  const [_showFgPreview, setShowFgPreview] = useState(false);
+  const [showFgPreview, setShowFgPreview] = useState(false);
   // Collapse both on tab change so the new tab starts fast; user re-opens
   // per tab if they actually need the QR grid.
   /* eslint-disable react-hooks/set-state-in-effect -- collapse panels on tab change */
@@ -3166,6 +3166,35 @@ export default function ProductionPage({
     setFgPrintRequested(true);
   }, [filteredOrders, fgStickers, loadFgStickers]);
 
+  // Grid-filter scoped FG stickers — single source of truth shared by the
+  // on-screen FG preview tiles AND the hidden print container, so what the
+  // operator sees printed matches what the grid filter shows. Without this
+  // shared predicate, filtering "WIP contains Divan" would still print the
+  // HB sticker because the print loop iterated raw `fgStickers` (Wei Siang
+  // report 2026-05-10).
+  const visibleFgStickers = useMemo<FgSticker[]>(() => {
+    const visibleRowsForKey =
+      (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
+    const visiblePoIds = new Set(visibleRowsForKey.map((r) => r.poId));
+    const visibleBfKeys = new Set<string>();
+    for (const r of visibleRowsForKey) {
+      if (r.category === "BEDFRAME") {
+        visibleBfKeys.add(`${r.poId}::${r.wipType}`);
+      }
+    }
+    return fgStickers.filter((s) => {
+      if (!visiblePoIds.has(s.poId)) return false;
+      if (s.itemCategory === "BEDFRAME") {
+        const t =
+          s.pieceName === "HB" ? "HB" :
+          s.pieceName === "Divan" ? "DIVAN" :
+          "";
+        return t === "" || visibleBfKeys.has(`${s.poId}::${t}`);
+      }
+      return true;
+    });
+  }, [fgStickers, gridFilteredDeptRows, deptRows]);
+
   // Auto-populate the FG preview tiles when entering the UPHOLSTERY or
   // PACKING tab. Orders change (dept switch, filter tweak) retrigger the
   // load so the tiles stay in sync with what the operator is looking at.
@@ -3210,7 +3239,10 @@ export default function ProductionPage({
 
   useTimeout(
     () => {
-      if (fgStickers.length === 0) {
+      // Use the grid-filter scoped count — when the operator narrows the
+      // PACKING grid down to nothing, Print All shouldn't fire window.print()
+      // against an empty `#batch-fg-print` container.
+      if (visibleFgStickers.length === 0) {
         setFgPrintRequested(false);
         return;
       }
@@ -4988,65 +5020,56 @@ export default function ProductionPage({
                 </span>
               </h2>
             </div>
+            {/* Show QR / Print All — mirrors the QR Stickers section on
+                non-PACK dept tabs (line 4851). Tiles stay collapsed by
+                default to keep tab entry fast (mounting 100+ <QRImg>s on
+                every tab change is laggy); operator clicks Show QR when
+                they actually need to scan/inspect. Print All triggers the
+                same hidden #batch-fg-print path the toolbar button uses,
+                and the print loop iterates `visibleFgStickers` so the
+                grid filter is honoured (Wei Siang 2026-05-10). */}
+            <div className="flex gap-2">
+              {visibleFgStickers.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowFgPreview((v) => !v)}
+                >
+                  {showFgPreview ? "Hide QR" : "Show QR"}
+                </Button>
+              )}
+              {visibleFgStickers.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handlePrintFgStickers}
+                >
+                  Print All
+                </Button>
+              )}
+            </div>
           </div>
           {loadingFgPreview ? (
             <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
               Loading FG units…
             </div>
-          ) : fgStickers.length === 0 ? (
+          ) : visibleFgStickers.length === 0 ? (
             <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
               No FG units for the current filter. FG units are generated when an
               order reaches this department.
             </div>
+          ) : !showFgPreview ? (
+            <div className="px-4 py-6 text-center text-xs text-[#9A918A]">
+              {visibleFgStickers.filter((s) => !s.isSyntheticLegs && !s.isSyntheticPillow).length} sticker{visibleFgStickers.filter((s) => !s.isSyntheticLegs && !s.isSyntheticPillow).length === 1 ? "" : "s"} ready · click <span className="font-semibold text-[#6B5C32]">Show QR</span> to render the tiles.
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <div className="flex gap-3 p-3 min-w-min">
-                {(() => {
-                  // Build visibility set from the post-filter dept-grid rows.
-                  // A bedframe PO has TWO packing rows (HB + DIVAN) so we key
-                  // by (poId, wipType) — wipType is "HB" or "DIVAN" on the
-                  // dept row, and the FG sticker derives the same on the BF
-                  // aggregator (pieceName "HB" vs "Divan", line 3002/3009).
-                  // Sofa POs collapse to ONE packing row (jc.wipKey === "FG")
-                  // so poId alone is sufficient for sofa stickers; synthetic
-                  // legs/pillow inherit compartment1's poId so they follow
-                  // their primary. Pillows from accessory POs carry their
-                  // own poId — if the accessory PO is filtered out, the
-                  // pillow is too (intentional).
-                  const visibleRowsForKey =
-                    (gridFilteredDeptRows as unknown as DeptRow[] | null) ??
-                    deptRows;
-                  const visiblePoIds = new Set(
-                    visibleRowsForKey.map((r) => r.poId),
-                  );
-                  const visibleBfKeys = new Set<string>();
-                  for (const r of visibleRowsForKey) {
-                    if (r.category === "BEDFRAME") {
-                      visibleBfKeys.add(`${r.poId}::${r.wipType}`);
-                    }
-                  }
-                  const stickerVisible = (s: FgSticker): boolean => {
-                    if (!visiblePoIds.has(s.poId)) return false;
-                    if (s.itemCategory === "BEDFRAME") {
-                      const t =
-                        s.pieceName === "HB" ? "HB" :
-                        s.pieceName === "Divan" ? "DIVAN" :
-                        "";
-                      return t === "" || visibleBfKeys.has(`${s.poId}::${t}`);
-                    }
-                    return true;
-                  };
-                  return fgStickers.map((s) => {
+                {visibleFgStickers.map((s) => {
                   // Paired secondary stickers (Legs after Compartment 1,
                   // Pillow after the LAST Compartment) render inside their
                   // pair partner's card — skip standalone.
                   if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
-                  // Grid-filter scoping — only render stickers whose parent
-                  // dept row passed the DataGrid's column filters. Without
-                  // this, filtering "WIP contains Divan" left the HB sticker
-                  // visible because it shares the same poId as the DIVAN
-                  // packing row (Wei Siang report 2026-05-10).
-                  if (!stickerVisible(s)) return null;
                   const origin =
                     typeof window !== "undefined" && window.location?.origin
                       ? window.location.origin
@@ -5059,10 +5082,10 @@ export default function ProductionPage({
                   // Pillow) carries comboPairKey pointing to its primary;
                   // we find them by walking the list. Single-compartment
                   // SOs may pair the same primary with BOTH secondaries.
-                  const legsPair = fgStickers.find(
+                  const legsPair = visibleFgStickers.find(
                     (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
                   );
-                  const pillowPair = fgStickers.find(
+                  const pillowPair = visibleFgStickers.find(
                     (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
                   );
                   // Both Legs and Pillow sections are text-only (no QR).
@@ -5145,8 +5168,7 @@ export default function ProductionPage({
                       </div>
                     </div>
                   );
-                });
-                })()}
+                })}
               </div>
             </div>
           )}
@@ -5258,8 +5280,11 @@ export default function ProductionPage({
         </>
       )}
 
-      {/* Batch FG stickers — one 100×150mm page per filtered PO. */}
-      {fgStickers.length > 0 && (
+      {/* Batch FG stickers — one 100×150mm page per filtered PO. Iterates
+          `visibleFgStickers` (grid-filter scoped) so Print All on the
+          PACKING tab honours whatever the operator has narrowed the grid
+          down to (Wei Siang 2026-05-10). */}
+      {visibleFgStickers.length > 0 && (
         <>
           <style>{`
             @media print {
@@ -5290,7 +5315,7 @@ export default function ProductionPage({
             }
           `}</style>
           <div id="batch-fg-print" className="hidden print:block">
-            {fgStickers.map((s) => {
+            {visibleFgStickers.map((s) => {
               // Paired secondaries (Legs / Pillow) print inside their
               // primary's page — skip standalone.
               if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
@@ -5300,10 +5325,10 @@ export default function ProductionPage({
                   : "";
               const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
               const customerLine = s.customerHub ? `${s.customerName} (${s.customerHub})` : s.customerName;
-              const legsPair = fgStickers.find(
+              const legsPair = visibleFgStickers.find(
                 (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
               );
-              const pillowPair = fgStickers.find(
+              const pillowPair = visibleFgStickers.find(
                 (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
               );
               // Legs section is text-only (no QR), no track URL needed.

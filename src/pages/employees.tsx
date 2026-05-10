@@ -1493,7 +1493,6 @@ function EmployeeMasterTab({
         body: JSON.stringify(payload),
       });
       setEditingId(null);
-      setDeptDropdownOpen(false);
       refreshWorkers();
     } catch {
       // handle error
@@ -1853,7 +1852,7 @@ function EmployeeMasterTab({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => { setEditingId(null); setDeptDropdownOpen(false); }}
+                onClick={() => setEditingId(null)}
               >
                 <X className="h-3 w-3" />
               </Button>

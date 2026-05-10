@@ -71,6 +71,8 @@ type Worker = {
   departmentCode: string;
   /** Multi-dept support — full set of department codes assigned to this worker. */
   departmentCodes?: string[];
+  /** Production categories the worker covers ("SOFA" / "BEDFRAME"). Empty = all. */
+  categories?: string[];
   position: string;
   phone: string;
   status: string;
@@ -1074,6 +1076,10 @@ type WorkerFormData = {
   // here as the full set; departmentId stays as the worker's "primary" so
   // legacy single-dept lookups keep working.
   departmentCodes: string[];
+  // Production categories — "SOFA" / "BEDFRAME". Empty array = no filter
+  // (worker handles whatever). For Operator Leaders this scopes the Team
+  // dashboard so a SOFA-only leader doesn't see BEDFRAME rows.
+  categories: string[];
   position: string;
   phone: string;
   basicSalarySen: number;
@@ -1090,6 +1096,7 @@ const emptyForm: WorkerFormData = {
   name: "",
   departmentId: "dept-1",
   departmentCodes: [],
+  categories: [],
   position: "Operator",
   phone: "",
   basicSalarySen: 180000,
@@ -1353,6 +1360,7 @@ function EmployeeMasterTab({
           : w.departmentCode
             ? [w.departmentCode]
             : [],
+      categories: Array.isArray(w.categories) ? w.categories : [],
       position: w.position,
       phone: w.phone,
       basicSalarySen: w.basicSalarySen,
@@ -1511,16 +1519,62 @@ function EmployeeMasterTab({
         label: "Position",
         render: (_value, row) =>
           editingId === row.id ? (
-            <Input
+            <select
               value={editForm.position}
               onChange={(e) =>
                 setEditForm((f) => ({ ...f, position: e.target.value }))
               }
-              className="h-8 w-24 text-xs"
-            />
+              className="h-8 w-36 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+            >
+              <option value="Operator">Operator</option>
+              <option value="Operator Leader">Operator Leader</option>
+            </select>
           ) : (
             <span className="text-[#4B5563]">{row.position}</span>
           ),
+      },
+      {
+        key: "categories",
+        label: "Categories",
+        render: (_value, row) => {
+          const CATS: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
+          if (editingId === row.id) {
+            return (
+              <div className="flex flex-wrap gap-1">
+                {CATS.map((cat) => {
+                  const checked = editForm.categories.includes(cat);
+                  return (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditForm((f) => {
+                          const set = new Set(f.categories);
+                          if (set.has(cat)) set.delete(cat);
+                          else set.add(cat);
+                          return { ...f, categories: Array.from(set) };
+                        });
+                      }}
+                      className={`inline-flex items-center px-2 py-0.5 rounded border text-[11px] whitespace-nowrap transition-colors ${
+                        checked
+                          ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                          : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          }
+          const cats = Array.isArray(row.categories) ? row.categories : [];
+          if (cats.length === 0) {
+            return <span className="text-[#9CA3AF] text-xs">All</span>;
+          }
+          return <span className="text-[#4B5563] text-xs">{cats.join(", ")}</span>;
+        },
       },
       {
         key: "phone",
@@ -1884,12 +1938,40 @@ function EmployeeMasterTab({
                   }
                   className="h-8 text-xs w-full border border-[#D1D5DB] rounded-md px-2 bg-white"
                 >
-                  <option value="">— Select —</option>
                   <option value="Operator">Operator</option>
                   <option value="Operator Leader">Operator Leader</option>
-                  <option value="Supervisor">Supervisor</option>
-                  <option value="Manager">Manager</option>
                 </select>
+              </div>
+              <div className="col-span-2">
+                <label className="text-xs text-[#6B7280]">
+                  Categories <span className="text-[10px] text-[#9CA3AF]">(blank = all)</span>
+                </label>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {(["SOFA", "BEDFRAME"] as const).map((cat) => {
+                    const checked = form.categories.includes(cat);
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => {
+                          setForm((f) => {
+                            const set = new Set(f.categories);
+                            if (set.has(cat)) set.delete(cat);
+                            else set.add(cat);
+                            return { ...f, categories: Array.from(set) };
+                          });
+                        }}
+                        className={`inline-flex items-center px-2.5 py-0.5 rounded border text-[11px] transition-colors ${
+                          checked
+                            ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                            : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
+                        }`}
+                      >
+                        {cat}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
               <div>
                 <label className="text-xs text-[#6B7280]">Phone</label>

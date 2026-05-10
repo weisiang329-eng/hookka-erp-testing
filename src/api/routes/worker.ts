@@ -105,7 +105,7 @@ async function getWorker(
     };
   }
   const w = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentId, departmentCode, departmentCodes, position, phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth FROM workers WHERE id = ?",
+    "SELECT id, empNo, name, departmentId, departmentCode, departmentCodes, categories, position, phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth FROM workers WHERE id = ?",
   )
     .bind(workerId)
     .first<WorkerRow>();
@@ -1301,7 +1301,33 @@ app.get("/team-stats", async (c) => {
 
   type CellKey = string; // `${deptCode}::${category}`
   const cellKey = (d: string, cat: string): CellKey => `${d}::${cat}`;
-  const CATEGORIES: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
+  // Scope categories to whatever the leader is responsible for. Empty list
+  // means "no filter" — show both SOFA and BEDFRAME. Wei Siang 2026-05-10.
+  const ALL_CATEGORIES: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
+  const leaderCats = (() => {
+    const raw = (worker as { categories?: string | string[] | null }).categories;
+    if (Array.isArray(raw)) {
+      const cleaned = raw.filter(
+        (x): x is "SOFA" | "BEDFRAME" => x === "SOFA" || x === "BEDFRAME",
+      );
+      return cleaned.length > 0 ? cleaned : null;
+    }
+    if (typeof raw === "string" && raw.length > 0) {
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          const cleaned = arr.filter(
+            (x): x is "SOFA" | "BEDFRAME" => x === "SOFA" || x === "BEDFRAME",
+          );
+          return cleaned.length > 0 ? cleaned : null;
+        }
+      } catch {
+        /* malformed → no filter */
+      }
+    }
+    return null;
+  })();
+  const CATEGORIES: Array<"SOFA" | "BEDFRAME"> = leaderCats ?? ALL_CATEGORIES;
 
   type Cell = {
     departmentCode: string;

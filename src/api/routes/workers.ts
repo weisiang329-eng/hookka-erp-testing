@@ -23,6 +23,10 @@ type WorkerRow = {
   // codes, e.g. '["FAB_CUT","FAB_SEW"]'. departmentCode stays as the
   // primary (legacy single) for back-compat with reads that filter by code.
   departmentCodes: string | null;
+  // Production categories the worker covers. JSON array of "SOFA" / "BEDFRAME".
+  // Empty/null = no filter (worker handles whatever). For Operator Leaders
+  // this scopes which (dept × category) cells the Team dashboard surfaces.
+  categories: string | null;
   position: string | null;
   phone: string | null;
   status: string;
@@ -58,6 +62,21 @@ function parseDepartmentCodes(raw: string | null, fallback: string): string[] {
   return fallback ? [fallback] : [];
 }
 
+function parseCategories(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      return arr.filter(
+        (x): x is string => typeof x === "string" && (x === "SOFA" || x === "BEDFRAME"),
+      );
+    }
+  } catch {
+    /* malformed → no filter */
+  }
+  return [];
+}
+
 function rowToWorker(row: WorkerRow) {
   return {
     id: row.id,
@@ -66,6 +85,7 @@ function rowToWorker(row: WorkerRow) {
     departmentId: row.departmentId ?? "",
     departmentCode: row.departmentCode ?? "",
     departmentCodes: parseDepartmentCodes(row.departmentCodes, row.departmentCode ?? ""),
+    categories: parseCategories(row.categories),
     position: row.position ?? "",
     phone: row.phone ?? "",
     status: row.status,
@@ -163,11 +183,17 @@ app.post("/", async (c) => {
     // single-code consumers (lookups by departmentCode) working.
     const primaryCode = codesArr[0];
 
+    const incomingCategories = Array.isArray(body.categories)
+      ? (body.categories as unknown[]).filter(
+          (x): x is string => x === "SOFA" || x === "BEDFRAME",
+        )
+      : [];
+
     await c.var.DB.prepare(
-      `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, departmentCodes, position,
+      `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, departmentCodes, categories, position,
          phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier,
          joinDate, icNumber, passportNumber, nationality)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -176,6 +202,7 @@ app.post("/", async (c) => {
         departmentId,
         primaryCode,
         JSON.stringify(codesArr),
+        JSON.stringify(incomingCategories),
         position ?? "",
         phone ?? "",
         "ACTIVE",
@@ -284,12 +311,23 @@ app.put("/:id", async (c) => {
             : [];
     const finalPrimary = finalCodes[0] ?? nextDepartmentCode ?? "";
 
+    const incomingCategories = Array.isArray(body.categories)
+      ? (body.categories as unknown[]).filter(
+          (x): x is string => x === "SOFA" || x === "BEDFRAME",
+        )
+      : null;
+    const finalCategories =
+      incomingCategories !== null
+        ? incomingCategories
+        : parseCategories(existing.categories);
+
     const merged = {
       name: body.name ?? existing.name,
       empNo: body.empNo ?? existing.empNo,
       departmentId: nextDepartmentId,
       departmentCode: finalPrimary,
       departmentCodes: JSON.stringify(finalCodes),
+      categories: JSON.stringify(finalCategories),
       position: body.position ?? existing.position ?? "",
       phone: body.phone ?? existing.phone ?? "",
       status: body.status ?? existing.status,
@@ -308,7 +346,7 @@ app.put("/:id", async (c) => {
 
     await c.var.DB.prepare(
       `UPDATE workers SET
-         name = ?, empNo = ?, departmentId = ?, departmentCode = ?, departmentCodes = ?,
+         name = ?, empNo = ?, departmentId = ?, departmentCode = ?, departmentCodes = ?, categories = ?,
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?
@@ -320,6 +358,7 @@ app.put("/:id", async (c) => {
         merged.departmentId,
         merged.departmentCode,
         merged.departmentCodes,
+        merged.categories,
         merged.position,
         merged.phone,
         merged.status,

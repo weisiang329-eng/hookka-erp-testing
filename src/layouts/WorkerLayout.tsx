@@ -13,7 +13,7 @@
 // ============================================================
 import { Outlet, useLocation, useNavigate, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Home, Wallet, User, Globe } from "lucide-react";
+import { Home, Wallet, User, Globe, Users } from "lucide-react";
 import {
   useT,
   useApplyHtmlLang,
@@ -84,6 +84,24 @@ export async function workerFetch(
   return res;
 }
 
+// Read the cached worker profile (set by /api/worker-auth/login) to find
+// out the operator's position. Synchronous so the bottom nav doesn't flash
+// the wrong shape on first render. Returns null when storage is empty or
+// malformed — every caller treats null as "not a leader".
+function readWorkerMeSync(): WorkerMe | null {
+  try {
+    const raw = localStorage.getItem(WORKER_ME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as WorkerMe;
+    if (parsed && typeof parsed === "object" && parsed.id && parsed.empNo) {
+      return parsed;
+    }
+  } catch {
+    /* malformed → treat as missing */
+  }
+  return null;
+}
+
 export default function WorkerLayout() {
   const t = useT();
   const navigate = useNavigate();
@@ -92,11 +110,18 @@ export default function WorkerLayout() {
 
   // Reactive token check — redirect to login if missing.
   const [token, setToken] = useState<string | null>(getWorkerToken());
+  // Cached profile drives the conditional Team tab. Re-reads on the same
+  // `storage` event the token watcher uses, so login/logout immediately
+  // expands or collapses the bottom nav.
+  const [workerMe, setWorkerMe] = useState<WorkerMe | null>(readWorkerMeSync);
 
   useEffect(() => {
-    // Re-read token from storage whenever another tab (or our own
+    // Re-read token + profile from storage whenever another tab (or our own
     // workerFetch 401 handler) changes it.
-    const onStorage = () => setToken(getWorkerToken());
+    const onStorage = () => {
+      setToken(getWorkerToken());
+      setWorkerMe(readWorkerMeSync());
+    };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
@@ -110,6 +135,12 @@ export default function WorkerLayout() {
   // Login page uses this same layout wrapper for consistent theming,
   // but skips the nav (no point showing tabs before login).
   const isLogin = pathname === "/worker/login";
+
+  // Operator Leader gets a 4th tab between Home and Pay so the Department
+  // Performance view (same module they have on desktop /employees) is one
+  // tap away. Backend /api/worker/department-performance returns isLeader
+  // anyway as defense in depth — this just hides the entry point.
+  const isLeader = (workerMe?.position ?? "") === "Operator Leader";
 
   return (
     <div className="min-h-screen bg-[#F0ECE9] flex flex-col text-[#1F1D1B]">
@@ -137,13 +168,23 @@ export default function WorkerLayout() {
       {/* Wei Siang 2026-05-10: Scan tab hidden until rollout. */}
       {!isLogin && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-[#D8D2CC] shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
-          <div className="max-w-md mx-auto grid grid-cols-3">
+          <div
+            className={`max-w-md mx-auto grid ${isLeader ? "grid-cols-4" : "grid-cols-3"}`}
+          >
             <TabButton
               to="/worker"
               active={pathname === "/worker"}
               icon={<Home className="h-5 w-5" />}
               label={t("nav.home")}
             />
+            {isLeader && (
+              <TabButton
+                to="/worker/team"
+                active={pathname.startsWith("/worker/team")}
+                icon={<Users className="h-5 w-5" />}
+                label={t("nav.team")}
+              />
+            )}
             <TabButton
               to="/worker/pay"
               active={pathname.startsWith("/worker/pay")}

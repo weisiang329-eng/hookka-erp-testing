@@ -21,6 +21,7 @@ const WorkerScan = lazy(() => import('./pages/worker/scan'))
 const WorkerIssue = lazy(() => import('./pages/worker/issue'))
 const WorkerPay = lazy(() => import('./pages/worker/pay'))
 const WorkerMe = lazy(() => import('./pages/worker/me'))
+const WorkerTeam = lazy(() => import('./pages/worker/team'))
 
 // ── Loading fallback ──────────────────────────────────────────────────────
 
@@ -89,6 +90,7 @@ export const router = createBrowserRouter([
       { path: '/worker/issue', element: <S><WorkerIssue /></S> },
       { path: '/worker/pay', element: <S><WorkerPay /></S> },
       { path: '/worker/me', element: <S><WorkerMe /></S> },
+      { path: '/worker/team', element: <S><WorkerTeam /></S> },
     ],
   },
 ])

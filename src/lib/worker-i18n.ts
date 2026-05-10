@@ -62,6 +62,7 @@ const dict: Dict = {
   },
   'nav.home': { en: 'Home', ms: 'Utama', zh: '主页', my: 'ပင်မ' },
   'nav.scan': { en: 'Scan', ms: 'Imbas', zh: '扫码', my: 'စကင်န်' },
+  'nav.team': { en: 'Team', ms: 'Pasukan', zh: '团队', my: 'အသင်း' },
   'nav.pay': { en: 'Pay', ms: 'Gaji', zh: '薪水', my: 'လစာ' },
   'nav.me': { en: 'Me', ms: 'Saya', zh: '我', my: 'ကျွန်ုပ်' },
 
@@ -549,6 +550,114 @@ const dict: Dict = {
     ms: 'pekerja',
     zh: '人',
     my: 'ဝန်ထမ်း',
+  },
+
+  // ---- Team page (Operator Leader's Department Performance view) ----
+  'team.title': {
+    en: 'Department Performance',
+    ms: 'Prestasi Jabatan',
+    zh: '部门表现',
+    my: 'ဌာန၏ စွမ်းဆောင်ရည်',
+  },
+  'team.allDepts': {
+    en: 'All my departments',
+    ms: 'Semua jabatan saya',
+    zh: '我所有部门',
+    my: 'ကျွန်ုပ်၏ ဌာန အားလုံး',
+  },
+  'team.allCats': {
+    en: 'All categories',
+    ms: 'Semua kategori',
+    zh: '全部类别',
+    my: 'အမျိုးအစား အားလုံး',
+  },
+  'team.dept': {
+    en: 'Department',
+    ms: 'Jabatan',
+    zh: '部门',
+    my: 'ဌာန',
+  },
+  'team.category': {
+    en: 'Category',
+    ms: 'Kategori',
+    zh: '类别',
+    my: 'အမျိုးအစား',
+  },
+  'team.from': { en: 'From', ms: 'Dari', zh: '从', my: 'မှ' },
+  'team.to': { en: 'To', ms: 'Hingga', zh: '到', my: 'အထိ' },
+  'team.workers': { en: 'Workers', ms: 'Pekerja', zh: '员工数', my: 'ဝန်ထမ်း' },
+  'team.totalWorkingHrs': {
+    en: 'Working Hrs',
+    ms: 'Jam Kerja',
+    zh: '工作时长',
+    my: 'အလုပ်ချိန်',
+  },
+  'team.totalProductionHrs': {
+    en: 'Production Hrs',
+    ms: 'Jam Pengeluaran',
+    zh: '生产时长',
+    my: 'ထုတ်လုပ်ချိန်',
+  },
+  'team.avgEfficiency': {
+    en: 'Avg Efficiency',
+    ms: 'Kecekapan Purata',
+    zh: '平均效率',
+    my: 'ပျမ်းမျှ စွမ်းဆောင်ရည်',
+  },
+  'team.dailyBreakdown': {
+    en: 'Daily Breakdown',
+    ms: 'Pecahan Harian',
+    zh: '每日明细',
+    my: 'နေ့စဉ် အသေးစိတ်',
+  },
+  'team.colDate': { en: 'Date', ms: 'Tarikh', zh: '日期', my: 'ရက်စွဲ' },
+  'team.colWorkingHrs': {
+    en: 'Working',
+    ms: 'Kerja',
+    zh: '工时',
+    my: 'အလုပ်',
+  },
+  'team.colProductionHrs': {
+    en: 'Production',
+    ms: 'Pengeluaran',
+    zh: '生产',
+    my: 'ထုတ်လုပ်',
+  },
+  'team.colEfficiency': {
+    en: 'Eff %',
+    ms: 'Cekap %',
+    zh: '效率%',
+    my: 'စွမ်း%',
+  },
+  'team.empty': {
+    en: 'No data in this range',
+    ms: 'Tiada data dalam tempoh ini',
+    zh: '此区间无数据',
+    my: 'ဤကာလအတွင်း ဒေတာ မရှိပါ',
+  },
+  'team.loading': {
+    en: 'Loading…',
+    ms: 'Memuatkan…',
+    zh: '加载中…',
+    my: 'ဖွင့်နေသည်…',
+  },
+  'team.notLeader': {
+    en: 'Operator Leader access only',
+    ms: 'Akses Ketua Operator sahaja',
+    zh: '仅限操作组长查看',
+    my: 'အော်ပရေတာ ခေါင်းဆောင်သာ ကြည့်နိုင်သည်',
+  },
+  'team.workerProductionShare': {
+    en: 'Per-worker share',
+    ms: 'Bahagian setiap pekerja',
+    zh: '每位员工占比',
+    my: 'ဝန်ထမ်းတစ်ဦးစီ၏ ဝေစု',
+  },
+  'team.jobs': {
+    en: 'Job cards',
+    ms: 'Kad kerja',
+    zh: '工作单',
+    my: 'အလုပ်ကတ်များ',
   },
 
   // ---- Me ----

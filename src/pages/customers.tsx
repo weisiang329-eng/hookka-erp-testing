@@ -3151,7 +3151,9 @@ export default function CustomersPage() {
         body: JSON.stringify(updated),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({} as { error?: string }));
+        const body = (await res
+          .json()
+          .catch(() => ({}))) as { error?: string };
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
       // Only this customer changed — don't nuke the whole list cache. Hub

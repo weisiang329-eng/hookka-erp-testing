@@ -1465,9 +1465,12 @@ export default function DeliveryPage() {
         }).then((r) =>
           r.ok
             ? null
-            : r.json().then((j: { error?: string }) =>
-                Promise.reject(new Error(j?.error || `HTTP ${r.status}`))
-              )
+            : r.json().then((j) => {
+                const body = j as { error?: string };
+                return Promise.reject(
+                  new Error(body?.error || `HTTP ${r.status}`),
+                );
+              })
         )
       )
     );
@@ -1497,9 +1500,12 @@ export default function DeliveryPage() {
         }).then((r) =>
           r.ok
             ? null
-            : r.json().then((j: { error?: string }) =>
-                Promise.reject(new Error(j?.error || `HTTP ${r.status}`))
-              )
+            : r.json().then((j) => {
+                const body = j as { error?: string };
+                return Promise.reject(
+                  new Error(body?.error || `HTTP ${r.status}`),
+                );
+              })
         )
       )
     );

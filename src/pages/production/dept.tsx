@@ -49,5 +49,23 @@ export default function ProductionDept() {
   if (!code) {
     return <Navigate to="/production" replace />;
   }
-  return <ProductionPage mode="dept" deptCode={code} />;
+  // key={code} forces a fresh ProductionPage instance on every dept hop.
+  // Without this, navigating /production/upholstery → /production/foam reused
+  // the previous instance, leaving the old `orders` array (~2 Upholstery POs)
+  // in state while the new dept fetched its own (~1k FOAM POs). The page
+  // re-rendered repeatedly through three intermediate states (URL changed →
+  // filters cleared → fetch fired → orders arrived → activeTab synced),
+  // each one paying the full pickerIndex / baseRows / visibleOrders memo
+  // recompute. Operator saw a 50s freeze with the page stuck rendering
+  // the old dept's title + records badge — the Foam click that should
+  // have shown Foam data sat at "Upholstery — 2 items" until the cascade
+  // finished. (Wei Siang 2026-05-10 report.)
+  //
+  // Remount runs the init effects exactly once with the right inputs,
+  // collapsing those 22 sequential long tasks into one render. Cost: the
+  // top-bar filter inputs (search / customer / state / category) reset
+  // between dept hops — their state is URL-backed anyway and the URL
+  // change clears the params, so the visible result is the same. Column
+  // filters / sort survive because DataGrid persists those by gridId.
+  return <ProductionPage key={code} mode="dept" deptCode={code} />;
 }

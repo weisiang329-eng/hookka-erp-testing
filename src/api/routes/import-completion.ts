@@ -14349,4 +14349,104 @@ app.post("/backfill-pillow-packing-jc", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-supplier-sku-1to1
+//
+// Wei Siang spec (2026-05-10): 731 of 969 supplier_material_bindings have
+// supplierSku != materialCode — caused by an import default that
+// dumped the same value (e.g. "PC151-01" on 153 rows) across unrelated
+// internal codes. Operators were about to open POs against the wrong
+// supplier SKU.
+//
+// Fix: force supplierSku = materialCode for every mismatched row. If
+// any supplier really does use a different SKU, operator can fix that
+// row manually in Maintenance afterwards (the backfill is a safe
+// reset since no supplierDescription was set on these rows anyway).
+//
+// Body: { dryRun: boolean (default true) }
+//
+// Per project_migration_in_progress: one-shot, will be removed
+// post-migration.
+// ---------------------------------------------------------------------------
+app.post("/backfill-supplier-sku-1to1", async (c) => {
+  const denied = await requirePermission(c, "suppliers", "update");
+  if (denied) return denied;
+
+  let body: { dryRun?: unknown } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    // empty body OK
+  }
+  const dryRun = body.dryRun !== false;
+  const db = c.var.DB;
+
+  type Row = {
+    id: string;
+    materialCode: string | null;
+    materialName: string | null;
+    supplierSku: string | null;
+    supplierDescription: string | null;
+  };
+
+  const res = await db
+    .prepare(
+      `SELECT id, materialCode, materialName, supplierSku, supplierDescription
+         FROM supplier_material_bindings
+         WHERE supplierSku IS NOT NULL
+           AND materialCode IS NOT NULL
+           AND supplierSku <> materialCode`,
+    )
+    .all<Row>();
+  const rows = res.results ?? [];
+
+  // Distribution of "wrong" supplierSku values for visibility
+  const dist = new Map<string, number>();
+  for (const r of rows) {
+    const k = r.supplierSku || "";
+    dist.set(k, (dist.get(k) || 0) + 1);
+  }
+  const topDist = [...dist.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([sku, count]) => ({ sku, count }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      mismatchCount: rows.length,
+      topMismatchedSkus: topDist,
+      sampleChanges: rows.slice(0, 20).map((r) => ({
+        id: r.id,
+        materialCode: r.materialCode,
+        materialName: r.materialName,
+        supplierSku_before: r.supplierSku,
+        supplierSku_after: r.materialCode,
+      })),
+    });
+  }
+
+  // Live: batch update.
+  const stmts: D1PreparedStatement[] = rows.map((r) =>
+    db
+      .prepare(
+        `UPDATE supplier_material_bindings SET supplierSku = ? WHERE id = ?`,
+      )
+      .bind(r.materialCode, r.id),
+  );
+  // D1 batch limit ~100 per call — chunk.
+  const chunkSize = 80;
+  for (let i = 0; i < stmts.length; i += chunkSize) {
+    await db.batch(stmts.slice(i, i + chunkSize));
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    updated: rows.length,
+    topMismatchedSkus: topDist,
+  });
+});
+
 export default app;

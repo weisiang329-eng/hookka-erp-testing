@@ -5185,15 +5185,20 @@ export default function ProductionPage({
                 FG Sticker Preview
                 <span className="ml-2 text-xs font-normal text-[#8A7F73]">
                   {(() => {
-                    const visibleRows = gridFilteredDeptRows ?? deptRows;
-                    const rowCount = visibleRows.length;
-                    // Sum wipQty (Qty column) across visible rows — 1 qty
-                    // = 1 sticker (1 physical box) per Wei Siang spec.
-                    const qtySum = visibleRows.reduce(
-                      (s, r) => s + ((r as { qty?: number }).qty ?? 0),
-                      0,
-                    );
-                    return `(${rowCount} row${rowCount === 1 ? "" : "s"} · ${qtySum} sticker${qtySum === 1 ? "" : "s"})`;
+                    // Mirror the QR Stickers panel on the other dept tabs:
+                    // count the actual sticker tiles that will render, not
+                    // an upstream "expected" qty derived from grid rows.
+                    // The previous "(N rows · M stickers)" form let the
+                    // header advertise 9 stickers while the body said "No
+                    // FG units" (server hadn't generated them yet) — Wei
+                    // Siang reported it as "panel feels open with no
+                    // matching content" 2026-05-10. Filter out the
+                    // synthetic Legs/Pillow tiles for the same reason as
+                    // the collapsed-state copy below.
+                    const realCount = visibleFgStickers.filter(
+                      (s) => !s.isSyntheticLegs && !s.isSyntheticPillow,
+                    ).length;
+                    return `(${realCount} sticker${realCount === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;
                   })()}
                 </span>
               </h2>
@@ -5233,8 +5238,7 @@ export default function ProductionPage({
             </div>
           ) : visibleFgStickers.length === 0 ? (
             <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
-              No FG units for the current filter. FG units are generated when an
-              order reaches this department.
+              No FG units match the current filter.
             </div>
           ) : !showFgPreview ? (
             <div className="px-4 py-6 text-center text-xs text-[#9A918A]">

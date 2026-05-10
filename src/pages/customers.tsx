@@ -182,6 +182,7 @@ function StateBadge({ state }: { state: string }) {
 //   - Pending badge surfaces when a future-dated history row exists.
 // =====================================================================
 function CustomerProductsPanel({ customerId, customerName, customer: _customer }: { customerId: string; customerName: string; customer: Customer }) {
+  const { toast } = useToast();
   // Date the operator wants prices resolved to. Drives BOTH the on-screen
   // grid AND the Export Quotation PDF — plumbed into both
   // /api/customer-products?asOf= and /api/customer-quotation?asOf=.
@@ -287,7 +288,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
   // Bulk save — one POST /api/customer-products/:cpId/prices per dirty row.
   async function bulkSave() {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(bulkEffectiveFrom)) {
-      alert("Effective date must be YYYY-MM-DD.");
+      toast.error("Effective date must be YYYY-MM-DD.");
       return;
     }
     if (dirtyEdits.size === 0) return;
@@ -318,7 +319,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       const results = await Promise.all(requests);
       const failed = results.filter((r) => !r.ok);
       if (failed.length > 0) {
-        alert(
+        toast.error(
           `${failed.length} of ${results.length} updates failed. The successful ones were saved.`,
         );
       }
@@ -366,7 +367,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
     const res = await fetch(`/api/customer-products/${row.id}`, { method: "DELETE" });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      alert((j as { error?: string }).error || `Failed to remove (HTTP ${res.status})`);
+      toast.error((j as { error?: string }).error || `Failed to remove (HTTP ${res.status})`);
       return;
     }
     invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
@@ -393,7 +394,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        alert((j as { error?: string }).error || `Failed to assign (HTTP ${res.status})`);
+        toast.error((j as { error?: string }).error || `Failed to assign (HTTP ${res.status})`);
         return;
       }
       invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
@@ -430,7 +431,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        alert((j as { error?: string }).error || `Copy from master failed (HTTP ${res.status})`);
+        toast.error((j as { error?: string }).error || `Copy from master failed (HTTP ${res.status})`);
         return;
       }
       const j = (await res.json().catch(() => ({}))) as {
@@ -439,7 +440,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       };
       const a = j.data?.assigned ?? 0;
       const h = j.data?.historyRowsAdded ?? 0;
-      alert(
+      toast.success(
         `Sync done — assigned ${a} new SKU${a === 1 ? "" : "s"}, mirrored ${h} master price-history row${h === 1 ? "" : "s"}.`,
       );
       invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
@@ -457,7 +458,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
   // exports for the same customer don't collide on disk.
   const handleExportQuotationV2 = async () => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(quotationAsOf)) {
-      alert("Effective date must be YYYY-MM-DD.");
+      toast.error("Effective date must be YYYY-MM-DD.");
       return;
     }
     setExportingQuotation(true);
@@ -467,7 +468,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       );
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        alert(
+        toast.error(
           (j as { error?: string }).error ||
             `Failed to fetch quotation (HTTP ${res.status})`,
         );
@@ -477,7 +478,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
         | { success: true; data: import("@/lib/generate-customer-quotation-pdf-v2").QuotationEnvelope }
         | { success: false; error?: string };
       if (!json.success) {
-        alert(json.error || "Quotation API returned an error.");
+        toast.error(json.error || "Quotation API returned an error.");
         return;
       }
       // Optional: pull a kv_config('org-letterhead') override so the PDF
@@ -2332,6 +2333,7 @@ function CustomerPriceHistoryDialog({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const { toast } = useToast();
   const [history, setHistory] = useState<PriceHistoryRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2422,7 +2424,7 @@ function CustomerPriceHistoryDialog({
 
   const save = async () => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
-      alert("Effective From date is required (YYYY-MM-DD).");
+      toast.error("Effective From date is required (YYYY-MM-DD).");
       return;
     }
     setSaving(true);
@@ -2442,7 +2444,7 @@ function CustomerPriceHistoryDialog({
             if (!raw) continue;
             const num = Number(raw);
             if (!Number.isFinite(num) || num < 0) {
-              alert(`Invalid price for ${h}" ${t}: must be a non-negative number.`);
+              toast.error(`Invalid price for ${h}" ${t}: must be a non-negative number.`);
               setSaving(false);
               return;
             }
@@ -2461,7 +2463,7 @@ function CustomerPriceHistoryDialog({
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        alert((j as { error?: string }).error || `Failed to save (HTTP ${res.status})`);
+        toast.error((j as { error?: string }).error || `Failed to save (HTTP ${res.status})`);
         return;
       }
       onChanged();
@@ -2479,7 +2481,7 @@ function CustomerPriceHistoryDialog({
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      alert((j as { error?: string }).error || `Failed to delete (HTTP ${res.status})`);
+      toast.error((j as { error?: string }).error || `Failed to delete (HTTP ${res.status})`);
       return;
     }
     onChanged();
@@ -3061,6 +3063,10 @@ export default function CustomersPage() {
   // edit customer dialog state
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
   const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0 });
+  // Guards the Save Changes button so a double-tap on tablet doesn't fire two
+  // PUTs. persistCustomer already does the optimistic-update + rollback dance,
+  // but without this guard the operator can still hammer the network.
+  const [savingEdit, setSavingEdit] = useState(false);
 
   // add/edit hub form state
   const [showAddHub, setShowAddHub] = useState(false);
@@ -3117,17 +3123,17 @@ export default function CustomersPage() {
       // otherwise let the row disappear from the list locally while the
       // customer stays in the DB. On next reload it reappears "zombie" style.
       if (!res.ok) {
-        alert(json?.error || `Failed to delete customer (HTTP ${res.status})`);
+        toast.error(json?.error || `Failed to delete customer (HTTP ${res.status})`);
         return;
       }
       if (json.success) {
         setData((prev) => prev.filter((c) => c.id !== customer.id));
         invalidateCachePrefix("/api/customers");
       } else {
-        alert(json.error || "Failed to delete customer");
+        toast.error(json.error || "Failed to delete customer");
       }
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Network error — customer not deleted");
+      toast.error(e instanceof Error ? e.message : "Network error — customer not deleted");
     }
   };
 
@@ -3180,12 +3186,17 @@ export default function CustomersPage() {
   };
 
   const saveEditCustomer = async () => {
-    if (!editCustomer) return;
-    const updated = { ...editCustomer, ...editCustForm };
-    const ok = await persistCustomer(updated);
-    if (ok) setEditCustomer(null);
-    // On failure persistCustomer already rolled back local state and toasted.
-    // Keep the dialog open so the operator can retry.
+    if (!editCustomer || savingEdit) return;
+    setSavingEdit(true);
+    try {
+      const updated = { ...editCustomer, ...editCustForm };
+      const ok = await persistCustomer(updated);
+      if (ok) setEditCustomer(null);
+      // On failure persistCustomer already rolled back local state and toasted.
+      // Keep the dialog open so the operator can retry.
+    } finally {
+      setSavingEdit(false);
+    }
   };
 
   // ---------- KPI calculations ----------
@@ -3760,8 +3771,8 @@ export default function CustomersPage() {
               </div>
             </div>
             <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
-              <Button variant="outline" onClick={() => setEditCustomer(null)}>Cancel</Button>
-              <Button variant="primary" onClick={saveEditCustomer} disabled={!editCustForm.name || !editCustForm.code}>Save Changes</Button>
+              <Button variant="outline" onClick={() => setEditCustomer(null)} disabled={savingEdit}>Cancel</Button>
+              <Button variant="primary" onClick={saveEditCustomer} disabled={savingEdit || !editCustForm.name || !editCustForm.code}>{savingEdit ? "Saving…" : "Save Changes"}</Button>
             </div>
           </div>
         </div>

@@ -53,6 +53,12 @@ test('worker team-stats endpoint is registered', () => {
   assert.match(workerRoutes, /app\.get\(\s*["']\/team-stats["']/);
 });
 
+test('department-performance route is mounted in api worker', () => {
+  const apiWorker = read('src/api/worker.ts');
+  assert.match(apiWorker, /app\.route\(\s*["']\/api\/department-performance["']\s*,\s*departmentPerformance\s*\)/);
+  assert.ok(existsSync(resolve(root, 'src/api/routes/department-performance.ts')));
+});
+
 test('deploy workflow runs tests before build', () => {
   const deployWorkflow = read('.github/workflows/deploy.yml');
   const testStep = deployWorkflow.indexOf('- run: npm test');

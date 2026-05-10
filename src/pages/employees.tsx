@@ -3751,6 +3751,263 @@ function EmployeeDetailTab({
   );
 }
 
+// ========== TAB 4b: DEPARTMENT PERFORMANCE ==========
+//
+// Sibling of EmployeeDetailTab — same KPI strip + daily breakdown layout, but
+// the slice is (department, category, dateRange) instead of (worker,
+// dateRange). Backend GET /api/department-performance returns pre-aggregated
+// totals + per-day rows so this tab is a thin renderer.
+
+type DeptPerfDailyRow = {
+  date: string;
+  workingMinutes: number;
+  productionMinutes: number;
+  efficiencyPct: number;
+};
+
+type DeptPerfResponse = {
+  success?: boolean;
+  data?: {
+    range: { from: string; to: string };
+    departmentCode: string | null;
+    category: string | null;
+    totals: {
+      workingMinutes: number;
+      productionMinutes: number;
+      efficiencyPct: number;
+      workerCount: number;
+    };
+    daily: DeptPerfDailyRow[];
+  };
+};
+
+// Default range = last 7 days inclusive (today − 6 .. today). Computed once
+// at module scope so the localStorage fallback below stays cheap and the
+// per-render call sites stay readable.
+function sevenDaysAgoStr(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 6);
+  return d.toISOString().split("T")[0];
+}
+
+function DepartmentPerformanceTab({
+  departments,
+}: {
+  departments: DepartmentLite[];
+}) {
+  // Fall back to seed depts so the dropdown doesn't flash empty on first
+  // render before /api/departments resolves. Sorted: production first
+  // (in sequence order), then non-production — same convention as the
+  // Efficiency Overview tab.
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
+  const orderedDepts = useMemo(() => {
+    const copy = [...allDepts];
+    copy.sort((a, b) => {
+      if (a.isProduction !== b.isProduction) return a.isProduction ? -1 : 1;
+      const sa = a.sequence ?? 999;
+      const sb = b.sequence ?? 999;
+      if (sa !== sb) return sa - sb;
+      return a.code.localeCompare(b.code);
+    });
+    return copy;
+  }, [allDepts]);
+
+  const [departmentCode, setDepartmentCode] = useState<string>("");
+  const [category, setCategory] = useState<string>("");
+
+  // Date range — last 7 days inclusive by default, persisted per-tab so
+  // reopening the page restores the operator's window. Mirrors the pattern
+  // every other tab on this page uses.
+  const [dateFrom, setDateFrom] = useState<string>(() =>
+    readPersistedDateRange("employees:dept-perf:dateRange").from ?? sevenDaysAgoStr()
+  );
+  const [dateTo, setDateTo] = useState<string>(() =>
+    readPersistedDateRange("employees:dept-perf:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("employees:dept-perf:dateRange", dateFrom, dateTo);
+  }, [dateFrom, dateTo]);
+
+  const url = `/api/department-performance?from=${dateFrom}&to=${dateTo}&departmentCode=${encodeURIComponent(departmentCode)}&category=${encodeURIComponent(category)}`;
+  const { data: resp, loading } = useCachedJson<DeptPerfResponse>(url);
+  const payload = resp?.data;
+  const totals = payload?.totals;
+  const daily: DeptPerfDailyRow[] = useMemo(() => payload?.daily ?? [], [payload]);
+
+  const avgEff = totals && totals.workingMinutes > 0
+    ? totals.efficiencyPct.toFixed(1)
+    : null;
+
+  const dailyColumns: Column<DeptPerfDailyRow>[] = [
+    {
+      key: "date",
+      label: "Date",
+      sortable: true,
+      render: (_v, row) => <span className="font-medium">{formatDateDMY(row.date)}</span>,
+    },
+    {
+      key: "workingMinutes",
+      label: "Working hrs",
+      align: "right",
+      sortable: true,
+      render: (_v, row) => (
+        <span className="tabular-nums">
+          {row.workingMinutes > 0 ? formatHours(row.workingMinutes) : "-"}
+        </span>
+      ),
+    },
+    {
+      key: "productionMinutes",
+      label: "Production hrs",
+      align: "right",
+      sortable: true,
+      render: (_v, row) => (
+        <span className="tabular-nums">
+          {row.productionMinutes > 0 ? formatHours(row.productionMinutes) : "-"}
+        </span>
+      ),
+    },
+    {
+      key: "efficiencyPct",
+      label: "Efficiency %",
+      align: "right",
+      sortable: true,
+      render: (_v, row) => {
+        if (row.workingMinutes <= 0) {
+          return <span className="text-[#9CA3AF] tabular-nums">—</span>;
+        }
+        const pct = row.efficiencyPct;
+        const color = pct >= 80 ? "text-[#4F7C3A]" : pct >= 60 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
+        return (
+          <span className={`font-semibold tabular-nums ${color}`}>
+            {pct.toFixed(1)}%
+          </span>
+        );
+      },
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {/* Filters */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center flex-wrap gap-4">
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-[#1F1D1B]">Department</label>
+              <select
+                value={departmentCode}
+                onChange={(e) => setDepartmentCode(e.target.value)}
+                className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="">All departments</option>
+                {orderedDepts.map((d) => (
+                  <option key={d.code} value={d.code}>
+                    {d.code} - {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-[#1F1D1B]">Category</label>
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="">All categories</option>
+                <option value="SOFA">SOFA</option>
+                <option value="BEDFRAME">BEDFRAME</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">From</label>
+              <Input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="w-36 h-8 text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">To</label>
+              <Input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="w-36 h-8 text-xs"
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Summary Stats — mirrors EmployeeDetailTab strip, minus Total OT
+          (backend doesn't surface OT for dept aggregates). "Workers" replaces
+          "Days Present" because the response gives us workerCount, not a
+          per-worker presence count. */}
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
+        <Card>
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-[#1F1D1B]">{totals?.workerCount ?? 0}</p>
+            <p className="text-xs text-[#6B7280]">Workers</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold">
+              {totals && totals.workingMinutes > 0 ? formatHours(totals.workingMinutes) : "-"}
+            </p>
+            <p className="text-xs text-[#6B7280]">Total Working Hrs</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold">
+              {totals && totals.productionMinutes > 0 ? formatHours(totals.productionMinutes) : "-"}
+            </p>
+            <p className="text-xs text-[#6B7280]">Total Production Hrs</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            {avgEff !== null ? (
+              <p
+                className={`text-2xl font-bold ${Number(avgEff) >= 80 ? "text-[#4F7C3A]" : Number(avgEff) >= 60 ? "text-[#9C6F1E]" : "text-[#9A3A2D]"}`}
+              >
+                {avgEff}%
+              </p>
+            ) : (
+              <p className="text-2xl font-bold text-[#9CA3AF]" title="No working hours recorded in range — efficiency requires hours to compare against.">
+                —
+              </p>
+            )}
+            <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Daily Breakdown Table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2">
+            <CalendarDays className="h-5 w-5 text-[#6B5C32]" /> Daily Breakdown
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <DataGrid
+            columns={dailyColumns}
+            data={daily}
+            keyField="date"
+            gridId="department-performance-daily"
+            emptyMessage={loading ? "Loading..." : "No working hours in the selected period."}
+          />
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 // ========== TAB 5: PAYROLL ==========
 
 function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
@@ -5590,7 +5847,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
 
 // ========== MAIN PAGE ==========
 
-type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "payroll" | "leave";
+type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "department-performance" | "payroll" | "leave";
 
 // Labor Cost tab is wedged between Working Hours and Payroll per spec — the
 // flow goes "what hours did people work" → "what did those hours cost vs the
@@ -5620,6 +5877,11 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     key: "detail",
     label: "Employee Performance",
     icon: <Search className="h-4 w-4" />,
+  },
+  {
+    key: "department-performance",
+    label: "Department Performance",
+    icon: <Activity className="h-4 w-4" />,
   },
   {
     key: "payroll",
@@ -5862,6 +6124,10 @@ export default function EmployeesPage() {
           allAttendance={allAttendance}
           departments={departments}
         />
+      )}
+
+      {activeTab === "department-performance" && (
+        <DepartmentPerformanceTab departments={departments} />
       )}
 
       {activeTab === "labor-cost" && (

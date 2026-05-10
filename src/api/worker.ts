@@ -622,6 +622,10 @@ import serviceCases from "./routes/service-cases";
 // SHEETS_SPREADSHEET_ID / SHEETS_SYNC_SECRET are missing — see
 // docs/SHEETS-SYNC.md for the GCP provisioning checklist.
 import sheetsSync from "./routes/sheets-sync";
+// Department Performance KPI feed for the /employees Department Performance
+// tab. Admin-scoped (workers:read) — distinct from /api/department-labor
+// and from /api/worker/team-stats (worker-token, leader-only).
+import departmentPerformance from "./routes/department-performance";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -788,6 +792,9 @@ app.route("/api/import", importCompletion);
 // SupabaseAdapter route by registration order so this matters.
 app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
+// Department Performance — admin KPI feed for /employees tab. Distinct path
+// from /api/department-labor (no collision); see routes/department-performance.ts.
+app.route("/api/department-performance", departmentPerformance);
 
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every

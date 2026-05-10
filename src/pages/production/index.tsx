@@ -3060,11 +3060,11 @@ export default function ProductionPage({
         s.pieceNo = idx + 1;
         s.totalPieces = totalPacks;
         s.wipLabel = fullCompartment;
-        // boxLabel = this sticker's own productCode (matches Production
-        // Sheet's WIP column for sofa, which is just productCode per
-        // Wei Siang spec 2026-05-10). Joined fullCompartment lives on
-        // wipLabel if anything else needs it.
-        s.boxLabel = s.productCode;
+        // boxLabel = SO-wide joined fullCompartment so the WIP body
+        // line is meaningfully DIFFERENT from the productCode header.
+        // (Listing format = productCode but that duplicates the header
+        // — packer wants to see all sibling components on the sticker.)
+        s.boxLabel = fullCompartment;
         s.pieceName = "sofa";
         if (legsInfo) s.legsInfo = legsInfo;
       });
@@ -4995,7 +4995,7 @@ export default function ProductionPage({
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
                         {s.boxLabel && (
-                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">WIP</span>: {s.boxLabel}</div>
+                          <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
                         )}
                         {s.itemCategory === "BEDFRAME" && (
                           <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
@@ -5235,7 +5235,7 @@ export default function ProductionPage({
                     <div className="border-t border-black my-[1.5mm]" />
                     <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
                       {s.boxLabel && (
-                        <div><span className="inline-block w-[26mm] font-semibold">WIP</span>: {s.boxLabel}</div>
+                        <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "26mm" }}>WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
                       )}
                       {s.itemCategory === "BEDFRAME" && (
                         <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>

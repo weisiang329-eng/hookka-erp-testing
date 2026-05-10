@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -2497,6 +2498,11 @@ function EfficiencyOverviewTab({
   onJumpToEmployeeDetail?: (workerId: string) => void;
 }) {
   const { toast } = useToast();
+  // Tablet/narrow-viewport breakpoint — used to default-hide the informational
+  // Non-Prod Hrs column (Prod Hrs is the load-bearing one, the denominator of
+  // Efficiency %; Non-Prod Hrs is the leftover that the operator can opt back
+  // in via the Columns picker).
+  const isTablet = useMediaQuery("(max-width: 1280px)");
   // Date range — defaults to single-day (today) so the date picker pops open
   // on the current month instead of jumping back 30 days. Last selection is
   // persisted in localStorage so revisiting the tab keeps the operator's
@@ -2663,6 +2669,72 @@ function EfficiencyOverviewTab({
           );
         },
       },
+      // Prod Hrs / Non-Prod Hrs — make the Efficiency % denominator visible.
+      // The ratio formula is `prodMins / (prodHours * 60)`, where prodHours
+      // counts ONLY production-dept hours (Fab Cut / Fab Sew / Foam / Wood
+      // Cut / Framing / Webbing / Upholstery / Packing). Without these two
+      // columns operators can't reconcile "Total Working Hrs 38h 30m" with
+      // an efficiency ratio computed against 34h 30m — the 4h gap (Warehousing
+      // / Repair / Maintenance / Production Shortfall) is invisible. Now the
+      // math shows its work: Total = Prod Hrs + Non-Prod Hrs, and
+      // Efficiency % = Production Time ÷ (Prod Hrs × 60).
+      {
+        key: "prodHours",
+        label: "Prod Hrs",
+        align: "right",
+        sortable: true,
+        sortAccessor: (row) =>
+          Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
+            0,
+          ),
+        render: (_value, row) => {
+          const prodHours = Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
+            0,
+          );
+          if (prodHours <= 0) {
+            return <span className="text-[#D1D5DB] tabular-nums">—</span>;
+          }
+          return (
+            <span
+              className="tabular-nums text-[#1F1D1B]"
+              title="Hours worked in production depts only — used as the denominator for Efficiency %"
+            >
+              {formatHours(Math.round(prodHours * 60))}
+            </span>
+          );
+        },
+      },
+      {
+        key: "nonProdHours",
+        label: "Non-Prod Hrs",
+        align: "right",
+        sortable: true,
+        defaultHidden: isTablet,
+        sortAccessor: (row) =>
+          Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s : s + h),
+            0,
+          ),
+        render: (_value, row) => {
+          const nonProdHours = Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s : s + h),
+            0,
+          );
+          if (nonProdHours <= 0) {
+            return <span className="text-[#D1D5DB] tabular-nums">—</span>;
+          }
+          return (
+            <span
+              className="tabular-nums text-[#9CA3AF]"
+              title="Hours in Warehousing / Repair / Maintenance / Shortfall — not counted in Efficiency %"
+            >
+              {formatHours(Math.round(nonProdHours * 60))}
+            </span>
+          );
+        },
+      },
       // Efficiency % — Production output / Production-dept hours. Same
       // green/amber/red thresholds the Employee Performance KPI card uses
       // (>=85 green, >=70 amber, else red). Bug fix 2026-04-28: denominator
@@ -2784,7 +2856,7 @@ function EfficiencyOverviewTab({
     });
 
     return cols;
-  }, [orderedDepts, prodMinsByWorker, productionDeptCodes]);
+  }, [orderedDepts, prodMinsByWorker, productionDeptCodes, isTablet]);
 
   const contextMenuItems: ContextMenuItem[] = [
     {

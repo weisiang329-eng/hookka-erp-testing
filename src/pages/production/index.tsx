@@ -3358,27 +3358,43 @@ export default function ProductionPage({
     });
   }, [fgStickers, gridFilteredDeptRows, deptRows]);
 
-  // Auto-populate the FG preview tiles when entering the UPHOLSTERY or
-  // PACKING tab. Orders change (dept switch, filter tweak) retrigger the
-  // load so the tiles stay in sync with what the operator is looking at.
-  // Other tabs clear the list so the hidden print container doesn't carry
+  // Lazy-load the FG sticker tiles. Mirrors the job-card sticker flow on
+  // every other dept tab, where `jobCardStickers` is empty until the
+  // operator clicks Print All — tab entry stays cheap, and we only pay
+  // the load + render cost when the operator actually wants to see or
+  // print stickers (Wei Siang 2026-05-10: "为了防止页面卡顿, 默认都是先
+  // 隐藏着的, 只有当我点击 Show All 的时候内容才会显示出来"). Two triggers:
+  //   1. Operator clicks Show QR → setShowFgPreview(true) → load + render
+  //      visible tiles.
+  //   2. Operator clicks Print All → setFgPrintRequested(true) →
+  //      handlePrintFgStickers loads if needed then triggers print.
+  // While the preview is open, re-load whenever the grid filter changes
+  // so the tile set tracks what the operator sees in the sheet above.
+  // Other tabs always clear so the hidden print container can't carry
   // stale data into a job-card print job.
-  /* eslint-disable react-hooks/set-state-in-effect -- auto-load FG stickers on UPH/PACK tab */
+  /* eslint-disable react-hooks/set-state-in-effect -- on-demand FG load + tab-leave cleanup */
   useEffect(() => {
     if (activeTab !== "UPHOLSTERY" && activeTab !== "PACKING") {
       setFgStickers([]);
       return;
     }
-    // Race-condition guard: when entering UPH/PACK tab, gridFilteredDeptRows
-    // is reset to null, then DataGrid mounts + reports its filtered rows
-    // microseconds later. If we fire loadFgStickers BEFORE the grid reports,
-    // the first call iterates ALL filteredOrders (200+ POs → 750+ fg_units),
-    // and its slower fetch can OVERWRITE the second (filtered) call's
-    // result when it eventually completes. Wait for the grid to populate
-    // before loading.
+    // Only load when the operator has signalled intent — clicking Show QR
+    // or Print All. Without these gates, every Packing tab entry was
+    // firing a full /api/fg-units sweep + sales-orders fan-out + the
+    // aggregator pass over hundreds of pieces, which the operator felt
+    // as page lag even though the visible preview was collapsed.
+    if (!showFgPreview && !fgPrintRequested) return;
+    // Same race-condition guard as before: wait for the DataGrid to
+    // report its filtered rows so the load matches what's on screen.
     if (gridFilteredDeptRows === null) return;
     loadFgStickers();
-  }, [activeTab, gridFilteredDeptRows, loadFgStickers]);
+  }, [
+    activeTab,
+    showFgPreview,
+    fgPrintRequested,
+    gridFilteredDeptRows,
+    loadFgStickers,
+  ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Once the batch container is rendered, fire the print dialog. Small
@@ -5183,24 +5199,16 @@ export default function ProductionPage({
               <span className="h-2.5 w-2.5 rounded-full bg-[#6B5C32]" />
               <h2 className="text-sm font-semibold text-[#1F1D1B]">
                 FG Sticker Preview
-                <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                  {(() => {
-                    // Mirror the QR Stickers panel on the other dept tabs:
-                    // count the actual sticker tiles that will render, not
-                    // an upstream "expected" qty derived from grid rows.
-                    // The previous "(N rows · M stickers)" form let the
-                    // header advertise 9 stickers while the body said "No
-                    // FG units" (server hadn't generated them yet) — Wei
-                    // Siang reported it as "panel feels open with no
-                    // matching content" 2026-05-10. Filter out the
-                    // synthetic Legs/Pillow tiles for the same reason as
-                    // the collapsed-state copy below.
-                    const realCount = visibleFgStickers.filter(
-                      (s) => !s.isSyntheticLegs && !s.isSyntheticPillow,
-                    ).length;
-                    return `(${realCount} sticker${realCount === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;
-                  })()}
-                </span>
+                {fgStickers.length > 0 && (
+                  <span className="ml-2 text-xs font-normal text-[#8A7F73]">
+                    {(() => {
+                      const realCount = visibleFgStickers.filter(
+                        (s) => !s.isSyntheticLegs && !s.isSyntheticPillow,
+                      ).length;
+                      return `(${realCount} sticker${realCount === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;
+                    })()}
+                  </span>
+                )}
               </h2>
             </div>
             {/* Show QR / Print All — mirrors the QR Stickers section on
@@ -5212,7 +5220,12 @@ export default function ProductionPage({
                 and the print loop iterates `visibleFgStickers` so the
                 grid filter is honoured (Wei Siang 2026-05-10). */}
             <div className="flex gap-2">
-              {visibleFgStickers.length > 0 && (
+              {/* Buttons gated on deptRows (the sheet above), not on
+                  fgStickers.length — the load is on-demand now, so
+                  fgStickers is empty until the operator actually clicks.
+                  Mirrors the UPH job-card panel where buttons appear as
+                  soon as the dept has rows. */}
+              {deptRows.length > 0 && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -5221,7 +5234,7 @@ export default function ProductionPage({
                   {showFgPreview ? "Hide QR" : "Show QR"}
                 </Button>
               )}
-              {visibleFgStickers.length > 0 && (
+              {deptRows.length > 0 && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -5235,6 +5248,15 @@ export default function ProductionPage({
           {loadingFgPreview ? (
             <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
               Loading FG units…
+            </div>
+          ) : fgStickers.length === 0 && !showFgPreview ? (
+            // Default state on tab entry — nothing fetched yet. Mirrors
+            // the UPH "X stickers ready · click Show QR" placeholder, but
+            // without a count because we haven't loaded the FG units to
+            // count from yet. Click Show QR or Print All triggers the
+            // load via the on-demand effect above.
+            <div className="px-4 py-6 text-center text-xs text-[#9A918A]">
+              Click <span className="font-semibold text-[#6B5C32]">Show QR</span> to render the tiles for this filter.
             </div>
           ) : visibleFgStickers.length === 0 ? (
             <div className="px-4 py-8 text-center text-xs text-[#9A918A]">

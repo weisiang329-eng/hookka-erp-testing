@@ -5002,34 +5002,14 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D] shrink-0">Special</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* QR + badge — VERTICAL stack per Wei Siang spec
-                          2026-05-10: 1/3 sofa on top, 3/3 leg below.
-                          Single QR sticker is full size (110px); legs
-                          section is text-only (no QR), centered & big,
-                          stacked below the main QR section. Pillow
-                          stays as another vertical section below. */}
+                      {/* QR + badge — VERTICAL stack. Order top→bottom:
+                          Legs (text only, no QR), Pillow (QR + badge),
+                          then Main sticker (QR + badge). Wei Siang spec
+                          2026-05-10: paired secondaries above the main
+                          (3/3 LEG above 1/3 SOFA). */}
                       <div className="mt-auto flex flex-col gap-2">
-                        {/* Main sticker — QR + badge horizontal. Single
-                            QR sticker uses full size (110px) per Wei
-                            Siang spec; paired sections use the same
-                            size since the card is now tall enough. */}
-                        <div className="flex items-end gap-2">
-                          <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
-                          <div className="flex-1 text-center min-w-0">
-                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
-                              {s.pieceNo}/{s.totalPieces}
-                            </div>
-                            <div className="leading-tight truncate uppercase" style={{ fontSize: "12px" }}>
-                              {s.pieceName}
-                            </div>
-                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
-                              {s.shortCode}
-                            </div>
-                          </div>
-                        </div>
                         {legsPair && (
                           <>
-                            <div className="border-t border-dashed border-[#6B5C32]" />
                             <div className="flex flex-col items-center justify-center py-1">
                               <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "20px" }}>
                                 {legsPair.pieceNo}/{legsPair.totalPieces}
@@ -5038,11 +5018,11 @@ export default function ProductionPage({
                                 {legsPair.pieceName}
                               </div>
                             </div>
+                            <div className="border-t border-dashed border-[#6B5C32]" />
                           </>
                         )}
                         {pillowPair && (
                           <>
-                            <div className="border-t border-dashed border-[#6B5C32]" />
                             <div className="flex items-end gap-2">
                               <QRImg data={pillowTrackUrl} size={110} alt="Pillow QR" className="block" />
                               <div className="flex-1 text-center min-w-0">
@@ -5057,8 +5037,24 @@ export default function ProductionPage({
                                 </div>
                               </div>
                             </div>
+                            <div className="border-t border-dashed border-[#6B5C32]" />
                           </>
                         )}
+                        {/* Main sticker — QR + badge horizontal. */}
+                        <div className="flex items-end gap-2">
+                          <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
+                          <div className="flex-1 text-center min-w-0">
+                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
+                              {s.pieceNo}/{s.totalPieces}
+                            </div>
+                            <div className="leading-tight truncate uppercase" style={{ fontSize: "12px" }}>
+                              {s.pieceName}
+                            </div>
+                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
+                              {s.shortCode}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                       {/* Customer footer — full-width, always visible
                           even when customerName is missing (fallback "—"). */}

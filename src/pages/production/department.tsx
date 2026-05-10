@@ -426,11 +426,14 @@ export default function DepartmentProductionPage() {
         method: "PATCH",
         body: { rackingNumber: rack },
       });
-      if (data.success) {
-        setOrders((prev) => prev.map((o) => (o.id === order.id ? (data.data as ProductionOrder) : o)));
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCachePrefix("/api/sales-orders");
-      }
+      if (!data.success) throw new Error(data.error || "Save failed");
+      setOrders((prev) => prev.map((o) => (o.id === order.id ? (data.data as ProductionOrder) : o)));
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/sales-orders");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to save rack: ${detail}`);
+      console.error(err);
     } finally {
       setSaving(null);
     }
@@ -489,11 +492,14 @@ export default function DepartmentProductionPage() {
         method: "PUT",
         body: { jobCardId: jc.id, status: "IN_PROGRESS" },
       });
-      if (data.success) {
-        setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCachePrefix("/api/sales-orders");
-      }
+      if (!data.success) throw new Error(data.error || "Start failed");
+      setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/sales-orders");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to start: ${detail}`);
+      console.error(err);
     } finally {
       setSaving(null);
     }
@@ -523,12 +529,16 @@ export default function DepartmentProductionPage() {
           pic2Id: pic2Id || null,
         },
       });
-      if (data.success) {
-        setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCachePrefix("/api/sales-orders");
-        setDoneDialog(null);
-      }
+      if (!data.success) throw new Error(data.error || "Save failed");
+      setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/sales-orders");
+      setDoneDialog(null);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to mark complete: ${detail}`);
+      console.error(err);
+      // Don't close dialog — let operator retry.
     } finally {
       setSaving(null);
     }
@@ -548,11 +558,12 @@ export default function DepartmentProductionPage() {
       body.completedDate = edit.completedDate;
     }
 
-    const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
-      method: "PUT",
-      body,
-    });
-    if (data.success) {
+    try {
+      const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
+        method: "PUT",
+        body,
+      });
+      if (!data.success) throw new Error(data.error || "Save failed");
       setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/sales-orders");
@@ -562,8 +573,13 @@ export default function DepartmentProductionPage() {
         delete next[jc.id];
         return next;
       });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to save: ${detail}`);
+      console.error(err);
+    } finally {
+      setSaving(null);
     }
-    setSaving(null);
   };
 
   const stats = {
@@ -850,8 +866,13 @@ export default function DepartmentProductionPage() {
                       variant="outline"
                       className="gap-2"
                       onClick={async () => {
-                        const { generateJobCardPdf } = await import("@/lib/generate-po-pdf");
-                        generateJobCardPdf(order, jc.departmentCode);
+                        try {
+                          const { generateJobCardPdf } = await import("@/lib/generate-po-pdf");
+                          generateJobCardPdf(order, jc.departmentCode);
+                        } catch (err) {
+                          toast.error("Print failed — please refresh and try again.");
+                          console.error(err);
+                        }
                       }}
                     >
                       <Download className="h-4 w-4" />
@@ -861,8 +882,13 @@ export default function DepartmentProductionPage() {
                       variant="outline"
                       className="gap-2"
                       onClick={async () => {
-                        const { generateStickerPdf } = await import("@/lib/generate-sticker-pdf");
-                        generateStickerPdf(order, jc, orders);
+                        try {
+                          const { generateStickerPdf } = await import("@/lib/generate-sticker-pdf");
+                          generateStickerPdf(order, jc, orders);
+                        } catch (err) {
+                          toast.error("Print failed — please refresh and try again.");
+                          console.error(err);
+                        }
                       }}
                     >
                       <Printer className="h-4 w-4" />
@@ -1301,8 +1327,13 @@ export default function DepartmentProductionPage() {
                               size="sm"
                               className="h-6 px-1.5"
                               onClick={async () => {
-                                const { generateJobCardPdf } = await import("@/lib/generate-po-pdf");
-                                generateJobCardPdf(row, jc.departmentCode);
+                                try {
+                                  const { generateJobCardPdf } = await import("@/lib/generate-po-pdf");
+                                  generateJobCardPdf(row, jc.departmentCode);
+                                } catch (err) {
+                                  toast.error("Print failed — please refresh and try again.");
+                                  console.error(err);
+                                }
                               }}
                               title="Print Job Card"
                             >
@@ -1313,8 +1344,13 @@ export default function DepartmentProductionPage() {
                               size="sm"
                               className="h-6 px-1.5"
                               onClick={async () => {
-                                const { generateStickerPdf } = await import("@/lib/generate-sticker-pdf");
-                                generateStickerPdf(row, jc, orders);
+                                try {
+                                  const { generateStickerPdf } = await import("@/lib/generate-sticker-pdf");
+                                  generateStickerPdf(row, jc, orders);
+                                } catch (err) {
+                                  toast.error("Print failed — please refresh and try again.");
+                                  console.error(err);
+                                }
                               }}
                               title="Print Sticker"
                             >

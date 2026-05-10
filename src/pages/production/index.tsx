@@ -3157,12 +3157,20 @@ export default function ProductionPage({
   // stale data into a job-card print job.
   /* eslint-disable react-hooks/set-state-in-effect -- auto-load FG stickers on UPH/PACK tab */
   useEffect(() => {
-    if (activeTab === "UPHOLSTERY" || activeTab === "PACKING") {
-      loadFgStickers();
-    } else {
+    if (activeTab !== "UPHOLSTERY" && activeTab !== "PACKING") {
       setFgStickers([]);
+      return;
     }
-  }, [activeTab, loadFgStickers]);
+    // Race-condition guard: when entering UPH/PACK tab, gridFilteredDeptRows
+    // is reset to null, then DataGrid mounts + reports its filtered rows
+    // microseconds later. If we fire loadFgStickers BEFORE the grid reports,
+    // the first call iterates ALL filteredOrders (200+ POs → 750+ fg_units),
+    // and its slower fetch can OVERWRITE the second (filtered) call's
+    // result when it eventually completes. Wait for the grid to populate
+    // before loading.
+    if (gridFilteredDeptRows === null) return;
+    loadFgStickers();
+  }, [activeTab, gridFilteredDeptRows, loadFgStickers]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Once the batch container is rendered, fire the print dialog. Small

@@ -396,12 +396,12 @@ export default function WorkerHomePage() {
           per-product tables. */}
       <div className="bg-[#1B2B44] text-white rounded-xl p-4 mt-4">
         <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-white/70">
-          Employee Detail Dashboard
+          {t("home.dashboardTitle")}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
           <label className="block">
-            <span className="text-[11px] text-white/60">From</span>
+            <span className="text-[11px] text-white/60">{t("pay.from")}</span>
             <input
               type="date"
               value={from}
@@ -411,7 +411,7 @@ export default function WorkerHomePage() {
             />
           </label>
           <label className="block">
-            <span className="text-[11px] text-white/60">To</span>
+            <span className="text-[11px] text-white/60">{t("pay.to")}</span>
             <input
               type="date"
               value={to}
@@ -423,10 +423,10 @@ export default function WorkerHomePage() {
         </div>
 
         <div className="flex gap-1.5 mt-2 overflow-x-auto -mx-1 px-1">
-          <Chip onClick={() => setPreset("7d")}>7d</Chip>
-          <Chip onClick={() => setPreset("30d")}>30d</Chip>
-          <Chip onClick={() => setPreset("month")}>This month</Chip>
-          <Chip onClick={() => setPreset("lastMonth")}>Last month</Chip>
+          <Chip onClick={() => setPreset("7d")}>{t("home.last7d")}</Chip>
+          <Chip onClick={() => setPreset("30d")}>{t("home.last30d")}</Chip>
+          <Chip onClick={() => setPreset("month")}>{t("pay.thisMonthChip")}</Chip>
+          <Chip onClick={() => setPreset("lastMonth")}>{t("pay.lastMonth")}</Chip>
         </div>
       </div>
 
@@ -434,15 +434,15 @@ export default function WorkerHomePage() {
       {hist && (
         <div className="grid grid-cols-3 gap-2">
           <Kpi
-            label="Working Hours"
+            label={t("home.workingHours")}
             value={mins2hrs(hist.totals.workedMinutes)}
           />
           <Kpi
-            label="Production Time"
+            label={t("home.productionTime")}
             value={mins2hrs(hist.totals.productionMinutes)}
           />
           <Kpi
-            label="Efficiency %"
+            label={t("home.efficiencyPct")}
             value={`${hist.totals.efficiencyPct}%`}
             tone={
               hist.totals.efficiencyPct >= 80
@@ -458,9 +458,14 @@ export default function WorkerHomePage() {
       {/* Daily attendance — Work/Prod/Eff per day. Clock In/Out column dropped
           since the clock-in flow itself is hidden (Wei Siang 2026-05-10). */}
       {hist && (
-        <TableSection title="Daily Attendance">
+        <TableSection title={t("pay.dailyAttendance")}>
           <TableHeader
-            cols={["Date", "Working hrs", "Production hrs", "Efficiency %"]}
+            cols={[
+              t("pay.colDate"),
+              t("home.colWorkingHrs"),
+              t("home.colProductionHrs"),
+              t("home.efficiencyPct"),
+            ]}
             align={["left", "right", "right", "right"]}
           />
           {hist.daily.length === 0 ? (
@@ -505,9 +510,9 @@ export default function WorkerHomePage() {
 
       {/* Completed products */}
       {hist && (
-        <TableSection title={`Completed products (${hist.completed.length})`}>
+        <TableSection title={`${t("home.completedProducts")} (${hist.completed.length})`}>
           <TableHeader
-            cols={["Date · Dept", "Mins"]}
+            cols={[t("home.colDateDept"), t("home.colMins")]}
             align={["left", "right"]}
           />
           {hist.completed.length === 0 ? (
@@ -566,8 +571,8 @@ export default function WorkerHomePage() {
                   {openShare === c.jobCardId && c.piecesShared > 0 && (
                     <div className="mt-1.5 ml-0 px-2.5 py-1.5 rounded bg-[#FAF7EE] border border-[#E5DEC6] text-[11px] text-[#5A5550]">
                       {c.sharedWith && c.sharedWith.length > 0
-                        ? `Shared with: ${c.sharedWith.map((w) => w.name).join(", ")}`
-                        : "Shared with another worker (name unavailable)"}
+                        ? `${t("home.shareWith")}: ${c.sharedWith.map((w) => w.name).join(", ")}`
+                        : t("home.shareWith")}
                     </div>
                   )}
                 </div>

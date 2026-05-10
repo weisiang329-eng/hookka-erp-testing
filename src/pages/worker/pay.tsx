@@ -335,12 +335,12 @@ export default function WorkerPayPage() {
           can reconcile their RM estimate with actual days/OT. */}
       <div className="bg-[#1B2B44] text-white rounded-xl p-4">
         <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-white/70">
-          Attendance & OT
+          {t("pay.attendanceOt")}
         </p>
 
         <div className="grid grid-cols-2 gap-2 mt-3">
           <label className="block">
-            <span className="text-[11px] text-white/60">From</span>
+            <span className="text-[11px] text-white/60">{t("pay.from")}</span>
             <input
               type="date"
               value={from}
@@ -350,7 +350,7 @@ export default function WorkerPayPage() {
             />
           </label>
           <label className="block">
-            <span className="text-[11px] text-white/60">To</span>
+            <span className="text-[11px] text-white/60">{t("pay.to")}</span>
             <input
               type="date"
               value={to}
@@ -362,19 +362,19 @@ export default function WorkerPayPage() {
         </div>
 
         <div className="flex gap-1.5 mt-2 overflow-x-auto -mx-1 px-1">
-          <Chip onClick={() => setPreset("month")}>This month</Chip>
-          <Chip onClick={() => setPreset("lastMonth")}>Last month</Chip>
-          <Chip onClick={() => setPreset("30d")}>Last 30d</Chip>
+          <Chip onClick={() => setPreset("month")}>{t("pay.thisMonthChip")}</Chip>
+          <Chip onClick={() => setPreset("lastMonth")}>{t("pay.lastMonth")}</Chip>
+          <Chip onClick={() => setPreset("30d")}>{t("pay.last30d")}</Chip>
         </div>
       </div>
 
       {/* Mini KPIs for the picked range */}
       {hist && (
         <div className="grid grid-cols-3 gap-2">
-          <Mini label="Days" value={String(hist.totals.days)} />
-          <Mini label="Hours" value={mins2hrs(hist.totals.workedMinutes)} />
+          <Mini label={t("pay.days")} value={String(hist.totals.days)} />
+          <Mini label={t("pay.hours")} value={mins2hrs(hist.totals.workedMinutes)} />
           <Mini
-            label="OT hrs"
+            label={t("pay.otHrs")}
             value={mins2hrs(hist.totals.overtimeMinutes)}
             accent
           />
@@ -384,9 +384,9 @@ export default function WorkerPayPage() {
       {/* Daily attendance — Hours pulled from working_hour_entries via /history.
           Clock-in/out column dropped (flow not yet live). */}
       {hist && (
-        <TableSection title="Daily Attendance">
+        <TableSection title={t("pay.dailyAttendance")}>
           <TableHeader
-            cols={["Date", "Working hrs", "Overtime hrs"]}
+            cols={[t("pay.colDate"), t("pay.colWorkHrs"), t("pay.colOvertimeHrs")]}
             align={["left", "right", "right"]}
           />
           {hist.attendance.length === 0 ? (

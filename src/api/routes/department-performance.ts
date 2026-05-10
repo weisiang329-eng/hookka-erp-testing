@@ -91,7 +91,20 @@ app.get("/", async (c) => {
       : null;
 
   // ---- Per-date accumulators.
-  type WorkerCell = { workerId: string; workingMinutes: number };
+  type WorkerJobCell = {
+    jobCardId: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string | null;
+    poNo: string | null;
+    productionMinutes: number;
+  };
+  type WorkerCell = {
+    workerId: string;
+    workingMinutes: number;
+    productionMinutes: number;
+    jobs: WorkerJobCell[];
+  };
   type JobCell = {
     jobCardId: string;
     poNo: string | null;
@@ -160,6 +173,8 @@ app.get("/", async (c) => {
           day.workersByWorker.set(r.workerId, {
             workerId: r.workerId,
             workingMinutes: mins,
+            productionMinutes: 0,
+            jobs: [],
           });
         }
       }
@@ -281,6 +296,62 @@ app.get("/", async (c) => {
         productionMinutes: mins,
         workerIds: jcWorkerIds,
       });
+
+      // ---- Per-worker pro-rated share for THIS jc.
+      // Mirrors /api/worker/history (worker.ts ~570-640): per-piece split when
+      // piece_pics rows exist, otherwise legacy single-pic split on the JC
+      // itself. Keyed against (estMinutes ?? actualMinutes) per task spec.
+      const jcMins = jc.estMinutes ?? jc.actualMinutes ?? 0;
+      const pieces = picsByJc.get(jc.id) ?? [];
+      const perWorkerMins = new Map<string, number>();
+      if (pieces.length > 0) {
+        for (const s of pieces) {
+          const picCount = (s.pic1Id ? 1 : 0) + (s.pic2Id ? 1 : 0);
+          const share = jcMins / Math.max(1, picCount);
+          if (s.pic1Id) {
+            perWorkerMins.set(
+              s.pic1Id,
+              (perWorkerMins.get(s.pic1Id) ?? 0) + share,
+            );
+          }
+          if (s.pic2Id) {
+            perWorkerMins.set(
+              s.pic2Id,
+              (perWorkerMins.get(s.pic2Id) ?? 0) + share,
+            );
+          }
+        }
+      } else {
+        const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
+        const share = jcMins / Math.max(1, picCount);
+        if (jc.pic1Id) perWorkerMins.set(jc.pic1Id, share);
+        if (jc.pic2Id) perWorkerMins.set(jc.pic2Id, share);
+      }
+
+      for (const [wid, rawMins] of perWorkerMins) {
+        const myMins = Math.round(rawMins);
+        let wc = day.workersByWorker.get(wid);
+        if (!wc) {
+          // Worker has JC credit but no working_hour_entries row for this date.
+          // Surface them in workers[] anyway with workingMinutes=0.
+          wc = {
+            workerId: wid,
+            workingMinutes: 0,
+            productionMinutes: 0,
+            jobs: [],
+          };
+          day.workersByWorker.set(wid, wc);
+        }
+        wc.productionMinutes += myMins;
+        wc.jobs.push({
+          jobCardId: jc.id,
+          productCode: meta?.productCode ?? "",
+          productName: meta?.productName ?? "",
+          wipLabel: jc.wipLabel ?? null,
+          poNo: meta?.poNo ?? null,
+          productionMinutes: myMins,
+        });
+      }
     }
   }
 
@@ -308,6 +379,14 @@ app.get("/", async (c) => {
           workerId: w.workerId,
           workerName: workerNameById.get(w.workerId) ?? "",
           workingMinutes: w.workingMinutes,
+          productionMinutes: w.productionMinutes,
+          efficiencyPct:
+            w.workingMinutes > 0
+              ? Math.round((w.productionMinutes / w.workingMinutes) * 100)
+              : 0,
+          jobs: w.jobs
+            .slice()
+            .sort((a, b) => b.productionMinutes - a.productionMinutes),
         }))
         .sort((a, b) => b.workingMinutes - a.workingMinutes);
 

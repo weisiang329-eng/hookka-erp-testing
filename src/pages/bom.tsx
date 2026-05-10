@@ -4676,7 +4676,7 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
                         <button
                           onClick={() => deleteCategory(catIdx)}
                           title={`Delete ${cat}`}
-                          className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-[#9A3A2D] transition-opacity leading-none"
+                          className="text-gray-400 hover:text-[#9A3A2D] leading-none"
                         >
                           ×
                         </button>

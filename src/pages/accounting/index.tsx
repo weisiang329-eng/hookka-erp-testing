@@ -575,7 +575,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                               {formatCurrency(Math.abs(child.balance))}
                               {child.balance < 0 ? " CR" : ""}
                             </span>
-                            <div className="opacity-0 group-hover:opacity-100 flex gap-1">
+                            <div className="flex gap-1">
                               {editCode === child.code ? (
                                 <>
                                   <button onClick={() => handleEdit(child.code)} className="text-[#4F7C3A] hover:text-[#3D6329] p-1 cursor-pointer"><Check className="h-3.5 w-3.5" /></button>

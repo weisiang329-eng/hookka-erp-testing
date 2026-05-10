@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Routes, ScrollRestoration, useLocation } from "react-router-dom";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Breadcrumbs } from "@/components/layout/breadcrumbs";
@@ -60,6 +61,22 @@ export default function DashboardLayout() {
       return next;
     });
   }, []);
+
+  // Auto-collapse on narrow / portrait viewports — the always-on 240px
+  // sidebar eats 31% of an iPad portrait window (768×1024). Collapse to the
+  // 56px icons-only rail so content gets the room. Operator can still
+  // expand manually via the toggle button. We only force-collapse on the
+  // RISING edge (portrait → became-portrait) so user can still open it
+  // mid-session if they want; we don't continuously force it closed.
+  const isNarrowOrPortrait = useMediaQuery(
+    "(orientation: portrait), (max-width: 768px)"
+  );
+  useEffect(() => {
+    if (isNarrowOrPortrait) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- viewport-driven one-shot collapse on rising edge
+      setSidebarCollapsed(true);
+    }
+  }, [isNarrowOrPortrait]);
 
   // Defer heavy startup work so first paint / page navigation stays responsive.
   // NOTE: We intentionally avoid static-importing `@/pages/bom` here because

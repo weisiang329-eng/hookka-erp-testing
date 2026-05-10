@@ -324,6 +324,30 @@ function DeptStatusFilter({
   );
 }
 
+// Mirrors api/routes/fg-units.ts isHeadboardOnlySpecial — single rule shared
+// across the codebase so the production "Filter Incomplete" toggle stays in
+// step with the backend cascade. Inline duplicate of the helper in
+// pages/delivery/index.tsx; consolidate to src/lib/ when a third caller shows
+// up (see feedback_validation_frontend_backend_unified.md).
+function isHbOnlySpecial(specialOrder: string | null | undefined): boolean {
+  if (!specialOrder) return false;
+  return specialOrder.toLowerCase().includes("headboard only");
+}
+
+// Drop DIVAN UPH JCs when the PO is a BEDFRAME + Headboard Only — matches
+// filterJcsForCompletionGate in the backend production-orders route. Legacy
+// HB-only POs (created before commit 9086352) carry stranded DIVAN job cards
+// that will never complete; ignoring them lets the row drop out of the
+// "Filter Incomplete" view once the only piece that matters (HB) is done.
+function pickRelevantUphCards(po: ProductionOrder): JobCard[] {
+  const uph = (po.jobCards || []).filter(
+    (j) => j.departmentCode === "UPHOLSTERY",
+  );
+  const isBf = (po.itemCategory || "").toUpperCase() === "BEDFRAME";
+  if (!isBf || !isHbOnlySpecial(po.specialOrder)) return uph;
+  return uph.filter((j) => (j.wipType || "").toUpperCase() !== "DIVAN");
+}
+
 // ----- main page -----
 
 // Rendering mode — injected by the per-route wrappers in overview.tsx / dept.tsx.
@@ -1296,7 +1320,14 @@ export default function ProductionPage({
       // still in scope.
       if (incompleteOnly) {
         const gateDept = activeTab === "ALL" ? "UPHOLSTERY" : activeTab;
-        const gateJcs = (o.jobCards ?? []).filter((j) => j.departmentCode === gateDept);
+        // For UPHOLSTERY (Overview gate + UPH dept tab), drop DIVAN UPH JCs
+        // when the PO is BEDFRAME + Headboard Only. Mirrors the backend
+        // cascade and the delivery page's pickRelevantUphCards — legacy
+        // HB-only POs carry a stranded DIVAN UPH JC that will never complete,
+        // and the only piece that gates ship-readiness is the HB UPH JC.
+        const gateJcs = gateDept === "UPHOLSTERY"
+          ? pickRelevantUphCards(o)
+          : (o.jobCards ?? []).filter((j) => j.departmentCode === gateDept);
         if (gateJcs.length > 0) {
           const stillOpen = gateJcs.some(
             (j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED",

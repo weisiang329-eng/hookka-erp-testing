@@ -1164,10 +1164,11 @@ function EmployeeMasterTab({
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
-  // Whether the per-row Departments multi-select popover is open. Only one
-  // row can be editing at a time so a single boolean is enough. Auto-closes
-  // when the row exits edit mode.
+  // Whether the per-row Departments / Categories multi-select popovers are
+  // open. Only one row can be editing at a time so a single boolean per
+  // dropdown is enough. Auto-closes when the row exits edit mode.
   const [deptDropdownOpen, setDeptDropdownOpen] = useState(false);
+  const [catDropdownOpen, setCatDropdownOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pinModal, setPinModal] = useState<PinModalState | null>(null);
   const [bulkModal, setBulkModal] = useState<BulkModalState | null>(null);
@@ -1398,6 +1399,7 @@ function EmployeeMasterTab({
       });
       setEditingId(null);
       setDeptDropdownOpen(false);
+      setCatDropdownOpen(false);
       refreshWorkers();
     } catch {
       // handle error
@@ -1487,11 +1489,13 @@ function EmployeeMasterTab({
                     e.stopPropagation();
                     setDeptDropdownOpen((v) => !v);
                   }}
-                  className="h-8 w-44 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-6 text-left truncate flex items-center justify-between focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  className="h-8 w-44 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-2 text-left flex items-center justify-between gap-1 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                   title={selected.length > 0 ? deptNamesOf(selected) : ""}
                 >
-                  <span className="truncate">{summary}</span>
-                  <span className="text-[10px] text-[#9CA3AF] ml-1">▾</span>
+                  <span className="truncate flex-1">{summary}</span>
+                  <svg className="h-3 w-3 text-[#6B7280] shrink-0" viewBox="0 0 12 12" fill="none">
+                    <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 </button>
                 {deptDropdownOpen && (
                   <>
@@ -1586,39 +1590,67 @@ function EmployeeMasterTab({
         render: (_value, row) => {
           const CATS: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
           // Categories only apply to Operator Leaders. Wei Siang 2026-05-10:
-          // a regular Operator's category column should look "not applicable",
-          // not show "All" or chips that imply they should pick something.
+          // a regular Operator's category column shows "—", not "All" or chips.
           if (editingId === row.id) {
             if (editForm.position !== "Operator Leader") {
               return <span className="text-[#9CA3AF] text-xs">—</span>;
             }
+            const summary =
+              editForm.categories.length === 0
+                ? "All"
+                : editForm.categories.join(", ");
             return (
-              <div className="flex flex-wrap gap-1">
-                {CATS.map((cat) => {
-                  const checked = editForm.categories.includes(cat);
-                  return (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditForm((f) => {
-                          const set = new Set(f.categories);
-                          if (set.has(cat)) set.delete(cat);
-                          else set.add(cat);
-                          return { ...f, categories: Array.from(set) };
-                        });
-                      }}
-                      className={`inline-flex items-center px-2 py-0.5 rounded border text-[11px] whitespace-nowrap transition-colors ${
-                        checked
-                          ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-                          : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
-                      }`}
-                    >
-                      {cat}
-                    </button>
-                  );
-                })}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCatDropdownOpen((v) => !v);
+                  }}
+                  className="h-8 w-32 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-2 text-left flex items-center justify-between gap-1 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                >
+                  <span className="truncate flex-1">{summary}</span>
+                  <svg className="h-3 w-3 text-[#6B7280] shrink-0" viewBox="0 0 12 12" fill="none">
+                    <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+                {catDropdownOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setCatDropdownOpen(false)}
+                    />
+                    <div className="absolute z-50 top-full left-0 mt-1 w-40 bg-white border border-[#E2DDD8] rounded-md shadow-lg">
+                      {CATS.map((cat) => {
+                        const checked = editForm.categories.includes(cat);
+                        return (
+                          <label
+                            key={cat}
+                            className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-[#FAF9F7] ${
+                              checked ? "bg-[#FAF7EE]" : ""
+                            }`}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-[#6B5C32]"
+                              checked={checked}
+                              onChange={() => {
+                                setEditForm((f) => {
+                                  const set = new Set(f.categories);
+                                  if (set.has(cat)) set.delete(cat);
+                                  else set.add(cat);
+                                  return { ...f, categories: Array.from(set) };
+                                });
+                              }}
+                            />
+                            <span className="text-[#374151]">{cat}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
               </div>
             );
           }
@@ -1816,7 +1848,7 @@ function EmployeeMasterTab({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => { setEditingId(null); setDeptDropdownOpen(false); }}
+                onClick={() => { setEditingId(null); setDeptDropdownOpen(false); setCatDropdownOpen(false); }}
               >
                 <X className="h-3 w-3" />
               </Button>

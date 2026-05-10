@@ -1146,6 +1146,101 @@ type BulkModalState = {
   error: string | null;
 };
 
+// Self-contained Departments multi-select dropdown for the inline edit row.
+// Owns its own open/close state so DataGrid cell memoization (which keys on
+// row data only) doesn't strand the popover JSX un-mounted. Previously the
+// open boolean lived in the parent EmployeeMasterTab, which meant clicking
+// the button re-rendered the parent but NOT the memoized cell — operator
+// had to click twice to open the popover (Wei Siang 2026-05-10: "很卡，要
+// 点两下才开"). Keeping state inside this component forces the cell to
+// re-render via React's normal child-state path.
+function DepartmentMultiSelect({
+  selectedCodes,
+  allDepts,
+  onChange,
+}: {
+  selectedCodes: string[];
+  allDepts: DepartmentLite[];
+  onChange: (codes: string[], primaryDept: DepartmentLite | undefined) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  // Click-outside detector. Document-level mousedown (not a backdrop div)
+  // because the edit row scrolls horizontally — an opaque shield would
+  // block reaching the Save button on narrow screens.
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  const deptNamesOf = (codes: string[]) =>
+    codes
+      .map((code) => allDepts.find((d) => d.code === code)?.name ?? code)
+      .join(", ");
+
+  const summary =
+    selectedCodes.length === 0
+      ? "— Select —"
+      : selectedCodes.length <= 2
+        ? deptNamesOf(selectedCodes)
+        : `${selectedCodes.length} departments`;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="h-8 w-44 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-2 text-left flex items-center justify-between gap-1 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+        title={selectedCodes.length > 0 ? deptNamesOf(selectedCodes) : ""}
+      >
+        <span className="truncate flex-1">{summary}</span>
+        <svg className="h-3 w-3 text-[#6B7280] shrink-0" viewBox="0 0 12 12" fill="none">
+          <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute z-50 top-full left-0 mt-1 w-56 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
+          {allDepts.map((d) => {
+            const checked = selectedCodes.includes(d.code);
+            return (
+              <label
+                key={d.id}
+                className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-[#FAF9F7] ${
+                  checked ? "bg-[#FAF7EE]" : ""
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-[#6B5C32]"
+                  checked={checked}
+                  onChange={() => {
+                    const set = new Set(selectedCodes);
+                    if (set.has(d.code)) set.delete(d.code);
+                    else set.add(d.code);
+                    const codes = Array.from(set);
+                    const primaryDept = allDepts.find((x) => x.code === codes[0]);
+                    onChange(codes, primaryDept);
+                  }}
+                />
+                <span className="text-[#374151]">{d.name}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EmployeeMasterTab({
   workers,
   refreshWorkers,
@@ -1164,29 +1259,10 @@ function EmployeeMasterTab({
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
-  // Whether the per-row Departments multi-select popover is open. Only one
-  // row can be editing at a time so a single boolean is enough. Auto-closes
-  // when the row exits edit mode. (Categories is a native select, no state
-  // needed for it.)
-  const [deptDropdownOpen, setDeptDropdownOpen] = useState(false);
-  // Click-outside detector for the dept dropdown. We used to render a
-  // <div className="fixed inset-0"> backdrop which closed the popover on
-  // outside click, but it ALSO blocked horizontal scrolling of the wide
-  // edit row — operator couldn't scroll right to reach the Save button
-  // (Wei Siang 2026-05-10: "save 不到"). Document-level mousedown listener
-  // gives the same close-on-outside-click without an opaque interaction
-  // shield over the rest of the table.
-  const deptDropdownRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!deptDropdownOpen) return;
-    const onDocMouseDown = (e: MouseEvent) => {
-      if (!deptDropdownRef.current?.contains(e.target as Node)) {
-        setDeptDropdownOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [deptDropdownOpen]);
+  // Per-row Departments multi-select popover state lives inside
+  // DepartmentMultiSelect (rendered in the column below) so DataGrid cell
+  // memoization can't strand it un-rendered. (Categories is a native select,
+  // no state needed for it.)
   const [saving, setSaving] = useState(false);
   const [pinModal, setPinModal] = useState<PinModalState | null>(null);
   const [bulkModal, setBulkModal] = useState<BulkModalState | null>(null);
@@ -1491,70 +1567,21 @@ function EmployeeMasterTab({
             // Multi-select disguised as a dropdown — looks like the Position
             // <select> but the panel has tickable checkboxes. Wei Siang
             // 2026-05-10: the chip wall was too tall and ugly inline.
-            const selected = editForm.departmentCodes;
-            const summary =
-              selected.length === 0
-                ? "— Select —"
-                : selected.length <= 2
-                  ? deptNamesOf(selected)
-                  : `${selected.length} departments`;
+            // State lives inside DepartmentMultiSelect to bypass DataGrid
+            // cell memoization (parent state changes wouldn't re-render the
+            // memoized cell, so the popover never mounted on first click).
             return (
-              <div className="relative" ref={deptDropdownRef}>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeptDropdownOpen((v) => !v);
-                  }}
-                  className="h-8 w-44 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-2 text-left flex items-center justify-between gap-1 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                  title={selected.length > 0 ? deptNamesOf(selected) : ""}
-                >
-                  <span className="truncate flex-1">{summary}</span>
-                  <svg className="h-3 w-3 text-[#6B7280] shrink-0" viewBox="0 0 12 12" fill="none">
-                    <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
-                {deptDropdownOpen && (
-                  // Outside-click handled by the document mousedown effect
-                  // above. No opaque backdrop — operator needs to scroll the
-                  // wide edit row horizontally while the popover is open.
-                  <div className="absolute z-50 top-full left-0 mt-1 w-56 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
-                      {allDepts.map((d) => {
-                        const checked = editForm.departmentCodes.includes(d.code);
-                        return (
-                          <label
-                            key={d.id}
-                            className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-[#FAF9F7] ${
-                              checked ? "bg-[#FAF7EE]" : ""
-                            }`}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <input
-                              type="checkbox"
-                              className="h-3.5 w-3.5 accent-[#6B5C32]"
-                              checked={checked}
-                              onChange={() => {
-                                setEditForm((f) => {
-                                  const set = new Set(f.departmentCodes);
-                                  if (set.has(d.code)) set.delete(d.code);
-                                  else set.add(d.code);
-                                  const codes = Array.from(set);
-                                  const primaryDept = allDepts.find((x) => x.code === codes[0]);
-                                  return {
-                                    ...f,
-                                    departmentCodes: codes,
-                                    departmentId: primaryDept?.id ?? f.departmentId,
-                                  };
-                                });
-                              }}
-                            />
-                            <span className="text-[#374151]">{d.name}</span>
-                          </label>
-                        );
-                      })}
-                  </div>
-                )}
-              </div>
+              <DepartmentMultiSelect
+                selectedCodes={editForm.departmentCodes}
+                allDepts={allDepts}
+                onChange={(codes, primaryDept) => {
+                  setEditForm((f) => ({
+                    ...f,
+                    departmentCodes: codes,
+                    departmentId: primaryDept?.id ?? f.departmentId,
+                  }));
+                }}
+              />
             );
           }
           const codes =

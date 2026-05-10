@@ -1913,19 +1913,28 @@ export function DataGrid<T extends Record<string, any>>({
                 // exist in the DOM at any time. Note that grouping is
                 // disabled in this path (virtualizationActive guards it).
                 //
-                // ALIGNMENT GATE: even with the v.index<length clip below,
-                // tanstack-virtual's getTotalSize() lags one render behind
-                // a sharp count drop (e.g. column-filter narrows 460→3),
-                // producing a giant stale paddingBottom that breaks the
-                // body-vs-badge invariant the user reports as "filter
-                // doesn't align" (Wei Siang, 2026-04-26 — multiple
-                // sightings). Below VIRTUALIZE_MIN_ROWS we skip the
-                // virtualizer entirely and render every row through the
-                // same renderDataRow that the legacy path uses — direct
-                // 1:1 mapping with sortedData, no spacers, no race. The
-                // virtualizer hook still mounts (line ~1016) so hook
-                // order stays stable; we just don't consult its output.
-                const VIRTUALIZE_MIN_ROWS = 100;
+                // ALIGNMENT GATE: original 2026-04-26 incident was that
+                // tanstack-virtual's getTotalSize() lagged one render
+                // behind a sharp count drop (e.g. column-filter narrows
+                // 460→3), producing a giant stale paddingBottom and a
+                // body that disagreed with the "X of Y records" badge
+                // ("filter doesn't align" report, multiple sightings).
+                // The fix landed at line ~1990 below: totalSize is now
+                // computed directly from sortedData.length × ROW_HEIGHT_PX
+                // — bypasses the lagging memo entirely. With that fix
+                // shipped + the v.index<sortedData.length clip on the
+                // virtualItems, the original race is closed.
+                //
+                // Lowered 2026-05-11 from 100 → 30: Fab Cut runs ~47
+                // dept rows × ~25 cols × custom cell renderers (status
+                // pills, date pickers, sticky cols), and at the 100-row
+                // threshold it fell back to legacy non-virtualized
+                // render — paying ~850ms initial mount per profile.
+                // Below 30 rows the virtualizer's overhead exceeds its
+                // gain, so legacy path stays for tiny lists (e.g.
+                // /consignment with 6 rows). Bump back up if a future
+                // race surfaces — one-line revert.
+                const VIRTUALIZE_MIN_ROWS = 30;
                 const useVirtualizedBody =
                   virtualizationActive && sortedData.length >= VIRTUALIZE_MIN_ROWS;
                 if (useVirtualizedBody) {

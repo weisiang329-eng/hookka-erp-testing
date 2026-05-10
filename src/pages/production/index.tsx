@@ -465,6 +465,14 @@ export default function ProductionPage({
         el.style.width = "1px";
         el.style.height = "1px";
       }
+      // Force a synchronous layout flush — Chromium's showPicker() anchors
+      // the calendar to where the input was laid out, NOT the styles we just
+      // assigned. Without this read, the very FIRST click after page load
+      // pops the calendar at the input's cached origin (top-left of the
+      // viewport, i.e. its initial 0,0 fixed position) even though the
+      // inline style now points at the cell. Reading getBoundingClientRect
+      // forces the browser to recompute layout before showPicker() reads it.
+      void el.getBoundingClientRect();
       if (typeof el.showPicker === "function") {
         try { el.showPicker(); return; } catch { /* showPicker not supported — fall through to focus/click */ }
       }

@@ -3743,6 +3743,26 @@ type DeptPerfDailyRow = {
   workingMinutes: number;
   productionMinutes: number;
   efficiencyPct: number;
+  // Drill-down arrays — backend extension. Optional on the type so the
+  // renderer doesn't crash if an older response shape is served (e.g.
+  // a stale browser tab hitting a freshly deployed backend before its own
+  // bundle reload). Empty arrays are treated identically to "missing".
+  workers?: Array<{
+    workerId: string;
+    workerName: string;
+    workingMinutes: number;
+  }>;
+  jobs?: Array<{
+    jobCardId: string;
+    poNo: string;
+    departmentCode: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string;
+    sizeLabel: string;
+    productionMinutes: number;
+    workers: Array<{ id: string; name: string }>;
+  }>;
 };
 
 type DeptPerfResponse = {
@@ -3818,54 +3838,20 @@ function DepartmentPerformanceTab({
     ? totals.efficiencyPct.toFixed(1)
     : null;
 
-  const dailyColumns: Column<DeptPerfDailyRow>[] = [
-    {
-      key: "date",
-      label: "Date",
-      sortable: true,
-      render: (_v, row) => <span className="font-medium">{formatDateDMY(row.date)}</span>,
-    },
-    {
-      key: "workingMinutes",
-      label: "Working hrs",
-      align: "right",
-      sortable: true,
-      render: (_v, row) => (
-        <span className="tabular-nums">
-          {row.workingMinutes > 0 ? formatHours(row.workingMinutes) : "-"}
-        </span>
-      ),
-    },
-    {
-      key: "productionMinutes",
-      label: "Production hrs",
-      align: "right",
-      sortable: true,
-      render: (_v, row) => (
-        <span className="tabular-nums">
-          {row.productionMinutes > 0 ? formatHours(row.productionMinutes) : "-"}
-        </span>
-      ),
-    },
-    {
-      key: "efficiencyPct",
-      label: "Efficiency %",
-      align: "right",
-      sortable: true,
-      render: (_v, row) => {
-        if (row.workingMinutes <= 0) {
-          return <span className="text-[#9CA3AF] tabular-nums">—</span>;
-        }
-        const pct = row.efficiencyPct;
-        const color = pct >= 80 ? "text-[#4F7C3A]" : pct >= 60 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
-        return (
-          <span className={`font-semibold tabular-nums ${color}`}>
-            {pct.toFixed(1)}%
-          </span>
-        );
-      },
-    },
-  ];
+  // Expanded-row state per date. Set<string> so flipping one row doesn't
+  // collapse another — operator can fan out multiple days side-by-side. Cleared
+  // implicitly on filter change because each filter swap remounts the rows
+  // with new keys; if a date persists across a refresh we keep its state,
+  // which is the right behaviour (operator's drill-down survives a poll).
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(() => new Set());
+  const toggleDate = useCallback((date: string) => {
+    setExpandedDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="space-y-4">
@@ -3967,7 +3953,12 @@ function DepartmentPerformanceTab({
         </Card>
       </div>
 
-      {/* Daily Breakdown Table */}
+      {/* Daily Breakdown Table — expandable rows. Click row OR caret to drill
+          into who logged hours and which job cards completed on that date.
+          Custom <table> instead of DataGrid because DataGrid has no expansion
+          slot; the column count here is small enough that we don't lose the
+          DataGrid features (sort/filter) the operator actually uses on this
+          short range view. */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2">
@@ -3975,15 +3966,197 @@ function DepartmentPerformanceTab({
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <DataGrid
-            columns={dailyColumns}
-            data={daily}
-            keyField="date"
-            gridId="department-performance-daily"
-            emptyMessage={loading ? "Loading..." : "No working hours in the selected period."}
-          />
+          {daily.length === 0 ? (
+            <div className="flex h-32 items-center justify-center text-sm text-[#6B7280]">
+              {loading ? "Loading..." : "No working hours in the selected period."}
+            </div>
+          ) : (
+            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-2 text-left font-medium text-[#374151] w-8"></th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Date</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Working hrs</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Production hrs</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Efficiency %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {daily.map((row) => {
+                    const isOpen = expandedDates.has(row.date);
+                    const pct = row.efficiencyPct;
+                    const effColor =
+                      row.workingMinutes <= 0
+                        ? "text-[#9CA3AF]"
+                        : pct >= 80
+                          ? "text-[#4F7C3A]"
+                          : pct >= 60
+                            ? "text-[#9C6F1E]"
+                            : "text-[#9A3A2D]";
+                    return (
+                      <Fragment key={row.date}>
+                        <tr
+                          className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors cursor-pointer"
+                          onClick={() => toggleDate(row.date)}
+                        >
+                          <td className="h-10 px-2 text-center text-[#6B7280]">
+                            {isOpen ? (
+                              <ChevronDown className="h-4 w-4 inline" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4 inline" />
+                            )}
+                          </td>
+                          <td className="h-10 px-3 font-medium text-[#1F1D1B]">
+                            {formatDateDMY(row.date)}
+                          </td>
+                          <td className="h-10 px-3 text-right tabular-nums">
+                            {row.workingMinutes > 0 ? formatHours(row.workingMinutes) : "-"}
+                          </td>
+                          <td className="h-10 px-3 text-right tabular-nums">
+                            {row.productionMinutes > 0 ? formatHours(row.productionMinutes) : "-"}
+                          </td>
+                          <td className={`h-10 px-3 text-right tabular-nums font-semibold ${effColor}`}>
+                            {row.workingMinutes <= 0 ? "—" : `${pct.toFixed(1)}%`}
+                          </td>
+                        </tr>
+                        {isOpen && (
+                          <tr className="bg-[#FDFCFB]">
+                            <td colSpan={5} className="px-6 py-4">
+                              <DailyDrillDown
+                                workers={row.workers ?? []}
+                                jobs={row.jobs ?? []}
+                              />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// Per-date drill-down panel rendered inside the expanded row. Two columns
+// side-by-side on desktop, stacked on mobile. Both sections always render —
+// even when empty — so the panel never looks broken or partially loaded.
+// Sort key: workers by minutes desc, jobs by minutes desc. Ties keep input
+// order (stable sort) which matches backend ordering.
+function DailyDrillDown({
+  workers,
+  jobs,
+}: {
+  workers: Array<{ workerId: string; workerName: string; workingMinutes: number }>;
+  jobs: Array<{
+    jobCardId: string;
+    poNo: string;
+    departmentCode: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string;
+    sizeLabel: string;
+    productionMinutes: number;
+    workers: Array<{ id: string; name: string }>;
+  }>;
+}) {
+  const sortedWorkers = useMemo(
+    () => [...workers].sort((a, b) => b.workingMinutes - a.workingMinutes),
+    [workers],
+  );
+  const sortedJobs = useMemo(
+    () => [...jobs].sort((a, b) => b.productionMinutes - a.productionMinutes),
+    [jobs],
+  );
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      {/* Workers */}
+      <div className="space-y-2">
+        <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
+          Workers
+        </h4>
+        <div className="rounded-lg bg-white border border-[#E2DDD8]">
+          {sortedWorkers.length === 0 ? (
+            <p className="px-3 py-3 text-xs text-[#9CA3AF]">
+              No working hours logged on this date.
+            </p>
+          ) : (
+            <ul className="divide-y divide-[#F0ECE9]">
+              {sortedWorkers.map((w) => (
+                <li
+                  key={w.workerId}
+                  className="flex items-center justify-between px-3 py-2 text-xs"
+                >
+                  <span className="text-[#1F1D1B]">{w.workerName}</span>
+                  <span className="tabular-nums text-[#374151] font-medium">
+                    {formatHours(w.workingMinutes)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+
+      {/* Job Cards */}
+      <div className="space-y-2">
+        <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
+          Job Cards
+        </h4>
+        <div className="rounded-lg bg-white border border-[#E2DDD8]">
+          {sortedJobs.length === 0 ? (
+            <p className="px-3 py-3 text-xs text-[#9CA3AF]">
+              No job cards completed on this date.
+            </p>
+          ) : (
+            <ul className="divide-y divide-[#F0ECE9]">
+              {sortedJobs.map((j) => {
+                const title = j.wipLabel || j.productName || j.productCode;
+                const workerNames = j.workers.map((w) => w.name).join(", ");
+                return (
+                  <li
+                    key={j.jobCardId}
+                    className="px-3 py-2 text-xs space-y-1"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium text-[#1F1D1B] truncate">
+                          {title}
+                        </div>
+                        <div className="text-[10px] text-[#6B7280]">
+                          {j.productCode}
+                          {j.sizeLabel ? ` • ${j.sizeLabel}` : ""}
+                        </div>
+                      </div>
+                      <span className="tabular-nums text-[#374151] font-medium whitespace-nowrap">
+                        {formatHours(j.productionMinutes)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {j.poNo ? (
+                        <span className="inline-flex items-center rounded bg-[#F0ECE9] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32]">
+                          {j.poNo}
+                        </span>
+                      ) : null}
+                      {workerNames ? (
+                        <span className="text-[10px] text-[#6B7280]">
+                          {workerNames}
+                        </span>
+                      ) : null}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

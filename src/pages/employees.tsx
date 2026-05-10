@@ -1971,7 +1971,7 @@ function EmployeeMasterTab({
           keyField="id"
           gridId="employees-master"
           contextMenuItems={contextMenuItems}
-          onDoubleClick={(row) => toast.info(`Opening details for ${row.name}`)}
+          onDoubleClick={(row) => startEdit(row)}
           emptyMessage="No employees found."
         />
       </CardContent>

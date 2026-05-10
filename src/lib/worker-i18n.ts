@@ -593,10 +593,10 @@ const dict: Dict = {
     my: 'ထုတ်လုပ်',
   },
   'team.colEfficiency': {
-    en: 'Eff %',
-    ms: 'Cekap %',
-    zh: '效率%',
-    my: 'စွမ်း%',
+    en: 'Efficiency',
+    ms: 'Kecekapan',
+    zh: '效率',
+    my: 'စွမ်းဆောင်ရည်',
   },
   'team.empty': {
     en: 'No data in this range',

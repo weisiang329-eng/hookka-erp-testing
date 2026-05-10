@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -1062,9 +1063,14 @@ function ClaudePOCard({
 }) {
   const po = row.extracted;
   const totalQty = po.items.reduce((s, i) => s + (i.quantity || 1), 0);
-
-  // Strip the trailing inch-mark on catalog values like '8"' so we can compare
-  // / show as plain numbers in the divan/leg/gap inputs.
+  // On tablet (<= lg) the modal is max-w-4xl ~896px; the inner table needed
+  // min-w-[64rem] (1024px) which created a nested horizontal scroll inside
+  // the modal scrollbar. Hide non-load-bearing OCR-review columns at tablet
+  // width so the table fits the modal — operator can still verify the most
+  // important fields (Cat, Product, Qty, Special, Price) without scrolling
+  // sideways. Divan/Leg/Gap apply only to bedframes, Size + Fabric the
+  // operator can re-check by expanding/scrolling.
+  const isTablet = useMediaQuery("(max-width: 1024px)");
   const stripInch = (s: string): number | null => {
     const m = s.replace(/[^0-9.]/g, "");
     return m ? Number(m) : null;
@@ -1208,18 +1214,18 @@ function ClaudePOCard({
 
             {expanded && (
               <div className="mt-2 border border-[#E2DDD8] rounded-lg overflow-x-auto">
-                <table className="w-full min-w-[64rem] text-xs">
+                <table className={`w-full text-xs ${isTablet ? "" : "min-w-[64rem]"}`}>
                   <thead>
                     <tr className="bg-[#F5F5F5] text-[#6B7280]">
                       <th className="px-1.5 py-1 text-left">#</th>
                       <th className="px-1.5 py-1 text-left">Cat</th>
                       <th className="px-1.5 py-1 text-left">Product</th>
                       <th className="px-1.5 py-1 text-center">Qty</th>
-                      <th className="px-1.5 py-1 text-left">Size</th>
+                      {!isTablet && <th className="px-1.5 py-1 text-left">Size</th>}
                       <th className="px-1.5 py-1 text-left">Fabric</th>
-                      <th className="px-1.5 py-1 text-center">Divan</th>
-                      <th className="px-1.5 py-1 text-center">Leg</th>
-                      <th className="px-1.5 py-1 text-center">Gap</th>
+                      {!isTablet && <th className="px-1.5 py-1 text-center">Divan</th>}
+                      {!isTablet && <th className="px-1.5 py-1 text-center">Leg</th>}
+                      {!isTablet && <th className="px-1.5 py-1 text-center">Gap</th>}
                       <th className="px-1.5 py-1 text-left">Special</th>
                       <th className="px-1.5 py-1 text-right">Price (RM)</th>
                       <th className="px-1.5 py-1"></th>
@@ -1332,13 +1338,15 @@ function ClaudePOCard({
                               onChange={(e) => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
                             />
                           </td>
-                          <td className="px-1.5 py-1">
-                            <input
-                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
-                              value={item.sizeLabel ?? ""}
-                              onChange={(e) => onUpdateItem(i, { sizeLabel: e.target.value || null })}
-                            />
-                          </td>
+                          {!isTablet && (
+                            <td className="px-1.5 py-1">
+                              <input
+                                className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                                value={item.sizeLabel ?? ""}
+                                onChange={(e) => onUpdateItem(i, { sizeLabel: e.target.value || null })}
+                              />
+                            </td>
+                          )}
                           <td className="px-1.5 py-1">
                             <SearchableSelect
                               value={item.fabricCode ?? ""}
@@ -1349,68 +1357,74 @@ function ClaudePOCard({
                               warning={!!isUnknownFabric}
                             />
                           </td>
-                          <td className="px-1.5 py-1 text-center">
-                            <input
-                              list={`div-${row.sampleId}-${i}`}
-                              type="number"
-                              step="0.5"
-                              onFocus={(e) => e.currentTarget.select()}
-                              className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                              value={item.divanHeightInches ?? ""}
-                              onChange={(e) => {
-                                const v = e.target.value === "" ? null : Number(e.target.value);
-                                onUpdateItem(i, { divanHeightInches: v });
-                              }}
-                              disabled={item.category !== "BEDFRAME"}
-                            />
-                            <datalist id={`div-${row.sampleId}-${i}`}>
-                              {divanValues.map((v) => <option key={v} value={v} />)}
-                            </datalist>
-                          </td>
-                          <td className="px-1.5 py-1 text-center">
-                            {/* Single dropdown matches the Maintenance leg-height
-                                pattern: "No Leg" + numeric options. The current
-                                value renders as either "No Leg" or e.g. '4"'. */}
-                            <select
-                              className="w-20 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent disabled:opacity-50"
-                              value={item.noLeg ? "__NOLEG__" : (item.legHeightInches != null ? String(item.legHeightInches) : "")}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                if (v === "__NOLEG__") {
-                                  onUpdateItem(i, { noLeg: true, legHeightInches: null });
-                                } else if (v === "") {
-                                  onUpdateItem(i, { noLeg: false, legHeightInches: null });
-                                } else {
-                                  onUpdateItem(i, { noLeg: false, legHeightInches: Number(v) });
-                                }
-                              }}
-                              disabled={item.category === "ACCESSORY"}
-                            >
-                              <option value="">—</option>
-                              <option value="__NOLEG__">No Leg</option>
-                              {legValues.map((v) => (
-                                <option key={v} value={v}>{`${v}"`}</option>
-                              ))}
-                            </select>
-                          </td>
-                          <td className="px-1.5 py-1 text-center">
-                            <input
-                              list={`gap-${row.sampleId}-${i}`}
-                              type="number"
-                              step="0.5"
-                              onFocus={(e) => e.currentTarget.select()}
-                              className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                              value={item.gapInches ?? ""}
-                              onChange={(e) => {
-                                const v = e.target.value === "" ? null : Number(e.target.value);
-                                onUpdateItem(i, { gapInches: v });
-                              }}
-                              disabled={item.category !== "BEDFRAME"}
-                            />
-                            <datalist id={`gap-${row.sampleId}-${i}`}>
-                              {gapValues.map((v) => <option key={v} value={v} />)}
-                            </datalist>
-                          </td>
+                          {!isTablet && (
+                            <td className="px-1.5 py-1 text-center">
+                              <input
+                                list={`div-${row.sampleId}-${i}`}
+                                type="number"
+                                step="0.5"
+                                onFocus={(e) => e.currentTarget.select()}
+                                className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                value={item.divanHeightInches ?? ""}
+                                onChange={(e) => {
+                                  const v = e.target.value === "" ? null : Number(e.target.value);
+                                  onUpdateItem(i, { divanHeightInches: v });
+                                }}
+                                disabled={item.category !== "BEDFRAME"}
+                              />
+                              <datalist id={`div-${row.sampleId}-${i}`}>
+                                {divanValues.map((v) => <option key={v} value={v} />)}
+                              </datalist>
+                            </td>
+                          )}
+                          {!isTablet && (
+                            <td className="px-1.5 py-1 text-center">
+                              {/* Single dropdown matches the Maintenance leg-height
+                                  pattern: "No Leg" + numeric options. The current
+                                  value renders as either "No Leg" or e.g. '4"'. */}
+                              <select
+                                className="w-20 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent disabled:opacity-50"
+                                value={item.noLeg ? "__NOLEG__" : (item.legHeightInches != null ? String(item.legHeightInches) : "")}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  if (v === "__NOLEG__") {
+                                    onUpdateItem(i, { noLeg: true, legHeightInches: null });
+                                  } else if (v === "") {
+                                    onUpdateItem(i, { noLeg: false, legHeightInches: null });
+                                  } else {
+                                    onUpdateItem(i, { noLeg: false, legHeightInches: Number(v) });
+                                  }
+                                }}
+                                disabled={item.category === "ACCESSORY"}
+                              >
+                                <option value="">—</option>
+                                <option value="__NOLEG__">No Leg</option>
+                                {legValues.map((v) => (
+                                  <option key={v} value={v}>{`${v}"`}</option>
+                                ))}
+                              </select>
+                            </td>
+                          )}
+                          {!isTablet && (
+                            <td className="px-1.5 py-1 text-center">
+                              <input
+                                list={`gap-${row.sampleId}-${i}`}
+                                type="number"
+                                step="0.5"
+                                onFocus={(e) => e.currentTarget.select()}
+                                className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                value={item.gapInches ?? ""}
+                                onChange={(e) => {
+                                  const v = e.target.value === "" ? null : Number(e.target.value);
+                                  onUpdateItem(i, { gapInches: v });
+                                }}
+                                disabled={item.category !== "BEDFRAME"}
+                              />
+                              <datalist id={`gap-${row.sampleId}-${i}`}>
+                                {gapValues.map((v) => <option key={v} value={v} />)}
+                              </datalist>
+                            </td>
+                          )}
                           <td className="px-1.5 py-1">
                             <SpecialMultiSelect
                               value={item.specialOrder ?? ""}

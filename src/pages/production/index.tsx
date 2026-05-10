@@ -5504,8 +5504,22 @@ export default function ProductionPage({
               }
             }
           `}</style>
+          {/* Hidden-by-default print container. Only mount the heavy
+              <QRImg> tree when the operator actually clicks Print All,
+              not on every Packing tab entry. Pre-fix: visibleFgStickers
+              was iterated unconditionally — `className="hidden"` removes
+              the page from layout but React still constructs every
+              component, and even with QRImg's IntersectionObserver gate
+              the React reconciliation of ~1000 siblings made tab entry
+              feel like the QR grid was opening (Wei Siang 2026-05-10:
+              "一打开就直接 show 出来会很卡"). The handlePrintFgStickers
+              path flips fgPrintRequested true, the useTimeout below
+              fires window.print() at ~300ms — enough time for the tree
+              to mount with QRImg in the print viewport, where the
+              observer triggers canvas generation. Reset 500ms after
+              print closes wipes the tree again. */}
           <div id="batch-fg-print" className="hidden print:block">
-            {visibleFgStickers.map((s) => {
+            {fgPrintRequested && visibleFgStickers.map((s) => {
               // Paired secondaries (Legs / Pillow) print inside their
               // primary's page — skip standalone.
               if (s.isSyntheticLegs || s.isSyntheticPillow) return null;

@@ -4958,7 +4958,7 @@ export default function ProductionPage({
               <h2 className="text-sm font-semibold text-[#1F1D1B]">
                 FG Sticker Preview
                 <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                  ({fgStickers.length} unit{fgStickers.length === 1 ? "" : "s"} in {activeDept?.name || activeTab})
+                  ({gridFilteredDeptRows?.length ?? deptRows.length} row{(gridFilteredDeptRows?.length ?? deptRows.length) === 1 ? "" : "s"} · {fgStickers.length} sticker{fgStickers.length === 1 ? "" : "s"})
                 </span>
               </h2>
             </div>

@@ -212,14 +212,18 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
           </Link>
         </div>
 
-        {/* Dev-only error details */}
-        {isDev && error && (
+        {/* Error details — collapsed by default in prod so the screen
+             stays clean, but expandable so the operator can screenshot
+             the actual exception when filing a bug. Without this Wei
+             Siang can only tell us "Something went wrong"; with it we
+             get the message + stack + component path. */}
+        {error && (
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden bg-white">
             <button
               onClick={() => setShowDetails((v) => !v)}
               className="w-full flex items-center justify-between px-4 py-3 text-xs font-semibold text-[#5A5550] hover:bg-[#F5F2ED] transition-colors"
             >
-              <span>Error details (dev only)</span>
+              <span>{isDev ? "Error details (dev only)" : "Error details (tap to expand)"}</span>
               <svg
                 className={`h-3.5 w-3.5 transition-transform ${showDetails ? "rotate-180" : ""}`}
                 fill="none"

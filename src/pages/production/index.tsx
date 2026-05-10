@@ -5008,53 +5008,47 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D] shrink-0">Special</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* QR + badge — SOFA on TOP (with QR, the main),
-                          LEG and PILLOW BELOW as text-only sections
-                          (no QR for either, share sofa's identity).
-                          Wei Siang spec 2026-05-10: "Sofa is the main,
-                          legs/pillow are accessories below." */}
-                      <div className="mt-auto flex flex-col gap-2">
-                        {/* Sofa — QR + badge */}
-                        <div className="flex items-end gap-2">
-                          <QRImg data={trackUrl} size={90} alt="FG unit QR" className="block" />
-                          <div className="flex-1 text-center min-w-0">
-                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "12px" }}>
-                              {s.pieceNo}/{s.totalPieces}
-                            </div>
-                            <div className="leading-tight truncate uppercase" style={{ fontSize: "10px" }}>
-                              {s.pieceName}
-                            </div>
-                            <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "8px" }}>
-                              {s.shortCode}
-                            </div>
+                      {/* Single shared QR (left) + right column stacked:
+                          SOFA on top (main), LEG and PILLOW below as
+                          text-only with internal dividers. Wei Siang
+                          spec 2026-05-10: swap positions vs the
+                          earlier design — sofa is the main, legs &
+                          pillow are accessories. */}
+                      <div className="mt-auto flex items-end gap-2">
+                        <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
+                        <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
+                          <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
+                            {s.pieceNo}/{s.totalPieces}
                           </div>
-                        </div>
-                        {legsPair && (
-                          <>
-                            <div className="border-t border-dashed border-[#6B5C32]" />
-                            <div className="flex flex-col items-center justify-center">
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "12px" }}>
+                          <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
+                            {s.pieceName}
+                          </div>
+                          <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
+                            {s.shortCode}
+                          </div>
+                          {legsPair && (
+                            <>
+                              <div className="border-t border-dashed border-[#6B5C32] my-1" />
+                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
                                 {legsPair.pieceNo}/{legsPair.totalPieces}
                               </div>
-                              <div className="leading-tight text-center uppercase" style={{ fontSize: "10px" }}>
+                              <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
                                 {legsPair.pieceName}
                               </div>
-                            </div>
-                          </>
-                        )}
-                        {pillowPair && (
-                          <>
-                            <div className="border-t border-dashed border-[#6B5C32]" />
-                            <div className="flex flex-col items-center justify-center">
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "12px" }}>
+                            </>
+                          )}
+                          {pillowPair && (
+                            <>
+                              <div className="border-t border-dashed border-[#6B5C32] my-1" />
+                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}
                               </div>
-                              <div className="leading-tight text-center uppercase" style={{ fontSize: "10px" }}>
+                              <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
                                 {pillowPair.pieceName}
                               </div>
-                            </div>
-                          </>
-                        )}
+                            </>
+                          )}
+                        </div>
                       </div>
                       {/* Customer footer — full-width, always visible
                           even when customerName is missing (fallback "—"). */}

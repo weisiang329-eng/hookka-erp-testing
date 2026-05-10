@@ -4976,13 +4976,14 @@ export default function ProductionPage({
                 <span className="ml-2 text-xs font-normal text-[#8A7F73]">
                   {(() => {
                     const visibleRows = gridFilteredDeptRows ?? deptRows;
+                    const rowCount = visibleRows.length;
                     // Sum wipQty (Qty column) across visible rows — 1 qty
                     // = 1 sticker (1 physical box) per Wei Siang spec.
                     const qtySum = visibleRows.reduce(
                       (s, r) => s + ((r as { qty?: number }).qty ?? 0),
                       0,
                     );
-                    return `(${qtySum} sticker${qtySum === 1 ? "" : "s"})`;
+                    return `(${rowCount} row${rowCount === 1 ? "" : "s"} · ${qtySum} sticker${qtySum === 1 ? "" : "s"})`;
                   })()}
                 </span>
               </h2>
@@ -5000,11 +5001,52 @@ export default function ProductionPage({
           ) : (
             <div className="overflow-x-auto">
               <div className="flex gap-3 p-3 min-w-min">
-                {fgStickers.map((s) => {
+                {(() => {
+                  // Build visibility set from the post-filter dept-grid rows.
+                  // A bedframe PO has TWO packing rows (HB + DIVAN) so we key
+                  // by (poId, wipType) — wipType is "HB" or "DIVAN" on the
+                  // dept row, and the FG sticker derives the same on the BF
+                  // aggregator (pieceName "HB" vs "Divan", line 3002/3009).
+                  // Sofa POs collapse to ONE packing row (jc.wipKey === "FG")
+                  // so poId alone is sufficient for sofa stickers; synthetic
+                  // legs/pillow inherit compartment1's poId so they follow
+                  // their primary. Pillows from accessory POs carry their
+                  // own poId — if the accessory PO is filtered out, the
+                  // pillow is too (intentional).
+                  const visibleRowsForKey =
+                    (gridFilteredDeptRows as unknown as DeptRow[] | null) ??
+                    deptRows;
+                  const visiblePoIds = new Set(
+                    visibleRowsForKey.map((r) => r.poId),
+                  );
+                  const visibleBfKeys = new Set<string>();
+                  for (const r of visibleRowsForKey) {
+                    if (r.category === "BEDFRAME") {
+                      visibleBfKeys.add(`${r.poId}::${r.wipType}`);
+                    }
+                  }
+                  const stickerVisible = (s: FgSticker): boolean => {
+                    if (!visiblePoIds.has(s.poId)) return false;
+                    if (s.itemCategory === "BEDFRAME") {
+                      const t =
+                        s.pieceName === "HB" ? "HB" :
+                        s.pieceName === "Divan" ? "DIVAN" :
+                        "";
+                      return t === "" || visibleBfKeys.has(`${s.poId}::${t}`);
+                    }
+                    return true;
+                  };
+                  return fgStickers.map((s) => {
                   // Paired secondary stickers (Legs after Compartment 1,
                   // Pillow after the LAST Compartment) render inside their
                   // pair partner's card — skip standalone.
                   if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
+                  // Grid-filter scoping — only render stickers whose parent
+                  // dept row passed the DataGrid's column filters. Without
+                  // this, filtering "WIP contains Divan" left the HB sticker
+                  // visible because it shares the same poId as the DIVAN
+                  // packing row (Wei Siang report 2026-05-10).
+                  if (!stickerVisible(s)) return null;
                   const origin =
                     typeof window !== "undefined" && window.location?.origin
                       ? window.location.origin
@@ -5103,7 +5145,8 @@ export default function ProductionPage({
                       </div>
                     </div>
                   );
-                })}
+                });
+                })()}
               </div>
             </div>
           )}

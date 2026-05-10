@@ -450,6 +450,8 @@ app.get("/history", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
   const { workerId } = auth;
+  const hoursPerDay =
+    (auth.worker as { workingHoursPerDay?: number }).workingHoursPerDay ?? 9;
 
   const today = new Date();
   const defaultTo = today.toISOString().slice(0, 10);
@@ -485,17 +487,28 @@ app.get("/history", async (c) => {
     wheMinutesByDate.set(d, (wheMinutesByDate.get(d) ?? 0) + mins);
   }
 
+  const standardMins = hoursPerDay * 60;
   const attendance = (attRes.results ?? []).map((r) => {
     const wheMins = wheMinutesByDate.get(r.date);
+    // When working_hour_entries has data for the date, split into regular
+    // (capped at workingHoursPerDay) and overtime — anything above the
+    // standard day is OT. Workers + Wei Siang see the row split as
+    // "9h work + 2h OT" instead of one bucket of 11h. Falls back to
+    // attendance_records numbers for dates that pre-date the entries.
+    let workingMinutes = r.workingMinutes;
+    let overtimeMinutes = r.overtimeMinutes;
+    if (wheMins != null) {
+      workingMinutes = Math.min(wheMins, standardMins);
+      overtimeMinutes = Math.max(0, wheMins - standardMins);
+    }
     return {
       date: r.date,
       clockIn: r.clockIn,
       clockOut: r.clockOut,
-      // working_hour_entries (manual admin grid) wins over attendance clock-time.
-      workingMinutes: wheMins != null ? wheMins : r.workingMinutes,
+      workingMinutes,
       productionTimeMinutes: r.productionTimeMinutes,
       efficiencyPct: r.efficiencyPct,
-      overtimeMinutes: r.overtimeMinutes,
+      overtimeMinutes,
       status: r.status,
     };
   });
@@ -745,28 +758,39 @@ app.get("/history", async (c) => {
     a.date.localeCompare(b.date),
   );
 
-  // workedMinutes: prefer working_hour_entries per date, fall back to attendance
-  // clock-time for dates with no manual entry. Union the date sets so days that
-  // appear in only one source still contribute.
+  // workedMinutes / overtimeMinutes — split per date once we know which side
+  // (working_hour_entries vs attendance clock-time) wins. Per-date split:
+  //   • From WHE: regular = min(hours, hoursPerDay), OT = max(0, hours - hoursPerDay)
+  //   • Fallback to attendance_records.workingMinutes / overtimeMinutes when
+  //     no manual entry exists.
+  // Union both date sets so dates that appear in only one source still count.
   const workedDates = new Set<string>();
   for (const r of attendance) workedDates.add(r.date);
   for (const d of wheMinutesByDate.keys()) workedDates.add(d);
-  const attMinutesByDate = new Map<string, number>();
-  for (const r of attendance) attMinutesByDate.set(r.date, r.workingMinutes);
+  const attRowByDate = new Map<string, typeof attendance[number]>();
+  for (const r of attendance) attRowByDate.set(r.date, r);
   let workedMinutes = 0;
+  let overtimeMinutes = 0;
   for (const d of workedDates) {
     const wheMins = wheMinutesByDate.get(d);
-    workedMinutes += wheMins != null ? wheMins : (attMinutesByDate.get(d) ?? 0);
+    if (wheMins != null) {
+      workedMinutes += Math.min(wheMins, standardMins);
+      overtimeMinutes += Math.max(0, wheMins - standardMins);
+    } else {
+      const row = attRowByDate.get(d);
+      workedMinutes += row?.workingMinutes ?? 0;
+      overtimeMinutes += row?.overtimeMinutes ?? 0;
+    }
   }
   const productionMinutes = completed.reduce(
     (s, r) => s + (r.myMinutes || 0),
     0,
   );
   const totals = {
-    days: attendance.length,
+    days: workedDates.size,
     workedMinutes,
     productionMinutes,
-    overtimeMinutes: attendance.reduce((s, r) => s + r.overtimeMinutes, 0),
+    overtimeMinutes,
     completedCount: completed.length,
     efficiencyPct:
       workedMinutes > 0

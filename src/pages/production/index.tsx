@@ -5199,16 +5199,36 @@ export default function ProductionPage({
               <span className="h-2.5 w-2.5 rounded-full bg-[#6B5C32]" />
               <h2 className="text-sm font-semibold text-[#1F1D1B]">
                 FG Sticker Preview
-                {fgStickers.length > 0 && (
-                  <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                    {(() => {
+                <span className="ml-2 text-xs font-normal text-[#8A7F73]">
+                  {(() => {
+                    // Two-source count, mirrors how UPH's QR Stickers
+                    // header always carries onScreenStickers.length:
+                    //   • Before the operator hits Show QR / Print All
+                    //     (fgStickers not loaded yet) → estimate from
+                    //     the sheet above. 1 grid row × qty = 1 box per
+                    //     Wei Siang spec.
+                    //   • After load → exact count from visibleFgStickers
+                    //     (matches the grid filter, drops synthetic
+                    //     Legs/Pillow tiles which are rendered as
+                    //     children of their primary).
+                    // Both branches stay in sync with whatever the body
+                    // says (placeholder vs tiles vs "no match"), so the
+                    // header never advertises a count the body can't
+                    // back up.
+                    if (fgStickers.length > 0) {
                       const realCount = visibleFgStickers.filter(
                         (s) => !s.isSyntheticLegs && !s.isSyntheticPillow,
                       ).length;
                       return `(${realCount} sticker${realCount === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;
-                    })()}
-                  </span>
-                )}
+                    }
+                    const visibleRows = gridFilteredDeptRows ?? deptRows;
+                    const qtySum = visibleRows.reduce(
+                      (s, r) => s + ((r as { qty?: number }).qty ?? 0),
+                      0,
+                    );
+                    return `(${qtySum} sticker${qtySum === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;
+                  })()}
+                </span>
               </h2>
             </div>
             {/* Show QR / Print All — mirrors the QR Stickers section on

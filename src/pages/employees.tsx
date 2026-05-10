@@ -4091,7 +4091,17 @@ function DailyDrillDown({
       <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
         Workers
       </h4>
-      <div className="rounded-lg bg-white border border-[#E2DDD8] divide-y divide-[#F0ECE9]">
+      <div className="rounded-lg bg-white border border-[#E2DDD8] overflow-hidden">
+        {/* Column header — mirrors the parent Daily Breakdown table so the
+            operator's eye traces the same column meaning from outer to inner. */}
+        <div className="flex items-center gap-3 px-3 py-2 bg-[#F0ECE9] border-b border-[#E2DDD8] text-[10px] font-medium text-[#374151] uppercase tracking-wide">
+          <span className="w-4 flex-shrink-0" />
+          <span className="flex-1 min-w-0">Worker</span>
+          <span className="w-24 text-right">Working hrs</span>
+          <span className="w-24 text-right">Production hrs</span>
+          <span className="w-14 text-right">Efficiency</span>
+        </div>
+        <div className="divide-y divide-[#F0ECE9]">
         {sortedWorkers.map((w) => {
           const key = `${date}::${w.workerId}`;
           const isOpen = expandedKeys.has(key);
@@ -4115,7 +4125,7 @@ function DailyDrillDown({
                 className="w-full flex items-center gap-3 px-3 py-2 text-xs hover:bg-[#FAF9F7] transition-colors text-left"
                 aria-expanded={isOpen}
               >
-                <span className="text-[#6B7280] flex-shrink-0">
+                <span className="text-[#6B7280] flex-shrink-0 w-4">
                   {isOpen ? (
                     <ChevronDown className="h-4 w-4" />
                   ) : (
@@ -4125,12 +4135,11 @@ function DailyDrillDown({
                 <span className="font-medium text-[#1F1D1B] flex-1 min-w-0 truncate">
                   {w.workerName}
                 </span>
-                <span className="tabular-nums text-[#374151] whitespace-nowrap">
+                <span className="tabular-nums text-[#374151] whitespace-nowrap w-24 text-right">
                   {w.workingMinutes > 0 ? formatHours(w.workingMinutes) : "-"}
                 </span>
-                <span className="text-[#9CA3AF]">·</span>
                 <span
-                  className="tabular-nums text-[#374151] whitespace-nowrap"
+                  className="tabular-nums text-[#374151] whitespace-nowrap w-24 text-right"
                   title="Production hours (pro-rated share of completed JCs)"
                 >
                   {w.productionMinutes > 0 ? formatHours(w.productionMinutes) : "-"}
@@ -4182,6 +4191,7 @@ function DailyDrillDown({
             </Fragment>
           );
         })}
+        </div>
       </div>
     </div>
   );

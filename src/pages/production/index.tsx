@@ -4625,15 +4625,23 @@ export default function ProductionPage({
             // history. Mirrors the operator's request: fewer rows
             // means faster page open and a more focused live view.
             defaultExcludedValues={{ status: ["COMPLETED", "TRANSFERRED"] }}
-            // Virtualization disabled (2026-05-04): the virtualizer +
-            // sticky header + frozen-left columns combination drifts the
-            // frozen track by one row when scrolled — user reported the
-            // SO ID column lining up against the column header instead of
-            // the matching data row. The earlier perf gain (5c8aad7) only
-            // matters on Fab Sew (~1,200 rows); other depts top out around
-            // 500 and render fine without windowing. Re-enable once
-            // DataGrid's frozen track gets its own sticky-header offset
-            // pass, or split Fab Sew onto its own virtualized variant.
+            // Re-enabled 2026-05-10 after measuring a 5.4s React-render
+            // block on Fab Sew (~1.4k rows × 25 cols) immediately after
+            // clearing the From-date filter — operator's "卡着 needs refresh"
+            // symptom. Long-task profile pinned the cost on the body's
+            // tbody reconciliation, not on the data prep (baseRows fix
+            // already trimmed compute to <100ms). With virtualize=true
+            // DataGrid only mounts the ~30 rows in the viewport, dropping
+            // body reconciliation by ~50×.
+            //
+            // The 2026-05-04 alignment-drift report (sticky # / SO ID
+            // columns lining up against the header instead of the row)
+            // was the reason this was off. The clipping + totalSize
+            // safeguards added in DataGrid since (Apr 26 2026 fixes plus
+            // the VIRTUALIZE_MIN_ROWS=100 fall-through) should keep this
+            // path stable, but if the alignment regresses on the live
+            // grid, flip back to virtualize={false} — fast revert.
+            virtualize
             // ON_HOLD → amber background; CANCELLED → grey + strikethrough.
             // rowClassName appends onto the grid's default row class so alt-row
             // striping still works when no lifecycle class applies.

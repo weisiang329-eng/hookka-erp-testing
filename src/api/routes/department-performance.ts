@@ -20,9 +20,17 @@
 // × completedDate in range), credit the JC's full actualMinutes ?? estMinutes
 // ONCE per date (no double-count when multiple workers share the JC).
 //
-// Each daily row also returns drilldown arrays:
-//   workers[] — per-worker working-minutes for that date (sorted desc)
-//   jobs[]    — per-JC production-minutes for that date (deduped, sorted desc)
+// Each daily row also returns a drilldown array:
+//   workers[] — per-worker working / production / efficiency for that date,
+//               plus the JCs that worker contributed to (pro-rated share).
+//
+// Production-minutes pro-ration: a JC's full minutes are divided EVENLY
+// across the distinct worker ids credited to it (pic1 + pic2 on the JC plus
+// any piece_pics rows). This way the SUM of per-worker productionMinutes
+// for a date equals the date-level productionMinutes (modulo rounding), and
+// efficiency at the worker level is comparable to efficiency at the date
+// level — operator can drill from a low daily % straight to the worker(s)
+// pulling the average down.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";

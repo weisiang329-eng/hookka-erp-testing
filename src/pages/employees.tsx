@@ -3738,31 +3738,32 @@ function EmployeeDetailTab({
 // dateRange). Backend GET /api/department-performance returns pre-aggregated
 // totals + per-day rows so this tab is a thin renderer.
 
+type DrillDownWorker = {
+  workerId: string;
+  workerName: string;
+  workingMinutes: number;
+  productionMinutes: number;
+  efficiencyPct: number;
+  jobs: Array<{
+    jobCardId: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string | null;
+    poNo: string | null;
+    productionMinutes: number;
+  }>;
+};
+
 type DeptPerfDailyRow = {
   date: string;
   workingMinutes: number;
   productionMinutes: number;
   efficiencyPct: number;
-  // Drill-down arrays — backend extension. Optional on the type so the
+  // Drill-down array — backend extension. Optional on the type so the
   // renderer doesn't crash if an older response shape is served (e.g.
   // a stale browser tab hitting a freshly deployed backend before its own
-  // bundle reload). Empty arrays are treated identically to "missing".
-  workers?: Array<{
-    workerId: string;
-    workerName: string;
-    workingMinutes: number;
-  }>;
-  jobs?: Array<{
-    jobCardId: string;
-    poNo: string;
-    departmentCode: string;
-    productCode: string;
-    productName: string;
-    wipLabel: string;
-    sizeLabel: string;
-    productionMinutes: number;
-    workers: Array<{ id: string; name: string }>;
-  }>;
+  // bundle reload). Empty array is treated identically to "missing".
+  workers?: DrillDownWorker[];
 };
 
 type DeptPerfResponse = {
@@ -4024,8 +4025,8 @@ function DepartmentPerformanceTab({
                           <tr className="bg-[#FDFCFB]">
                             <td colSpan={5} className="px-6 py-4">
                               <DailyDrillDown
+                                date={row.date}
                                 workers={row.workers ?? []}
-                                jobs={row.jobs ?? []}
                               />
                             </td>
                           </tr>
@@ -4043,119 +4044,144 @@ function DepartmentPerformanceTab({
   );
 }
 
-// Per-date drill-down panel rendered inside the expanded row. Two columns
-// side-by-side on desktop, stacked on mobile. Both sections always render —
-// even when empty — so the panel never looks broken or partially loaded.
-// Sort key: workers by minutes desc, jobs by minutes desc. Ties keep input
-// order (stable sort) which matches backend ordering.
+// Per-date drill-down panel rendered inside the expanded row. Single-column
+// vertical stack of worker rows; each row is itself expandable to reveal
+// THAT worker's completed JCs for the date. Multiple workers can be open
+// at once — tracked in a Set<string> of "${date}::${workerId}" keys so
+// expansion state survives re-renders without colliding across dates.
+//
+// Sort: workers by working minutes desc (matches backend), jobs by
+// production minutes desc per worker.
 function DailyDrillDown({
+  date,
   workers,
-  jobs,
 }: {
-  workers: Array<{ workerId: string; workerName: string; workingMinutes: number }>;
-  jobs: Array<{
-    jobCardId: string;
-    poNo: string;
-    departmentCode: string;
-    productCode: string;
-    productName: string;
-    wipLabel: string;
-    sizeLabel: string;
-    productionMinutes: number;
-    workers: Array<{ id: string; name: string }>;
-  }>;
+  date: string;
+  workers: DrillDownWorker[];
 }) {
   const sortedWorkers = useMemo(
     () => [...workers].sort((a, b) => b.workingMinutes - a.workingMinutes),
     [workers],
   );
-  const sortedJobs = useMemo(
-    () => [...jobs].sort((a, b) => b.productionMinutes - a.productionMinutes),
-    [jobs],
+
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
+  const toggleWorker = useCallback(
+    (workerId: string) => {
+      const key = `${date}::${workerId}`;
+      setExpandedKeys((prev) => {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+    },
+    [date],
   );
 
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {/* Workers */}
-      <div className="space-y-2">
-        <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
-          Workers
-        </h4>
-        <div className="rounded-lg bg-white border border-[#E2DDD8]">
-          {sortedWorkers.length === 0 ? (
-            <p className="px-3 py-3 text-xs text-[#9CA3AF]">
-              No working hours logged on this date.
-            </p>
-          ) : (
-            <ul className="divide-y divide-[#F0ECE9]">
-              {sortedWorkers.map((w) => (
-                <li
-                  key={w.workerId}
-                  className="flex items-center justify-between px-3 py-2 text-xs"
-                >
-                  <span className="text-[#1F1D1B]">{w.workerName}</span>
-                  <span className="tabular-nums text-[#374151] font-medium">
-                    {formatHours(w.workingMinutes)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+  if (sortedWorkers.length === 0) {
+    return (
+      <div className="rounded-lg bg-white border border-[#E2DDD8] px-3 py-3 text-xs text-[#9CA3AF]">
+        No working hours logged on this date.
       </div>
+    );
+  }
 
-      {/* Job Cards */}
-      <div className="space-y-2">
-        <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
-          Job Cards
-        </h4>
-        <div className="rounded-lg bg-white border border-[#E2DDD8]">
-          {sortedJobs.length === 0 ? (
-            <p className="px-3 py-3 text-xs text-[#9CA3AF]">
-              No job cards completed on this date.
-            </p>
-          ) : (
-            <ul className="divide-y divide-[#F0ECE9]">
-              {sortedJobs.map((j) => {
-                const title = j.wipLabel || j.productName || j.productCode;
-                const workerNames = j.workers.map((w) => w.name).join(", ");
-                return (
-                  <li
-                    key={j.jobCardId}
-                    className="px-3 py-2 text-xs space-y-1"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="font-medium text-[#1F1D1B] truncate">
-                          {title}
-                        </div>
-                        <div className="text-[10px] text-[#6B7280]">
-                          {j.productCode}
-                          {j.sizeLabel ? ` • ${j.sizeLabel}` : ""}
-                        </div>
-                      </div>
-                      <span className="tabular-nums text-[#374151] font-medium whitespace-nowrap">
-                        {formatHours(j.productionMinutes)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {j.poNo ? (
-                        <span className="inline-flex items-center rounded bg-[#F0ECE9] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32]">
-                          {j.poNo}
-                        </span>
-                      ) : null}
-                      {workerNames ? (
-                        <span className="text-[10px] text-[#6B7280]">
-                          {workerNames}
-                        </span>
-                      ) : null}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
+  return (
+    <div className="space-y-2">
+      <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
+        Workers
+      </h4>
+      <div className="rounded-lg bg-white border border-[#E2DDD8] divide-y divide-[#F0ECE9]">
+        {sortedWorkers.map((w) => {
+          const key = `${date}::${w.workerId}`;
+          const isOpen = expandedKeys.has(key);
+          const pct = w.efficiencyPct;
+          const effColor =
+            w.workingMinutes <= 0
+              ? "text-[#9CA3AF]"
+              : pct >= 80
+                ? "text-[#4F7C3A]"
+                : pct >= 60
+                  ? "text-[#9C6F1E]"
+                  : "text-[#9A3A2D]";
+          const sortedJobs = [...w.jobs].sort(
+            (a, b) => b.productionMinutes - a.productionMinutes,
+          );
+          return (
+            <Fragment key={w.workerId}>
+              <button
+                type="button"
+                onClick={() => toggleWorker(w.workerId)}
+                className="w-full flex items-center gap-3 px-3 py-2 text-xs hover:bg-[#FAF9F7] transition-colors text-left"
+                aria-expanded={isOpen}
+              >
+                <span className="text-[#6B7280] flex-shrink-0">
+                  {isOpen ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                </span>
+                <span className="font-medium text-[#1F1D1B] flex-1 min-w-0 truncate">
+                  {w.workerName}
+                </span>
+                <span className="tabular-nums text-[#374151] whitespace-nowrap">
+                  {w.workingMinutes > 0 ? formatHours(w.workingMinutes) : "-"}
+                </span>
+                <span className="text-[#9CA3AF]">·</span>
+                <span
+                  className="tabular-nums text-[#374151] whitespace-nowrap"
+                  title="Production hours (pro-rated share of completed JCs)"
+                >
+                  {w.productionMinutes > 0 ? formatHours(w.productionMinutes) : "-"}
+                </span>
+                <span
+                  className={`tabular-nums font-semibold whitespace-nowrap w-14 text-right ${effColor}`}
+                >
+                  {w.workingMinutes <= 0 ? "—" : `${pct.toFixed(0)}%`}
+                </span>
+              </button>
+              {isOpen && (
+                <div className="bg-[#FDFCFB] px-3 py-3">
+                  {sortedJobs.length === 0 ? (
+                    <p className="text-xs text-[#9CA3AF]">
+                      No completed job cards on this date.
+                    </p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {sortedJobs.map((j) => {
+                        const title = j.wipLabel || j.productName || j.productCode;
+                        return (
+                          <li
+                            key={j.jobCardId}
+                            className="flex items-start justify-between gap-3 rounded border border-[#F0ECE9] bg-white px-3 py-2 text-xs"
+                          >
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="font-medium text-[#1F1D1B] truncate">
+                                {title}
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap text-[10px] text-[#6B7280]">
+                                <span>{j.productCode}</span>
+                                {j.poNo ? (
+                                  <span className="inline-flex items-center rounded bg-[#F0ECE9] px-1.5 py-0.5 font-medium text-[#6B5C32]">
+                                    {j.poNo}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                            <span className="tabular-nums text-[#374151] font-medium whitespace-nowrap">
+                              {formatHours(j.productionMinutes)}
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
       </div>
     </div>
   );

@@ -15,7 +15,7 @@
 //     actual delivery date.
 // ---------------------------------------------------------------------------
 import { useMemo } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,7 +29,22 @@ import {
   AlertTriangle,
   CheckCircle2,
   TrendingUp,
+  Package,
+  Plus,
 } from "lucide-react";
+
+type SkuBinding = {
+  id: string;
+  materialCode: string;
+  materialName: string;
+  supplierSku: string;
+  supplierDescription?: string;
+  unitPrice: number;
+  currency: string;
+  leadTimeDays: number;
+  moq: number;
+  isMainSupplier: boolean;
+};
 
 type ScorecardLastPO = {
   id: string;
@@ -81,6 +96,7 @@ function deliveryDelta(po: ScorecardLastPO): {
 
 export default function SupplierDetailPage() {
   const { id } = useParams();
+  const navigate = useNavigate();
 
   const { data: supResp, loading: supLoading } = useCachedJson<{
     success?: boolean;
@@ -92,6 +108,14 @@ export default function SupplierDetailPage() {
     data?: ScorecardDetail;
     error?: string;
   }>(id ? `/api/supplier-scorecards/${id}` : null);
+  const { data: skuResp } = useCachedJson<{
+    success?: boolean;
+    data?: SkuBinding[];
+  }>(id ? `/api/supplier-materials?supplierId=${id}` : null);
+  const skus = useMemo(
+    () => (skuResp?.success ? skuResp.data ?? [] : []),
+    [skuResp],
+  );
 
   const supplier: Supplier | null = useMemo(
     () => (supResp?.success ? supResp.data ?? null : null),
@@ -231,6 +255,87 @@ export default function SupplierDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* SKU mappings — per-supplier code/description list */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Package className="h-4 w-4 text-[#6B5C32]" />
+              SKU Mappings
+              <span className="text-xs text-[#9CA3AF] font-normal">
+                ({skus.length} {skus.length === 1 ? "code" : "codes"})
+              </span>
+            </CardTitle>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() =>
+                navigate(
+                  `/procurement/maintenance?tab=sku-costing&supplier=${encodeURIComponent(id ?? "")}&action=add`,
+                )
+              }
+            >
+              <Plus className="h-4 w-4" /> Add SKU Mapping
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {skus.length === 0 ? (
+            <p className="text-sm text-[#9CA3AF] py-6 text-center">
+              No SKU mappings yet for this supplier.
+            </p>
+          ) : (
+            <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Internal Code</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Internal Description</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier Code</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier Description</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Unit Price</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Lead Time</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">MOQ</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Main</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {skus.map((s, idx) => (
+                    <tr
+                      key={s.id}
+                      onDoubleClick={() =>
+                        navigate(
+                          `/procurement/maintenance?tab=sku-costing&supplier=${encodeURIComponent(id ?? "")}`,
+                        )
+                      }
+                      className={`border-b border-[#E2DDD8] last:border-b-0 cursor-pointer hover:bg-[#FAF7EE] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}
+                      title="Double-click to manage in Maintenance"
+                    >
+                      <td className="h-10 px-3 font-medium text-[#6B5C32]">{s.materialCode}</td>
+                      <td className="h-10 px-3 text-[#374151]">{s.materialName}</td>
+                      <td className="h-10 px-3 text-[#374151]">{s.supplierSku}</td>
+                      <td className="h-10 px-3 text-[#6B7280]">{s.supplierDescription || "—"}</td>
+                      <td className="h-10 px-3 text-right text-[#1F1D1B]">
+                        {formatCurrency(s.unitPrice)} {s.currency !== "MYR" ? s.currency : ""}
+                      </td>
+                      <td className="h-10 px-3 text-right text-[#4B5563]">{s.leadTimeDays}d</td>
+                      <td className="h-10 px-3 text-right text-[#4B5563]">{s.moq}</td>
+                      <td className="h-10 px-3">
+                        {s.isMainSupplier ? (
+                          <Badge className="bg-green-50 text-green-800 border-green-300">Main</Badge>
+                        ) : (
+                          <span className="text-[#9CA3AF] text-xs">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Last 10 POs */}
       <Card>

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -395,12 +395,16 @@ function SKUFormDialog({
   inventoryItems,
   onSave,
   onClose,
+  presetSupplierId,
 }: {
   editData?: SupplierSKU | null;
   suppliers: Supplier[];
   inventoryItems: InventoryItem[];
   onSave: (data: Omit<SupplierSKU, "id">) => void;
   onClose: () => void;
+  // When opened from the supplier detail page, supplier dropdown is
+  // pre-selected so operator doesn't have to pick again.
+  presetSupplierId?: string;
 }) {
   const [internalRMCode, setInternalRMCode] = useState(editData?.internalRMCode || "");
   const [materialName, setMaterialName] = useState(editData?.materialName || "");
@@ -437,7 +441,9 @@ function SKUFormDialog({
     setShowRmDropdown(false);
     setRmSearch("");
   };
-  const [supplierId, setSupplierId] = useState(editData?.supplierId || "");
+  const [supplierId, setSupplierId] = useState(
+    editData?.supplierId || presetSupplierId || "",
+  );
   const [supplierSku, setSupplierSku] = useState(editData?.supplierSku || "");
   const [supplierDescription, setSupplierDescription] = useState(
     editData?.supplierDescription || "",
@@ -609,7 +615,10 @@ type TabId = "suppliers" | "sku-costing";
 
 export default function SupplierMaintenancePage() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<TabId>("suppliers");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<TabId>(
+    searchParams.get("tab") === "sku-costing" ? "sku-costing" : "suppliers",
+  );
 
   // Supplier state — D1 is source of truth; MOCK_SUPPLIERS kept only as
   // a fallback if the API is unreachable, so the page always renders.
@@ -652,9 +661,30 @@ export default function SupplierMaintenancePage() {
   // fallback if the API is unreachable, so the page always renders.
   const [skuList, setSkuList] = useState<SupplierSKU[]>([]);
   const [skuSearch, setSkuSearch] = useState("");
-  const [skuSupplierFilter, setSkuSupplierFilter] = useState<string>("");
+  const [skuSupplierFilter, setSkuSupplierFilter] = useState<string>(
+    searchParams.get("supplier") ?? "",
+  );
   const [showSKUForm, setShowSKUForm] = useState(false);
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
+
+  // Deep-link from /suppliers/:id detail page: ?action=add pre-opens the
+  // SKU form on the SKU & Costing tab. Once consumed, the param is stripped
+  // from the URL so a refresh doesn't re-open the dialog. The tab + supplier
+  // filter params are handled at useState init above so they survive refresh.
+  const consumedDeepLinkRef = useRef(false);
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot: opens dialog from URL on first mount */
+  useEffect(() => {
+    if (consumedDeepLinkRef.current) return;
+    if (searchParams.get("action") !== "add") return;
+    consumedDeepLinkRef.current = true;
+    setActiveTab("sku-costing");
+    setEditingSKU(null);
+    setShowSKUForm(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("action");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // D1 exposes this under /api/supplier-materials (the legacy mock was
   // /api/supplier-skus which never became a real endpoint). Map the
@@ -1035,7 +1065,7 @@ export default function SupplierMaintenancePage() {
             keyField="id"
             gridId="supplier-info"
             contextMenuItems={supplierContextMenu}
-            onDoubleClick={(row) => { setEditingSupplier(row); setShowSupplierForm(true); }}
+            onDoubleClick={(row) => navigate(`/suppliers/${row.id}`)}
             emptyMessage="No suppliers found."
             stickyHeader
             maxHeight="calc(100vh - 420px)"
@@ -1111,6 +1141,7 @@ export default function SupplierMaintenancePage() {
           editData={editingSKU}
           suppliers={suppliers}
           inventoryItems={inventoryItems}
+          presetSupplierId={editingSKU ? undefined : skuSupplierFilter || undefined}
           onSave={handleSaveSKU}
           onClose={() => { setShowSKUForm(false); setEditingSKU(null); }}
         />

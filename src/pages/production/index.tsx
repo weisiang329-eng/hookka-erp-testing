@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
@@ -365,6 +366,11 @@ export default function ProductionPage({
 }: { mode?: ProductionPageMode; deptCode?: string } = {}) {
   const navigate = useNavigate();
   const { toast } = useToast();
+  // Tablet breakpoint — default-hide low-priority DataGrid columns when the
+  // viewport is narrower than ~lg (1280px gives a safety margin over the
+  // Tailwind lg=1024 breakpoint so iPad Mini landscape ~1180px also hides
+  // them). Operator can still re-enable via the Columns picker.
+  const isTablet = useMediaQuery("(max-width: 1280px)");
   // Slim payload opt-in: fields=minimal drops ~20 unused PO fields + the
   // entire piece_pics tree on the wire. The Production page never reads
   // them and this response ships ~530 POs × ~9k JCs — the largest payload
@@ -2583,9 +2589,14 @@ export default function ProductionPage({
       },
     },
     { key: "customerPOId",  label: "Customer PO ID", type: "docno",  width: "130px", sortable: true },
-    { key: "customerRef",   label: "Customer Ref",   type: "text",   width: "120px", sortable: true },
+    // Low-priority on tablet — operator can re-enable via Columns picker.
+    // The on-screen Production matrix has 13+ cols at full width (~2050px).
+    // On iPad Mini landscape (~1180px content), customerRef / state / divan /
+    // leg / totalHeight / prodTime are nice-to-have not load-bearing for the
+    // floor supervisor, so they get hidden by default below lg.
+    { key: "customerRef",   label: "Customer Ref",   type: "text",   width: "120px", sortable: true, defaultHidden: isTablet },
     { key: "customerName",  label: "Customer Name",  type: "text",   width: "130px", sortable: true },
-    { key: "customerState", label: "State",          type: "text",   width: "70px",  sortable: true },
+    { key: "customerState", label: "State",          type: "text",   width: "70px",  sortable: true, defaultHidden: isTablet },
     { key: "category",      label: "Category",       type: "text",   width: "90px",  sortable: true },
     { key: "model",         label: "Model",          type: "text",   width: "110px", sortable: true },
     // Type column (HEADBOARD / DIVAN / BASE / CUSHION / ARMREST / etc.) —
@@ -2594,15 +2605,15 @@ export default function ProductionPage({
     // Hide by default on FAB_CUT tab; other dept tabs keep it visible
     // since each row is still per-piece for them. Wei Siang explicitly
     // asked to hide on Fab Cut: "type 的话你可能需要换掉了。要不然我们就直接
-    // hide 起来吧".
-    { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true, defaultHidden: activeTab === "FAB_CUT" },
+    // hide 起来吧". Also hide on tablet to save horizontal space.
+    { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true, defaultHidden: activeTab === "FAB_CUT" || isTablet },
     { key: "wip",           label: "WIP",            type: "text",   width: "220px", sortable: true },
     { key: "size",          label: "Size",           type: "text",   width: "70px",  sortable: true },
     { key: "colour",        label: "Colour",         type: "text",   width: "100px", sortable: true },
     { key: "gap",           label: "Gap",            type: "text",   width: "60px",  sortable: true, align: "right" },
-    { key: "divan",         label: "Divan",          type: "text",   width: "70px",  sortable: true, align: "right" },
-    { key: "leg",           label: "Leg",            type: "text",   width: "60px",  sortable: true, align: "right" },
-    { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right" },
+    { key: "divan",         label: "Divan",          type: "text",   width: "70px",  sortable: true, align: "right", defaultHidden: isTablet },
+    { key: "leg",           label: "Leg",            type: "text",   width: "60px",  sortable: true, align: "right", defaultHidden: isTablet },
+    { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right", defaultHidden: isTablet },
     { key: "specialOrder",  label: "Special Order",  type: "text",   width: "130px", sortable: true },
     { key: "qty",           label: "Qty",            type: "number", width: "60px",  sortable: true, align: "right" },
     // Fabric Usage column — predicted meters of fabric this WIP will consume.
@@ -2634,7 +2645,7 @@ export default function ProductionPage({
     // time-budget read. On FAB_CUT the merged row sums across all
     // components (Base + Cushion + Arm cut together) so the number
     // reflects the actual lay-down time, not any single component.
-    { key: "prodTime",      label: "Prod Time (min)", type: "number", width: "100px", sortable: true, align: "right" },
+    { key: "prodTime",      label: "Prod Time (min)", type: "number", width: "100px", sortable: true, align: "right", defaultHidden: isTablet },
     // Rack — only meaningful for the Packing dept. Hidden on every other
     // tab so the sheet stays clean. Renders as a dropdown of warehouse rack
     // slots; selecting one PATCHes the PO's rackingNumber so the delivery
@@ -2742,7 +2753,7 @@ export default function ProductionPage({
       sortable: true,
       render: (_v, row) => renderStatusCell(row),
     },
-  ], [activeTab, upstreamDepts]);
+  ], [activeTab, upstreamDepts, isTablet]);
 
   const activeDept = DEPARTMENTS.find((d) => d.code === activeTab);
 

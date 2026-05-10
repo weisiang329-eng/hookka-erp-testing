@@ -174,26 +174,31 @@ function genFGUnitId(poId: string, unitNo: number, pieceNo: number): string {
 
 /**
  * Default piece configuration for bedframes when product.pieces JSON is
- * empty. Wei Siang's spec (2026-05-09):
- *   K, Q   → 3 packs (1 Headboard + 2 Divan halves)
- *   S, SS  → 2 packs (1 Headboard + 1 Divan)
+ * empty. Wei Siang's spec:
+ *   Full bedframe (HB + Divan):
+ *     K, Q   → 3 packs (1 Headboard + 2 Divan halves)
+ *     S, SS  → 2 packs (1 Headboard + 1 Divan)
+ *   Divan-only (productCode starts with "DIVAN"):
+ *     K, Q   → 2 packs (2 Divan halves, no HB)
+ *     S, SS  → 1 pack (1 Divan, no HB)
  *
  * sizeCode normalisation: case-insensitive; trims whitespace; ignores
  * variants like "K-S" (king with storage) → still K family.
  */
 function bedframeSizeDefault(
   sizeCode: string | null,
+  isDivanOnly: boolean,
 ): { count: number; names: string[] } | null {
   if (!sizeCode) return null;
   const norm = sizeCode.trim().toUpperCase();
   // Strip storage / option suffixes (e.g. "K-S", "Q (HF)") — first word wins
   const base = norm.split(/[\s\-_(]/)[0];
   if (base === "K" || base === "Q") {
-    // Wei Siang spec 2026-05-09: don't differentiate L vs R — both halves
-    // are just "Divan". Operator visually identifies by box position.
+    if (isDivanOnly) return { count: 2, names: ["Divan", "Divan"] };
     return { count: 3, names: ["Headboard", "Divan", "Divan"] };
   }
   if (base === "S" || base === "SS") {
+    if (isDivanOnly) return { count: 1, names: ["Divan"] };
     return { count: 2, names: ["Headboard", "Divan"] };
   }
   return null;
@@ -201,7 +206,7 @@ function bedframeSizeDefault(
 
 function parsePieces(
   raw: string | null,
-  product?: { category?: string | null; sizeCode?: string | null } | null,
+  product?: { category?: string | null; sizeCode?: string | null; code?: string | null } | null,
 ): { count: number; names: string[] } {
   // Operator-set pieces config wins. Empty → category-aware fallback.
   if (raw) {
@@ -220,7 +225,9 @@ function parsePieces(
   // BEDFRAME size-based default — covers 99% of bedframe SKUs without
   // requiring per-SKU pieces JSON config in the catalog.
   if (product?.category === "BEDFRAME") {
-    const def = bedframeSizeDefault(product.sizeCode ?? null);
+    const code = (product.code ?? "").toUpperCase();
+    const isDivanOnly = code.startsWith("DIVAN");
+    const def = bedframeSizeDefault(product.sizeCode ?? null, isDivanOnly);
     if (def) return def;
   }
   return { count: 1, names: ["Full Product"] };

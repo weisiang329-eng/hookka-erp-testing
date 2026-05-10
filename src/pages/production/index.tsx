@@ -2968,17 +2968,20 @@ export default function ProductionPage({
       }
     }
 
-    // Bedframe boxLabel — matches Production Sheet's WIP column format
-    // (per Wei Siang spec 2026-05-10) so the sheet listing and the
-    // sticker show identical strings.
-    //   HB box    → "{productCode}-HB{totalH}\""    e.g. "1005-(Q)-HB22\""
-    //   Divan box → "{divanH}\" Divan-{sizeLabel}"  e.g. "8\" Divan-6FT"
-    //   totalH    = gapInches + divanHeightInches + legHeightInches
+    // Bedframe boxLabel — matches Production Sheet's WIP column format.
+    //   Full bedframe (HB + Divan):
+    //     HB box    → "{productCode}-HB{totalH}\""    e.g. "1005-(Q)-HB22\""
+    //     Divan box → "{divanH}\" Divan-{sizeLabel}"  e.g. "8\" Divan-6FT"
+    //   Divan-only (productCode starts "DIVAN"):
+    //     ALL boxes are Divan boxes, no HB.
+    //   totalH = gapInches + divanHeightInches + legHeightInches
     for (const s of nonSofa) {
       if (s.itemCategory === "BEDFRAME") {
         const parts = [s.sizeLabel, s.fabricCode].filter(Boolean);
         s.wipLabel = parts.join(" | ");
-        if (s.pieceNo === 1) {
+        const isDivanOnly = (s.productCode || "").toUpperCase().startsWith("DIVAN");
+        // Divan-only: every box is a Divan. Full BF: pieceNo 1 = HB, rest = Divan.
+        if (!isDivanOnly && s.pieceNo === 1) {
           const totalH = (s.gapInches ?? 0) + (s.divanHeightInches ?? 0) + (s.legHeightInches ?? 0);
           s.boxLabel = totalH > 0
             ? `${s.productCode}-HB${totalH}"`
@@ -4973,7 +4976,7 @@ export default function ProductionPage({
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
-                      style={{ width: "250px", height: "380px" }}
+                      style={{ width: "250px", height: "500px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       {/* Top header = Product Code (this box's specific
@@ -4999,19 +5002,24 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D] shrink-0">Special</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* QR row — HORIZONTAL per section (QR left, badge
-                          right). Reverted from vertical per Wei Siang
-                          spec 2026-05-10. Legs section is synthetic
-                          (no real fg_unit) so it shows TEXT ONLY (no
-                          QR), centered & big. Pillow keeps its QR. */}
-                      <div className="mt-auto flex items-end gap-2">
-                        <div className="flex items-end gap-1 flex-1 min-w-0">
-                          <QRImg data={trackUrl} size={legsPair || pillowPair ? 70 : 110} alt="FG unit QR" className="block" />
+                      {/* QR + badge — VERTICAL stack per Wei Siang spec
+                          2026-05-10: 1/3 sofa on top, 3/3 leg below.
+                          Single QR sticker is full size (110px); legs
+                          section is text-only (no QR), centered & big,
+                          stacked below the main QR section. Pillow
+                          stays as another vertical section below. */}
+                      <div className="mt-auto flex flex-col gap-2">
+                        {/* Main sticker — QR + badge horizontal. Single
+                            QR sticker uses full size (110px) per Wei
+                            Siang spec; paired sections use the same
+                            size since the card is now tall enough. */}
+                        <div className="flex items-end gap-2">
+                          <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0">
-                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
+                            <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
                               {s.pieceNo}/{s.totalPieces}
                             </div>
-                            <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
+                            <div className="leading-tight truncate uppercase" style={{ fontSize: "12px" }}>
                               {s.pieceName}
                             </div>
                             <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>
@@ -5021,8 +5029,8 @@ export default function ProductionPage({
                         </div>
                         {legsPair && (
                           <>
-                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
-                            <div className="flex flex-col items-center justify-center flex-1 min-w-0">
+                            <div className="border-t border-dashed border-[#6B5C32]" />
+                            <div className="flex flex-col items-center justify-center py-1">
                               <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "20px" }}>
                                 {legsPair.pieceNo}/{legsPair.totalPieces}
                               </div>
@@ -5034,14 +5042,14 @@ export default function ProductionPage({
                         )}
                         {pillowPair && (
                           <>
-                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
-                            <div className="flex items-end gap-1 flex-1 min-w-0">
-                              <QRImg data={pillowTrackUrl} size={70} alt="Pillow QR" className="block" />
+                            <div className="border-t border-dashed border-[#6B5C32]" />
+                            <div className="flex items-end gap-2">
+                              <QRImg data={pillowTrackUrl} size={110} alt="Pillow QR" className="block" />
                               <div className="flex-1 text-center min-w-0">
-                                <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
+                                <div className="font-bold leading-tight uppercase" style={{ fontSize: "14px" }}>
                                   {pillowPair.pieceNo}/{pillowPair.totalPieces}
                                 </div>
-                                <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
+                                <div className="leading-tight truncate uppercase" style={{ fontSize: "12px" }}>
                                   {pillowPair.pieceName}
                                 </div>
                                 <div className="text-[#6B7280] mt-1 leading-tight truncate" style={{ fontSize: "10px" }}>

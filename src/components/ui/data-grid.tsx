@@ -1369,6 +1369,19 @@ export function DataGrid<T extends Record<string, any>>({
     setCtxMenu({ x: e.clientX, y: e.clientY, row });
   }, [contextMenuItems, keyField]);
 
+  // Tablet UX: open the same context menu via a tap on the row's kebab
+  // button. Anchors the menu to the kebab's bottom-right so it appears
+  // exactly where the operator's finger expects, instead of at click coords.
+  const handleKebabTap = useCallback((e: React.MouseEvent, row: T) => {
+    if (!contextMenuItems) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const key = String(getNestedValue(row, keyField));
+    setSelectedKeys(new Set([key]));
+    setCtxMenu({ x: rect.right, y: rect.bottom, row });
+  }, [contextMenuItems, keyField]);
+
   const resolvedCtxItems = useMemo(() => {
     if (!ctxMenu || !contextMenuItems) return [];
     if (typeof contextMenuItems === "function") return contextMenuItems(ctxMenu.row);
@@ -1383,13 +1396,21 @@ export function DataGrid<T extends Record<string, any>>({
 
   const activeFilterCount = Object.values(columnFilters).filter(Boolean).length + Object.keys(columnValueFilters).length + (searchText ? 1 : 0);
 
+  // Tablet UX: when a row has any context-menu items (static array OR
+  // a function — the function only resolves per-row, so we can only
+  // assume "yes" here), render a kebab column. Operators on iPad can
+  // tap to open the same menu that desktop right-click reveals.
+  const hasContextMenu = !!contextMenuItems;
+
   return (
     <div className={cn("flex flex-col", className)}>
       {/* Toolbar */}
+      {/* Tablet UX: bumped from py-1.5 / text-[11px] / h-~26px to h-9 (36px)
+          search + h-9 buttons. Per-control sizing notes inline below. */}
       <div className="flex items-center gap-2 border border-b-0 border-[#E2DDD8] bg-[#FAFAF8] px-2 py-1.5 rounded-t">
-        {/* Search */}
+        {/* Search — h-9 / text-sm for finger-target on iPad Safari */}
         <div className="relative flex-1 max-w-[280px]">
-          <svg className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#999]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#999]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
           </svg>
           <input
@@ -1397,14 +1418,14 @@ export function DataGrid<T extends Record<string, any>>({
             placeholder="Search..."
             value={searchText}
             onChange={e => setSearchText(e.target.value)}
-            className="w-full rounded border border-[#DDD] bg-white py-1 pl-7 pr-2 text-[11px] text-[#333] placeholder-[#AAA] focus:border-[#6B5C32] focus:outline-none"
+            className="w-full rounded border border-[#DDD] bg-white h-9 pl-8 pr-7 text-sm text-[#333] placeholder-[#AAA] focus:border-[#6B5C32] focus:outline-none"
           />
           {searchText && (
             <button
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[#AAA] hover:text-[#666]"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-[#AAA] hover:text-[#666] p-1"
               onClick={() => setSearchText("")}
             >
-              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M18 6 6 18M6 6l12 12" /></svg>
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M18 6 6 18M6 6l12 12" /></svg>
             </button>
           )}
         </div>
@@ -1412,10 +1433,10 @@ export function DataGrid<T extends Record<string, any>>({
         {/* Clear filters */}
         {activeFilterCount > 0 && (
           <button
-            className="flex items-center gap-1 text-[11px] text-[#6B5C32] hover:text-[#4D4224] font-medium"
+            className="flex items-center gap-1 text-sm text-[#6B5C32] hover:text-[#4D4224] font-medium"
             onClick={() => { setValueFilterTouched(true); setSearchText(""); setColumnFilters({}); setColumnValueFilters({}); }}
           >
-            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M18 6 6 18M6 6l12 12" /></svg>
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M18 6 6 18M6 6l12 12" /></svg>
             Clear {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""}
           </button>
         )}
@@ -1427,13 +1448,13 @@ export function DataGrid<T extends Record<string, any>>({
           <div className="relative flex items-center gap-1">
             <button
               className={cn(
-                "flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+                "flex items-center gap-1 rounded border h-9 px-3 text-sm font-medium transition-colors",
                 groupEnabled ? "border-[#6B5C32] bg-[#6B5C32]/10 text-[#6B5C32]" : "border-[#DDD] text-[#666] hover:border-[#999]"
               )}
               onClick={() => { setGroupEnabled(v => !v); setCollapsedGroups(new Set()); setGroupFilter(null); }}
               title={groupEnabled ? "Disable grouping" : "Enable grouping"}
             >
-              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                 <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
               </svg>
               Group
@@ -1441,13 +1462,13 @@ export function DataGrid<T extends Record<string, any>>({
             {groupEnabled && allGroupValues.length > 1 && (
               <button
                 className={cn(
-                  "flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+                  "flex items-center gap-1 rounded border h-9 px-3 text-sm font-medium transition-colors",
                   groupFilter ? "border-[#6B5C32] bg-[#6B5C32]/10 text-[#6B5C32]" : "border-[#DDD] text-[#666] hover:border-[#999]"
                 )}
                 onClick={() => setShowGroupDropdown(v => !v)}
                 title="Filter groups"
               >
-                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>
                 {groupFilter ? `${groupFilter.size}/${allGroupValues.length}` : "All"}
               </button>
             )}
@@ -1500,14 +1521,14 @@ export function DataGrid<T extends Record<string, any>>({
           <div className="relative" ref={viewsDropdownRef}>
             <button
               className={cn(
-                "flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+                "flex items-center gap-1 rounded border h-9 px-3 text-sm font-medium transition-colors",
                 showViewsDropdown ? "border-[#6B5C32] bg-[#6B5C32]/10 text-[#6B5C32]" : "border-[#DDD] text-[#666] hover:border-[#999]"
               )}
               onClick={() => { setShowViewsDropdown(v => !v); setShowNewViewInput(false); setNewViewName(""); }}
               title="Saved Views"
             >
               {/* Bookmark icon (lucide-react style) */}
-              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
               </svg>
               Views
@@ -1528,19 +1549,20 @@ export function DataGrid<T extends Record<string, any>>({
                 {savedViews.map((view, i) => (
                   <div
                     key={i}
-                    className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-[#333] hover:bg-[#F5F3F0] cursor-pointer group"
+                    className="flex items-center gap-1 px-3 min-h-[32px] py-1 text-sm text-[#333] hover:bg-[#F5F3F0] cursor-pointer group"
                     onClick={() => applyView(view)}
                   >
-                    <svg className="h-3 w-3 text-[#999] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <svg className="h-3.5 w-3.5 text-[#999] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                       <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
                     </svg>
                     <span className="flex-1 truncate">{view.name}</span>
+                    {/* Tablet has no hover — always visible. Kept compact. */}
                     <button
-                      className="hidden group-hover:flex h-4 w-4 items-center justify-center rounded hover:bg-[#E0E0E0] text-[#AAA] hover:text-[#666] shrink-0"
+                      className="flex h-5 w-5 items-center justify-center rounded hover:bg-[#E0E0E0] text-[#AAA] hover:text-[#666] shrink-0"
                       onClick={(e) => { e.stopPropagation(); deleteView(i); }}
                       title="Delete view"
                     >
-                      <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6 6 18M6 6l12 12" /></svg>
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><path d="M18 6 6 18M6 6l12 12" /></svg>
                     </button>
                   </div>
                 ))}
@@ -1592,13 +1614,13 @@ export function DataGrid<T extends Record<string, any>>({
         <div className="relative">
           <button
             className={cn(
-              "flex items-center gap-1 rounded border px-2 py-1 text-[11px] font-medium transition-colors",
+              "flex items-center gap-1 rounded border h-9 px-3 text-sm font-medium transition-colors",
               showCustomizer ? "border-[#6B5C32] bg-[#6B5C32]/10 text-[#6B5C32]" : "border-[#DDD] text-[#666] hover:border-[#999]"
             )}
             onClick={() => setShowCustomizer(!showCustomizer)}
             title="Customize Columns"
           >
-            <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></svg>
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></svg>
             Columns
           </button>
           {showCustomizer && (
@@ -1647,6 +1669,9 @@ export function DataGrid<T extends Record<string, any>>({
                 style={col.width ? { width: col.width, minWidth: col.width } : undefined}
               />
             ))}
+            {/* Kebab column — renders only when contextMenuItems is set
+                so list pages without row actions stay unchanged. */}
+            {hasContextMenu && <col style={{ width: "40px" }} />}
           </colgroup>
 
           <thead className={cn(stickyHeader && "sticky top-0 z-10")}>
@@ -1656,7 +1681,7 @@ export function DataGrid<T extends Record<string, any>>({
                 <th className="px-2 py-1.5 text-center bg-[#F0ECE9]">
                   <input
                     type="checkbox"
-                    className="h-3.5 w-3.5 accent-[#6B5C32] cursor-pointer"
+                    className="h-4 w-4 accent-[#6B5C32] cursor-pointer"
                     checked={sortedData.length > 0 && sortedData.every(r => selectedKeys.has(String(getNestedValue(r, keyField))))}
                     onChange={(e) => {
                       e.stopPropagation();
@@ -1705,24 +1730,32 @@ export function DataGrid<T extends Record<string, any>>({
                         (col.align === "right" || col.type === "currency" || col.type === "number") && "flex-row-reverse"
                       )}
                     >
+                      {/* Tablet UX: label + sort arrows form one tappable
+                          area (single onClick on a wrapping span). Filter
+                          funnel stays separate so it doesn't trigger a
+                          sort when tapped. Sort triangles bumped from
+                          text-[7px] to text-[10px]. */}
                       <span
-                        className="cursor-pointer hover:text-[#000] hover:bg-[#E5E5E5] rounded px-0.5"
+                        className="inline-flex items-center gap-0.5 cursor-pointer hover:text-[#000] hover:bg-[#E5E5E5] rounded px-0.5 py-0.5"
                         onClick={() => handleSort(col)}
                       >
-                        {col.label}
+                        <span>{col.label}</span>
+                        <span className="inline-flex flex-col text-[10px] leading-none ml-0.5">
+                          <span className={sortKey === col.key && sortDir === "asc" ? "text-[#333]" : "text-[#CCC]"}>▲</span>
+                          <span className={sortKey === col.key && sortDir === "desc" ? "text-[#333]" : "text-[#CCC]"}>▼</span>
+                        </span>
                       </span>
-                      <span className="inline-flex flex-col text-[7px] leading-none ml-0.5 cursor-pointer" onClick={() => handleSort(col)}>
-                        <span className={sortKey === col.key && sortDir === "asc" ? "text-[#333]" : "text-[#CCC]"}>▲</span>
-                        <span className={sortKey === col.key && sortDir === "desc" ? "text-[#333]" : "text-[#CCC]"}>▼</span>
-                      </span>
+                      {/* Filter funnel: bumped 16px → 28px (h-7 w-7) for
+                          tablet tap target. Glyph also bumped from 8px
+                          to text-xs (12px) so it's actually visible. */}
                       <button
                         className={cn(
-                          "ml-0.5 inline-flex items-center justify-center h-4 w-4 rounded hover:bg-[#D8D8D8] transition-colors text-[8px]",
+                          "ml-0.5 inline-flex items-center justify-center h-7 w-7 rounded hover:bg-[#D8D8D8] transition-colors text-xs",
                           hasFilter ? "text-[#6B5C32]" : "text-[#AAA] hover:text-[#666]"
                         )}
                         onClick={(e) => {
                           e.stopPropagation();
-                          const rect = (e.target as HTMLElement).getBoundingClientRect();
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                           setFilterDropdown(prev =>
                             prev?.key === col.key ? null : { key: col.key, rect: { left: rect.left, top: rect.bottom + 2 } }
                           );
@@ -1735,6 +1768,12 @@ export function DataGrid<T extends Record<string, any>>({
                   </th>
                 );
               })}
+              {hasContextMenu && (
+                <th
+                  className="px-1 py-1.5 text-center bg-[#F0ECE9]"
+                  aria-label="Row actions"
+                />
+              )}
             </tr>
 
           </thead>
@@ -1742,13 +1781,13 @@ export function DataGrid<T extends Record<string, any>>({
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)} className="py-8 text-center text-[12px] text-[#999]">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0)} className="py-8 text-center text-[12px] text-[#999]">
                   <span className="inline-block animate-pulse">Loading...</span>
                 </td>
               </tr>
             ) : sortedData.length === 0 ? (
               <tr>
-                <td colSpan={visibleColumns.length + (selectable ? 1 : 0)} className="py-8 text-center text-[12px] text-[#999]">
+                <td colSpan={visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0)} className="py-8 text-center text-[12px] text-[#999]">
                   {emptyMessage}
                 </td>
               </tr>
@@ -1765,7 +1804,11 @@ export function DataGrid<T extends Record<string, any>>({
                     <tr
                       key={key}
                       className={cn(
+                        // Tablet: min-h-[40px] for finger-friendly row height
+                        // when selectable=true; otherwise keep the dense default
+                        // so non-selectable list pages stay information-dense.
                         "border-b border-[#E2DDD8] text-[12px] text-[#111]",
+                        selectable && "min-h-[40px]",
                         isEven && "bg-[#FAFAFA]",
                         rowClassName?.(row),
                         isSelected && "!bg-[#CCE0FF] border-l-2 border-l-[#3366CC]",
@@ -1778,24 +1821,27 @@ export function DataGrid<T extends Record<string, any>>({
                     >
                       {selectable && (
                         <td
-                          className="px-2 py-[3px] text-center"
-                          style={{ height: "26px", lineHeight: "20px" }}
-                          onClick={(e) => e.stopPropagation()}
+                          className="p-2 text-center cursor-pointer"
+                          style={{ minHeight: "40px" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedKeys(prev => {
+                              const next = new Set(prev);
+                              if (next.has(key)) next.delete(key);
+                              else next.add(key);
+                              return next;
+                            });
+                          }}
                         >
                           <input
                             type="checkbox"
-                            className="h-3.5 w-3.5 accent-[#6B5C32] cursor-pointer"
+                            className="h-4 w-4 accent-[#6B5C32] cursor-pointer pointer-events-none"
                             checked={isSelected}
-                            onChange={(e) => {
-                              e.stopPropagation();
-                              setSelectedKeys(prev => {
-                                const next = new Set(prev);
-                                if (next.has(key)) next.delete(key);
-                                else next.add(key);
-                                return next;
-                              });
-                            }}
-                            onClick={(e) => e.stopPropagation()}
+                            // Cell-wrapper handles toggle so the entire cell
+                            // is a tap target on tablet. The input itself is
+                            // pointer-events-none + readOnly to avoid double-
+                            // toggle when the input is tapped directly.
+                            readOnly
                           />
                         </td>
                       )}
@@ -1835,6 +1881,26 @@ export function DataGrid<T extends Record<string, any>>({
                           </td>
                         );
                       })}
+                      {hasContextMenu && (
+                        <td
+                          className="px-1 text-center"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded text-[#888] hover:bg-[#E0DCD7] hover:text-[#333] active:bg-[#D5D0CB]"
+                            onClick={(e) => handleKebabTap(e, row)}
+                            title="Row actions"
+                            aria-label="Row actions"
+                          >
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+                              <circle cx="12" cy="5" r="1.6" />
+                              <circle cx="12" cy="12" r="1.6" />
+                              <circle cx="12" cy="19" r="1.6" />
+                            </svg>
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 };
@@ -1901,7 +1967,7 @@ export function DataGrid<T extends Record<string, any>>({
                   // footer are derived from the same source of truth in the
                   // SAME render pass, eliminating the drift.
                   const totalSize = sortedData.length * ROW_HEIGHT_PX;
-                  const colSpan = visibleColumns.length + (selectable ? 1 : 0);
+                  const colSpan = visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0);
                   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
                   const paddingBottom =
                     virtualItems.length > 0
@@ -1955,7 +2021,7 @@ export function DataGrid<T extends Record<string, any>>({
                           onClick={() => toggleGroupCollapse(gv)}
                         >
                           <td
-                            colSpan={visibleColumns.length + (selectable ? 1 : 0)}
+                            colSpan={visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0)}
                             className="px-3 py-1.5 text-[11px] font-bold text-[#4A4540]"
                           >
                             <span className="inline-block w-3 text-[9px] mr-1">{isCollapsed ? "▶" : "▼"}</span>

@@ -4496,10 +4496,17 @@ export default function ProductionPage({
                   // then we fall back to the spreadsheet root and the user
                   // picks the tab manually.
                   const SHEET_ID = "1hDGUYeKuWHpCXKrZptFI2eIKh9yNdhw7JeKbTjxT-x8";
+                  // FIXME: populate real gids per dept after sheet provisioning.
+                  // Until then the operator gets dropped at the spreadsheet
+                  // root + a toast explaining they need to pick the tab.
                   const GID_BY_DEPT: Record<string, string> = {
                     // TODO: fill in real gids after sheet provisioning.
                   };
                   const gid = GID_BY_DEPT[activeDept.code];
+                  if (!gid) {
+                    console.warn(`[GID_BY_DEPT] no gid configured for ${activeDept.code} — opening spreadsheet root`);
+                    toast.info(`Sheet tab for ${activeDept.name} not configured — pick the tab manually after the spreadsheet opens.`);
+                  }
                   const url = gid
                     ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit#gid=${gid}`
                     : `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`;

@@ -28,7 +28,6 @@ const TodayEnvelope = z
   .object({ success: z.boolean().optional(), data: z.unknown().optional(), error: z.string().optional() })
   .passthrough();
 const HistoryEnvelope = TodayEnvelope;
-const TeamStatsEnvelope = TodayEnvelope;
 
 // ---------- types ----------
 type TodayData = {
@@ -109,23 +108,6 @@ type HistoryData = {
     efficiencyPct: number;
   };
 };
-// Team stats — only populated when the logged-in worker has
-// position === "Operator Leader". Drives the "Team" card between
-// Daily Attendance and Completed Products.
-type TeamStatsRow = {
-  departmentCode: string;
-  category: "SOFA" | "BEDFRAME";
-  workingMinutes: number;
-  productionMinutes: number;
-  efficiencyPct: number;
-  workerCount: number;
-};
-type TeamStatsData = {
-  isLeader: boolean;
-  range: { from: string; to: string };
-  rows: TeamStatsRow[];
-};
-
 // ---------- helpers ----------
 function fmtHM(mins: number): string {
   const h = Math.floor(mins / 60);
@@ -167,7 +149,6 @@ export default function WorkerHomePage() {
   const [from, setFrom] = useState<string>(() => ymd(addDays(new Date(), -6)));
   const [to, setTo] = useState<string>(() => ymd(new Date()));
   const [hist, setHist] = useState<HistoryData | null>(null);
-  const [teamStats, setTeamStats] = useState<TeamStatsData | null>(null);
   // Tap-to-expand share roster on Completed Products.
   const [openShare, setOpenShare] = useState<string | null>(null);
 
@@ -199,31 +180,14 @@ export default function WorkerHomePage() {
     }
   }, []);
 
-  // Team stats — backend gates by `position === "Operator Leader"` and
-  // sets isLeader=false for everyone else; we hide the section in that
-  // case. Errors leave teamStats as-is so the rest of the page renders.
-  const loadTeamStats = useCallback(async (f: string, tto: string) => {
-    try {
-      const res = await workerFetch(
-        `/api/worker/team-stats?from=${encodeURIComponent(f)}&to=${encodeURIComponent(tto)}`,
-      );
-      const raw = await res.json();
-      const j = TeamStatsEnvelope.parse(raw);
-      if (j.success) setTeamStats(j.data as TeamStatsData);
-    } catch {
-      /* leave teamStats as-is */
-    }
-  }, []);
-
   useEffect(() => {
     refreshToday();
   }, [refreshToday]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- refresh history + team stats when date range changes; setState lives inside the async callback */
+  /* eslint-disable react-hooks/set-state-in-effect -- refresh history when date range changes; setState lives inside the async callback */
   useEffect(() => {
     refreshHistory(from, to);
-    loadTeamStats(from, to);
-  }, [refreshHistory, loadTeamStats, from, to]);
+  }, [refreshHistory, from, to]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   async function handleClock(action: "CLOCK_IN" | "CLOCK_OUT") {
@@ -543,24 +507,11 @@ export default function WorkerHomePage() {
         </TableSection>
       )}
 
-      {/* ==================== */}
-      {/*  Team (leader only)  */}
-      {/* ==================== */}
-      {/* Backend sets isLeader=true only when worker.position === "Operator
-          Leader". Any other position → section disappears entirely.
-          Sort: departmentCode asc, SOFA before BEDFRAME. Hide rows where
-          both working+production minutes are zero. */}
-      {teamStats && teamStats.isLeader && (
-        <TeamSection
-          rows={teamStats.rows}
-          tWorkingHrs={t("home.colWorkingHrs")}
-          tProductionHrs={t("home.colProductionHrs")}
-          tEffPct={t("home.efficiencyPct")}
-          tTotal={t("home.teamTotal")}
-          tWorkers={t("home.teamWorkers")}
-          title={t("home.teamTitle")}
-        />
-      )}
+      {/* Team summary lived here pre-2026-05-10. Moved to /worker/team
+          (dedicated tab on the bottom nav) so the leader gets the full
+          Department Performance view — KPI strip + daily breakdown +
+          per-worker drilldown — instead of a cramped at-a-glance card on
+          the Home page. Home stays focused on the worker's own day. */}
 
       {/* Completed products */}
       {hist && (
@@ -764,150 +715,3 @@ function EmptyRow() {
   return <div className="py-4 text-center text-xs text-[#8A8680]">—</div>;
 }
 
-// ---------- Team section (Operator Leader) ----------
-// Dept-grouped layout: a leader covering Upholstery sees a sub-block per
-// department, each listing SOFA / BEDFRAME (or whichever categories have
-// data) on their own row. Departments with zero data in every category
-// are hidden. A TOTAL stat tile across all the leader's depts sits on
-// top so the "am I on track this week" answer is one glance away.
-function TeamSection({
-  rows,
-  tWorkingHrs,
-  tProductionHrs,
-  tEffPct,
-  tTotal,
-  tWorkers,
-  title,
-}: {
-  rows: TeamStatsRow[];
-  tWorkingHrs: string;
-  tProductionHrs: string;
-  tEffPct: string;
-  tTotal: string;
-  tWorkers: string;
-  title: string;
-}) {
-  // Group rows by department. Within each dept, sort SOFA before BEDFRAME
-  // and drop categories with zero working+production minutes — keeps the
-  // sub-card focused on what the leader actually did this period.
-  const byDept = new Map<string, TeamStatsRow[]>();
-  for (const r of rows) {
-    if (r.workingMinutes <= 0 && r.productionMinutes <= 0) continue;
-    const list = byDept.get(r.departmentCode) ?? [];
-    list.push(r);
-    byDept.set(r.departmentCode, list);
-  }
-  const depts = Array.from(byDept.entries())
-    .map(([code, list]) => ({
-      code,
-      rows: [...list].sort((a, b) => {
-        if (a.category === b.category) return 0;
-        return a.category === "SOFA" ? -1 : 1;
-      }),
-      // Worker counts come per-row from the API; the leader's headcount
-      // for a dept is the max over its categories (same set of workers
-      // doing both SOFA and BEDFRAME, not the sum).
-      workers: list.reduce((m, r) => Math.max(m, r.workerCount), 0),
-    }))
-    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
-
-  // TOTAL across all surviving rows — matches the same date range as
-  // the rest of the dashboard, no separate fetch.
-  const totalWorking = depts.reduce(
-    (s, d) => s + d.rows.reduce((ss, r) => ss + r.workingMinutes, 0),
-    0,
-  );
-  const totalProduction = depts.reduce(
-    (s, d) => s + d.rows.reduce((ss, r) => ss + r.productionMinutes, 0),
-    0,
-  );
-  const totalEff =
-    totalWorking > 0 ? Math.round((totalProduction / totalWorking) * 100) : 0;
-  const totalTone =
-    totalEff >= 80 ? "good" : totalEff >= 60 ? "warn" : "bad";
-
-  return (
-    <TableSection title={title}>
-      {depts.length === 0 ? (
-        <EmptyRow />
-      ) : (
-        <div className="py-2 space-y-3">
-          {/* Top TOTAL tiles across all the leader's depts */}
-          <div className="grid grid-cols-3 gap-2">
-            <Kpi label={`${tTotal} · ${tWorkingHrs}`} value={mins2hrs(totalWorking)} />
-            <Kpi
-              label={`${tTotal} · ${tProductionHrs}`}
-              value={mins2hrs(totalProduction)}
-            />
-            <Kpi label={tEffPct} value={`${totalEff}%`} tone={totalTone} />
-          </div>
-
-          {/* One sub-card per department */}
-          {depts.map((d) => (
-            <div
-              key={d.code}
-              className="rounded-lg border border-[#E5DEC6] bg-[#FAF7EE] overflow-hidden"
-            >
-              <div className="px-3 py-2 flex items-baseline justify-between bg-[#F0EAD6]">
-                <span className="text-xs font-bold uppercase tracking-wide text-[#1F1D1B]">
-                  {d.code}
-                </span>
-                <span className="text-[10px] text-[#8A8680]">
-                  {d.workers} {tWorkers}
-                </span>
-              </div>
-              <div className="px-3 py-1">
-                {d.rows.map((r) => {
-                  const eff = Math.round(r.efficiencyPct);
-                  const effTone =
-                    eff >= 80
-                      ? "text-[#2A6B4A]"
-                      : eff >= 60
-                        ? "text-[#9C6F1E]"
-                        : "text-[#9A3A2D]";
-                  const badgeBg =
-                    r.category === "SOFA"
-                      ? "bg-[#E5EEF6] text-[#3E6570]"
-                      : "bg-[#F0E5E1] text-[#7A4A3A]";
-                  return (
-                    <div
-                      key={`${d.code}__${r.category}`}
-                      className="grid grid-cols-[auto_1fr_auto] gap-2 py-2 items-center text-sm border-t border-[#E5DEC6] first:border-t-0"
-                    >
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded font-semibold whitespace-nowrap ${badgeBg}`}
-                      >
-                        {r.category}
-                      </span>
-                      <span className="flex items-baseline gap-3 justify-end tabular-nums text-xs text-[#5A5550]">
-                        <span>
-                          <span className="text-[9px] uppercase tracking-wide text-[#8A8680] mr-1">
-                            {tWorkingHrs}
-                          </span>
-                          <span className="font-semibold text-[#1F1D1B]">
-                            {mins2hrs(r.workingMinutes)}
-                          </span>
-                        </span>
-                        <span>
-                          <span className="text-[9px] uppercase tracking-wide text-[#8A8680] mr-1">
-                            {tProductionHrs}
-                          </span>
-                          <span className="font-semibold text-[#3E6570]">
-                            {mins2hrs(r.productionMinutes)}
-                          </span>
-                        </span>
-                      </span>
-                      <span className={`tabular-nums text-right font-bold text-base ${effTone} min-w-[3rem]`}>
-                        {eff}%
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </TableSection>
-  );
-}

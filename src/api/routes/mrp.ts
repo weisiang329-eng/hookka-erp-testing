@@ -570,7 +570,11 @@ app.post("/", async (c) => {
     // use). Output shape adapted to the legacy FabricRow at the boundary so
     // the rest of this handler is unchanged.
     c.var.DB.prepare(
-      `SELECT id, "fabricCode", "fabricDescription", "fabricCategory", soh FROM fabric_trackings`,
+      // Bare camelCase column refs — translateSql() rewrites to snake_case
+      // via the rename map. Quoting them (e.g. "fabricCode") would make the
+      // adapter pass them through verbatim and Postgres would error with
+      // `column "fabricCode" does not exist` (real column is fabric_code).
+      `SELECT id, fabricCode, fabricDescription, fabricCategory, soh FROM fabric_trackings`,
     ).all<FabricTrackingRowMrp>(),
     // Single source of truth for per-fabric demand: walks active FAB_CUT
     // JCs (Fab Cut sheet's view), computes per-JC fabric meters via BOM +

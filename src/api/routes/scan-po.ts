@@ -156,14 +156,20 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
     // longer the prompt source.
     db
       .prepare(
-        `SELECT rm."itemCode" AS "fabricCode",
-                COALESCE(ft."fabricDescription", rm.description, '') AS "fabricDescription",
-                COALESCE(ft."priceTier", 'PRICE_1') AS "priceTier"
+        // Bare camelCase column refs (rm.itemCode, ft.fabricCode, ft.priceTier,
+        // rm.itemGroup) — translateSql() rewrites these to snake_case via the
+        // rename map. DO NOT quote them ("ft.\"fabricCode\"") because the
+        // adapter passes already-quoted identifiers through verbatim, which
+        // sends literal `ft."fabricCode"` to Postgres → "column does not
+        // exist". Output aliases stay quoted to preserve camelCase result keys.
+        `SELECT rm.itemCode AS "fabricCode",
+                COALESCE(ft.fabricDescription, rm.description, '') AS "fabricDescription",
+                COALESCE(ft.priceTier, 'PRICE_1') AS "priceTier"
            FROM raw_materials rm
-           LEFT JOIN fabric_trackings ft ON ft."fabricCode" = rm."itemCode"
-          WHERE rm."itemCode" IS NOT NULL
-            AND rm."itemGroup" IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
-          ORDER BY rm."itemCode"`,
+           LEFT JOIN fabric_trackings ft ON ft.fabricCode = rm.itemCode
+          WHERE rm.itemCode IS NOT NULL
+            AND rm.itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
+          ORDER BY rm.itemCode`,
       )
       .all<{ fabricCode: string; fabricDescription: string | null; priceTier: string | null }>(),
     db

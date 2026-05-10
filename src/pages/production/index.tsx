@@ -4976,14 +4976,13 @@ export default function ProductionPage({
                 <span className="ml-2 text-xs font-normal text-[#8A7F73]">
                   {(() => {
                     const visibleRows = gridFilteredDeptRows ?? deptRows;
-                    const rowCount = visibleRows.length;
                     // Sum wipQty (Qty column) across visible rows — 1 qty
                     // = 1 sticker (1 physical box) per Wei Siang spec.
                     const qtySum = visibleRows.reduce(
                       (s, r) => s + ((r as { qty?: number }).qty ?? 0),
                       0,
                     );
-                    return `(${rowCount} row${rowCount === 1 ? "" : "s"} · ${qtySum} sticker${qtySum === 1 ? "" : "s"})`;
+                    return `(${qtySum} sticker${qtySum === 1 ? "" : "s"})`;
                   })()}
                 </span>
               </h2>

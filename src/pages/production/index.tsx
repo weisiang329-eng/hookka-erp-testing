@@ -1762,6 +1762,31 @@ export default function ProductionPage({
     const today = new Date().toISOString().slice(0, 10);
     const rows: Array<DeptRow & { _deptCode: string }> = [];
     let n = 1;
+
+    // Pre-index orders by their merge-group key so the picker's cross-PO
+    // sibling scan below is O(1) lookup instead of O(N) over ALL filtered
+    // orders. The full scan was the main thread freeze the operator hit
+    // when navigating between dept pages on large depts (e.g. fab-sew with
+    // 1.8k orders × 3 JCs × 8 dept columns × 1.8k inner-scan ≈ 80M iters
+    // → 45s renderer hang, "需要 refresh 才 load" symptom). The group key
+    // recipe MUST stay in sync with the per-sibling computation in the
+    // picker fallback (companySOId || salesOrderId || companyCOId ||
+    // consignmentOrderId) — otherwise siblings vanish from the index and
+    // SOFA cross-PO FAB_CUT lookups silently return null again.
+    const ordersByGroup = new Map<string, ProductionOrder[]>();
+    for (const o of filteredOrders) {
+      const gid =
+        o.companySOId ||
+        o.salesOrderId ||
+        o.companyCOId ||
+        o.consignmentOrderId ||
+        "";
+      if (!gid) continue;
+      const arr = ordersByGroup.get(gid);
+      if (arr) arr.push(o);
+      else ordersByGroup.set(gid, [o]);
+    }
+
     for (const o of filteredOrders) {
       const poDeptIndex = pickerIndex.get(o.id);
       for (const jc of o.jobCards) {
@@ -1832,24 +1857,26 @@ export default function ProductionPage({
               const isSofa = o.itemCategory === "SOFA";
               const myBase = (o.productCode || "").split("-")[0];
               const myFabric = o.fabricCode || "";
-              for (const sib of filteredOrders) {
-                if (sib.id === o.id) continue;
-                const sibGroupId =
-                  sib.companySOId ||
-                  sib.salesOrderId ||
-                  sib.companyCOId ||
-                  sib.consignmentOrderId ||
-                  "";
-                if (sibGroupId !== myGroupId) continue;
-                // SOFA must also match baseModel + fabric since multiple
-                // sofa products can coexist in one parent doc.
-                if (isSofa) {
-                  if ((sib.fabricCode || "") !== myFabric) continue;
-                  const sibBase = (sib.productCode || "").split("-")[0];
-                  if (sibBase !== myBase) continue;
+              // O(1) groupId lookup against the pre-indexed map at the top
+              // of this useMemo — no more O(N_filteredOrders) scan per call.
+              // Group key recipe is duplicated in the index builder; keep
+              // them in lockstep.
+              const sibs = ordersByGroup.get(myGroupId);
+              if (sibs) {
+                for (const sib of sibs) {
+                  if (sib.id === o.id) continue;
+                  // SOFA must also match baseModel + fabric since multiple
+                  // sofa products can coexist in one parent doc.
+                  if (isSofa) {
+                    if ((sib.fabricCode || "") !== myFabric) continue;
+                    const sibBase = (sib.productCode || "").split("-")[0];
+                    if (sibBase !== myBase) continue;
+                  }
+                  const sibJc = sib.jobCards.find(
+                    (j) => j.departmentCode === code,
+                  );
+                  if (sibJc) return sibJc;
                 }
-                const sibJc = sib.jobCards.find((j) => j.departmentCode === code);
-                if (sibJc) return sibJc;
               }
             }
           }

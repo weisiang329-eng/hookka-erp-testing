@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, Fragment } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1169,6 +1169,24 @@ function EmployeeMasterTab({
   // when the row exits edit mode. (Categories is a native select, no state
   // needed for it.)
   const [deptDropdownOpen, setDeptDropdownOpen] = useState(false);
+  // Click-outside detector for the dept dropdown. We used to render a
+  // <div className="fixed inset-0"> backdrop which closed the popover on
+  // outside click, but it ALSO blocked horizontal scrolling of the wide
+  // edit row — operator couldn't scroll right to reach the Save button
+  // (Wei Siang 2026-05-10: "save 不到"). Document-level mousedown listener
+  // gives the same close-on-outside-click without an opaque interaction
+  // shield over the rest of the table.
+  const deptDropdownRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!deptDropdownOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!deptDropdownRef.current?.contains(e.target as Node)) {
+        setDeptDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [deptDropdownOpen]);
   const [saving, setSaving] = useState(false);
   const [pinModal, setPinModal] = useState<PinModalState | null>(null);
   const [bulkModal, setBulkModal] = useState<BulkModalState | null>(null);
@@ -1481,7 +1499,7 @@ function EmployeeMasterTab({
                   ? deptNamesOf(selected)
                   : `${selected.length} departments`;
             return (
-              <div className="relative">
+              <div className="relative" ref={deptDropdownRef}>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1497,13 +1515,10 @@ function EmployeeMasterTab({
                   </svg>
                 </button>
                 {deptDropdownOpen && (
-                  <>
-                    {/* Click-outside backdrop */}
-                    <div
-                      className="fixed inset-0 z-40"
-                      onClick={() => setDeptDropdownOpen(false)}
-                    />
-                    <div className="absolute z-50 top-full left-0 mt-1 w-56 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
+                  // Outside-click handled by the document mousedown effect
+                  // above. No opaque backdrop — operator needs to scroll the
+                  // wide edit row horizontally while the popover is open.
+                  <div className="absolute z-50 top-full left-0 mt-1 w-56 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
                       {allDepts.map((d) => {
                         const checked = editForm.departmentCodes.includes(d.code);
                         return (
@@ -1537,8 +1552,7 @@ function EmployeeMasterTab({
                           </label>
                         );
                       })}
-                    </div>
-                  </>
+                  </div>
                 )}
               </div>
             );

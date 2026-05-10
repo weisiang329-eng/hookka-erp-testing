@@ -69,6 +69,8 @@ type Worker = {
   name: string;
   departmentId: string;
   departmentCode: string;
+  /** Multi-dept support — full set of department codes assigned to this worker. */
+  departmentCodes?: string[];
   position: string;
   phone: string;
   status: string;
@@ -1067,6 +1069,11 @@ type WorkerFormData = {
   empNo: string;
   name: string;
   departmentId: string;
+  // Multi-department support — Wei Siang 2026-05-10. Operator Leaders (and
+  // any worker who covers more than one production department) are tracked
+  // here as the full set; departmentId stays as the worker's "primary" so
+  // legacy single-dept lookups keep working.
+  departmentCodes: string[];
   position: string;
   phone: string;
   basicSalarySen: number;
@@ -1082,7 +1089,8 @@ const emptyForm: WorkerFormData = {
   empNo: "",
   name: "",
   departmentId: "dept-1",
-  position: "Worker",
+  departmentCodes: [],
+  position: "Operator",
   phone: "",
   basicSalarySen: 180000,
   workingHoursPerDay: 9,
@@ -1339,6 +1347,12 @@ function EmployeeMasterTab({
       empNo: w.empNo,
       name: w.name,
       departmentId: w.departmentId,
+      departmentCodes:
+        Array.isArray(w.departmentCodes) && w.departmentCodes.length > 0
+          ? w.departmentCodes
+          : w.departmentCode
+            ? [w.departmentCode]
+            : [],
       position: w.position,
       phone: w.phone,
       basicSalarySen: w.basicSalarySen,
@@ -1422,29 +1436,62 @@ function EmployeeMasterTab({
       },
       {
         key: "departmentCode",
-        label: "Department",
+        label: "Departments",
         sortable: true,
-        render: (_value, row) =>
-          editingId === row.id ? (
-            <select
-              value={editForm.departmentId}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, departmentId: e.target.value }))
-              }
-              className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-            >
-              {allDepts.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <span className="text-[#4B5563]">
-              {allDepts.find((d) => d.id === row.departmentId)?.name ||
-                row.departmentCode}
+        render: (_value, row) => {
+          const deptNamesOf = (codes: string[]) =>
+            codes
+              .map(
+                (code) => allDepts.find((d) => d.code === code)?.name ?? code,
+              )
+              .join(", ");
+          if (editingId === row.id) {
+            // Native multi-select: hold ⌘/Ctrl to toggle. Primary departmentId
+            // follows the first selected option.
+            return (
+              <select
+                multiple
+                size={Math.min(6, Math.max(3, allDepts.length))}
+                value={editForm.departmentCodes}
+                onChange={(e) => {
+                  const codes = Array.from(e.target.selectedOptions).map((o) => o.value);
+                  const primaryDept = allDepts.find((d) => d.code === codes[0]);
+                  setEditForm((f) => ({
+                    ...f,
+                    departmentCodes: codes,
+                    departmentId: primaryDept?.id ?? f.departmentId,
+                  }));
+                }}
+                className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32] min-w-[180px]"
+              >
+                {allDepts.map((d) => (
+                  <option key={d.id} value={d.code}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            );
+          }
+          const codes =
+            Array.isArray(row.departmentCodes) && row.departmentCodes.length > 0
+              ? row.departmentCodes
+              : row.departmentCode
+                ? [row.departmentCode]
+                : [];
+          if (codes.length === 0) {
+            return <span className="text-[#9CA3AF]">—</span>;
+          }
+          return (
+            <span className="text-[#4B5563]" title={deptNamesOf(codes)}>
+              {deptNamesOf(codes)}
+              {codes.length > 1 && (
+                <span className="ml-1 text-[10px] text-[#9CA3AF]">
+                  ({codes.length})
+                </span>
+              )}
             </span>
-          ),
+          );
+        },
       },
       {
         key: "position",
@@ -1771,32 +1818,65 @@ function EmployeeMasterTab({
                   className="h-8 text-xs"
                 />
               </div>
-              <div>
-                <label className="text-xs text-[#6B7280]">Department</label>
-                <select
-                  value={form.departmentId}
-                  onChange={(e) =>
-                    setForm((f) => ({ ...f, departmentId: e.target.value }))
-                  }
-                  className="flex h-8 w-full rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                >
-                  {allDepts.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
+              <div className="col-span-2">
+                <label className="text-xs text-[#6B7280]">
+                  Departments <span className="text-[10px] text-[#9CA3AF]">(tick all that apply)</span>
+                </label>
+                <div className="mt-1 flex flex-wrap gap-1.5 p-2 border border-[#E2DDD8] rounded-md bg-white max-h-32 overflow-y-auto">
+                  {allDepts.map((d) => {
+                    const checked = form.departmentCodes.includes(d.code);
+                    return (
+                      <label
+                        key={d.id}
+                        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded border text-[11px] cursor-pointer ${
+                          checked
+                            ? "bg-[#F0ECE9] border-[#6B5C32] text-[#1F1D1B]"
+                            : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-3 w-3"
+                          checked={checked}
+                          onChange={(e) => {
+                            setForm((f) => {
+                              const set = new Set(f.departmentCodes);
+                              if (e.target.checked) set.add(d.code);
+                              else set.delete(d.code);
+                              const codes = Array.from(set);
+                              // Primary departmentId follows the first
+                              // ticked department (so back-compat lookups
+                              // by departmentId still resolve sensibly).
+                              const primaryDept = allDepts.find((x) => x.code === codes[0]);
+                              return {
+                                ...f,
+                                departmentCodes: codes,
+                                departmentId: primaryDept?.id ?? f.departmentId,
+                              };
+                            });
+                          }}
+                        />
+                        {d.name}
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
               <div>
                 <label className="text-xs text-[#6B7280]">Position</label>
-                <Input
+                <select
                   value={form.position}
                   onChange={(e) =>
                     setForm((f) => ({ ...f, position: e.target.value }))
                   }
-                  placeholder="Worker"
-                  className="h-8 text-xs"
-                />
+                  className="h-8 text-xs w-full border border-[#D1D5DB] rounded-md px-2 bg-white"
+                >
+                  <option value="">— Select —</option>
+                  <option value="Operator">Operator</option>
+                  <option value="Operator Leader">Operator Leader</option>
+                  <option value="Supervisor">Supervisor</option>
+                  <option value="Manager">Manager</option>
+                </select>
               </div>
               <div>
                 <label className="text-xs text-[#6B7280]">Phone</label>

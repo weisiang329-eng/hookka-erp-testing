@@ -19,6 +19,10 @@ type WorkerRow = {
   name: string;
   departmentId: string | null;
   departmentCode: string | null;
+  // Multi-department support — Wei Siang 2026-05-10. JSON array of dept
+  // codes, e.g. '["FAB_CUT","FAB_SEW"]'. departmentCode stays as the
+  // primary (legacy single) for back-compat with reads that filter by code.
+  departmentCodes: string | null;
   position: string | null;
   phone: string | null;
   status: string;
@@ -38,6 +42,22 @@ type DepartmentRow = {
   workingHoursPerDay: number;
 };
 
+function parseDepartmentCodes(raw: string | null, fallback: string): string[] {
+  if (raw) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const cleaned = arr
+          .filter((x): x is string => typeof x === "string" && x.length > 0);
+        if (cleaned.length > 0) return cleaned;
+      }
+    } catch {
+      /* fall through to single */
+    }
+  }
+  return fallback ? [fallback] : [];
+}
+
 function rowToWorker(row: WorkerRow) {
   return {
     id: row.id,
@@ -45,6 +65,7 @@ function rowToWorker(row: WorkerRow) {
     name: row.name,
     departmentId: row.departmentId ?? "",
     departmentCode: row.departmentCode ?? "",
+    departmentCodes: parseDepartmentCodes(row.departmentCodes, row.departmentCode ?? ""),
     position: row.position ?? "",
     phone: row.phone ?? "",
     status: row.status,
@@ -128,18 +149,33 @@ app.post("/", async (c) => {
     const resolvedHours =
       workingHoursPerDay ?? department.workingHoursPerDay;
 
+    // Multi-dept support: caller may pass an explicit departmentCodes array.
+    // If absent, fall back to a single-element array of the resolved primary
+    // department code so the new column never holds NULL on creates.
+    const incomingCodes = Array.isArray(body.departmentCodes)
+      ? (body.departmentCodes as unknown[]).filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        )
+      : null;
+    const codesArr =
+      incomingCodes && incomingCodes.length > 0 ? incomingCodes : [department.code];
+    // Primary department code = the array's first entry. Keeps existing
+    // single-code consumers (lookups by departmentCode) working.
+    const primaryCode = codesArr[0];
+
     await c.var.DB.prepare(
-      `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, position,
+      `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, departmentCodes, position,
          phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier,
          joinDate, icNumber, passportNumber, nationality)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
         empNo,
         name,
         departmentId,
-        department.code,
+        primaryCode,
+        JSON.stringify(codesArr),
         position ?? "",
         phone ?? "",
         "ACTIVE",
@@ -225,11 +261,35 @@ app.put("/:id", async (c) => {
       nextDepartmentCode = body.departmentCode;
     }
 
+    // Multi-dept resolution. If caller passes departmentCodes explicitly use
+    // it; otherwise keep the existing array (or fall back to the single
+    // primary code we just resolved). Primary code is always set to the
+    // first entry of the final array.
+    const incomingCodes = Array.isArray(body.departmentCodes)
+      ? (body.departmentCodes as unknown[]).filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        )
+      : null;
+    const existingCodes = parseDepartmentCodes(
+      existing.departmentCodes,
+      existing.departmentCode ?? "",
+    );
+    const finalCodes =
+      incomingCodes !== null && incomingCodes.length > 0
+        ? incomingCodes
+        : existingCodes.length > 0
+          ? existingCodes
+          : nextDepartmentCode
+            ? [nextDepartmentCode]
+            : [];
+    const finalPrimary = finalCodes[0] ?? nextDepartmentCode ?? "";
+
     const merged = {
       name: body.name ?? existing.name,
       empNo: body.empNo ?? existing.empNo,
       departmentId: nextDepartmentId,
-      departmentCode: nextDepartmentCode,
+      departmentCode: finalPrimary,
+      departmentCodes: JSON.stringify(finalCodes),
       position: body.position ?? existing.position ?? "",
       phone: body.phone ?? existing.phone ?? "",
       status: body.status ?? existing.status,
@@ -248,7 +308,7 @@ app.put("/:id", async (c) => {
 
     await c.var.DB.prepare(
       `UPDATE workers SET
-         name = ?, empNo = ?, departmentId = ?, departmentCode = ?,
+         name = ?, empNo = ?, departmentId = ?, departmentCode = ?, departmentCodes = ?,
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?
@@ -259,6 +319,7 @@ app.put("/:id", async (c) => {
         merged.empNo,
         merged.departmentId,
         merged.departmentCode,
+        merged.departmentCodes,
         merged.position,
         merged.phone,
         merged.status,

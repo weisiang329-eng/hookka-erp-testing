@@ -1338,10 +1338,16 @@ function EmployeeMasterTab({
   const handleAdd = async () => {
     setSaving(true);
     try {
+      // Categories only meaningful for Operator Leaders — strip on the way
+      // out for everyone else so we never persist stale values.
+      const payload =
+        form.position === "Operator Leader"
+          ? form
+          : { ...form, categories: [] };
       await fetch("/api/workers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
       setShowAddForm(false);
       setForm({ ...emptyForm });
@@ -1381,10 +1387,14 @@ function EmployeeMasterTab({
     if (!editingId) return;
     setSaving(true);
     try {
+      const payload =
+        editForm.position === "Operator Leader"
+          ? editForm
+          : { ...editForm, categories: [] };
       await fetch(`/api/workers/${editingId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editForm),
+        body: JSON.stringify(payload),
       });
       setEditingId(null);
       setDeptDropdownOpen(false);
@@ -1575,7 +1585,13 @@ function EmployeeMasterTab({
         label: "Categories",
         render: (_value, row) => {
           const CATS: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
+          // Categories only apply to Operator Leaders. Wei Siang 2026-05-10:
+          // a regular Operator's category column should look "not applicable",
+          // not show "All" or chips that imply they should pick something.
           if (editingId === row.id) {
+            if (editForm.position !== "Operator Leader") {
+              return <span className="text-[#9CA3AF] text-xs">—</span>;
+            }
             return (
               <div className="flex flex-wrap gap-1">
                 {CATS.map((cat) => {
@@ -1605,6 +1621,9 @@ function EmployeeMasterTab({
                 })}
               </div>
             );
+          }
+          if (row.position !== "Operator Leader") {
+            return <span className="text-[#9CA3AF] text-xs">—</span>;
           }
           const cats = Array.isArray(row.categories) ? row.categories : [];
           if (cats.length === 0) {
@@ -1979,37 +1998,43 @@ function EmployeeMasterTab({
                   <option value="Operator Leader">Operator Leader</option>
                 </select>
               </div>
-              <div className="col-span-2">
-                <label className="text-xs text-[#6B7280]">
-                  Categories <span className="text-[10px] text-[#9CA3AF]">(blank = all)</span>
-                </label>
-                <div className="mt-1 flex flex-wrap gap-1.5">
-                  {(["SOFA", "BEDFRAME"] as const).map((cat) => {
-                    const checked = form.categories.includes(cat);
-                    return (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => {
-                          setForm((f) => {
-                            const set = new Set(f.categories);
-                            if (set.has(cat)) set.delete(cat);
-                            else set.add(cat);
-                            return { ...f, categories: Array.from(set) };
-                          });
-                        }}
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded border text-[11px] transition-colors ${
-                          checked
-                            ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-                            : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
-                        }`}
-                      >
-                        {cat}
-                      </button>
-                    );
-                  })}
+              {/* Categories only apply to Operator Leaders — gates which
+                  (dept × category) cells the Team dashboard surfaces. Hide
+                  the picker entirely for plain Operators so the form doesn't
+                  imply they need to choose. — Wei Siang 2026-05-10 */}
+              {form.position === "Operator Leader" && (
+                <div className="col-span-2">
+                  <label className="text-xs text-[#6B7280]">
+                    Categories <span className="text-[10px] text-[#9CA3AF]">(blank = all)</span>
+                  </label>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {(["SOFA", "BEDFRAME"] as const).map((cat) => {
+                      const checked = form.categories.includes(cat);
+                      return (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => {
+                            setForm((f) => {
+                              const set = new Set(f.categories);
+                              if (set.has(cat)) set.delete(cat);
+                              else set.add(cat);
+                              return { ...f, categories: Array.from(set) };
+                            });
+                          }}
+                          className={`inline-flex items-center px-2.5 py-0.5 rounded border text-[11px] transition-colors ${
+                            checked
+                              ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                              : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
+                          }`}
+                        >
+                          {cat}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              )}
               <div>
                 <label className="text-xs text-[#6B7280]">Phone</label>
                 <Input

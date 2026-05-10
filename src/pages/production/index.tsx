@@ -3112,11 +3112,16 @@ export default function ProductionPage({
           const rep = pillowGroup[0];
           const qty = pillowGroup.length;
           const name = rep.productName || rep.productCode || "Pillow";
+          // Include fabric color so packers see "Square Pillow KN390-2 x3"
+          // instead of just "Square Pillow x3" — color is what differentiates
+          // pillow groups within the same SO.
+          const fabric = rep.fabricCode ? ` ${rep.fabricCode}` : "";
+          const labelWithFabric = `${name}${fabric} x${qty}`;
           rep.pieceNo = compartmentCount + legShift + 1 + pillowIdx;
           rep.totalPieces = totalPacks;
           rep.wipLabel = fullCompartment;
-          rep.boxLabel = `${name} x${qty}`;
-          rep.pieceName = `${name} x${qty}`;
+          rep.boxLabel = labelWithFabric;
+          rep.pieceName = labelWithFabric;
           if (pillowIdx === 0) {
             rep.comboPairKey = lastCompartment.key;
             rep.isSyntheticPillow = true;

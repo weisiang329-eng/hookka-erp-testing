@@ -675,11 +675,19 @@ function TableHeader({
   cols: string[];
   align?: Array<"left" | "right">;
 }) {
+  // Match the row templates exactly so headers sit above their column.
+  // - 4 cols → Daily breakdown rows use [auto_1fr_1fr_1fr]
+  // - 2 cols → Completed products header (rows are flex)
+  // - other → equal split
   const gridCols =
-    cols.length === 4 ? "grid-cols-[auto_1fr_auto_auto]" : "grid-cols-4";
+    cols.length === 4
+      ? "grid-cols-[auto_1fr_1fr_1fr]"
+      : cols.length === 2
+        ? "grid-cols-[1fr_auto]"
+        : `grid-cols-${cols.length}`;
   return (
     <div
-      className={`grid ${gridCols} gap-2 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3`}
+      className={`grid ${gridCols} gap-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3`}
     >
       {cols.map((c, i) => (
         <span

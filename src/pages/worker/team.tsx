@@ -276,7 +276,14 @@ export default function WorkerTeamPage() {
 
       {/* Daily Breakdown list. Vertical row list instead of a table —
           tighter on mobile and lets each row have its own tap-to-expand
-          drilldown beneath it without horizontal scrolling. */}
+          drilldown beneath it without horizontal scrolling.
+
+          Column layout (fixed across header + every data row so values
+          line up under their labels):
+            [chevron 16px] [date 64px] [3-col grid: working / production / eff%]
+          The header row mirrors the same flex template; the chevron slot
+          stays empty + the date slot holds "Date" so the column titles
+          land at the same x-coordinate as the values below. */}
       <div className="rounded-lg bg-white border border-[#D8D2CC] overflow-hidden">
         <div className="px-3 py-2 bg-[#F0ECE9] border-b border-[#D8D2CC]">
           <span className="text-xs font-bold uppercase tracking-wide text-[#1F1D1B]">
@@ -296,57 +303,63 @@ export default function WorkerTeamPage() {
             {t("team.empty")}
           </div>
         ) : (
-          <ul className="divide-y divide-[#F0ECE9]">
-            {daily.map((row) => {
-              const isOpen = expandedDates.has(row.date);
-              const hasHours = row.workingMinutes > 0;
-              const tone = effTone(row.efficiencyPct, hasHours);
-              return (
-                <li key={row.date}>
-                  <button
-                    type="button"
-                    onClick={() => toggleDate(row.date)}
-                    className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-[#FAF7EE] active:bg-[#F0ECE9]"
-                  >
-                    <span className="text-[#5A5550] flex-shrink-0">
-                      {isOpen ? (
-                        <ChevronDown className="h-4 w-4" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4" />
-                      )}
-                    </span>
-                    <span className="font-medium text-sm text-[#1F1D1B] flex-shrink-0 w-16 tabular-nums">
-                      {fmtDayShort(row.date)}
-                    </span>
-                    <span className="flex-1 grid grid-cols-3 gap-1 text-[11px] tabular-nums">
-                      <Stat
-                        label={t("team.colWorkingHrs")}
-                        value={fmtHours(row.workingMinutes)}
-                      />
-                      <Stat
-                        label={t("team.colProductionHrs")}
-                        value={fmtHours(row.productionMinutes)}
-                      />
-                      <span className="flex flex-col items-end">
-                        <span className="text-[10px] text-[#8A8680]">
-                          {t("team.colEfficiency")}
+          <>
+            {/* Column header — same flex / grid template as data rows so
+                the values below land directly under their label. */}
+            <div className="px-3 py-1.5 flex items-center gap-3 border-b border-[#E5DEC6] bg-[#FAF7EE] text-[10px] uppercase tracking-wide text-[#8A8680] font-semibold">
+              <span className="w-4 flex-shrink-0" aria-hidden />
+              <span className="w-16 flex-shrink-0">{t("team.colDate")}</span>
+              <span className="flex-1 grid grid-cols-3 gap-1 text-right">
+                <span>{t("team.colWorkingHrs")}</span>
+                <span>{t("team.colProductionHrs")}</span>
+                <span>{t("team.colEfficiency")}</span>
+              </span>
+            </div>
+            <ul className="divide-y divide-[#F0ECE9]">
+              {daily.map((row) => {
+                const isOpen = expandedDates.has(row.date);
+                const hasHours = row.workingMinutes > 0;
+                const tone = effTone(row.efficiencyPct, hasHours);
+                return (
+                  <li key={row.date}>
+                    <button
+                      type="button"
+                      onClick={() => toggleDate(row.date)}
+                      className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-[#FAF7EE] active:bg-[#F0ECE9]"
+                    >
+                      <span className="w-4 flex-shrink-0 text-[#5A5550]">
+                        {isOpen ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                      </span>
+                      <span className="font-medium text-sm text-[#1F1D1B] flex-shrink-0 w-16 tabular-nums">
+                        {fmtDayShort(row.date)}
+                      </span>
+                      <span className="flex-1 grid grid-cols-3 gap-1 text-xs tabular-nums text-right">
+                        <span className="text-[#1F1D1B]">
+                          {fmtHours(row.workingMinutes)}
+                        </span>
+                        <span className="text-[#1F1D1B]">
+                          {fmtHours(row.productionMinutes)}
                         </span>
                         <span className={`font-semibold ${tone}`}>
                           {hasHours ? `${row.efficiencyPct}%` : "—"}
                         </span>
                       </span>
-                    </span>
-                  </button>
-                  {isOpen && (
-                    <DailyDrillDown
-                      date={row.date}
-                      workers={row.workers ?? []}
-                    />
-                  )}
-                </li>
-              );
-            })}
-          </ul>
+                    </button>
+                    {isOpen && (
+                      <DailyDrillDown
+                        date={row.date}
+                        workers={row.workers ?? []}
+                      />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </>
         )}
       </div>
     </div>
@@ -378,15 +391,6 @@ function Kpi({
         {label}
       </p>
     </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <span className="flex flex-col items-end">
-      <span className="text-[10px] text-[#8A8680]">{label}</span>
-      <span className="text-[#1F1D1B]">{value}</span>
-    </span>
   );
 }
 

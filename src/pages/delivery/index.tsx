@@ -282,8 +282,41 @@ type ProductionOrderApiShape = {
   completedDate?: string | null;
   targetEndDate?: string;
   rackingNumber?: string;
-  jobCards?: { departmentCode: string; status: string; completedDate?: string | null }[];
+  // Mirrored from production_orders.specialOrder so the HB-only completion
+  // gate stays in step with the backend (cascadeUpholsteryToSO drops DIVAN
+  // UPH JCs from the readiness check when this contains "Headboard Only").
+  specialOrder?: string;
+  // wipType lets us identify DIVAN UPHOLSTERY rows for the HB-only filter
+  // — see isHbOnlySpecial / pickRelevantUphCards below.
+  jobCards?: {
+    departmentCode: string;
+    status: string;
+    completedDate?: string | null;
+    wipType?: string;
+  }[];
 };
+
+// Mirrors api/routes/fg-units.ts isHeadboardOnlySpecial — single rule shared
+// across the codebase so the planning/ready filters stay in sync with the
+// backend cascade.
+function isHbOnlySpecial(specialOrder: string | null | undefined): boolean {
+  if (!specialOrder) return false;
+  return specialOrder.toLowerCase().includes("headboard only");
+}
+
+// Drop DIVAN UPH JCs when the PO is a BEDFRAME + Headboard Only — matches
+// filterJcsForCompletionGate in the backend production-orders route. Legacy
+// HB-only POs (created before commit 9086352) carry stranded DIVAN job cards
+// that will never complete; ignoring them lets the row qualify for Pending
+// Delivery the moment the HB pieces are packed.
+function pickRelevantUphCards(po: ProductionOrderApiShape) {
+  const uph = (po.jobCards || []).filter(
+    (j) => j.departmentCode === "UPHOLSTERY",
+  );
+  const isBf = (po.itemCategory || "").toUpperCase() === "BEDFRAME";
+  if (!isBf || !isHbOnlySpecial(po.specialOrder)) return uph;
+  return uph.filter((j) => (j.wipType || "").toUpperCase() !== "DIVAN");
+}
 
 export default function DeliveryPage() {
   const { toast } = useToast();
@@ -591,7 +624,10 @@ export default function DeliveryPage() {
           // row defaults treat them as complete (set total/ready = 1).
           // ---------------------------------------------------------------
           const allUphDone = (po: ProductionOrderApiShape): boolean => {
-            const uph = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            // HB-only BEDFRAME POs: ignore stranded DIVAN UPH cards so the
+            // PO can register as ready once the HB UPH is packed. Mirrors
+            // filterJcsForCompletionGate on the backend.
+            const uph = pickRelevantUphCards(po);
             if (uph.length === 0) return false;
             return uph.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
           };
@@ -600,7 +636,7 @@ export default function DeliveryPage() {
             if (po.status === "CANCELLED") continue;
             if (po.consignmentOrderId) continue;
             if (linkedPOIds.has(po.id)) continue;
-            const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            const uphCards = pickRelevantUphCards(po);
             if (uphCards.length === 0) continue;
             const soId = po.salesOrderId || "";
             if (!siblingsBySo.has(soId)) siblingsBySo.set(soId, { total: 0, ready: 0 });
@@ -634,7 +670,10 @@ export default function DeliveryPage() {
               unitM3: productM3Map.get(po.productCode || "") ?? 0,
               completedDate: po.completedDate || null,
               uphCompletedDate: (() => {
-                const uphCards = (po.jobCards || []).filter(j => j.departmentCode === "UPHOLSTERY");
+                // HB-only filter applied so the "uph completed" date
+                // reflects the date the HB UPH cards finished, not a
+                // null from a never-completed legacy DIVAN UPH card.
+                const uphCards = pickRelevantUphCards(po);
                 if (uphCards.length === 0) return null;
                 // Find the latest completion date among upholstery cards
                 const dates = uphCards.map(j => j.completedDate).filter((d): d is string => !!d);
@@ -659,8 +698,9 @@ export default function DeliveryPage() {
             .filter((po) => {
               if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
               if (po.consignmentOrderId) return false;
-              // Must have upholstery cards
-              const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+              // Must have upholstery cards (HB-only filter excludes DIVAN
+              // UPH so the PO leaves Planning the moment the HB UPH is done).
+              const uphCards = pickRelevantUphCards(po);
               if (uphCards.length === 0) return false;
               // At least one upholstery card not yet done
               return uphCards.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
@@ -679,7 +719,9 @@ export default function DeliveryPage() {
               if (po.status === "CANCELLED") return false;
               if (po.consignmentOrderId) return false;
               // Check that upholstery cards exist and ALL are done
-              const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+              // (HB-only filter applied so legacy DIVAN UPH stragglers
+              // don't keep the row out of Pending Delivery).
+              const uphCards = pickRelevantUphCards(po);
               if (uphCards.length === 0) return false;
               return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
             })

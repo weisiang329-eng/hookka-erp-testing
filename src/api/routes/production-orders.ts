@@ -67,8 +67,44 @@ import {
   validateFabricCodes,
   unknownFabricCodeError,
 } from "../lib/fabric-validation";
+// HB-only completion gate (commit 9086352 + this commit). When a BEDFRAME PO
+// carries specialOrder "Headboard Only", the SO/CO line really is HB-only —
+// any DIVAN job_cards are either (a) filtered out at PO creation by the
+// production-builder forward-only fix, or (b) legacy stragglers from before
+// that fix that we don't touch (per memory feedback_protect_completed_work).
+// Either way, completion math must ignore wipType=DIVAN so the HB pack alone
+// can flip the PO to COMPLETED → SO/CO to READY_TO_SHIP.
+import { isHeadboardOnlySpecial } from "./fg-units";
 
 const app = new Hono<Env>();
+
+// ---------------------------------------------------------------------------
+// HB-only completion filter — single helper used by every "are all JCs done?"
+// gate so the rule stays in one place. Returns the JC list with DIVAN entries
+// dropped when the PO is BEDFRAME + Headboard Only; otherwise returns the
+// list unchanged. The match is on jc.wipType (the BOM tag set at PO creation
+// — see _shared/production-builder breakBomIntoWips), not on labels/codes,
+// so any future BOM relabeling stays self-consistent.
+//
+// Why we filter rather than delete legacy DIVAN JCs: per Wei Siang
+// 2026-05-10 ("不用理 之后的"), legacy HB-only POs that already created
+// DIVAN job_cards before commit 9086352 must keep those rows untouched.
+// The cleanup endpoint /api/import/cleanup-headboard-only-divans (added in
+// 9086352) is the explicit opt-in path for clearing them.
+// ---------------------------------------------------------------------------
+function filterJcsForCompletionGate<
+  J extends { wipType?: string | null },
+>(
+  po: { itemCategory?: string | null; specialOrder?: string | null } | null
+    | undefined,
+  jcs: J[],
+): J[] {
+  if (!po) return jcs;
+  const isBf = (po.itemCategory ?? "").toUpperCase() === "BEDFRAME";
+  if (!isBf) return jcs;
+  if (!isHeadboardOnlySpecial(po.specialOrder ?? null)) return jcs;
+  return jcs.filter((j) => (j.wipType ?? "").toUpperCase() !== "DIVAN");
+}
 
 // Self-applying migrations for the production-orders / job-cards space.
 // Mirrors the pattern in src/api/routes/sales-orders.ts:1492 — each ALTER
@@ -1597,11 +1633,14 @@ export async function applyWipInventoryChange(
       // wasAllUphDone is true iff every UPH JC in this PO is currently
       // COMPLETED/TRANSFERRED EXCEPT the reverting one — and we know the
       // reverting one was previously COMPLETED (wasDone=true).
-      const poUphJcs = allJcRows.filter(
+      // HB-only PO: drop DIVAN UPH JCs from the predicate so the rollback
+      // mirror stays in step with the forward gate above.
+      const poUphJcsAll = allJcRows.filter(
         (j) =>
           j.productionOrderId === poRow.id &&
           (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
       );
+      const poUphJcs = filterJcsForCompletionGate(poRow, poUphJcsAll);
       const wasAllUphDone =
         poUphJcs.length > 0 &&
         poUphJcs.every((j) =>
@@ -2162,11 +2201,16 @@ export async function applyWipInventoryChange(
       // BASE+CUSHION+ARMREST UPH JCs in one PO (see _shared/production-builder
       // SOFA-set logic). Accessory: same. allJcRows already reflects the
       // post-update state (refreshed at the call site).
-      const poUphJcs = allJcRows.filter(
+      // HB-only PO: ignore DIVAN UPH JCs in the "all UPH done?" gate so
+      // legacy stranded DIVAN rows don't keep the WIP→FG transition from
+      // firing. The DIVAN wip_items rows themselves stay where they are
+      // (we don't subtract them since their UPH JCs never completed).
+      const poUphJcsAll = allJcRows.filter(
         (j) =>
           j.productionOrderId === poRow.id &&
           (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
       );
+      const poUphJcs = filterJcsForCompletionGate(poRow, poUphJcsAll);
       const allUphDone =
         poUphJcs.length > 0 &&
         poUphJcs.every(
@@ -2352,8 +2396,17 @@ async function cascadeUpholsteryToSO(
   const uphJcs = uphRes.results ?? [];
   if (uphJcs.length === 0) return;
 
+  // HB-only sibling POs: drop their DIVAN UPHOLSTERY JCs so the readiness
+  // check doesn't wait for divan pieces the customer never ordered. See
+  // filterJcsForCompletionGate above for full context.
+  const poById = new Map(siblingPOs.map((p) => [p.id, p]));
+  const filteredUphFor = (poId: string): JobCardRow[] => {
+    const mine = uphJcs.filter((j) => j.productionOrderId === poId);
+    return filterJcsForCompletionGate(poById.get(poId), mine);
+  };
+
   const everyUphDone = siblingPOs.every((p) => {
-    const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+    const mine = filteredUphFor(p.id);
     if (mine.length === 0) return true;
     return mine.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
   });
@@ -2361,7 +2414,7 @@ async function cascadeUpholsteryToSO(
   const now = new Date().toISOString();
   if (everyUphDone) {
     for (const p of siblingPOs) {
-      const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+      const mine = filteredUphFor(p.id);
       if (
         mine.length > 0 &&
         mine.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")
@@ -2441,8 +2494,16 @@ async function cascadeUpholsteryToCO(
   const uphJcs = uphRes.results ?? [];
   if (uphJcs.length === 0) return;
 
+  // HB-only sibling POs: drop their DIVAN UPHOLSTERY JCs (see SO twin above
+  // for full rationale).
+  const poById = new Map(siblingPOs.map((p) => [p.id, p]));
+  const filteredUphFor = (poId: string): JobCardRow[] => {
+    const mine = uphJcs.filter((j) => j.productionOrderId === poId);
+    return filterJcsForCompletionGate(poById.get(poId), mine);
+  };
+
   const everyUphDone = siblingPOs.every((p) => {
-    const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+    const mine = filteredUphFor(p.id);
     if (mine.length === 0) return true;
     return mine.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
   });
@@ -2450,7 +2511,7 @@ async function cascadeUpholsteryToCO(
   const now = new Date().toISOString();
   if (everyUphDone) {
     for (const p of siblingPOs) {
-      const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+      const mine = filteredUphFor(p.id);
       if (
         mine.length > 0 &&
         mine.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")
@@ -2521,7 +2582,7 @@ async function cascadeUpholsteryToCO(
     ]);
     for (const p of siblingPOs) {
       if (!p.stockedIn) continue;
-      const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+      const mine = filteredUphFor(p.id);
       const stillFullyDone =
         mine.length > 0 &&
         mine.every(
@@ -2593,9 +2654,11 @@ async function cascadeUpholsteryRollbackToSO(
   if (so.status !== "READY_TO_SHIP") return;
 
   const siblings = await db
-    .prepare("SELECT id FROM production_orders WHERE salesOrderId = ?")
+    .prepare(
+      "SELECT id, itemCategory, specialOrder FROM production_orders WHERE salesOrderId = ?",
+    )
     .bind(so.id)
-    .all<{ id: string }>();
+    .all<{ id: string; itemCategory: string | null; specialOrder: string | null }>();
   const siblingPOs = siblings.results ?? [];
   if (siblingPOs.length === 0) return;
 
@@ -2603,18 +2666,22 @@ async function cascadeUpholsteryRollbackToSO(
   const placeholders = sibIds.map(() => "?").join(",");
   const uphRes = await db
     .prepare(
-      `SELECT productionOrderId, status FROM job_cards
+      `SELECT productionOrderId, status, wipType FROM job_cards
         WHERE departmentCode = 'UPHOLSTERY' AND productionOrderId IN (${placeholders})`,
     )
     .bind(...sibIds)
-    .all<{ productionOrderId: string; status: string }>();
+    .all<{ productionOrderId: string; status: string; wipType: string | null }>();
   const uphJcs = uphRes.results ?? [];
 
   // Mirror the forward path: every sibling PO must have all its UPH JCs in
   // COMPLETED/TRANSFERRED for the SO to remain READY_TO_SHIP. POs with no
   // UPH JCs at all are treated as vacuous-true (matches the forward path).
+  // HB-only sibling POs: drop their DIVAN UPH JCs so the rollback decision
+  // stays in sync with the forward cascade (which also ignores them).
+  const poById = new Map(siblingPOs.map((p) => [p.id, p]));
   const everyUphDone = siblingPOs.every((p) => {
-    const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+    const minePre = uphJcs.filter((j) => j.productionOrderId === p.id);
+    const mine = filterJcsForCompletionGate(poById.get(p.id), minePre);
     if (mine.length === 0) return true;
     return mine.every(
       (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
@@ -2906,10 +2973,17 @@ export async function recomputePoStatusAndProgress(
   };
   const poRow = await db
     .prepare(
-      `SELECT status, progress, completedDate FROM production_orders WHERE id = ?`,
+      `SELECT status, progress, completedDate, itemCategory, specialOrder
+         FROM production_orders WHERE id = ?`,
     )
     .bind(poId)
-    .first<{ status: string; progress: number; completedDate: string | null }>();
+    .first<{
+      status: string;
+      progress: number;
+      completedDate: string | null;
+      itemCategory: string | null;
+      specialOrder: string | null;
+    }>();
   if (!poRow) return noop;
 
   // Admin states are sticky — exit before touching anything.
@@ -2917,7 +2991,7 @@ export async function recomputePoStatusAndProgress(
 
   const sibs = await db
     .prepare(
-      `SELECT id, status, completedDate, wipQty, sequence
+      `SELECT id, status, completedDate, wipQty, sequence, wipType
          FROM job_cards
         WHERE productionOrderId = ?`,
     )
@@ -2928,8 +3002,12 @@ export async function recomputePoStatusAndProgress(
       completedDate: string | null;
       wipQty: number | null;
       sequence: number;
+      wipType: string | null;
     }>();
-  const allJcs = sibs.results ?? [];
+  // HB-only PO: drop DIVAN job cards from the completion gate so the HB
+  // pieces alone can flip the PO to COMPLETED. Leaves the rows in the DB
+  // untouched (per forward-only fix policy) — they just don't block status.
+  const allJcs = filterJcsForCompletionGate(poRow, sibs.results ?? []);
 
   const isDone = (s: string) => s === "COMPLETED" || s === "TRANSFERRED";
   const isInProgress = (s: string) => s === "IN_PROGRESS" || s === "PAUSED";

@@ -28,6 +28,7 @@ const TodayEnvelope = z
   .object({ success: z.boolean().optional(), data: z.unknown().optional(), error: z.string().optional() })
   .passthrough();
 const HistoryEnvelope = TodayEnvelope;
+const TeamStatsEnvelope = TodayEnvelope;
 
 // ---------- types ----------
 type TodayData = {
@@ -108,6 +109,22 @@ type HistoryData = {
     efficiencyPct: number;
   };
 };
+// Team stats — only populated when the logged-in worker has
+// position === "Operator Leader". Drives the "Team" card between
+// Daily Attendance and Completed Products.
+type TeamStatsRow = {
+  departmentCode: string;
+  category: "SOFA" | "BEDFRAME";
+  workingMinutes: number;
+  productionMinutes: number;
+  efficiencyPct: number;
+  workerCount: number;
+};
+type TeamStatsData = {
+  isLeader: boolean;
+  range: { from: string; to: string };
+  rows: TeamStatsRow[];
+};
 
 // ---------- helpers ----------
 function fmtHM(mins: number): string {
@@ -150,6 +167,7 @@ export default function WorkerHomePage() {
   const [from, setFrom] = useState<string>(() => ymd(addDays(new Date(), -6)));
   const [to, setTo] = useState<string>(() => ymd(new Date()));
   const [hist, setHist] = useState<HistoryData | null>(null);
+  const [teamStats, setTeamStats] = useState<TeamStatsData | null>(null);
   // Tap-to-expand share roster on Completed Products.
   const [openShare, setOpenShare] = useState<string | null>(null);
 
@@ -181,14 +199,31 @@ export default function WorkerHomePage() {
     }
   }, []);
 
+  // Team stats — backend gates by `position === "Operator Leader"` and
+  // sets isLeader=false for everyone else; we hide the section in that
+  // case. Errors leave teamStats as-is so the rest of the page renders.
+  const loadTeamStats = useCallback(async (f: string, tto: string) => {
+    try {
+      const res = await workerFetch(
+        `/api/worker/team-stats?from=${encodeURIComponent(f)}&to=${encodeURIComponent(tto)}`,
+      );
+      const raw = await res.json();
+      const j = TeamStatsEnvelope.parse(raw);
+      if (j.success) setTeamStats(j.data as TeamStatsData);
+    } catch {
+      /* leave teamStats as-is */
+    }
+  }, []);
+
   useEffect(() => {
     refreshToday();
   }, [refreshToday]);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- refresh history when date range changes; setState lives inside the async callback */
+  /* eslint-disable react-hooks/set-state-in-effect -- refresh history + team stats when date range changes; setState lives inside the async callback */
   useEffect(() => {
     refreshHistory(from, to);
-  }, [refreshHistory, from, to]);
+    loadTeamStats(from, to);
+  }, [refreshHistory, loadTeamStats, from, to]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   async function handleClock(action: "CLOCK_IN" | "CLOCK_OUT") {
@@ -508,6 +543,25 @@ export default function WorkerHomePage() {
         </TableSection>
       )}
 
+      {/* ==================== */}
+      {/*  Team (leader only)  */}
+      {/* ==================== */}
+      {/* Backend sets isLeader=true only when worker.position === "Operator
+          Leader". Any other position → section disappears entirely.
+          Sort: departmentCode asc, SOFA before BEDFRAME. Hide rows where
+          both working+production minutes are zero. */}
+      {teamStats && teamStats.isLeader && (
+        <TeamSection
+          rows={teamStats.rows}
+          tDept={t("home.teamCol.dept")}
+          tCategory={t("home.teamCol.category")}
+          tWorkingHrs={t("home.colWorkingHrs")}
+          tProductionHrs={t("home.colProductionHrs")}
+          tEffPct={t("home.efficiencyPct")}
+          title={t("home.teamTitle")}
+        />
+      )}
+
       {/* Completed products */}
       {hist && (
         <TableSection title={`${t("home.completedProducts")} (${hist.completed.length})`}>
@@ -708,4 +762,83 @@ function TableHeader({
 
 function EmptyRow() {
   return <div className="py-4 text-center text-xs text-[#8A8680]">—</div>;
+}
+
+// ---------- Team section (Operator Leader) ----------
+// Renders one row per (departmentCode × category). Sort is dept asc,
+// SOFA before BEDFRAME. Eff % uses the same green/amber/red palette as
+// the Daily Attendance row.
+function TeamSection({
+  rows,
+  tDept,
+  tCategory,
+  tWorkingHrs,
+  tProductionHrs,
+  tEffPct,
+  title,
+}: {
+  rows: TeamStatsRow[];
+  tDept: string;
+  tCategory: string;
+  tWorkingHrs: string;
+  tProductionHrs: string;
+  tEffPct: string;
+  title: string;
+}) {
+  const sorted = [...rows]
+    .filter((r) => r.workingMinutes > 0 || r.productionMinutes > 0)
+    .sort((a, b) => {
+      if (a.departmentCode !== b.departmentCode) {
+        return a.departmentCode < b.departmentCode ? -1 : 1;
+      }
+      // SOFA before BEDFRAME
+      if (a.category === b.category) return 0;
+      return a.category === "SOFA" ? -1 : 1;
+    });
+  return (
+    <TableSection title={title}>
+      <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3">
+        <span className="text-left">{tDept}</span>
+        <span className="text-left">{tCategory}</span>
+        <span className="text-right">{tWorkingHrs}</span>
+        <span className="text-right">{tProductionHrs}</span>
+        <span className="text-right">{tEffPct}</span>
+      </div>
+      {sorted.length === 0 ? (
+        <EmptyRow />
+      ) : (
+        sorted.map((r) => {
+          const eff = Math.round(r.efficiencyPct);
+          const effTone =
+            eff >= 80
+              ? "text-[#2A6B4A]"
+              : eff >= 60
+                ? "text-[#9C6F1E]"
+                : "text-[#9A3A2D]";
+          return (
+            <div
+              key={`${r.departmentCode}__${r.category}`}
+              className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 py-2.5 text-sm border-t border-[#F0ECE9] items-center"
+            >
+              <span className="text-[#1F1D1B] font-medium">
+                {r.departmentCode}
+              </span>
+              <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
+                {r.category}
+              </span>
+              <span className="tabular-nums text-right font-semibold">
+                {mins2hrs(r.workingMinutes)}
+              </span>
+              <span className="tabular-nums text-right font-semibold text-[#3E6570]">
+                {mins2hrs(r.productionMinutes)}
+              </span>
+              <span className={`tabular-nums text-right font-semibold ${effTone}`}>
+                {eff}%
+              </span>
+            </div>
+          );
+        })
+      )}
+    </TableSection>
+  );
 }

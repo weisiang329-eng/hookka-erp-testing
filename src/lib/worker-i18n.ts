@@ -520,6 +520,24 @@ const dict: Dict = {
     zh: '分享给',
     my: 'ဝေမျှသူ',
   },
+  'home.teamTitle': {
+    en: 'Team',
+    ms: 'Pasukan',
+    zh: '团队',
+    my: 'အသင်း',
+  },
+  'home.teamCol.dept': {
+    en: 'Department',
+    ms: 'Jabatan',
+    zh: '部门',
+    my: 'ဌာန',
+  },
+  'home.teamCol.category': {
+    en: 'Category',
+    ms: 'Kategori',
+    zh: '类别',
+    my: 'အမျိုးအစား',
+  },
 
   // ---- Me ----
   'me.title': { en: 'Me', ms: 'Saya', zh: '我的', my: 'ကျွန်ုပ်' },

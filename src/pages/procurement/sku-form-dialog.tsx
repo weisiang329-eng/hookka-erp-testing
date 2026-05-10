@@ -1,0 +1,316 @@
+// ---------------------------------------------------------------------------
+// SKU Form Dialog — shared between /procurement/maintenance (global SKU tab)
+// and /suppliers/:id (per-supplier SKU management). Extracted Wei Siang
+// 2026-05-10 so the supplier detail page can edit mappings inline without
+// duplicating the form code.
+// ---------------------------------------------------------------------------
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { X } from "lucide-react";
+
+export type SupplierSKU = {
+  id: string;
+  internalRMCode: string;
+  materialName: string; // = our internal description
+  supplierId: string;
+  supplierName?: string;
+  supplierSku: string; // = supplier's code
+  supplierDescription: string; // = supplier's description
+  unitPriceSen: number;
+  currency: string;
+  leadTimeDays: number;
+  moq: number;
+  isMainSupplier: boolean;
+  validFrom: string;
+  validTo: string;
+};
+
+export type SkuFormSupplier = {
+  id: string;
+  code: string;
+  name: string;
+  status: string; // "ACTIVE" | "INACTIVE" | "BLACKLISTED"
+};
+
+export type SkuFormInventoryItem = {
+  id: string;
+  itemCode: string;
+  description: string;
+  baseUOM: string;
+  itemGroup: string;
+};
+
+export function SKUFormDialog({
+  editData,
+  suppliers,
+  inventoryItems,
+  onSave,
+  onClose,
+  presetSupplierId,
+}: {
+  editData?: SupplierSKU | null;
+  suppliers: SkuFormSupplier[];
+  inventoryItems: SkuFormInventoryItem[];
+  onSave: (data: Omit<SupplierSKU, "id">) => void;
+  onClose: () => void;
+  // When opened from the supplier detail page the supplier dropdown is
+  // pre-selected so operator doesn't have to pick again.
+  presetSupplierId?: string;
+}) {
+  const [internalRMCode, setInternalRMCode] = useState(editData?.internalRMCode || "");
+  const [materialName, setMaterialName] = useState(editData?.materialName || "");
+  const [rmSearch, setRmSearch] = useState("");
+  const [showRmDropdown, setShowRmDropdown] = useState(false);
+  const rmDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close the inventory dropdown on outside click. Without this it stayed
+  // open indefinitely once focused, overlaying the Cancel + Add Mapping
+  // buttons further down the form.
+  useEffect(() => {
+    if (!showRmDropdown) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (rmDropdownRef.current && !rmDropdownRef.current.contains(e.target as Node)) {
+        setShowRmDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [showRmDropdown]);
+
+  const filteredInventory = useMemo(() => {
+    if (!rmSearch) return inventoryItems.slice(0, 50);
+    const q = rmSearch.toLowerCase();
+    return inventoryItems
+      .filter(
+        (item) =>
+          item.itemCode.toLowerCase().includes(q) ||
+          item.description.toLowerCase().includes(q),
+      )
+      .slice(0, 50);
+  }, [inventoryItems, rmSearch]);
+
+  const selectInventoryItem = (item: SkuFormInventoryItem) => {
+    setInternalRMCode(item.itemCode);
+    setMaterialName(item.description);
+    setShowRmDropdown(false);
+    setRmSearch("");
+  };
+  const [supplierId, setSupplierId] = useState(
+    editData?.supplierId || presetSupplierId || "",
+  );
+  const [supplierSku, setSupplierSku] = useState(editData?.supplierSku || "");
+  const [supplierDescription, setSupplierDescription] = useState(
+    editData?.supplierDescription || "",
+  );
+  const [unitPrice, setUnitPrice] = useState(editData ? String(editData.unitPriceSen / 100) : "");
+  const [currency] = useState(editData?.currency || "MYR");
+  const [leadTimeDays, setLeadTimeDays] = useState(editData?.leadTimeDays || 7);
+  const [moq, setMoq] = useState(editData?.moq || 1);
+  const [isMainSupplier, setIsMainSupplier] = useState(editData?.isMainSupplier || false);
+  const [validFrom, setValidFrom] = useState(
+    editData?.validFrom || new Date().toISOString().split("T")[0],
+  );
+  const [validTo, setValidTo] = useState(editData?.validTo || "2026-12-31");
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSave({
+      internalRMCode,
+      materialName,
+      supplierId,
+      supplierSku,
+      supplierDescription,
+      unitPriceSen: Math.round(parseFloat(unitPrice) * 100),
+      currency,
+      leadTimeDays,
+      moq,
+      isMainSupplier,
+      validFrom,
+      validTo,
+    });
+  };
+
+  // Close on Escape key — operators expect dialog dismissal even when focus
+  // is trapped inside an Input.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between p-6 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">
+            {editData ? "Edit SKU Mapping" : "Add SKU Mapping"}
+          </h2>
+          <Button type="button" variant="ghost" size="icon" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="relative" ref={rmDropdownRef}>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Internal Code *</label>
+              <Input
+                value={showRmDropdown ? rmSearch : internalRMCode}
+                onChange={(e) => {
+                  setRmSearch(e.target.value);
+                  setShowRmDropdown(true);
+                }}
+                onFocus={() => setShowRmDropdown(true)}
+                placeholder="Search FG / WIP / RM..."
+                required
+                autoComplete="off"
+              />
+              {showRmDropdown && (
+                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-48 overflow-y-auto">
+                  {filteredInventory.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-gray-400">No items found</div>
+                  ) : (
+                    filteredInventory.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-[#FAF9F7] flex items-center gap-2 border-b border-[#E2DDD8]/50 last:border-0"
+                        onClick={() => selectInventoryItem(item)}
+                      >
+                        <span className="font-mono text-xs text-[#6B5C32] min-w-[100px]">{item.itemCode}</span>
+                        <span className="text-[#374151] truncate">{item.description}</span>
+                        <span className="text-[10px] text-gray-400 ml-auto shrink-0">{item.itemGroup}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Internal Description *</label>
+              <Input
+                value={materialName}
+                onChange={(e) => setMaterialName(e.target.value)}
+                required
+                placeholder="Auto-filled from selection"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-[#374151] mb-1">Supplier *</label>
+            <select
+              className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              required
+            >
+              <option value="">Select supplier...</option>
+              {suppliers
+                .filter((s) => s.status === "ACTIVE")
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.code} - {s.name}
+                  </option>
+                ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Code *</label>
+              <Input
+                value={supplierSku}
+                onChange={(e) => setSupplierSku(e.target.value)}
+                required
+                placeholder="Supplier's SKU / part number"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Description</label>
+              <Input
+                value={supplierDescription}
+                onChange={(e) => setSupplierDescription(e.target.value)}
+                placeholder="As printed on supplier PI / quote"
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Unit Price (RM) *</label>
+              <Input
+                type="number"
+                onFocus={(e) => e.currentTarget.select()}
+                step="0.01"
+                min="0"
+                value={unitPrice}
+                onChange={(e) => setUnitPrice(e.target.value)}
+                required
+                placeholder="0.00"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Lead Time (days)</label>
+              <Input
+                type="number"
+                onFocus={(e) => e.currentTarget.select()}
+                min="1"
+                value={leadTimeDays}
+                onChange={(e) => setLeadTimeDays(Number(e.target.value))}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">MOQ</label>
+              <Input
+                type="number"
+                onFocus={(e) => e.currentTarget.select()}
+                min="1"
+                value={moq}
+                onChange={(e) => setMoq(Number(e.target.value))}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Valid From</label>
+              <Input
+                type="date"
+                value={validFrom}
+                onChange={(e) => setValidFrom(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Valid To</label>
+              <Input
+                type="date"
+                value={validTo}
+                onChange={(e) => setValidTo(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="mainSupplier"
+              checked={isMainSupplier}
+              onChange={(e) => setIsMainSupplier(e.target.checked)}
+              className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+            />
+            <label htmlFor="mainSupplier" className="text-sm font-medium text-[#374151]">
+              Main supplier for this material
+            </label>
+          </div>
+          <div className="flex justify-end gap-3 pt-4 border-t border-[#E2DDD8]">
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit" variant="primary">{editData ? "Update" : "Add Mapping"}</Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

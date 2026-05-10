@@ -14,14 +14,20 @@
 //   - Last 10 POs table: poNo, status, ordered/received qty, expected vs
 //     actual delivery date.
 // ---------------------------------------------------------------------------
-import { useMemo } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { useParams, Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Supplier } from "@/types";
+import {
+  SKUFormDialog,
+  type SupplierSKU,
+  type SkuFormSupplier,
+  type SkuFormInventoryItem,
+} from "@/pages/procurement/sku-form-dialog";
 import {
   ArrowLeft,
   Building2,
@@ -31,6 +37,8 @@ import {
   TrendingUp,
   Package,
   Plus,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 
 type SkuBinding = {
@@ -44,6 +52,8 @@ type SkuBinding = {
   leadTimeDays: number;
   moq: number;
   isMainSupplier: boolean;
+  priceValidFrom?: string;
+  priceValidTo?: string;
 };
 
 type ScorecardLastPO = {
@@ -96,7 +106,6 @@ function deliveryDelta(po: ScorecardLastPO): {
 
 export default function SupplierDetailPage() {
   const { id } = useParams();
-  const navigate = useNavigate();
 
   const { data: supResp, loading: supLoading } = useCachedJson<{
     success?: boolean;
@@ -116,6 +125,119 @@ export default function SupplierDetailPage() {
     () => (skuResp?.success ? skuResp.data ?? [] : []),
     [skuResp],
   );
+
+  // Suppliers list — needed by the SKU form dialog's supplier dropdown.
+  // We only show ACTIVE entries in the dropdown; the dialog filters that
+  // itself, so just feed the full list.
+  const { data: suppliersResp } = useCachedJson<
+    { success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]
+  >("/api/suppliers");
+  const supplierOptions: SkuFormSupplier[] = useMemo(() => {
+    const list = Array.isArray((suppliersResp as { data?: unknown[] })?.data)
+      ? ((suppliersResp as { data: Record<string, unknown>[] }).data)
+      : Array.isArray(suppliersResp)
+        ? (suppliersResp as Record<string, unknown>[])
+        : [];
+    return list.map((s) => ({
+      id: String(s.id ?? s.code ?? ""),
+      code: String(s.code ?? s.id ?? ""),
+      name: String(s.name ?? ""),
+      status: String(
+        s.status ?? (s.isActive === false ? "INACTIVE" : "ACTIVE"),
+      ),
+    }));
+  }, [suppliersResp]);
+
+  // Inventory items — for the dialog's RM autocomplete.
+  const { data: invResp } = useCachedJson<{
+    success?: boolean;
+    data?: {
+      rawMaterials?: SkuFormInventoryItem[];
+      finishedGoods?: SkuFormInventoryItem[];
+      wipItems?: SkuFormInventoryItem[];
+    };
+  }>("/api/inventory");
+  const inventoryItems: SkuFormInventoryItem[] = useMemo(() => {
+    if (!invResp?.success || !invResp.data) return [];
+    return [
+      ...(invResp.data.rawMaterials || []),
+      ...(invResp.data.finishedGoods || []),
+      ...(invResp.data.wipItems || []),
+    ].map((item) => ({
+      id: item.id,
+      itemCode: item.itemCode,
+      description: item.description,
+      baseUOM: item.baseUOM,
+      itemGroup: item.itemGroup,
+    }));
+  }, [invResp]);
+
+  // SKU dialog state
+  const [showSKUForm, setShowSKUForm] = useState(false);
+  const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
+
+  function bindingToSKU(b: SkuBinding): SupplierSKU {
+    return {
+      id: b.id,
+      internalRMCode: b.materialCode,
+      materialName: b.materialName,
+      supplierId: id ?? "",
+      supplierSku: b.supplierSku,
+      supplierDescription: b.supplierDescription ?? "",
+      unitPriceSen: b.unitPrice,
+      currency: b.currency || "MYR",
+      leadTimeDays: b.leadTimeDays,
+      moq: b.moq,
+      isMainSupplier: b.isMainSupplier,
+      validFrom: b.priceValidFrom ?? "",
+      validTo: b.priceValidTo ?? "",
+    };
+  }
+
+  async function handleSaveSKU(data: Omit<SupplierSKU, "id">) {
+    const payload = {
+      supplierId: data.supplierId,
+      materialCode: data.internalRMCode,
+      materialName: data.materialName,
+      supplierSku: data.supplierSku,
+      supplierDescription: data.supplierDescription,
+      unitPrice: data.unitPriceSen,
+      currency: data.currency,
+      leadTimeDays: data.leadTimeDays,
+      moq: data.moq,
+      isMainSupplier: data.isMainSupplier,
+      priceValidFrom: data.validFrom,
+      priceValidTo: data.validTo,
+    };
+    const url = editingSKU
+      ? `/api/supplier-materials/${editingSKU.id}`
+      : "/api/supplier-materials";
+    const method = editingSKU ? "PUT" : "POST";
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      alert(`Save failed: ${j?.error ?? res.status}`);
+      return;
+    }
+    invalidateCachePrefix("/api/supplier-materials");
+    setShowSKUForm(false);
+    setEditingSKU(null);
+  }
+
+  async function handleDeleteSKU(b: SkuBinding) {
+    if (!confirm(`Delete SKU mapping for ${b.materialCode}?`)) return;
+    const res = await fetch(`/api/supplier-materials/${b.id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      alert(`Delete failed: ${j?.error ?? res.status}`);
+      return;
+    }
+    invalidateCachePrefix("/api/supplier-materials");
+  }
 
   const supplier: Supplier | null = useMemo(
     () => (supResp?.success ? supResp.data ?? null : null),
@@ -270,11 +392,10 @@ export default function SupplierDetailPage() {
             <Button
               variant="primary"
               size="sm"
-              onClick={() =>
-                navigate(
-                  `/procurement/maintenance?tab=sku-costing&supplier=${encodeURIComponent(id ?? "")}&action=add`,
-                )
-              }
+              onClick={() => {
+                setEditingSKU(null);
+                setShowSKUForm(true);
+              }}
             >
               <Plus className="h-4 w-4" /> Add SKU Mapping
             </Button>
@@ -298,19 +419,19 @@ export default function SupplierDetailPage() {
                     <th className="h-10 px-3 text-right font-medium text-[#374151]">Lead Time</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151]">MOQ</th>
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Main</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {skus.map((s, idx) => (
                     <tr
                       key={s.id}
-                      onDoubleClick={() =>
-                        navigate(
-                          `/procurement/maintenance?tab=sku-costing&supplier=${encodeURIComponent(id ?? "")}`,
-                        )
-                      }
+                      onDoubleClick={() => {
+                        setEditingSKU(bindingToSKU(s));
+                        setShowSKUForm(true);
+                      }}
                       className={`border-b border-[#E2DDD8] last:border-b-0 cursor-pointer hover:bg-[#FAF7EE] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}
-                      title="Double-click to manage in Maintenance"
+                      title="Double-click to edit"
                     >
                       <td className="h-10 px-3 font-medium text-[#6B5C32]">{s.materialCode}</td>
                       <td className="h-10 px-3 text-[#374151]">{s.materialName}</td>
@@ -327,6 +448,34 @@ export default function SupplierDetailPage() {
                         ) : (
                           <span className="text-[#9CA3AF] text-xs">—</span>
                         )}
+                      </td>
+                      <td className="h-10 px-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Edit"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingSKU(bindingToSKU(s));
+                              setShowSKUForm(true);
+                            }}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Delete"
+                            className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteSKU(s);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -406,6 +555,20 @@ export default function SupplierDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      {showSKUForm && (
+        <SKUFormDialog
+          editData={editingSKU}
+          suppliers={supplierOptions}
+          inventoryItems={inventoryItems}
+          presetSupplierId={editingSKU ? undefined : id}
+          onSave={handleSaveSKU}
+          onClose={() => {
+            setShowSKUForm(false);
+            setEditingSKU(null);
+          }}
+        />
+      )}
     </div>
   );
 }

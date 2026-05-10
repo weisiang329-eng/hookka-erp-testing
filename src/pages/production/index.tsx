@@ -458,8 +458,48 @@ export default function ProductionPage({
   // and made the Overview matrix noticeably laggy on click; this pool-of-1
   // approach keeps the page light. Click handler rewires value + onChange
   // on the fly and calls showPicker() to pop the native calendar.
+  //
+  // 2026-05-10 bug fix — operator reported clicking production completion
+  // date cells did nothing. showPicker() was opening the calendar but
+  // picking a date wasn't firing patchJobCard. Two separate root causes:
+  //   1. The input had `pointer-events: none` so Chromium would not deliver
+  //      the native `change` event when the picker committed. The original
+  //      reason for pointer-events:none was so the 1×1 input at top-left
+  //      wouldn't intercept clicks — but at 1×1 in the corner it can't be
+  //      reached by the cursor anyway, and once we resize+reposition over a
+  //      cell we WANT it interactable.
+  //   2. React's synthetic onChange runs through root-level event delegation;
+  //      with the input cycled across many cells per second the delegated
+  //      handler can be stale. Binding `change` natively to the actual DOM
+  //      node guarantees delivery.
+  // Fix is in the ref + useEffect below, plus removed pointer-events:none in
+  // the JSX. See also `pickerSupportedRef` for the iPad-Safari fallback.
   const sharedDateInputRef = useRef<HTMLInputElement>(null);
   const sharedDateChangeRef = useRef<(v: string) => void>(() => {});
+  // Native `change` listener — see comment block above. Binds once on mount,
+  // reads the LIVE ref each invocation so successive openDatePicker calls
+  // always route to the latest onChange.
+  useEffect(() => {
+    const el = sharedDateInputRef.current;
+    if (!el) return;
+    const handler = () => {
+      try {
+        sharedDateChangeRef.current(el.value);
+      } catch (err) {
+        console.error("[sharedDatePicker] onChange threw", err);
+      }
+    };
+    el.addEventListener("change", handler);
+    return () => el.removeEventListener("change", handler);
+  }, []);
+  // Feature-detect showPicker once at mount (iOS < 16.4 / older Safari /
+  // some Android WebViews don't have it). Used both to pick the open path
+  // and so we can show the operator a toast if it's missing.
+  const pickerSupportedRef = useRef<boolean>(true);
+  useEffect(() => {
+    const el = sharedDateInputRef.current;
+    pickerSupportedRef.current = !!el && typeof el.showPicker === "function";
+  }, []);
   // Opens the shared native date picker. `anchor` is the cell element that
   // was clicked — we reposition the invisible input on top of it so the
   // browser anchors the popup calendar near the cell instead of at the
@@ -497,13 +537,29 @@ export default function ProductionPage({
       // inline style now points at the cell. Reading getBoundingClientRect
       // forces the browser to recompute layout before showPicker() reads it.
       void el.getBoundingClientRect();
-      if (typeof el.showPicker === "function") {
-        try { el.showPicker(); return; } catch { /* showPicker not supported — fall through to focus/click */ }
+      if (pickerSupportedRef.current) {
+        try { el.showPicker(); return; } catch (err) {
+          // showPicker can throw if the input is disconnected, not focusable,
+          // or the user-gesture chain was broken. Fall through to focus/click
+          // and surface the failure so the operator knows to refresh rather
+          // than silently typing into thin air.
+          console.warn("[openDatePicker] showPicker threw", err);
+        }
       }
-      el.focus();
-      el.click();
+      // Fallback path — focus + synthetic click. On iPad Safari 16.4+ this
+      // still pops the calendar; on older WebViews it focuses the (now
+      // visible-via-1px-square) input so keyboard typing works as a last
+      // resort. If even focus throws, surface a toast — silent failure was
+      // the original 2026-05-10 bug surface.
+      try {
+        el.focus();
+        el.click();
+      } catch (err) {
+        console.error("[openDatePicker] fallback failed", err);
+        toast.error("Could not open date picker. Please refresh the page.");
+      }
     },
-    [],
+    [toast],
   );
   // Page-level filters — apply to BOTH the Overview matrix and all dept
   // sub-tabs. URL-synced so a refresh / nav-and-back / share-link all
@@ -5247,19 +5303,27 @@ export default function ProductionPage({
           is driven entirely by inline style set inside openDatePicker so
           the calendar pops anchored to the clicked cell — no Tailwind
           left/bottom utilities here, they would override the inline
-          coords and pin the popup to the corner of the viewport. */}
+          coords and pin the popup to the corner of the viewport.
+          NOTE: pointer-events MUST stay enabled (was 'none' until the
+          2026-05-10 bug fix). With pointer-events:none, Chromium silently
+          dropped the `change` event when the user picked a date so
+          patchJobCard never fired. At 1×1 in the corner
+          the input can't be reached by an actual cursor click — the
+          original concern that prompted pointer-events:none doesn't
+          apply. The change handler is bound natively in a useEffect
+          above (NOT via React onChange) to bypass synthetic-event
+          delegation races. opacity:0.001 instead of 0 — some browsers
+          treat 0-opacity as render-skipped which can also drop events. */}
       <input
         ref={sharedDateInputRef}
         type="date"
-        onChange={(e) => sharedDateChangeRef.current(e.target.value)}
         style={{
           position: "fixed",
           left: 0,
           top: 0,
           width: 1,
           height: 1,
-          opacity: 0,
-          pointerEvents: "none",
+          opacity: 0.001,
         }}
         tabIndex={-1}
         aria-hidden

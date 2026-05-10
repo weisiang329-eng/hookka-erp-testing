@@ -4958,7 +4958,16 @@ export default function ProductionPage({
               <h2 className="text-sm font-semibold text-[#1F1D1B]">
                 FG Sticker Preview
                 <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                  ({gridFilteredDeptRows?.length ?? deptRows.length} row{(gridFilteredDeptRows?.length ?? deptRows.length) === 1 ? "" : "s"} · {fgStickers.length} sticker{fgStickers.length === 1 ? "" : "s"})
+                  {(() => {
+                    const rowCount = gridFilteredDeptRows?.length ?? deptRows.length;
+                    // Count only visible sticker CARDS — synthetic legs +
+                    // pillow that nest into the sofa card don't render as
+                    // standalone cards and shouldn't inflate the count.
+                    const visibleStickerCount = fgStickers.filter(
+                      (s) => !s.isSyntheticLegs && !s.isSyntheticPillow,
+                    ).length;
+                    return `(${rowCount} row${rowCount === 1 ? "" : "s"} · ${visibleStickerCount} sticker${visibleStickerCount === 1 ? "" : "s"})`;
+                  })()}
                 </span>
               </h2>
             </div>

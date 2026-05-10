@@ -538,6 +538,18 @@ const dict: Dict = {
     zh: '类别',
     my: 'အမျိုးအစား',
   },
+  'home.teamTotal': {
+    en: 'Total',
+    ms: 'Jumlah',
+    zh: '总计',
+    my: 'စုစုပေါင်း',
+  },
+  'home.teamWorkers': {
+    en: 'workers',
+    ms: 'pekerja',
+    zh: '人',
+    my: 'ဝန်ထမ်း',
+  },
 
   // ---- Me ----
   'me.title': { en: 'Me', ms: 'Saya', zh: '我的', my: 'ကျွန်ုပ်' },

@@ -553,11 +553,11 @@ export default function WorkerHomePage() {
       {teamStats && teamStats.isLeader && (
         <TeamSection
           rows={teamStats.rows}
-          tDept={t("home.teamCol.dept")}
-          tCategory={t("home.teamCol.category")}
           tWorkingHrs={t("home.colWorkingHrs")}
           tProductionHrs={t("home.colProductionHrs")}
           tEffPct={t("home.efficiencyPct")}
+          tTotal={t("home.teamTotal")}
+          tWorkers={t("home.teamWorkers")}
           title={t("home.teamTitle")}
         />
       )}
@@ -765,79 +765,148 @@ function EmptyRow() {
 }
 
 // ---------- Team section (Operator Leader) ----------
-// Renders one row per (departmentCode × category). Sort is dept asc,
-// SOFA before BEDFRAME. Eff % uses the same green/amber/red palette as
-// the Daily Attendance row.
+// Dept-grouped layout: a leader covering Upholstery sees a sub-block per
+// department, each listing SOFA / BEDFRAME (or whichever categories have
+// data) on their own row. Departments with zero data in every category
+// are hidden. A TOTAL stat tile across all the leader's depts sits on
+// top so the "am I on track this week" answer is one glance away.
 function TeamSection({
   rows,
-  tDept,
-  tCategory,
   tWorkingHrs,
   tProductionHrs,
   tEffPct,
+  tTotal,
+  tWorkers,
   title,
 }: {
   rows: TeamStatsRow[];
-  tDept: string;
-  tCategory: string;
   tWorkingHrs: string;
   tProductionHrs: string;
   tEffPct: string;
+  tTotal: string;
+  tWorkers: string;
   title: string;
 }) {
-  const sorted = [...rows]
-    .filter((r) => r.workingMinutes > 0 || r.productionMinutes > 0)
-    .sort((a, b) => {
-      if (a.departmentCode !== b.departmentCode) {
-        return a.departmentCode < b.departmentCode ? -1 : 1;
-      }
-      // SOFA before BEDFRAME
-      if (a.category === b.category) return 0;
-      return a.category === "SOFA" ? -1 : 1;
-    });
+  // Group rows by department. Within each dept, sort SOFA before BEDFRAME
+  // and drop categories with zero working+production minutes — keeps the
+  // sub-card focused on what the leader actually did this period.
+  const byDept = new Map<string, TeamStatsRow[]>();
+  for (const r of rows) {
+    if (r.workingMinutes <= 0 && r.productionMinutes <= 0) continue;
+    const list = byDept.get(r.departmentCode) ?? [];
+    list.push(r);
+    byDept.set(r.departmentCode, list);
+  }
+  const depts = Array.from(byDept.entries())
+    .map(([code, list]) => ({
+      code,
+      rows: [...list].sort((a, b) => {
+        if (a.category === b.category) return 0;
+        return a.category === "SOFA" ? -1 : 1;
+      }),
+      // Worker counts come per-row from the API; the leader's headcount
+      // for a dept is the max over its categories (same set of workers
+      // doing both SOFA and BEDFRAME, not the sum).
+      workers: list.reduce((m, r) => Math.max(m, r.workerCount), 0),
+    }))
+    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+
+  // TOTAL across all surviving rows — matches the same date range as
+  // the rest of the dashboard, no separate fetch.
+  const totalWorking = depts.reduce(
+    (s, d) => s + d.rows.reduce((ss, r) => ss + r.workingMinutes, 0),
+    0,
+  );
+  const totalProduction = depts.reduce(
+    (s, d) => s + d.rows.reduce((ss, r) => ss + r.productionMinutes, 0),
+    0,
+  );
+  const totalEff =
+    totalWorking > 0 ? Math.round((totalProduction / totalWorking) * 100) : 0;
+  const totalTone =
+    totalEff >= 80 ? "good" : totalEff >= 60 ? "warn" : "bad";
+
   return (
     <TableSection title={title}>
-      <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3">
-        <span className="text-left">{tDept}</span>
-        <span className="text-left">{tCategory}</span>
-        <span className="text-right">{tWorkingHrs}</span>
-        <span className="text-right">{tProductionHrs}</span>
-        <span className="text-right">{tEffPct}</span>
-      </div>
-      {sorted.length === 0 ? (
+      {depts.length === 0 ? (
         <EmptyRow />
       ) : (
-        sorted.map((r) => {
-          const eff = Math.round(r.efficiencyPct);
-          const effTone =
-            eff >= 80
-              ? "text-[#2A6B4A]"
-              : eff >= 60
-                ? "text-[#9C6F1E]"
-                : "text-[#9A3A2D]";
-          return (
+        <div className="py-2 space-y-3">
+          {/* Top TOTAL tiles across all the leader's depts */}
+          <div className="grid grid-cols-3 gap-2">
+            <Kpi label={`${tTotal} · ${tWorkingHrs}`} value={mins2hrs(totalWorking)} />
+            <Kpi
+              label={`${tTotal} · ${tProductionHrs}`}
+              value={mins2hrs(totalProduction)}
+            />
+            <Kpi label={tEffPct} value={`${totalEff}%`} tone={totalTone} />
+          </div>
+
+          {/* One sub-card per department */}
+          {depts.map((d) => (
             <div
-              key={`${r.departmentCode}__${r.category}`}
-              className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 py-2.5 text-sm border-t border-[#F0ECE9] items-center"
+              key={d.code}
+              className="rounded-lg border border-[#E5DEC6] bg-[#FAF7EE] overflow-hidden"
             >
-              <span className="text-[#1F1D1B] font-medium">
-                {r.departmentCode}
-              </span>
-              <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
-                {r.category}
-              </span>
-              <span className="tabular-nums text-right font-semibold">
-                {mins2hrs(r.workingMinutes)}
-              </span>
-              <span className="tabular-nums text-right font-semibold text-[#3E6570]">
-                {mins2hrs(r.productionMinutes)}
-              </span>
-              <span className={`tabular-nums text-right font-semibold ${effTone}`}>
-                {eff}%
-              </span>
+              <div className="px-3 py-2 flex items-baseline justify-between bg-[#F0EAD6]">
+                <span className="text-xs font-bold uppercase tracking-wide text-[#1F1D1B]">
+                  {d.code}
+                </span>
+                <span className="text-[10px] text-[#8A8680]">
+                  {d.workers} {tWorkers}
+                </span>
+              </div>
+              <div className="px-3 py-1">
+                {d.rows.map((r) => {
+                  const eff = Math.round(r.efficiencyPct);
+                  const effTone =
+                    eff >= 80
+                      ? "text-[#2A6B4A]"
+                      : eff >= 60
+                        ? "text-[#9C6F1E]"
+                        : "text-[#9A3A2D]";
+                  const badgeBg =
+                    r.category === "SOFA"
+                      ? "bg-[#E5EEF6] text-[#3E6570]"
+                      : "bg-[#F0E5E1] text-[#7A4A3A]";
+                  return (
+                    <div
+                      key={`${d.code}__${r.category}`}
+                      className="grid grid-cols-[auto_1fr_auto] gap-2 py-2 items-center text-sm border-t border-[#E5DEC6] first:border-t-0"
+                    >
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-semibold whitespace-nowrap ${badgeBg}`}
+                      >
+                        {r.category}
+                      </span>
+                      <span className="flex items-baseline gap-3 justify-end tabular-nums text-xs text-[#5A5550]">
+                        <span>
+                          <span className="text-[9px] uppercase tracking-wide text-[#8A8680] mr-1">
+                            {tWorkingHrs}
+                          </span>
+                          <span className="font-semibold text-[#1F1D1B]">
+                            {mins2hrs(r.workingMinutes)}
+                          </span>
+                        </span>
+                        <span>
+                          <span className="text-[9px] uppercase tracking-wide text-[#8A8680] mr-1">
+                            {tProductionHrs}
+                          </span>
+                          <span className="font-semibold text-[#3E6570]">
+                            {mins2hrs(r.productionMinutes)}
+                          </span>
+                        </span>
+                      </span>
+                      <span className={`tabular-nums text-right font-bold text-base ${effTone} min-w-[3rem]`}>
+                        {eff}%
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          );
-        })
+          ))}
+        </div>
       )}
     </TableSection>
   );

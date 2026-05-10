@@ -1523,6 +1523,10 @@ export default function ProductionPage({
     // NULL until the operator hands the printed sheet to the production
     // worker. Drives the leftmost Sent column on the dept grid.
     distributedAt: string | null;
+    // Derived "Yes"/"No" so the column-level Values filter can group
+    // rows by sent-state. Without this the filter sees only the
+    // ISO-timestamp string and dumps every row into "(blank)".
+    sent: "Yes" | "No";
     // Predicted fabric meters for this WIP, computed server-side by
     // walking the parent PO's BOM template (bom_templates.wipComponents)
     // and summing FAB_CUT-node fabric materials × node.quantity ×
@@ -1950,6 +1954,7 @@ export default function ProductionPage({
           // ISO timestamp the operator clicked the "Sent" tick. NULL =
           // not yet handed out; truthy = printed + given to the floor.
           distributedAt: jc.distributedAt ?? null,
+          sent: jc.distributedAt ? "Yes" : "No",
           // Predicted fabric meters for FAB_CUT JCs, computed server-side
           // from bom_templates (see rowToMinimalJobCard in
           // production-orders.ts). 0 / undefined for non-FC depts —

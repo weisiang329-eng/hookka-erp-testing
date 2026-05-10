@@ -1456,20 +1456,29 @@ export default function DeliveryPage() {
       .filter((d) => selectedIds.has(d.id) && d.status === "DRAFT")
       .map((d) => d.id);
     if (doIds.length === 0) return;
-    try {
-      await Promise.all(
-        doIds.map((id) =>
-          fetch(`/api/delivery-orders/${id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status: "LOADED" }),
-          })
+    const results = await Promise.allSettled(
+      doIds.map((id) =>
+        fetch(`/api/delivery-orders/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "LOADED" }),
+        }).then((r) =>
+          r.ok
+            ? null
+            : r.json().then((j: { error?: string }) =>
+                Promise.reject(new Error(j?.error || `HTTP ${r.status}`))
+              )
         )
-      );
-    } catch {
-      toast.error("Failed to mark dispatched");
+      )
+    );
+    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    if (failures.length) {
+      const firstMsg = failures[0].reason instanceof Error ? failures[0].reason.message : String(failures[0].reason);
+      toast.error(`${failures.length} of ${doIds.length} failed: ${firstMsg}`);
+    } else {
+      toast.success(`${doIds.length} delivery orders marked dispatched`);
+      setSelectedIds(new Set());
     }
-    setSelectedIds(new Set());
     fetchData();
   };
 
@@ -1479,20 +1488,29 @@ export default function DeliveryPage() {
       .filter((d) => selectedIds.has(d.id) && (d.status === "LOADED" || d.status === "IN_TRANSIT"))
       .map((d) => d.id);
     if (doIds.length === 0) return;
-    try {
-      await Promise.all(
-        doIds.map((doId) =>
-          fetch(`/api/delivery-orders/${doId}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status: "DELIVERED" }),
-          })
+    const results = await Promise.allSettled(
+      doIds.map((doId) =>
+        fetch(`/api/delivery-orders/${doId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "DELIVERED" }),
+        }).then((r) =>
+          r.ok
+            ? null
+            : r.json().then((j: { error?: string }) =>
+                Promise.reject(new Error(j?.error || `HTTP ${r.status}`))
+              )
         )
-      );
-    } catch {
-      toast.error("Failed to mark delivered");
+      )
+    );
+    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    if (failures.length) {
+      const firstMsg = failures[0].reason instanceof Error ? failures[0].reason.message : String(failures[0].reason);
+      toast.error(`${failures.length} of ${doIds.length} failed: ${firstMsg}`);
+    } else {
+      toast.success(`${doIds.length} delivery orders marked delivered`);
+      setSelectedIds(new Set());
     }
-    setSelectedIds(new Set());
     fetchData();
   };
 

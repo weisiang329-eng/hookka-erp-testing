@@ -1255,30 +1255,58 @@ export default function ProductionPage({
 
   // Optimistic PATCH for the Packing Rack dropdown. Writes rackingNumber to
   // the specific JobCard (so two WIPs under the same PO can land on different
-  // racks) and mirrors it to the PO-level field for legacy readers.
+  // racks) and mirrors it to the PO-level field for legacy readers. Captures
+  // the previous rack value per (po,jc) so we can roll back if the API rejects.
   const patchRack = useCallback(
-    (poId: string, jobCardId: string, rack: string) => {
+    async (poId: string, jobCardId: string, rack: string) => {
+      let prevPoRack = "";
+      let prevJcRack = "";
       setOrders((prev) =>
-        prev.map((o) =>
-          o.id !== poId
-            ? o
-            : {
-                ...o,
-                rackingNumber: rack,
-                jobCards: o.jobCards.map((j) =>
-                  j.id === jobCardId ? { ...j, rackingNumber: rack } : j,
-                ),
-              },
-        ),
+        prev.map((o) => {
+          if (o.id !== poId) return o;
+          prevPoRack = o.rackingNumber || "";
+          return {
+            ...o,
+            rackingNumber: rack,
+            jobCards: o.jobCards.map((j) => {
+              if (j.id !== jobCardId) return j;
+              prevJcRack = j.rackingNumber || "";
+              return { ...j, rackingNumber: rack };
+            }),
+          };
+        }),
       );
-      // No invalidation — optimistic setOrders already reflects the rack change.
-      fetch(`/api/production-orders/${poId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobCardId, rackingNumber: rack }),
-      }).catch((err) => console.error("[patchRack] network error", err));
+      try {
+        const res = await fetch(`/api/production-orders/${poId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobCardId, rackingNumber: rack }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({} as { error?: string }));
+          throw new Error(body?.error || `HTTP ${res.status}`);
+        }
+      } catch (err) {
+        // Roll back optimistic update.
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id !== poId
+              ? o
+              : {
+                  ...o,
+                  rackingNumber: prevPoRack,
+                  jobCards: o.jobCards.map((j) =>
+                    j.id === jobCardId ? { ...j, rackingNumber: prevJcRack } : j,
+                  ),
+                },
+          ),
+        );
+        const detail = err instanceof Error ? err.message : "try again";
+        toast.error(`Failed to set rack: ${detail}`);
+        console.error("[patchRack] network error", err);
+      }
     },
-    [],
+    [toast],
   );
 
   // Dept fractions for tab bar: done/total rows across all orders per dept.

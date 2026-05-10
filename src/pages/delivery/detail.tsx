@@ -229,13 +229,16 @@ export default function DeliveryDetailPage() {
         method: "PUT",
         body: { lorryId },
       });
-      if (data.success && data.data) {
+      if (!data.success) throw new Error(data.error || "Failed to assign lorry");
+      if (data.data) {
         setOrder(data.data as DeliveryOrder);
         // Lorry assignment only affects this DO; no cascade. Per-id only.
         if (id) invalidateCache(`/api/delivery-orders/${id}`);
       }
-    } catch {
-      // Lorry assignment is non-critical UI affordance — swallow + log via fetchJson
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to assign lorry: ${detail}`);
+      console.error(err);
     } finally {
       setUpdating(false);
     }

@@ -507,14 +507,24 @@ export default function SalesOrderDetailPage() {
 
   const deleteOrder = async () => {
     if (!confirm("Delete this order?")) return;
-    await fetch(`/api/sales-orders/${id}`, { method: "DELETE" });
-    // Deleting an SO also cascades to its linked POs on the server. Invalidate
-    // the SO list (one row gone) and the PO list (linked POs gone), plus the
-    // per-id SO entry so any stale detail fetch doesn't resurrect a 404.
-    invalidateCachePrefix("/api/sales-orders");
-    invalidateCachePrefix("/api/production-orders");
-    if (id) invalidateCache(`/api/sales-orders/${id}`);
-    navigate("/sales");
+    try {
+      const res = await fetch(`/api/sales-orders/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { error?: string }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      // Deleting an SO also cascades to its linked POs on the server. Invalidate
+      // the SO list (one row gone) and the PO list (linked POs gone), plus the
+      // per-id SO entry so any stale detail fetch doesn't resurrect a 404.
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
+      if (id) invalidateCache(`/api/sales-orders/${id}`);
+      navigate("/sales");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : "try again";
+      toast.error(`Failed to delete order: ${detail}`);
+      console.error(err);
+    }
   };
 
   const handleClone = () => {

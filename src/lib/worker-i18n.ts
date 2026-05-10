@@ -396,10 +396,10 @@ const dict: Dict = {
   },
   'pay.estimate': { en: 'estimate', ms: 'anggaran', zh: '估算', my: 'ခန့်မှန်း' },
   'pay.basicFullMonth': {
-    en: 'Basic (full month)',
-    ms: 'Asas (bulan penuh)',
-    zh: '底薪（整月）',
-    my: 'အခြေခံလစာ (တစ်လအပြည့်)',
+    en: 'Basic',
+    ms: 'Asas',
+    zh: '底薪',
+    my: 'အခြေခံလစာ',
   },
   'pay.basicAbsent': {
     en: 'Basic · {n}d absent',

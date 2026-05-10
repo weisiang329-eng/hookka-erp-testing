@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
@@ -1550,6 +1551,25 @@ export default function ProductionPage({
     }
     return rows;
   }, [filteredOrders, activeTab, overviewSort, overviewFilters]);
+
+  // Overview matrix row virtualization. Pre-fix: every order in
+  // visibleOrders was rendered to a hand-rolled CSS-grid <div>, so a
+  // ~540-row matrix mounted ~7,500 React component nodes (14 cells per
+  // row) on every page entry — Wei Siang reported the resulting 5.4s
+  // main-thread block 2026-05-11. Mounting only the ~30 rows in the
+  // viewport drops the body reconciliation by an order of magnitude.
+  // Hooks always run; the body render below switches between
+  // virtualized and legacy (matrix on Overview tab only) so dept tabs
+  // stay on their existing DataGrid path. estimateSize=36 matches the
+  // typical row height (single-line product); rows that wrap (long
+  // model + spec line) are auto-measured via `measureElement`.
+  const overviewBodyRef = useRef<HTMLDivElement>(null);
+  const overviewRowVirtualizer = useVirtualizer({
+    count: activeTab === "ALL" ? visibleOrders.length : 0,
+    getScrollElement: () => overviewBodyRef.current,
+    estimateSize: () => 36,
+    overscan: 8,
+  });
 
   // Unique customer + state options for the filter dropdowns, derived
   // live from the order set so they auto-update when data changes.
@@ -4878,13 +4898,34 @@ export default function ProductionPage({
           ))}
         </div>
 
-        {/* Body rows */}
+        {/* Body rows. Wrapped in a scroll container + virtualizer so we
+            only mount the ~30 rows currently in viewport. See the
+            useVirtualizer setup near visibleOrders for the rationale.
+            Each row's outer <div> is augmented with absolute positioning
+            via translateY so the virtualizer can place it at the right
+            offset, plus measureElement wiring (data-index + ref) so
+            rows that wrap (long product line) get their real height
+            measured. */}
         {visibleOrders.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-[#9A918A]">
             No production orders found.
           </div>
         ) : (
-          visibleOrders.map((order) => {
+          <div
+            ref={overviewBodyRef}
+            className="overflow-y-auto"
+            style={{ maxHeight: "calc(100vh - 320px)" }}
+          >
+          <div
+            style={{
+              height: `${overviewRowVirtualizer.getTotalSize()}px`,
+              position: "relative",
+              width: "100%",
+            }}
+          >
+          {overviewRowVirtualizer.getVirtualItems().map((virtualRow) => {
+            const order = visibleOrders[virtualRow.index];
+            if (!order) return null;
             // Lifecycle row styling — amber background for ON_HOLD, grey +
             // strikethrough for CANCELLED. Matches the dept DataGrid rule.
             const rowCls =
@@ -4908,8 +4949,17 @@ export default function ProductionPage({
             return (
             <div
               key={order.id}
-              className={`grid items-stretch border-b border-[#F0EBE3] last:border-b-0 cursor-pointer ${rowCls}`}
-              style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
+              ref={overviewRowVirtualizer.measureElement}
+              data-index={virtualRow.index}
+              className={`grid items-stretch border-b border-[#F0EBE3] cursor-pointer ${rowCls}`}
+              style={{
+                gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))",
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                transform: `translateY(${virtualRow.start}px)`,
+              }}
               onDoubleClick={() => {
                 if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
                 else if (order.consignmentOrderId)
@@ -5043,7 +5093,9 @@ export default function ProductionPage({
               })}
             </div>
             );
-          })
+          })}
+          </div>
+          </div>
         )}
 
         {/* Footer */}

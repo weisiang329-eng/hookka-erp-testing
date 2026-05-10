@@ -1164,11 +1164,11 @@ function EmployeeMasterTab({
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
-  // Whether the per-row Departments / Categories multi-select popovers are
-  // open. Only one row can be editing at a time so a single boolean per
-  // dropdown is enough. Auto-closes when the row exits edit mode.
+  // Whether the per-row Departments multi-select popover is open. Only one
+  // row can be editing at a time so a single boolean is enough. Auto-closes
+  // when the row exits edit mode. (Categories is a native select, no state
+  // needed for it.)
   const [deptDropdownOpen, setDeptDropdownOpen] = useState(false);
-  const [catDropdownOpen, setCatDropdownOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pinModal, setPinModal] = useState<PinModalState | null>(null);
   const [bulkModal, setBulkModal] = useState<BulkModalState | null>(null);
@@ -1399,7 +1399,6 @@ function EmployeeMasterTab({
       });
       setEditingId(null);
       setDeptDropdownOpen(false);
-      setCatDropdownOpen(false);
       refreshWorkers();
     } catch {
       // handle error
@@ -1586,72 +1585,36 @@ function EmployeeMasterTab({
       },
       {
         key: "categories",
-        label: "Categories",
+        label: "Category",
         render: (_value, row) => {
-          const CATS: Array<"SOFA" | "BEDFRAME"> = ["SOFA", "BEDFRAME"];
-          // Categories only apply to Operator Leaders. Wei Siang 2026-05-10:
-          // a regular Operator's category column shows "—", not "All" or chips.
+          // Categories only apply to Operator Leaders. Single-select native
+          // dropdown to match the Position cell visually — Wei Siang
+          // 2026-05-10. "All" stores [] (no filter), the named choices store
+          // a single-element array. A leader who covers both SOFA + BEDFRAME
+          // picks "All".
           if (editingId === row.id) {
             if (editForm.position !== "Operator Leader") {
               return <span className="text-[#9CA3AF] text-xs">—</span>;
             }
-            const summary =
+            const current =
               editForm.categories.length === 0
-                ? "All"
-                : editForm.categories.join(", ");
+                ? ""
+                : editForm.categories[0];
             return (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setCatDropdownOpen((v) => !v);
-                  }}
-                  className="h-8 w-32 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 pr-2 text-left flex items-center justify-between gap-1 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                >
-                  <span className="truncate flex-1">{summary}</span>
-                  <svg className="h-3 w-3 text-[#6B7280] shrink-0" viewBox="0 0 12 12" fill="none">
-                    <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
-                {catDropdownOpen && (
-                  <>
-                    <div
-                      className="fixed inset-0 z-40"
-                      onClick={() => setCatDropdownOpen(false)}
-                    />
-                    <div className="absolute z-50 top-full left-0 mt-1 w-40 bg-white border border-[#E2DDD8] rounded-md shadow-lg">
-                      {CATS.map((cat) => {
-                        const checked = editForm.categories.includes(cat);
-                        return (
-                          <label
-                            key={cat}
-                            className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-[#FAF9F7] ${
-                              checked ? "bg-[#FAF7EE]" : ""
-                            }`}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <input
-                              type="checkbox"
-                              className="h-3.5 w-3.5 accent-[#6B5C32]"
-                              checked={checked}
-                              onChange={() => {
-                                setEditForm((f) => {
-                                  const set = new Set(f.categories);
-                                  if (set.has(cat)) set.delete(cat);
-                                  else set.add(cat);
-                                  return { ...f, categories: Array.from(set) };
-                                });
-                              }}
-                            />
-                            <span className="text-[#374151]">{cat}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </div>
+              <select
+                value={current}
+                onChange={(e) =>
+                  setEditForm((f) => ({
+                    ...f,
+                    categories: e.target.value ? [e.target.value] : [],
+                  }))
+                }
+                className="h-8 w-32 text-xs border border-[#E2DDD8] rounded-md bg-white px-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="">All</option>
+                <option value="SOFA">SOFA</option>
+                <option value="BEDFRAME">BEDFRAME</option>
+              </select>
             );
           }
           if (row.position !== "Operator Leader") {
@@ -1661,7 +1624,7 @@ function EmployeeMasterTab({
           if (cats.length === 0) {
             return <span className="text-[#9CA3AF] text-xs">All</span>;
           }
-          return <span className="text-[#4B5563] text-xs">{cats.join(", ")}</span>;
+          return <span className="text-[#4B5563] text-xs">{cats[0]}</span>;
         },
       },
       {
@@ -1848,7 +1811,7 @@ function EmployeeMasterTab({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => { setEditingId(null); setDeptDropdownOpen(false); setCatDropdownOpen(false); }}
+                onClick={() => { setEditingId(null); setDeptDropdownOpen(false); }}
               >
                 <X className="h-3 w-3" />
               </Button>
@@ -2030,41 +1993,26 @@ function EmployeeMasterTab({
                   <option value="Operator Leader">Operator Leader</option>
                 </select>
               </div>
-              {/* Categories only apply to Operator Leaders — gates which
-                  (dept × category) cells the Team dashboard surfaces. Hide
-                  the picker entirely for plain Operators so the form doesn't
-                  imply they need to choose. — Wei Siang 2026-05-10 */}
+              {/* Category only applies to Operator Leaders — gates which
+                  (dept × category) cells the Team dashboard surfaces. Hidden
+                  entirely for plain Operators. — Wei Siang 2026-05-10 */}
               {form.position === "Operator Leader" && (
-                <div className="col-span-2">
-                  <label className="text-xs text-[#6B7280]">
-                    Categories <span className="text-[10px] text-[#9CA3AF]">(blank = all)</span>
-                  </label>
-                  <div className="mt-1 flex flex-wrap gap-1.5">
-                    {(["SOFA", "BEDFRAME"] as const).map((cat) => {
-                      const checked = form.categories.includes(cat);
-                      return (
-                        <button
-                          key={cat}
-                          type="button"
-                          onClick={() => {
-                            setForm((f) => {
-                              const set = new Set(f.categories);
-                              if (set.has(cat)) set.delete(cat);
-                              else set.add(cat);
-                              return { ...f, categories: Array.from(set) };
-                            });
-                          }}
-                          className={`inline-flex items-center px-2.5 py-0.5 rounded border text-[11px] transition-colors ${
-                            checked
-                              ? "bg-[#6B5C32] border-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-                              : "bg-white border-[#E2DDD8] text-[#6B7280] hover:bg-[#FAF9F7]"
-                          }`}
-                        >
-                          {cat}
-                        </button>
-                      );
-                    })}
-                  </div>
+                <div>
+                  <label className="text-xs text-[#6B7280]">Category</label>
+                  <select
+                    value={form.categories[0] ?? ""}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        categories: e.target.value ? [e.target.value] : [],
+                      }))
+                    }
+                    className="h-8 text-xs w-full border border-[#D1D5DB] rounded-md px-2 bg-white"
+                  >
+                    <option value="">All</option>
+                    <option value="SOFA">SOFA</option>
+                    <option value="BEDFRAME">BEDFRAME</option>
+                  </select>
                 </div>
               )}
               <div>

@@ -121,42 +121,6 @@ type EmittedRow = {
   hasZeroMinutes: boolean;
 };
 
-// wipTypes whose BOM nodes are SHARED across variants of the same baseModel.
-// For these, the BOM template's `{SEAT_SIZE}` token resolves to the per-
-// product variant tag (e.g. "1A" / "2NA" / "L" / "CNR") rather than a real
-// seat width, producing one WIP Times row per variant when there should be
-// one row per baseModel. Wei Siang 2026-05-11: "5535 back cushion 都是同一体的"
-// — the Back Cushion is the same physical piece across every 5535 variant,
-// so the row should collapse to "5535 -Back Cushion" (no trailing variant).
-//
-// SOFA_BASE is intentionally NOT in this set — Base IS variant-specific
-// (1A base ≠ 2A base ≠ L base), so each variant must keep its own row.
-const SHARED_BY_BASEMODEL_WIP_TYPES = new Set<string>([
-  "SOFA_CUSHION",
-  "SOFA_HEADREST",
-]);
-
-// When the wipType is shared across variants and the resolved label ends
-// with the per-product variant suffix (= ctx.sizeCode for sofa), strip the
-// suffix so all variants of the same baseModel collapse to one canonical
-// label. No-op when the type is variant-specific (BASE) or when the label
-// doesn't actually end with the suffix.
-function stripSharedVariantSuffix(
-  resolvedLabel: string,
-  wipType: string,
-  variantSuffix: string,
-): string {
-  if (!variantSuffix) return resolvedLabel;
-  if (!SHARED_BY_BASEMODEL_WIP_TYPES.has(wipType.toUpperCase())) {
-    return resolvedLabel;
-  }
-  const trail = ` ${variantSuffix}`;
-  if (resolvedLabel.endsWith(trail)) {
-    return resolvedLabel.slice(0, -trail.length).trim();
-  }
-  return resolvedLabel;
-}
-
 function walkTree(
   nodes: BomWipNode[] | undefined,
   ctx: BomVariantContext,
@@ -170,15 +134,10 @@ function walkTree(
     if (!node || typeof node !== "object") continue;
     const rawCode = String(node.wipCode || "");
     const rawLabel = String(node.wipLabel || rawCode || "");
-    const wipType = String(node.wipType || "").toUpperCase();
-    const wipLabelRaw = rawLabel
+    const wipLabel = rawLabel
       ? resolveWipTokens(rawLabel, ctx)
       : resolveWipTokens(rawCode, ctx);
-    const wipLabel = stripSharedVariantSuffix(
-      wipLabelRaw,
-      wipType,
-      ctx.sizeCode || "",
-    );
+    const wipType = String(node.wipType || "").toUpperCase();
     const quantity = Number(node.quantity) > 0 ? Number(node.quantity) : 1;
     const procs = Array.isArray(node.processes) ? node.processes : [];
     for (const p of procs) {
@@ -439,20 +398,9 @@ function mutateMatchingNodes(
     if (!node || typeof node !== "object") continue;
     const rawCode = String(node.wipCode || "");
     const rawLabel = String(node.wipLabel || rawCode || "");
-    const wipType = String(node.wipType || "").toUpperCase();
-    const resolvedRaw = rawLabel
+    const resolved = rawLabel
       ? resolveWipTokens(rawLabel, ctx)
       : resolveWipTokens(rawCode, ctx);
-    // Apply the same shared-variant-suffix strip as the GET path so an
-    // inline edit on the folded label "5535 -Back Cushion" matches every
-    // BOM node whose resolved label is "5535 -Back Cushion 1A",
-    // "5535 -Back Cushion 1NA", etc. — i.e. one save updates all
-    // variants of the baseModel for SOFA_CUSHION/HEADREST.
-    const resolved = stripSharedVariantSuffix(
-      resolvedRaw,
-      wipType,
-      ctx.sizeCode || "",
-    );
     // Match on the stripped form so 5530-1A(LHF) and 5530-1A(RHF) both
     // match a target of "5530-1A -Base (FC)".
     if (stripOrientationForMatch(resolved) === targetLabel) {

@@ -50,6 +50,53 @@ const DEPT_LABEL_BY_CODE = new Map<string, string>(
   DEPARTMENTS.map((d) => [d.code, d.name]),
 );
 
+// wipType raw codes → friendly labels operators use on paper sheets.
+// Matches DEFAULT_WIP_DEPT_CHAINS keys on the server.
+const WIP_TYPE_LABELS: Record<string, string> = {
+  DIVAN: "Divan",
+  HEADBOARD: "HB",
+  SOFA_BASE: "Base",
+  SOFA_CUSHION: "Back Cushion",
+  SOFA_ARMREST: "Armrest",
+  SOFA_HEADREST: "Headrest",
+  FG_MAIN: "FG",
+};
+// Type-filter options surfaced in the dropdown — ordered by how often they
+// show up in operator conversations (HB / Divan are the biggest bedframe
+// concerns, Base / Cushion / Arm for sofa).
+const WIP_TYPE_OPTIONS = [
+  "HEADBOARD",
+  "DIVAN",
+  "SOFA_BASE",
+  "SOFA_CUSHION",
+  "SOFA_ARMREST",
+  "SOFA_HEADREST",
+  "FG_MAIN",
+] as const;
+function wipTypeLabel(code: string): string {
+  return WIP_TYPE_LABELS[code] ?? code;
+}
+// Pill color per wipType — keeps the table scan-able. Same palette spirit
+// as the Category badges.
+function wipTypePillClass(code: string): string {
+  switch (code) {
+    case "DIVAN":
+      return "bg-[#F0E5E1] text-[#7A4A3A]";
+    case "HEADBOARD":
+      return "bg-[#E5EEF6] text-[#3E6570]";
+    case "SOFA_BASE":
+      return "bg-[#E8E5F0] text-[#574B79]";
+    case "SOFA_CUSHION":
+      return "bg-[#F0EBDC] text-[#7A6A3A]";
+    case "SOFA_ARMREST":
+      return "bg-[#E5F0E8] text-[#3A7A4A]";
+    case "SOFA_HEADREST":
+      return "bg-[#F0E5EC] text-[#7A3A6A]";
+    default:
+      return "bg-[#F0ECE9] text-[#5A5550]";
+  }
+}
+
 function fmtMinutes(min: number): string {
   if (min <= 0) return "—";
   if (min < 60) return `${min}m`;
@@ -89,6 +136,7 @@ type EditState = {
 export default function WipTimesPage() {
   const [dept, setDept] = useUrlState<string>("dept", "");
   const [category, setCategory] = useUrlState<string>("category", "");
+  const [wipType, setWipType] = useUrlState<string>("wipType", "");
   const [exporting, setExporting] = useState(false);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
@@ -103,13 +151,18 @@ export default function WipTimesPage() {
   }, [dept, category]);
 
   const { data: resp, loading } = useCachedJson<WipTimeResponse>(url);
+  // wipType filter is client-side — server returns wipType per row so we
+  // filter in JS rather than re-fetch. Keeps the cache hit when the user
+  // toggles between types within the same dept/category scope.
   const rows: (WipTimeRow & { _key: string })[] = useMemo(
     () =>
-      (resp?.data ?? []).map((r) => ({
-        ...r,
-        _key: rowKey(r),
-      })),
-    [resp],
+      (resp?.data ?? [])
+        .filter((r) => !wipType || r.wipType === wipType)
+        .map((r) => ({
+          ...r,
+          _key: rowKey(r),
+        })),
+    [resp, wipType],
   );
 
   // Totals: # WIPs in scope, sum of unique-product appearances, avg minutes
@@ -186,7 +239,8 @@ export default function WipTimesPage() {
 
       const headerRow = [
         "WIP",
-        "WIP Type",
+        "Type",
+        "WIP Type Code",
         "Department",
         "Category",
         "Qty Min",
@@ -202,6 +256,7 @@ export default function WipTimesPage() {
 
       const dataRows = rows.map((r) => [
         r.wipLabel,
+        wipTypeLabel(r.wipType),
         r.wipType,
         DEPT_LABEL_BY_CODE.get(r.departmentCode) ?? r.departmentCode,
         r.itemCategories || r.itemCategory || "",
@@ -278,6 +333,22 @@ export default function WipTimesPage() {
             {DEPT_LABEL_BY_CODE.get(r.departmentCode) ?? r.departmentCode}
           </span>
         ),
+      },
+      {
+        key: "wipType",
+        label: "Type",
+        sortable: true,
+        width: "140px",
+        render: (_v, r) => {
+          if (!r.wipType) return <span className="text-[#9CA3AF]">—</span>;
+          return (
+            <span
+              className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${wipTypePillClass(r.wipType)}`}
+            >
+              {wipTypeLabel(r.wipType)}
+            </span>
+          );
+        },
       },
       {
         key: "itemCategories",
@@ -445,12 +516,28 @@ export default function WipTimesPage() {
                 <option value="ACCESSORY">ACCESSORY</option>
               </select>
             </div>
-            {(dept || category) && (
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium text-[#1F1D1B]">Type</label>
+              <select
+                value={wipType}
+                onChange={(e) => setWipType(e.target.value)}
+                className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="">All types</option>
+                {WIP_TYPE_OPTIONS.map((t) => (
+                  <option key={t} value={t}>
+                    {wipTypeLabel(t)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {(dept || category || wipType) && (
               <button
                 type="button"
                 onClick={() => {
                   setDept("");
                   setCategory("");
+                  setWipType("");
                 }}
                 className="text-xs font-semibold text-[#6B5C32] hover:underline"
               >

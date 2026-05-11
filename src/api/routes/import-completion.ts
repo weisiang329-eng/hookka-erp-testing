@@ -916,7 +916,11 @@ app.post("/clear-future-completions", async (c) => {
 //
 // Permission: production-orders:update.
 // ---------------------------------------------------------------------------
-const CASCADE_DATE_CLAMP = "2026-05-04";
+// Today-cap: newDate can never land beyond this date. Update before each
+// re-run; the previous value (2026-05-04) was correct at the time of the
+// first pass but stale for the 2026-05-11 re-run, which would have
+// pinned every May 5–11 anchor's backfill date to 2026-05-04.
+const CASCADE_DATE_CLAMP = "2026-05-11";
 
 // Default rules — fire regardless of wipType.
 const CASCADE_ALLOWED_DEFAULT: Record<string, readonly string[]> = {

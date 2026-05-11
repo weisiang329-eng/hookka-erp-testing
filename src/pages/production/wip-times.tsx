@@ -74,15 +74,19 @@ function fmtMinutes(min: number): string {
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
 
-// BOM time cell — "Xh Ym" when min == max, "Xm – Yh Zm" range when they
-// differ. Zero-only buckets render "0m" so the ⚠️ badge can do the talking.
-function fmtBomRange(min: number, max: number): string {
+// BOM time cell — "Xh Ym" when min == max (flat across BOMs), else the
+// range PLUS the avg so the planner sees spread + central tendency at a
+// glance. Per Wei Siang 2026-05-11 Q1=C "show min, max, AND avg".
+// Zero-only buckets render "0m" alone — the ⚠️ badge does the talking.
+function fmtBomRange(min: number, max: number, avg: number): string {
   if (max === 0 && min === 0) return "0m";
   if (min === max) return fmtMinutes(min);
   // When some BOMs filled minutes and others didn't, min=0 → render as
-  // "0 – Xh Ym" so the operator sees the gap explicitly.
+  // "0 – Xh Ym" so the operator sees the gap explicitly. Avg always
+  // appears in parens for ranges so "is 53m closer to 30m or 1h 30m?"
+  // is answered without doing math.
   const left = min === 0 ? "0m" : fmtMinutes(min);
-  return `${left} – ${fmtMinutes(max)}`;
+  return `${left} – ${fmtMinutes(max)} (avg ${fmtMinutes(avg)})`;
 }
 
 export default function WipTimesPage() {
@@ -160,7 +164,7 @@ export default function WipTimesPage() {
         r.bomMinMinutes,
         r.bomMaxMinutes,
         r.bomAvgMinutes,
-        fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes),
+        fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes, r.bomAvgMinutes),
         r.productCount,
         r.hasZeroMinutes ? "YES" : "",
       ]);
@@ -257,7 +261,8 @@ export default function WipTimesPage() {
         label: "BOM Time",
         sortable: true,
         align: "right",
-        width: "180px",
+        // 240px so "30m – 1h 30m (avg 53m)" fits without truncation
+        width: "240px",
         render: (_v, r) => (
           <span className="inline-flex items-center gap-1.5 justify-end">
             {r.hasZeroMinutes && (
@@ -275,7 +280,7 @@ export default function WipTimesPage() {
                   : "text-[#1F1D1B]"
               }`}
             >
-              {fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes)}
+              {fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes, r.bomAvgMinutes)}
             </span>
           </span>
         ),
@@ -308,9 +313,10 @@ export default function WipTimesPage() {
             BOM-canonical per-unit production times. One row per WIP × department —
             walks every active BOM template and surfaces the time written for that
             WIP. When the same WIP has different minutes across products, the cell
-            shows a range (e.g. <span className="font-mono">30m – 1h 30m</span>).
-            A ⚠️ flags WIPs where BOM hasn't filled in a time yet — those need to
-            be set on the product's BOM.
+            shows the range plus average (e.g.{" "}
+            <span className="font-mono">30m – 1h 30m (avg 53m)</span>). A ⚠️
+            flags WIPs where BOM hasn't filled in a time yet — those need to be
+            set on the product's BOM.
           </p>
         </div>
         <Button

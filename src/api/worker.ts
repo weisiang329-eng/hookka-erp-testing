@@ -626,6 +626,11 @@ import sheetsSync from "./routes/sheets-sync";
 // tab. Admin-scoped (workers:read) — distinct from /api/department-labor
 // and from /api/worker/team-stats (worker-token, leader-only).
 import departmentPerformance from "./routes/department-performance";
+// WIP catalog — per-(wipLabel × dept × category) average production time
+// aggregator. Powers the /production/wip-times reference page where
+// dept supervisors / planners pick a dept (or SOFA/BEDFRAME category) and
+// see how long each WIP typically takes.
+import wipTimes from "./routes/wip-times";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -795,6 +800,7 @@ app.route("/api/service-orders", serviceOrders);
 // Department Performance — admin KPI feed for /employees tab. Distinct path
 // from /api/department-labor (no collision); see routes/department-performance.ts.
 app.route("/api/department-performance", departmentPerformance);
+app.route("/api/wip-times", wipTimes);
 
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every

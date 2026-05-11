@@ -41,6 +41,7 @@ import {
   DollarSign,
   Scale,
   Tag,
+  Clock,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -100,6 +101,9 @@ const navigationGroups: NavGroup[] = [
         { name: "Webbing", href: "/production/webbing", icon: Wrench },
         { name: "Upholstery", href: "/production/upholstery", icon: Shirt },
         { name: "Packing", href: "/production/packing", icon: Package },
+        // WIP catalog — average production time per (WIP × dept × category).
+        // Reference page for dept supervisors / planners.
+        { name: "WIP Times", href: "/production/wip-times", icon: Clock },
       ]},
       { name: "Planning", href: "/planning", icon: Calendar },
       { name: "Scanner", href: "/production/scan", icon: QrCode },
@@ -419,7 +423,8 @@ export function Sidebar({
       href === "/production/framing" ||
       href === "/production/webbing" ||
       href === "/production/upholstery" ||
-      href === "/production/packing"
+      href === "/production/packing" ||
+      href === "/production/wip-times"
     ) {
       return pathname === href;
     }

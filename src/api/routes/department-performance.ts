@@ -56,6 +56,10 @@ type JobCardRow = {
   estMinutes: number | null;
   actualMinutes: number | null;
   wipLabel: string | null;
+  // B3 fix companion (2026-05-11): wipQty needed so the audit's
+  // per-unit → total multiplication can reach the row. SELECT below
+  // must fetch it too.
+  wipQty: number | null;
 };
 
 type PiecePicRow = {
@@ -205,7 +209,8 @@ app.get("/", async (c) => {
       binds.push(departmentCode);
     }
     const jcSql = `SELECT id, productionOrderId, departmentCode, pic1Id, pic2Id,
-                          completedDate, estMinutes, actualMinutes, wipLabel
+                          completedDate, estMinutes, actualMinutes, wipLabel,
+                          wipQty
                      FROM job_cards
                     WHERE ${where.join(" AND ")}`;
     const jcRes = await c.var.DB.prepare(jcSql)

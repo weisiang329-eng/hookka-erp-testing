@@ -1394,7 +1394,7 @@ app.get("/team-stats", async (c) => {
     const deptPh = leaderDepts.map(() => "?").join(",");
     const jcRes = await c.var.DB.prepare(
       `SELECT id, productionOrderId, departmentCode, status, pic1Id, pic2Id,
-              completedDate, estMinutes, actualMinutes
+              completedDate, estMinutes, actualMinutes, wipQty
          FROM job_cards
         WHERE departmentCode IN (${deptPh})
           AND status IN ('COMPLETED','TRANSFERRED')
@@ -1411,6 +1411,7 @@ app.get("/team-stats", async (c) => {
         completedDate: string | null;
         estMinutes: number;
         actualMinutes: number | null;
+        wipQty: number | null;
       }>();
     const candidateJcs = jcRes.results ?? [];
 
@@ -1775,7 +1776,8 @@ app.get("/department-performance", async (c) => {
   {
     const deptPh = activeDepts.map(() => "?").join(",");
     const jcSql = `SELECT id, productionOrderId, departmentCode, pic1Id, pic2Id,
-                          completedDate, estMinutes, actualMinutes, wipLabel
+                          completedDate, estMinutes, actualMinutes, wipLabel,
+                          wipQty
                      FROM job_cards
                     WHERE status IN ('COMPLETED','TRANSFERRED')
                       AND completedDate >= ? AND completedDate <= ?

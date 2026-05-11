@@ -325,6 +325,10 @@ app.get("/", async (c) => {
       quantityMin: qMin,
       quantityMax: qMax,
       productCount: b.productCodes.size,
+      // Surface the actual product codes (sorted) so the Edit BOM Time
+      // dialog can list which products this row's edit will touch.
+      // Kept sorted for stable display + dialog-list ordering.
+      productCodes: Array.from(b.productCodes).sort(),
       hasZeroMinutes: b.minutes.some((m) => m === 0),
     };
   });

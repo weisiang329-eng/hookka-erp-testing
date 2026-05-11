@@ -34,6 +34,10 @@ type WipTimeRow = {
   quantityMin: number;
   quantityMax: number;
   productCount: number;
+  // Concrete product codes covered by this (wipLabel × dept) bucket —
+  // surfaced so the Edit BOM Time dialog can list which BOMs an inline
+  // edit will touch ("Will update 2 products: 5530-L(LHF), 5530-L(RHF)").
+  productCodes: string[];
   hasZeroMinutes: boolean;
 };
 
@@ -129,6 +133,10 @@ type EditState = {
   bomMaxMinutes: number;
   bomAvgMinutes: number;
   productCount: number;
+  // Product codes this edit will touch — listed in the dialog so the
+  // operator can see EXACTLY which products get re-stamped before they
+  // click Apply.
+  productCodes: string[];
   // What the user is currently typing.
   draftMinutes: string;
 };
@@ -420,6 +428,7 @@ export default function WipTimesPage() {
                   bomMaxMinutes: r.bomMaxMinutes,
                   bomAvgMinutes: r.bomAvgMinutes,
                   productCount: r.productCount,
+                  productCodes: r.productCodes ?? [],
                   // Seed input with current value — avg is the most useful
                   // single starting point when min == max (which is the
                   // common case); for ranges, user can replace.
@@ -657,6 +666,27 @@ export default function WipTimesPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Concrete product list — operator can verify EXACTLY which
+                  BOMs the inline edit will touch before Applying. Hidden
+                  when zero codes (legacy API response shape) so the dialog
+                  still works against older servers. Capped height so a
+                  big bucket (e.g. "Divan 5FT" across 20 K/Q variants) doesn't
+                  push Apply off-screen. */}
+              {editing.productCodes.length > 0 && (
+                <div className="bg-white border border-[#E2DDD8] rounded-md">
+                  <div className="px-3 py-2 text-xs text-[#6B7280] border-b border-[#E2DDD8]">
+                    Affected products
+                  </div>
+                  <div className="max-h-32 overflow-y-auto px-3 py-2 text-sm tabular-nums">
+                    {editing.productCodes.map((code) => (
+                      <div key={code} className="text-[#1F1D1B] py-0.5">
+                        {code}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-[#1F1D1B] mb-1">

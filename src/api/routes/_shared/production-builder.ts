@@ -97,7 +97,7 @@ export function parseL1Processes(raw: string | null): L1Process[] {
 //   - wipQty    = anchor slot's wipQty (sofa: line qty; BF: 1 piece per
 //                 source slot — set count).
 // ---------------------------------------------------------------------------
-type FcSlotInfo = {
+export type FcSlotInfo = {
   poId: string;
   productCode: string;
   baseModel: string;
@@ -126,7 +126,7 @@ type FcSlotInfo = {
   branchKey: string;
 };
 
-type FcMergedJc = {
+export type FcMergedJc = {
   jcId: string;
   poId: string;
   deptId: string;
@@ -147,7 +147,7 @@ type FcMergedJc = {
 // Build the human-readable wipLabel for a FAB_CUT JC. Mirrors the formula in
 // `src/pages/inventory/index.tsx:483-494` (kept in lockstep so Inventory and
 // the Production sheet always show the identical string).
-function buildFcWipLabel(
+export function buildFcWipLabel(
   modelLabel: string,
   sizeLabel: string,
   totalH: number,
@@ -179,7 +179,7 @@ function buildFcWipLabel(
 //   ["5535-2A(LHF)", "5535-L(RHF)"]  →  "5535-2A(LHF)+L(RHF)"
 //   ["5531"]                         →  "5531"
 //   ["5531", "5535"]                 →  "5531+5535"   (no shared prefix)
-function joinModelLabel(productCodes: string[]): string {
+export function joinModelLabel(productCodes: string[]): string {
   const all = productCodes.filter(Boolean);
   if (all.length === 0) return "";
   if (all.length === 1) return all[0];
@@ -205,7 +205,7 @@ function joinModelLabel(productCodes: string[]): string {
 // rejected at SO save (commit 7302f0f), every SOFA line is qty=1 and the
 // per-piece-vs-merged distinction collapses: SOFA always cross-PO merges
 // at FAB_CUT (cutter physically cuts together), BF/ACC always per-PO.
-function aggregateFcSlots(
+export function aggregateFcSlots(
   slots: FcSlotInfo[],
   companySOId: string,
 ): FcMergedJc[] {

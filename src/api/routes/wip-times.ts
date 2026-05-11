@@ -28,20 +28,8 @@ import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import {
   resolveWipTokens,
-  DEFAULT_WIP_DEPT_CHAINS,
   type BomVariantContext,
 } from "../lib/bom-wip-breakdown";
-
-// "FAB_CUT" → "Fab Cut" — used when synthesising a missing process node
-// in a BOM via PUT, since stored processes carry a human `dept` label
-// alongside `deptCode`. Lowercase + Title-case each underscore segment.
-function deptHumanLabel(code: string): string {
-  return code
-    .toLowerCase()
-    .split("_")
-    .map((s) => (s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s))
-    .join(" ");
-}
 
 const app = new Hono<Env>();
 
@@ -61,11 +49,6 @@ type BomRow = {
 };
 
 type BomProcess = {
-  // BOM-authored process entries carry a human `dept` label alongside
-  // `deptCode` (e.g. "Fab Cut" / "FAB_CUT"). When we synthesise a new
-  // process via the PUT inline-edit path, we write both so the BOM
-  // editor in /bom keeps rendering consistently.
-  dept?: string;
   deptCode?: string;
   category?: string;
   minutes?: number;
@@ -157,11 +140,9 @@ function walkTree(
     const wipType = String(node.wipType || "").toUpperCase();
     const quantity = Number(node.quantity) > 0 ? Number(node.quantity) : 1;
     const procs = Array.isArray(node.processes) ? node.processes : [];
-    const definedDepts = new Set<string>();
     for (const p of procs) {
       const dept = String(p?.deptCode || "").toUpperCase();
       if (!dept) continue;
-      definedDepts.add(dept);
       const minutes = Number(p?.minutes);
       const m = Number.isFinite(minutes) ? minutes : 0;
       // Skip rows with no label at all — they'd render as orphans. Keep
@@ -179,28 +160,6 @@ function walkTree(
         bomMinutes: m,
         hasZeroMinutes: m === 0,
       });
-    }
-    // Synthetic rows for "BOM defines this WIP but forgot a dept" —
-    // per Wei Siang 2026-05-11 "BOM 存在都要进 没 set 时间就 production
-    // time 放 0". For each dept in the wipType's default chain that
-    // isn't on `procs`, emit a 0m row so the editor can fill it in via
-    // the inline ✏️ flow (PUT then CREATEs the process entry).
-    if (wipLabel) {
-      const expectedChain = DEFAULT_WIP_DEPT_CHAINS[wipType] ?? [];
-      for (const expectedDept of expectedChain) {
-        if (definedDepts.has(expectedDept)) continue;
-        out.push({
-          productCode,
-          baseModel,
-          category,
-          wipLabel,
-          wipType,
-          quantity,
-          departmentCode: expectedDept,
-          bomMinutes: 0,
-          hasZeroMinutes: true,
-        });
-      }
     }
     if (Array.isArray(node.children)) {
       walkTree(node.children, ctx, productCode, baseModel, category, out);
@@ -420,10 +379,8 @@ const stripOrientationForMatch = (s: string): string =>
   s.replace(/\s*\((LHF|RHF)\)/gi, "").replace(/\s+/g, " ").trim();
 
 // Walk a wip subtree and mutate every process.minutes where the node's
-// resolved label + dept matches the target. If a matching node has NO
-// process entry for the target dept, CREATE one — supports the synthetic
-// 0m rows shown for "BOM forgot this dept" combos, so the first inline
-// edit actually persists. Returns # nodes touched.
+// resolved label + dept matches the target. Returns # nodes updated in
+// this subtree so the caller can decide whether to write the BOM back.
 function mutateMatchingNodes(
   nodes: BomWipNode[] | undefined,
   ctx: BomVariantContext,
@@ -443,31 +400,13 @@ function mutateMatchingNodes(
     // Match on the stripped form so 5530-1A(LHF) and 5530-1A(RHF) both
     // match a target of "5530-1A -Base (FC)".
     if (stripOrientationForMatch(resolved) === targetLabel) {
-      const procs: BomProcess[] = Array.isArray(node.processes)
-        ? node.processes
-        : [];
-      let foundExisting = false;
+      const procs = Array.isArray(node.processes) ? node.processes : [];
       for (const p of procs) {
         if (!p || !p.deptCode) continue;
         if (String(p.deptCode).toUpperCase() === targetDept) {
           p.minutes = newMinutes;
           count++;
-          foundExisting = true;
         }
-      }
-      if (!foundExisting) {
-        // Synthesise a new process entry so the BOM gains a real row
-        // that the next GET can return non-synthetically. Category left
-        // empty — operator can adjust via the per-product BOM editor if
-        // categorisation matters. dept = human label, deptCode = upper.
-        procs.push({
-          dept: deptHumanLabel(targetDept),
-          deptCode: targetDept,
-          category: "",
-          minutes: newMinutes,
-        } as BomProcess);
-        node.processes = procs;
-        count++;
       }
     }
     if (Array.isArray(node.children)) {

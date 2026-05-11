@@ -95,10 +95,7 @@ export type WipBreakdownItem = {
 };
 
 // Fallback dept chains for each known wipType when the BOM has no process data.
-// Exported so the /api/wip-times catalog can surface "BOM forgot this dept"
-// rows at 0m for editors to fill in — per Wei Siang 2026-05-11 "BOM 存在
-// 都要进 没 set 时间就 production time 放 0".
-export const DEFAULT_WIP_DEPT_CHAINS: Record<string, string[]> = {
+const DEFAULT_WIP_DEPT_CHAINS: Record<string, string[]> = {
   DIVAN:         ["WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
   HEADBOARD:     ["FAB_CUT", "FAB_SEW", "FOAM", "FRAMING", "UPHOLSTERY", "PACKING"],
   SOFA_BASE:     ["WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],

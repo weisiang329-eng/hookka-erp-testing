@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
@@ -401,20 +401,24 @@ export default function ProductionPage({
   // depend on it. baseUrl / dueQueryFrag are deferred to AFTER
   // fltDueFrom/fltDueTo are declared (~line 791) to dodge a TDZ error.
   const [shouldFetch, setShouldFetch] = useState<boolean>(mode === "dept");
-  // Suppress the first-mount fetch until the date-seed effect (~L517) has
-  // populated fltDueFrom/fltDueTo. Otherwise mount fires fetch #1 against
-  // the bare URL (`?fields=minimal&dept=X` — full table, ~10s on prod) and
-  // a second fetch lands seconds later with the seeded dates. Both queries
-  // race on Hyperdrive; on a slow Postgres day they stack and freeze the
-  // page for 15-20s when the user navigates away mid-render.
-  // Initialise from URL synchronously so deep links / refreshes (which
-  // already carry from/to params) don't pay the one-render delay.
-  const [datesSeeded, setDatesSeeded] = useState<boolean>(() => {
-    if (mode !== "dept") return true;
-    if (typeof window === "undefined") return true;
-    const params = new URLSearchParams(window.location.search);
-    return params.has("from") || params.has("to");
-  });
+  // Date-seed gate for the orders fetch.
+  //
+  // Before F1 (2026-05-11): this returned false on cold dept-mount when
+  // the URL had no from/to, which gated the orders fetch off until the
+  // first-mount seed useEffect landed today in the URL — a 2-effect / 3-
+  // render waterfall (~280ms cold-start cost) before the main fetch
+  // could fire.
+  //
+  // After F1: we ALWAYS return true for dept mode. The cold-start today
+  // fallback (effectiveDueFrom/effectiveDueTo below) ensures the fetch
+  // URL has from/to on the very first render, so we no longer need to
+  // gate. The first-mount seed useEffect still runs (writes today to
+  // the URL for shareable / refresh-safe deep links) but it's a
+  // background concern now, not on the fetch critical path.
+  // Always true now — see comment above. Kept as state-shaped for minimal
+  // diff with surrounding code that reads `datesSeeded` directly.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- setDatesSeeded retained for future flip if needed; intentionally unused after F1
+  const [datesSeeded, setDatesSeeded] = useState<boolean>(true);
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
@@ -596,11 +600,41 @@ export default function ProductionPage({
   // helper so the operator's initial view stays narrowed to today.
   const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
   const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
+
+  // F1 cold-start today fallback (2026-05-11).
+  //
+  // Problem: on a cold cold dept-page mount with no from/to in the URL,
+  // the legacy flow was:
+  //   render 1 → seed useEffect fires setUrlBatch(today, today) → state
+  //   update → render 2 → datesSeeded-flip useEffect fires → render 3
+  //   → useCachedJson sees the new URL → orders fetch fires.
+  //
+  // Net result: ~280ms of React work between bundle ready and the first
+  // orders fetch firing — pure waterfall, no useful concurrency.
+  //
+  // Fix: before the seed useEffect lands, the fetch URL uses today as the
+  // EFFECTIVE date filter. The URL state (fltDueFrom/fltDueTo) is still
+  // empty on render 1 — we only inject today into the fetch URL string.
+  // The seed useEffect later updates the URL state to match, which is a
+  // no-op as far as the fetch is concerned (same URL string, useCachedJson
+  // skips the duplicate). isColdStartRef gates this to ONLY render 1 of
+  // each mount so that a user CLEARING the date filter post-mount still
+  // gets the "show all history" semantic (open-ended fetch URL) — matches
+  // the pre-F1 behavior the L591-596 doc-block was guarding.
+  const isColdStartRef = useRef(true);
+  useLayoutEffect(() => {
+    isColdStartRef.current = false;
+  }, []);
+  const useColdStartTodayFallback =
+    mode === "dept" && isColdStartRef.current && !fltDueFrom && !fltDueTo;
+  const effectiveDueFrom = useColdStartTodayFallback ? todayISO() : fltDueFrom;
+  const effectiveDueTo = useColdStartTodayFallback ? todayISO() : fltDueTo;
+
   // dueQueryFrag/baseUrl/ordersResp moved here from earlier in the file
   // to satisfy the TDZ for fltDueFrom/fltDueTo (declared just above).
   const dueQueryFrag =
-    (fltDueFrom ? `&dueFrom=${encodeURIComponent(fltDueFrom)}` : "") +
-    (fltDueTo ? `&dueTo=${encodeURIComponent(fltDueTo)}` : "");
+    (effectiveDueFrom ? `&dueFrom=${encodeURIComponent(effectiveDueFrom)}` : "") +
+    (effectiveDueTo ? `&dueTo=${encodeURIComponent(effectiveDueTo)}` : "");
   const baseUrl =
     mode === "dept" && deptCode
       ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}`
@@ -710,15 +744,12 @@ export default function ProductionPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Once the seed lands in the URL state, flip datesSeeded so ordersUrl
-  // builds with the date filter on its first non-null render. Prevents
-  // the duplicate first-mount fetch (bare URL → seeded URL).
-  useEffect(() => {
-    if (!datesSeeded && (fltDueFrom || fltDueTo)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot seed-completion gate; flips a one-way boolean derived from external (URL) state landing
-      setDatesSeeded(true);
-    }
-  }, [datesSeeded, fltDueFrom, fltDueTo]);
+  // Datesseeded-flip useEffect removed in F1 (2026-05-11). `datesSeeded`
+  // now initialises to `true` unconditionally — see the cold-start today
+  // fallback (`effectiveDueFrom` / `effectiveDueTo`) just below the
+  // useUrlState calls above. The seed useEffect above still writes today
+  // to the URL state for shareable / refresh-safe deep links; it just no
+  // longer gates the fetch.
 
   // Overview-matrix-only sort + filter state. Persisted to localStorage so
   // the operator's column preferences (e.g. "sort by Customer asc, hide

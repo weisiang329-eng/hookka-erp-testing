@@ -184,8 +184,6 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/production/webbing', element: <S><ProductionDeptPage /></S> },
   { path: '/production/upholstery', element: <S><ProductionDeptPage /></S> },
   { path: '/production/packing', element: <S><ProductionDeptPage /></S> },
-  // WIP catalog — per-(wipLabel × dept × category) production time reference.
-  { path: '/production/wip-times', element: <S><WipTimesPage /></S> },
   // /production/:id PO-detail route deleted (2026-04-26, user request).
   // PO double-clicks now route directly to /sales/:salesOrderId — the SO
   // page is the canonical place to track an order. Any stale link to
@@ -280,6 +278,11 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // BOM
   { path: '/bom', element: <S><BOM /></S> },
+  // WIP catalog — unique-per-WIP production time reference, sourced from
+  // job_cards.estMinutes aggregated by (wipLabel × dept). Sibling to /bom
+  // because BOM is the canonical recipe — operators use this page as a
+  // flat dedup'd view of every wipLabel that's ever run, with its avg time.
+  { path: '/bom/wip-times', element: <S><WipTimesPage /></S> },
 
   // Products
   { path: '/products', element: <S><Products /></S> },

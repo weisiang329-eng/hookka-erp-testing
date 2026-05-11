@@ -101,9 +101,6 @@ const navigationGroups: NavGroup[] = [
         { name: "Webbing", href: "/production/webbing", icon: Wrench },
         { name: "Upholstery", href: "/production/upholstery", icon: Shirt },
         { name: "Packing", href: "/production/packing", icon: Package },
-        // WIP catalog — average production time per (WIP × dept × category).
-        // Reference page for dept supervisors / planners.
-        { name: "WIP Times", href: "/production/wip-times", icon: Clock },
       ]},
       { name: "Planning", href: "/planning", icon: Calendar },
       { name: "Scanner", href: "/production/scan", icon: QrCode },
@@ -114,6 +111,9 @@ const navigationGroups: NavGroup[] = [
     items: [
       { name: "Products", href: "/products", icon: Boxes },
       { name: "BOM", href: "/bom", icon: Layers },
+      // WIP catalog — dedup'd per (wipLabel × dept) view of every WIP that's
+      // ever run, with avg production time. Reference for planners.
+      { name: "WIP Times", href: "/bom/wip-times", icon: Clock },
       { name: "Sofa Combos", href: "/maintenance/sofa-combos", icon: Tag },
     ],
   },
@@ -423,9 +423,11 @@ export function Sidebar({
       href === "/production/framing" ||
       href === "/production/webbing" ||
       href === "/production/upholstery" ||
-      href === "/production/packing" ||
-      href === "/production/wip-times"
+      href === "/production/packing"
     ) {
+      return pathname === href;
+    }
+    if (href === "/bom/wip-times") {
       return pathname === href;
     }
     if (href === "/production") {

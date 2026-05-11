@@ -22,7 +22,13 @@ import { useUrlState } from "@/lib/use-url-state";
 type WipTimeRow = {
   wipLabel: string;
   departmentCode: string;
+  // Primary category for the badge (first alphabetically when a WIP spans
+  // categories — single-category WIPs just have this one).
   itemCategory: string;
+  // Comma-joined list of distinct categories this WIP runs under. Most
+  // rows have one category, but cross-category WIPs (rare) show both —
+  // e.g. "BEDFRAME, SOFA". Frontend prefers this for the cell text.
+  itemCategories: string;
   avgMinutes: number;
   jcCount: number;
   lastCompletedDate: string | null;
@@ -34,10 +40,12 @@ type WipTimeResponse = {
 };
 
 // Stable composite key for DataGrid — wipLabel alone isn't unique because
-// the same WIP can appear under two depts (e.g. FAB_CUT cuts + FAB_SEW
-// sews) with their own avg time.
+// the same WIP runs in two depts (e.g. FAB_CUT cuts + FAB_SEW sews) with
+// their own avg time. itemCategory is NOT part of the key per Wei Siang
+// 2026-05-11 "if same WIP only show once" — server already collapses
+// multi-category WIPs into a single row via STRING_AGG.
 function rowKey(r: WipTimeRow): string {
-  return `${r.wipLabel}::${r.departmentCode}::${r.itemCategory}`;
+  return `${r.wipLabel}::${r.departmentCode}`;
 }
 
 // Map departmentCode → human label so the column reads "Fab Sew" instead of
@@ -126,23 +134,40 @@ export default function WipTimesPage() {
         ),
       },
       {
-        key: "itemCategory",
+        key: "itemCategories",
         label: "Category",
         sortable: true,
-        width: "120px",
-        render: (_v, r) => (
-          <span
-            className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
-              r.itemCategory === "SOFA"
-                ? "bg-[#E5EEF6] text-[#3E6570]"
-                : r.itemCategory === "BEDFRAME"
-                  ? "bg-[#F0E5E1] text-[#7A4A3A]"
-                  : "bg-[#F0ECE9] text-[#5A5550]"
-            }`}
-          >
-            {r.itemCategory || "—"}
-          </span>
-        ),
+        width: "150px",
+        render: (_v, r) => {
+          // Most WIPs have one category. Cross-category WIPs show both
+          // (e.g. "BEDFRAME, SOFA"). When multi, render as plain text;
+          // when single, use the coloured pill.
+          const cats = (r.itemCategories || r.itemCategory).split(",")
+            .map((c) => c.trim())
+            .filter(Boolean);
+          if (cats.length === 0) return <span className="text-[#9CA3AF]">—</span>;
+          if (cats.length === 1) {
+            const c = cats[0];
+            return (
+              <span
+                className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                  c === "SOFA"
+                    ? "bg-[#E5EEF6] text-[#3E6570]"
+                    : c === "BEDFRAME"
+                      ? "bg-[#F0E5E1] text-[#7A4A3A]"
+                      : "bg-[#F0ECE9] text-[#5A5550]"
+                }`}
+              >
+                {c}
+              </span>
+            );
+          }
+          return (
+            <span className="text-[10px] font-semibold text-[#5A5550]">
+              {cats.join(" · ")}
+            </span>
+          );
+        },
       },
       {
         key: "avgMinutes",
@@ -192,8 +217,11 @@ export default function WipTimesPage() {
             WIP Production Times
           </h1>
           <p className="text-sm text-[#6B7280] mt-1">
-            Average production time per WIP, aggregated from every job card
-            we've completed. Pick a department or category to scope the list.
+            Flat, deduplicated view of every WIP that's ever run. One row per
+            (WIP × department) — same WIP across multiple products / categories
+            collapses into a single row. Average production time is the mean
+            of all completed job cards for that WIP-department combo. Filter
+            by department or category to scope the list.
           </p>
         </div>
       </div>

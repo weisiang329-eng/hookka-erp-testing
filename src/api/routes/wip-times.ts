@@ -32,7 +32,16 @@ const app = new Hono<Env>();
 type WipTimeAggRow = {
   wipLabel: string;
   departmentCode: string;
+  // Aggregated category: when a wipLabel runs across multiple categories
+  // (rare — happens when the same physical sub-assembly is reused), SQL
+  // returns the alphabetically first one. Treated as display-only; the
+  // user filter applies via WHERE before grouping so it doesn't disagree
+  // with the visible scope.
   itemCategory: string | null;
+  // Multi-category badge — when GROUP BY emits more than one category for
+  // the same (wipLabel, dept), STRING_AGG returns the comma-joined list.
+  // Frontend can show "SOFA, BEDFRAME" instead of just the first.
+  itemCategories: string | null;
   avgMinutes: number | string | null;
   jcCount: number | string | null;
   lastCompletedDate: string | null;
@@ -77,22 +86,32 @@ app.get("/", async (c) => {
     bindings.push(category);
   }
 
-  // GROUP BY the three identity columns. AVG over estMinutes per group, then
-  // ORDER BY the aggregated avg descending so the longest-running WIPs sit
-  // on top (planners scan from worst → best). Postgres-specific NULLS LAST
-  // is unnecessary here because the WHERE clause already drops null estMins.
+  // Dedup-by-WIP per Wei Siang 2026-05-11 spec ("如果同样的WIP 就只显示一次").
+  // GROUP BY the WIP identity (wipLabel × departmentCode). itemCategory used
+  // to be a third grouping column but that double-counted WIPs that span
+  // categories. Now it's display-only: MIN() picks the alphabetically first
+  // for the badge, STRING_AGG returns the full distinct set so the UI can
+  // show "SOFA, BEDFRAME" when a WIP straddles. The category filter still
+  // applies in WHERE — so even though grouping is by (wipLabel × dept), the
+  // resulting rows reflect only the scoped categories.
+  //
+  // AVG over estMinutes per group; ORDER BY aggregated avg descending so the
+  // longest-running WIPs sit on top (planners scan from worst → best).
+  // WHERE clause already drops null / zero estMins so NULLS LAST isn't
+  // needed.
   const sql = `
     SELECT
       jc.wipLabel AS wipLabel,
       jc.departmentCode AS departmentCode,
-      po.itemCategory AS itemCategory,
+      MIN(po.itemCategory) AS itemCategory,
+      STRING_AGG(DISTINCT po.itemCategory, ', ' ORDER BY po.itemCategory) AS itemCategories,
       AVG(jc.estMinutes) AS avgMinutes,
       COUNT(*) AS jcCount,
       MAX(jc.completedDate) AS lastCompletedDate
     FROM job_cards jc
     JOIN production_orders po ON po.id = jc.productionOrderId
     WHERE ${where.join(" AND ")}
-    GROUP BY jc.wipLabel, jc.departmentCode, po.itemCategory
+    GROUP BY jc.wipLabel, jc.departmentCode
     ORDER BY AVG(jc.estMinutes) DESC
   `;
 
@@ -104,6 +123,10 @@ app.get("/", async (c) => {
     wipLabel: r.wipLabel,
     departmentCode: r.departmentCode,
     itemCategory: r.itemCategory ?? "",
+    // When a wipLabel runs across multiple categories the badge shows the
+    // joined list ("SOFA, BEDFRAME"); single-category rows just get that
+    // one value. Frontend treats both shapes identically.
+    itemCategories: r.itemCategories ?? r.itemCategory ?? "",
     avgMinutes: Math.round(Number(r.avgMinutes) || 0),
     jcCount: Number(r.jcCount) || 0,
     lastCompletedDate: r.lastCompletedDate,

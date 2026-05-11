@@ -10,14 +10,19 @@
 // (wipLabel × departmentCode × itemCategory). See routes/wip-times.ts for
 // the rationale on using actual JC estMinutes rather than the BOM master.
 // ---------------------------------------------------------------------------
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Clock } from "lucide-react";
+import { Clock, Download } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { DEPARTMENTS } from "./utils";
 import { formatDateDMY } from "@/lib/utils";
 import { useUrlState } from "@/lib/use-url-state";
+// xlsx is a 421KB module — dynamic-imported inside the export handler so
+// page mount doesn't pull it in. Matches the BatchImportDialog pattern.
+import type * as XlsxNs from "xlsx";
+type XLSXModule = typeof XlsxNs;
 
 type WipTimeRow = {
   wipLabel: string;
@@ -67,6 +72,7 @@ export default function WipTimesPage() {
   // URL-backed so a planner can deep-link to "Fab Sew + Sofa" and share it.
   const [dept, setDept] = useUrlState<string>("dept", "");
   const [category, setCategory] = useUrlState<string>("category", "");
+  const [exporting, setExporting] = useState(false);
 
   const url = useMemo(() => {
     const params = new URLSearchParams();
@@ -105,6 +111,64 @@ export default function WipTimesPage() {
       avgOfAvgs: Math.round(sumAvgs / rows.length),
     };
   }, [rows]);
+
+  // -- Excel export ---------------------------------------------------------
+  // Exports rows currently in scope (after dept/category filter) to .xlsx.
+  // Filename reflects scope so the planner can stash one per dept without
+  // overwriting. Minutes go out as raw integers so Excel can sum / sort
+  // numerically; a formatted "Hh Mm" column rides alongside for humans.
+  const handleExport = async () => {
+    if (rows.length === 0 || exporting) return;
+    setExporting(true);
+    try {
+      const XLSX: XLSXModule = await import("xlsx");
+
+      const headerRow = [
+        "WIP",
+        "Department",
+        "Category",
+        "Avg Minutes",
+        "Avg (Hh Mm)",
+        "Sample (JCs)",
+        "Last Completed",
+      ];
+
+      const dataRows = rows.map((r) => [
+        r.wipLabel,
+        DEPT_LABEL_BY_CODE.get(r.departmentCode) ?? r.departmentCode,
+        r.itemCategories || r.itemCategory || "",
+        r.avgMinutes,
+        fmtMinutes(r.avgMinutes),
+        r.jcCount,
+        r.lastCompletedDate ? formatDateDMY(r.lastCompletedDate) : "",
+      ]);
+
+      const aoa: (string | number)[][] = [headerRow, ...dataRows];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+      // Auto-size columns based on actual content. Cap at 50 so an
+      // unusually long WIP label doesn't blow the layout.
+      ws["!cols"] = headerRow.map((h, colIdx) => {
+        let maxLen = h.length + 2;
+        for (const row of dataRows) {
+          const len = String(row[colIdx] ?? "").length;
+          if (len > maxLen) maxLen = len;
+        }
+        return { wch: Math.min(Math.max(maxLen, 10), 50) };
+      });
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "WIP Times");
+
+      const scopeParts: string[] = [];
+      if (dept) scopeParts.push(dept.toLowerCase());
+      if (category) scopeParts.push(category.toLowerCase());
+      const scope = scopeParts.length > 0 ? scopeParts.join("-") : "all";
+      XLSX.writeFile(wb, `wip-times-${scope}.xlsx`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const columns: Column<WipTimeRow & { _key: string }>[] = useMemo(
     () => [
@@ -210,7 +274,7 @@ export default function WipTimesPage() {
 
   return (
     <div className="space-y-4 p-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-[#1F1D1B] flex items-center gap-2">
             <Clock className="h-6 w-6 text-[#6B5C32]" />
@@ -224,6 +288,17 @@ export default function WipTimesPage() {
             by department or category to scope the list.
           </p>
         </div>
+        {/* Export reflects the active filter — `rows` is already scoped */}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleExport}
+          disabled={rows.length === 0 || exporting || loading}
+          className="shrink-0 mt-1"
+        >
+          <Download className="h-4 w-4 mr-1.5" />
+          {exporting ? "Exporting…" : "Export Excel"}
+        </Button>
       </div>
 
       {/* Filter bar */}

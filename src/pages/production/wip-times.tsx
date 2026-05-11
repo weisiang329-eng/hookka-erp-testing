@@ -1,12 +1,14 @@
 // ---------------------------------------------------------------------------
-// /production/wip-times — paper-style WIP catalog (per product × WIP node × dept).
+// /production/wip-times — BOM-canonical WIP times, deduplicated.
 //
-// Replaces the paper reference sheets (Sofa Fab Cut / Headboard Foam Bonding /
-// Divan Framing etc.). One row per (productCode × BOM WIP node × dept), with
-// WIP labels variant-resolved from each product's defaultVariants. Filter by
-// department = one paper sheet's contents.
+// One row per (resolved wipLabel × department). Variant tokens like
+// `{DIVAN_HEIGHT}`, `{SIZE}` resolved from products.sizeLabel / sizeCode +
+// defaultVariants. After resolution, shared WIPs (e.g. `Divan- 6FT Frame`
+// across every King-size bedframe) collapse into a single row with min–max
+// minutes + # products. Per Wei Siang 2026-05-11 "如果相同的 wip 出来就
+// 不需要 show 一次可以了".
 //
-// Source: /api/wip-times — BOM templates only, NOT job_cards. See
+// Source: /api/wip-times — BOM templates ONLY, never job_cards. See
 // routes/wip-times.ts for the rationale.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
@@ -17,20 +19,21 @@ import { Clock, Download, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DEPARTMENTS } from "./utils";
 import { useUrlState } from "@/lib/use-url-state";
-// xlsx is a 421KB module — dynamic-imported inside the export handler so
-// page mount doesn't pull it in.
 import type * as XlsxNs from "xlsx";
 type XLSXModule = typeof XlsxNs;
 
 type WipTimeRow = {
-  productCode: string;
-  baseModel: string;
-  category: string;
   wipLabel: string;
-  wipType: string;
-  quantity: number;
   departmentCode: string;
-  bomMinutes: number;
+  wipType: string;
+  itemCategory: string;
+  itemCategories: string;
+  bomMinMinutes: number;
+  bomMaxMinutes: number;
+  bomAvgMinutes: number;
+  quantityMin: number;
+  quantityMax: number;
+  productCount: number;
   hasZeroMinutes: boolean;
 };
 
@@ -39,10 +42,8 @@ type WipTimeResponse = {
   data?: WipTimeRow[];
 };
 
-// Composite key — same productCode × dept can emit multiple rows (one per
-// WIP node), so include wipLabel + wipType to keep DataGrid happy.
-function rowKey(r: WipTimeRow, idx: number): string {
-  return `${r.productCode}::${r.departmentCode}::${r.wipLabel}::${r.wipType}::${idx}`;
+function rowKey(r: WipTimeRow): string {
+  return `${r.wipLabel}::${r.departmentCode}`;
 }
 
 const DEPT_LABEL_BY_CODE = new Map<string, string>(
@@ -55,6 +56,22 @@ function fmtMinutes(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+// "Xm" when flat across products, "Xm – Yh Zm (avg Wm)" when minutes
+// vary (e.g. headboard FC ranges 30-90 across product models).
+function fmtBomRange(min: number, max: number, avg: number): string {
+  if (max === 0 && min === 0) return "0m";
+  if (min === max) return fmtMinutes(min);
+  const left = min === 0 ? "0m" : fmtMinutes(min);
+  return `${left} – ${fmtMinutes(max)} (avg ${fmtMinutes(avg)})`;
+}
+
+// "2 PCS" when same across products, "1–2 PCS" when it varies (e.g. divan
+// quantity differs by bed size — K has 2, S has 1).
+function fmtQty(qMin: number, qMax: number): string {
+  if (qMin === qMax) return `${qMin} PCS`;
+  return `${qMin}–${qMax} PCS`;
 }
 
 export default function WipTimesPage() {
@@ -73,26 +90,33 @@ export default function WipTimesPage() {
   const { data: resp, loading } = useCachedJson<WipTimeResponse>(url);
   const rows: (WipTimeRow & { _key: string })[] = useMemo(
     () =>
-      (resp?.data ?? []).map((r, idx) => ({
+      (resp?.data ?? []).map((r) => ({
         ...r,
-        _key: rowKey(r, idx),
+        _key: rowKey(r),
       })),
     [resp],
   );
 
-  // Totals — # rows, # distinct products, avg minutes, # ⚠️ missing.
+  // Totals: # WIPs in scope, sum of unique-product appearances, avg minutes
+  // across WIPs (per WIP, not per appearance), # ⚠️ missing.
   const totals = useMemo(() => {
     if (rows.length === 0) {
-      return { rows: 0, products: 0, avgMinutes: 0, missing: 0 };
+      return { wips: 0, productAppearances: 0, avgMinutes: 0, missing: 0 };
     }
-    const products = new Set(rows.map((r) => r.productCode)).size;
-    // Avg over non-zero rows so ⚠️ entries don't sink the number; we
-    // surface the missing count separately.
-    const nonZero = rows.filter((r) => r.bomMinutes > 0);
-    const sumMin = nonZero.reduce((s, r) => s + r.bomMinutes, 0);
-    const avgMinutes = nonZero.length > 0 ? Math.round(sumMin / nonZero.length) : 0;
+    const productAppearances = rows.reduce((s, r) => s + r.productCount, 0);
+    const nonZero = rows.filter((r) => r.bomAvgMinutes > 0);
+    const avgMinutes = nonZero.length
+      ? Math.round(
+          nonZero.reduce((s, r) => s + r.bomAvgMinutes, 0) / nonZero.length,
+        )
+      : 0;
     const missing = rows.filter((r) => r.hasZeroMinutes).length;
-    return { rows: rows.length, products, avgMinutes, missing };
+    return {
+      wips: rows.length,
+      productAppearances,
+      avgMinutes,
+      missing,
+    };
   }, [rows]);
 
   // -- Excel export ---------------------------------------------------------
@@ -103,28 +127,34 @@ export default function WipTimesPage() {
       const XLSX: XLSXModule = await import("xlsx");
 
       const headerRow = [
-        "Product Code",
-        "Base Model",
-        "Category",
         "WIP",
         "WIP Type",
-        "Quantity",
         "Department",
-        "BOM Minutes",
+        "Category",
+        "Qty Min",
+        "Qty Max",
+        "Quantity",
+        "BOM Min Minutes",
+        "BOM Max Minutes",
+        "BOM Avg Minutes",
         "BOM Time",
+        "# Products",
         "BOM Missing?",
       ];
 
       const dataRows = rows.map((r) => [
-        r.productCode,
-        r.baseModel,
-        r.category,
         r.wipLabel,
         r.wipType,
-        r.quantity,
         DEPT_LABEL_BY_CODE.get(r.departmentCode) ?? r.departmentCode,
-        r.bomMinutes,
-        fmtMinutes(r.bomMinutes),
+        r.itemCategories || r.itemCategory || "",
+        r.quantityMin,
+        r.quantityMax,
+        fmtQty(r.quantityMin, r.quantityMax),
+        r.bomMinMinutes,
+        r.bomMaxMinutes,
+        r.bomAvgMinutes,
+        fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes, r.bomAvgMinutes),
+        r.productCount,
         r.hasZeroMinutes ? "YES" : "",
       ]);
 
@@ -155,27 +185,13 @@ export default function WipTimesPage() {
   const columns: Column<WipTimeRow & { _key: string }>[] = useMemo(
     () => [
       {
-        key: "productCode",
-        label: "Product Code",
-        sortable: true,
-        width: "180px",
-        render: (_v, r) => (
-          <span
-            className="font-semibold text-[#1F1D1B] truncate block"
-            title={r.productCode}
-          >
-            {r.productCode}
-          </span>
-        ),
-      },
-      {
         key: "wipLabel",
         label: "WIP",
         sortable: true,
-        width: "320px",
+        width: "360px",
         render: (_v, r) => (
           <span
-            className="text-[#1F1D1B] truncate block"
+            className="font-semibold text-[#1F1D1B] truncate block"
             title={r.wipLabel}
           >
             {r.wipLabel}
@@ -183,14 +199,14 @@ export default function WipTimesPage() {
         ),
       },
       {
-        key: "quantity",
+        key: "quantityMax",
         label: "Qty / Bed",
         sortable: true,
         align: "right",
-        width: "100px",
+        width: "110px",
         render: (_v, r) => (
           <span className="tabular-nums text-[#8A8680]">
-            {r.quantity} PCS
+            {fmtQty(r.quantityMin, r.quantityMax)}
           </span>
         ),
       },
@@ -206,38 +222,52 @@ export default function WipTimesPage() {
         ),
       },
       {
-        key: "category",
+        key: "itemCategories",
         label: "Category",
         sortable: true,
-        width: "130px",
+        width: "150px",
         render: (_v, r) => {
-          if (!r.category) return <span className="text-[#9CA3AF]">—</span>;
+          const cats = (r.itemCategories || r.itemCategory)
+            .split(",")
+            .map((c) => c.trim())
+            .filter(Boolean);
+          if (cats.length === 0)
+            return <span className="text-[#9CA3AF]">—</span>;
+          if (cats.length === 1) {
+            const c = cats[0];
+            return (
+              <span
+                className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                  c === "SOFA"
+                    ? "bg-[#E5EEF6] text-[#3E6570]"
+                    : c === "BEDFRAME"
+                      ? "bg-[#F0E5E1] text-[#7A4A3A]"
+                      : "bg-[#F0ECE9] text-[#5A5550]"
+                }`}
+              >
+                {c}
+              </span>
+            );
+          }
           return (
-            <span
-              className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
-                r.category === "SOFA"
-                  ? "bg-[#E5EEF6] text-[#3E6570]"
-                  : r.category === "BEDFRAME"
-                    ? "bg-[#F0E5E1] text-[#7A4A3A]"
-                    : "bg-[#F0ECE9] text-[#5A5550]"
-              }`}
-            >
-              {r.category}
+            <span className="text-[10px] font-semibold text-[#5A5550]">
+              {cats.join(" · ")}
             </span>
           );
         },
       },
       {
-        key: "bomMinutes",
+        key: "bomMaxMinutes",
         label: "BOM Time",
         sortable: true,
         align: "right",
-        width: "150px",
+        // 240px so "30m – 1h 30m (avg 53m)" fits without truncation
+        width: "240px",
         render: (_v, r) => (
           <span className="inline-flex items-center gap-1.5 justify-end">
             {r.hasZeroMinutes && (
               <span
-                title="BOM hasn't set a time for this WIP — fill it in on the product's BOM."
+                title="BOM hasn't set a time for at least one product using this WIP — fill it in to make the canonical time accurate."
                 className="inline-flex items-center"
               >
                 <AlertTriangle className="h-3.5 w-3.5 text-[#C99A3F]" />
@@ -245,11 +275,23 @@ export default function WipTimesPage() {
             )}
             <span
               className={`tabular-nums font-semibold ${
-                r.bomMinutes === 0 ? "text-[#C99A3F]" : "text-[#1F1D1B]"
+                r.bomMaxMinutes === 0 ? "text-[#C99A3F]" : "text-[#1F1D1B]"
               }`}
             >
-              {r.bomMinutes === 0 ? "0m" : fmtMinutes(r.bomMinutes)}
+              {fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes, r.bomAvgMinutes)}
             </span>
+          </span>
+        ),
+      },
+      {
+        key: "productCount",
+        label: "# Products",
+        sortable: true,
+        align: "right",
+        width: "120px",
+        render: (_v, r) => (
+          <span className="tabular-nums text-[#8A8680]">
+            {r.productCount.toLocaleString()}
           </span>
         ),
       },
@@ -266,13 +308,13 @@ export default function WipTimesPage() {
             WIP Production Times
           </h1>
           <p className="text-sm text-[#6B7280] mt-1">
-            BOM-canonical per-unit production times by product. One row per
-            (product × WIP × department) — variant tokens like{" "}
-            <span className="font-mono">{"{DIVAN_HEIGHT}"}</span> are resolved
-            against each product's default variants (e.g.{" "}
-            <span className="font-mono">8" Divan- K (FC)</span>). Filter by
-            department to get the equivalent of one paper reference sheet. A{" "}
-            <AlertTriangle className="inline h-3.5 w-3.5 text-[#C99A3F]" /> flags
+            BOM-canonical per-unit production times. One row per WIP × department —
+            same WIP across multiple products collapses into one row, with{" "}
+            <span className="font-mono">Min – Max (avg)</span> minutes when
+            products disagree. Variant tokens like{" "}
+            <span className="font-mono">{"{SIZE}"}</span> resolve to the product's
+            actual size (e.g. <span className="font-mono">Divan- 6FT Frame</span>).
+            A <AlertTriangle className="inline h-3.5 w-3.5 text-[#C99A3F]" /> flags
             WIPs where BOM hasn't set a time yet.
           </p>
         </div>
@@ -345,17 +387,17 @@ export default function WipTimesPage() {
         <Card>
           <CardContent className="p-3 text-center">
             <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-              {totals.rows.toLocaleString()}
+              {totals.wips.toLocaleString()}
             </p>
-            <p className="text-xs text-[#6B7280] mt-0.5">Rows in scope</p>
+            <p className="text-xs text-[#6B7280] mt-0.5">WIPs in scope</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
             <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-              {totals.products.toLocaleString()}
+              {totals.productAppearances.toLocaleString()}
             </p>
-            <p className="text-xs text-[#6B7280] mt-0.5">Distinct products</p>
+            <p className="text-xs text-[#6B7280] mt-0.5">Product appearances</p>
           </CardContent>
         </Card>
         <Card>
@@ -363,7 +405,7 @@ export default function WipTimesPage() {
             <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
               {fmtMinutes(totals.avgMinutes)}
             </p>
-            <p className="text-xs text-[#6B7280] mt-0.5">Avg per WIP node</p>
+            <p className="text-xs text-[#6B7280] mt-0.5">Avg across WIPs</p>
           </CardContent>
         </Card>
         <Card>
@@ -382,7 +424,7 @@ export default function WipTimesPage() {
         </Card>
       </div>
 
-      {/* Main table */}
+      {/* WIP table */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base font-semibold">
@@ -391,9 +433,8 @@ export default function WipTimesPage() {
               : "All Departments — WIPs"}
             {category && ` · ${category}`}
             <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-              ({totals.rows.toLocaleString()}{" "}
-              {totals.rows === 1 ? "row" : "rows"} ·{" "}
-              {totals.products.toLocaleString()} products)
+              ({totals.wips.toLocaleString()}{" "}
+              {totals.wips === 1 ? "WIP" : "WIPs"})
             </span>
           </CardTitle>
         </CardHeader>

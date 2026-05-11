@@ -255,18 +255,82 @@ app.get("/", async (c) => {
     ? rows.filter((r) => r.departmentCode === dept)
     : rows;
 
-  // Stable sort: category → productCode → dept → wipLabel. Matches the
-  // paper sheet ordering (planners scan by product within a dept).
-  filtered.sort((a, b) => {
-    if (a.category !== b.category) return a.category.localeCompare(b.category);
-    if (a.productCode !== b.productCode)
-      return a.productCode.localeCompare(b.productCode);
+  // Dedup pass — per Wei Siang 2026-05-11 v3 "如果相同的 wip 出来就不需要
+  // 了 show 一次可以了". Now that variant tokens are resolved (sizeLabel ↦
+  // "6FT", divanHeight ↦ "8\""), divan WIPs naturally share a label across
+  // every K-size bedframe; collapse them into a single row with min/max/avg
+  // minutes plus the product count. Headboard WIPs use {PRODUCT_CODE} so
+  // their labels stay unique → 1 product per bucket (still shown, just
+  // doesn't collapse with anything).
+  type AggBucket = {
+    wipLabel: string;
+    departmentCode: string;
+    wipType: string;
+    minutes: number[];
+    quantities: number[];
+    productCodes: Set<string>;
+    categories: Set<string>;
+  };
+  const buckets = new Map<string, AggBucket>();
+  for (const r of filtered) {
+    const key = `${r.wipLabel}::${r.departmentCode}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = {
+        wipLabel: r.wipLabel,
+        departmentCode: r.departmentCode,
+        wipType: r.wipType,
+        minutes: [],
+        quantities: [],
+        productCodes: new Set(),
+        categories: new Set(),
+      };
+      buckets.set(key, b);
+    }
+    b.minutes.push(r.bomMinutes);
+    b.quantities.push(r.quantity);
+    b.productCodes.add(r.productCode);
+    if (r.category) b.categories.add(r.category);
+  }
+
+  const agg = Array.from(buckets.values()).map((b) => {
+    const min = b.minutes.length ? Math.min(...b.minutes) : 0;
+    const max = b.minutes.length ? Math.max(...b.minutes) : 0;
+    const avg = b.minutes.length
+      ? Math.round(b.minutes.reduce((s, m) => s + m, 0) / b.minutes.length)
+      : 0;
+    const qMin = b.quantities.length ? Math.min(...b.quantities) : 1;
+    const qMax = b.quantities.length ? Math.max(...b.quantities) : 1;
+    const cats = Array.from(b.categories).sort();
+    return {
+      wipLabel: b.wipLabel,
+      departmentCode: b.departmentCode,
+      wipType: b.wipType,
+      itemCategory: cats[0] ?? "",
+      itemCategories: cats.join(", "),
+      bomMinMinutes: min,
+      bomMaxMinutes: max,
+      bomAvgMinutes: avg,
+      quantityMin: qMin,
+      quantityMax: qMax,
+      productCount: b.productCodes.size,
+      hasZeroMinutes: b.minutes.some((m) => m === 0),
+    };
+  });
+
+  // Sort by max minutes desc (longest WIPs surface first — what planners
+  // scan for); same-minute rows fall back to category → wipLabel.
+  agg.sort((a, b) => {
+    if (a.bomMaxMinutes !== b.bomMaxMinutes)
+      return b.bomMaxMinutes - a.bomMaxMinutes;
+    if (a.itemCategory !== b.itemCategory)
+      return a.itemCategory.localeCompare(b.itemCategory);
     if (a.departmentCode !== b.departmentCode)
       return a.departmentCode.localeCompare(b.departmentCode);
     return a.wipLabel.localeCompare(b.wipLabel);
   });
 
-  return c.json({ success: true, data: filtered });
+  return c.json({ success: true, data: agg });
 });
 
 export default app;

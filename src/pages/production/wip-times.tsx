@@ -18,7 +18,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Clock, Download, AlertTriangle, Pencil, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DEPARTMENTS } from "./utils";
-import { useUrlState } from "@/lib/use-url-state";
+import { useUrlState, useUrlStateBool } from "@/lib/use-url-state";
 import type * as XlsxNs from "xlsx";
 type XLSXModule = typeof XlsxNs;
 
@@ -145,6 +145,12 @@ export default function WipTimesPage() {
   const [dept, setDept] = useUrlState<string>("dept", "");
   const [category, setCategory] = useUrlState<string>("category", "");
   const [wipType, setWipType] = useUrlState<string>("wipType", "");
+  // Toggle that narrows the grid to rows with hasZeroMinutes=true (i.e. at
+  // least one product whose BOM hasn't set a time for this WIP × dept).
+  // Wired to the "⚠️ Missing BOM time" summary card so clicking it filters
+  // the table to exactly that backlog — operator can punch through and
+  // edit each row in place. URL-stateful so the filter survives reloads.
+  const [missingOnly, setMissingOnly] = useUrlStateBool("missing", false);
   const [exporting, setExporting] = useState(false);
   const [editing, setEditing] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
@@ -166,11 +172,12 @@ export default function WipTimesPage() {
     () =>
       (resp?.data ?? [])
         .filter((r) => !wipType || r.wipType === wipType)
+        .filter((r) => !missingOnly || r.hasZeroMinutes)
         .map((r) => ({
           ...r,
           _key: rowKey(r),
         })),
-    [resp, wipType],
+    [resp, wipType, missingOnly],
   );
 
   // Totals: # WIPs in scope, sum of unique-product appearances, avg minutes
@@ -583,7 +590,31 @@ export default function WipTimesPage() {
             <p className="text-xs text-[#6B7280] mt-0.5">Avg across WIPs</p>
           </CardContent>
         </Card>
-        <Card>
+        {/* Clickable card — toggles the missingOnly filter so the operator
+            can punch through to the backlog (rows with hasZeroMinutes=true)
+            in one click and edit each row inline. Highlighted while the
+            filter is active so it's obvious the table is narrowed. */}
+        <Card
+          role="button"
+          tabIndex={0}
+          onClick={() => setMissingOnly(!missingOnly)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setMissingOnly(!missingOnly);
+            }
+          }}
+          className={`cursor-pointer transition-colors ${
+            missingOnly
+              ? "ring-2 ring-[#C99A3F] bg-[#FDF6EC]"
+              : "hover:bg-[#FAF9F7]"
+          }`}
+          title={
+            missingOnly
+              ? "Click to clear filter — show all WIPs"
+              : "Click to filter table to WIPs missing BOM time"
+          }
+        >
           <CardContent className="p-3 text-center">
             <p
               className={`text-xl font-bold tabular-nums ${
@@ -594,6 +625,7 @@ export default function WipTimesPage() {
             </p>
             <p className="text-xs text-[#6B7280] mt-0.5">
               ⚠️ Missing BOM time
+              {missingOnly && " · filter on"}
             </p>
           </CardContent>
         </Card>

@@ -262,6 +262,16 @@ app.get("/", async (c) => {
   // minutes plus the product count. Headboard WIPs use {PRODUCT_CODE} so
   // their labels stay unique → 1 product per bucket (still shown, just
   // doesn't collapse with anything).
+  //
+  // LHF/RHF folding (v5, Wei Siang 2026-05-11):
+  // `5530-1A(LHF) -Base (FC)` and `5530-1A(RHF) -Base (FC)` are mirror
+  // operations with identical production time, so the dedup key strips
+  // `(LHF)` / `(RHF)`. The displayed wipLabel uses the same stripped form
+  // so the table reads `5530-1A -Base (FC)` once with productCount=2.
+  // Inline-edit naturally follows: PUT /api/wip-times matches by stripped
+  // label too, so saving once updates BOTH BOMs.
+  const stripOrientation = (s: string): string =>
+    s.replace(/\s*\((LHF|RHF)\)/gi, "").replace(/\s+/g, " ").trim();
   type AggBucket = {
     wipLabel: string;
     departmentCode: string;
@@ -273,11 +283,12 @@ app.get("/", async (c) => {
   };
   const buckets = new Map<string, AggBucket>();
   for (const r of filtered) {
-    const key = `${r.wipLabel}::${r.departmentCode}`;
+    const dedupLabel = stripOrientation(r.wipLabel);
+    const key = `${dedupLabel}::${r.departmentCode}`;
     let b = buckets.get(key);
     if (!b) {
       b = {
-        wipLabel: r.wipLabel,
+        wipLabel: dedupLabel,
         departmentCode: r.departmentCode,
         wipType: r.wipType,
         minutes: [],
@@ -361,6 +372,12 @@ type PutBody = {
   minutes?: unknown;
 };
 
+// Same orientation-stripping rule as the GET dedup pass — LHF/RHF mirrors
+// share a row so an inline edit on `5530-1A -Base (FC)` must also match
+// the BOM nodes that resolve to `5530-1A(LHF) -Base (FC)` and the RHF.
+const stripOrientationForMatch = (s: string): string =>
+  s.replace(/\s*\((LHF|RHF)\)/gi, "").replace(/\s+/g, " ").trim();
+
 // Walk a wip subtree and mutate every process.minutes where the node's
 // resolved label + dept matches the target. Returns # nodes updated in
 // this subtree so the caller can decide whether to write the BOM back.
@@ -380,7 +397,9 @@ function mutateMatchingNodes(
     const resolved = rawLabel
       ? resolveWipTokens(rawLabel, ctx)
       : resolveWipTokens(rawCode, ctx);
-    if (resolved === targetLabel) {
+    // Match on the stripped form so 5530-1A(LHF) and 5530-1A(RHF) both
+    // match a target of "5530-1A -Base (FC)".
+    if (stripOrientationForMatch(resolved) === targetLabel) {
       const procs = Array.isArray(node.processes) ? node.processes : [];
       for (const p of procs) {
         if (!p || !p.deptCode) continue;
@@ -415,7 +434,12 @@ app.put("/", async (c) => {
     return c.json({ success: false, error: "invalid json" }, 400);
   }
 
-  const wipLabel = typeof body.wipLabel === "string" ? body.wipLabel.trim() : "";
+  // Strip orientation on intake too — if a caller posts the raw
+  // `5530-1A(LHF) -Base (FC)` instead of the stripped form, we still
+  // want to match every (LHF, RHF) sibling.
+  const wipLabelRaw =
+    typeof body.wipLabel === "string" ? body.wipLabel.trim() : "";
+  const wipLabel = stripOrientationForMatch(wipLabelRaw);
   const deptCode =
     typeof body.deptCode === "string" ? body.deptCode.trim().toUpperCase() : "";
   const minutesRaw = Number(body.minutes);

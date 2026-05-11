@@ -83,8 +83,15 @@ async function loadCoreState(db: D1Database) {
       "SELECT code, name, workingHoursPerDay FROM departments",
     ).all<DepartmentRow>(),
     // Active queue load: pending/in-progress job cards on non-completed POs.
+    // B1 fix (2026-05-11 audit): jc.estMinutes is per-UNIT (mirrors how the
+    // BOM→JC cascade seeds it); the queue total has to multiply by wipQty.
+    // Before this fix, an 8-unit divan PO with 10-min/unit JCs registered
+    // as 10 min of queue load instead of 80 — promise dates ran way short.
+    // COALESCE protects against NULL wipQty in legacy rows; GREATEST(1,...)
+    // ensures a zero/missing qty still credits at least the per-unit minute.
     db.prepare(
-      `SELECT po.productId AS "productId", SUM(jc.estMinutes) AS "totalMinutes"
+      `SELECT po.productId AS "productId",
+              SUM(jc.estMinutes * GREATEST(1, COALESCE(jc.wipQty, 1))) AS "totalMinutes"
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
         WHERE jc.status IN ('WAITING','IN_PROGRESS','PAUSED','BLOCKED')

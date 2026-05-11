@@ -696,10 +696,17 @@ app.get("/history", async (c) => {
             ? "PIC2"
             : "PIC1";
     } else {
-      // Legacy path
+      // Legacy path (pre piece_pics — single-JC PIC tracking).
+      // B2 fix (2026-05-11 audit): jc.estMinutes is per-UNIT; the pieces
+      // path above implicitly sums across pieces (one row per piece), but
+      // the legacy path treats the JC as a single chunk and forgot to
+      // multiply by wipQty. Result: a worker on a 6-unit divan JC (10 min
+      // per unit, no co-pic) was credited 10 min not 60 → under-payment.
+      // Mirror the pieces-path math: jc.estMinutes × wipQty ÷ coPicCount.
       if (jc.pic1Id !== workerId && jc.pic2Id !== workerId) continue;
       const coPicCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
-      myMinutes = (jc.estMinutes || 0) / Math.max(1, coPicCount);
+      const wipQty = Math.max(1, jc.wipQty || 1);
+      myMinutes = ((jc.estMinutes || 0) * wipQty) / Math.max(1, coPicCount);
       piecesWorked = 1;
       piecesShared = coPicCount >= 2 ? 1 : 0;
       role = jc.pic1Id === workerId ? "PIC1" : "PIC2";

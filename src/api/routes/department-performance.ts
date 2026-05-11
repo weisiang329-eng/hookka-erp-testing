@@ -268,7 +268,11 @@ app.get("/", async (c) => {
     for (const jc of keptJcs) {
       const date = jc.completedDate as string;
       // Dedup per JC: credit its full minutes once for its completedDate.
-      const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+      // B3 fix (2026-05-11): jc.estMinutes + jc.actualMinutes are both
+      // per-UNIT (import-completion.ts:538 sets actual ← per-unit value).
+      // Multiply by wipQty for the JC total — mirrors worker.ts:1475.
+      const wipQty = Math.max(1, jc.wipQty ?? 1);
+      const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
       const day = ensure(date);
       day.productionMinutes += mins;
 
@@ -330,8 +334,11 @@ app.get("/", async (c) => {
           }
         }
       } else {
+        // B3 fix: legacy path = no pieces, so jcMins (per-unit) needs
+        // explicit × wipQty for total. Pieces path above is fine because
+        // it iterates pieces.length × jcMins per worker = wipQty × jcMins.
         const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
-        const share = jcMins / Math.max(1, picCount);
+        const share = (jcMins * wipQty) / Math.max(1, picCount);
         if (jc.pic1Id) perWorkerMins.set(jc.pic1Id, share);
         if (jc.pic2Id) perWorkerMins.set(jc.pic2Id, share);
       }

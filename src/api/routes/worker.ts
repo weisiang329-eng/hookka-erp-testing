@@ -1472,7 +1472,14 @@ app.get("/team-stats", async (c) => {
 
       // Credit the JC's full minutes once (no double-count when multiple
       // team workers share it). actualMinutes wins when populated.
-      const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+      // B3 fix (2026-05-11 audit): both estMinutes and actualMinutes are
+      // per-UNIT (import-completion.ts:538 sets actualMinutes ← per-unit
+      // value); multiply by wipQty for the JC TOTAL. Without this, a
+      // 6-unit sofa Fab Cut merged JC at 30 min/piece showed 30 min of
+      // cell production instead of 180.
+      const mins =
+        (jc.actualMinutes ?? jc.estMinutes ?? 0) *
+        Math.max(1, jc.wipQty ?? 1);
       cell.productionMinutes += mins;
       for (const id of onJc) cell.workerIds.add(id);
     }
@@ -1827,7 +1834,9 @@ app.get("/department-performance", async (c) => {
 
     for (const jc of keptJcs) {
       const date = jc.completedDate as string;
-      const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+      // B3 fix: per-unit → total via × wipQty. See worker.ts:1475 comment.
+      const wipQty = Math.max(1, jc.wipQty ?? 1);
+      const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
       const day = ensure(date);
       day.productionMinutes += mins;
 
@@ -1865,6 +1874,9 @@ app.get("/department-performance", async (c) => {
       });
 
       // Per-worker pro-rated share — same logic as the admin endpoint.
+      // B3 fix: pieces path iterates pieces.length (= wipQty) times so
+      // jcMins-per-piece sums to total naturally. Legacy path treats the
+      // JC as one chunk → needs × wipQty (already in scope above).
       const jcMins = jc.estMinutes ?? jc.actualMinutes ?? 0;
       const pieces = picsByJc.get(jc.id) ?? [];
       const perWorkerMins = new Map<string, number>();
@@ -1887,7 +1899,7 @@ app.get("/department-performance", async (c) => {
         }
       } else {
         const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
-        const share = jcMins / Math.max(1, picCount);
+        const share = (jcMins * wipQty) / Math.max(1, picCount);
         if (jc.pic1Id) perWorkerMins.set(jc.pic1Id, share);
         if (jc.pic2Id) perWorkerMins.set(jc.pic2Id, share);
       }

@@ -34,12 +34,18 @@ import {
 const app = new Hono<Env>();
 
 // Raw row from the SELECT — wipComponents + defaultVariants arrive as TEXT.
+// sizeCode / sizeLabel live on `products` as scalar columns (not nested in
+// defaultVariants), and they hold the canonical size for the SKU — e.g.
+// `1003-(K)` has sizeCode="K" / sizeLabel="King". Needed so the {SIZE}
+// token in wipCode templates resolves to something meaningful.
 type BomRow = {
   productCode: string;
   baseModel: string | null;
   category: string | null;
   wipComponents: string | null;
   defaultVariants: string | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
 };
 
 type BomProcess = {
@@ -82,13 +88,20 @@ function parseInches(raw: unknown): number | null {
 function buildVariantContext(
   productCode: string,
   baseModel: string | null,
+  sizeCode: string | null,
+  sizeLabel: string | null,
   blob: DefaultVariantsBlob | null,
 ): BomVariantContext {
   return {
     productCode,
     model: baseModel ?? productCode,
-    sizeLabel: null,
-    sizeCode: null,
+    // Size comes from products.sizeCode / sizeLabel — NOT defaultVariants,
+    // which doesn't carry size (size is a product attribute, not a per-line
+    // option). resolveWipTokens reads sizeLabel first then falls back to
+    // sizeCode, so passing both means `{SIZE}` always resolves when either
+    // is populated. Bedframe products like `1003-(K)` have sizeCode="K".
+    sizeLabel: sizeLabel ?? null,
+    sizeCode: sizeCode ?? null,
     fabricCode: blob?.fabricCode ?? null,
     divanHeightInches: parseInches(blob?.divanHeight),
     legHeightInches: parseInches(blob?.legHeight),
@@ -190,7 +203,9 @@ app.get("/", async (c) => {
       bt.baseModel        AS "baseModel",
       bt.category         AS "category",
       bt.wipComponents    AS "wipComponents",
-      p.defaultVariants   AS "defaultVariants"
+      p.defaultVariants   AS "defaultVariants",
+      p.sizeCode          AS "sizeCode",
+      p.sizeLabel         AS "sizeLabel"
     FROM bom_templates bt
     LEFT JOIN products p ON p.code = bt.productCode AND p.orgId = bt.orgId
     WHERE ${where.join(" AND ")}
@@ -221,6 +236,8 @@ app.get("/", async (c) => {
     const ctx = buildVariantContext(
       row.productCode,
       row.baseModel,
+      row.sizeCode,
+      row.sizeLabel,
       defaults,
     );
     walkTree(

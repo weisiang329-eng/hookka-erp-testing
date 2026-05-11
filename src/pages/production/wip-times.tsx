@@ -1,23 +1,23 @@
 // ---------------------------------------------------------------------------
-// /production/wip-times — WIP catalog reference page.
+// /production/wip-times — WIP catalog reference page (BOM-canonical times).
 //
 // For dept supervisors + planners. Pick a Department or Category and see
-// every WIP we've ever processed with its average production time, the
-// number of historical job_cards backing the average, and the most recent
-// completion date.
+// every WIP defined in BOM with its canonical per-unit production time,
+// the number of products that use it, and a ⚠️ flag where BOM hasn't set
+// a time yet.
 //
-// Source: /api/wip-times — aggregates job_cards.estMinutes by
-// (wipLabel × departmentCode × itemCategory). See routes/wip-times.ts for
-// the rationale on using actual JC estMinutes rather than the BOM master.
+// Source: /api/wip-times — walks ACTIVE bom_templates' wipComponents JSON
+// trees and aggregates by (wipLabel × departmentCode). See routes/wip-times.ts
+// for why BOM not job_cards: fabric cutting is merged across WIPs so JC totals
+// don't reflect per-WIP truth, BOM does.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Clock, Download } from "lucide-react";
+import { Clock, Download, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DEPARTMENTS } from "./utils";
-import { formatDateDMY } from "@/lib/utils";
 import { useUrlState } from "@/lib/use-url-state";
 // xlsx is a 421KB module — dynamic-imported inside the export handler so
 // page mount doesn't pull it in. Matches the BatchImportDialog pattern.
@@ -34,9 +34,18 @@ type WipTimeRow = {
   // rows have one category, but cross-category WIPs (rare) show both —
   // e.g. "BEDFRAME, SOFA". Frontend prefers this for the cell text.
   itemCategories: string;
-  avgMinutes: number;
-  jcCount: number;
-  lastCompletedDate: string | null;
+  // BOM minutes — min/max bracket the spread across contributing BOMs,
+  // avg is the arithmetic mean. UI shows range when min != max, single
+  // value when flat.
+  bomMinMinutes: number;
+  bomMaxMinutes: number;
+  bomAvgMinutes: number;
+  // # of distinct products whose BOM contains this (wipLabel, dept).
+  productCount: number;
+  // True if ANY BOM with this WIP has minutes=0 — surfaces gaps in BOM
+  // data so they can be filled in (e.g. Back Cushion / Arm currently
+  // have no time set in BOM).
+  hasZeroMinutes: boolean;
 };
 
 type WipTimeResponse = {
@@ -45,17 +54,14 @@ type WipTimeResponse = {
 };
 
 // Stable composite key for DataGrid — wipLabel alone isn't unique because
-// the same WIP runs in two depts (e.g. FAB_CUT cuts + FAB_SEW sews) with
-// their own avg time. itemCategory is NOT part of the key per Wei Siang
-// 2026-05-11 "if same WIP only show once" — server already collapses
-// multi-category WIPs into a single row via STRING_AGG.
+// the same WIP runs in two depts (e.g. FAB_CUT + FAB_SEW) with their own
+// minutes.
 function rowKey(r: WipTimeRow): string {
   return `${r.wipLabel}::${r.departmentCode}`;
 }
 
 // Map departmentCode → human label so the column reads "Fab Sew" instead of
-// "FAB_SEW". Falls back to the raw code for any dept not in the seed list
-// (shouldn't happen in practice — DEPARTMENTS covers every production dept).
+// "FAB_SEW". Falls back to the raw code for any dept not in the seed list.
 const DEPT_LABEL_BY_CODE = new Map<string, string>(
   DEPARTMENTS.map((d) => [d.code, d.name]),
 );
@@ -66,6 +72,17 @@ function fmtMinutes(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+// BOM time cell — "Xh Ym" when min == max, "Xm – Yh Zm" range when they
+// differ. Zero-only buckets render "0m" so the ⚠️ badge can do the talking.
+function fmtBomRange(min: number, max: number): string {
+  if (max === 0 && min === 0) return "0m";
+  if (min === max) return fmtMinutes(min);
+  // When some BOMs filled minutes and others didn't, min=0 → render as
+  // "0 – Xh Ym" so the operator sees the gap explicitly.
+  const left = min === 0 ? "0m" : fmtMinutes(min);
+  return `${left} – ${fmtMinutes(max)}`;
 }
 
 export default function WipTimesPage() {
@@ -84,9 +101,7 @@ export default function WipTimesPage() {
 
   const { data: resp, loading } = useCachedJson<WipTimeResponse>(url);
   // Inject a composite `_key` per row so DataGrid (which wants a string
-  // keyField, not a function) gets a stable per-row identity. wipLabel
-  // alone isn't unique — the same WIP can land in two depts (Fab Cut +
-  // Fab Sew) with their own avg times.
+  // keyField, not a function) gets a stable per-row identity.
   const rows: (WipTimeRow & { _key: string })[] = useMemo(
     () =>
       (resp?.data ?? []).map((r) => ({
@@ -96,27 +111,30 @@ export default function WipTimesPage() {
     [resp],
   );
 
-  // Totals strip — sum of JCs aggregated + arithmetic mean of the per-WIP
-  // averages so the planner has a one-glance answer to "how many WIPs am
-  // I looking at and what's the typical run time?".
+  // Totals strip — # WIPs, # products covered, and avg of avg minutes for
+  // a one-glance "how many WIPs do we have and what's the typical recipe
+  // time?". Products counts distinct codes summed across rows is misleading
+  // (same product appears in many WIPs), so we surface a row-count proxy
+  // instead: sum of productCount (BOM appearances).
   const totals = useMemo(() => {
     if (rows.length === 0) {
-      return { wips: 0, jcs: 0, avgOfAvgs: 0 };
+      return { wips: 0, bomAppearances: 0, avgOfAvgs: 0, missing: 0 };
     }
-    const jcs = rows.reduce((s, r) => s + r.jcCount, 0);
-    const sumAvgs = rows.reduce((s, r) => s + r.avgMinutes, 0);
+    const bomAppearances = rows.reduce((s, r) => s + r.productCount, 0);
+    const sumAvgs = rows.reduce((s, r) => s + r.bomAvgMinutes, 0);
+    const missing = rows.filter((r) => r.hasZeroMinutes).length;
     return {
       wips: rows.length,
-      jcs,
+      bomAppearances,
       avgOfAvgs: Math.round(sumAvgs / rows.length),
+      missing,
     };
   }, [rows]);
 
   // -- Excel export ---------------------------------------------------------
-  // Exports rows currently in scope (after dept/category filter) to .xlsx.
-  // Filename reflects scope so the planner can stash one per dept without
-  // overwriting. Minutes go out as raw integers so Excel can sum / sort
-  // numerically; a formatted "Hh Mm" column rides alongside for humans.
+  // Exports rows currently in scope (after dept/category filter). Minutes
+  // go out as raw integers so Excel can sum / sort; a formatted column
+  // rides alongside for humans.
   const handleExport = async () => {
     if (rows.length === 0 || exporting) return;
     setExporting(true);
@@ -127,27 +145,29 @@ export default function WipTimesPage() {
         "WIP",
         "Department",
         "Category",
-        "Avg Minutes",
-        "Avg (Hh Mm)",
-        "Sample (JCs)",
-        "Last Completed",
+        "BOM Min Minutes",
+        "BOM Max Minutes",
+        "BOM Avg Minutes",
+        "BOM Time (Range)",
+        "# Products",
+        "BOM Missing?",
       ];
 
       const dataRows = rows.map((r) => [
         r.wipLabel,
         DEPT_LABEL_BY_CODE.get(r.departmentCode) ?? r.departmentCode,
         r.itemCategories || r.itemCategory || "",
-        r.avgMinutes,
-        fmtMinutes(r.avgMinutes),
-        r.jcCount,
-        r.lastCompletedDate ? formatDateDMY(r.lastCompletedDate) : "",
+        r.bomMinMinutes,
+        r.bomMaxMinutes,
+        r.bomAvgMinutes,
+        fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes),
+        r.productCount,
+        r.hasZeroMinutes ? "YES" : "",
       ]);
 
       const aoa: (string | number)[][] = [headerRow, ...dataRows];
       const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-      // Auto-size columns based on actual content. Cap at 50 so an
-      // unusually long WIP label doesn't blow the layout.
       ws["!cols"] = headerRow.map((h, colIdx) => {
         let maxLen = h.length + 2;
         for (const row of dataRows) {
@@ -158,7 +178,7 @@ export default function WipTimesPage() {
       });
 
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "WIP Times");
+      XLSX.utils.book_append_sheet(wb, ws, "BOM WIP Times");
 
       const scopeParts: string[] = [];
       if (dept) scopeParts.push(dept.toLowerCase());
@@ -176,7 +196,7 @@ export default function WipTimesPage() {
         key: "wipLabel",
         label: "WIP",
         sortable: true,
-        width: "320px",
+        width: "400px",
         render: (_v, r) => (
           <span
             className="font-medium text-[#1F1D1B] truncate block"
@@ -203,13 +223,12 @@ export default function WipTimesPage() {
         sortable: true,
         width: "150px",
         render: (_v, r) => {
-          // Most WIPs have one category. Cross-category WIPs show both
-          // (e.g. "BEDFRAME, SOFA"). When multi, render as plain text;
-          // when single, use the coloured pill.
-          const cats = (r.itemCategories || r.itemCategory).split(",")
+          const cats = (r.itemCategories || r.itemCategory)
+            .split(",")
             .map((c) => c.trim())
             .filter(Boolean);
-          if (cats.length === 0) return <span className="text-[#9CA3AF]">—</span>;
+          if (cats.length === 0)
+            return <span className="text-[#9CA3AF]">—</span>;
           if (cats.length === 1) {
             const c = cats[0];
             return (
@@ -234,37 +253,42 @@ export default function WipTimesPage() {
         },
       },
       {
-        key: "avgMinutes",
-        label: "Avg Production Time",
+        key: "bomMaxMinutes",
+        label: "BOM Time",
         sortable: true,
         align: "right",
         width: "180px",
         render: (_v, r) => (
-          <span className="tabular-nums font-semibold text-[#1F1D1B]">
-            {fmtMinutes(r.avgMinutes)}
+          <span className="inline-flex items-center gap-1.5 justify-end">
+            {r.hasZeroMinutes && (
+              <span
+                title="BOM has not set a time for this WIP on at least one product — fill it in to make the canonical time accurate."
+                className="inline-flex items-center"
+              >
+                <AlertTriangle className="h-3.5 w-3.5 text-[#C99A3F]" />
+              </span>
+            )}
+            <span
+              className={`tabular-nums font-semibold ${
+                r.bomMaxMinutes === 0
+                  ? "text-[#C99A3F]"
+                  : "text-[#1F1D1B]"
+              }`}
+            >
+              {fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes)}
+            </span>
           </span>
         ),
       },
       {
-        key: "jcCount",
-        label: "Sample (JCs)",
+        key: "productCount",
+        label: "# Products",
         sortable: true,
         align: "right",
         width: "120px",
         render: (_v, r) => (
           <span className="tabular-nums text-[#8A8680]">
-            {r.jcCount.toLocaleString()}
-          </span>
-        ),
-      },
-      {
-        key: "lastCompletedDate",
-        label: "Last Completed",
-        sortable: true,
-        width: "150px",
-        render: (_v, r) => (
-          <span className="text-xs text-[#8A8680] tabular-nums">
-            {r.lastCompletedDate ? formatDateDMY(r.lastCompletedDate) : "—"}
+            {r.productCount.toLocaleString()}
           </span>
         ),
       },
@@ -281,14 +305,14 @@ export default function WipTimesPage() {
             WIP Production Times
           </h1>
           <p className="text-sm text-[#6B7280] mt-1">
-            Flat, deduplicated view of every WIP that's ever run. One row per
-            (WIP × department) — same WIP across multiple products / categories
-            collapses into a single row. Average production time is the mean
-            of all completed job cards for that WIP-department combo. Filter
-            by department or category to scope the list.
+            BOM-canonical per-unit production times. One row per WIP × department —
+            walks every active BOM template and surfaces the time written for that
+            WIP. When the same WIP has different minutes across products, the cell
+            shows a range (e.g. <span className="font-mono">30m – 1h 30m</span>).
+            A ⚠️ flags WIPs where BOM hasn't filled in a time yet — those need to
+            be set on the product's BOM.
           </p>
         </div>
-        {/* Export reflects the active filter — `rows` is already scoped */}
         <Button
           variant="outline"
           size="sm"
@@ -354,7 +378,7 @@ export default function WipTimesPage() {
       </Card>
 
       {/* Totals strip */}
-      <div className="grid gap-3 grid-cols-3">
+      <div className="grid gap-3 grid-cols-4">
         <Card>
           <CardContent className="p-3 text-center">
             <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
@@ -366,11 +390,9 @@ export default function WipTimesPage() {
         <Card>
           <CardContent className="p-3 text-center">
             <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
-              {totals.jcs.toLocaleString()}
+              {totals.bomAppearances.toLocaleString()}
             </p>
-            <p className="text-xs text-[#6B7280] mt-0.5">
-              Total job cards aggregated
-            </p>
+            <p className="text-xs text-[#6B7280] mt-0.5">BOM appearances</p>
           </CardContent>
         </Card>
         <Card>
@@ -379,6 +401,20 @@ export default function WipTimesPage() {
               {fmtMinutes(totals.avgOfAvgs)}
             </p>
             <p className="text-xs text-[#6B7280] mt-0.5">Average across WIPs</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-3 text-center">
+            <p
+              className={`text-xl font-bold tabular-nums ${
+                totals.missing > 0 ? "text-[#C99A3F]" : "text-[#1F1D1B]"
+              }`}
+            >
+              {totals.missing.toLocaleString()}
+            </p>
+            <p className="text-xs text-[#6B7280] mt-0.5">
+              ⚠️ Missing BOM time
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -406,7 +442,7 @@ export default function WipTimesPage() {
             virtualize
             gridId="wip-times-list"
             maxHeight="calc(100vh - 360px)"
-            emptyMessage="No completed job cards yet for this scope. Once orders run through the floor, their estMinutes show up here."
+            emptyMessage="No BOM-defined WIPs for this scope yet. Make sure the relevant products have active BOMs configured."
           />
         </CardContent>
       </Card>

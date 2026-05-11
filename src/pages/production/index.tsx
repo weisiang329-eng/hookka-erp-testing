@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
@@ -1391,20 +1391,52 @@ export default function ProductionPage({
   // (itemTypesByPo memo removed 2026-05-08 — was only consumed by the
   // now-deleted Item type filter dropdown.)
 
+  // F5 (2026-05-11) — defer heavy useMemo deps so filter clicks feel
+  // instant.
+  //
+  // Problem: every keystroke / Clear / date pick fires a state update that
+  // cascades through filteredOrders + visibleOrders + baseRows useMemos,
+  // each O(N×depts) over the full PO set (~1.8k POs × 8 depts on Fab Sew).
+  // The cascade runs synchronously in the render commit — main thread
+  // blocks 0.5-2s and click events queue behind it ("点 Clear 没反应、点
+  // 日期没反应" — Wei Siang 2026-05-11).
+  //
+  // Fix: pass the deferred copy of each filter value into the heavy
+  // useMemo deps. The deferred value lags by one render cycle, so the
+  // urgent render (input field updates, button highlights, URL state
+  // writes) commits and paints first — user sees instant click feedback.
+  // The heavy filter pass + sched matrix rebuild happens in the next
+  // commit (a low-priority render React schedules off the main thread's
+  // critical path).
+  //
+  // Input bindings still use the IMMEDIATE values (fltDueFrom etc.) so
+  // typing into a date field shows the new value in the input the moment
+  // the keystroke lands. Only the expensive downstream reads use the
+  // deferred values.
+  const deferredFltSearch = useDeferredValue(fltSearch);
+  const deferredFltState = useDeferredValue(fltState);
+  const deferredFltCustomer = useDeferredValue(fltCustomer);
+  const deferredFltDueFrom = useDeferredValue(fltDueFrom);
+  const deferredFltDueTo = useDeferredValue(fltDueTo);
+  const deferredFltCategory = useDeferredValue(fltCategory);
+  const deferredIncompleteOnly = useDeferredValue(incompleteOnly);
+  const deferredOverviewFilters = useDeferredValue(overviewFilters);
+  const deferredOverviewSort = useDeferredValue(overviewSort);
+
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
   // a non-empty cell in that dept).
   const filteredOrders = useMemo(() => {
-    const q = fltSearch.trim().toLowerCase();
+    const q = deferredFltSearch.trim().toLowerCase();
     return orders.filter((o) => {
       if (q) {
         const hay = haystackByPo.get(o.id) || "";
         if (!hay.includes(q)) return false;
       }
-      if (fltState && o.customerState !== fltState) return false;
-      if (fltCustomer && o.customerName !== fltCustomer) return false;
+      if (deferredFltState && o.customerState !== deferredFltState) return false;
+      if (deferredFltCustomer && o.customerName !== deferredFltCustomer) return false;
       // Category — itemCategory column on the PO.
-      if (fltCategory && o.itemCategory !== fltCategory) return false;
+      if (deferredFltCategory && o.itemCategory !== deferredFltCategory) return false;
       // (Item type + Model filters removed 2026-05-08 — data shows all
       //  item types + models by default; operators narrow via search /
       //  category / state / date instead.)
@@ -1430,8 +1462,8 @@ export default function ProductionPage({
         const jc = (o.jobCards ?? []).find((j) => j.departmentCode === activeTab);
         axisVal = jc?.dueDate || "";
       }
-      if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
-      if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
+      if (deferredFltDueFrom && axisVal && axisVal < deferredFltDueFrom) return false;
+      if (deferredFltDueTo && axisVal && axisVal > deferredFltDueTo) return false;
       // "Filter Incomplete" toggle — dept-aware:
       //   Overview ("ALL")  → keep POs whose UPHOLSTERY JC isn't done.
       //                       UPH gates ship-readiness, so this answers
@@ -1442,7 +1474,7 @@ export default function ProductionPage({
       // POs with no JC for the gating dept stay visible — we can't tell
       // those are "done" and silently hiding them would lie about what's
       // still in scope.
-      if (incompleteOnly) {
+      if (deferredIncompleteOnly) {
         const gateDept = activeTab === "ALL" ? "UPHOLSTERY" : activeTab;
         // For UPHOLSTERY (Overview gate + UPH dept tab), drop DIVAN UPH JCs
         // when the PO is BEDFRAME + Headboard Only. Mirrors the backend
@@ -1469,11 +1501,15 @@ export default function ProductionPage({
     });
   }, [
     orders, haystackByPo,
-    fltSearch, fltState, fltCustomer,
-    fltDueFrom, fltDueTo, fltDateAxis,
-    fltCategory,
+    // F5: filter values consumed via deferred copies above. Listing the
+    // deferred deps (not the raw filt* state) is what makes useDeferredValue
+    // work — the memo recomputes only when the deferred value catches up,
+    // not on the urgent render that fires when the input changes.
+    deferredFltSearch, deferredFltState, deferredFltCustomer,
+    deferredFltDueFrom, deferredFltDueTo, fltDateAxis,
+    deferredFltCategory,
     showCancelled,
-    incompleteOnly,
+    deferredIncompleteOnly,
     // activeTab drives the dueDate axis branch added 2026-05-07 (overview
     // → PO.targetEndDate, dept page → matching dept's JC.dueDate). Without
     // it in the deps the memo retains stale results when the route changes.
@@ -1504,7 +1540,9 @@ export default function ProductionPage({
     // page-level filter pass above so the operator can layer column
     // filters on top of the global Customer / Date filters.
     if (activeTab === "ALL") {
-      const f = overviewFilters;
+      // F5: use deferred overviewFilters here so Clear / per-column filter
+      // edits don't block the click on the heavy recompute.
+      const f = deferredOverviewFilters;
       // Cell-state cache so dept-status filter + dept-sort don't recompute
       // cellFor() N×M times.
       const cellCache = new Map<string, ReturnType<typeof cellFor>>();
@@ -1554,9 +1592,10 @@ export default function ProductionPage({
         return true;
       });
       // Sort — single key, asc/desc. Empty values park at the end so they
-      // don't dominate ascending order.
-      if (overviewSort) {
-        const { key, dir } = overviewSort;
+      // don't dominate ascending order. F5: deferred copy for the same
+      // reason as filters above — sort clicks should feel instant.
+      if (deferredOverviewSort) {
+        const { key, dir } = deferredOverviewSort;
         const sign = dir === "asc" ? 1 : -1;
         const cmpStr = (av: string, bv: string) => {
           if (!av && !bv) return 0;
@@ -1581,7 +1620,7 @@ export default function ProductionPage({
       }
     }
     return rows;
-  }, [filteredOrders, activeTab, overviewSort, overviewFilters]);
+  }, [filteredOrders, activeTab, deferredOverviewSort, deferredOverviewFilters]);
 
   // Overview matrix row virtualization. Pre-fix: every order in
   // visibleOrders was rendered to a hand-rolled CSS-grid <div>, so a

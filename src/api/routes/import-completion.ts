@@ -3905,8 +3905,12 @@ app.post("/refund-backfill-overconsume", async (c) => {
           AND actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)
           AND pic1Id IS NULL
           AND COALESCE(pic1Name,'') = ''
-          AND completedDate >= '2026-01-01'
-          AND completedDate <= '2026-04-30'`,
+          AND completedDate >= ?
+          AND completedDate <= ?`,
+    )
+    .bind(
+      c.req.query("from") || "2026-01-01",
+      c.req.query("to") || "2026-04-30",
     )
     .all<RefundCandidateRow>();
   const candidates = candRes.results ?? [];

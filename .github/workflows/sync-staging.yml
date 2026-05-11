@@ -1,0 +1,113 @@
+name: Sync prod → staging
+
+# Refreshes the staging Supabase project from a pg_dump of prod. Dumps and
+# restores the `public` schema only (Supabase-managed schemas like `auth`,
+# `storage`, `extensions` are left untouched on both ends).
+#
+# Triggers:
+#   * workflow_dispatch — manual one-shot. Requires typing `SYNC` in the
+#     confirm input to fire (guard against accidental clicks).
+#   * schedule — nightly at 02:00 SGT (18:00 UTC). Note: GitHub Actions only
+#     runs `schedule:` triggers from the DEFAULT branch (main). While this
+#     file lives on the staging branch, only workflow_dispatch is active.
+#     Once proven, merge to main to enable the cron.
+#
+# Secrets required (already set):
+#   * PROD_DATABASE_URL    — session pooler URL for prod Supabase
+#   * STAGING_DATABASE_URL — session pooler URL for staging Supabase
+#
+# Both URLs MUST use the session pooler (port 5432 on
+# aws-1-<region>.pooler.supabase.com) because GitHub Actions runners are
+# IPv4-only and Supabase direct connections are IPv6 by default.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type SYNC to confirm (safety gate)'
+        required: true
+        type: string
+  schedule:
+    # 02:00 SGT daily = 18:00 UTC previous day. Quiet hour for the operator.
+    - cron: '0 18 * * *'
+
+concurrency:
+  group: sync-staging
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate manual confirmation
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [[ "${{ inputs.confirm }}" != "SYNC" ]]; then
+            echo "::error::Manual trigger requires confirm input to be exactly 'SYNC'. Got: '${{ inputs.confirm }}'"
+            exit 1
+          fi
+          echo "Manual sync confirmed."
+
+      - name: Install PostgreSQL 16 client
+        run: |
+          sudo sh -c 'echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo install -d /etc/apt/keyrings
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-16
+          pg_dump --version
+          psql --version
+
+      - name: pg_dump prod (public schema, custom format)
+        env:
+          PROD_URL: ${{ secrets.PROD_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          pg_dump \
+            --no-owner --no-acl \
+            --schema=public \
+            --format=custom \
+            --compress=9 \
+            --file=prod.dump \
+            "$PROD_URL"
+          ls -lh prod.dump
+
+      - name: Reset staging public schema (drop + recreate)
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 <<'SQL'
+            DROP SCHEMA IF EXISTS public CASCADE;
+            CREATE SCHEMA public;
+            GRANT ALL ON SCHEMA public TO postgres;
+            GRANT ALL ON SCHEMA public TO anon, authenticated, service_role;
+            GRANT ALL ON SCHEMA public TO public;
+          SQL
+
+      - name: Restore prod dump into staging
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          # --exit-on-error stops on first failure so we don't end up with a
+          # half-restored staging. --no-owner / --no-acl strips ownership
+          # info (the prod and staging projects have different role names).
+          pg_restore \
+            --no-owner --no-acl \
+            --schema=public \
+            --exit-on-error \
+            --dbname="$STAGING_URL" \
+            prod.dump
+
+      - name: Verify staging matches prod
+        env:
+          PROD_URL: ${{ secrets.PROD_DATABASE_URL }}
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          echo "=== Prod row counts ==="
+          psql "$PROD_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"
+          echo "=== Staging row counts ==="
+          psql "$STAGING_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"

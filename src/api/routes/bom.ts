@@ -606,7 +606,12 @@ app.put("/templates/:id", async (c) => {
 //
 // Response: { success: true, updated: N, failed: [{templateId, error}] }
 app.post("/templates/bulk-process-edit", async (c) => {
-  const denied = await requirePermission(c, "bom", "create");
+  // I3 fix (2026-05-11 audit): was `bom:create` — wrong, this endpoint
+  // MASS-EDITS existing templates' process rows. Right gate is `bom:update`,
+  // matching the per-template PUT at line 461 and the inline-edit route at
+  // /api/wip-times. Users with update-but-not-create were blocked; users
+  // with create-but-not-update could mutate. Inverted gate.
+  const denied = await requirePermission(c, "bom", "update");
   if (denied) return denied;
   try {
     const body = await c.req.json();

@@ -4063,6 +4063,15 @@ app.post("/refund-backfill-overconsume", async (c) => {
   // from a CSV-completed upstream JC, which means applyWipInventoryChange
   // already inserted/upserted that label's row at CSV time. We just
   // adjust stockQty.
+  //
+  // 2026-05-11 — sign param for revert mode. The endpoint is NOT
+  // idempotent by design: running it twice double-credits. Add
+  // `?revert=true` (sign=-1) to subtract the same qty back, used as a
+  // one-shot when refund was accidentally re-run. The plan list is
+  // deterministic (same SELECT filter → same rows) so revert on the
+  // same dataset exactly inverts a prior wet-run.
+  const revertMode = c.req.query("revert") === "true";
+  const sign = revertMode ? -1 : 1;
   let updated = 0;
   let skippedRowMissing = 0;
   const errors: Array<{ jcId: string; message: string }> = [];
@@ -4086,7 +4095,7 @@ app.post("/refund-backfill-overconsume", async (c) => {
         .prepare(
           `UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?`,
         )
-        .bind(p.wipQty, p.upstreamWipLabel)
+        .bind(sign * p.wipQty, p.upstreamWipLabel)
         .run();
       updated++;
     } catch (err) {

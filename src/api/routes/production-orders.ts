@@ -980,17 +980,29 @@ async function fetchFilteredPOs(
   //                                  SEW on sibling POs of same SO; both
   //                                  directions need to see across).
   //
-  // Performance note: for typical SOs this returns ~14 JCs/PO × 1-3 POs.
-  // The strict wipKey-IN strip was tighter (~7 JCs/PO) but broke under
-  // Option C. The companySOId scan only widens within a SO, which is
-  // bounded — production dataset has ~432 POs across ~340 SOs so the
-  // upper bound on JC payload is well within Hyperdrive's response budget.
-  // Cross-PO sibling subquery widens the JC fetch so a sibling PO of a
-  // merged group (e.g. SOFA cross-PO FAB_CUT) gets the merged JC pulled
-  // in. CO-origin POs use companyCOId instead of companySOId — match
-  // either pair so CO sofa siblings render correctly in dept tabs.
+  // Performance note: for typical SOs this returns ~1 JC/PO × 1-3 POs after
+  // the 2026-05-11 outer-narrow. Previously the outer SELECT pulled every
+  // JC on each matched PO (~14 JCs/PO) so a single /production/fab-sew
+  // page received ~10k JC rows for ~630 POs — only ~1.4k were FAB_SEW, the
+  // rest were noise from the other 7 depts. Profile-reported as 2.94 MB
+  // JSON / 1.5s fetch / 1s parse on the dept page (Wei Siang 2026-05-11).
+  //
+  // Outer narrow added: `AND departmentCode = ?` on the JC SELECT. The
+  // PO-id subquery already pulls in cross-SO/CO siblings, so for the SOFA
+  // cross-PO FAB_CUT case the anchor PO's merged JC is still included.
+  // Sibling POs that have no deptFilter JC of their own return empty
+  // jobCards arrays; the frontend baseRows picker (production/index.tsx
+  // L1730+) already falls back to ordersByGroup to surface the anchor's
+  // merged JC on those sibling rows, so the rendered dept cells stay
+  // populated. rowToMinimalPO only reads PO-level metadata
+  // (currentDepartment, progress) plus its own filtered JC list — never
+  // depends on cross-dept JCs.
+  //
+  // Cross-PO sibling subquery still widens the PO set within a SO group
+  // so the merged FAB_CUT JC + sibling rows are returned together. CO-
+  // origin POs use companyCOId.
   const jcWhereDept = deptFilter
-    ? ` WHERE orgId = ? AND productionOrderId IN (
+    ? ` WHERE orgId = ? AND departmentCode = ? AND productionOrderId IN (
           SELECT po.id FROM production_orders po
           WHERE po.orgId = ?
             AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
@@ -1046,12 +1058,13 @@ async function fetchFilteredPOs(
   // by the JC set we already loaded, not the full piece_pics table.
   if (minimal) {
     if (deptFilter) {
-      // Bind slots: 8 = orgId (outer JC scope) + orgId (po.orgId) + orgId
-      // (inner jc) + deptFilter + orgId (jc2 SO sibling) + deptFilter +
-      // orgId (jc3 CO sibling) + deptFilter.
+      // Bind slots: 9 = orgId (outer JC scope) + deptFilter (outer JC narrow,
+      // added 2026-05-11) + orgId (po.orgId) + orgId (inner jc) + deptFilter
+      // + orgId (jc2 SO sibling) + deptFilter + orgId (jc3 CO sibling) +
+      // deptFilter.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+        .bind(orgId, deptFilter, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -1112,10 +1125,10 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
-    // Bind slots: 8 — see jcWhereDept comment above for the layout.
+    // Bind slots: 9 — see jcWhereDept comment above for the layout.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+      .bind(orgId, deptFilter, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),

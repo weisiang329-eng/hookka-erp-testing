@@ -333,4 +333,185 @@ app.get("/", async (c) => {
   return c.json({ success: true, data: agg });
 });
 
+// ---------------------------------------------------------------------------
+// PUT /api/wip-times — bulk update BOM minutes by (wipLabel, deptCode)
+//
+// The list page dedupes by resolved (wipLabel × deptCode); one row often
+// represents many products that share the same WIP. To let operators fix
+// "BOM hasn't set a time" gaps (175+ rows across sofa Back Cushion / Arm)
+// without clicking into each product's BOM page, this endpoint:
+//
+// 1. Walks every ACTIVE bom_template the user can see (org-scoped).
+// 2. Re-resolves wipLabel tokens against each product's variants (same
+//    logic as the GET path).
+// 3. For every process node whose (resolvedLabel, deptCode) matches the
+//    request, overwrites process.minutes.
+// 4. Stringifies the modified tree back into wipComponents and UPDATEs
+//    the bom_templates row.
+//
+// Body: { wipLabel: string, deptCode: string, minutes: number }
+// Response: { success, updatedBomCount, updatedNodeCount }
+//
+// Safety: requires permission "bom:update". The frontend confirms
+// "Updating N products" before calling — see /production/wip-times.tsx.
+// ---------------------------------------------------------------------------
+type PutBody = {
+  wipLabel?: unknown;
+  deptCode?: unknown;
+  minutes?: unknown;
+};
+
+// Walk a wip subtree and mutate every process.minutes where the node's
+// resolved label + dept matches the target. Returns # nodes updated in
+// this subtree so the caller can decide whether to write the BOM back.
+function mutateMatchingNodes(
+  nodes: BomWipNode[] | undefined,
+  ctx: BomVariantContext,
+  targetLabel: string,
+  targetDept: string,
+  newMinutes: number,
+): number {
+  if (!Array.isArray(nodes)) return 0;
+  let count = 0;
+  for (const node of nodes) {
+    if (!node || typeof node !== "object") continue;
+    const rawCode = String(node.wipCode || "");
+    const rawLabel = String(node.wipLabel || rawCode || "");
+    const resolved = rawLabel
+      ? resolveWipTokens(rawLabel, ctx)
+      : resolveWipTokens(rawCode, ctx);
+    if (resolved === targetLabel) {
+      const procs = Array.isArray(node.processes) ? node.processes : [];
+      for (const p of procs) {
+        if (!p || !p.deptCode) continue;
+        if (String(p.deptCode).toUpperCase() === targetDept) {
+          p.minutes = newMinutes;
+          count++;
+        }
+      }
+    }
+    if (Array.isArray(node.children)) {
+      count += mutateMatchingNodes(
+        node.children,
+        ctx,
+        targetLabel,
+        targetDept,
+        newMinutes,
+      );
+    }
+  }
+  return count;
+}
+
+app.put("/", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  let body: PutBody;
+  try {
+    body = (await c.req.json()) as PutBody;
+  } catch {
+    return c.json({ success: false, error: "invalid json" }, 400);
+  }
+
+  const wipLabel = typeof body.wipLabel === "string" ? body.wipLabel.trim() : "";
+  const deptCode =
+    typeof body.deptCode === "string" ? body.deptCode.trim().toUpperCase() : "";
+  const minutesRaw = Number(body.minutes);
+  // Cap at a sane upper bound — typo "1000" should not silently land in BOM.
+  // 8h (480 min) is already extreme for a single per-unit operation; we
+  // accept up to 24h (1440) so legitimate long bake/cure steps work, then
+  // hard-reject anything bigger.
+  if (!wipLabel) {
+    return c.json({ success: false, error: "wipLabel required" }, 400);
+  }
+  if (!deptCode) {
+    return c.json({ success: false, error: "deptCode required" }, 400);
+  }
+  if (!Number.isFinite(minutesRaw) || minutesRaw < 0 || minutesRaw > 1440) {
+    return c.json(
+      { success: false, error: "minutes must be 0–1440 (24h cap)" },
+      400,
+    );
+  }
+  const minutes = Math.round(minutesRaw);
+
+  // Pull every ACTIVE BOM in the org with the joined products row so we
+  // can rebuild the variant context exactly like the GET path does.
+  const result = await c.var.DB.prepare(
+    `SELECT
+       bt.id               AS "id",
+       bt.productCode      AS "productCode",
+       bt.baseModel        AS "baseModel",
+       bt.category         AS "category",
+       bt.wipComponents    AS "wipComponents",
+       p.defaultVariants   AS "defaultVariants",
+       p.sizeCode          AS "sizeCode",
+       p.sizeLabel         AS "sizeLabel"
+     FROM bom_templates bt
+     LEFT JOIN products p ON p.code = bt.productCode AND p.orgId = bt.orgId
+     WHERE bt.orgId = ? AND UPPER(bt.versionStatus) = 'ACTIVE'`,
+  )
+    .bind(orgId)
+    .all<BomRow & { id: string }>();
+
+  let updatedBomCount = 0;
+  let updatedNodeCount = 0;
+
+  for (const row of result.results ?? []) {
+    if (!row.wipComponents) continue;
+    let tree: unknown;
+    try {
+      tree = JSON.parse(row.wipComponents);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(tree)) continue;
+
+    let defaults: DefaultVariantsBlob | null = null;
+    if (row.defaultVariants) {
+      try {
+        defaults = JSON.parse(row.defaultVariants) as DefaultVariantsBlob;
+      } catch {
+        defaults = null;
+      }
+    }
+    const ctx = buildVariantContext(
+      row.productCode,
+      row.baseModel,
+      row.sizeCode,
+      row.sizeLabel,
+      defaults,
+    );
+
+    const nodesUpdated = mutateMatchingNodes(
+      tree as BomWipNode[],
+      ctx,
+      wipLabel,
+      deptCode,
+      minutes,
+    );
+    if (nodesUpdated > 0) {
+      const newJson = JSON.stringify(tree);
+      await c.var.DB.prepare(
+        `UPDATE bom_templates SET wipComponents = ? WHERE id = ? AND orgId = ?`,
+      )
+        .bind(newJson, row.id, orgId)
+        .run();
+      updatedBomCount++;
+      updatedNodeCount += nodesUpdated;
+    }
+  }
+
+  return c.json({
+    success: true,
+    updatedBomCount,
+    updatedNodeCount,
+    wipLabel,
+    deptCode,
+    minutes,
+  });
+});
+
 export default app;

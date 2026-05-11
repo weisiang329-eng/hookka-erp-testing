@@ -12,10 +12,10 @@
 // routes/wip-times.ts for the rationale.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Clock, Download, AlertTriangle } from "lucide-react";
+import { Clock, Download, AlertTriangle, Pencil, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DEPARTMENTS } from "./utils";
 import { useUrlState } from "@/lib/use-url-state";
@@ -74,10 +74,25 @@ function fmtQty(qMin: number, qMax: number): string {
   return `${qMin}–${qMax} PCS`;
 }
 
+// Inline-edit state for the BOM Time cell. Null when the dialog is closed.
+type EditState = {
+  wipLabel: string;
+  departmentCode: string;
+  bomMinMinutes: number;
+  bomMaxMinutes: number;
+  bomAvgMinutes: number;
+  productCount: number;
+  // What the user is currently typing.
+  draftMinutes: string;
+};
+
 export default function WipTimesPage() {
   const [dept, setDept] = useUrlState<string>("dept", "");
   const [category, setCategory] = useUrlState<string>("category", "");
   const [exporting, setExporting] = useState(false);
+  const [editing, setEditing] = useState<EditState | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const url = useMemo(() => {
     const params = new URLSearchParams();
@@ -118,6 +133,49 @@ export default function WipTimesPage() {
       missing,
     };
   }, [rows]);
+
+  // -- Inline edit save -----------------------------------------------------
+  // PUTs the new minutes value to /api/wip-times, which finds every ACTIVE
+  // BOM template containing this (wipLabel × deptCode) and overwrites the
+  // matching process.minutes in their wipComponents JSON. One row in the UI
+  // = N BOMs on the server (N = productCount).
+  const handleSaveEdit = async () => {
+    if (!editing || saving) return;
+    setSaveError(null);
+    const m = Number(editing.draftMinutes.trim());
+    if (!Number.isFinite(m) || m < 0 || m > 1440) {
+      setSaveError("Enter a number between 0 and 1440 (24h cap).");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/wip-times", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          wipLabel: editing.wipLabel,
+          deptCode: editing.departmentCode,
+          minutes: m,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      // Invalidate every /api/wip-times cache key — filter combos differ
+      // so a prefix invalidation catches them all (with-dept, with-cat etc).
+      invalidateCachePrefix("/api/wip-times");
+      setEditing(null);
+      // Force the page-bound useCachedJson to refetch by mutating url state
+      // not strictly needed — invalidateCachePrefix already flips the cache
+      // entry; the next render's useCachedJson will see the fresh fetch.
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   // -- Excel export ---------------------------------------------------------
   const handleExport = async () => {
@@ -261,13 +319,13 @@ export default function WipTimesPage() {
         label: "BOM Time",
         sortable: true,
         align: "right",
-        // 240px so "30m – 1h 30m (avg 53m)" fits without truncation
-        width: "240px",
+        // 270px — fits "30m – 1h 30m (avg 53m)" + the pencil icon.
+        width: "270px",
         render: (_v, r) => (
           <span className="inline-flex items-center gap-1.5 justify-end">
             {r.hasZeroMinutes && (
               <span
-                title="BOM hasn't set a time for at least one product using this WIP — fill it in to make the canonical time accurate."
+                title="BOM hasn't set a time for at least one product using this WIP — click ✏️ to fill it in."
                 className="inline-flex items-center"
               >
                 <AlertTriangle className="h-3.5 w-3.5 text-[#C99A3F]" />
@@ -280,6 +338,27 @@ export default function WipTimesPage() {
             >
               {fmtBomRange(r.bomMinMinutes, r.bomMaxMinutes, r.bomAvgMinutes)}
             </span>
+            <button
+              type="button"
+              title={`Edit BOM minutes for "${r.wipLabel}" — applies to all ${r.productCount} product(s) using this WIP`}
+              onClick={() =>
+                setEditing({
+                  wipLabel: r.wipLabel,
+                  departmentCode: r.departmentCode,
+                  bomMinMinutes: r.bomMinMinutes,
+                  bomMaxMinutes: r.bomMaxMinutes,
+                  bomAvgMinutes: r.bomAvgMinutes,
+                  productCount: r.productCount,
+                  // Seed input with current value — avg is the most useful
+                  // single starting point when min == max (which is the
+                  // common case); for ranges, user can replace.
+                  draftMinutes: String(r.bomAvgMinutes),
+                })
+              }
+              className="ml-1 p-1 rounded hover:bg-[#F0ECE9] text-[#8A8680] hover:text-[#6B5C32]"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
           </span>
         ),
       },
@@ -423,6 +502,132 @@ export default function WipTimesPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit BOM Time modal — opens when user clicks the ✏️ icon on a row.
+          One row in the UI represents N BOM products (productCount), so the
+          modal makes the "bulk update" cost visible before we PUT. */}
+      {editing && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => !saving && setEditing(null)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-md w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-[#E2DDD8] flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-[#1F1D1B]">
+                  Edit BOM Time
+                </h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">
+                  Updates the per-unit minutes on every product's BOM.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => !saving && setEditing(null)}
+                className="p-1 rounded hover:bg-[#F0ECE9] text-[#8A8680]"
+                disabled={saving}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-4 space-y-4">
+              <div>
+                <p className="text-xs text-[#6B7280] uppercase tracking-wide">
+                  WIP
+                </p>
+                <p className="font-semibold text-[#1F1D1B] mt-0.5">
+                  {editing.wipLabel}
+                </p>
+                <p className="text-xs text-[#6B7280] mt-1">
+                  Department:{" "}
+                  <span className="font-medium text-[#1F1D1B]">
+                    {DEPT_LABEL_BY_CODE.get(editing.departmentCode) ??
+                      editing.departmentCode}
+                  </span>
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 bg-[#FAF9F7] rounded-md p-3 text-sm">
+                <div>
+                  <p className="text-xs text-[#6B7280]">Current BOM Time</p>
+                  <p className="font-semibold text-[#1F1D1B] mt-0.5">
+                    {fmtBomRange(
+                      editing.bomMinMinutes,
+                      editing.bomMaxMinutes,
+                      editing.bomAvgMinutes,
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-[#6B7280]">Will update</p>
+                  <p className="font-semibold text-[#1F1D1B] mt-0.5">
+                    {editing.productCount} product
+                    {editing.productCount === 1 ? "" : "s"}
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-[#1F1D1B] mb-1">
+                  New BOM Time (minutes per unit)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={1440}
+                  step={1}
+                  value={editing.draftMinutes}
+                  onChange={(e) =>
+                    setEditing((prev) =>
+                      prev ? { ...prev, draftMinutes: e.target.value } : prev,
+                    )
+                  }
+                  className="w-full h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-base font-semibold tabular-nums focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  placeholder="0"
+                  disabled={saving}
+                  autoFocus
+                />
+                <p className="text-xs text-[#6B7280] mt-1">
+                  0 – 1440 minutes (24h cap). Applies to all{" "}
+                  {editing.productCount} matching BOM
+                  {editing.productCount === 1 ? "" : "s"}.
+                </p>
+              </div>
+
+              {saveError && (
+                <div className="text-xs text-[#B91C1C] bg-[#FEF2F2] border border-[#FECACA] rounded p-2">
+                  {saveError}
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 border-t border-[#E2DDD8] flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEditing(null)}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSaveEdit}
+                disabled={saving}
+                className="bg-[#6B5C32] text-white hover:bg-[#574B29]"
+              >
+                {saving
+                  ? "Saving…"
+                  : `Apply to ${editing.productCount} BOM${editing.productCount === 1 ? "" : "s"}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* WIP table */}
       <Card>

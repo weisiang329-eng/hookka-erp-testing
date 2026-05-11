@@ -5,6 +5,13 @@ on:
     branches:
       - main
       - 'claude/**'
+      # `staging` is the long-lived staging branch. Pushes to this branch
+      # deploy to https://staging.hookka-erp-testing.pages.dev (Cloudflare
+      # Pages preview slug). worker.ts routes the subdomain to
+      # HYPERDRIVE_STAGING (= hookka-erp-staging Supabase in Tokyo).
+      # Trigger lives only on the staging branch for now to avoid
+      # touching main's deploy.yml until ready to merge.
+      - staging
   # Also run on every PR targeting main so the required `deploy` status
   # check is produced regardless of the PR's source branch. Without this,
   # PRs from teammate / feature branches can never satisfy the branch

@@ -227,7 +227,31 @@ function aggregateFcSlots(
         .map((s) => s.dueDate)
         .filter(Boolean)
         .sort()[0] ?? anchor.dueDate;
-    const modelLabel = joinModelLabel(group.map((s) => s.productCode));
+    // SOFA: collapse to one slot per PO BEFORE building label / wipQty. A
+    // single SOFA BOM has multiple top-level WIP nodes (Sofa Base + Back
+    // Cushion + Armrest, each with its own Fab Cut process step), so the
+    // outer planned-loop pushes one FC slot PER sub-WIP. A 2-line SO
+    // (1A(LHF) + 1A(RHF)) therefore arrives here as 2 POs × 3 sub-WIPs =
+    // 6 slots, all carrying the parent PO's productCode. Joining slot
+    // productCodes directly inflates the label to 6 entries when the SO
+    // only ordered 2 pieces. Collapsing by poId first restores the
+    // 1-entry-per-SO-line semantics — same fix the
+    // backfill-fab-cut-merge endpoint already applies (see
+    // import-completion.ts line 5687–5700). BF/ACC stays per-row: same-PO
+    // merge needs the multi-piece breakdown (HB qty=1 + DV qty=2 → min=1
+    // set).
+    const isSofa = anchor.itemCategory === "SOFA";
+    const labelSlots = isSofa
+      ? Array.from(
+          group
+            .reduce((m, s) => {
+              if (!m.has(s.poId)) m.set(s.poId, s);
+              return m;
+            }, new Map<string, FcSlotInfo>())
+            .values(),
+        )
+      : group;
+    const modelLabel = joinModelLabel(labelSlots.map((s) => s.productCode));
     const wipLabel = buildFcWipLabel(
       modelLabel,
       anchor.sizeLabel,
@@ -271,14 +295,14 @@ function aggregateFcSlots(
       //   - BF/ACC same-PO merge → set count via min (HB=1 + DV=2 → min=1
       //     means 1 set, mirrors original logic — multipliers across pieces
       //     of the same set must NOT be summed).
-      //   - SOFA cross-PO merge → sum across source POs (the cutter cuts
-      //     every piece in the group: 5530-1A(LHF) ×2 + 1NA ×1 + 1A(RHF)
-      //     ×2 + 1S ×1 → wipQty=6, not 1). Each sibling PO contributes its
-      //     own line qty.
-      wipQty:
-        anchor.itemCategory === "SOFA"
-          ? group.reduce((sum, s) => sum + s.wipQty, 0)
-          : Math.min(...group.map((s) => s.wipQty)),
+      //   - SOFA cross-PO merge → sum over the per-PO collapsed slots (one
+      //     entry per source PO, each contributing its line qty). 6 POs of
+      //     a sofa group → wipQty=6, not 18 (which is what a raw sum across
+      //     the BOM-expanded slot list would produce when each PO has 3
+      //     sub-WIPs traversing FAB_CUT).
+      wipQty: isSofa
+        ? labelSlots.reduce((sum, s) => sum + s.wipQty, 0)
+        : Math.min(...group.map((s) => s.wipQty)),
       category: anchor.processCategory,
       minutes: totalMinutes,
       branchKey: "",

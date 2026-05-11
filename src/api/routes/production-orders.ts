@@ -980,29 +980,23 @@ async function fetchFilteredPOs(
   //                                  SEW on sibling POs of same SO; both
   //                                  directions need to see across).
   //
-  // Performance note: for typical SOs this returns ~1 JC/PO × 1-3 POs after
-  // the 2026-05-11 outer-narrow. Previously the outer SELECT pulled every
-  // JC on each matched PO (~14 JCs/PO) so a single /production/fab-sew
-  // page received ~10k JC rows for ~630 POs — only ~1.4k were FAB_SEW, the
-  // rest were noise from the other 7 depts. Profile-reported as 2.94 MB
-  // JSON / 1.5s fetch / 1s parse on the dept page (Wei Siang 2026-05-11).
-  //
-  // Outer narrow added: `AND departmentCode = ?` on the JC SELECT. The
-  // PO-id subquery already pulls in cross-SO/CO siblings, so for the SOFA
-  // cross-PO FAB_CUT case the anchor PO's merged JC is still included.
-  // Sibling POs that have no deptFilter JC of their own return empty
-  // jobCards arrays; the frontend baseRows picker (production/index.tsx
-  // L1730+) already falls back to ordersByGroup to surface the anchor's
-  // merged JC on those sibling rows, so the rendered dept cells stay
-  // populated. rowToMinimalPO only reads PO-level metadata
-  // (currentDepartment, progress) plus its own filtered JC list — never
-  // depends on cross-dept JCs.
-  //
+  // Performance note: deptFilter narrows the PO set (only POs that have at
+  // least one JC of this dept, plus cross-SO/CO siblings) but the JC
+  // SELECT itself stays un-narrowed by departmentCode. Returning all 8
+  // depts of JCs per matched PO is required for the dept page's upstream
+  // cells: the frontend picker (production/index.tsx L1914) does a strict
+  // wipKey match against same-PO JCs of OTHER depts to populate columns
+  // like Fab Sew / Foam / Framing / Webbing on the Upholstery tab. The
+  // 2026-05-11 attempt to add `AND departmentCode = ?` here (commit
+  // f5657f5) blanked every non-active upstream cell on every dept page
+  // because the picker had nothing to match against. The frontend's
+  // ordersByGroup fallback only fires for FAB_CUT lookups, NOT for non-
+  // FC ↔ non-FC pairs, so the outer narrow could not be salvaged by FE.
   // Cross-PO sibling subquery still widens the PO set within a SO group
   // so the merged FAB_CUT JC + sibling rows are returned together. CO-
   // origin POs use companyCOId.
   const jcWhereDept = deptFilter
-    ? ` WHERE orgId = ? AND departmentCode = ? AND productionOrderId IN (
+    ? ` WHERE orgId = ? AND productionOrderId IN (
           SELECT po.id FROM production_orders po
           WHERE po.orgId = ?
             AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
@@ -1058,13 +1052,12 @@ async function fetchFilteredPOs(
   // by the JC set we already loaded, not the full piece_pics table.
   if (minimal) {
     if (deptFilter) {
-      // Bind slots: 9 = orgId (outer JC scope) + deptFilter (outer JC narrow,
-      // added 2026-05-11) + orgId (po.orgId) + orgId (inner jc) + deptFilter
-      // + orgId (jc2 SO sibling) + deptFilter + orgId (jc3 CO sibling) +
-      // deptFilter.
+      // Bind slots: 8 = orgId (outer JC scope) + orgId (po.orgId) + orgId
+      // (inner jc) + deptFilter + orgId (jc2 SO sibling) + deptFilter +
+      // orgId (jc3 CO sibling) + deptFilter.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, deptFilter, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -1125,10 +1118,10 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
-    // Bind slots: 9 — see jcWhereDept comment above for the layout.
+    // Bind slots: 8 — see jcWhereDept comment above for the layout.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, deptFilter, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),

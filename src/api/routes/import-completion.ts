@@ -5838,6 +5838,294 @@ app.post("/backfill-fab-cut-merge", async (c) => {
 
 
 // ---------------------------------------------------------------------------
+// /backfill-fc-label-refresh — one-shot retroactive FAB_CUT wipLabel/wipQty
+// refresh.
+//
+// Background: production-builder.ts `aggregateFcSlots` had a per-PO collapse
+// bug where each BOM top-level sub-WIP that traversed FAB_CUT (SOFA: Base +
+// Back Cushion + Armrest; BF: HB + Divan) pushed its OWN slot. Joining slot
+// productCodes inflated labels — SOFA `5531-1A(LHF)+1A(LHF)+1A(LHF)+...`
+// from 1 PO with 3 sub-WIPs, BF `1013-(S)+(S)` from 1 PO with HB+DV. Fix in
+// commits 5346bb7 + ce019a6 now collapses one slot per PO before joining;
+// new SO confirms / PUT-cascades produce the correct label. This endpoint
+// rewrites the labels on already-cascaded JCs that still carry the inflated
+// form — non-destructive, only UPDATEs wipLabel + wipQty + productionTime,
+// leaves status / completedDate / PIC / dueDate untouched so in-progress
+// scans aren't disturbed.
+//
+// Idempotent. Re-running after a successful run is a no-op (labels already
+// match what the fixed cascade would produce).
+//
+// Always run with `?dryRun=true` first.
+// ---------------------------------------------------------------------------
+type FcRefreshJcRow = {
+  id: string;
+  productionOrderId: string;
+  wipLabel: string;
+  wipQty: number;
+  productionTimeMinutes: number | null;
+  estMinutes: number | null;
+  poProductCode: string | null;
+  poFabricCode: string | null;
+  poSizeLabel: string | null;
+  poGapInches: number | null;
+  poDivanHeightInches: number | null;
+  poLegHeightInches: number | null;
+  poItemCategory: string | null;
+  poCompanySOId: string | null;
+  poSalesOrderId: string | null;
+  poCompanyCOId: string | null;
+  poConsignmentOrderId: string | null;
+  bomBaseModel: string | null;
+};
+
+type PoRow = {
+  id: string;
+  productCode: string | null;
+  companySOId: string | null;
+  salesOrderId: string | null;
+  companyCOId: string | null;
+  consignmentOrderId: string | null;
+  fabricCode: string | null;
+  itemCategory: string | null;
+  bomBaseModel: string | null;
+};
+
+app.post("/backfill-fc-label-refresh", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // 1. Pull every FAB_CUT JC with its anchor PO context. Each JC has ONE
+  //    anchor PO (productionOrderId). For SOFA cross-PO merged JCs the
+  //    anchor is whichever PO won the deterministic jcId seed; siblings
+  //    are NOT in job_cards anymore (they were lumped into the anchor),
+  //    so we'll find them by querying production_orders separately.
+  const jcRowsRes = await db
+    .prepare(
+      `SELECT
+         jc.id, jc.productionOrderId, jc.wipLabel, jc.wipQty,
+         jc.productionTimeMinutes, jc.estMinutes,
+         po.productCode       AS "poProductCode",
+         po.fabricCode        AS "poFabricCode",
+         po.sizeLabel         AS "poSizeLabel",
+         po.gapInches         AS "poGapInches",
+         po.divanHeightInches AS "poDivanHeightInches",
+         po.legHeightInches   AS "poLegHeightInches",
+         po.itemCategory      AS "poItemCategory",
+         po.companySOId       AS "poCompanySOId",
+         po.salesOrderId      AS "poSalesOrderId",
+         po.companyCOId       AS "poCompanyCOId",
+         po.consignmentOrderId AS "poConsignmentOrderId",
+         bt.baseModel         AS "bomBaseModel"
+       FROM job_cards jc
+       JOIN production_orders po ON po.id = jc.productionOrderId
+       LEFT JOIN bom_templates bt
+         ON bt.productCode = po.productCode
+        AND bt.versionStatus = 'ACTIVE'
+       WHERE jc.departmentCode = 'FAB_CUT'
+         AND jc.orgId = ?`,
+    )
+    .bind(orgId)
+    .all<FcRefreshJcRow>();
+  const jcRows = jcRowsRes.results ?? [];
+
+  // 2. Pull all production_orders (org-scoped) with their baseModel so we
+  //    can reconstruct each merge group's full PO list. SOFA merged JCs
+  //    span multiple POs that share (companySOId, baseModel, fabricCode).
+  const posRes = await db
+    .prepare(
+      `SELECT
+         po.id, po.productCode, po.companySOId, po.salesOrderId,
+         po.companyCOId, po.consignmentOrderId, po.fabricCode,
+         po.itemCategory,
+         bt.baseModel AS "bomBaseModel"
+       FROM production_orders po
+       LEFT JOIN bom_templates bt
+         ON bt.productCode = po.productCode
+        AND bt.versionStatus = 'ACTIVE'
+       WHERE po.orgId = ?`,
+    )
+    .bind(orgId)
+    .all<PoRow>();
+  const allPos = posRes.results ?? [];
+
+  // 3. Build groupKey → PO rows index. Same keying as production-builder
+  //    `aggregateFcSlots`:
+  //      SOFA  → SOFA::{parentDocKey}::{baseModel}::{fabric}
+  //      BF/ACC → PO::{poId}
+  const groupKeyForPo = (po: PoRow): string => {
+    const isSofa = (po.itemCategory ?? "") === "SOFA";
+    if (!isSofa) return `PO::${po.id}`;
+    const parentDocKey =
+      po.companySOId ??
+      po.salesOrderId ??
+      po.companyCOId ??
+      po.consignmentOrderId ??
+      "";
+    const baseModel = po.bomBaseModel || po.productCode || "";
+    const fabric = po.fabricCode ?? "";
+    return `SOFA::${parentDocKey}::${baseModel}::${fabric}`;
+  };
+  const posByGroup = new Map<string, PoRow[]>();
+  for (const po of allPos) {
+    const key = groupKeyForPo(po);
+    if (!posByGroup.has(key)) posByGroup.set(key, []);
+    posByGroup.get(key)!.push(po);
+  }
+
+  // 4. For each FC JC, compute the merge groupKey from its anchor PO,
+  //    pull the PO list from the index, and rebuild the label.
+  type Plan = {
+    jcId: string;
+    groupKey: string;
+    poCount: number;
+    oldLabel: string;
+    newLabel: string;
+    oldQty: number;
+    newQty: number;
+    oldProdTime: number | null;
+    newProdTime: number;
+  };
+  const plans: Plan[] = [];
+  let skippedNoAnchorPo = 0;
+  let skippedNoGroup = 0;
+  let unchanged = 0;
+
+  for (const jc of jcRows) {
+    if (!jc.poItemCategory) {
+      // PO context missing — can't recompute, skip rather than corrupt.
+      skippedNoAnchorPo++;
+      continue;
+    }
+    const anchorPo: PoRow = {
+      id: jc.productionOrderId,
+      productCode: jc.poProductCode,
+      companySOId: jc.poCompanySOId,
+      salesOrderId: jc.poSalesOrderId,
+      companyCOId: jc.poCompanyCOId,
+      consignmentOrderId: jc.poConsignmentOrderId,
+      fabricCode: jc.poFabricCode,
+      itemCategory: jc.poItemCategory,
+      bomBaseModel: jc.bomBaseModel,
+    };
+    const key = groupKeyForPo(anchorPo);
+    const groupPos = posByGroup.get(key);
+    if (!groupPos || groupPos.length === 0) {
+      skippedNoGroup++;
+      continue;
+    }
+    // Per-PO collapse: each PO contributes ONE productCode entry to the
+    // label. Sort by id so the order is deterministic across runs (and
+    // matches createdAt for the SO line order, since poIds are seeded
+    // pord-{soId}-{NN}).
+    const sortedPos = [...groupPos].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    );
+    const productCodes = sortedPos
+      .map((p) => p.productCode ?? "")
+      .filter(Boolean);
+    const modelLabel = joinModelLabel(productCodes);
+    const isBF = (jc.poItemCategory ?? "") === "BEDFRAME";
+    const totalH =
+      (jc.poGapInches ?? 0) +
+      (jc.poDivanHeightInches ?? 0) +
+      (jc.poLegHeightInches ?? 0);
+    const newLabel = buildFcWipLabel(
+      modelLabel,
+      jc.poSizeLabel ?? "",
+      totalH,
+      jc.poDivanHeightInches,
+      jc.poFabricCode ?? "",
+      isBF,
+    );
+
+    // wipQty:
+    //   SOFA → 1 set per PO (SOFA qty=1 enforced upstream) → poCount.
+    //   BF/ACC → group is 1 PO, qty stays as it was (cascade-correct).
+    const isSofa = (jc.poItemCategory ?? "") === "SOFA";
+    const newQty = isSofa ? sortedPos.length : jc.wipQty;
+
+    // productionTimeMinutes — wasn't part of the cascade bug, but if the
+    // backfill-fab-cut-merge endpoint stamped a value derived from
+    // inflated slot rows it may be too high. Leave it as-is unless the
+    // operator explicitly requests a recompute via a future flag.
+    const newProdTime =
+      jc.productionTimeMinutes ?? jc.estMinutes ?? 0;
+
+    if (newLabel === jc.wipLabel && newQty === jc.wipQty) {
+      unchanged++;
+      continue;
+    }
+    plans.push({
+      jcId: jc.id,
+      groupKey: key,
+      poCount: sortedPos.length,
+      oldLabel: jc.wipLabel,
+      newLabel,
+      oldQty: jc.wipQty,
+      newQty,
+      oldProdTime: jc.productionTimeMinutes,
+      newProdTime,
+    });
+  }
+
+  if (dryRun) {
+    return c.json({
+      mode: "dry-run",
+      totalFcJcs: jcRows.length,
+      totalPos: allPos.length,
+      groupsIndexed: posByGroup.size,
+      skippedNoAnchorPo,
+      skippedNoGroup,
+      unchanged,
+      toUpdate: plans.length,
+      sample: plans.slice(0, 20),
+    });
+  }
+
+  // Execute. Only UPDATE wipLabel + wipQty — leave status / completedDate /
+  // PIC / dueDate / sequence untouched so in-progress JCs keep their
+  // scanned state.
+  let updated = 0;
+  const errors: { jcId: string; error: string }[] = [];
+  for (const plan of plans) {
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET wipLabel = ?, wipQty = ?
+            WHERE id = ?`,
+        )
+        .bind(plan.newLabel, plan.newQty, plan.jcId)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: plan.jcId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    mode: "executed",
+    totalFcJcs: jcRows.length,
+    totalPos: allPos.length,
+    groupsIndexed: posByGroup.size,
+    skippedNoAnchorPo,
+    skippedNoGroup,
+    unchanged,
+    toUpdate: plans.length,
+    updated,
+    errors,
+  });
+});
+
+
+// ---------------------------------------------------------------------------
 // /backfill-split-multi-qty — one-shot retroactive SO→PO split repair.
 //
 // Background: production-builder.ts:412-414 added the SO→PO split-by-quantity

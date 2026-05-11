@@ -3863,6 +3863,138 @@ type RefundSiblingRow = {
   completedDate: string | null;
 };
 
+// One-shot: same refund logic as /refund-backfill-overconsume but hardcoded
+// for the May 2026 uph-pofold backfill range (2026-05-01 ↔ 2026-05-11).
+// Created because the date-range query params on the main endpoint weren't
+// propagating to edge in time and we have 58 May negatives blocking ops.
+// Will be deleted post-migration.
+app.post("/refund-may-2026-pofold", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  const candRes = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentCode, wipKey, wipLabel,
+              wipQty, completedDate, branchKey, sequence, estMinutes,
+              productionTimeMinutes, actualMinutes, overdue
+         FROM job_cards
+        WHERE status IN ('COMPLETED','TRANSFERRED')
+          AND completedDate IS NOT NULL
+          AND overdue = 'COMPLETED'
+          AND UPPER(COALESCE(departmentCode,''))
+              IN ('FAB_SEW','FRAMING','WEBBING','FOAM','WOOD_CUT')
+          AND actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)
+          AND pic1Id IS NULL
+          AND COALESCE(pic1Name,'') = ''
+          AND completedDate >= '2026-05-01'
+          AND completedDate <= '2026-05-11'`,
+    )
+    .all<RefundCandidateRow>();
+  const candidates = candRes.results ?? [];
+
+  const byPo = new Map<string, RefundCandidateRow[]>();
+  for (const r of candidates) {
+    const list = byPo.get(r.productionOrderId) ?? [];
+    list.push(r);
+    byPo.set(r.productionOrderId, list);
+  }
+
+  type RefundPlan = {
+    jcId: string;
+    poId: string;
+    dept: string;
+    wipQty: number;
+    upstreamWipLabel: string;
+    upstreamDept: string;
+  };
+  const plan: RefundPlan[] = [];
+
+  for (const [poId, cands] of byPo) {
+    const sibsRes = await db
+      .prepare(
+        `SELECT id, productionOrderId, departmentCode, wipKey, wipLabel,
+                wipQty, branchKey, sequence, status, pic1Id, pic1Name,
+                actualMinutes, productionTimeMinutes, estMinutes,
+                overdue, completedDate
+           FROM job_cards
+          WHERE productionOrderId = ?`,
+      )
+      .bind(poId)
+      .all<RefundSiblingRow>();
+    const sibs = sibsRes.results ?? [];
+
+    for (const cand of cands) {
+      if (!cand.wipKey) continue;
+      const wipQty = cand.wipQty ?? 0;
+      if (!wipQty) continue;
+      // uph-pofold flips JCs across branchKeys → don't filter by branchKey
+      // here; look at same wipKey siblings with smaller sequence.
+      const upstreams = sibs
+        .filter((s) => s.wipKey === cand.wipKey && s.sequence < cand.sequence)
+        .sort((a, b) => b.sequence - a.sequence);
+      const upstream = upstreams[0];
+      if (!upstream || !upstream.wipLabel) continue;
+      plan.push({
+        jcId: cand.id,
+        poId,
+        dept: (cand.departmentCode || "").toUpperCase(),
+        wipQty,
+        upstreamWipLabel: upstream.wipLabel,
+        upstreamDept: (upstream.departmentCode || "").toUpperCase(),
+      });
+    }
+  }
+
+  const deptCounts: Record<string, number> = {};
+  let totalRefundQty = 0;
+  for (const p of plan) {
+    deptCounts[p.dept] = (deptCounts[p.dept] ?? 0) + 1;
+    totalRefundQty += p.wipQty;
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidateCount: candidates.length,
+      planCount: plan.length,
+      totalRefundQty,
+      deptCounts,
+      sample: plan.slice(0, 10),
+    });
+  }
+
+  let updated = 0;
+  let skippedRowMissing = 0;
+  for (const p of plan) {
+    const exists = await db
+      .prepare("SELECT id FROM wip_items WHERE code = ?")
+      .bind(p.upstreamWipLabel)
+      .first<{ id: string }>();
+    if (!exists) {
+      skippedRowMissing++;
+      continue;
+    }
+    await db
+      .prepare(`UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?`)
+      .bind(p.wipQty, p.upstreamWipLabel)
+      .run();
+    updated++;
+  }
+
+  return c.json({
+    success: true,
+    candidateCount: candidates.length,
+    planCount: plan.length,
+    totalRefundQty,
+    updated,
+    skippedRowMissing,
+    deptCounts,
+  });
+});
+
 app.post("/refund-backfill-overconsume", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;

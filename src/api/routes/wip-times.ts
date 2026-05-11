@@ -99,15 +99,24 @@ app.get("/", async (c) => {
   // longest-running WIPs sit on top (planners scan from worst → best).
   // WHERE clause already drops null / zero estMins so NULLS LAST isn't
   // needed.
+  // Aliases that are NOT existing column names (avgMinutes, jcCount,
+  // itemCategories, lastCompletedDate) MUST be quoted — otherwise Postgres
+  // lowercases them on parse and the camel→snake compat layer can't map
+  // them back (because they have no underscore). Without quotes the rows
+  // came back as { avgminutes, jccount, ... } but my JS read r.avgMinutes
+  // → undefined → fallback to 0. The bare identifiers that ARE real
+  // columns (wipLabel, departmentCode, itemCategory) hit the rename map
+  // and round-trip cleanly via wip_label ↔ wipLabel, so we leave those
+  // unquoted to keep the rewriter happy.
   const sql = `
     SELECT
       jc.wipLabel AS wipLabel,
       jc.departmentCode AS departmentCode,
       MIN(po.itemCategory) AS itemCategory,
-      STRING_AGG(DISTINCT po.itemCategory, ', ' ORDER BY po.itemCategory) AS itemCategories,
-      AVG(jc.estMinutes) AS avgMinutes,
-      COUNT(*) AS jcCount,
-      MAX(jc.completedDate) AS lastCompletedDate
+      STRING_AGG(DISTINCT po.itemCategory, ', ' ORDER BY po.itemCategory) AS "itemCategories",
+      AVG(jc.estMinutes) AS "avgMinutes",
+      COUNT(*) AS "jcCount",
+      MAX(jc.completedDate) AS "lastCompletedDate"
     FROM job_cards jc
     JOIN production_orders po ON po.id = jc.productionOrderId
     WHERE ${where.join(" AND ")}

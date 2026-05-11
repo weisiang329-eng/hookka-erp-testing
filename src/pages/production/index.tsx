@@ -3574,24 +3574,24 @@ export default function ProductionPage({
       // Dept sub-tab: print template mirrors the on-screen Production Sheet
       // columns 1:1 so the operator sees the same data on paper. Trimmed to
       // fit A4 landscape without overflow.
-      // Two filter passes (Wei Siang spec 2026-05-10):
-      //   1. PER-ROW Due-date filter — page-level fltDueFrom/fltDueTo is
-      //      enforced at the JC.dueDate level (each deptRow has its OWN
-      //      dueDate). The PO-level filter at line 1274 uses find(), which
-      //      lets a row through whenever ANY JC of its PO is in range; the
-      //      CUSHION row of a 19-May-due PO leaks in even when the BASE
-      //      JC is 28-Apr. Applying the filter again per-row removes those
-      //      stragglers and keeps print 1:1 with the on-screen rowcount.
-      //   2. DataGrid column filters (gridFilterIdSet) — narrows to the
-      //      visible rows the operator has filtered to in the grid header.
-      const dueFilteredRows = deptRows.filter((r) => {
+      // Source rows: when the DataGrid has handed us its post-sort +
+      // post-filter mirror (gridFilteredDeptRows), use it directly — it
+      // preserves the column sort the operator clicked in the grid. Only
+      // fall back to raw deptRows when the mirror hasn't been populated
+      // yet (first render, before the grid's onFilteredDataChange fires).
+      //
+      // Then re-apply the PER-ROW Due-date filter (page-level
+      // fltDueFrom/fltDueTo): the PO-level filter uses find(), which lets
+      // a row through whenever ANY JC of its PO is in range — so the
+      // CUSHION row of a 19-May-due PO leaks in even when the BASE JC is
+      // 28-Apr. Filtering again per-row removes those stragglers.
+      const baseRows =
+        (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
+      const printRows = baseRows.filter((r) => {
         if (fltDueFrom && r.dueDate && r.dueDate < fltDueFrom) return false;
         if (fltDueTo && r.dueDate && r.dueDate > fltDueTo) return false;
         return true;
       });
-      const printRows = gridFilterIdSet
-        ? dueFilteredRows.filter((r) => gridFilterIdSet.has(r.id))
-        : dueFilteredRows;
       // ---- Dynamic column resolution: print whatever the user has visible ----
       // Read the user's column visibility + order from localStorage (same
       // keys the DataGrid writes to). Falls back to defaultHidden=false
@@ -3826,7 +3826,8 @@ export default function ProductionPage({
   }, [
     activeTab, activeDept, visibleOrders, deptRows, deptColumns,
     filteredOrders.length,
-    fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo, gridFilterIdSet,
+    fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo,
+    gridFilterIdSet, gridFilteredDeptRows,
   ]);
 
   // "Total Listing" — sibling to handlePrintSchedule. Same filter inputs,

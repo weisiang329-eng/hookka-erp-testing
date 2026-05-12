@@ -3585,6 +3585,12 @@ async function applyPoUpdate(
   }
 
   const fresh = await fetchPO(db, id);
+
+  // Bump the per-org version key — invalidates every cached GET /
+  // response for this org so the operator's own mutation is reflected
+  // immediately on the next list fetch. See poListCacheVersion above.
+  await bumpPoListCacheVersion(c, getOrgId(c));
+
   return c.json({ success: true, data: fresh });
 }
 
@@ -3801,6 +3807,62 @@ app.get("/overdue-counts", async (c) => {
 });
 
 
+// ---------------------------------------------------------------------------
+// Phase 2.5-C — KV cache for GET /api/production-orders.
+// ---------------------------------------------------------------------------
+// The list endpoint joins production_orders + job_cards across an entire org
+// and the comment in deploy.yml + observability tags note it routinely takes
+// 5-17s on Hyperdrive. With 3-5 operators opening the matrix in a short
+// window, that's 30-80s of duplicated DB work. KV wraps each (orgId, query)
+// tuple with a 60s TTL.
+//
+// Invalidation uses a per-org monotonic "version" key — every mutation
+// (applyPoUpdate at the end of every PUT/PATCH) bumps the version, which
+// changes every subsequent cache key under that prefix. Old cache values
+// expire naturally via TTL (no manual delete needed; KV doesn't support
+// prefix-delete cheaply anyway).
+//
+// 60s TTL is generous because:
+//   1. The user's OWN mutation bumps the version → next read misses → fresh
+//      data within ~50ms. Operator never sees their own write delayed.
+//   2. Other operators in the same org see staleness up to 60s. Phase 2.5-D
+//      (Supabase Realtime) closes that gap.
+async function poListCacheVersion(c: Context<Env>, orgId: string): Promise<string> {
+  const kv = c.env.SESSION_CACHE;
+  if (!kv) return "0";
+  try {
+    return (await kv.get(`pos:version:${orgId}`)) ?? "0";
+  } catch {
+    return "0";
+  }
+}
+
+async function bumpPoListCacheVersion(c: Context<Env>, orgId: string): Promise<void> {
+  const kv = c.env.SESSION_CACHE;
+  if (!kv) return;
+  const v = String(Date.now());
+  const writePromise = kv
+    .put(`pos:version:${orgId}`, v, { expirationTtl: 86400 })
+    .catch((err) => {
+      console.error("[bumpPoListCacheVersion] kv write failed", err);
+    });
+  if (c.executionCtx?.waitUntil) {
+    c.executionCtx.waitUntil(writePromise);
+  } else {
+    void writePromise;
+  }
+}
+
+function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
+  // Canonicalise query params (sorted) so semantically-identical URLs share
+  // a cache key. Drop empty values to be conservative.
+  const pairs = Array.from(url.searchParams.entries())
+    .filter(([, v]) => v !== "")
+    .sort(([a], [b]) => a.localeCompare(b));
+  const qs = pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+  return `pos:${orgId}:v${version}:${qs}`;
+}
+
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam
@@ -3848,6 +3910,31 @@ app.get("/", async (c) => {
 
   const orgId = getOrgId(c);
 
+  // Cache check — return early if a fresh response for this (orgId, query)
+  // is sitting in KV. Cache key includes the per-org version counter so any
+  // mutation auto-invalidates the entire org's matrix cache.
+  const kvCache = c.env.SESSION_CACHE;
+  let cacheKeyForWrite: string | null = null;
+  if (kvCache) {
+    const version = await poListCacheVersion(c, orgId);
+    const cacheKey = buildPoListCacheKey(orgId, version, new URL(c.req.url));
+    try {
+      const cached = await kvCache.get(cacheKey);
+      if (cached !== null) {
+        return new Response(cached, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "X-Cache": "HIT",
+          },
+        });
+      }
+    } catch (err) {
+      console.error("[poList cache] kv get failed", err);
+    }
+    cacheKeyForWrite = cacheKey;
+  }
+
   if (!paginate) {
     const data = await fetchFilteredPOs(
       c.var.DB,
@@ -3860,7 +3947,18 @@ app.get("/", async (c) => {
       dueFrom,
       dueTo,
     );
-    return c.json({ success: true, data, total: data.length });
+    const body = JSON.stringify({ success: true, data, total: data.length });
+    if (cacheKeyForWrite && kvCache) {
+      const writePromise = kvCache
+        .put(cacheKeyForWrite, body, { expirationTtl: 60 })
+        .catch((err) => console.error("[poList cache] kv put failed", err));
+      if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(writePromise);
+      else void writePromise;
+    }
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "application/json", "X-Cache": "MISS" },
+    });
   }
 
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
@@ -3879,7 +3977,18 @@ app.get("/", async (c) => {
     dueFrom,
     dueTo,
   );
-  return c.json({ success: true, data, page, limit, total });
+  const body = JSON.stringify({ success: true, data, page, limit, total });
+  if (cacheKeyForWrite && kvCache) {
+    const writePromise = kvCache
+      .put(cacheKeyForWrite, body, { expirationTtl: 60 })
+      .catch((err) => console.error("[poList cache] kv put failed", err));
+    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(writePromise);
+    else void writePromise;
+  }
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "application/json", "X-Cache": "MISS" },
+  });
 });
 
 // ---------------------------------------------------------------------------

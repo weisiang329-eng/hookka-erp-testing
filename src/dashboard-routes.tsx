@@ -33,6 +33,8 @@ const ProductionOverview = lazy(() => import('./pages/production/overview'))
 const ProductionDeptPage = lazy(() => import('./pages/production/dept'))
 const WipTimesPage = lazy(() => import('./pages/production/wip-times'))
 const DepartmentDetail = lazy(() => import('./pages/production/department'))
+const ProductionFolders = lazy(() => import('./pages/production/folders'))
+const ProductionFolderDetail = lazy(() => import('./pages/production/folder-detail'))
 const ProductionScan = lazy(() => import('./pages/production/scan'))
 const FGScan = lazy(() => import('./pages/production/fg-scan'))
 
@@ -174,6 +176,11 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/production/fg-scan', element: <S><FGScan /></S> },
   { path: '/production/tracker', element: <Navigate to="/planning" replace /> },
   { path: '/production/department/:code', element: <S><DepartmentDetail /></S> },
+  // Production Folders — archive paper schedules. Both routes are LITERAL
+  // prefixes so React Router's route matcher distinguishes them from the
+  // dept routes below. `/folders` lists, `/folders/:id` opens one.
+  { path: '/production/folders', element: <S><ProductionFolders /></S> },
+  { path: '/production/folders/:id', element: <S><ProductionFolderDetail /></S> },
   // Per-department split routes — each renders the shared ProductionPage
   // with mode="dept" and narrows the backend fetch to that dept's JCs only.
   { path: '/production/fab-cut', element: <S><ProductionDeptPage /></S> },

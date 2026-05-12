@@ -42,6 +42,7 @@ import {
   Scale,
   Tag,
   Clock,
+  FolderOpen,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -104,6 +105,9 @@ const navigationGroups: NavGroup[] = [
       ]},
       { name: "Planning", href: "/planning", icon: Calendar },
       { name: "Scanner", href: "/production/scan", icon: QrCode },
+      // Archive of printed paper schedules — operator multi-selects rows on
+      // a dept page → "Save to Folder" to find them back later.
+      { name: "Folders", href: "/production/folders", icon: FolderOpen },
     ],
   },
   {

@@ -42,6 +42,12 @@ import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
 import {
+  BatchActionToolbar,
+  ApplyBatchDateDialog,
+  ApplyBatchPicDialog,
+  SaveToFolderDialog,
+} from "./components/BatchActionToolbar";
+import {
   PatchFailureModal,
   type PatchFailure,
 } from "./components/PatchFailureModal";
@@ -1015,6 +1021,29 @@ export default function ProductionPage({
   // previous dept would briefly filter the QR tile row to an empty set.
   /* eslint-disable react-hooks/set-state-in-effect -- reset mirror on tab change */
   useEffect(() => { setGridFilteredDeptRows(null); }, [activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Batch-action selection state — populated when the operator ticks the
+  // checkbox column on the dept grid. The toolbar (rendered just under
+  // the grid) reads from `selectedDeptRows` and dispatches into the bulk-
+  // patch endpoint or the production-folders endpoint. Per Wei Siang's
+  // 2026-05-12 ask: multi-select rows → batch Apply Date / Apply PIC /
+  // Save into a Folder so paper-schedule sheets are easy to find again.
+  type DeptRowLite = { id: string; poId: string; jobCardId: string };
+  const [selectedDeptRows, setSelectedDeptRows] = useState<DeptRowLite[]>([]);
+  const [batchDateOpen, setBatchDateOpen] = useState(false);
+  const [batchPicOpen, setBatchPicOpen] = useState(false);
+  const [batchFolderOpen, setBatchFolderOpen] = useState(false);
+  type FolderOption = { id: string; name: string; jc_count: number };
+  const [folderList, setFolderList] = useState<FolderOption[]>([]);
+  // Reset selection + close batch dialogs when the dept tab changes.
+  /* eslint-disable react-hooks/set-state-in-effect -- reset on tab change */
+  useEffect(() => {
+    setSelectedDeptRows([]);
+    setBatchDateOpen(false);
+    setBatchPicOpen(false);
+    setBatchFolderOpen(false);
+  }, [activeTab]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Batch sticker printing — populated when the user clicks "Print Job Card
@@ -5262,6 +5291,14 @@ export default function ProductionPage({
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
             onFilteredDataChange={setGridFilteredDeptRows}
+            // Batch-action multi-select. Adds the checkbox column on the
+            // left + populates `selectedDeptRows` for the toolbar below.
+            selectable
+            onSelectionChange={(rows: DeptRow[]) =>
+              setSelectedDeptRows(
+                rows.map((r) => ({ id: r.id, poId: r.poId, jobCardId: r.jobCardId })),
+              )
+            }
             // Hide already-completed / transferred dept cards by default
             // so the operator opens the page and immediately sees only
             // the live work in front of them. They can re-tick
@@ -5326,8 +5363,135 @@ export default function ProductionPage({
               </div>
             );
           })()}
+          {/* Batch action toolbar — floats above the grid bottom when the
+              operator has multi-selected rows. */}
+          <BatchActionToolbar
+            count={selectedDeptRows.length}
+            onClear={() => setSelectedDeptRows([])}
+            onApplyDate={() => setBatchDateOpen(true)}
+            onApplyPic={() => setBatchPicOpen(true)}
+            onSaveToFolder={async () => {
+              // Load folders fresh each open so a folder created in another
+              // tab is visible. Fast endpoint (<100ms) so no UX cost.
+              try {
+                const res = await fetch("/api/production-folders", { credentials: "include" });
+                if (res.ok) {
+                  const j = (await res.json()) as { success: boolean; data: FolderOption[] };
+                  if (j.success) setFolderList(j.data || []);
+                }
+              } catch {/* show dialog with empty existing list — operator can still create new */}
+              setBatchFolderOpen(true);
+            }}
+          />
         </div>
       )}
+
+      {/* Batch dialogs — mounted at page level so they overlay everything */}
+      <ApplyBatchDateDialog
+        open={batchDateOpen}
+        count={selectedDeptRows.length}
+        onCancel={() => setBatchDateOpen(false)}
+        onApply={async (date) => {
+          setBatchDateOpen(false);
+          const patches = selectedDeptRows.map((r) => ({
+            poId: r.poId,
+            jobCardId: r.jobCardId,
+            completedDate: date,
+            status: date ? "COMPLETED" : "WAITING",
+          }));
+          try {
+            const res = await fetch("/api/production-orders/bulk-patch", {
+              method: "POST",
+              headers: csrfHeaders(),
+              body: JSON.stringify({ patches }),
+              credentials: "include",
+            });
+            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
+            const failed = (j.results || []).filter((x) => !x.success);
+            if (failed.length > 0) {
+              toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+            } else {
+              toast.success(`Stamped completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            }
+            invalidateCachePrefix("/api/production-orders");
+            setSelectedDeptRows([]);
+            fetchOrders();
+          } catch (err) {
+            toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      />
+      <ApplyBatchPicDialog
+        open={batchPicOpen}
+        count={selectedDeptRows.length}
+        workers={workers
+          .filter((w) => !activeDept || (w.departmentCode || "").toUpperCase() === activeDept.code.toUpperCase())
+          .map((w) => ({ id: w.id, name: w.name }))}
+        onCancel={() => setBatchPicOpen(false)}
+        onApply={async (worker) => {
+          setBatchPicOpen(false);
+          const patches = selectedDeptRows.map((r) => ({
+            poId: r.poId,
+            jobCardId: r.jobCardId,
+            pic1Id: worker?.id ?? null,
+          }));
+          try {
+            const res = await fetch("/api/production-orders/bulk-patch", {
+              method: "POST",
+              headers: csrfHeaders(),
+              body: JSON.stringify({ patches }),
+              credentials: "include",
+            });
+            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
+            const failed = (j.results || []).filter((x) => !x.success);
+            if (failed.length > 0) {
+              toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+            } else {
+              toast.success(`Set PIC on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            }
+            invalidateCachePrefix("/api/production-orders");
+            setSelectedDeptRows([]);
+            fetchOrders();
+          } catch (err) {
+            toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      />
+      <SaveToFolderDialog
+        open={batchFolderOpen}
+        count={selectedDeptRows.length}
+        existing={folderList}
+        onCancel={() => setBatchFolderOpen(false)}
+        onSave={async (args) => {
+          setBatchFolderOpen(false);
+          const jobCardIds = selectedDeptRows.map((r) => r.jobCardId);
+          try {
+            if (args.mode === "new") {
+              const res = await fetch("/api/production-folders", {
+                method: "POST",
+                headers: csrfHeaders(),
+                body: JSON.stringify({ name: args.name, jobCardIds }),
+                credentials: "include",
+              });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              toast.success(`Saved ${jobCardIds.length} job card${jobCardIds.length === 1 ? "" : "s"} into "${args.name}".`);
+            } else {
+              const res = await fetch(`/api/production-folders/${encodeURIComponent(args.folderId)}/add-jcs`, {
+                method: "POST",
+                headers: csrfHeaders(),
+                body: JSON.stringify({ jobCardIds }),
+                credentials: "include",
+              });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const folder = folderList.find((f) => f.id === args.folderId);
+              toast.success(`Added ${jobCardIds.length} job card${jobCardIds.length === 1 ? "" : "s"} to "${folder?.name ?? "folder"}".`);
+            }
+            setSelectedDeptRows([]);
+          } catch (err) {
+            toast.error(`Save to folder failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      />
 
       {/* Overview matrix grid (only shown when Overview tab is active) */}
       {activeTab === "ALL" && (

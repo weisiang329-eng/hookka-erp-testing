@@ -23,6 +23,35 @@ export default defineConfig({
     },
   },
   build: {
+    // ─────────────────────────────────────────────────────────────────
+    // Module-preload filter (perf, 2026-05-12 — Wei Siang report).
+    //
+    // Rolldown's default `modulePreload` emits a
+    // `<link rel="modulepreload" href="…">` tag in index.html for every
+    // chunk reachable from the entry, including heavy chunks that we
+    // ONLY load behind `await import()` at click time (pdf-lib /
+    // pdfjs-dist / jspdf for invoice/DO/quotation generation, xlsx for
+    // Excel import-export). Without filtering, the browser eagerly
+    // downloads ~1.5 MB of JS on every cold visit — even on Dashboard,
+    // where neither library is touched — pushing first-byte-to-interactive
+    // up by ~700ms on a typical broadband connection.
+    //
+    // The `resolveDependencies` hook below removes any chunk filename
+    // matching /pdf-|xlsx-/ from the preload list. The chunks still
+    // exist on disk and are loaded by the dynamic-import call sites the
+    // moment a user clicks Export-Excel / Generate-PDF / Scan-PO; we
+    // just don't pay for them on every page transition any more.
+    //
+    // Caveat: dynamic chunks are no longer warm in the HTTP cache until
+    // their first use, so the first Generate-Invoice-PDF click after a
+    // deploy pays a ~300ms download. That's an acceptable trade — the
+    // savings on every other page transition far outweigh it.
+    // ─────────────────────────────────────────────────────────────────
+    modulePreload: {
+      resolveDependencies(_filename, deps) {
+        return deps.filter((d) => !/(^|\/)(pdf|xlsx)-[A-Za-z0-9_-]+\.js$/.test(d));
+      },
+    },
     rollupOptions: {
       output: {
         // Manual vendor chunk splitting so the main bundle doesn't

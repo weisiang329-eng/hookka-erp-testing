@@ -4437,13 +4437,29 @@ export default function ProductionPage({
             Refresh
           </button>
         )}
-        {/* Removed 2026-05-05: the "Clear all" button wiped from/to dates as
-            part of the URL batch, which caused a full-table refetch (~9k JCs)
-            + grid re-render that froze the main thread for 1-2s and broke
-            the date picker pop. Operators preferred just adjusting the
-            from/to inputs directly (or using "Load all"), so the shortcut
-            is gone. The URL params themselves still work — sharing a link
-            with explicit q/state/customer/cat etc. params still filters. */}
+        {/* Clear all — restored 2026-05-12. The 2026-05-05 removal was
+            because clearing from/to caused a 1-2s main-thread freeze
+            (~9k JC refetch + grid re-render); commit 1fdb903 fixed that
+            by deferring the heavy filter useMemo deps. The trigger for
+            bringing it back was iPad Safari: the native <input type="date">
+            picker has no Clear (X) button on iPadOS, so operators on the
+            shop-floor tablet couldn't empty the date range once set. One
+            tap here wipes the date inputs and every other page-level
+            filter in a single atomic URL write. */}
+        <button
+          type="button"
+          onClick={() => {
+            setUrlBatch({ q: "", state: "", customer: "", cat: "", from: "", to: "" });
+            setFltSearchInput("");
+            setIncompleteOnly(false);
+            clearAllOverviewFilters();
+            setOverduePanelMode(null);
+          }}
+          className="text-[10px] px-2 py-1 rounded border border-[#E6E0D9] text-[#6B5C32] hover:bg-[#FAF8F4]"
+          title="Clear all filters and date range"
+        >
+          Clear all
+        </button>
         <span className="ml-auto text-[10px] text-[#8A7F73]">
           {shouldFetch
             ? `${filteredOrders.length} of ${orders.length} orders`

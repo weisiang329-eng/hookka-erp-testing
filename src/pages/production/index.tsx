@@ -48,10 +48,7 @@ import {
   ApplyBatchPicDialog,
   SaveToFolderDialog,
 } from "./components/BatchActionToolbar";
-import {
-  PatchFailureModal,
-  type PatchFailure,
-} from "./components/PatchFailureModal";
+// PatchFailureModal removed 2026-05-12 — see flushDrafts toast.error branch.
 
 // ----- Overdue breakdown row (mirrors /api/production-orders/overdue-counts) -----
 // Server returns overdueCategories as string[] (it was Set<string> when the FE
@@ -1403,12 +1400,11 @@ export default function ProductionPage({
   // in the pending set. PATCH failures surface as a toast so the operator
   // knows to retry instead of silently losing the edit (was console.error
   // only; you'd never see it).
-  // Per-cell save failures still awaiting operator decision. Each entry shows
-  // up in <PatchFailureModal> with Retry / Discard buttons. Cleared as the
-  // operator acts. See PatchFailureModal.tsx for the rationale (replaces the
-  // ephemeral toast that operators were missing — see prod audit: 153
-  // COMPLETED_DATE_CLEARED + many silent dueDate losses).
-  const [patchFailures, setPatchFailures] = useState<PatchFailure[]>([]);
+  // 2026-05-12 simplification: per-cell save failures were tracked in a
+  // setPatchFailures state and surfaced via <PatchFailureModal>. Both removed
+  // — failures now surface as toast.error in flushDrafts (cell auto-reverts
+  // to pre-edit value via the setOrders splice above). Trade-off: lost the
+  // persistent "Retry" button; operator re-clicks the cell.
 
   // -----------------------------------------------------------------------
   // Phase 2.5 — Debounced write batching.
@@ -1582,34 +1578,28 @@ export default function ProductionPage({
       return next;
     });
 
-    const newFailures: PatchFailure[] = [];
+    // Per-draft outcome: success → flash green + optional success toast;
+    // failure → flash red + toast.error with the JC dept and error message.
+    // Optimistic state was already rolled back in the setOrders splice above,
+    // so the operator sees the cell revert + the toast at the same time.
+    // BUG-2026-05-12 simplification: PatchFailureModal replaced with toast —
+    // less state, less code, same operator signal (cell reverts visibly +
+    // toast appears). Trade-off: lost the persistent "Retry" button; operator
+    // has to re-click the cell to retry. Acceptable for a small-shop workflow.
     for (const { draft, result } of results) {
       if (result.success) {
         if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "ok");
         if (draft.feedback?.successMsg) toast.success(draft.feedback.successMsg);
       } else {
         if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "err");
-        newFailures.push({
-          id: `${draft.jcId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          poId: draft.poId,
-          jcId: draft.jcId,
-          deptCode: draft.deptCode,
-          deptName: draft.deptName,
-          attemptedPatch: draft.patch,
-          prevState: draft.prevState,
-          errorMsg: result.error ?? "unknown",
-          attemptsUsed: result.attemptsUsed,
-          at: Date.now(),
-        });
+        const label = draft.deptCode ? `${draft.deptCode} JC` : "Job card";
+        toast.error(`${label} save failed: ${result.error ?? "unknown"}. Cell reverted — click again to retry.`);
         console.error("[flushDrafts] draft failed after retries", {
           jcId: draft.jcId,
           patch: draft.patch,
           error: result.error,
         });
       }
-    }
-    if (newFailures.length > 0) {
-      setPatchFailures((prev) => [...prev, ...newFailures]);
     }
     setSavingNow(false);
   }, [sendOneDraft, flashCell, toast]);
@@ -1710,87 +1700,10 @@ export default function ProductionPage({
     [sendOneDraft, flushDrafts],
   );
 
-  // Retry handlers wired into <PatchFailureModal>. Re-stage the attempted
-  // patch and immediately flush so the operator sees a fast retry (no 2s
-  // debounce wait when they explicitly press Retry).
-  const retryFailure = useCallback(
-    (f: PatchFailure) => {
-      setPatchFailures((prev) => prev.filter((x) => x.id !== f.id));
-      // Re-apply optimistic state for this draft so the matrix reflects the
-      // attempted value while we re-send. flushDrafts will roll it back
-      // again if the retry fails.
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id !== f.poId
-            ? o
-            : {
-                ...o,
-                jobCards: o.jobCards.map((j) =>
-                  j.id !== f.jcId ? j : { ...j, ...f.attemptedPatch },
-                ),
-              },
-        ),
-      );
-      draftsRef.current.set(f.jcId, {
-        poId: f.poId,
-        jcId: f.jcId,
-        patch: f.attemptedPatch,
-        prevState: f.prevState,
-        deptCode: f.deptCode,
-        deptName: f.deptName,
-        feedback: f.deptCode
-          ? { flashKey: `${f.jcId}|${f.deptCode}` }
-          : undefined,
-        stagedAt: Date.now(),
-      });
-      setUnsavedCount(draftsRef.current.size);
-      void flushDrafts();
-    },
-    [flushDrafts],
-  );
-  const discardFailure = useCallback((id: string) => {
-    setPatchFailures((prev) => prev.filter((x) => x.id !== id));
-  }, []);
-  const retryAllFailures = useCallback(() => {
-    // Snapshot the current failures, clear the list, re-stage + flush each.
-    setPatchFailures((prev) => {
-      const snapshot = prev.slice();
-      queueMicrotask(() => {
-        for (const f of snapshot) {
-          setOrders((cur) =>
-            cur.map((o) =>
-              o.id !== f.poId
-                ? o
-                : {
-                    ...o,
-                    jobCards: o.jobCards.map((j) =>
-                      j.id !== f.jcId ? j : { ...j, ...f.attemptedPatch },
-                    ),
-                  },
-            ),
-          );
-          draftsRef.current.set(f.jcId, {
-            poId: f.poId,
-            jcId: f.jcId,
-            patch: f.attemptedPatch,
-            prevState: f.prevState,
-            deptCode: f.deptCode,
-            deptName: f.deptName,
-            feedback: f.deptCode
-              ? { flashKey: `${f.jcId}|${f.deptCode}` }
-              : undefined,
-            stagedAt: Date.now(),
-          });
-        }
-        setUnsavedCount(draftsRef.current.size);
-        void flushDrafts();
-      });
-      return [];
-    });
-  }, [flushDrafts]);
-  const discardAllFailures = useCallback(() => {
-    setPatchFailures([]);
-  }, []);
+  // 2026-05-12 simplification: retryFailure / discardFailure /
+  // retryAllFailures / discardAllFailures all removed — operator now
+  // retries by re-clicking the cell. See the failure branch in flushDrafts
+  // for the new toast-based UX.
 
   // Optimistic PATCH for the Packing Rack dropdown. Writes rackingNumber to
   // the specific JobCard (so two WIPs under the same PO can land on different
@@ -6505,17 +6418,9 @@ export default function ProductionPage({
         onCreated={fetchOrders}
       />
 
-      {/* Persistent failure modal — surfaces any patchJobCard call that
-          exhausted its retries. Operators MUST click Retry / Discard, so a
-          silent save failure can no longer be missed. UI state has already
-          been rolled back when this renders (see patchJobCard above). */}
-      <PatchFailureModal
-        failures={patchFailures}
-        onRetry={retryFailure}
-        onDiscard={discardFailure}
-        onRetryAll={retryAllFailures}
-        onDiscardAll={discardAllFailures}
-      />
+      {/* PatchFailureModal removed 2026-05-12 — failures now surface as
+          toast.error from flushDrafts. Cell auto-reverts on failure, so the
+          operator sees the value disappear + the toast at the same time. */}
     </div>
   );
 }

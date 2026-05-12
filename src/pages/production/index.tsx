@@ -4041,8 +4041,22 @@ export default function ProductionPage({
 
     let body = "";
     let columnCount = 0;
+    // Total production minutes across the printed scope — printed as a
+    // footer line ("Total Production Time: 1,180 min (19.7 h)") so the
+    // operator can size a shift / capacity against the schedule at a
+    // glance. Computed per branch because Overview reads visibleOrders'
+    // jobCards directly while Dept already has the per-jc total
+    // (DeptRow.prodTime = productionTimeMinutes × wipQty) materialised.
+    let totalProdMinutes = 0;
     if (activeTab === "ALL") {
       // Overview matrix: one row per filtered order × 8 dept columns.
+      for (const o of visibleOrders) {
+        for (const jc of o.jobCards || []) {
+          const perUnit = Number(jc.productionTimeMinutes) || Number(jc.estMinutes) || 0;
+          const wipQty = (jc as JobCard & { wipQty?: number }).wipQty ?? 1;
+          totalProdMinutes += perUnit * (wipQty || 1);
+        }
+      }
       const rowsHtml = visibleOrders.map((o) => {
         const cells = DEPARTMENTS.map((d) => {
           const c = cellFor(o, d.code, visibleOrders);
@@ -4105,6 +4119,14 @@ export default function ProductionPage({
         if (fltDueTo && r.dueDate && r.dueDate > fltDueTo) return false;
         return true;
       });
+      // Sum the per-jc prodTime (productionTimeMinutes × wipQty) on the
+      // dept rows we're actually printing. Mirrors the on-screen Total
+      // footer at line 5292+ so the printed total matches what the
+      // operator sees above when they hit Print.
+      totalProdMinutes = printRows.reduce(
+        (s, r) => s + (Number(r.prodTime) || 0),
+        0,
+      );
       // ---- Dynamic column resolution: print whatever the user has visible ----
       // Read the user's column visibility + order from localStorage (same
       // keys the DataGrid writes to). Falls back to defaultHidden=false
@@ -4298,6 +4320,20 @@ export default function ProductionPage({
     span.pill.pending  { font-style: italic; }
     tr { page-break-inside: avoid; }
     thead { display: table-header-group; }
+    .totals {
+      margin-top: 6px;
+      padding: 4px 6px;
+      font-size: ${sizes.body}px;
+      font-weight: 700;
+      text-align: right;
+      border-top: 0.5px solid #000;
+      background: #ffffff;
+    }
+    .totals .hours {
+      font-weight: 500;
+      color: #555;
+      margin-left: 4px;
+    }
     .footer {
       margin-top: 8px; padding-top: 3px; border-top: 0.5px solid #666;
       font-size: ${sizes.footer}px; color: #333; text-align: center;
@@ -4326,6 +4362,7 @@ export default function ProductionPage({
   </div>
   ${filterLine}
   ${body}
+  ${totalProdMinutes > 0 ? `<div class="totals">Total Production Time: ${totalProdMinutes.toLocaleString()} min<span class="hours">(${(totalProdMinutes / 60).toFixed(1)} h)</span></div>` : ""}
   <div class="footer">Hookka Manufacturing ERP — Production Schedule · Printed ${today}</div>
   <script>setTimeout(function(){ window.print(); }, 300);</${''}script>
 </body>
@@ -4397,6 +4434,11 @@ export default function ProductionPage({
     let sourceCount = 0;
     let mergedCount = 0;
     let totalQty = 0;
+    // Total production minutes across the printed source scope — printed
+    // as a totals line under the merged table so the operator can size a
+    // shift / capacity against the schedule at a glance. Mirrors
+    // handlePrintSchedule's totals; computed per branch.
+    let totalProdMinutes = 0;
 
     if (activeTab === "ALL") {
       // Overview merge: group by (productCode, sizeLabel, fabricCode).
@@ -4437,6 +4479,15 @@ export default function ProductionPage({
         if (o.customerName) b.customers.add(o.customerName);
       }
       sourceCount = visibleOrders.length;
+      // Sum jobCard prodTime across all visible orders — mirrors the
+      // Overview branch in handlePrintSchedule.
+      for (const o of visibleOrders) {
+        for (const jc of o.jobCards || []) {
+          const perUnit = Number(jc.productionTimeMinutes) || Number(jc.estMinutes) || 0;
+          const wipQty = (jc as JobCard & { wipQty?: number }).wipQty ?? 1;
+          totalProdMinutes += perUnit * (wipQty || 1);
+        }
+      }
       const list = Array.from(buckets.values()).sort((a, b) => {
         const m = a.productCode.localeCompare(b.productCode);
         if (m !== 0) return m;
@@ -4486,6 +4537,13 @@ export default function ProductionPage({
       const printRows = gridFilterIdSet
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
+      // Mirror the dept branch in handlePrintSchedule: DeptRow.prodTime
+      // already has productionTimeMinutes × wipQty baked in for this
+      // dept's job cards, so a flat sum gives the correct total.
+      totalProdMinutes = printRows.reduce(
+        (s, r) => s + (Number(r.prodTime) || 0),
+        0,
+      );
       type Bucket = {
         wip: string;
         qty: number;
@@ -4597,6 +4655,20 @@ export default function ProductionPage({
     table.schedule tbody small { color: #555; font-size: 6.5px; }
     tr { page-break-inside: avoid; }
     thead { display: table-header-group; }
+    .totals {
+      margin-top: 6px;
+      padding: 4px 6px;
+      font-size: 9px;
+      font-weight: 700;
+      text-align: right;
+      border-top: 0.5px solid #000;
+      background: #ffffff;
+    }
+    .totals .hours {
+      font-weight: 500;
+      color: #555;
+      margin-left: 4px;
+    }
     .footer {
       margin-top: 8px; padding-top: 3px; border-top: 0.5px solid #666;
       font-size: 6.5px; color: #333; text-align: center;
@@ -4625,6 +4697,7 @@ export default function ProductionPage({
   </div>
   ${filterLine}
   ${body}
+  ${totalProdMinutes > 0 ? `<div class="totals">Total Production Time: ${totalProdMinutes.toLocaleString()} min<span class="hours">(${(totalProdMinutes / 60).toFixed(1)} h)</span></div>` : ""}
   <div class="footer">Hookka Manufacturing ERP — Production Schedule (Total Listing) · Merged from ${sourceCount} source rows into ${mergedCount} unique items · Total qty across all items: ${totalQty} · Printed ${today}</div>
   <script>setTimeout(function(){ window.print(); }, 300);</${''}script>
 </body>

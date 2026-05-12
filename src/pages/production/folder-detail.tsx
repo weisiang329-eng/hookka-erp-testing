@@ -445,13 +445,14 @@ export default function ProductionFolderDetailPage() {
         count={selected.length}
         workers={workers.map((w) => ({ id: w.id, name: w.name }))}
         onCancel={() => setPicOpen(false)}
-        onApply={async (worker) => {
+        onApply={async ({ pic1, pic2 }) => {
           setPicOpen(false);
-          const patches = selected.map((r) => ({
-            poId: r.poId,
-            jobCardId: r.jobCardId,
-            pic1Id: worker?.id ?? null,
-          }));
+          const patches = selected.map((r) => {
+            const p: Record<string, unknown> = { poId: r.poId, jobCardId: r.jobCardId };
+            if (pic1 !== undefined) p.pic1Id = pic1?.id ?? null;
+            if (pic2 !== undefined) p.pic2Id = pic2?.id ?? null;
+            return p;
+          });
           try {
             const res = await fetch("/api/production-orders/bulk-patch", {
               method: "POST",
@@ -461,8 +462,9 @@ export default function ProductionFolderDetailPage() {
             });
             const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
             const failed = (j.results || []).filter((x) => !x.success);
+            const slots = [pic1 !== undefined ? "PIC 1" : null, pic2 !== undefined ? "PIC 2" : null].filter(Boolean).join(" + ");
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
-            else toast.success(`PIC set on ${patches.length}.`);
+            else toast.success(`Set ${slots} on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             setSelected([]);
             await fetchAll();
           } catch (err) {

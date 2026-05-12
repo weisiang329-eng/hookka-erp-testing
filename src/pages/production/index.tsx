@@ -5465,13 +5465,18 @@ export default function ProductionPage({
           .filter((w) => !activeDept || (w.departmentCode || "").toUpperCase() === activeDept.code.toUpperCase())
           .map((w) => ({ id: w.id, name: w.name }))}
         onCancel={() => setBatchPicOpen(false)}
-        onApply={async (worker) => {
+        onApply={async ({ pic1, pic2 }) => {
           setBatchPicOpen(false);
-          const patches = selectedDeptRows.map((r) => ({
-            poId: r.poId,
-            jobCardId: r.jobCardId,
-            pic1Id: worker?.id ?? null,
-          }));
+          // pic1/pic2 semantics:
+          //   undefined → leave that slot alone (don't include the key)
+          //   null      → explicitly clear the slot
+          //   {id,name} → set to that worker
+          const patches = selectedDeptRows.map((r) => {
+            const p: Record<string, unknown> = { poId: r.poId, jobCardId: r.jobCardId };
+            if (pic1 !== undefined) p.pic1Id = pic1?.id ?? null;
+            if (pic2 !== undefined) p.pic2Id = pic2?.id ?? null;
+            return p;
+          });
           try {
             const res = await fetch("/api/production-orders/bulk-patch", {
               method: "POST",
@@ -5481,10 +5486,11 @@ export default function ProductionPage({
             });
             const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
             const failed = (j.results || []).filter((x) => !x.success);
+            const slots = [pic1 !== undefined ? "PIC 1" : null, pic2 !== undefined ? "PIC 2" : null].filter(Boolean).join(" + ");
             if (failed.length > 0) {
               toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             } else {
-              toast.success(`Set PIC on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+              toast.success(`Set ${slots} on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             }
             invalidateCachePrefix("/api/production-orders");
             setSelectedDeptRows([]);

@@ -110,42 +110,83 @@ export function ApplyBatchDateDialog({ open, count, onCancel, onApply }: ApplyBa
 }
 
 // ===========================================================================
-// Apply PIC dialog — single worker dropdown + Apply / Cancel.
+// Apply PIC dialog — TWO worker dropdowns (PIC 1 + PIC 2) + Apply / Cancel.
+//
+// Wei Siang 2026-05-12: "这个 apply to pic 不能放两个人吗" — operators often
+// pair workers on a single job card, so the batch action must support setting
+// both PIC slots in one click. Empty dropdown = "don't touch that slot"
+// (different from "clear it"), which is the safer default for batch actions.
+// Explicit clear is via the "— (clear PIC)" choice in either dropdown.
 // ===========================================================================
 type WorkerOption = { id: string; name: string };
+type ApplyPicPayload = {
+  pic1: WorkerOption | null | undefined;  // undefined = leave alone, null = clear
+  pic2: WorkerOption | null | undefined;
+};
 type ApplyBatchPicDialogProps = {
   open: boolean;
   count: number;
   workers: WorkerOption[];
   onCancel: () => void;
-  onApply: (worker: WorkerOption | null) => void;  // null = clear PIC
+  onApply: (payload: ApplyPicPayload) => void;
 };
 
+// Sentinel values for the select's "leave alone" vs "explicit clear" modes.
+const LEAVE_ALONE = "__leave__";
+const EXPLICIT_CLEAR = "__clear__";
+
 export function ApplyBatchPicDialog({ open, count, workers, onCancel, onApply }: ApplyBatchPicDialogProps) {
-  const [workerId, setWorkerId] = useState<string>("");
+  const [pic1Id, setPic1Id] = useState<string>(LEAVE_ALONE);
+  const [pic2Id, setPic2Id] = useState<string>(LEAVE_ALONE);
   if (!open) return null;
-  const chosen = workers.find((w) => w.id === workerId) ?? null;
+
+  const resolve = (id: string): WorkerOption | null | undefined => {
+    if (id === LEAVE_ALONE) return undefined;
+    if (id === EXPLICIT_CLEAR) return null;
+    return workers.find((w) => w.id === id) ?? undefined;
+  };
+  const pic1 = resolve(pic1Id);
+  const pic2 = resolve(pic2Id);
+  const canApply = pic1 !== undefined || pic2 !== undefined;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[400px]">
-        <h3 className="mb-2 text-[14px] font-semibold text-[#3A2E22]">Apply PIC 1</h3>
+      <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[440px]">
+        <h3 className="mb-2 text-[14px] font-semibold text-[#3A2E22]">Apply PIC</h3>
         <p className="mb-3 text-[12px] text-[#6B5E50]">
-          Sets PIC 1 on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}.
+          Sets PIC 1 / PIC 2 on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}. Leave a dropdown on "(leave alone)" to skip that slot.
         </p>
+
+        <label className="block mb-1 text-[11px] font-semibold text-[#6B5E50]">PIC 1</label>
         <select
-          value={workerId}
-          onChange={(e) => setWorkerId(e.target.value)}
-          className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px]"
+          value={pic1Id}
+          onChange={(e) => setPic1Id(e.target.value)}
+          className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px] mb-3"
           autoFocus
         >
-          <option value="">— (clear PIC)</option>
+          <option value={LEAVE_ALONE}>— (leave alone)</option>
+          <option value={EXPLICIT_CLEAR}>— (clear PIC 1)</option>
           {workers.map((w) => (
-            <option key={w.id} value={w.id}>{w.name}</option>
+            <option key={`p1-${w.id}`} value={w.id}>{w.name}</option>
           ))}
         </select>
+
+        <label className="block mb-1 text-[11px] font-semibold text-[#6B5E50]">PIC 2</label>
+        <select
+          value={pic2Id}
+          onChange={(e) => setPic2Id(e.target.value)}
+          className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px]"
+        >
+          <option value={LEAVE_ALONE}>— (leave alone)</option>
+          <option value={EXPLICIT_CLEAR}>— (clear PIC 2)</option>
+          {workers.map((w) => (
+            <option key={`p2-${w.id}`} value={w.id}>{w.name}</option>
+          ))}
+        </select>
+
         <div className="mt-4 flex justify-end gap-2">
           <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button size="sm" onClick={() => onApply(chosen)}>
+          <Button size="sm" onClick={() => onApply({ pic1, pic2 })} disabled={!canApply}>
             Apply to {count}
           </Button>
         </div>

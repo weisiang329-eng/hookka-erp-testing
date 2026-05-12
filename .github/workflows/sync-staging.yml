@@ -59,8 +59,12 @@ jobs:
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
           sudo apt-get update -qq
           sudo apt-get install -y postgresql-client-17
-          pg_dump --version
-          psql --version
+          # Ubuntu's postgresql-client-common wrapper picks the highest
+          # *registered* major; on GHA runners postgresql-client-16 is
+          # pre-installed and the wrapper picks 16. Force 17 via PATH.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/psql --version
 
       - name: pg_dump prod (public schema, custom format)
         env:

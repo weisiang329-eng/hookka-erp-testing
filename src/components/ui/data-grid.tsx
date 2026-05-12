@@ -606,6 +606,19 @@ function ColumnCustomizer<T>({
     dragOver.current = null;
   };
 
+  // Tap-to-move fallback for iPad operators — HTML5 drag-and-drop above
+  // does not fire on iOS/iPadOS Safari, so the grip handle is a no-op on
+  // tablets. The ↑/↓ buttons rendered next to each row let touch users
+  // reorder one step at a time; desktop drag still works in parallel.
+  const moveBy = (idx: number, delta: number) => {
+    const newIdx = idx + delta;
+    if (newIdx < 0 || newIdx >= orderedColumns.length) return;
+    const newOrder = orderedColumns.map(c => c.key);
+    const [removed] = newOrder.splice(idx, 1);
+    newOrder.splice(newIdx, 0, removed);
+    onReorder(newOrder);
+  };
+
   return (
     <div
       ref={ref}
@@ -652,6 +665,34 @@ function ColumnCustomizer<T>({
               />
               {col.label}
             </label>
+            {/* Touch fallback — HTML5 drag does not fire on iPad Safari.
+                These buttons let tablet operators reorder one step at a
+                time. Disabled at the edges so the visual affordance
+                matches the constraint. */}
+            <button
+              type="button"
+              onClick={() => moveBy(idx, -1)}
+              disabled={idx === 0}
+              className="shrink-0 px-1.5 py-0.5 text-[#6B5C32] disabled:text-[#D0D0D0] disabled:cursor-not-allowed hover:bg-[#F0ECE9] rounded"
+              title="Move up"
+              aria-label="Move column up"
+            >
+              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="6 15 12 9 18 15" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={() => moveBy(idx, 1)}
+              disabled={idx === orderedColumns.length - 1}
+              className="shrink-0 px-1.5 py-0.5 text-[#6B5C32] disabled:text-[#D0D0D0] disabled:cursor-not-allowed hover:bg-[#F0ECE9] rounded"
+              title="Move down"
+              aria-label="Move column down"
+            >
+              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
           </div>
         ))}
       </div>

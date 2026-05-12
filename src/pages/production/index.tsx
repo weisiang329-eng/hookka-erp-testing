@@ -3946,7 +3946,16 @@ export default function ProductionPage({
       // eslint-disable-next-line no-restricted-syntax -- one-shot post-print state cleanup, fires from print callback
       setTimeout(() => setFgPrintRequested(false), 500);
     },
-    fgPrintRequested ? 300 : null,
+    // 1500ms — gives the eager <QRImg> tree time to generate all QR data
+    // URLs before window.print() fires. Pre-2026-05-12 this was 300ms
+    // under the (incorrect) assumption that mounting the tree inside the
+    // hidden print container would let IntersectionObserver kick off QR
+    // generation. The observer never fires for `display: none` parents,
+    // so the QRs would stay as gray placeholders → operator-reported
+    // blank/broken FG sticker prints. The `eager` flag on the print-only
+    // <QRImg> instances below skips the observer; this bumped delay
+    // accommodates ~100 sequential 500px QR generations (~10-30ms each).
+    fgPrintRequested ? 1500 : null,
   );
 
   // Print the current filtered schedule as an A4 landscape listing. Opens
@@ -6289,10 +6298,14 @@ export default function ProductionPage({
               feel like the QR grid was opening (Wei Siang 2026-05-10:
               "一打开就直接 show 出来会很卡"). The handlePrintFgStickers
               path flips fgPrintRequested true, the useTimeout below
-              fires window.print() at ~300ms — enough time for the tree
-              to mount with QRImg in the print viewport, where the
-              observer triggers canvas generation. Reset 500ms after
-              print closes wipes the tree again. */}
+              fires window.print() at ~1500ms — enough time for the
+              `eager` <QRImg> instances inside this hidden container to
+              generate all their data URLs synchronously on mount. The
+              eager flag is required: IntersectionObserver never fires
+              inside a `display: none` parent (operator-reported blank
+              FG sticker bug 2026-05-12), so the on-screen lazy gate
+              would leave every QR stuck as a gray placeholder.
+              Reset 500ms after print closes wipes the tree again. */}
           <div id="batch-fg-print" className="hidden print:block">
             {fgPrintRequested && visibleFgStickers.map((s) => {
               // Paired secondaries (Legs / Pillow) print inside their
@@ -6350,7 +6363,7 @@ export default function ProductionPage({
                         right). Legs section text-only (no QR). */}
                     <div className="mt-auto flex items-end gap-[2mm]">
                       <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                        <QRImg data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />
+                        <QRImg eager data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
                           <div className="font-bold uppercase" style={{ fontSize: "14pt" }}>
                             {s.pieceNo}/{s.totalPieces}
@@ -6380,7 +6393,7 @@ export default function ProductionPage({
                         <>
                           <div className="border-l border-dashed border-black self-stretch" />
                           <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                            <QRImg data={pillowTrackUrl} size={300} alt="Pillow QR" className="block" />
+                            <QRImg eager data={pillowTrackUrl} size={300} alt="Pillow QR" className="block" />
                             <div className="flex-1 text-center min-w-0">
                               <div className="font-bold uppercase" style={{ fontSize: "13pt" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}

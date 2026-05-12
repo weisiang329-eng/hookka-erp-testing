@@ -21,11 +21,24 @@ type QRImgProps = {
   size?: number;
   className?: string;
   alt?: string;
+  /**
+   * Bypass the IntersectionObserver gate and start generating the QR data
+   * URL immediately on mount. Use for QRs rendered inside a `display: none`
+   * print container — the observer never fires for hidden elements, so the
+   * default lazy path leaves the QR stuck as a placeholder when print mode
+   * activates (FG sticker blank-page bug, operator-reported 2026-05-12).
+   *
+   * On-screen tiles should leave this false: the gate prevents 100+ QRs
+   * from being generated synchronously when the operator switches tabs.
+   */
+  eager?: boolean;
 };
 
-function QRImgBase({ data, size = 200, className, alt = "QR" }: QRImgProps) {
+function QRImgBase({ data, size = 200, className, alt = "QR", eager = false }: QRImgProps) {
   const [src, setSrc] = useState<string>("");
-  const [shouldRender, setShouldRender] = useState<boolean>(false);
+  // Eager mode starts shouldRender=true so generation begins on the first
+  // commit. The on-screen lazy path keeps the IntersectionObserver gate.
+  const [shouldRender, setShouldRender] = useState<boolean>(eager);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
   // Subscribe to viewport intersection — this is a textbook "external system

@@ -116,12 +116,45 @@ export default function ProductionFoldersPage() {
     return d.toISOString().slice(0, 10);
   };
 
+  // Pre-create an empty folder via a quick prompt. Operator workflow:
+  //   "I'm planning tomorrow's Wood Cut sheet — let me make an empty folder
+  //    now, then go to Wood Cut tab and Save the right rows into it."
+  // No JCs required at create time; the folder shows up immediately with
+  // jc_count=0 and the operator can populate it from any dept tab.
+  const handleNewFolder = async (): Promise<void> => {
+    const name = window.prompt("Folder name:", "");
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      toast.error("Name cannot be empty.");
+      return;
+    }
+    if (trimmed.length > 200) {
+      toast.error("Name too long (max 200 chars).");
+      return;
+    }
+    try {
+      const res = await fetch("/api/production-folders", {
+        method: "POST", headers: csrfHeaders(), credentials: "include",
+        body: JSON.stringify({ name: trimmed, jobCardIds: [] }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast.success(`Created folder "${trimmed}".`);
+      await refresh();
+    } catch (err) {
+      toast.error(`Create failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   return (
     <div className="p-4 max-w-5xl mx-auto">
       <div className="mb-4 flex items-center gap-2">
         <h1 className="text-lg font-semibold text-[#3A2E22]">Production Folders</h1>
         <span className="text-[12px] text-[#8A7F73]">— archived schedules</span>
         <div className="flex-1" />
+        <Button size="sm" onClick={handleNewFolder} className="bg-[#1F1D1B] hover:bg-[#3A2E22] text-white">
+          <Plus className="h-3.5 w-3.5 mr-1" /> New Folder
+        </Button>
         <Button size="sm" variant="outline" onClick={refresh}>
           Refresh
         </Button>

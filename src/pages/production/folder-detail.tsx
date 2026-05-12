@@ -14,7 +14,7 @@ import { useState, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Button } from "@/components/ui/button";
-import { Trash2, ArrowLeft } from "lucide-react";
+import { Trash2, ArrowLeft, Printer } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
@@ -236,6 +236,123 @@ export default function ProductionFolderDetailPage() {
     }
   };
 
+  // ---------------------------------------------------------------------
+  // Print Schedule — opens a new window with an A4-landscape paper layout
+  // mirroring the on-screen folder columns, then auto-fires window.print().
+  // Mirrors the existing handlePrintSchedule on the Production page so the
+  // operator sees a familiar layout. Folder name + created-by + today's
+  // date land in the header so the printed sheet is self-describing when
+  // handed to the floor.
+  // ---------------------------------------------------------------------
+  const handlePrintSchedule = (): void => {
+    if (rows.length === 0) {
+      toast.error("Folder is empty — nothing to print.");
+      return;
+    }
+    const today = new Date().toLocaleDateString("en-MY", {
+      year: "numeric", month: "short", day: "numeric",
+    });
+    const fmt = (iso: string | null | undefined): string => {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      return `${d.getDate()} ${d.toLocaleString("en-US", { month: "short" })}`;
+    };
+    const escape = (s: string | null | undefined): string => {
+      if (!s) return "";
+      return String(s).replace(/[&<>"']/g, (c) =>
+        c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;"
+      );
+    };
+    const folderName = folder?.name ?? "Folder";
+    const createdLine = [
+      folder?.createdBy ? `Created by ${folder.createdBy}` : "",
+      folder?.createdAt ? fmtDate(folder.createdAt) : "",
+    ].filter(Boolean).join(" · ");
+
+    const rowsHtml = rows.map((r) => `
+      <tr>
+        <td>${escape(r.salesOrderNo)}</td>
+        <td>${escape(r.poNo)}</td>
+        <td>${escape(r.customerName)}</td>
+        <td><b>${escape(r.productCode)}</b></td>
+        <td>${escape(r.departmentCode)}</td>
+        <td class="status ${(r.status || '').toLowerCase()}">${escape(r.status)}</td>
+        <td class="num">${r.qty || ""}</td>
+        <td>${fmt(r.dueDate)}</td>
+        <td>${fmt(r.completedDate)}</td>
+        <td>${escape(r.pic1Name)}</td>
+      </tr>
+    `).join("");
+
+    const html = `<!doctype html><html><head>
+      <meta charset="utf-8" />
+      <title>${escape(folderName)} — Production Schedule</title>
+      <style>
+        @page { size: A4 landscape; margin: 10mm; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #1F1D1B; font-size: 10pt; }
+        .header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 8px; border-bottom: 2px solid #1F1D1B; padding-bottom: 4px; }
+        .header h1 { margin: 0; font-size: 14pt; }
+        .header .meta { font-size: 9pt; color: #6B5E50; }
+        table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+        th, td { border: 1px solid #C9BFB1; padding: 4px 6px; text-align: left; vertical-align: top; }
+        th { background: #F0E6D2; font-weight: 600; }
+        .num { text-align: right; }
+        .status.completed { background: #DCEFD8; }
+        .status.in_progress { background: #FFF3CC; }
+        .status.waiting { color: #6B5E50; }
+        tr { page-break-inside: avoid; }
+        .signoff { margin-top: 16px; font-size: 9pt; display: flex; gap: 40px; }
+        .signoff div { flex: 1; border-top: 1px solid #1F1D1B; padding-top: 4px; }
+        @media print { .noprint { display: none; } }
+      </style>
+    </head><body>
+      <div class="header">
+        <div>
+          <h1>${escape(folderName)}</h1>
+          <div class="meta">${escape(createdLine)} · Printed ${today}</div>
+        </div>
+        <div class="meta">${rows.length} job card${rows.length === 1 ? "" : "s"}</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>SO #</th>
+            <th>PO #</th>
+            <th>Customer</th>
+            <th>Product</th>
+            <th>Dept</th>
+            <th>Status</th>
+            <th class="num">Qty</th>
+            <th>Due</th>
+            <th>Completed</th>
+            <th>PIC</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <div class="signoff">
+        <div>Supervisor signature & date</div>
+        <div>Floor lead signature & date</div>
+      </div>
+    </body></html>`;
+
+    const w = window.open("", "_blank", "width=1200,height=800");
+    if (!w) {
+      toast.error("Print window blocked by browser. Allow pop-ups and try again.");
+      return;
+    }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    // Defer print() so the new window's DOM finishes laying out fonts/borders
+    // before the print dialog opens. 250ms is plenty on any modern desktop.
+    w.setTimeout(() => {
+      w.focus();
+      w.print();
+    }, 250);
+  };
+
   if (!folderId) {
     return (
       <div className="p-4">
@@ -261,6 +378,9 @@ export default function ProductionFolderDetailPage() {
           </div>
         </div>
         <Button size="sm" variant="outline" onClick={fetchAll}>Refresh</Button>
+        <Button size="sm" variant="outline" onClick={handlePrintSchedule} title="Print this folder as a paper schedule">
+          <Printer className="h-3.5 w-3.5 mr-1" /> Print Schedule
+        </Button>
         <Button size="sm" variant="outline" onClick={handleDeleteFolder} title="Delete this folder">
           <Trash2 className="h-3.5 w-3.5 mr-1 text-red-600" /> Delete Folder
         </Button>

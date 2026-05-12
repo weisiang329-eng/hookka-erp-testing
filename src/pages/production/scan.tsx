@@ -102,6 +102,9 @@ function ScannerPage() {
 
   const [workers, setWorkers] = useState<WorkerOption[]>([]);
   const [selectedWorkerId, setSelectedWorkerId] = useState("");
+  // PIC "Show all" override — bypasses the per-JC-dept filter on the
+  // worker dropdown. Default off so the scanner's worker list stays short.
+  const [picShowAll, setPicShowAll] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<
     | { kind: "success"; slot: 1 | 2; workerName: string }
@@ -444,7 +447,9 @@ function ScannerPage() {
                       <option value="">Select worker...</option>
                       {workers
                         .filter((w) =>
-                          workerCoversDept(w, jc?.departmentCode ?? ""),
+                          picShowAll
+                            ? true
+                            : workerCoversDept(w, jc?.departmentCode ?? ""),
                         )
                         .map((w) => (
                           <option key={w.id} value={w.id}>
@@ -453,6 +458,24 @@ function ScannerPage() {
                           </option>
                         ))}
                     </select>
+                    {/* "Show all PIC" override — for cross-dept help / new
+                        hires not yet in Employee Master. */}
+                    <button
+                      type="button"
+                      onClick={() => setPicShowAll((v) => !v)}
+                      className={`text-xs px-3 py-2 rounded border transition shrink-0 ${
+                        picShowAll
+                          ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                          : "bg-white text-[#6B5C32] border-[#E2DDD8] hover:bg-[#FAF8F4]"
+                      }`}
+                      title={
+                        picShowAll
+                          ? "Showing all workers. Click to filter back to this dept."
+                          : "Filtered to this dept's workers. Click to show all."
+                      }
+                    >
+                      {picShowAll ? "All ✓" : "All"}
+                    </button>
                   </div>
                 </CardContent>
               </Card>

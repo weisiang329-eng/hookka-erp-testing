@@ -353,6 +353,10 @@ export default function DepartmentProductionPage() {
     setOrders(fetchedOrders);
   }
   const [saving, setSaving] = useState<string | null>(null);
+  // Smart PIC filter (operator request 2026-05-12). Default: only workers
+  // who cover this dept are listed in the PIC dropdowns; toggle expands
+  // to the full roster for cross-dept assignments.
+  const [picShowAll, setPicShowAll] = useState<boolean>(false);
   const [jobCardDialog, setJobCardDialog] = useState<{ order: ProductionOrder; jc: JobCard } | null>(null);
   // Quick "Mark Done" modal — captures PIC1 (required) + optional PIC2 and
   // auto-stamps completedDate=today on submit. Workflow per the user:
@@ -489,16 +493,15 @@ export default function DepartmentProductionPage() {
       return (a.jc.wipKey || "FG").localeCompare(b.jc.wipKey || "FG");
     });
 
-  // PIC dropdown — strict per-dept filter (operator request 2026-05-12).
-  // Pre-2026-05-12 this filtered by the legacy single `departmentCode`
-  // field and fell back to ALL workers when the dept had no roster, which
-  // surfaced every non-production employee (office staff, sales, etc.)
-  // in every dept's PIC list. The multi-dept model (`departmentCodes`)
-  // now carries every dept a worker covers; workers with no dept assigned
-  // stay hidden. See workerCoversDept() in src/lib/worker.ts.
-  // `allWorkers` is kept as the variable name because four PIC dropdowns
-  // in this file read it; renaming would just churn the diff.
-  const allWorkers = workers.filter((w) => workerCoversDept(w, deptCode));
+  // PIC dropdown — smart filter (operator request 2026-05-12).
+  // Default: narrow to workers whose departmentCodes include this page's
+  // deptCode. `picShowAll` toggle (button in header) bypasses the filter
+  // for cross-dept temporary-assignment cases. See workerCoversDept() in
+  // src/lib/worker.ts. `allWorkers` keeps its name because four PIC
+  // dropdowns in this file read it; renaming would just churn the diff.
+  const allWorkers = picShowAll
+    ? workers
+    : workers.filter((w) => workerCoversDept(w, deptCode));
 
   const updateEdit = (jcId: string, field: string, value: string) => {
     setEdits(prev => ({
@@ -650,29 +653,50 @@ export default function DepartmentProductionPage() {
             </div>
           </div>
         </div>
-        <Button
-          variant="outline"
-          className="gap-2"
-          onClick={async () => {
-            const pendingOrders = orders.filter(o =>
-              o.jobCards.some(jc => jc.departmentCode === deptCode && jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED")
-            );
-            if (pendingOrders.length === 0) {
-              toast.info(`No pending ${dept.name} stickers to print.`);
-              return;
+        <div className="flex items-center gap-2">
+          {/* PIC dropdown "Show all workers" override. Default off — operators
+              ASKED for the per-dept short list (2026-05-12). Toggle on for
+              cross-dept temporary-assignment cases. Session-only. */}
+          <button
+            type="button"
+            onClick={() => setPicShowAll((v) => !v)}
+            className={`text-xs px-3 py-2 rounded border transition ${
+              picShowAll
+                ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                : "bg-white text-[#6B5C32] border-[#E6E0D9] hover:bg-[#FAF8F4]"
+            }`}
+            title={
+              picShowAll
+                ? "PIC dropdowns are showing ALL workers. Click to filter back to this department."
+                : "PIC dropdowns are filtered to this department's workers. Click to show all workers (cross-dept help, new hires)."
             }
-            const { generateBatchStickersPdf } = await import("@/lib/generate-sticker-pdf");
-            const { generated, skipped } = await generateBatchStickersPdf(pendingOrders, deptCode);
-            if (generated === 0) {
-              toast.warning(`No stickers generated — no orders have a ${dept.name} job card. Check BOMs.`);
-            } else if (skipped > 0) {
-              toast.info(`Generated ${generated} stickers, skipped ${skipped} orders without a ${dept.name} job card.`);
-            }
-          }}
-        >
-          <Printer className="h-4 w-4" />
-          Print Stickers
-        </Button>
+          >
+            {picShowAll ? "All PIC ✓" : "All PIC"}
+          </button>
+          <Button
+            variant="outline"
+            className="gap-2"
+            onClick={async () => {
+              const pendingOrders = orders.filter(o =>
+                o.jobCards.some(jc => jc.departmentCode === deptCode && jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED")
+              );
+              if (pendingOrders.length === 0) {
+                toast.info(`No pending ${dept.name} stickers to print.`);
+                return;
+              }
+              const { generateBatchStickersPdf } = await import("@/lib/generate-sticker-pdf");
+              const { generated, skipped } = await generateBatchStickersPdf(pendingOrders, deptCode);
+              if (generated === 0) {
+                toast.warning(`No stickers generated — no orders have a ${dept.name} job card. Check BOMs.`);
+              } else if (skipped > 0) {
+                toast.info(`Generated ${generated} stickers, skipped ${skipped} orders without a ${dept.name} job card.`);
+              }
+            }}
+          >
+            <Printer className="h-4 w-4" />
+            Print Stickers
+          </Button>
+        </div>
       </div>
 
       {/* Stats */}

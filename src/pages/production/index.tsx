@@ -804,6 +804,15 @@ export default function ProductionPage({
       return false;
     }
   });
+
+  // PIC dropdown — "Show all workers" override. False by default (strict
+  // per-dept filter, operator-requested 2026-05-12). Flipping true expands
+  // every PIC dropdown on the page to the full worker roster, for the
+  // cross-dept temporary-assignment case (e.g. an Upholstery operator
+  // helping out Fab Sew for a shift). Session-only — operators rarely need
+  // it, and resetting on reload keeps the default short-list behaviour
+  // sticky for the common path.
+  const [picShowAll, setPicShowAll] = useState<boolean>(false);
   useEffect(() => {
     try {
       localStorage.setItem(INCOMPLETE_FILTER_LS_KEY, incompleteOnly ? "1" : "0");
@@ -2769,22 +2778,22 @@ export default function ProductionPage({
     );
   };
 
-  // PIC dropdown — strict per-dept filter (operator request 2026-05-12).
-  // Originally the dropdown showed ALL workers because the single-dept
-  // model would hide cross-trained staff. The multi-dept model
-  // (`Worker.departmentCodes`, shipped 2026-05-10) carries every dept a
-  // worker can cover, so the dropdown now narrows to workers whose
-  // departmentCodes include the active tab. Workers with no dept assigned
-  // are intentionally hidden — see workerCoversDept() in src/lib/worker.ts.
-  // On the "ALL" overview tab there's no inline PIC editor, so we keep
-  // the unfiltered list as a defensive fallback.
+  // PIC dropdown — smart filter (operator request 2026-05-12).
+  // Default: narrow to workers whose departmentCodes include the active
+  // tab — operators see a short relevant list. The `picShowAll` toggle
+  // expands every PIC dropdown to the full roster, for cross-dept
+  // temporary-assignment cases (e.g. an Upholstery operator helping out
+  // Fab Sew for a shift, or any worker whose Employee Master record
+  // hasn't been filled in yet). See workerCoversDept() in
+  // src/lib/worker.ts. On the "ALL" overview tab there's no inline PIC
+  // editor, so the filter is bypassed there as a defensive fallback.
   const deptWorkers = useMemo(() => {
     const list = [...(workers || [])].sort((a, b) =>
       (a.name || "").localeCompare(b.name || ""),
     );
-    if (activeTab === "ALL") return list;
+    if (activeTab === "ALL" || picShowAll) return list;
     return list.filter((w) => workerCoversDept(w, activeTab));
-  }, [workers, activeTab]);
+  }, [workers, activeTab, picShowAll]);
 
   // Full-cell clickable date input. Renders as a spreadsheet cell showing
   // the formatted date; clicking anywhere in the cell opens the picker.
@@ -4878,6 +4887,29 @@ export default function ProductionPage({
             ? `Filter Incomplete (${filteredOrders.length})`
             : "Filter Incomplete"}
         </button>
+        {/* "Show all PIC" override — bypasses the per-dept filter on every
+            PIC dropdown when an operator needs to assign a worker outside
+            the active dept (temporary cross-dept help, brand-new hire not
+            yet in Employee Master). Filtered by default since operators
+            ASKED for the narrow list to combat the long-roster scrolling
+            pain; this toggle is the escape hatch. Session-only — reload
+            resets to filtered. */}
+        <button
+          type="button"
+          onClick={() => setPicShowAll((v) => !v)}
+          className={`text-xs px-2 py-1.5 rounded border transition ${
+            picShowAll
+              ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+              : "bg-white text-[#6B5C32] border-[#E6E0D9] hover:bg-[#FAF8F4]"
+          }`}
+          title={
+            picShowAll
+              ? "PIC dropdowns are showing ALL workers. Click to filter back to the active department."
+              : "PIC dropdowns are filtered to workers in the active department. Click to show all workers (cross-dept help, new hires)."
+          }
+        >
+          {picShowAll ? "All PIC ✓" : "All PIC"}
+        </button>
         {!shouldFetch && (
           <button
             onClick={() => setShouldFetch(true)}
@@ -4902,6 +4934,7 @@ export default function ProductionPage({
             setUrlBatch({ q: "", state: "", customer: "", cat: "", from: "", to: "" });
             setFltSearchInput("");
             setIncompleteOnly(false);
+            setPicShowAll(false);
             clearAllOverviewFilters();
             setOverduePanelMode(null);
           }}

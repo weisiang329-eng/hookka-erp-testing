@@ -116,6 +116,9 @@ export default function FGScanPage() {
     [workersResp]
   );
   const [workerId, setWorkerId] = useState("");
+  // PIC "Show all" override — defaults to PACKING-only filter; flip on for
+  // cross-dept help (e.g. a Webbing operator stepping into Packing today).
+  const [picShowAll, setPicShowAll] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<
     | { kind: "success"; unit: FGUnit; message: string }
@@ -271,9 +274,28 @@ export default function FGScanPage() {
 
           {/* Worker dropdown — required for PACK, optional otherwise */}
           <div>
-            <label className="block text-xs font-medium text-[#6B7280] mb-1">
-              Worker {action === "PACK" ? <span className="text-[#9A3A2D]">*</span> : <span className="text-[#9CA3AF]">(optional)</span>}
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-[#6B7280]">
+                Worker {action === "PACK" ? <span className="text-[#9A3A2D]">*</span> : <span className="text-[#9CA3AF]">(optional)</span>}
+              </label>
+              {/* "Show all PIC" override for cross-dept help / new hires. */}
+              <button
+                type="button"
+                onClick={() => setPicShowAll((v) => !v)}
+                className={`text-[10px] px-2 py-1 rounded border transition ${
+                  picShowAll
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                    : "bg-white text-[#6B5C32] border-[#E2DDD8] hover:bg-[#FAF8F4]"
+                }`}
+                title={
+                  picShowAll
+                    ? "Showing all workers. Click to filter back to Packing."
+                    : "Filtered to Packing workers. Click to show all."
+                }
+              >
+                {picShowAll ? "All ✓" : "All"}
+              </button>
+            </div>
             <select
               value={workerId}
               onChange={(e) => setWorkerId(e.target.value)}
@@ -283,7 +305,7 @@ export default function FGScanPage() {
                 {action === "PACK" ? "Select worker..." : "(no worker)"}
               </option>
               {workers
-                .filter((w) => workerCoversDept(w, "PACKING"))
+                .filter((w) => (picShowAll ? true : workerCoversDept(w, "PACKING")))
                 .map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}{w.empNo ? ` (${w.empNo})` : ""}

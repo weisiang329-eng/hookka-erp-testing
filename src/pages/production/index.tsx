@@ -5570,14 +5570,11 @@ export default function ProductionPage({
       <ApplyBatchPicDialog
         open={batchPicOpen}
         count={selectedDeptRows.length}
-        // deptWorkers respects the page-level "All PIC" toggle (Wei Siang's
-        // 4808ffc commit) and uses workerCoversDept's smart filter.
-        workers={deptWorkers.map((w) => ({ id: w.id, name: w.name }))}
-        // Also pass the full roster so the dialog can offer its own "All
-        // departments" checkbox — saves the operator from leaving the dialog,
-        // hunting for the filter-bar toggle, then re-opening with their
-        // multi-selection intact. Wei Siang 2026-05-12.
-        allWorkers={(workers || [])
+        // Wei Siang 2026-05-13: batch dialogs (production + folder) BOTH
+        // default to the full production worker roster — strict per-dept
+        // filter is for inline cell dropdowns only. Operators doing batch
+        // assignments routinely cross dept lines.
+        workers={(workers || [])
           .slice()
           .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
           .map((w) => ({ id: w.id, name: w.name }))}

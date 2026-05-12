@@ -443,40 +443,11 @@ export default function ProductionFolderDetailPage() {
       <ApplyBatchPicDialog
         open={picOpen}
         count={selected.length}
-        // Smart-filter (Option B from 2026-05-12 discussion): folders can
-        // span multiple depts, so the default list is workers whose depts
-        // include at least one of the SELECTED rows' depts. Wei Siang
-        // screenshot 2026-05-13: dialog was opening with the full ~30-worker
-        // roster which is too noisy — operator wants smart default + an "All
-        // departments" escape hatch (already wired below).
-        workers={(() => {
-          const selectedDepts = new Set(
-            selected
-              .map((r) => (r.departmentCode || "").toUpperCase())
-              .filter(Boolean),
-          );
-          const sorted = workers
-            .slice()
-            .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-          if (selectedDepts.size === 0) return sorted.map((w) => ({ id: w.id, name: w.name }));
-          const filtered = sorted.filter((w) => {
-            const codes =
-              Array.isArray(w.departmentCodes) && w.departmentCodes.length > 0
-                ? w.departmentCodes
-                : w.departmentCode
-                  ? [w.departmentCode]
-                  : [];
-            return codes.some((c) => selectedDepts.has((c || "").toUpperCase()));
-          });
-          // Safety: if the smart filter wipes the list to zero (e.g. PACKING
-          // selected and no one is registered under PACKING), fall back to
-          // the full roster rather than showing an empty dropdown. The "All
-          // departments" toggle still lets the operator widen explicitly.
-          return (filtered.length > 0 ? filtered : sorted).map((w) => ({ id: w.id, name: w.name }));
-        })()}
-        // Full roster is always available behind the dialog's "All
-        // departments" checkbox for cross-dept temp assignments.
-        allWorkers={workers
+        // Wei Siang 2026-05-13: same rule as the production page batch
+        // dialog — show the full production worker roster by default.
+        // Folders span multiple depts anyway; smart per-dept filter
+        // would just confuse the picker.
+        workers={workers
           .slice()
           .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
           .map((w) => ({ id: w.id, name: w.name }))}

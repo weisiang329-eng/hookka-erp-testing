@@ -22,13 +22,16 @@ function csrfHeaders(): Record<string, string> {
   return h;
 }
 
+// SupabaseAdapter auto-camelCases column names — listing endpoint returns
+// camelCase keys (createdAt etc.) but jc_count stays snake_case because it
+// comes from a SQL alias on a COUNT(*) subquery, not a renamed column.
 type Folder = {
   id: string;
   name: string;
   description: string | null;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
   jc_count: number;
 };
 
@@ -103,12 +106,14 @@ export default function ProductionFoldersPage() {
     }
   };
 
-  const fmtDate = (iso: string): string => {
-    try {
-      return new Date(iso).toISOString().slice(0, 10);
-    } catch {
-      return iso;
-    }
+  // Tolerant date formatter — undefined/invalid input does NOT crash the
+  // page (was previously `new Date(undefined).toISOString()` throwing
+  // RangeError + tripping ErrorBoundary).
+  const fmtDate = (iso: string | null | undefined): string => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toISOString().slice(0, 10);
   };
 
   return (
@@ -167,8 +172,8 @@ export default function ProductionFoldersPage() {
                   </button>
                 )}
                 <div className="text-[11px] text-[#8A7F73] mt-0.5">
-                  {folder.jc_count} job card{folder.jc_count === 1 ? "" : "s"} · Created {fmtDate(folder.created_at)}
-                  {folder.created_by ? ` · by ${folder.created_by}` : ""}
+                  {folder.jc_count} job card{folder.jc_count === 1 ? "" : "s"} · Created {fmtDate(folder.createdAt)}
+                  {folder.createdBy ? ` · by ${folder.createdBy}` : ""}
                 </div>
               </div>
               <Button size="sm" variant="ghost" onClick={() => navigate(`/production/folders/${folder.id}`)} title="Open folder">

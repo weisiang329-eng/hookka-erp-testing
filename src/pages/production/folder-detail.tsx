@@ -31,12 +31,16 @@ function csrfHeaders(): Record<string, string> {
   return h;
 }
 
+// The SupabaseAdapter auto-camelCases snake_case columns on read, so
+// created_at / created_by from the DB come back as createdAt / createdBy
+// in the JSON payload. Surfaced by a crash on the folder detail page —
+// Date(undefined).toISOString() threw RangeError.
 type FolderData = {
   id: string;
   name: string;
   description: string | null;
-  created_by: string | null;
-  created_at: string;
+  createdBy: string | null;
+  createdAt: string;
   jobCardIds: string[];
 };
 
@@ -45,6 +49,11 @@ type FolderJcRow = {
   poId: string;
   jobCardId: string;
   poNo: string | null;
+  // Sales Order number (e.g. "SO-2605-148") — surfaced as its own column so
+  // operators can scan the folder by SO at a glance. Falls back to the CO
+  // number for consignment-driven POs. Requested by Wei Siang 2026-05-12.
+  salesOrderNo: string | null;
+  salesOrderId: string | null;
   productCode: string | null;
   productName: string | null;
   customerName: string | null;
@@ -93,6 +102,9 @@ export default function ProductionFolderDetailPage() {
         data: Array<{
           id: string;
           poNo?: string;
+          salesOrderId?: string;
+          companySOId?: string;
+          companyCOId?: string;
           productCode?: string;
           productName?: string;
           customerName?: string;
@@ -111,11 +123,16 @@ export default function ProductionFolderDetailPage() {
       for (const po of poJson.data || []) {
         for (const jc of po.jobCards || []) {
           if (!memberSet.has(jc.id)) continue;
+          // Prefer the SO number; fall back to CO number for consignment POs
+          // (companySOId is null on CO-driven production orders).
+          const soNo = po.companySOId ?? po.companyCOId ?? "";
           collected.push({
             id: jc.id,
             poId: po.id,
             jobCardId: jc.id,
             poNo: po.poNo ?? "",
+            salesOrderNo: soNo,
+            salesOrderId: po.salesOrderId ?? null,
             productCode: po.productCode ?? "",
             productName: po.productName ?? "",
             customerName: po.customerName ?? "",
@@ -185,16 +202,39 @@ export default function ProductionFolderDetailPage() {
   };
 
   const columns: Column<FolderJcRow>[] = [
+    // SO# is sticky so it stays visible while operator scrolls horizontally.
+    // Clicking the cell navigates to the SO detail page.
+    { key: "salesOrderNo", label: "SO #", width: "120px", render: (_v, r) => r.salesOrderNo ? (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); if (r.salesOrderId) navigate(`/sales/${r.salesOrderId}`); }}
+        className="text-[#3F6F8B] hover:underline"
+      >{r.salesOrderNo}</button>
+    ) : "" },
     { key: "poNo", label: "PO #", width: "110px" },
     { key: "customerName", label: "Customer", width: "160px" },
     { key: "productCode", label: "Product", width: "160px" },
     { key: "departmentCode", label: "Dept", width: "90px" },
     { key: "status", label: "Status", width: "110px" },
     { key: "qty", label: "Qty", width: "60px" },
-    { key: "dueDate", label: "Due", width: "95px", render: (r) => r.dueDate ?? "" },
-    { key: "completedDate", label: "Completed", width: "95px", render: (r) => r.completedDate ?? "" },
+    { key: "dueDate", label: "Due", width: "95px", render: (_v, r) => r.dueDate ?? "" },
+    { key: "completedDate", label: "Completed", width: "95px", render: (_v, r) => r.completedDate ?? "" },
     { key: "pic1Name", label: "PIC", width: "120px" },
   ];
+
+  // Safe date formatter — `created_at` was previously stringly-typed and an
+  // invalid value (or undefined from a snake/camel typo) crashed the entire
+  // page with `Date.toISOString` throwing RangeError. Caught + ignored here.
+  const fmtDate = (iso: string | null | undefined): string => {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      return d.toISOString().slice(0, 10);
+    } catch {
+      return "";
+    }
+  };
 
   if (!folderId) {
     return (
@@ -216,8 +256,8 @@ export default function ProductionFolderDetailPage() {
           </h1>
           <div className="text-[11px] text-[#8A7F73]">
             {rows.length} job card{rows.length === 1 ? "" : "s"}
-            {folder?.created_by ? ` · Created by ${folder.created_by}` : ""}
-            {folder ? ` · ${new Date(folder.created_at).toISOString().slice(0, 10)}` : ""}
+            {folder?.createdBy ? ` · Created by ${folder.createdBy}` : ""}
+            {folder?.createdAt ? ` · ${fmtDate(folder.createdAt)}` : ""}
           </div>
         </div>
         <Button size="sm" variant="outline" onClick={fetchAll}>Refresh</Button>

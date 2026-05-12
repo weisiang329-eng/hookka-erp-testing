@@ -177,6 +177,12 @@ export type Worker = {
   name: string;
   departmentId: string;
   departmentCode: string;
+  // Multi-dept assignment (added 2026-05-10). Workers cross-trained across
+  // multiple depts list every code they can cover here. The legacy single
+  // `departmentCode` field stays populated as the primary dept for back-compat
+  // with reports that key on a single dept; `departmentCodes` is the source
+  // of truth for PIC dropdown filtering.
+  departmentCodes?: string[];
   position: string;
   phone: string;
   status: string;

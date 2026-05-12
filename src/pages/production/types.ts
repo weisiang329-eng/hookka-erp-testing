@@ -87,7 +87,17 @@ export type Cell = {
   isOffLeadtime: boolean;
 };
 
-export type Worker = { id: string; name: string; departmentCode?: string; empNo?: string };
+export type Worker = {
+  id: string;
+  name: string;
+  // Legacy single dept (kept populated for back-compat with reports that
+  // key on one dept per worker).
+  departmentCode?: string;
+  // Multi-dept assignment — every dept this worker can cover. Source of
+  // truth for PIC dropdown filtering (see src/lib/worker.ts).
+  departmentCodes?: string[];
+  empNo?: string;
+};
 
 // Stock PO dialog source types — historical WIPs/FGs surfaced for the
 // "make-to-stock" picker. Only SKUs previously produced show up.

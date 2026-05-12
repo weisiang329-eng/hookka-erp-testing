@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, CheckCircle2, AlertTriangle, ScanLine } from "lucide-react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { workerCoversDept } from "@/lib/worker";
 
 type ScanAction = "PACK" | "LOAD" | "DELIVER" | "RETURN";
 
@@ -36,6 +37,9 @@ type Worker = {
   name: string;
   empNo?: string;
   departmentCode?: string;
+  // Multi-dept assignment (2026-05-10). FG scan is a PACKING-dept operation,
+  // so the dropdown narrows to workers whose departmentCodes include PACKING.
+  departmentCodes?: string[];
 };
 
 type RecentEntry = {
@@ -278,11 +282,13 @@ export default function FGScanPage() {
               <option value="">
                 {action === "PACK" ? "Select worker..." : "(no worker)"}
               </option>
-              {workers.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}{w.empNo ? ` (${w.empNo})` : ""}
-                </option>
-              ))}
+              {workers
+                .filter((w) => workerCoversDept(w, "PACKING"))
+                .map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}{w.empNo ? ` (${w.empNo})` : ""}
+                  </option>
+                ))}
             </select>
           </div>
 

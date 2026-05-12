@@ -16,6 +16,7 @@ import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
+import { workerCoversDept } from "@/lib/worker";
 
 // Build headers for mutating fetches. The default Hookka fetcher (fetchJson)
 // auto-injects X-CSRF-Token, but Phase 2.5's sendOneDraft / flushDrafts go
@@ -2855,14 +2856,22 @@ export default function ProductionPage({
     );
   };
 
-  // PIC dropdown shows ALL workers regardless of department — many staff
-  // cover multiple depts, so filtering by activeTab hides valid assignees.
-  // Sort alphabetically by name for easier scanning.
+  // PIC dropdown — strict per-dept filter (operator request 2026-05-12).
+  // Originally the dropdown showed ALL workers because the single-dept
+  // model would hide cross-trained staff. The multi-dept model
+  // (`Worker.departmentCodes`, shipped 2026-05-10) carries every dept a
+  // worker can cover, so the dropdown now narrows to workers whose
+  // departmentCodes include the active tab. Workers with no dept assigned
+  // are intentionally hidden — see workerCoversDept() in src/lib/worker.ts.
+  // On the "ALL" overview tab there's no inline PIC editor, so we keep
+  // the unfiltered list as a defensive fallback.
   const deptWorkers = useMemo(() => {
-    return [...(workers || [])].sort((a, b) =>
+    const list = [...(workers || [])].sort((a, b) =>
       (a.name || "").localeCompare(b.name || ""),
     );
-  }, [workers]);
+    if (activeTab === "ALL") return list;
+    return list.filter((w) => workerCoversDept(w, activeTab));
+  }, [workers, activeTab]);
 
   // Full-cell clickable date input. Renders as a spreadsheet cell showing
   // the formatted date; clicking anywhere in the cell opens the picker.

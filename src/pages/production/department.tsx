@@ -12,6 +12,7 @@ import { ArrowLeft, Download, Save, Printer, Check, X, Clock, User, Play } from 
 // vendor chunk only ships when the user actually prints a card / sticker.
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { fetchJson } from "@/lib/fetch-json";
+import { workerCoversDept } from "@/lib/worker";
 
 const POMutationSchema = z.object({
   success: z.boolean(),
@@ -49,7 +50,13 @@ type ProductionOrder = {
 };
 
 type Worker = {
-  id: string; empNo: string; name: string; departmentCode: string;
+  id: string;
+  empNo: string;
+  name: string;
+  departmentCode: string;
+  // Multi-dept assignment (added 2026-05-10). Optional because legacy
+  // cached payloads may not include it.
+  departmentCodes?: string[];
 };
 
 const DEPT_INFO: Record<string, { name: string; color: string }> = {
@@ -482,10 +489,16 @@ export default function DepartmentProductionPage() {
       return (a.jc.wipKey || "FG").localeCompare(b.jc.wipKey || "FG");
     });
 
-  // PIC dropdown: prefer workers in this dept, but fall back to ALL workers
-  // if the dept has no roster (mock data may not have one assigned).
-  const deptWorkers = workers.filter(w => w.departmentCode === deptCode);
-  const allWorkers = deptWorkers.length > 0 ? deptWorkers : workers;
+  // PIC dropdown — strict per-dept filter (operator request 2026-05-12).
+  // Pre-2026-05-12 this filtered by the legacy single `departmentCode`
+  // field and fell back to ALL workers when the dept had no roster, which
+  // surfaced every non-production employee (office staff, sales, etc.)
+  // in every dept's PIC list. The multi-dept model (`departmentCodes`)
+  // now carries every dept a worker covers; workers with no dept assigned
+  // stay hidden. See workerCoversDept() in src/lib/worker.ts.
+  // `allWorkers` is kept as the variable name because four PIC dropdowns
+  // in this file read it; renaming would just churn the diff.
+  const allWorkers = workers.filter((w) => workerCoversDept(w, deptCode));
 
   const updateEdit = (jcId: string, field: string, value: string) => {
     setEdits(prev => ({

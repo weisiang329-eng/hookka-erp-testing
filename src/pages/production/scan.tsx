@@ -10,6 +10,7 @@ import { useSearchParams } from "react-router-dom";
 import { parseStickerData } from "@/lib/qr-utils";
 import { fetchJson } from "@/lib/fetch-json";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
+import { workerCoversDept } from "@/lib/worker";
 
 const WorkerListSchema = z.object({
   success: z.boolean(),
@@ -75,6 +76,10 @@ type WorkerOption = {
   name: string;
   empNo?: string;
   departmentCode?: string;
+  // Multi-dept assignment (2026-05-10). Drives PIC dropdown narrowing
+  // once a job card has been scanned — only workers whose departmentCodes
+  // include the scanned JC's dept appear in the picker.
+  departmentCodes?: string[];
 };
 
 export default function ScannerPageWrapper() {
@@ -437,12 +442,16 @@ function ScannerPage() {
                       className="flex-1 h-10 px-3 rounded-md border border-[#E2DDD8] bg-white text-base text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                     >
                       <option value="">Select worker...</option>
-                      {workers.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {w.name}
-                          {w.empNo ? ` (${w.empNo})` : ""}
-                        </option>
-                      ))}
+                      {workers
+                        .filter((w) =>
+                          workerCoversDept(w, jc?.departmentCode ?? ""),
+                        )
+                        .map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                            {w.empNo ? ` (${w.empNo})` : ""}
+                          </option>
+                        ))}
                     </select>
                   </div>
                 </CardContent>

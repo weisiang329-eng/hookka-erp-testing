@@ -1416,9 +1416,11 @@ export default function ProductionPage({
     [],
   );
 
-  // flushDrafts — fire all currently-staged drafts in parallel, then act on
-  // each result (success → flash green; fail → rollback + push to failure
-  // modal). Idempotent on empty drafts. Clears the debounce timer up front.
+  // flushDrafts — Phase 2.5-B: try the bulk endpoint first (1 HTTP for all
+  // drafts in the buffer); fall back to per-draft sendOneDraft on bulk
+  // failure (network error, 4xx, server doesn't yet know /bulk-patch).
+  // Either way, per-draft outcomes feed the same success/rollback path.
+  // Clears the debounce timer up front; idempotent on empty drafts.
   const flushDrafts = useCallback(async () => {
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
@@ -1430,14 +1432,57 @@ export default function ProductionPage({
     setUnsavedCount(0);
     setSavingNow(true);
 
-    const results = await Promise.all(
-      drafts.map(async (d) => {
-        pendingJcPatchesRef.current.add(d.jcId);
-        const r = await sendOneDraft(d);
-        pendingJcPatchesRef.current.delete(d.jcId);
-        return { draft: d, result: r };
-      }),
-    );
+    for (const d of drafts) pendingJcPatchesRef.current.add(d.jcId);
+
+    // Try bulk endpoint first (1 HTTP for the whole buffer). On any failure
+    // (network, 5xx, endpoint not deployed yet on this preview, 4xx
+    // malformed), fall back to per-draft sendOneDraft so the operator still
+    // gets save semantics. The fallback path also keeps the per-draft retry
+    // (3 attempts) that Phase 2.5-A introduced.
+    type DraftResult = {
+      draft: (typeof drafts)[number];
+      result: { success: boolean; error?: string; attemptsUsed: number };
+    };
+    let results: DraftResult[] = [];
+    let bulkOK = false;
+    try {
+      const res = await fetch("/api/production-orders/bulk-patch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patches: drafts.map((d) => ({ poId: d.poId, jobCardId: d.jcId, ...d.patch })),
+        }),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as {
+          results?: Array<{ poId: string; jobCardId: string; success: boolean; error?: string }>;
+        };
+        const perJc = new Map<string, { success: boolean; error?: string }>();
+        for (const r of body.results ?? []) perJc.set(r.jobCardId, r);
+        results = drafts.map((d) => {
+          const r = perJc.get(d.jcId);
+          return {
+            draft: d,
+            result: r
+              ? { success: r.success, error: r.error, attemptsUsed: 1 }
+              : { success: false, error: "no result in bulk response", attemptsUsed: 1 },
+          };
+        });
+        bulkOK = true;
+      }
+    } catch {
+      /* fall through to per-draft path */
+    }
+
+    if (!bulkOK) {
+      results = await Promise.all(
+        drafts.map(async (d) => {
+          const r = await sendOneDraft(d);
+          return { draft: d, result: r };
+        }),
+      );
+    }
+    for (const d of drafts) pendingJcPatchesRef.current.delete(d.jcId);
 
     // Apply per-draft outcomes. Successful drafts: optimistic state already
     // reflects the desired value, just flash green. Failed drafts: roll the

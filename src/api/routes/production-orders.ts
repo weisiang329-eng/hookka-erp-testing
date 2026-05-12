@@ -5096,6 +5096,112 @@ app.get("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 // PUT /api/production-orders/:id
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// POST /bulk-patch — Phase 2.5-B: batch endpoint for the frontend's debounced
+// draft queue. Accepts an array of { poId, jobCardId, ...patchFields }, runs
+// each as a self-loopback PATCH so the entire applyPoUpdate flow (auth,
+// audit, cascade, cache bump) executes per-patch exactly as it would for a
+// direct client request, and returns a per-patch success/error array.
+//
+// Why loopback fetch instead of refactoring applyPoUpdate to take body as a
+// parameter:
+//   * applyPoUpdate is 480 lines + threads Context for c.var.DB, getOrgId(c),
+//     c.executionCtx, audit context, etc. A clean param-passing refactor is
+//     ~1 day of careful surgery, with a real risk of regressing 153 audit
+//     emissions and the SO/CO cascade hooks. Not worth it for the marginal
+//     gain over loopback.
+//   * Worker → Worker subrequests are intra-isolate (sub-100ms each), so
+//     N loopbacks ≈ 1 outer HTTP + N intra-isolate work. The frontend
+//     latency win is the round-trip avoidance, which loopback delivers.
+//   * Cookie forwarding preserves auth so the loopback request lands at
+//     authMiddleware → requirePermission → applyPoUpdate exactly as the
+//     original direct PATCH would.
+//
+// Limits: max 50 patches per batch (Worker subrequest limit on Pro is 1000;
+// 50 is conservative + matches typical UX — operators almost never batch
+// more than 10-20 cells at a time).
+//
+// The /bulk-patch URL is mounted BEFORE /:id so Hono doesn't route
+// "bulk-patch" into the PUT/PATCH /:id handler as poId="bulk-patch".
+app.post("/bulk-patch", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+
+  type IncomingPatch = {
+    poId: string;
+    jobCardId: string;
+    [k: string]: unknown;
+  };
+  type RawBody = { patches?: unknown };
+
+  let parsed: RawBody;
+  try {
+    parsed = (await c.req.json()) as RawBody;
+  } catch {
+    return c.json({ success: false, error: "invalid JSON body" }, 400);
+  }
+  const patches = Array.isArray(parsed.patches) ? (parsed.patches as IncomingPatch[]) : [];
+  if (patches.length === 0) {
+    return c.json({ success: false, error: "patches: non-empty array required" }, 400);
+  }
+  if (patches.length > 50) {
+    return c.json({ success: false, error: "max 50 patches per batch" }, 400);
+  }
+
+  const baseUrl = new URL(c.req.url).origin;
+  // Forward the Cookie header so the loopback request authenticates as the
+  // same operator. Authorization header is also forwarded for any bearer-token
+  // callers (worker-portal scan flow uses Bearer).
+  const cookie = c.req.header("Cookie") ?? "";
+  const authHeader = c.req.header("Authorization") ?? "";
+
+  const results = await Promise.all(
+    patches.map(async (p) => {
+      const { poId, jobCardId } = p;
+      if (!poId || typeof poId !== "string" || !jobCardId || typeof jobCardId !== "string") {
+        return { poId, jobCardId, success: false, error: "poId and jobCardId required" };
+      }
+      // Extract patch fields (everything except poId).
+      const subBody: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(p)) {
+        if (k === "poId") continue;
+        subBody[k] = v;
+      }
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (cookie) headers["Cookie"] = cookie;
+        if (authHeader) headers["Authorization"] = authHeader;
+        const res = await fetch(`${baseUrl}/api/production-orders/${encodeURIComponent(poId)}`, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify(subBody),
+        });
+        if (res.ok) {
+          return { poId, jobCardId, success: true };
+        }
+        let msg = `HTTP ${res.status}`;
+        try {
+          const errBody = (await res.json()) as { error?: string } | null;
+          if (errBody && typeof errBody.error === "string") msg = errBody.error;
+        } catch {
+          /* non-json error body */
+        }
+        return { poId, jobCardId, success: false, error: msg };
+      } catch (err) {
+        return {
+          poId,
+          jobCardId,
+          success: false,
+          error: err instanceof Error ? err.message : "network error",
+        };
+      }
+    }),
+  );
+
+  return c.json({ success: true, results });
+});
+
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;

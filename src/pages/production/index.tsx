@@ -6469,7 +6469,18 @@ export default function ProductionPage({
                         right). Legs section text-only (no QR). */}
                     <div className="mt-auto flex items-end gap-[2mm]">
                       <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                        <QRImg eager data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />
+                        {/* QR pixel size doubles as the displayed CSS px
+                            width (1 CSS px ≈ 0.265mm). Pre-2026-05-12 the
+                            print path passed 500 / 320 — values calibrated
+                            for a 50mm-wide thermal label, not the 100mm
+                            FG sticker. With eager mode actually generating
+                            the QR (lazy gate previously hid the bug), the
+                            500px QR (~132mm) overflowed the 100mm page,
+                            shoving the piece-badge column off the right
+                            edge. 180 ≈ 48mm leaves ~42mm for the badge
+                            text in the primary-only layout; 130 ≈ 34mm
+                            fits when a legs / pillow pair shares the row. */}
+                        <QRImg eager data={trackUrl} size={legsPair || pillowPair ? 130 : 180} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
                           <div className="font-bold uppercase" style={{ fontSize: "14pt" }}>
                             {s.pieceNo}/{s.totalPieces}
@@ -6499,7 +6510,12 @@ export default function ProductionPage({
                         <>
                           <div className="border-l border-dashed border-black self-stretch" />
                           <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                            <QRImg eager data={pillowTrackUrl} size={300} alt="Pillow QR" className="block" />
+                            {/* Pillow QR sits inside a pair-shared row, so
+                                its display footprint must match the primary
+                                QR's pair-case sizing (130 ≈ 34mm). See the
+                                comment on the primary QR above for why the
+                                pre-2026-05-12 value (300) overflowed. */}
+                            <QRImg eager data={pillowTrackUrl} size={130} alt="Pillow QR" className="block" />
                             <div className="flex-1 text-center min-w-0">
                               <div className="font-bold uppercase" style={{ fontSize: "13pt" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}

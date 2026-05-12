@@ -4020,16 +4020,30 @@ export default function ProductionPage({
       if (isNaN(d.getTime())) return "";
       return `${d.getDate()} ${d.toLocaleString("en-US", { month: "short" })}`;
     };
+    // Page-level filter bits. Grid-level column filters (Status: WAITING,
+    // Product Code contains "1005", etc.) are appended later inside the
+    // dept branch where the grid filter store key is computed. filterLine
+    // itself is built after the body branch so it can include both
+    // page-level and grid-level chips (operator report 2026-05-13 —
+    // "filter status waiting的 product code啊等等 全部都要 show 出来").
     const filterBits: string[] = [];
     if (fltSearch) filterBits.push(`Search: "${fltSearch}"`);
     if (fltCustomer) filterBits.push(`Customer: ${fltCustomer}`);
     if (fltState) filterBits.push(`State: ${fltState}`);
+    if (fltCategory) {
+      const catLabel =
+        fltCategory === "ACCESSORY" ? "Accessories" :
+        fltCategory === "BEDFRAME" ? "Bedframe" :
+        fltCategory === "SOFA" ? "Sofa" :
+        fltCategory;
+      filterBits.push(`Category: ${catLabel}`);
+    }
     if (fltDueFrom || fltDueTo) {
       filterBits.push(`Due: ${fltDueFrom || "…"} → ${fltDueTo || "…"}`);
     }
-    const filterLine = filterBits.length
-      ? `<div class="filters">Filters — ${filterBits.join(" · ")}</div>`
-      : "";
+    if (incompleteOnly) {
+      filterBits.push("Incomplete only");
+    }
 
     const title =
       activeTab === "ALL" ? "Production Schedule — Overview" : `Production Schedule — ${activeDept?.name}`;
@@ -4147,6 +4161,37 @@ export default function ProductionPage({
           return raw ? JSON.parse(raw) : null;
         } catch { return null; }
       };
+
+      // Pull the DataGrid's column filters / value-filter checkbox state /
+      // grid search out of sessionStorage so the printout's "Filters —"
+      // header lists what the operator is ACTUALLY looking at — not just
+      // the page-level filter bar at the top. Storage key + payload
+      // shape mirror data-grid.tsx filterStoreKey + the JSON it writes
+      // there (line 1080+ in that file). Reading errors are swallowed
+      // intentionally: a parse / quota failure should never block a print.
+      try {
+        const filterStoreKey = `datagrid-filters-${gridId}-${userEmailLc}`;
+        const raw = sessionStorage.getItem(filterStoreKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as {
+            searchText?: string;
+            columnFilters?: Record<string, string>;
+            columnValueFilters?: Record<string, string[]>;
+          };
+          const colLabel = new Map(deptColumns.map((c) => [c.key, c.label]));
+          if (parsed.searchText) {
+            filterBits.push(`Grid search: "${parsed.searchText}"`);
+          }
+          for (const [key, val] of Object.entries(parsed.columnFilters ?? {})) {
+            if (val) filterBits.push(`${colLabel.get(key) ?? key}: ${val}`);
+          }
+          for (const [key, vals] of Object.entries(parsed.columnValueFilters ?? {})) {
+            if (Array.isArray(vals) && vals.length > 0) {
+              filterBits.push(`${colLabel.get(key) ?? key}: ${vals.join(", ")}`);
+            }
+          }
+        }
+      } catch { /* ignore — don't block print on storage errors */ }
       const visibleSetRaw =
         readJson(`datagrid-cols-${gridId}-${userEmailLc}`) ??
         readJson(`datagrid-cols-${gridId}-org-default`);
@@ -4222,6 +4267,14 @@ export default function ProductionPage({
         </table>`;
       columnCount = orderedColumns.length;
     }
+
+    // Build the final filter chip strip. Constructed AFTER the body
+    // branch so grid-level column / value / search filters (appended
+    // inside the dept branch above) are included alongside the
+    // page-level chips collected at the top.
+    const filterLine = filterBits.length
+      ? `<div class="filters">Filters — ${filterBits.join(" · ")}</div>`
+      : "";
 
     // Tier-based font/padding scaling so the printout fills A4 landscape
     // regardless of how many columns the user has visible. Few columns →
@@ -4376,7 +4429,7 @@ export default function ProductionPage({
   }, [
     activeTab, activeDept, visibleOrders, deptRows, deptColumns,
     filteredOrders.length,
-    fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo,
+    fltSearch, fltCustomer, fltState, fltCategory, fltDueFrom, fltDueTo, incompleteOnly,
     gridFilterIdSet, gridFilteredDeptRows,
   ]);
 
@@ -4414,16 +4467,29 @@ export default function ProductionPage({
     const escapeHtml = (s: string) =>
       s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+    // Page-level filter bits. Grid-level chips (Status / Product Code /
+    // checkbox value filters / grid search) are appended later in the
+    // dept branch where gridFilterIdSet is consumed; filterLine itself
+    // is built after the body branch so it covers both layers. Mirrors
+    // handlePrintSchedule for consistency.
     const filterBits: string[] = [];
     if (fltSearch) filterBits.push(`Search: "${fltSearch}"`);
     if (fltCustomer) filterBits.push(`Customer: ${fltCustomer}`);
     if (fltState) filterBits.push(`State: ${fltState}`);
+    if (fltCategory) {
+      const catLabel =
+        fltCategory === "ACCESSORY" ? "Accessories" :
+        fltCategory === "BEDFRAME" ? "Bedframe" :
+        fltCategory === "SOFA" ? "Sofa" :
+        fltCategory;
+      filterBits.push(`Category: ${catLabel}`);
+    }
     if (fltDueFrom || fltDueTo) {
       filterBits.push(`Due: ${fltDueFrom || "…"} → ${fltDueTo || "…"}`);
     }
-    const filterLine = filterBits.length
-      ? `<div class="filters">Filters — ${filterBits.join(" · ")}</div>`
-      : "";
+    if (incompleteOnly) {
+      filterBits.push("Incomplete only");
+    }
 
     const title =
       activeTab === "ALL"
@@ -4544,6 +4610,42 @@ export default function ProductionPage({
         (s, r) => s + (Number(r.prodTime) || 0),
         0,
       );
+
+      // Pull grid-level filters (column text filter, value-checkbox
+      // filter, grid search) out of sessionStorage so the merged-listing
+      // printout's "Filters" line reflects everything the operator has
+      // narrowed the view by. Same storage shape as data-grid.tsx
+      // writes; see handlePrintSchedule's identical block for context.
+      try {
+        const gridId = `production-dept-${activeTab.toLowerCase()}`;
+        const userEmailLc = (() => {
+          try {
+            const u = getCurrentUser();
+            return u?.email ? u.email.toLowerCase() : "anon";
+          } catch { return "anon"; }
+        })();
+        const filterStoreKey = `datagrid-filters-${gridId}-${userEmailLc}`;
+        const raw = sessionStorage.getItem(filterStoreKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as {
+            searchText?: string;
+            columnFilters?: Record<string, string>;
+            columnValueFilters?: Record<string, string[]>;
+          };
+          const colLabel = new Map(deptColumns.map((c) => [c.key, c.label]));
+          if (parsed.searchText) {
+            filterBits.push(`Grid search: "${parsed.searchText}"`);
+          }
+          for (const [key, val] of Object.entries(parsed.columnFilters ?? {})) {
+            if (val) filterBits.push(`${colLabel.get(key) ?? key}: ${val}`);
+          }
+          for (const [key, vals] of Object.entries(parsed.columnValueFilters ?? {})) {
+            if (Array.isArray(vals) && vals.length > 0) {
+              filterBits.push(`${colLabel.get(key) ?? key}: ${vals.join(", ")}`);
+            }
+          }
+        }
+      } catch { /* ignore — don't block print on storage errors */ }
       type Bucket = {
         wip: string;
         qty: number;
@@ -4601,6 +4703,13 @@ export default function ProductionPage({
           <tbody>${rowsHtml}</tbody>
         </table>`;
     }
+
+    // Final filter chip strip — constructed after the body branch so it
+    // covers both page-level chips (top of function) and grid-level chips
+    // (appended inside the dept branch above).
+    const filterLine = filterBits.length
+      ? `<div class="filters">Filters — ${filterBits.join(" · ")}</div>`
+      : "";
 
     const html = `<!doctype html>
 <html>
@@ -4710,7 +4819,7 @@ export default function ProductionPage({
     w.document.close();
   }, [
     activeTab, activeDept, visibleOrders, deptRows,
-    fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo, gridFilterIdSet,
+    fltSearch, fltCustomer, fltState, fltCategory, fltDueFrom, fltDueTo, incompleteOnly, gridFilterIdSet, deptColumns,
   ]);
 
   // NOTE: loading is intentionally NOT an early-return — that previously

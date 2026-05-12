@@ -536,6 +536,17 @@ function rowToMinimalJobCard(
   bomWipComponentsRaw: unknown = null,
   bomByProductCode: Map<string, unknown> | null = null,
   siblings: SiblingPo[] | null = null,
+  // When a dept tab is active, the frontend only renders the OTHER-dept
+  // JCs as date-pill cells (renderDeptSchedCell — production/index.tsx
+  // L2221). Those cells only read id, departmentCode, dueDate, completed-
+  // Date, status, wipKey, branchKey, prerequisiteMet, expectedDueDate.
+  // Sending the full ~25-field JC for every PACKING / WOOD_CUT / FOAM
+  // row on a 700-PO sheet was ~7 MB of wire payload that the FE never
+  // looked at. activeDeptCode='UPHOLSTERY' (etc.) opts into a slim
+  // shape: full for the active dept + FAB_CUT (FC row needs PIC, prod-
+  // Time, fabricUsage), slim for the rest. activeDeptCode=null (overview
+  // mode) keeps the full shape for every dept — the matrix needs them.
+  activeDeptCode: string | null = null,
 ): MinimalJobCardOut {
   // wipQty defaults to 1 for legacy single-piece JCs; piecesTotal must
   // therefore floor at 1 so the FE never divides by 0 / renders "0/0".
@@ -552,6 +563,62 @@ function rowToMinimalJobCard(
     !!siblings &&
     siblings.length > 0 &&
     !!bomByProductCode;
+  // Slim path: non-active, non-FC JC on a dept-filtered request only
+  // renders as a date pill in the row's `sched_<DEPT>.sortKey` column.
+  // Drop fields the renderer never reads (wipCode, wipType, wipLabel,
+  // wipQty, pic1Id/pic1Name/pic2Id/pic2Name, productionTimeMinutes,
+  // estMinutes, category, rackingNumber, piecesTotal/piecesDone,
+  // distributedAt, fabricUsageMeters). Saves ~70% per JC on the wire,
+  // which is dominant on wide-range fetches (~10k other-dept JCs).
+  if (
+    activeDeptCode !== null &&
+    r.departmentCode !== activeDeptCode &&
+    r.departmentCode !== "FAB_CUT"
+  ) {
+    // Slim shape — JSON.stringify drops `undefined` so the wire payload
+    // omits ~12 fields the FE's renderDeptSchedCell never reads. Each
+    // dropped field saves ~15-25 bytes after key+separator; on a 9k-JC
+    // wide-range response that's another ~2-3 MB on top of the field
+    // count itself. The FE side reads these via `?? 0` / `|| ""` /
+    // `?? null` defaults (production/index.tsx L2112-2145), so undefined
+    // is safe — confirmed by reading every consumer of jc.pic1Name,
+    // .pic2Name, .productionTimeMinutes, .estMinutes, .category,
+    // .piecesTotal, .piecesDone, .distributedAt before this edit.
+    // TS-side: MinimalJobCardOut declares those fields non-optional, so
+    // we still satisfy the type with `0 / "" / null` for keys that the
+    // FE WOULD read but we want to keep as the JSON wire-default. The
+    // ones we want fully dropped use undefined casts.
+    return {
+      id: r.id,
+      departmentCode: r.departmentCode ?? "",
+      sequence: r.sequence,
+      status: r.status,
+      dueDate: r.dueDate ?? "",
+      expectedDueDate: computeExpectedDueDate(
+        parentTargetEndDate,
+        parentItemCategory,
+        r.departmentCode,
+        leadTimeMap,
+      ),
+      wipKey: r.wipKey ?? undefined,
+      branchKey: r.branchKey ?? undefined,
+      prerequisiteMet: Boolean(r.prerequisiteMet),
+      completedDate: r.completedDate,
+      // Wire-drop these (FE tolerates undefined). Cast through unknown so
+      // the slim record still satisfies the full MinimalJobCardOut type
+      // without polluting the wire JSON with empty placeholders.
+      pic1Id: undefined as unknown as null,
+      pic1Name: undefined as unknown as string,
+      pic2Id: undefined as unknown as null,
+      pic2Name: undefined as unknown as string,
+      productionTimeMinutes: undefined as unknown as number,
+      estMinutes: undefined as unknown as number,
+      category: undefined as unknown as string,
+      piecesTotal: undefined as unknown as number,
+      piecesDone: undefined as unknown as number,
+      distributedAt: undefined as unknown as null,
+    };
+  }
   const fabricUsageMeters =
     r.departmentCode === "FAB_CUT" &&
     parentPoForFabric &&
@@ -608,6 +675,10 @@ function rowToMinimalPO(
   bomByProductCode: Map<string, unknown> | null = null,
   siblingsByGroupKey: Map<string, SiblingPo[]> | null = null,
   baseModelByProductCode: Map<string, string> | null = null,
+  // Dept tab routes the active dept code in via the ?dept=X query param.
+  // Passed through to rowToMinimalJobCard so non-active-dept JCs render
+  // as slim shape (renderDeptSchedCell only reads ~9 fields out of ~25).
+  activeDeptCode: string | null = null,
 ): MinimalPOOut {
   const parentTargetEndDate = row.targetEndDate ?? null;
   const parentItemCategory = row.itemCategory ?? null;
@@ -666,6 +737,7 @@ function rowToMinimalPO(
         bomWipComponents,
         bomByProductCode,
         siblings,
+        activeDeptCode,
       ),
     );
   return {
@@ -1032,8 +1104,27 @@ async function fetchFilteredPOs(
   // Cross-PO sibling subquery still widens the PO set within a SO group
   // so the merged FAB_CUT JC + sibling rows are returned together. CO-
   // origin POs use companyCOId.
+  // Smart wipKey-aware narrow (2026-05-11 F2): the previous "PO-set narrow
+  // only, JC fan-out full" path returned ~14 JCs/PO × hundreds of POs on
+  // wide date ranges (~8 MB / 5s on /production/upholstery profile). The
+  // frontend picker (production/index.tsx L1914) only needs:
+  //   - the active dept's JCs (current row in the DataGrid), AND
+  //   - JCs whose wipKey matches an active-dept JC's wipKey on that SAME PO
+  //     (the upstream / downstream cells in the row's wipKey chain), AND
+  //   - FAB_CUT JCs unconditionally (Option C merged FC has a different
+  //     wipKey schema that won't match downstream per-piece wipKeys).
+  //
+  // Plus the sofa PACKING merge case: when the active-dept JC has wipKey
+  // 'FG' on a PO, every JC on that PO is needed (the upstream component
+  // branches don't share the FG wipKey but their dates feed the merge-row
+  // display). Mirrors the comment in fetchPaginatedPOs L1338 — same rule,
+  // single-query implementation.
+  //
+  // Result: ~8 MB → ~1.5 MB for wide ranges; daily-slice payloads
+  // unchanged. The `jc` alias on the outer table enables the EXISTS
+  // correlations that filter at row level rather than table level.
   const jcWhereDept = deptFilter
-    ? ` WHERE orgId = ? AND productionOrderId IN (
+    ? ` jc WHERE jc.orgId = ? AND jc.productionOrderId IN (
           SELECT po.id FROM production_orders po
           WHERE po.orgId = ?
             AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
@@ -1045,6 +1136,20 @@ async function fetchFilteredPOs(
                       SELECT po3.companyCOId FROM production_orders po3
                       JOIN ${jcSource} jc3 ON jc3.productionOrderId = po3.id
                       WHERE jc3.orgId = ? AND jc3.departmentCode = ? AND po3.companyCOId IS NOT NULL)))
+        )
+        AND (
+          jc.departmentCode = ?
+          OR jc.departmentCode = 'FAB_CUT'
+          OR (jc.wipKey IS NOT NULL AND EXISTS (
+                SELECT 1 FROM ${jcSource} jcm
+                WHERE jcm.productionOrderId = jc.productionOrderId
+                  AND jcm.departmentCode = ?
+                  AND jcm.wipKey = jc.wipKey))
+          OR EXISTS (
+                SELECT 1 FROM ${jcSource} jcfg
+                WHERE jcfg.productionOrderId = jc.productionOrderId
+                  AND jcfg.departmentCode = ?
+                  AND jcfg.wipKey = 'FG')
         )`
     : "";
 
@@ -1072,7 +1177,7 @@ async function fetchFilteredPOs(
     const pos = await poStmt.all<ProductionOrderRow>();
     if (minimal) {
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
+        rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
       );
     }
     return (pos.results ?? []).map((p) => rowToPO(p, [], [], leadTimeMap));
@@ -1089,12 +1194,13 @@ async function fetchFilteredPOs(
   // by the JC set we already loaded, not the full piece_pics table.
   if (minimal) {
     if (deptFilter) {
-      // Bind slots: 8 = orgId (outer JC scope) + orgId (po.orgId) + orgId
-      // (inner jc) + deptFilter + orgId (jc2 SO sibling) + deptFilter +
-      // orgId (jc3 CO sibling) + deptFilter.
+      // Bind slots: 11 = orgId (jc.orgId) + orgId (po.orgId) + orgId+deptFilter
+      // (inner jc PO-set) + orgId+deptFilter (jc2 SO sibling) + orgId+deptFilter
+      // (jc3 CO sibling) + deptFilter (jc.departmentCode active) + deptFilter
+      // (jcm.departmentCode EXISTS same-wipKey) + deptFilter (jcfg EXISTS FG).
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter, deptFilter, deptFilter, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -1106,7 +1212,7 @@ async function fetchFilteredPOs(
         jcRows.map((j) => j.id),
       );
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
+        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
       );
     }
     if (hasFilter) {
@@ -1132,7 +1238,7 @@ async function fetchFilteredPOs(
         jcs.map((j) => j.id),
       );
       return poRows.map((p) =>
-        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
+        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
       );
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
@@ -1150,15 +1256,15 @@ async function fetchFilteredPOs(
       jcRows.map((j) => j.id),
     );
     return (pos.results ?? []).map((p) =>
-      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
+      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
     );
   }
 
   if (deptFilter) {
-    // Bind slots: 8 — see jcWhereDept comment above for the layout.
+    // Bind slots: 11 — see jcWhereDept comment above for the layout.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter, deptFilter, deptFilter, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -1335,7 +1441,7 @@ async function fetchPaginatedPOs(
     if (minimal) {
       return {
         data: posRows.map((p) =>
-          rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
+          rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
         ),
         total,
       };
@@ -1422,7 +1528,7 @@ async function fetchPaginatedPOs(
   if (minimal) {
     return {
       data: posRows.map((p) =>
-        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
+        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode, deptFilter),
       ),
       total,
     };

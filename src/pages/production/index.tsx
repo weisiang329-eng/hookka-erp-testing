@@ -1580,7 +1580,7 @@ export default function ProductionPage({
       feedback?: { flashKey?: string; silent?: boolean; successMsg?: string },
     ) => {
       // 1. Snapshot + optimistic update (same as Phase 1, atomic inside setOrders).
-      let prevState: Record<string, unknown> = {};
+      const prevState: Record<string, unknown> = {};
       let deptCode = "";
       let deptName = "";
       setOrders((prev) => {
@@ -4844,7 +4844,7 @@ export default function ProductionPage({
               : "No overdue Bedframe SOs system-wide"
           }
         >
-          Bedframe Overdue: {bedframeOverdueCount}
+          Bedframe ⚠ {bedframeOverdueCount}
         </button>
         <button
           type="button"
@@ -4865,7 +4865,7 @@ export default function ProductionPage({
               : "No overdue Sofa SOs system-wide"
           }
         >
-          Sofa Overdue: {sofaOverdueCount}
+          Sofa ⚠ {sofaOverdueCount}
         </button>
         {/* "Filter Incomplete" toggle — narrows to POs whose gating-JC
             isn't COMPLETED/TRANSFERRED. Overview gates on UPHOLSTERY (ship
@@ -4899,15 +4899,6 @@ export default function ProductionPage({
             title="Skip filtering and load every active production order"
           >
             Load all
-          </button>
-        )}
-        {shouldFetch && (
-          <button
-            onClick={fetchOrders}
-            className="text-[10px] px-2 py-1 rounded border border-[#E6E0D9] text-[#6B5C32] hover:bg-[#FAF8F4]"
-            title="Re-fetch the orders payload (bypasses local cache)"
-          >
-            Refresh
           </button>
         )}
         {/* Clear all — restored 2026-05-12. The 2026-05-05 removal was

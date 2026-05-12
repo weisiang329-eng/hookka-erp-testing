@@ -621,9 +621,30 @@ export default function ProductionPage({
   // each mount so that a user CLEARING the date filter post-mount still
   // gets the "show all history" semantic (open-ended fetch URL) — matches
   // the pre-F1 behavior the L591-596 doc-block was guarding.
+  // F1.1 (2026-05-12) — atomic ref-flip + URL-seed (single layoutEffect).
+  //
+  // Background: the original F1 used two separate effects — a
+  // useLayoutEffect to flip isColdStartRef and a regular useEffect to
+  // call setUrlBatch. Between the two, there's a render window where
+  // ref.current === false but fltDueFrom/fltDueTo are still '' (URL
+  // hasn't been re-read by useUrlState yet). useColdStartTodayFallback
+  // evaluates false in that window, effectiveDueFrom/To collapse to '',
+  // and useCachedJson fires a SECOND fetch against the bare URL
+  // (`?fields=minimal&dept=X` — no date filter). On Foam / Fab Cut this
+  // showed up as 3 production-orders network calls per cold mount
+  // (todayed → unbounded → todayed), the middle one wasting ~280ms.
+  //
+  // Fix: combine the ref-flip and the URL-seed into ONE useLayoutEffect
+  // so React processes them atomically before the next render commits.
+  // The old standalone seed useEffect below has been removed too.
   const isColdStartRef = useRef(true);
   useLayoutEffect(() => {
     isColdStartRef.current = false;
+    if (mode === "dept" && !fltDueFrom && !fltDueTo) {
+      const today = todayISO();
+      setUrlBatch({ from: today, to: today });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot first-mount cold-start handler; deps frozen on purpose
   }, []);
   const useColdStartTodayFallback =
     mode === "dept" && isColdStartRef.current && !fltDueFrom && !fltDueTo;
@@ -729,20 +750,11 @@ export default function ProductionPage({
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
 
-  // First-mount seed: when both date params are blank, narrow to today
-  // so the operator lands on the daily slice. Atomic write via
-  // useUrlBatch dodges the React 18 batching race that two sequential
-  // setSearchParams hit (and that previously caused a freeze — see
-  // useUrlBatch jsdoc). Once the user clears or changes either field,
-  // the URL holds a real value and this branch never re-fires.
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot URL-seed on first mount only
-  useEffect(() => {
-    if (!fltDueFrom && !fltDueTo) {
-      const today = todayISO();
-      setUrlBatch({ from: today, to: today });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // First-mount seed: MOVED into the F1.1 ref-flip useLayoutEffect above
+  // (search for "isColdStartRef"). Splitting them produced an intermediate
+  // render where ref=false but URL state empty → a spurious unbounded
+  // fetch. See the comment block at the consolidated layoutEffect for the
+  // full diagnosis.
 
   // Datesseeded-flip useEffect removed in F1 (2026-05-11). `datesSeeded`
   // now initialises to `true` unconditionally — see the cold-start today

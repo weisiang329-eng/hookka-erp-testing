@@ -15,6 +15,21 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
+import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
+
+// Build headers for mutating fetches. The default Hookka fetcher (fetchJson)
+// auto-injects X-CSRF-Token, but Phase 2.5's sendOneDraft / flushDrafts go
+// through raw `fetch` (so we can distinguish status codes for retry logic +
+// inspect the bulk-patch per-row payload). Forgetting the header surfaces as
+// "CSRF token missing or invalid" 403 in the failure modal — Wei Siang hit
+// this on a FAB_SEW PIC patch 2026-05-12 and saw it auto-retry 1×, both
+// without the header, and finally land in the modal.
+function csrfHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json", ...(extra || {}) };
+  const csrf = readCsrfCookie();
+  if (csrf) h[CSRF_HEADER_NAME] = csrf;
+  return h;
+}
 
 import type { CellState, JobCard, ProductionOrder, Worker } from "./types";
 import {
@@ -1412,7 +1427,7 @@ export default function ProductionPage({
         try {
           const res = await fetch(`/api/production-orders/${d.poId}`, {
             method: "PATCH",
-            headers: { "Content-Type": "application/json" },
+            headers: csrfHeaders(),
             body: JSON.stringify({ jobCardId: d.jcId, ...d.patch }),
           });
           if (res.ok) return { success: true, attemptsUsed };
@@ -1472,7 +1487,7 @@ export default function ProductionPage({
     try {
       const res = await fetch("/api/production-orders/bulk-patch", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: csrfHeaders(),
         body: JSON.stringify({
           patches: drafts.map((d) => ({ poId: d.poId, jobCardId: d.jcId, ...d.patch })),
         }),

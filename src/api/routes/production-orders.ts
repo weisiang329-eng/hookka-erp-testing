@@ -5152,9 +5152,14 @@ app.post("/bulk-patch", async (c) => {
   const baseUrl = new URL(c.req.url).origin;
   // Forward the Cookie header so the loopback request authenticates as the
   // same operator. Authorization header is also forwarded for any bearer-token
-  // callers (worker-portal scan flow uses Bearer).
+  // callers (worker-portal scan flow uses Bearer). X-CSRF-Token must also
+  // forward — the inner PATCH /:id is a mutating method and the auth
+  // middleware enforces the double-submit check (cookie + header must match);
+  // without forwarding, every loopback fails 403 "CSRF token missing or
+  // invalid". Operator hit this on a FAB_SEW PIC patch 2026-05-12.
   const cookie = c.req.header("Cookie") ?? "";
   const authHeader = c.req.header("Authorization") ?? "";
+  const csrfHeader = c.req.header("X-CSRF-Token") ?? c.req.header("x-csrf-token") ?? "";
 
   const results = await Promise.all(
     patches.map(async (p) => {
@@ -5172,6 +5177,7 @@ app.post("/bulk-patch", async (c) => {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (cookie) headers["Cookie"] = cookie;
         if (authHeader) headers["Authorization"] = authHeader;
+        if (csrfHeader) headers["X-CSRF-Token"] = csrfHeader;
         const res = await fetch(`${baseUrl}/api/production-orders/${encodeURIComponent(poId)}`, {
           method: "PATCH",
           headers,

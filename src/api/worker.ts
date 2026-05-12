@@ -524,6 +524,7 @@ import invoices from "./routes/invoices";
 import payments from "./routes/payments";
 // Phase 4 — production / inventory / supplier
 import productionOrders from "./routes/production-orders";
+import productionFolders from "./routes/production-folders";
 import inventory from "./routes/inventory";
 // Phase 4.5 — aggregated WIP endpoint (supersedes client-side
 // deriveWIPFromPO + mergeSofaWIPSets in src/pages/inventory/index.tsx).
@@ -661,6 +662,10 @@ app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);
 // Phase 4
 app.route("/api/production-orders", productionOrders);
+// Phase 5 — Production Folders: archive paper-schedule snapshots for later
+// retrieval. Mounted AFTER /api/production-orders so route prefix matching
+// is unambiguous (different prefixes anyway, but staying explicit).
+app.route("/api/production-folders", productionFolders);
 // Phase 4.5 — MUST come before /api/inventory so the more-specific path
 // wins route matching (Hono picks the first mounted subapp that matches).
 app.route("/api/inventory/wip", inventoryWip);

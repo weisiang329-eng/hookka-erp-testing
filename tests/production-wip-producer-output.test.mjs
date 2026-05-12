@@ -171,11 +171,21 @@ test('PATCH route still calls applyWipInventoryChange when status changes', () =
   // an `if (body.status)` block, take db/existing/updated/body.status/
   // refreshed, AND pass jcRow.status as the prevStatus arg so the
   // BUG-2026-04-27-002 rollback branch can detect a DONE → non-DONE
-  // transition.
+  // transition. The trailing options object (post BUG-2026-05-12 cascade-
+  // log guard) carries orgId + source — required so the idempotency claim
+  // fires, but optional via parameter defaults so the regex stays loose.
   assert.match(
     src,
-    /if \(body\.status\) \{[\s\S]*?await applyWipInventoryChange\(\s*db,\s*existing,\s*updated,\s*body\.status,\s*refreshed,\s*jcRow\.status,?\s*\);/,
+    /if \(body\.status\) \{[\s\S]*?await applyWipInventoryChange\(\s*db,\s*existing,\s*updated,\s*body\.status,\s*refreshed,\s*jcRow\.status,?\s*(?:\{[\s\S]*?orgId:[\s\S]*?\},?\s*)?\);/,
     'PATCH should invoke applyWipInventoryChange(prevStatus=jcRow.status) on status change',
+  );
+  // Separate hard-assert: the PATCH path MUST pass orgId so the cascade-log
+  // guard fires. Without orgId the guard is bypassed and the structural
+  // protection against backfill / retry replay is gone.
+  assert.match(
+    src,
+    /await applyWipInventoryChange\([\s\S]*?\{\s*orgId:\s*getOrgId\(c\),\s*source:\s*["']PATCH["']/,
+    'PATCH should pass orgId + source so wip_cascade_log idempotency guard fires',
   );
 });
 

@@ -120,6 +120,32 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
   pendingMigrations = (async () => {
     const stmts = [
       "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS distributedAt TEXT",
+      // BUG-2026-05-12 (FOAM 326 cleanup): WIP cascade idempotency log. Every
+      // call to applyWipInventoryChange first INSERTs into this table with
+      // ON CONFLICT DO NOTHING; if no row was inserted the cascade
+      // short-circuits. Atomic, concurrent-safe, catches the cross-session
+      // replay case BUG-005 misses (backfill scripts, retries, migration
+      // imports re-firing the cascade on already-final-state JCs).
+      `CREATE TABLE IF NOT EXISTS wip_cascade_log (
+         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         org_id      UUID NOT NULL,
+         job_card_id TEXT NOT NULL,
+         from_status TEXT,
+         to_status   TEXT NOT NULL,
+         source      TEXT NOT NULL,
+         applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+       )`,
+      // NULL from_status is treated distinct by Postgres uniqueness, so the
+      // index is partial — one for the common (from, to) pair, one for the
+      // initial-emission case.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_wip_cascade_log_transition
+         ON wip_cascade_log (org_id, job_card_id, from_status, to_status)
+         WHERE from_status IS NOT NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS uniq_wip_cascade_log_initial
+         ON wip_cascade_log (org_id, job_card_id, to_status)
+         WHERE from_status IS NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_wip_cascade_log_jc
+         ON wip_cascade_log (org_id, job_card_id, applied_at DESC)`,
     ];
     for (const sql of stmts) {
       try {
@@ -127,8 +153,8 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       } catch (err) {
         // Best-effort. Log so silent schema drift surfaces in wrangler tail
         // (per the security-fix tightening landed earlier this branch).
-        console.warn("[production-orders.migrations] ALTER skipped", {
-          sql,
+        console.warn("[production-orders.migrations] DDL skipped", {
+          sql: sql.split("\n")[0],
           err: err instanceof Error ? err.message : String(err),
         });
       }
@@ -1532,12 +1558,61 @@ export async function applyWipInventoryChange(
   newStatus: string,
   allJcRows: JobCardRow[],
   prevStatus: string | null = null,
+  options: { orgId?: string; source?: string } = {},
 ): Promise<void> {
   // BUG-2026-04-27-005: a PATCH that re-sends the same status (e.g. duplicate
   // form submit, refresh + retry, two operators racing the same JC) used to
   // fire the cascade twice — once per PATCH — doubling every consume and
   // every producer-add. Short-circuit when the status didn't actually change.
   if (prevStatus !== null && prevStatus === newStatus) return;
+
+  // BUG-2026-05-12: structural fix for the FOAM 326 inflation. BUG-005 only
+  // catches duplicates within ONE PATCH request — it does NOT catch the same
+  // (jcId, fromStatus, toStatus) replayed from a backfill script, a retry
+  // handler, or a cross-session re-fire. Every prior WIP inflation traced
+  // back to one of those replay paths. Idempotency claim ticket: try to
+  // INSERT a row into wip_cascade_log under a UNIQUE (orgId, jcId, from,
+  // to) index. If we win the race (changes > 0) the cascade proceeds; if
+  // somebody already claimed this exact transition, we short-circuit and
+  // skip the side effects. Atomic, concurrent-safe, zero race window.
+  //
+  // Callers that pass options.orgId opt into the guard. Callers without
+  // orgId (legacy code paths we haven't audited yet, plus the unit tests)
+  // skip the guard and behave like before. Once every caller is updated
+  // we can flip this to require orgId.
+  if (options.orgId) {
+    try {
+      const claimResult = await db
+        .prepare(
+          `INSERT INTO wip_cascade_log (org_id, job_card_id, from_status, to_status, source)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT DO NOTHING`,
+        )
+        .bind(
+          options.orgId,
+          jcRow.id,
+          prevStatus,
+          newStatus,
+          options.source || "PATCH",
+        )
+        .run();
+      const changes = (claimResult as unknown as { meta?: { changes?: number } }).meta?.changes ?? 0;
+      if (changes === 0) {
+        // Already claimed by an earlier call for this exact transition.
+        // Side effects already applied — skip to keep wip_items balanced.
+        return;
+      }
+    } catch (err) {
+      // If the claim insert itself fails (DB error, table missing because
+      // migration hasn't landed yet), log and proceed without guard rather
+      // than blocking the primary write. The cascade is still gated by
+      // BUG-005 for same-request duplicates.
+      console.warn("[applyWipInventoryChange] cascade-log claim failed", {
+        jcId: jcRow.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   const deptCodeRaw = (jcRow.departmentCode || "").toUpperCase();
   // BUG-2026-04-27-016: PACKING is a metadata-only step — it only records the
   // racking_number on the PO row. It does NOT participate in the inventory
@@ -3387,6 +3462,7 @@ async function applyPoUpdate(
           body.status,
           refreshed,
           jcRow.status,
+          { orgId: getOrgId(c), source: "PATCH" },
         );
       } catch (err) {
         console.error("[applyWipInventoryChange] cascade failed", {
@@ -5009,6 +5085,7 @@ app.post("/:id/scan-complete", async (c) => {
       "COMPLETED",
       siblings.results ?? [],
       target.jc.status,
+      { orgId: getOrgId(c), source: "SCAN" },
     );
 
     // F2 — labor cost posting (idempotent per jobCardId).

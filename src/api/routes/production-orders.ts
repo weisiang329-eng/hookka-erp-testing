@@ -3207,16 +3207,18 @@ async function applyPoUpdate(
       if (isDone) {
         if (!updated.completedDate) updated.completedDate = today;
         updated.overdue = "COMPLETED";
-      } else if (wasDone && body.completedDate === undefined) {
-        // BUG-2026-04-27-001: previously cleared completedDate on ANY
-        // non-DONE status change (including WAITING → IN_PROGRESS, which
-        // shouldn't touch the date). Now only clear when the JC is
-        // genuinely transitioning OUT of a DONE state — i.e. the user is
-        // un-completing it. Other status touches (PIC re-assign that
-        // re-sends status, due-date edit that includes status) leave the
-        // date alone.
-        updated.completedDate = null;
       }
+      // BUG-2026-05-12: previously this branch auto-cleared completedDate
+      // whenever a JC transitioned out of DONE (e.g. status flipped back to
+      // WAITING for re-filtering on the production page). Operator domain
+      // model treats status as a FILTER label and completedDate as the
+      // user-owned source of truth — the system must never silently wipe a
+      // date the user explicitly set. Removed the auto-clear entirely. To
+      // actually drop a completion date, callers must send
+      // `body.completedDate = ""` (or null) explicitly; the block below
+      // honours that. Verified in prod via job_card_events audit: 153 COMPLETED_DATE_CLEARED
+      // events in 36h, all triggered by COMPLETED -> WAITING status flips,
+      // none of which the operator intended to wipe the date.
     }
 
     if (body.completedDate !== undefined) {

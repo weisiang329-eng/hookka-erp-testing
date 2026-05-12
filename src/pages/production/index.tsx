@@ -26,6 +26,10 @@ import {
 import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
+import {
+  PatchFailureModal,
+  type PatchFailure,
+} from "./components/PatchFailureModal";
 
 // ----- Overdue breakdown row (mirrors /api/production-orders/overdue-counts) -----
 // Server returns overdueCategories as string[] (it was Set<string> when the FE
@@ -1270,6 +1274,13 @@ export default function ProductionPage({
   // in the pending set. PATCH failures surface as a toast so the operator
   // knows to retry instead of silently losing the edit (was console.error
   // only; you'd never see it).
+  // Per-cell save failures still awaiting operator decision. Each entry shows
+  // up in <PatchFailureModal> with Retry / Discard buttons. Cleared as the
+  // operator acts. See PatchFailureModal.tsx for the rationale (replaces the
+  // ephemeral toast that operators were missing — see prod audit: 153
+  // COMPLETED_DATE_CLEARED + many silent dueDate losses).
+  const [patchFailures, setPatchFailures] = useState<PatchFailure[]>([]);
+
   const patchJobCard = useCallback(
     async (
       poId: string,
@@ -1277,13 +1288,34 @@ export default function ProductionPage({
       patch: Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">> & { distributedAt?: string | null },
       // Optional cell-flash key (e.g. `${jobCardId}|FAB_CUT`). When present
       // a successful PATCH paints the cell green for 800ms and fires a
-      // success toast; failure paints red + error toast. Caller can also
-      // pass `silent: true` if it wants neither (e.g. bulk fan-out where
-      // only the wrapper should report).
+      // success toast; failure paints red + adds an entry to the failure
+      // modal. Caller can pass `silent: true` to opt out of feedback (e.g.
+      // bulk fan-out where only the wrapper should report); silent callers
+      // get the error re-thrown instead of pushed to the modal.
       feedback?: { flashKey?: string; silent?: boolean; successMsg?: string },
     ) => {
-      setOrders((prev) =>
-        prev.map((o) =>
+      // 1. Snapshot the pre-edit value of every field being patched. We need
+      //    this for the rollback path AND so the failure modal can tell the
+      //    operator "you changed X → Y; reverted to X".
+      //
+      //    The snapshot is captured INSIDE setOrders so it's atomic with the
+      //    optimistic update — no chance of race between snapshot and the next
+      //    re-render landing.
+      let prevState: Record<string, unknown> = {};
+      let deptCode = "";
+      let deptName = "";
+
+      setOrders((prev) => {
+        const order = prev.find((o) => o.id === poId);
+        const jc = order?.jobCards.find((j) => j.id === jobCardId);
+        if (jc) {
+          for (const key of Object.keys(patch)) {
+            prevState[key] = (jc as unknown as Record<string, unknown>)[key];
+          }
+          deptCode = jc.departmentCode || "";
+          deptName = jc.departmentName || "";
+        }
+        return prev.map((o) =>
           o.id !== poId
             ? o
             : {
@@ -1292,43 +1324,162 @@ export default function ProductionPage({
                   j.id !== jobCardId ? j : { ...j, ...patch },
                 ),
               },
-        ),
-      );
+        );
+      });
       pendingJcPatchesRef.current.add(jobCardId);
-      try {
-        const res = await fetch(`/api/production-orders/${poId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobCardId, ...patch }),
-        });
-        if (!res.ok) {
+
+      // 2. Retry loop: original attempt + 2 retries with exponential backoff
+      //    (500ms, 1500ms). Retries protect against the bulk of "卡" symptoms
+      //    — Cloudflare Worker cold-start delays, Hyperdrive intermittent
+      //    Postgres timeouts, brief wifi blips on shop-floor iPads. 4xx errors
+      //    aren't retried (token expiry, lock check, validation — won't fix
+      //    themselves on a retry), 5xx + network errors are.
+      const MAX_ATTEMPTS = 3;
+      const RETRY_DELAYS_MS = [500, 1500];
+      let lastError = "";
+      let attemptsUsed = 0;
+      let succeeded = false;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        attemptsUsed = attempt;
+        let retryable = true;
+        try {
+          const res = await fetch(`/api/production-orders/${poId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobCardId, ...patch }),
+          });
+          if (res.ok) {
+            succeeded = true;
+            break;
+          }
+          // HTTP error — extract message, decide if retry-able.
           let msg = `HTTP ${res.status}`;
           try {
             const body = (await res.json()) as { error?: string } | null;
             if (body && typeof body.error === "string") msg = body.error;
-          } catch { /* non-json body — keep status code */ }
-          throw new Error(msg);
+          } catch {
+            /* non-json body — keep status code */
+          }
+          lastError = msg;
+          // 4xx (except 408 Request Timeout / 429 Too Many Requests) are
+          // client-level and won't change on retry — fail fast.
+          if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+            retryable = false;
+          }
+        } catch (err) {
+          // Network error, fetch threw — retry-able.
+          lastError = err instanceof Error ? err.message : "network error";
         }
+        if (!retryable) break;
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+        }
+      }
+
+      pendingJcPatchesRef.current.delete(jobCardId);
+
+      if (succeeded) {
         if (!feedback?.silent) {
           if (feedback?.flashKey) flashCell(feedback.flashKey, "ok");
           if (feedback?.successMsg) toast.success(feedback.successMsg);
         }
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : "network error";
-        console.error("[patchJobCard]", detail);
-        if (feedback?.flashKey) flashCell(feedback.flashKey, "err");
-        if (!feedback?.silent) {
-          toast.error(`Save failed (${detail}). Refresh and retry.`);
-        } else {
-          // Silent caller still wants to know — surface as a thrown error.
-          throw err instanceof Error ? err : new Error(detail);
-        }
-      } finally {
-        pendingJcPatchesRef.current.delete(jobCardId);
+        return;
       }
+
+      // 3. All attempts failed → rollback optimistic UI so the matrix matches
+      //    the server's actual state (= the pre-edit value). Operators were
+      //    previously seeing the optimistic value persist after a silent
+      //    failure, which made them believe the change saved when it hadn't.
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id !== poId
+            ? o
+            : {
+                ...o,
+                jobCards: o.jobCards.map((j) =>
+                  j.id !== jobCardId ? j : { ...j, ...prevState },
+                ),
+              },
+        ),
+      );
+      console.error("[patchJobCard] all attempts failed", {
+        jobCardId,
+        patch,
+        attemptsUsed,
+        lastError,
+      });
+      if (feedback?.flashKey) flashCell(feedback.flashKey, "err");
+
+      if (feedback?.silent) {
+        // Silent caller is responsible for its own surfacing; re-throw.
+        throw new Error(lastError);
+      }
+
+      // 4. Surface in the failure modal. Persists until operator clicks
+      //    Retry or Discard — unlike a toast which auto-dismisses in seconds.
+      const failureId = `${jobCardId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      setPatchFailures((prev) => [
+        ...prev,
+        {
+          id: failureId,
+          poId,
+          jcId: jobCardId,
+          deptCode,
+          deptName,
+          attemptedPatch: patch as Record<string, unknown>,
+          prevState,
+          errorMsg: lastError,
+          attemptsUsed,
+          at: Date.now(),
+        },
+      ]);
     },
     [toast, flashCell],
   );
+
+  // Retry handlers wired into <PatchFailureModal>. Re-firing patchJobCard
+  // means the optimistic UI flips back, the retry loop runs again, and on
+  // success the failure entry is gone (already removed below before re-firing).
+  const retryFailure = useCallback(
+    (f: PatchFailure) => {
+      setPatchFailures((prev) => prev.filter((x) => x.id !== f.id));
+      void patchJobCard(
+        f.poId,
+        f.jcId,
+        f.attemptedPatch as Parameters<typeof patchJobCard>[2],
+        { flashKey: f.deptCode ? `${f.jcId}|${f.deptCode}` : undefined },
+      );
+    },
+    [patchJobCard],
+  );
+  const discardFailure = useCallback((id: string) => {
+    setPatchFailures((prev) => prev.filter((x) => x.id !== id));
+  }, []);
+  const retryAllFailures = useCallback(() => {
+    // Snapshot first so new failures arriving during the retry batch aren't
+    // immediately re-fired (they enter the modal as fresh rows instead).
+    setPatchFailures((prev) => {
+      const snapshot = prev.slice();
+      // Defer re-fires to next tick so we don't call patchJobCard inside the
+      // state setter callback (would queue setOrders updates against a stale
+      // closure).
+      queueMicrotask(() => {
+        for (const f of snapshot) {
+          void patchJobCard(
+            f.poId,
+            f.jcId,
+            f.attemptedPatch as Parameters<typeof patchJobCard>[2],
+            { flashKey: f.deptCode ? `${f.jcId}|${f.deptCode}` : undefined },
+          );
+        }
+      });
+      return [];
+    });
+  }, [patchJobCard]);
+  const discardAllFailures = useCallback(() => {
+    setPatchFailures([]);
+  }, []);
 
   // Optimistic PATCH for the Packing Rack dropdown. Writes rackingNumber to
   // the specific JobCard (so two WIPs under the same PO can land on different
@@ -5875,6 +6026,18 @@ export default function ProductionPage({
         open={stockDialogOpen}
         onClose={() => setStockDialogOpen(false)}
         onCreated={fetchOrders}
+      />
+
+      {/* Persistent failure modal — surfaces any patchJobCard call that
+          exhausted its retries. Operators MUST click Retry / Discard, so a
+          silent save failure can no longer be missed. UI state has already
+          been rolled back when this renders (see patchJobCard above). */}
+      <PatchFailureModal
+        failures={patchFailures}
+        onRetry={retryFailure}
+        onDiscard={discardFailure}
+        onRetryAll={retryAllFailures}
+        onDiscardAll={discardAllFailures}
       />
     </div>
   );

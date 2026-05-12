@@ -127,6 +127,11 @@ type ApplyBatchPicDialogProps = {
   open: boolean;
   count: number;
   workers: WorkerOption[];
+  // Optional fuller roster — when provided, the dialog adds a "Show all
+  // departments" checkbox that swaps to this list. Lets operators batch-
+  // assign a cross-dept temp (Upholstery worker covering Fab Sew etc.)
+  // without leaving the dialog. Wei Siang feedback 2026-05-12.
+  allWorkers?: WorkerOption[];
   onCancel: () => void;
   onApply: (payload: ApplyPicPayload) => void;
 };
@@ -135,15 +140,21 @@ type ApplyBatchPicDialogProps = {
 const LEAVE_ALONE = "__leave__";
 const EXPLICIT_CLEAR = "__clear__";
 
-export function ApplyBatchPicDialog({ open, count, workers, onCancel, onApply }: ApplyBatchPicDialogProps) {
+export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel, onApply }: ApplyBatchPicDialogProps) {
   const [pic1Id, setPic1Id] = useState<string>(LEAVE_ALONE);
   const [pic2Id, setPic2Id] = useState<string>(LEAVE_ALONE);
+  const [showAll, setShowAll] = useState<boolean>(false);
   if (!open) return null;
+
+  // When showAll is on AND a fuller roster was passed in, swap the list.
+  // Falls back to the dept-filtered `workers` otherwise.
+  const list = showAll && allWorkers && allWorkers.length > 0 ? allWorkers : workers;
+  const hasToggle = Array.isArray(allWorkers) && allWorkers.length > workers.length;
 
   const resolve = (id: string): WorkerOption | null | undefined => {
     if (id === LEAVE_ALONE) return undefined;
     if (id === EXPLICIT_CLEAR) return null;
-    return workers.find((w) => w.id === id) ?? undefined;
+    return list.find((w) => w.id === id) ?? undefined;
   };
   const pic1 = resolve(pic1Id);
   const pic2 = resolve(pic2Id);
@@ -152,7 +163,20 @@ export function ApplyBatchPicDialog({ open, count, workers, onCancel, onApply }:
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[440px]">
-        <h3 className="mb-2 text-[14px] font-semibold text-[#3A2E22]">Apply PIC</h3>
+        <div className="mb-2 flex items-center gap-2">
+          <h3 className="text-[14px] font-semibold text-[#3A2E22]">Apply PIC</h3>
+          <div className="flex-1" />
+          {hasToggle && (
+            <label className="flex items-center gap-1 text-[11px] text-[#6B5E50] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showAll}
+                onChange={(e) => setShowAll(e.target.checked)}
+              />
+              All departments ({allWorkers?.length})
+            </label>
+          )}
+        </div>
         <p className="mb-3 text-[12px] text-[#6B5E50]">
           Sets PIC 1 / PIC 2 on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}. Leave a dropdown on "(leave alone)" to skip that slot.
         </p>
@@ -166,7 +190,7 @@ export function ApplyBatchPicDialog({ open, count, workers, onCancel, onApply }:
         >
           <option value={LEAVE_ALONE}>— (leave alone)</option>
           <option value={EXPLICIT_CLEAR}>— (clear PIC 1)</option>
-          {workers.map((w) => (
+          {list.map((w) => (
             <option key={`p1-${w.id}`} value={w.id}>{w.name}</option>
           ))}
         </select>
@@ -179,7 +203,7 @@ export function ApplyBatchPicDialog({ open, count, workers, onCancel, onApply }:
         >
           <option value={LEAVE_ALONE}>— (leave alone)</option>
           <option value={EXPLICIT_CLEAR}>— (clear PIC 2)</option>
-          {workers.map((w) => (
+          {list.map((w) => (
             <option key={`p2-${w.id}`} value={w.id}>{w.name}</option>
           ))}
         </select>

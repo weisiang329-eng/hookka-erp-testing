@@ -5461,8 +5461,16 @@ export default function ProductionPage({
       <ApplyBatchPicDialog
         open={batchPicOpen}
         count={selectedDeptRows.length}
-        workers={workers
-          .filter((w) => !activeDept || (w.departmentCode || "").toUpperCase() === activeDept.code.toUpperCase())
+        // deptWorkers respects the page-level "All PIC" toggle (Wei Siang's
+        // 4808ffc commit) and uses workerCoversDept's smart filter.
+        workers={deptWorkers.map((w) => ({ id: w.id, name: w.name }))}
+        // Also pass the full roster so the dialog can offer its own "All
+        // departments" checkbox — saves the operator from leaving the dialog,
+        // hunting for the filter-bar toggle, then re-opening with their
+        // multi-selection intact. Wei Siang 2026-05-12.
+        allWorkers={(workers || [])
+          .slice()
+          .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
           .map((w) => ({ id: w.id, name: w.name }))}
         onCancel={() => setBatchPicOpen(false)}
         onApply={async ({ pic1, pic2 }) => {

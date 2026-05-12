@@ -60,7 +60,7 @@ type Worker = { id: string; name: string; departmentCode: string | null };
 
 export default function ProductionFolderDetailPage() {
   const navigate = useNavigate();
-  const toast = useToast();
+  const { toast } = useToast();
   const params = useParams<{ id: string }>();
   const folderId = params.id ?? "";
   const [folder, setFolder] = useState<FolderData | null>(null);
@@ -185,15 +185,15 @@ export default function ProductionFolderDetailPage() {
   };
 
   const columns: Column<FolderJcRow>[] = [
-    { key: "poNo", header: "PO #", width: 110 },
-    { key: "customerName", header: "Customer", width: 160 },
-    { key: "productCode", header: "Product", width: 160 },
-    { key: "departmentCode", header: "Dept", width: 90 },
-    { key: "status", header: "Status", width: 110 },
-    { key: "qty", header: "Qty", width: 50, align: "right" },
-    { key: "dueDate", header: "Due", width: 95, render: (r) => r.dueDate ?? "" },
-    { key: "completedDate", header: "Completed", width: 95, render: (r) => r.completedDate ?? "" },
-    { key: "pic1Name", header: "PIC", width: 120 },
+    { key: "poNo", label: "PO #", width: "110px" },
+    { key: "customerName", label: "Customer", width: "160px" },
+    { key: "productCode", label: "Product", width: "160px" },
+    { key: "departmentCode", label: "Dept", width: "90px" },
+    { key: "status", label: "Status", width: "110px" },
+    { key: "qty", label: "Qty", width: "60px" },
+    { key: "dueDate", label: "Due", width: "95px", render: (r) => r.dueDate ?? "" },
+    { key: "completedDate", label: "Completed", width: "95px", render: (r) => r.completedDate ?? "" },
+    { key: "pic1Name", label: "PIC", width: "120px" },
   ];
 
   if (!folderId) {

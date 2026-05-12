@@ -34,7 +34,7 @@ type Folder = {
 
 export default function ProductionFoldersPage() {
   const navigate = useNavigate();
-  const toast = useToast();
+  const { toast } = useToast();
   const [folders, setFolders] = useState<Folder[]>([]);
   const [loading, setLoading] = useState(true);
   const [renamingId, setRenamingId] = useState<string | null>(null);

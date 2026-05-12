@@ -126,7 +126,12 @@ app.post("/", async (c) => {
   if (name.length > 200) return c.json({ success: false, error: "name too long (max 200 chars)" }, 400);
 
   const orgId = getOrgId(c);
-  const userEmail = c.get("userEmail") || c.get("userId") || "unknown";
+  // c.var.* context keys for user identity aren't typed on Env; best-effort
+  // string extraction with no-explicit-any. Falls back to "unknown" when the
+  // middleware hasn't populated either key.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ctxAny = c as any;
+  const userEmail: string = String(ctxAny.get?.("userEmail") || ctxAny.get?.("userId") || "unknown");
   const description = (body.description || "").trim() || null;
   const jcIds = Array.isArray(body.jobCardIds) ? body.jobCardIds.filter((x): x is string => typeof x === "string" && x.length > 0) : [];
   if (jcIds.length > 500) {
@@ -140,7 +145,7 @@ app.post("/", async (c) => {
         `INSERT INTO production_folders (id, org_id, name, description, created_by)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .bind(folderId, orgId, name, description, String(userEmail)),
+      .bind(folderId, orgId, name, description, userEmail),
   ];
   for (const jcId of jcIds) {
     stmts.push(

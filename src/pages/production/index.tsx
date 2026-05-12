@@ -2884,16 +2884,19 @@ export default function ProductionPage({
             const becomingDone =
               (next === "COMPLETED" || next === "TRANSFERRED") &&
               !(s === "COMPLETED" || s === "TRANSFERRED");
-            const leavingDone =
-              (s === "COMPLETED" || s === "TRANSFERRED") &&
-              !(next === "COMPLETED" || next === "TRANSFERRED");
             const patch: Parameters<typeof patchJobCard>[2] = { status: next };
             if (becomingDone && !row.completedDate) {
               patch.completedDate = new Date().toISOString().slice(0, 10);
             }
-            if (leavingDone) {
-              patch.completedDate = "";
-            }
+            // BUG-2026-05-12 (frontend twin of the backend fix in
+            // production-orders.ts:3211): previously, flipping status from
+            // COMPLETED → WAITING on the FAB_CUT row sent completedDate="" to
+            // the API, which then NULL'd the column. Status is a FILTER label,
+            // not a date controller — leaving DONE must NOT wipe the date the
+            // operator explicitly stamped. To actually clear the date, the
+            // operator clicks the completion date cell and clears it there
+            // (which sets status=WAITING + date=null together, the correct
+            // user-driven path).
             // Single-JC patch — FAB_CUT no longer merges rows, so every
             // dept (including FC) updates exactly the row's own jobCardId.
             patchJobCard(row.poId, row.jobCardId, patch);

@@ -1175,6 +1175,25 @@ export default function ProductionPage({
   // re-fire the fetch while a previous one was still in flight, which
   // stacked queries on Hyperdrive and froze the renderer for 15-20s
   // when the response payloads finally arrived together.
+  // Warn the operator if they try to leave the page with unsaved drafts in
+  // the buffer (closing tab, navigating away, hitting back). Modern browsers
+  // ignore the custom message and show their own generic prompt, but they
+  // DO show the prompt — which is the protection we want. `draftsRef`
+  // is read at the moment of the event, not at hook-bind time, so it always
+  // reflects the latest count.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (draftsRef.current.size === 0) return;
+      // Try to flush synchronously via sendBeacon-style fire-and-forget; if
+      // it lands, great — operator avoids the prompt. But we still show the
+      // prompt because we can't await the flush in this event handler.
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
@@ -1281,30 +1300,187 @@ export default function ProductionPage({
   // COMPLETED_DATE_CLEARED + many silent dueDate losses).
   const [patchFailures, setPatchFailures] = useState<PatchFailure[]>([]);
 
+  // -----------------------------------------------------------------------
+  // Phase 2.5 — Debounced write batching.
+  // -----------------------------------------------------------------------
+  // Cell clicks no longer fire a PATCH per click. Instead each click is
+  // staged into `draftsRef` and a 2s debounce timer accumulates additional
+  // edits. When the timer fires (or the operator clicks "Save All"), every
+  // staged draft is sent in parallel. This collapses a typical "click 8
+  // cells in 5 seconds" pattern from 8 HTTPs into ~1 burst, which Hyperdrive
+  // + the Worker route serialise far faster than 8 separate roundtrips.
+  //
+  // Why drafts live in a ref (not state): the render path doesn't depend on
+  // their contents — only `unsavedCount` does, and that's a separate state
+  // we update explicitly. Keeping drafts off the render path means the page
+  // doesn't re-paint on every keystroke during a rapid-click burst.
+  //
+  // Silent callers (bulk fan-out, scan-modal — feedback.silent=true) keep
+  // their old synchronous semantics: they bypass the queue and send + await
+  // + throw on failure as before, because they rely on awaiting the result.
+
+  type DraftEntry = {
+    poId: string;
+    jcId: string;
+    patch: Record<string, unknown>;
+    // Pre-edit values for every field in `patch`. Captured at first stage;
+    // preserved across merges with later staging on the same JC, so rollback
+    // restores the ORIGINAL value (not an intermediate one).
+    prevState: Record<string, unknown>;
+    deptCode: string;
+    deptName: string;
+    feedback?: { flashKey?: string; successMsg?: string };
+    stagedAt: number;
+  };
+  const draftsRef = useRef<Map<string, DraftEntry>>(new Map());
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [unsavedCount, setUnsavedCount] = useState(0);
+  const [savingNow, setSavingNow] = useState(false);
+  const DEBOUNCE_MS = 2000;
+
+  // sendOneDraft — the actual HTTP write with retry. Extracted from the
+  // pre-batching patchJobCard so flushDrafts and retryFailure can share it.
+  // Returns success / error data; never throws (caller decides UI handling).
+  const sendOneDraft = useCallback(
+    async (
+      d: Pick<DraftEntry, "poId" | "jcId" | "patch">,
+    ): Promise<{ success: boolean; error?: string; attemptsUsed: number }> => {
+      const MAX_ATTEMPTS = 3;
+      const RETRY_DELAYS_MS = [500, 1500];
+      let lastError = "";
+      let attemptsUsed = 0;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        attemptsUsed = attempt;
+        let retryable = true;
+        try {
+          const res = await fetch(`/api/production-orders/${d.poId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobCardId: d.jcId, ...d.patch }),
+          });
+          if (res.ok) return { success: true, attemptsUsed };
+          let msg = `HTTP ${res.status}`;
+          try {
+            const body = (await res.json()) as { error?: string } | null;
+            if (body && typeof body.error === "string") msg = body.error;
+          } catch {
+            /* non-json body */
+          }
+          lastError = msg;
+          if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+            retryable = false;
+          }
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : "network error";
+        }
+        if (!retryable) break;
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+        }
+      }
+      return { success: false, error: lastError, attemptsUsed };
+    },
+    [],
+  );
+
+  // flushDrafts — fire all currently-staged drafts in parallel, then act on
+  // each result (success → flash green; fail → rollback + push to failure
+  // modal). Idempotent on empty drafts. Clears the debounce timer up front.
+  const flushDrafts = useCallback(async () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    const drafts = Array.from(draftsRef.current.values());
+    if (drafts.length === 0) return;
+    draftsRef.current.clear();
+    setUnsavedCount(0);
+    setSavingNow(true);
+
+    const results = await Promise.all(
+      drafts.map(async (d) => {
+        pendingJcPatchesRef.current.add(d.jcId);
+        const r = await sendOneDraft(d);
+        pendingJcPatchesRef.current.delete(d.jcId);
+        return { draft: d, result: r };
+      }),
+    );
+
+    // Apply per-draft outcomes. Successful drafts: optimistic state already
+    // reflects the desired value, just flash green. Failed drafts: roll the
+    // affected JC's fields back to prevState AND push to the failure modal.
+    setOrders((prev) => {
+      let next = prev;
+      for (const { draft, result } of results) {
+        if (result.success) continue;
+        next = next.map((o) =>
+          o.id !== draft.poId
+            ? o
+            : {
+                ...o,
+                jobCards: o.jobCards.map((j) =>
+                  j.id !== draft.jcId ? j : { ...j, ...draft.prevState },
+                ),
+              },
+        );
+      }
+      return next;
+    });
+
+    const newFailures: PatchFailure[] = [];
+    for (const { draft, result } of results) {
+      if (result.success) {
+        if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "ok");
+        if (draft.feedback?.successMsg) toast.success(draft.feedback.successMsg);
+      } else {
+        if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "err");
+        newFailures.push({
+          id: `${draft.jcId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          poId: draft.poId,
+          jcId: draft.jcId,
+          deptCode: draft.deptCode,
+          deptName: draft.deptName,
+          attemptedPatch: draft.patch,
+          prevState: draft.prevState,
+          errorMsg: result.error ?? "unknown",
+          attemptsUsed: result.attemptsUsed,
+          at: Date.now(),
+        });
+        console.error("[flushDrafts] draft failed after retries", {
+          jcId: draft.jcId,
+          patch: draft.patch,
+          error: result.error,
+        });
+      }
+    }
+    if (newFailures.length > 0) {
+      setPatchFailures((prev) => [...prev, ...newFailures]);
+    }
+    setSavingNow(false);
+  }, [sendOneDraft, flashCell, toast]);
+
+  // saveAllNow — manual "Save All" button. Cancels the debounce and flushes
+  // immediately. Also used by the failure modal's retry helpers to push
+  // through without waiting.
+  const saveAllNow = useCallback(() => {
+    void flushDrafts();
+  }, [flushDrafts]);
+
+  // patchJobCard — primary API for every cell-edit handler on the page.
+  // Non-silent callers (the default) → stage into drafts + reset debounce.
+  // Silent callers (bulk fan-out) → send synchronously, throw on failure to
+  // preserve the pre-batch contract.
   const patchJobCard = useCallback(
     async (
       poId: string,
       jobCardId: string,
       patch: Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">> & { distributedAt?: string | null },
-      // Optional cell-flash key (e.g. `${jobCardId}|FAB_CUT`). When present
-      // a successful PATCH paints the cell green for 800ms and fires a
-      // success toast; failure paints red + adds an entry to the failure
-      // modal. Caller can pass `silent: true` to opt out of feedback (e.g.
-      // bulk fan-out where only the wrapper should report); silent callers
-      // get the error re-thrown instead of pushed to the modal.
       feedback?: { flashKey?: string; silent?: boolean; successMsg?: string },
     ) => {
-      // 1. Snapshot the pre-edit value of every field being patched. We need
-      //    this for the rollback path AND so the failure modal can tell the
-      //    operator "you changed X → Y; reverted to X".
-      //
-      //    The snapshot is captured INSIDE setOrders so it's atomic with the
-      //    optimistic update — no chance of race between snapshot and the next
-      //    re-render landing.
+      // 1. Snapshot + optimistic update (same as Phase 1, atomic inside setOrders).
       let prevState: Record<string, unknown> = {};
       let deptCode = "";
       let deptName = "";
-
       setOrders((prev) => {
         const order = prev.find((o) => o.id === poId);
         const jc = order?.jobCards.find((j) => j.id === jobCardId);
@@ -1328,155 +1504,135 @@ export default function ProductionPage({
       });
       pendingJcPatchesRef.current.add(jobCardId);
 
-      // 2. Retry loop: original attempt + 2 retries with exponential backoff
-      //    (500ms, 1500ms). Retries protect against the bulk of "卡" symptoms
-      //    — Cloudflare Worker cold-start delays, Hyperdrive intermittent
-      //    Postgres timeouts, brief wifi blips on shop-floor iPads. 4xx errors
-      //    aren't retried (token expiry, lock check, validation — won't fix
-      //    themselves on a retry), 5xx + network errors are.
-      const MAX_ATTEMPTS = 3;
-      const RETRY_DELAYS_MS = [500, 1500];
-      let lastError = "";
-      let attemptsUsed = 0;
-      let succeeded = false;
-
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        attemptsUsed = attempt;
-        let retryable = true;
-        try {
-          const res = await fetch(`/api/production-orders/${poId}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobCardId, ...patch }),
-          });
-          if (res.ok) {
-            succeeded = true;
-            break;
-          }
-          // HTTP error — extract message, decide if retry-able.
-          let msg = `HTTP ${res.status}`;
-          try {
-            const body = (await res.json()) as { error?: string } | null;
-            if (body && typeof body.error === "string") msg = body.error;
-          } catch {
-            /* non-json body — keep status code */
-          }
-          lastError = msg;
-          // 4xx (except 408 Request Timeout / 429 Too Many Requests) are
-          // client-level and won't change on retry — fail fast.
-          if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
-            retryable = false;
-          }
-        } catch (err) {
-          // Network error, fetch threw — retry-able.
-          lastError = err instanceof Error ? err.message : "network error";
-        }
-        if (!retryable) break;
-        if (attempt < MAX_ATTEMPTS) {
-          await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
-        }
+      // 2a. Silent caller (bulk fan-out etc.) → bypass the queue and use the
+      //     pre-batching synchronous contract: await result, rollback +
+      //     throw on failure.
+      if (feedback?.silent) {
+        const result = await sendOneDraft({ poId, jcId: jobCardId, patch });
+        pendingJcPatchesRef.current.delete(jobCardId);
+        if (result.success) return;
+        // Rollback this specific JC.
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id !== poId
+              ? o
+              : {
+                  ...o,
+                  jobCards: o.jobCards.map((j) =>
+                    j.id !== jobCardId ? j : { ...j, ...prevState },
+                  ),
+                },
+          ),
+        );
+        throw new Error(result.error ?? "unknown");
       }
 
-      pendingJcPatchesRef.current.delete(jobCardId);
+      // 2b. Default path: stage the draft. Merge with any in-flight draft on
+      //     the SAME JC so successive edits roll up into one PATCH and the
+      //     ORIGINAL prevState (before the first edit) is preserved for
+      //     rollback. Reset the debounce timer.
+      const existing = draftsRef.current.get(jobCardId);
+      const merged: DraftEntry = {
+        poId,
+        jcId: jobCardId,
+        patch: { ...(existing?.patch ?? {}), ...(patch as Record<string, unknown>) },
+        prevState: existing?.prevState ?? prevState,
+        deptCode: existing?.deptCode || deptCode,
+        deptName: existing?.deptName || deptName,
+        feedback: feedback
+          ? { flashKey: feedback.flashKey, successMsg: feedback.successMsg }
+          : undefined,
+        stagedAt: existing?.stagedAt ?? Date.now(),
+      };
+      draftsRef.current.set(jobCardId, merged);
+      setUnsavedCount(draftsRef.current.size);
 
-      if (succeeded) {
-        if (!feedback?.silent) {
-          if (feedback?.flashKey) flashCell(feedback.flashKey, "ok");
-          if (feedback?.successMsg) toast.success(feedback.successMsg);
-        }
-        return;
-      }
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = setTimeout(() => {
+        void flushDrafts();
+      }, DEBOUNCE_MS);
+    },
+    [sendOneDraft, flushDrafts],
+  );
 
-      // 3. All attempts failed → rollback optimistic UI so the matrix matches
-      //    the server's actual state (= the pre-edit value). Operators were
-      //    previously seeing the optimistic value persist after a silent
-      //    failure, which made them believe the change saved when it hadn't.
+  // Retry handlers wired into <PatchFailureModal>. Re-stage the attempted
+  // patch and immediately flush so the operator sees a fast retry (no 2s
+  // debounce wait when they explicitly press Retry).
+  const retryFailure = useCallback(
+    (f: PatchFailure) => {
+      setPatchFailures((prev) => prev.filter((x) => x.id !== f.id));
+      // Re-apply optimistic state for this draft so the matrix reflects the
+      // attempted value while we re-send. flushDrafts will roll it back
+      // again if the retry fails.
       setOrders((prev) =>
         prev.map((o) =>
-          o.id !== poId
+          o.id !== f.poId
             ? o
             : {
                 ...o,
                 jobCards: o.jobCards.map((j) =>
-                  j.id !== jobCardId ? j : { ...j, ...prevState },
+                  j.id !== f.jcId ? j : { ...j, ...f.attemptedPatch },
                 ),
               },
         ),
       );
-      console.error("[patchJobCard] all attempts failed", {
-        jobCardId,
-        patch,
-        attemptsUsed,
-        lastError,
+      draftsRef.current.set(f.jcId, {
+        poId: f.poId,
+        jcId: f.jcId,
+        patch: f.attemptedPatch,
+        prevState: f.prevState,
+        deptCode: f.deptCode,
+        deptName: f.deptName,
+        feedback: f.deptCode
+          ? { flashKey: `${f.jcId}|${f.deptCode}` }
+          : undefined,
+        stagedAt: Date.now(),
       });
-      if (feedback?.flashKey) flashCell(feedback.flashKey, "err");
-
-      if (feedback?.silent) {
-        // Silent caller is responsible for its own surfacing; re-throw.
-        throw new Error(lastError);
-      }
-
-      // 4. Surface in the failure modal. Persists until operator clicks
-      //    Retry or Discard — unlike a toast which auto-dismisses in seconds.
-      const failureId = `${jobCardId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      setPatchFailures((prev) => [
-        ...prev,
-        {
-          id: failureId,
-          poId,
-          jcId: jobCardId,
-          deptCode,
-          deptName,
-          attemptedPatch: patch as Record<string, unknown>,
-          prevState,
-          errorMsg: lastError,
-          attemptsUsed,
-          at: Date.now(),
-        },
-      ]);
+      setUnsavedCount(draftsRef.current.size);
+      void flushDrafts();
     },
-    [toast, flashCell],
-  );
-
-  // Retry handlers wired into <PatchFailureModal>. Re-firing patchJobCard
-  // means the optimistic UI flips back, the retry loop runs again, and on
-  // success the failure entry is gone (already removed below before re-firing).
-  const retryFailure = useCallback(
-    (f: PatchFailure) => {
-      setPatchFailures((prev) => prev.filter((x) => x.id !== f.id));
-      void patchJobCard(
-        f.poId,
-        f.jcId,
-        f.attemptedPatch as Parameters<typeof patchJobCard>[2],
-        { flashKey: f.deptCode ? `${f.jcId}|${f.deptCode}` : undefined },
-      );
-    },
-    [patchJobCard],
+    [flushDrafts],
   );
   const discardFailure = useCallback((id: string) => {
     setPatchFailures((prev) => prev.filter((x) => x.id !== id));
   }, []);
   const retryAllFailures = useCallback(() => {
-    // Snapshot first so new failures arriving during the retry batch aren't
-    // immediately re-fired (they enter the modal as fresh rows instead).
+    // Snapshot the current failures, clear the list, re-stage + flush each.
     setPatchFailures((prev) => {
       const snapshot = prev.slice();
-      // Defer re-fires to next tick so we don't call patchJobCard inside the
-      // state setter callback (would queue setOrders updates against a stale
-      // closure).
       queueMicrotask(() => {
         for (const f of snapshot) {
-          void patchJobCard(
-            f.poId,
-            f.jcId,
-            f.attemptedPatch as Parameters<typeof patchJobCard>[2],
-            { flashKey: f.deptCode ? `${f.jcId}|${f.deptCode}` : undefined },
+          setOrders((cur) =>
+            cur.map((o) =>
+              o.id !== f.poId
+                ? o
+                : {
+                    ...o,
+                    jobCards: o.jobCards.map((j) =>
+                      j.id !== f.jcId ? j : { ...j, ...f.attemptedPatch },
+                    ),
+                  },
+            ),
           );
+          draftsRef.current.set(f.jcId, {
+            poId: f.poId,
+            jcId: f.jcId,
+            patch: f.attemptedPatch,
+            prevState: f.prevState,
+            deptCode: f.deptCode,
+            deptName: f.deptName,
+            feedback: f.deptCode
+              ? { flashKey: `${f.jcId}|${f.deptCode}` }
+              : undefined,
+            stagedAt: Date.now(),
+          });
         }
+        setUnsavedCount(draftsRef.current.size);
+        void flushDrafts();
       });
       return [];
     });
-  }, [patchJobCard]);
+  }, [flushDrafts]);
   const discardAllFailures = useCallback(() => {
     setPatchFailures([]);
   }, []);
@@ -4399,6 +4555,35 @@ export default function ProductionPage({
         <div className="fixed top-2 right-2 z-50 flex items-center gap-2 px-3 py-1.5 bg-white border border-[#E6E0D9] rounded shadow-sm text-xs text-[#6B5C32]">
           <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#6B5C32] border-t-transparent" />
           Loading…
+        </div>
+      )}
+      {/* Unsaved changes banner — surfaces the pending draft buffer when the
+          debounce timer is still counting down. Operators see a live
+          unsaved-count + can force an immediate flush via "Save All Now".
+          Bar is sticky so it's visible while scrolling the matrix. */}
+      {(unsavedCount > 0 || savingNow) && (
+        <div className="sticky top-0 z-40 -mx-4 px-4 py-2 bg-amber-100 border-y border-amber-300 flex items-center justify-between gap-3 shadow-sm">
+          <div className="flex items-center gap-2 text-sm">
+            {savingNow ? (
+              <>
+                <div className="h-3 w-3 animate-spin rounded-full border-2 border-amber-700 border-t-transparent" />
+                <span className="font-medium text-amber-900">Saving {unsavedCount > 0 ? unsavedCount : ""}…</span>
+              </>
+            ) : (
+              <>
+                <span className="text-amber-700">●</span>
+                <span className="font-medium text-amber-900">
+                  {unsavedCount} unsaved change{unsavedCount === 1 ? "" : "s"}
+                </span>
+                <span className="text-amber-700 text-xs">· auto-saving in 2s</span>
+              </>
+            )}
+          </div>
+          {!savingNow && unsavedCount > 0 && (
+            <Button size="sm" onClick={saveAllNow} className="bg-amber-700 hover:bg-amber-800 text-white">
+              Save All Now
+            </Button>
+          )}
         </div>
       )}
       {/* Header */}

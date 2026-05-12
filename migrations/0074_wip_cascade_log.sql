@@ -49,13 +49,19 @@
 
 CREATE TABLE IF NOT EXISTS wip_cascade_log (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id      UUID NOT NULL,
+  -- org_id is TEXT (matches the multi-tenant skeleton from 0049) — Hookka
+  -- tables use TEXT 'hookka' as the tenant scope, not UUID. First-deploy
+  -- erroneously used UUID; idempotent ALTER below corrects in place.
+  org_id      TEXT NOT NULL,
   job_card_id TEXT NOT NULL,
   from_status TEXT,
   to_status   TEXT NOT NULL,
   source      TEXT NOT NULL,
   applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE wip_cascade_log
+  ALTER COLUMN org_id TYPE TEXT USING org_id::text;
 
 -- The idempotency key. NULLs are treated as distinct by Postgres, which is
 -- the behaviour we want — a NULL from_status means "first emission, no prior

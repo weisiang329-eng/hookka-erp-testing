@@ -126,15 +126,26 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // short-circuits. Atomic, concurrent-safe, catches the cross-session
       // replay case BUG-005 misses (backfill scripts, retries, migration
       // imports re-firing the cascade on already-final-state JCs).
+      //
+      // org_id is TEXT (not UUID) to match the multi-tenant skeleton from
+      // migration 0049 — every Hookka table uses TEXT 'hookka' as the tenant
+      // scope. The initial deploy on 2026-05-12 declared this as UUID by
+      // mistake, which caused every INSERT to fail silently (caught + logged
+      // as warning, so cascade still ran but without the idempotency guard
+      // active). The ALTER fixes any existing-with-wrong-type rows in place.
       `CREATE TABLE IF NOT EXISTS wip_cascade_log (
          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-         org_id      UUID NOT NULL,
+         org_id      TEXT NOT NULL,
          job_card_id TEXT NOT NULL,
          from_status TEXT,
          to_status   TEXT NOT NULL,
          source      TEXT NOT NULL,
          applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
        )`,
+      // Fix prior-deploy mistake — flip org_id from UUID to TEXT if needed.
+      // ALTER ... USING is idempotent: re-running when already TEXT is a no-op.
+      `ALTER TABLE wip_cascade_log
+         ALTER COLUMN org_id TYPE TEXT USING org_id::text`,
       // NULL from_status is treated distinct by Postgres uniqueness, so the
       // index is partial — one for the common (from, to) pair, one for the
       // initial-emission case.

@@ -37,15 +37,22 @@ function ensureSchema(db: D1Database): Promise<void> {
   if (pendingMigrations) return pendingMigrations;
   pendingMigrations = (async () => {
     const stmts = [
+      // org_id is TEXT (not UUID) to match the multi-tenant skeleton from
+      // migration 0049 — Hookka tables uniformly use TEXT 'hookka' as the
+      // tenant scope. The 2026-05-12 first deploy declared this UUID by
+      // mistake; the ALTER below idempotently flips any existing-with-UUID
+      // table to TEXT.
       `CREATE TABLE IF NOT EXISTS production_folders (
          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-         org_id      UUID NOT NULL,
+         org_id      TEXT NOT NULL,
          name        TEXT NOT NULL,
          description TEXT,
          created_by  TEXT,
          created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
          updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
        )`,
+      `ALTER TABLE production_folders
+         ALTER COLUMN org_id TYPE TEXT USING org_id::text`,
       `CREATE TABLE IF NOT EXISTS folder_job_cards (
          folder_id   UUID NOT NULL REFERENCES production_folders(id) ON DELETE CASCADE,
          job_card_id TEXT NOT NULL,

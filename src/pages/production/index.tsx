@@ -562,27 +562,51 @@ export default function ProductionPage({
       // inline style now points at the cell. Reading getBoundingClientRect
       // forces the browser to recompute layout before showPicker() reads it.
       void el.getBoundingClientRect();
-      if (pickerSupportedRef.current) {
-        try { el.showPicker(); return; } catch (err) {
-          // showPicker can throw if the input is disconnected, not focusable,
-          // or the user-gesture chain was broken. Fall through to focus/click
-          // and surface the failure so the operator knows to refresh rather
-          // than silently typing into thin air.
-          console.warn("[openDatePicker] showPicker threw", err);
+
+      const tryShowPicker = () => {
+        if (pickerSupportedRef.current) {
+          try {
+            el.showPicker();
+            return;
+          } catch (err) {
+            // showPicker can throw if the input is disconnected, not focusable,
+            // or the user-gesture chain was broken. Fall through to focus/click
+            // and surface the failure so the operator knows to refresh rather
+            // than silently typing into thin air.
+            console.warn("[openDatePicker] showPicker threw", err);
+          }
         }
-      }
-      // Fallback path — focus + synthetic click. On iPad Safari 16.4+ this
-      // still pops the calendar; on older WebViews it focuses the (now
-      // visible-via-1px-square) input so keyboard typing works as a last
-      // resort. If even focus throws, surface a toast — silent failure was
-      // the original 2026-05-10 bug surface.
-      try {
-        el.focus();
-        el.click();
-      } catch (err) {
-        console.error("[openDatePicker] fallback failed", err);
-        toast.error("Could not open date picker. Please refresh the page.");
-      }
+        // Fallback path — focus + synthetic click. On iPad Safari 16.4+ this
+        // still pops the calendar; on older WebViews it focuses the (now
+        // visible-via-1px-square) input so keyboard typing works as a last
+        // resort. If even focus throws, surface a toast — silent failure was
+        // the original 2026-05-10 bug surface.
+        try {
+          el.focus();
+          el.click();
+        } catch (err) {
+          console.error("[openDatePicker] fallback failed", err);
+          toast.error("Could not open date picker. Please refresh the page.");
+        }
+      };
+
+      // 2026-05-12: Wei Siang reported "click on Completion Date sometimes
+      // does nothing; clicking another column then back makes it work."
+      // Root cause: even with the getBoundingClientRect() read above to
+      // flush styles, showPicker() runs in the same microtask and sometimes
+      // hits Chromium's pre-paint cache, anchoring the calendar at the
+      // input's PREVIOUS position. The calendar opens — visually off-screen
+      // or hidden behind elements — and the operator interprets the lack of
+      // visible popup as "no response", dismisses it, and only after a
+      // second cell click (which re-flushed positioning) does the popup
+      // anchor correctly.
+      //
+      // Fix: defer showPicker() to the next animation frame. rAF callbacks
+      // run AFTER the browser has committed style writes, so showPicker()
+      // reads the freshly-positioned coordinates. The user-activation window
+      // for showPicker() lasts ~5s after the click (verified in Chromium
+      // source), so a 1-frame deferral is well within bounds — no rejection.
+      requestAnimationFrame(tryShowPicker);
     },
     [toast],
   );

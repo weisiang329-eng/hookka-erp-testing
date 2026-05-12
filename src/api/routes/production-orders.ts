@@ -3841,15 +3841,19 @@ async function bumpPoListCacheVersion(c: Context<Env>, orgId: string): Promise<v
   const kv = c.env.SESSION_CACHE;
   if (!kv) return;
   const v = String(Date.now());
-  const writePromise = kv
-    .put(`pos:version:${orgId}`, v, { expirationTtl: 86400 })
-    .catch((err) => {
-      console.error("[bumpPoListCacheVersion] kv write failed", err);
-    });
-  if (c.executionCtx?.waitUntil) {
-    c.executionCtx.waitUntil(writePromise);
-  } else {
-    void writePromise;
+  // BUG-2026-05-12: original implementation fired the kv.put via waitUntil so
+  // the response would return faster, but that meant the operator's NEXT GET
+  // (typically <100 ms later when the auto-refresh kicks in or they navigate
+  // away + back) could still read the OLD version key, build the OLD cache
+  // key, and hit the OLD cached payload — i.e. the date the operator just
+  // saved looked "missing". Contributes to the operator-reported "set then
+  // gone" symptom. Block on the put to guarantee the very next read sees the
+  // new version. KV writes are ~10–30 ms at the writing edge, which is well
+  // below the Worker request budget, so the latency cost is acceptable.
+  try {
+    await kv.put(`pos:version:${orgId}`, v, { expirationTtl: 86400 });
+  } catch (err) {
+    console.error("[bumpPoListCacheVersion] kv write failed", err);
   }
 }
 

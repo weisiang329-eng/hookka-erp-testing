@@ -1298,7 +1298,15 @@ export default function ProductionPage({
         ? d
         : [];
     const pending = pendingJcPatchesRef.current;
-    if (pending.size === 0) {
+    // BUG-2026-05-12: previously this only checked `pending` (in-flight
+    // PATCHes). Drafts staged in the debounce buffer but not yet flushed are
+    // NOT in pending, so a fetch that resolved AFTER the operator clicked a
+    // cell would visually overwrite the just-typed value (the data still
+    // survives in draftsRef and lands on the next flush, but the operator
+    // sees the cell flicker back). Also splice draftsRef so staged-but-unsent
+    // edits stay visible on the matrix until they hit the server.
+    const draftedIds = new Set(Array.from(draftsRef.current.keys()));
+    if (pending.size === 0 && draftedIds.size === 0) {
       setOrders(fresh);
       return;
     }
@@ -1308,7 +1316,7 @@ export default function ProductionPage({
       const prevJcMap = new Map<string, JobCard>();
       for (const po of prev) {
         for (const jc of po.jobCards) {
-          if (pending.has(jc.id)) prevJcMap.set(jc.id, jc);
+          if (pending.has(jc.id) || draftedIds.has(jc.id)) prevJcMap.set(jc.id, jc);
         }
       }
       if (prevJcMap.size === 0) return fresh;

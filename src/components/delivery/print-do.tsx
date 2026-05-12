@@ -43,25 +43,34 @@ const PrintDO = forwardRef<HTMLDivElement, PrintDOProps>(({ data, mode }, ref) =
   const title = mode === "do" ? "DELIVERY ORDER" : "PACKING LIST";
   const totalQty = data.items.reduce((s, i) => s + i.quantity, 0);
 
+  // `hidden print:block` on the root — Tailwind: display:none on screen,
+  // display:block in print. Matches the production FG / Job Card sticker
+  // pattern. Replaces a legacy `position: fixed; z-index: -1` wrapper in
+  // delivery/index.tsx that trapped this template behind the page background
+  // in Save-as-PDF (operator-reported blank-output bug 2026-05-12).
   return (
-    <div ref={ref} className="print-do-container">
+    <div ref={ref} className="print-do-container hidden print:block">
       <style>{`
         @media print {
           /* Kill ALL page / body background colors so printer uses paper-white only */
           html, body { background: #ffffff !important; }
-          body * { visibility: hidden; }
-          .print-do-container, .print-do-container * { visibility: visible; }
+          body * { visibility: hidden !important; }
+          .print-do-container, .print-do-container * { visibility: visible !important; }
           .print-do-container {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
             background: #ffffff !important;
           }
           /* Headers must print as outlined cells — no gray fill, saves ink */
           .print-do-container th { background: #ffffff !important; border: 1px solid #000 !important; }
           .print-do-container tfoot tr { background: #ffffff !important; }
-          @page { margin: 15mm; size: A4; background: #ffffff; }
+          /* @page only supports margin / size / marks / orphans / widows.
+             The pre-2026-05-12 rule included a background property which is
+             invalid here and could cascade-fail the entire @page block on
+             strict parsers. Page background is handled via html/body above. */
+          @page { margin: 15mm; size: A4; }
         }
         .print-do-container {
           font-family: Arial, Helvetica, sans-serif;

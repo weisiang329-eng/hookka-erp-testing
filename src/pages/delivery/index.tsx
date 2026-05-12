@@ -4174,11 +4174,16 @@ export default function DeliveryPage() {
         </>
       )}
 
-      {/* Hidden Print Container — rendered at page level so it's accessible from any tab */}
+      {/* Hidden Print Container — rendered at page level so it's accessible
+          from any tab. The PrintDO root carries `hidden print:block` so it's
+          display:none on screen and only renders into the print pipeline.
+          Pre-2026-05-12 this was wrapped in a `position: fixed; z-index: -1`
+          stacking context, which made Save-as-PDF capture the print template
+          BEHIND the page's white background → completely blank output. The
+          existing production FG / Job Card sticker prints already used the
+          `hidden print:block` pattern; this brings PrintDO in line. */}
       {printData && (
-        <div className="fixed left-0 top-0 w-full" style={{ zIndex: -1 }}>
-          <PrintDO ref={printRef} data={printData.data} mode={printData.mode} />
-        </div>
+        <PrintDO ref={printRef} data={printData.data} mode={printData.mode} />
       )}
     </div>
   );

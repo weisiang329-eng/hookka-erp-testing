@@ -428,13 +428,23 @@ export default function ProductionPage({
   // on ALL, matching legacy behavior.
   const initialTab = mode === "dept" && deptCode ? deptCode : "ALL";
   const [activeTab, setActiveTabRaw] = useState<"ALL" | string>(initialTab);
-  // Keep activeTab in sync with the deptCode prop when navigating between
-  // sibling dept routes (React Router reuses the component instance on
-  // /production/fab-cut → /production/fab-sew transitions).
+  // Keep activeTab in sync with the deptCode prop on dept-to-dept hops.
+  // Sibling dept routes (/production/fab-cut → /production/foam) reuse
+  // this component instance (the dept.tsx wrapper deliberately does NOT
+  // set key={code} — see its comment for why). Without atomic syncing
+  // the operator sees the OLD dept's H2 / sidebar / rows for several
+  // seconds until React's deferred work commits.
+  //
+  // useLayoutEffect (not useEffect) — fires BEFORE paint so the very
+  // first frame on the new dept already has activeTab pointing at the
+  // new dept. orders are cleared atomically so the DataGrid empty
+  // state (and the loading flag below) shows immediately and the
+  // operator never sees Foam's H2 over Fab Sew's rows.
   /* eslint-disable react-hooks/set-state-in-effect -- syncing activeTab to URL deptCode on route change */
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mode === "dept" && deptCode && deptCode !== activeTab) {
       setActiveTabRaw(deptCode);
+      setOrders([]);
     } else if (mode === "overview" && activeTab !== "ALL") {
       setActiveTabRaw("ALL");
     }
@@ -4654,10 +4664,16 @@ export default function ProductionPage({
             <h2 className="text-sm font-semibold text-[#1F1D1B]">
               {activeDept.name} — Production Sheet
               <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                ({(gridFilteredDeptRows ?? deptRows).length}
-                {gridFilteredDeptRows && gridFilteredDeptRows.length !== deptRows.length
-                  ? ` of ${deptRows.length}`
-                  : ""} items)
+                {loading && deptRows.length === 0
+                  ? "(loading…)"
+                  : (
+                  <>
+                    ({(gridFilteredDeptRows ?? deptRows).length}
+                    {gridFilteredDeptRows && gridFilteredDeptRows.length !== deptRows.length
+                      ? ` of ${deptRows.length}`
+                      : ""} items)
+                  </>
+                )}
               </span>
             </h2>
             <div className="ml-auto flex items-center gap-2">
@@ -4770,7 +4786,7 @@ export default function ProductionPage({
             keyField="id"
             stickyHeader
             maxHeight="calc(100vh - 300px)"
-            emptyMessage={`No job cards in ${activeDept.name}.`}
+            emptyMessage={loading ? `Loading ${activeDept.name}…` : `No job cards in ${activeDept.name}.`}
             onDoubleClick={(row) => {
               if (row.salesOrderId) navigate(`/sales/${row.salesOrderId}`);
               else if (row.consignmentOrderId) navigate(`/consignment/${row.consignmentOrderId}`);

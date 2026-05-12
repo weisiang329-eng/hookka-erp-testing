@@ -49,23 +49,24 @@ export default function ProductionDept() {
   if (!code) {
     return <Navigate to="/production" replace />;
   }
-  // key={code} forces a fresh ProductionPage instance on every dept hop.
-  // Without this, navigating /production/upholstery → /production/foam reused
-  // the previous instance, leaving the old `orders` array (~2 Upholstery POs)
-  // in state while the new dept fetched its own (~1k FOAM POs). The page
-  // re-rendered repeatedly through three intermediate states (URL changed →
-  // filters cleared → fetch fired → orders arrived → activeTab synced),
-  // each one paying the full pickerIndex / baseRows / visibleOrders memo
-  // recompute. Operator saw a 50s freeze with the page stuck rendering
-  // the old dept's title + records badge — the Foam click that should
-  // have shown Foam data sat at "Upholstery — 2 items" until the cascade
-  // finished. (Wei Siang 2026-05-10 report.)
+  // key={code} was added 2026-05-10 to dodge a 50s freeze where in-place
+  // dept switching cascaded through 22 intermediate-state re-renders
+  // (Wei Siang report). The remount collapsed those into one render —
+  // BUT it then introduced its own bug: with ~700-1900 rows per dept,
+  // unmount+mount of the entire ProductionPage (5800-line component
+  // tree, dozens of useMemos, DataGrid initial shape) took 5-12s, during
+  // which React kept the OLD dept committed on screen. From the
+  // operator's POV the URL changed but the page froze (Wei Siang
+  // 2026-05-12 report).
   //
-  // Remount runs the init effects exactly once with the right inputs,
-  // collapsing those 22 sequential long tasks into one render. Cost: the
-  // top-bar filter inputs (search / customer / state / category) reset
-  // between dept hops — their state is URL-backed anyway and the URL
-  // change clears the params, so the visible result is the same. Column
-  // filters / sort survive because DataGrid persists those by gridId.
-  return <ProductionPage key={code} mode="dept" deptCode={code} />;
+  // 2026-05-12: dropped `key`, switched ProductionPage to a synchronous
+  // useLayoutEffect that atomically clears orders + syncs activeTab when
+  // deptCode changes. The original 22-cascade is collapsed by React 18's
+  // automatic batching inside the layout effect, and the new dept's H2
+  // / sidebar highlight reflect the prop immediately because they read
+  // deptCode directly (not the lagging activeTab state). The DataGrid
+  // shows a Loading… placeholder while the new dept's fetch is in
+  // flight, so the operator can see the click registered. Net cost:
+  // single dept switch ~1.5s (the fetch) instead of 5-12s.
+  return <ProductionPage mode="dept" deptCode={code} />;
 }

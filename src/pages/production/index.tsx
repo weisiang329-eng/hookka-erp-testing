@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
@@ -600,6 +600,23 @@ export default function ProductionPage({
   // helper so the operator's initial view stays narrowed to today.
   const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
   const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
+  // Local mirrors so the date inputs stay responsive on iPad while the
+  // URL setter (which triggers a re-render across the whole page) runs
+  // in a transition. Without this, every keystroke / picker-commit fired
+  // a synchronous re-render that included filter useMemos + DataGrid
+  // re-shape — 1.2-1.6s of long-task blocking per change on prod data.
+  const [fltDueFromInput, setFltDueFromInput] = useState(fltDueFrom);
+  const [fltDueToInput, setFltDueToInput] = useState(fltDueTo);
+  const [, startDateTransition] = useTransition();
+  // Re-sync local mirror when URL state changes externally (Clear all,
+  // first-mount seed, deep link, back-button). Skip when the input
+  // already matches to dodge a self-loop.
+  useEffect(() => {
+    setFltDueFromInput((prev) => (prev === fltDueFrom ? prev : fltDueFrom));
+  }, [fltDueFrom]);
+  useEffect(() => {
+    setFltDueToInput((prev) => (prev === fltDueTo ? prev : fltDueTo));
+  }, [fltDueTo]);
 
   // F1 cold-start today fallback (2026-05-11).
   //
@@ -4332,15 +4349,23 @@ export default function ProductionPage({
         {/* order so the relationship is self-evident. */}
         <input
           type="date"
-          value={fltDueFrom}
-          onChange={(e) => setFltDueFrom(e.target.value)}
+          value={fltDueFromInput}
+          onChange={(e) => {
+            const v = e.target.value;
+            setFltDueFromInput(v);
+            startDateTransition(() => setFltDueFrom(v));
+          }}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
           title="From (due date)"
         />
         <input
           type="date"
-          value={fltDueTo}
-          onChange={(e) => setFltDueTo(e.target.value)}
+          value={fltDueToInput}
+          onChange={(e) => {
+            const v = e.target.value;
+            setFltDueToInput(v);
+            startDateTransition(() => setFltDueTo(v));
+          }}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
           title="To (due date)"
         />

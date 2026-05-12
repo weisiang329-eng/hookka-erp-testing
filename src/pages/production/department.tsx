@@ -317,7 +317,18 @@ export default function DepartmentProductionPage() {
   const deptCode = (code ?? "").toUpperCase();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  // 2026-05-12 perf: fields=minimal drops piece_pics + unused PO fields;
+  // dept=<code> narrows JCs to just this department at the SQL level (no
+  // need to ship the other 7 depts' JCs to filter client-side). Cuts the
+  // payload from ~2 MB to ~150-300 KB.
+  const ordersUrl = useMemo(
+    () =>
+      `/api/production-orders?fields=minimal&include=jobCards${
+        deptCode ? `&dept=${encodeURIComponent(deptCode)}` : ""
+      }`,
+    [deptCode],
+  );
+  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const fetchedOrders: ProductionOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),

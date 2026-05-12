@@ -521,7 +521,11 @@ export default function DeliveryPage() {
     // savedScroll is read on mount only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageTab, activeTab]);
-  const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
+  // 2026-05-12 perf: fields=minimal drops piece_pics + ~20 unused PO fields
+  // from the response. include=jobCards keeps the per-PO JC array (DO page
+  // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
+  // the response from 2-6 MB to 200-600 KB.
+  const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
   const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   // Pull product master data so each Planning / Pending Delivery row can

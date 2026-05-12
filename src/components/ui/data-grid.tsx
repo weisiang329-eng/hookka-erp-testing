@@ -1133,6 +1133,12 @@ export function DataGrid<T extends Record<string, any>>({
   // Sync groupEnabled when groupBy prop changes
   useEffect(() => { setGroupEnabled(!!groupBy); }, [groupBy]);
 
+  // 2026-05-12 perf: groups default collapsed on first paint. See the effect
+  // body further down (lives after the allGroupValues useMemo so we can
+  // depend on it). Ref tracks initialization-per-groupBy so manually
+  // expanded groups stay expanded on subsequent data refreshes.
+  const initialCollapseRef = useRef<string | null>(null);
+
   // ── Saved Views ──
   const [savedViews, setSavedViews] = useState<SavedView[]>(() => {
     if (viewStorageKey && typeof window !== "undefined") {
@@ -1295,6 +1301,24 @@ export function DataGrid<T extends Record<string, any>>({
     }
     return Array.from(vals).sort();
   }, [groupBy, filteredData]);
+
+  // 2026-05-12 perf: groups default collapsed on first paint. The pre-fix
+  // behaviour mounted every row in every group on initial render because
+  // the virtualizer is hard-disabled when groupBy is active (see
+  // virtualizationActive gate below). Operator-visible cost: 300-1200 ms
+  // freeze on DO + dept pages with groupBy="customerState" / similar.
+  // Tracks initialization per groupBy column key so we don't re-collapse
+  // after the operator manually expands a group on later data refreshes.
+  useEffect(() => {
+    if (!groupEnabled || !groupBy) {
+      initialCollapseRef.current = null;
+      return;
+    }
+    if (initialCollapseRef.current === groupBy) return;
+    if (allGroupValues.length === 0) return;
+    setCollapsedGroups(new Set(allGroupValues));
+    initialCollapseRef.current = groupBy;
+  }, [groupBy, groupEnabled, allGroupValues]);
 
   const sortedData = useMemo(() => {
     let result = [...filteredData];

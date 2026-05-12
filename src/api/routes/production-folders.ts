@@ -191,21 +191,25 @@ app.get("/:id", async (c) => {
     .first<FolderRow>();
   if (!folder) return c.json({ success: false, error: "folder not found" }, 404);
 
+  // SELECT alias to camelCase — the SupabaseAdapter automatically maps
+  // snake_case columns based on the column-rename-map, but folder_job_cards'
+  // job_card_id isn't in that map (new table). Use an explicit AS so the
+  // adapter's row builder gets the field under the camelCase key we expect.
   const members = await c.var.DB
     .prepare(
-      `SELECT job_card_id, added_at
+      `SELECT job_card_id AS "jobCardId", added_at AS "addedAt"
          FROM folder_job_cards
         WHERE folder_id = ?
         ORDER BY added_at ASC`,
     )
     .bind(id)
-    .all<{ job_card_id: string; added_at: string }>();
+    .all<{ jobCardId: string; addedAt: string }>();
 
   return c.json({
     success: true,
     data: {
       ...folder,
-      jobCardIds: (members.results ?? []).map((m) => m.job_card_id),
+      jobCardIds: (members.results ?? []).map((m) => m.jobCardId).filter(Boolean),
     },
   });
 });

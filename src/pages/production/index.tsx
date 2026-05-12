@@ -1175,6 +1175,39 @@ export default function ProductionPage({
   // re-fire the fetch while a previous one was still in flight, which
   // stacked queries on Hyperdrive and froze the renderer for 15-20s
   // when the response payloads finally arrived together.
+  // Phase 2.5-D-lite — passive auto-refresh polling.
+  //
+  // Real Supabase Realtime would push job_cards mutations directly to the
+  // browser via WebSocket (~1s latency), but it needs: a new dependency
+  // (@supabase/supabase-js), RLS policies on the table (Hookka uses
+  // service_role via Hyperdrive — no RLS today), and anon key wiring per
+  // env. Too invasive for this iteration.
+  //
+  // Instead we lean on Phase 2.5-C: a quiet 20s setInterval re-fetches the
+  // matrix while the tab is visible. With KV cache in front, the typical
+  // request is a HIT (~20-50ms, no DB work). When ANY operator (including
+  // this one) mutates, the bump invalidates the cache → next poll within
+  // 20s sees fresh data. Net result: cross-operator changes are visible
+  // within ~20-30s, without infra changes.
+  //
+  // Skips:
+  //   * pending optimistic patches (don't stomp in-flight writes)
+  //   * staged drafts (don't refetch over a buffer the operator is still
+  //     editing — would clobber unsaved cells)
+  //   * tab not visible (no point computing for an unviewed tab)
+  useEffect(() => {
+    const POLL_INTERVAL_MS = 20_000;
+    const tick = () => {
+      if (document.visibilityState !== "visible") return;
+      if (pendingJcPatchesRef.current.size > 0) return;
+      if (draftsRef.current.size > 0) return;
+      lastFetchAtRef.current = Date.now();
+      fetchOrders();
+    };
+    const id = setInterval(tick, POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [fetchOrders]);
+
   // Warn the operator if they try to leave the page with unsaved drafts in
   // the buffer (closing tab, navigating away, hitting back). Modern browsers
   // ignore the custom message and show their own generic prompt, but they

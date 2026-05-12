@@ -5057,6 +5057,32 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
 
+  // BUG-2026-05-12: full-scan rebuild blew past Cloudflare's request wall on
+  // prod-size data (5000+ JCs × 5000+ POs in-memory diff). Operator couldn't
+  // get FOAM 326-stuck-at-326 corrected because every dry-run hung > 3 min.
+  // Two scope filters bolted on so the operator can run dept-scoped (or
+  // code-substring-scoped) rebuilds that fit inside the request budget:
+  //
+  //   ?byDept=FOAM          → filter `expected` map to codes whose JC is in
+  //                           that dept (uses the (DEPT) suffix in the
+  //                           synthesized label as the heuristic). Also
+  //                           filters wip_items SELECT to a subset.
+  //   ?codeContains=<frag>  → filter wip_items + expected codes by substring
+  //                           (case-sensitive). Use for ad-hoc cleanup of a
+  //                           specific product code or wipKey.
+  //
+  // When both filters are unset the endpoint behaves exactly as before
+  // (whole-tenant rebuild). Filters compose with AND.
+  const scopeByDept = (c.req.query("byDept") || "").trim().toUpperCase();
+  const scopeCodeContains = (c.req.query("codeContains") || "").trim();
+  const hasScope = scopeByDept !== "" || scopeCodeContains !== "";
+  const matchesScope = (code: string): boolean => {
+    if (!hasScope) return true;
+    if (scopeByDept && !code.includes(`(${scopeByDept})`)) return false;
+    if (scopeCodeContains && !code.includes(scopeCodeContains)) return false;
+    return true;
+  };
+
   // ----- Step 1 — load all JCs (one query) -----
   const jcRes = await db
     .prepare(
@@ -5413,6 +5439,7 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
   // For each code in expected: if existing row, plan UPDATE (or DELETE if
   // expected==0 and current!=0); else if expected != 0, plan INSERT.
   for (const [code, qty] of expected) {
+    if (!matchesScope(code)) continue;
     const cur = wipByCode.get(code);
     if (cur) {
       if ((cur.stockQty || 0) === qty) continue;
@@ -5441,6 +5468,7 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
   // current != 0, plan DELETE. (If current == 0, leave alone — don't
   // delete already-zero unrelated rows.)
   for (const w of wipRes.results ?? []) {
+    if (!matchesScope(w.code)) continue;
     if (expected.has(w.code)) continue;
     if ((w.stockQty || 0) !== 0) {
       deletes.push({ id: w.id, code: w.code, from: w.stockQty });

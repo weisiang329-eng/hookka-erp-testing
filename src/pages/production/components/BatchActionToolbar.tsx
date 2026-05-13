@@ -141,6 +141,9 @@ const LEAVE_ALONE = "__leave__";
 const EXPLICIT_CLEAR = "__clear__";
 
 export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel, onApply }: ApplyBatchPicDialogProps) {
+  // Default value = LEAVE_ALONE which renders as "— Select —" placeholder.
+  // Operator picks a worker or "— Remove —" to act; leaving the placeholder
+  // = skip that slot.
   const [pic1Id, setPic1Id] = useState<string>(LEAVE_ALONE);
   const [pic2Id, setPic2Id] = useState<string>(LEAVE_ALONE);
   const [showAll, setShowAll] = useState<boolean>(false);
@@ -163,23 +166,25 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[440px]">
-        <div className="mb-2 flex items-center gap-2">
-          <h3 className="text-[14px] font-semibold text-[#3A2E22]">Apply PIC</h3>
-          <div className="flex-1" />
-          {hasToggle && (
-            <label className="flex items-center gap-1 text-[11px] text-[#6B5E50] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={showAll}
-                onChange={(e) => setShowAll(e.target.checked)}
-              />
-              All departments ({allWorkers?.length})
-            </label>
-          )}
-        </div>
+        <h3 className="mb-1 text-[14px] font-semibold text-[#3A2E22]">Apply PIC</h3>
         <p className="mb-3 text-[12px] text-[#6B5E50]">
-          Sets PIC 1 / PIC 2 on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}. Leave a dropdown on "(leave alone)" to skip that slot.
+          Sets PIC 1 / PIC 2 on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}. Leave a dropdown on "— Select —" to skip that slot.
         </p>
+
+        {hasToggle && (
+          // Prominent toggle button — Wei Siang 2026-05-13: the prior
+          // top-right tiny checkbox was easy to miss. A full-width button
+          // is the way.
+          <button
+            type="button"
+            onClick={() => setShowAll((v) => !v)}
+            className="mb-3 w-full rounded border border-dashed border-[#C9A227] bg-[#FFF8E6] px-2 py-1.5 text-[12px] font-medium text-[#5A4500] hover:bg-[#FBEBAE]"
+          >
+            {showAll
+              ? `↑ Show only dept workers (${workers.length})`
+              : `↓ Show all departments (${allWorkers?.length})`}
+          </button>
+        )}
 
         <label className="block mb-1 text-[11px] font-semibold text-[#6B5E50]">PIC 1</label>
         <select
@@ -188,8 +193,8 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
           className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px] mb-3"
           autoFocus
         >
-          <option value={LEAVE_ALONE}>— (leave alone)</option>
-          <option value={EXPLICIT_CLEAR}>— (clear PIC 1)</option>
+          <option value={LEAVE_ALONE}>— Select —</option>
+          <option value={EXPLICIT_CLEAR}>— Remove PIC 1 —</option>
           {list.map((w) => (
             <option key={`p1-${w.id}`} value={w.id}>{w.name}</option>
           ))}
@@ -201,8 +206,8 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
           onChange={(e) => setPic2Id(e.target.value)}
           className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px]"
         >
-          <option value={LEAVE_ALONE}>— (leave alone)</option>
-          <option value={EXPLICIT_CLEAR}>— (clear PIC 2)</option>
+          <option value={LEAVE_ALONE}>— Select —</option>
+          <option value={EXPLICIT_CLEAR}>— Remove PIC 2 —</option>
           {list.map((w) => (
             <option key={`p2-${w.id}`} value={w.id}>{w.name}</option>
           ))}

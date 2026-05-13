@@ -5570,11 +5570,12 @@ export default function ProductionPage({
       <ApplyBatchPicDialog
         open={batchPicOpen}
         count={selectedDeptRows.length}
-        // Wei Siang 2026-05-13: batch dialogs (production + folder) BOTH
-        // default to the full production worker roster — strict per-dept
-        // filter is for inline cell dropdowns only. Operators doing batch
-        // assignments routinely cross dept lines.
-        workers={(workers || [])
+        // Wei Siang 2026-05-13 (corrected): default = smart per-dept filter
+        // (same as inline cell PIC dropdowns) — operator wants the short
+        // relevant list first. The "All departments" toggle inside the
+        // dialog widens to the full roster when needed.
+        workers={deptWorkers.map((w) => ({ id: w.id, name: w.name }))}
+        allWorkers={(workers || [])
           .slice()
           .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
           .map((w) => ({ id: w.id, name: w.name }))}

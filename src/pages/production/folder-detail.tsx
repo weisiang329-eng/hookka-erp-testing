@@ -443,11 +443,33 @@ export default function ProductionFolderDetailPage() {
       <ApplyBatchPicDialog
         open={picOpen}
         count={selected.length}
-        // Wei Siang 2026-05-13: same rule as the production page batch
-        // dialog — show the full production worker roster by default.
-        // Folders span multiple depts anyway; smart per-dept filter
-        // would just confuse the picker.
-        workers={workers
+        // Wei Siang 2026-05-13 (corrected): default = smart filter by union
+        // of the SELECTED JCs' depts (same UX as inline cell dropdowns +
+        // production page batch dialog). The dialog's "All departments"
+        // toggle widens to the full roster.
+        workers={(() => {
+          const selectedDepts = new Set(
+            selected.map((r) => (r.departmentCode || "").toUpperCase()).filter(Boolean),
+          );
+          const sorted = workers
+            .slice()
+            .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+          if (selectedDepts.size === 0) {
+            return sorted.map((w) => ({ id: w.id, name: w.name }));
+          }
+          const filtered = sorted.filter((w) => {
+            const codes =
+              Array.isArray(w.departmentCodes) && w.departmentCodes.length > 0
+                ? w.departmentCodes
+                : w.departmentCode
+                  ? [w.departmentCode]
+                  : [];
+            return codes.some((c) => selectedDepts.has((c || "").toUpperCase()));
+          });
+          return (filtered.length > 0 ? filtered : sorted).map((w) => ({ id: w.id, name: w.name }));
+        })()}
+        // Full roster behind the dialog's "All departments" toggle.
+        allWorkers={workers
           .slice()
           .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
           .map((w) => ({ id: w.id, name: w.name }))}

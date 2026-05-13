@@ -171,21 +171,6 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
           Sets PIC 1 / PIC 2 on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}. Leave a dropdown on "— Select —" to skip that slot.
         </p>
 
-        {hasToggle && (
-          // Prominent toggle button — Wei Siang 2026-05-13: the prior
-          // top-right tiny checkbox was easy to miss. A full-width button
-          // is the way.
-          <button
-            type="button"
-            onClick={() => setShowAll((v) => !v)}
-            className="mb-3 w-full rounded border border-dashed border-[#C9A227] bg-[#FFF8E6] px-2 py-1.5 text-[12px] font-medium text-[#5A4500] hover:bg-[#FBEBAE]"
-          >
-            {showAll
-              ? `↑ Show only dept workers (${workers.length})`
-              : `↓ Show all departments (${allWorkers?.length})`}
-          </button>
-        )}
-
         <label className="block mb-1 text-[11px] font-semibold text-[#6B5E50]">PIC 1</label>
         <select
           value={pic1Id}
@@ -194,7 +179,6 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
           autoFocus
         >
           <option value={LEAVE_ALONE}>— Select —</option>
-          <option value={EXPLICIT_CLEAR}>— Remove PIC 1 —</option>
           {list.map((w) => (
             <option key={`p1-${w.id}`} value={w.id}>{w.name}</option>
           ))}
@@ -207,11 +191,25 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
           className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px]"
         >
           <option value={LEAVE_ALONE}>— Select —</option>
-          <option value={EXPLICIT_CLEAR}>— Remove PIC 2 —</option>
           {list.map((w) => (
             <option key={`p2-${w.id}`} value={w.id}>{w.name}</option>
           ))}
         </select>
+
+        {hasToggle && (
+          // Wei Siang 2026-05-13: toggle button moved BELOW the dropdowns,
+          // not above — operator's eyes land on the picker first, the
+          // "expand" affordance is right after.
+          <button
+            type="button"
+            onClick={() => setShowAll((v) => !v)}
+            className="mt-3 w-full rounded border border-dashed border-[#C9A227] bg-[#FFF8E6] px-2 py-1.5 text-[12px] font-medium text-[#5A4500] hover:bg-[#FBEBAE]"
+          >
+            {showAll
+              ? `↑ Show only dept workers (${workers.length})`
+              : `↓ Show all departments (${allWorkers?.length})`}
+          </button>
+        )}
 
         <div className="mt-4 flex justify-end gap-2">
           <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>

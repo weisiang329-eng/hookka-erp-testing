@@ -432,7 +432,7 @@ export default function ProductionFolderDetailPage() {
             const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
-            else toast.success(`Stamped on ${patches.length}.`);
+            else toast.success(`${date ? "Stamped" : "Cleared"} completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             setSelected([]);
             await fetchAll();
           } catch (err) {

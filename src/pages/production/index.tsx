@@ -5557,7 +5557,8 @@ export default function ProductionPage({
             if (failed.length > 0) {
               toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             } else {
-              toast.success(`Stamped completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+              const verb = date ? "Stamped completion date on" : "Cleared completion date on";
+              toast.success(`${verb} ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             }
             invalidateCachePrefix("/api/production-orders");
             setSelectedDeptRows([]);

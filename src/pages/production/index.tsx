@@ -6109,16 +6109,9 @@ export default function ProductionPage({
           <div className="overflow-x-auto">
             <div className="flex gap-3 p-3 min-w-min">
               {onScreenStickers.map((s) => {
-                // Mirror the fields the user sees in the Production Sheet row
-                // above: Customer PO · State · Model · Type (WIP category) ·
-                // WIP label · Size · Colour · (bedframe heights) · Qty ·
-                // Special Order (when the SO line carries a custom note).
-                // For bedframes the height line surfaces gap/divan/leg + total;
-                // for sofas the seat size is already in sizeLabel.
-                const heightLine = s.totalHeight
-                  ? [s.gap, s.divan, s.leg].filter(Boolean).join(" · ") +
-                    (s.totalHeight ? ` = ${s.totalHeight}` : "")
-                  : [s.gap, s.divan, s.leg].filter(Boolean).join(" · ");
+                // v3 layout (operator 2026-05-13) reads individual fields
+                // (s.leg) directly; the pre-fix `heightLine` summary string
+                // is unused now that we render labelled rows.
                 return (
                   <div
                     key={s.key}
@@ -6126,74 +6119,66 @@ export default function ProductionPage({
                     style={{ width: "180px" }}
                     title={`${s.customerPOId || s.poNo} · ${s.model} · ${s.wipType} · ${s.wipName} · ${s.sizeLabel} · ${s.colour} · Qty ${s.qty}`}
                   >
-                    {/* On-screen QR tile layout — restructured 2026-05-13 per
-                        operator feedback. Pre-fix the tile crammed model,
-                        wipType, wipName, customerPOId+state, poNo,
-                        deptCode+size+colour, height, special, qty across
-                        8-9 stacked lines with significant repetition: the
-                        wipName already encoded model + variant + size +
-                        fabric, and the deptCode line repeated size + fabric
-                        again. Operator asked specifically to drop the
-                        Customer PO row and keep just SO ID, and to organise
-                        the rest by importance:
-                          1. Model         — bold headline
-                          2. Category · WipType — gold accent
-                          3. Fabric · Size — key craft info for sewing /
-                                             cutting (was buried)
-                          4. Height        — optional, when relevant
-                          5. SO ID · State — traceability, was below
-                                             Customer PO before
-                          6. Qty           — bold standalone
-                          7. ★ Special     — red, only when set
-                        Dropped: wipName (info is in lines 1-4), Customer
-                        PO row, deptCode prefix (already in the panel
-                        header). */}
+                    {/* On-screen QR tile — v3 layout (operator 2026-05-13).
+                        SO ID promoted to the top (was buried), labelled
+                        Model / Type / Color / Leg rows replace the
+                        previous chip-style stack. Pattern: each labelled
+                        row uses "Label-Value" with a hyphen, matching the
+                        operator's literal spec "Type-Armrest / Color /
+                        Leg Quantity". Rows hide themselves when the
+                        backing field is empty so non-bedframe stickers
+                        don't print an awkward "Leg-—" line. */}
                     <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
-                    {/* 1. Model — big bold headline */}
+                    {/* SO ID + state — operator-requested top-of-tile
+                        position for fastest traceability. */}
                     <div
-                      className="mt-1.5 font-bold text-center leading-tight w-full truncate"
+                      className="mt-1.5 text-center leading-tight w-full font-semibold tabular-nums truncate text-[#1F1D1B]"
                       style={{ fontSize: "11px" }}
-                    >
-                      {s.model || s.wipName}
-                    </div>
-                    {/* 2. Category · WipType — accent */}
-                    {(s.category || s.wipType) && (
-                      <div
-                        className="text-center leading-tight w-full text-[#6B5C32] truncate"
-                        style={{ fontSize: "9px" }}
-                      >
-                        {[s.category, s.wipType].filter(Boolean).join(" · ")}
-                      </div>
-                    )}
-                    {/* 3. Fabric · Size — key craft info */}
-                    {(s.colour || s.sizeLabel) && (
-                      <div
-                        className="mt-0.5 text-center leading-tight w-full text-[#1F1D1B] truncate"
-                        style={{ fontSize: "9px" }}
-                      >
-                        {[s.colour, s.sizeLabel].filter(Boolean).join(" · ")}
-                      </div>
-                    )}
-                    {/* 4. Height — when relevant */}
-                    {heightLine && (
-                      <div
-                        className="text-center leading-tight w-full text-[#6B7280] truncate"
-                        style={{ fontSize: "9px" }}
-                      >
-                        {heightLine}
-                      </div>
-                    )}
-                    {/* 5. SO ID + state — operator-requested replacement
-                        for the Customer PO row. State stays inline so a
-                        warehouse picker can route at a glance. */}
-                    <div
-                      className="mt-1 text-center leading-tight w-full text-[#1F1D1B] font-semibold tabular-nums truncate"
-                      style={{ fontSize: "9px" }}
                     >
                       {s.poNo}
                       {s.customerState ? ` · ${s.customerState}` : ""}
                     </div>
-                    {/* 6. ★ Special — red highlight, only when set */}
+                    {/* Model — bold accent under SO ID. */}
+                    {s.model && (
+                      <div
+                        className="mt-0.5 text-center leading-tight w-full font-bold text-[#6B5C32] truncate"
+                        style={{ fontSize: "11px" }}
+                      >
+                        Model {s.model}
+                      </div>
+                    )}
+                    {/* 1. Type-{wipType} — what part of the product. */}
+                    {s.wipType && (
+                      <div
+                        className="mt-1 text-center leading-tight w-full text-[#1F1D1B] truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        1. Type-{s.wipType}
+                      </div>
+                    )}
+                    {/* 2. Color-{fabric} — sewing / cutting key info. */}
+                    {s.colour && (
+                      <div
+                        className="text-center leading-tight w-full text-[#1F1D1B] truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        2. Color-{s.colour}
+                      </div>
+                    )}
+                    {/* 3. Leg-{height} — only when the variant carries a
+                        leg measurement. Suppressed for products with no
+                        leg dimension to avoid empty "Leg-" filler. */}
+                    {s.leg && (
+                      <div
+                        className="text-center leading-tight w-full text-[#1F1D1B] truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        3. Leg-{s.leg}
+                      </div>
+                    )}
+                    {/* ★ Special — red highlight, only when set. Sits
+                        between the labelled rows and Qty so it can't be
+                        missed by a worker scanning the tile. */}
                     {s.specialOrder && (
                       <div
                         className="mt-0.5 text-center leading-tight w-full text-[#9A3A2D] font-semibold truncate"
@@ -6202,10 +6187,10 @@ export default function ProductionPage({
                         ★ {s.specialOrder}
                       </div>
                     )}
-                    {/* 7. Qty — bold footer */}
+                    {/* Qty — bold footer. */}
                     <div
-                      className="mt-0.5 text-center font-semibold text-[#1F1D1B]"
-                      style={{ fontSize: "9px" }}
+                      className="mt-1 text-center font-bold text-[#1F1D1B]"
+                      style={{ fontSize: "10px" }}
                     >
                       Qty {s.qty}
                     </div>
@@ -6503,41 +6488,65 @@ export default function ProductionPage({
             {jobCardStickers.map((s) => (
               <div
                 key={s.key}
-                className="sticker-jc-page bg-white text-black flex flex-col items-center justify-between"
+                className="sticker-jc-page bg-white text-black flex flex-col items-center"
                 style={{ width: "50mm", height: "75mm" }}
               >
+                {/* Print sticker — v3 layout (operator 2026-05-13).
+                    Pre-fix the print template rendered just wipName as a
+                    long single string ("5531-L(RHF) -Base 24 KN390-1"),
+                    which wrapped mid-word on a 50mm-wide page (operator
+                    screenshot: "KN390-" broke onto a new line just for
+                    "1"). Replaced with the same SO-first, labelled-rows
+                    layout the on-screen tile now uses so the printed
+                    paper matches what the operator sees on screen. */}
                 <img
                   src={s.qrDataUrl}
                   alt="Job card QR"
-                  style={{ width: "34mm", height: "34mm" }}
+                  style={{ width: "30mm", height: "30mm" }}
                 />
+                {/* SO ID + state — top of label, no awkward wrap. */}
                 <div
                   className="font-bold text-center leading-tight w-full"
-                  style={{ fontSize: "9pt" }}
+                  style={{ fontSize: "9pt", marginTop: "1mm" }}
                 >
-                  {s.wipName}
+                  {s.poNo}{s.customerState ? ` · ${s.customerState}` : ""}
                 </div>
-                {s.wipCode && (
+                {/* Model — bold accent under SO ID. */}
+                {s.model && (
                   <div
-                    className="text-center leading-tight w-full font-mono"
-                    style={{ fontSize: "7pt" }}
+                    className="font-bold text-center leading-tight w-full"
+                    style={{ fontSize: "8pt" }}
                   >
-                    {s.wipCode}
+                    Model {s.model}
                   </div>
                 )}
+                {/* Labelled rows — only render when the field is present.
+                    Hyphen separator matches the operator's literal spec. */}
                 <div
                   className="text-center leading-tight w-full"
-                  style={{ fontSize: "7pt" }}
+                  style={{ fontSize: "7pt", marginTop: "0.5mm" }}
                 >
-                  <div className="font-semibold">{s.poNo}</div>
-                  <div>
-                    {s.deptCode} · {s.sizeLabel}
+                  {s.wipType && <div>1. Type-{s.wipType}</div>}
+                  {s.colour && <div>2. Color-{s.colour}</div>}
+                  {s.leg && <div>3. Leg-{s.leg}</div>}
+                </div>
+                {/* ★ Special — red highlight only when set. */}
+                {s.specialOrder && (
+                  <div
+                    className="font-bold text-center leading-tight w-full"
+                    style={{ fontSize: "7pt", color: "#9A3A2D" }}
+                  >
+                    ★ {s.specialOrder}
                   </div>
-                  <div className="font-semibold">
-                    {s.totalPieces > 1
-                      ? `Piece ${s.pieceNo} of ${s.totalPieces}`
-                      : `Qty ${s.qty}`}
-                  </div>
+                )}
+                {/* Qty / piece marker — bold footer. */}
+                <div
+                  className="font-bold text-center leading-tight w-full"
+                  style={{ fontSize: "8pt", marginTop: "auto" }}
+                >
+                  {s.totalPieces > 1
+                    ? `Piece ${s.pieceNo} of ${s.totalPieces}`
+                    : `Qty ${s.qty}`}
                 </div>
               </div>
             ))}

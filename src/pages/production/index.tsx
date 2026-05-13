@@ -5069,29 +5069,11 @@ export default function ProductionPage({
             ? `Filter Incomplete (${filteredOrders.length})`
             : "Filter Incomplete"}
         </button>
-        {/* "Show all PIC" override — bypasses the per-dept filter on every
-            PIC dropdown when an operator needs to assign a worker outside
-            the active dept (temporary cross-dept help, brand-new hire not
-            yet in Employee Master). Filtered by default since operators
-            ASKED for the narrow list to combat the long-roster scrolling
-            pain; this toggle is the escape hatch. Session-only — reload
-            resets to filtered. */}
-        <button
-          type="button"
-          onClick={() => setPicShowAll((v) => !v)}
-          className={`text-xs px-2 py-1.5 rounded border transition ${
-            picShowAll
-              ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-              : "bg-white text-[#6B5C32] border-[#E6E0D9] hover:bg-[#FAF8F4]"
-          }`}
-          title={
-            picShowAll
-              ? "PIC dropdowns are showing ALL workers. Click to filter back to the active department."
-              : "PIC dropdowns are filtered to workers in the active department. Click to show all workers (cross-dept help, new hires)."
-          }
-        >
-          {picShowAll ? "All PIC ✓" : "All PIC"}
-        </button>
+        {/* Wei Siang 2026-05-13: removed the page-level "All PIC" toggle.
+            The batch Apply PIC dialog already exposes its own "Show all
+            departments" button for cross-dept assignment; inline cells
+            stay smart-filtered by active dept. picShowAll state kept
+            (false forever) to avoid touching deptWorkers / Clear-all wiring. */}
         {!shouldFetch && (
           <button
             onClick={() => setShouldFetch(true)}

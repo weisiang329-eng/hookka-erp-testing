@@ -84,7 +84,7 @@ export function ApplyBatchDateDialog({ open, count, onCancel, onApply }: ApplyBa
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[360px]">
+      <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[400px]">
         <h3 className="mb-2 text-[14px] font-semibold text-[#3A2E22]">
           Apply Completion Date
         </h3>
@@ -98,11 +98,29 @@ export function ApplyBatchDateDialog({ open, count, onCancel, onApply }: ApplyBa
           className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px]"
           autoFocus
         />
-        <div className="mt-4 flex justify-end gap-2">
-          <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button size="sm" onClick={() => onApply(date)} disabled={!date}>
-            Apply to {count}
+        <div className="mt-4 flex justify-between items-center gap-2">
+          {/* Wei Siang 2026-05-13: explicit batch-clear path. Passing
+              empty-string to the parent handler triggers completedDate=""
+              + status=WAITING (cell auto-clears). Red text + confirm to
+              avoid accidental wipeout of N completion dates. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-red-600 hover:text-red-700"
+            onClick={() => {
+              if (confirm(`Clear completion date on ${count} job card${count === 1 ? "" : "s"}? Status will revert to WAITING.`)) {
+                onApply("");
+              }
+            }}
+          >
+            Clear date
           </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+            <Button size="sm" onClick={() => onApply(date)} disabled={!date}>
+              Apply to {count}
+            </Button>
+          </div>
         </div>
       </div>
     </div>
@@ -210,6 +228,36 @@ export function ApplyBatchPicDialog({ open, count, workers, allWorkers, onCancel
               : `↓ Show all departments (${allWorkers?.length})`}
           </button>
         )}
+
+        {/* Wei Siang 2026-05-13: explicit batch-clear path for each slot.
+            Confirm-on-click so a misclick doesn't wipe N PICs. Red text
+            so the destructive nature reads at a glance. */}
+        <div className="mt-3 pt-3 border-t border-[#E6E0D9] flex gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-red-600 hover:text-red-700 flex-1 text-[11px]"
+            onClick={() => {
+              if (confirm(`Clear PIC 1 on ${count} job card${count === 1 ? "" : "s"}?`)) {
+                onApply({ pic1: null, pic2: undefined });
+              }
+            }}
+          >
+            Clear PIC 1
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-red-600 hover:text-red-700 flex-1 text-[11px]"
+            onClick={() => {
+              if (confirm(`Clear PIC 2 on ${count} job card${count === 1 ? "" : "s"}?`)) {
+                onApply({ pic1: undefined, pic2: null });
+              }
+            }}
+          >
+            Clear PIC 2
+          </Button>
+        </div>
 
         <div className="mt-4 flex justify-end gap-2">
           <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>

@@ -18,12 +18,12 @@ Each entry below jumps to the first BUG with that category tag.
 Entries themselves stay newest-first.
 
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
-- `ui-frontend` (21) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
-- `production-orders` (18) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
+- `ui-frontend` (22) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
+- `production-orders` (20) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
 - `bom` (18) — [BUG-2026-04-29-008](#bug-2026-04-29-008--dept-pivot-editor-shows-stale-minutes-same-cat-different-times-on-different-rows)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
 - `inventory-cascade` (16) — [BUG-2026-04-29-005](#bug-2026-04-29-005--cn-dispatch-left-fg_units--stock_movements--wip_items-untouched-no-inventory-cascade)
-- `delivery-orders` (10) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
+- `delivery-orders` (11) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
 - `data-migration` (5) — [BUG-2026-04-25-014](#bug-2026-04-25-014-fixd1-compat-ifnullcoalesce-bom-search-likeilike)
@@ -31,6 +31,145 @@ Entries themselves stay newest-first.
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-05-13-004 — On-screen QR tile cluttered with 8-9 stacked rows and duplicate fields
+
+**Status:** 🟢 Fixed (2026-05-13)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** FAB_SEW QR Stickers panel tile showed
+"5531 / SOFA · BASE / 5531-L(RHF) -Base 24 KN390-1 / PO-2604-114 · KL /
+SO-2604-346-02 / FAB_SEW · 24 · KN390-1 / 6" / Qty 1" — 8 lines, with
+the same model number in rows 1 + 3, the same "Base 24 KN390-1" in
+rows 3 + 6, and "FAB_SEW" repeated when the panel header already
+names the dept. Operator: "这一个有点乱，你可以帮我看一下怎么整理过吗".
+
+**Root cause:** the tile was extended incrementally over months; the
+wipName row (added for full-context identification) ended up duplicating
+the model headline above it AND the deptCode·size·fabric row below it.
+No single edit consolidated the duplicates.
+
+**Fix:** `src/pages/production/index.tsx` (lines 6092–6160) — collapsed
+to a 7-row priority-grouped layout per operator-approved Option C:
+(1) model, (2) Category · WipType, (3) Fabric · Size — promoted as the
+key craft info, (4) Height when relevant, (5) SO ID · State — replaces
+the Customer PO row at the operator's explicit request "show SO ID 就
+行了", (6) ★ Special when set, (7) Qty. Dropped: the wipName long
+string, the Customer PO row, and the deptCode prefix.
+
+**Verification:** typecheck clean; lint clean on touched file. Print
+job-card-sticker template (lines 6448+) was deliberately not touched —
+it has a different, already-clean layout and was outside the operator
+report.
+
+---
+
+## BUG-2026-05-13-003 — FG sticker print QR overflowed the 100mm page, clipping piece-badge column off the right edge
+
+**Status:** 🟢 Fixed (2026-05-13)
+**Category:** production-orders
+
+**Symptom (user-reported):** with QRs now rendering after BUG-2026-05-13-002,
+the FG sticker Save-as-PDF showed the QR taking ~70% of the page width
+and the piece-badge column ("1/3 SOFA 296906-1", piece name, shortCode)
+clipped off the right edge — operator could see fragments of badge text
+along the right boundary.
+
+**Root cause:** `<QRImg size={500}>` for the primary QR meant 500 CSS px
+≈ 132 mm, on a 100 mm wide @page. Pre-fix the IntersectionObserver gate
+(BUG-2026-05-13-002) kept the QR from ever rendering, so the overflow
+never surfaced. The 500 / 320 / 300 size values were calibrated for the
+older 50 mm thermal label layout, not the current 100 × 150 mm FG sticker.
+
+**Fix:** `src/pages/production/index.tsx` (lines 6472, 6502) — reduced
+the print-container QR sizes to fit the page:
+- Primary alone (no legs / pillow pair): 500 → 180 (~48 mm)
+- Primary with legs / pillow pair: 320 → 130 (~34 mm)
+- Pillow pair QR: 300 → 130 (~34 mm)
+Modules stay > 1 mm at 180 px so scan reliability is unaffected. The
+on-screen preview tile (size = 110, already fits its 180 px wrapper)
+was left untouched.
+
+**Verification:** operator confirmed via Save-as-PDF screenshot —
+"size 是确定我们要的".
+
+---
+
+## BUG-2026-05-13-002 — FG sticker print: QRs rendered as gray placeholders, dividers collapsed
+
+**Status:** 🟢 Fixed (2026-05-13)
+**Category:** production-orders
+
+**Symptom (user-reported):** FG sticker Save-as-PDF showed the sticker
+text fields but the QR was missing — its slot rendered as the gray
+placeholder div, the surrounding flex layout collapsed (horizontal
+dividers ended up vertical), and the piece-badge text landed in the
+wrong column.
+
+**Root cause:** the FG sticker print container is `display: none` on
+screen (`hidden print:block`) and only flips to `display: block` when
+@media print activates. Inside it the stickers rendered `<QRImg>`, which
+gates QR data-URL generation behind an IntersectionObserver — and the
+observer never fires for elements inside a `display: none` parent
+(zero-size, not in layout). `shouldRender` stayed false, the dataURL
+was never generated, and the empty placeholder div was what showed up
+in the print snapshot. The job-card sticker print path didn't have
+this bug because it pre-computes `s.qrDataUrl` and renders a plain
+`<img>` — no observer involved.
+
+**Fix:** `src/components/qr-img.tsx` — added an `eager` prop that
+starts `shouldRender = true` on first commit, bypassing the observer.
+`src/pages/production/index.tsx` (lines 6440, 6470) — passes `eager`
+to both QRImg instances inside `#batch-fg-print`. Bumped the print
+useTimeout from 300 ms to 1500 ms so the eager generation chain
+(~10-30 ms per QR × up to 100 stickers) completes before
+`window.print()` fires. On-screen preview tiles (lines 5948, 6173)
+keep the default lazy mode — they're visible at mount, observer fires
+normally.
+
+**Verification:** operator confirmed via Save-as-PDF screenshot — QRs
+render correctly in subsequent BUG-2026-05-13-003 follow-up.
+
+---
+
+## BUG-2026-05-13-001 — Delivery Save-as-PDF produced a completely blank body with only browser headers / footers
+
+**Status:** 🟢 Fixed (2026-05-13)
+**Category:** delivery-orders
+
+**Symptom (user-reported):** clicking Print on a Delivery Order with
+"Save as PDF" as the destination produced output containing only
+Chrome's auto headers/footers (date, page title, URL, page numbers) —
+the entire DO body (HOOKKA letterhead, customer info, items table,
+signature block) was missing. Reproduced across multiple computers,
+so not a per-machine setup issue.
+
+**Root cause:** the print container was rendered inside a wrapper with
+`position: fixed; z-index: -1` in `pages/delivery/index.tsx`. On screen
+the negative z-index hid the template behind page content as intended,
+but Chrome's Save-as-PDF renderer paints the page white background at
+z-index 0 and captures everything above. The print container, parked at
+z-index -1, painted behind the background and got clipped — leaving
+the visible area completely empty. The existing production FG / Job
+Card sticker prints already solved the same problem with a different
+pattern (`hidden print:block` on the template root, no fixed wrapper);
+PrintDO had never been migrated.
+
+**Fix:** `src/pages/delivery/index.tsx` (lines 4178–4182) — dropped the
+fixed / z-index:-1 wrapper; renders `<PrintDO>` directly.
+`src/components/delivery/print-do.tsx` — added `hidden print:block` to
+the template root, added `!important` to every @media print rule for
+cascade safety, removed the invalid `background: #ffffff` property
+from the `@page` block (only margin / size / marks / orphans / widows
+are valid in `@page`; the invalid declaration could cascade-fail the
+whole rule on strict parsers).
+
+**Verification:** typecheck clean; lint clean on touched files; the
+sticker pattern has been battle-tested on production FG / JC prints
+since the same blank-page bug was fixed there. Operator follow-up
+testing pending — see outstanding checklist.
 
 ---
 

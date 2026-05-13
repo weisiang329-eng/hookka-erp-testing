@@ -34,6 +34,59 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-13-005 — Production Folder detail showed only 10 columns vs Production main page's 25
+
+**Status:** 🟢 Fixed (2026-05-13)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** Wei Siang opened the Production Folder
+detail page (`!4/5 Sofa Foaming DONE distribute -2`) and saw only 10
+columns in the Column-toggle list (SO #, PO #, Customer, Product, Dept,
+Status, Qty, Due, Completed, PIC). The Production main page's
+Column-toggle had ~25 (Total H, Special Order, Prod Time, Fab Cut,
+Wood Cut, Framing, ...). Operator: "为什么两面的 Column 显示得不一样
+呢？Column 完全没有带过来" — opening a folder dropped every contextual
+column the operator relies on (WIP / Total H / Gap / Colour / Customer
+Ref / Special Order / Prod Time / Category / Model / Size / State /
+Type / Divan / Leg / Customer PO ID / PIC 2 / Distributed flag etc.).
+
+**Root cause:** when `folder-detail.tsx` was first built (Phase 2.6
+folder feature), only the columns minimally needed to identify a JC
+were ported in. The richer column set on Production main page wasn't
+mirrored — folder-detail's `FolderJcRow` type had 14 fields vs DeptRow's
+~30, so the column list was capped at what the row type held. No code
+path forced the two views to stay in sync.
+
+**Fix:** `src/pages/production/folder-detail.tsx`
+- Expanded `FolderJcRow` from 14 → 30 fields (model, wipType, wip,
+  category, size, colour, gap, divan, leg, totalHeight, specialOrder,
+  prodTime, customerPOId, customerRef, customerState, pic2Name,
+  distributedAt).
+- Mirrored the per-field derivation logic from
+  `src/pages/production/index.tsx` L2497-2606 (BEDFRAME vs SOFA branching
+  for model / wipType / wip; bedframe-only gap/divan/totalH; sofa drops
+  variant suffix from model; etc.) so cell values match 1:1 between the
+  two views.
+- Expanded the `columns: Column<FolderJcRow>[]` list from 10 → 25 to
+  mirror Production page's order + widths.
+- Explicitly EXCLUDED the 8 per-department sched-pill columns
+  (`sched_FAB_CUT`/`sched_FAB_SEW`/... etc.) — Wei Siang's call:
+  rendering 8 nested date pickers per row across a folder view (which
+  spans depts) is the load-bearing cause of the page feeling laggy.
+  "你唯一不需要带过来的，就是 Department 之间的完成日期，这样系统就
+  不会卡顿". Skipped FAB_CUT-only fabricUsage and PACKING-only rack for
+  the same dept-agnostic reason.
+
+**Verification:** typecheck clean; lint clean on touched file; build
+clean. Manual: open folder detail → operator sees WIP/Total H/Special
+Order/Prod Time/etc. in the Columns customization panel, same labels
+as Production main page. Per-dept date pills (the "Fab Cut date" /
+"Wood Cut date" etc.) intentionally NOT in the toggle list.
+
+**Commit:** `0f0b72c` (cherry-picked to main as `c16f460`).
+
+---
+
 ## BUG-2026-05-13-004 — On-screen QR tile cluttered with 8-9 stacked rows and duplicate fields
 
 **Status:** 🟢 Fixed (2026-05-13)

@@ -34,6 +34,297 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-12-009 — Perf wave (8MB → 1.5MB) was never merged from feature branch; production dept pages regressed to 9.2 MB
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** production-orders
+
+**Symptom (user-reported):** "记得之前有一天晚上很顺的" — the operator
+remembered a night the Production page felt smooth, but it had become
+slow again. Measured: dept-page fetch payload was **9.2 MB / 13,393 JCs /
+~2.8 s** on FAB_CUT. The "smooth night" (2026-05-10/11) had it at
+~1.5–3 MB.
+
+**Root cause:** 4 perf commits sat on an unmerged branch
+`claude/confident-gagarin-bd118e` and never made it to main:
+- `17a30f0` wipKey-aware JC narrow on dept page (8 MB → 1.5 MB)
+- `bc3293a` slim shape for non-active-dept JCs (8 MB → 3 MB)
+- `5613c59` drop default-value fields from slim shape
+- `ddb9b6f` mount-seed date filter only fires once per session
+
+The slim path's `activeDeptCode` parameter on `rowToMinimalJobCard` was
+never on main, so EVERY JC returned its full 24-field shape regardless
+of `?dept=` filter.
+
+**Fix:** `src/api/routes/production-orders.ts` — cherry-picked the 3 backend
+commits onto main. `activeDeptCode` parameter restored; non-active /
+non-FAB_CUT JCs emit the slim shape on dept-filtered fetches.
+
+**Verification:** measured after deploy on FAB_CUT page: **1093 KB /
+727 JCs / 830 ms** (vs 9172 KB / 13393 JCs / 2800 ms before). 8.4× smaller,
+3.4× faster.
+
+**Related:** [BUG-2026-05-12-003](#bug-2026-05-12-003--kv-cache-version-bump-fire-and-forget-caused-stale-reads).
+
+---
+
+## BUG-2026-05-12-008 — Folder detail page crashed on Date.toISOString(undefined)
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** clicking a folder in `/production/folders`
+hit the ErrorBoundary: "Something went wrong — RangeError: Invalid time
+value".
+
+**Root cause:** `src/pages/production/folder-detail.tsx` declared the
+`FolderData` type with `created_at` / `created_by` (snake_case), but the
+SupabaseAdapter auto-camelCases DB columns on read, so the API returns
+`createdAt` / `createdBy`. The page read `folder.created_at` (undefined)
+and called `new Date(undefined).toISOString()` → RangeError → unmounted
+the whole page tree.
+
+**Fix:** rename type fields to `createdAt` / `createdBy`; add a
+tolerant `fmtDate(iso)` helper that returns "" on undefined / invalid
+input. Same change to `src/pages/production/folders.tsx` (list page).
+Also fixed the GET `/api/production-folders/:id` SQL to alias
+`job_card_id AS "jobCardId"` so `jobCardIds[]` returns actual IDs
+instead of `[null, null]`.
+
+**Verification:** opened the existing folder via /production/folders →
+page renders; jobCardIds populated.
+
+---
+
+## BUG-2026-05-12-007 — wip_cascade_log + production_folders declared org_id UUID; multi-tenant skeleton uses TEXT
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** data-migration
+
+**Symptom (developer-side):** Folder create returned 500
+`invalid input syntax for type uuid: "hookka"`. Same shape would have
+been caught silently in the WIP cascade guard's try/catch wrapper
+(BUG-2026-05-12-006) — every INSERT into wip_cascade_log was failing
+since deploy, the guard wasn't actually active in prod.
+
+**Root cause:** migrations `0074_wip_cascade_log.sql` and
+`0075_production_folders.sql` declared `org_id UUID NOT NULL`, but
+Hookka's multi-tenant skeleton (migration `0049_multi_tenant_skeleton.sql`)
+uses `orgId TEXT NOT NULL DEFAULT 'hookka'` across every existing table.
+The runtime always supplies the literal string "hookka", which Postgres
+rejects when the column is typed UUID.
+
+**Fix:** redeclared both new tables with `org_id TEXT`. Added an
+idempotent `ALTER TABLE … ALTER COLUMN org_id TYPE TEXT USING org_id::text`
+in the self-applying migration block so the in-flight prod table flips
+to TEXT without losing rows (only had test rows anyway).
+
+**Verification:** folder create now returns 200; wip_cascade_log INSERT
+no longer emits the silent warning. Re-ran the WIP rebuild — drift = 0
+holds.
+
+---
+
+## BUG-2026-05-12-006 — wip_items has no idempotency guard; backfill scripts re-fired cascade and inflated stock (FOAM 326 case)
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** inventory-cascade
+
+**Symptom (user-reported):** WIP page showed `8" Divan- 5FT Foam = -8`
+and many other negatives; FOAM aggregate showed 326 against an expected
+~11. Earlier the same shape had been "fixed" multiple times — the
+phantom stock kept coming back.
+
+**Root cause:** of all cascade targets (cost_ledger / fg_units /
+fg_batches / job_cards) `wip_items` was the only one without a
+`(refType, refId, type)` idempotency key. The BUG-2026-04-27-005 guard
+only catches duplicates within ONE PATCH request — backfill scripts,
+retries, migration imports re-firing `applyWipInventoryChange` on
+already-final-state JCs all slipped through. Each replay added
+`+wipQty` again on the producer-add side; downstream consumes hit
+different / missing labels and the books didn't balance.
+
+**Fix:**
+1. Tactical: `/api/import/rebuild-wip-from-jcs` already exists. Added
+   `?byDept` / `?codeContains` scope params so it can run on the full
+   prod tenant without hitting the Cloudflare request wall. Ran it once
+   on 2026-05-12 — drift went **2029 → 0** (185 updates, 8 inserts,
+   350 deletes).
+2. Structural: new `wip_cascade_log` table with UNIQUE
+   `(org_id, jc_id, from_status, to_status)`. `applyWipInventoryChange`
+   first INSERTs a claim row with `ON CONFLICT DO NOTHING`; zero changes
+   = already seen, cascade short-circuits. Atomic + concurrent-safe
+   across PATCH / SCAN / BULK_PATCH / future backfill scripts.
+
+Migration: `migrations/0074_wip_cascade_log.sql` (self-applies via
+`ensurePendingMigrations`).
+
+**Verification:** rebuild dry-run after the run: drift = 0,
+current = expected = 1053. Permanent guard verified via repeat-PATCH
+test — second send for same (jcId, from, to) tuple short-circuits.
+
+**Related:** [BUG-2026-04-27-005](#bug-2026-04-27-005-cascade-short-circuits-on-prevstatus--newstatus).
+
+---
+
+## BUG-2026-05-12-005 — Phase 2.5 raw-fetch paths missing X-CSRF-Token; saves failed silently with 403
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** Persistent red failure modal on a FAB_SEW
+PIC patch: "CSRF token missing or invalid (auto-retried 1× before
+giving up)".
+
+**Root cause:** Phase 2.5's debounced batching introduced 3 fetch sites
+that bypass the `fetchJson` helper (which auto-injects X-CSRF-Token
+from the `hookka_csrf` cookie):
+1. `sendOneDraft` (production/index.tsx:1413) — per-draft retry.
+2. `flushDrafts` (production/index.tsx:1473) — bulk POST.
+3. `/bulk-patch` loopback fetch (production-orders.ts:5172) — inner PATCH.
+
+The auth middleware enforces double-submit CSRF on every mutating
+method when the caller is on cookie auth. Header missing → 403.
+Auto-retry sent the same empty header → still 403 → modal.
+
+**Fix:**
+- New `csrfHeaders()` helper on `src/pages/production/index.tsx` reads
+  `hookka_csrf` and builds `{Content-Type, X-CSRF-Token}`. Used by
+  `sendOneDraft` + `flushDrafts`.
+- `/bulk-patch` endpoint now reads `X-CSRF-Token` off the inbound
+  request and forwards it on the loopback fetch alongside Cookie +
+  Authorization.
+
+**Verification:** end-to-end 10-test suite (T1–T10) covering set / clear /
+batch / status-thrash for completedDate AND PIC — all 10 passed,
+zero 403s.
+
+---
+
+## BUG-2026-05-12-004 — Refetch effect didn't preserve staged drafts; typed cell values flickered to server snapshot
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** operator typed in a cell; a moment later
+the value flashed back to the prior server value, then was replaced
+again by the operator's edit on next flush. Data wasn't lost (the
+draft still hit the server) but the UI flickered.
+
+**Root cause:** `src/pages/production/index.tsx` had a refetch effect
+that spliced `ordersResp` into local `orders` state, preserving JC IDs
+in `pendingJcPatchesRef` (in-flight PATCHes). It did NOT consider
+`draftsRef` — JCs typed but not yet sent. Any fetch that resolved
+while a draft was queued blanked the optimistic cell back to the
+server's stale snapshot.
+
+**Fix:** `src/pages/production/index.tsx` — the splice now also reads
+`Array.from(draftsRef.current.keys())` and treats those JC IDs as
+"preserve from local state" alongside the in-flight set.
+
+**Verification:** typed in cell, immediately triggered a 20-second
+poll fetch + visibility refetch by switching tabs — cell value held
+through the refetch, then the debounce-flush wrote the typed value
+to the server normally.
+
+---
+
+## BUG-2026-05-12-003 — KV cache version bump fire-and-forget caused stale reads
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** infrastructure
+
+**Symptom (user-reported):** "我刚刚改的 completion date 隔天又不见了" —
+operator set a completion date, refreshed (or switched tabs back),
+and saw the prior value. The DB row had the new value; the GET was
+returning a cached body keyed off the old version.
+
+**Root cause:** `bumpPoListCacheVersion(c, orgId)` in
+`src/api/routes/production-orders.ts` wrote the new version key via
+`waitUntil` so the PATCH response could return faster. The operator's
+next GET (often <100 ms later) could read the OLD version key, build
+the OLD cache key, and hit the OLD cached payload. Compounded by
+BUG-2026-05-12-004: optimistic state was getting overwritten on
+refetch.
+
+**Fix:** drop `waitUntil`. `bumpPoListCacheVersion` now blocks on the
+KV put (~10–30 ms at the writing edge). Same-edge KV is
+read-your-writes consistent so the next GET is guaranteed to read
+the new version.
+
+**Verification:** patched + immediately GET'd 5× in a row — every
+fetch returned the freshly-written value.
+
+**Related:** [BUG-2026-05-12-004](#bug-2026-05-12-004--refetch-effect-didnt-preserve-staged-drafts-typed-cell-values-flickered-to-server-snapshot)
+(the "set then gone" symptom had two legs; this one was the more
+common second leg after the backend auto-clear was removed).
+
+---
+
+## BUG-2026-05-12-002 — Production page status dropdown wiped completedDate on every COMPLETED→WAITING flip
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** same "set then gone" symptom as
+BUG-2026-05-12-001, but on a different code path: even after the
+backend auto-clear was removed, flipping the status dropdown on the
+FAB_CUT dept row from COMPLETED to WAITING still wiped the date.
+
+**Root cause:** `src/pages/production/index.tsx` (status `<select>`
+onChange around line 2890) explicitly set `patch.completedDate = ""`
+whenever the new status was a non-DONE state. The backend's auto-clear
+removal didn't help because the FRONTEND was sending the empty string
+itself. Status is a filter label; the date is the user-owned source
+of truth, so the system must not silently wipe it on any path.
+
+**Fix:** remove the `leavingDone` branch from the status onChange.
+Status flip is now status-only; an operator wanting to clear the
+date clicks the date cell and clears it there (which sets
+status=WAITING + date=null together — the correct user-driven path).
+
+**Verification:** end-to-end test: set completion date, flip status
+4× (W→C→W→C), date held all 4 hops.
+
+**Related:** [BUG-2026-05-12-001](#bug-2026-05-12-001--patch-route-auto-cleared-completeddate-on-every-completed-non-completed-status-transition).
+
+---
+
+## BUG-2026-05-12-001 — PATCH route auto-cleared completedDate on every COMPLETED → non-COMPLETED status transition
+
+**Status:** 🟢 Fixed (2026-05-12)
+**Category:** production-orders
+
+**Symptom (user-reported):** "completion date 隔天又不见了" — operator
+set completion date manually on a JC, came back later, and the date
+was gone. Verified via prod `job_card_events` audit log: 153
+`COMPLETED_DATE_CLEARED` events in a 36 h window, all triggered by
+COMPLETED → WAITING status flips, none of which the operator intended
+to wipe the date.
+
+**Root cause:** `src/api/routes/production-orders.ts` (~line 3210
+pre-fix) auto-cleared `updated.completedDate = null` whenever a JC
+transitioned out of a DONE state, on the theory that "an open JC
+shouldn't carry a completion date". But operators flip status to
+WAITING to filter the dept page — they don't expect the system to
+also wipe the date they explicitly stamped.
+
+**Fix:** remove the auto-clear entirely from the PATCH handler. The
+existing `if (body.completedDate !== undefined) updated.completedDate
+= body.completedDate || null` branch still honours an explicit clear
+(`body.completedDate = ""`), so the operator-driven path still
+works.
+
+**Verification:** end-to-end tests T1, T2, T10 all pass. Audit log
+24 h post-fix: zero `COMPLETED_DATE_CLEARED` events from
+status-only PATCHes.
+
+**Related:** [BUG-2026-05-12-002](#bug-2026-05-12-002--production-page-status-dropdown-wiped-completeddate-on-every-completedwaiting-flip)
+(frontend twin), [BUG-2026-05-12-003](#bug-2026-05-12-003--kv-cache-version-bump-fire-and-forget-caused-stale-reads)
+(cache-side second leg).
+
+---
+
 ## BUG-2026-04-29-008 — Dept-Pivot editor shows stale minutes (same CAT, different times on different rows)
 
 **Status:** 🟡 Fix in progress (2026-04-29)

@@ -54,15 +54,39 @@ type FolderJcRow = {
   // number for consignment-driven POs. Requested by Wei Siang 2026-05-12.
   salesOrderNo: string | null;
   salesOrderId: string | null;
+  // Column-parity expansion 2026-05-13: folder detail must show every
+  // column the Production main page shows (Wei Siang feedback: "Column 完全
+  // 没有带过来"). EXCEPT the 8 per-dept sched-pill columns — those drive the
+  // wide-range "card lights up by dept" view on Production page, and Wei
+  // Siang explicitly asked to skip them here for performance. Every other
+  // field below mirrors the Production page's `DeptRow` shape so the column
+  // labels / widths / order can stay 1:1.
   productCode: string | null;
   productName: string | null;
+  customerPOId: string;
+  customerRef: string;
   customerName: string | null;
+  customerState: string;
+  category: string;
+  model: string;
+  wipType: string;
+  wip: string;
   departmentCode: string | null;
+  size: string;
+  colour: string;
+  gap: string;
+  divan: string;
+  leg: string;
+  totalHeight: string;
+  specialOrder: string;
+  qty: number;
+  prodTime: number;
   status: string | null;
   dueDate: string | null;
   completedDate: string | null;
-  pic1Name: string | null;
-  qty: number;
+  pic1Name: string;
+  pic2Name: string;
+  distributedAt: string | null;
 };
 
 type Worker = { id: string; name: string; departmentCode: string | null; departmentCodes?: string[] | null };
@@ -105,9 +129,21 @@ export default function ProductionFolderDetailPage() {
           salesOrderId?: string;
           companySOId?: string;
           companyCOId?: string;
+          customerPOId?: string;
+          customerReference?: string;
+          customerName?: string;
+          customerState?: string;
           productCode?: string;
           productName?: string;
-          customerName?: string;
+          itemCategory?: string;
+          sizeCode?: string;
+          sizeLabel?: string;
+          fabricCode?: string;
+          specialOrder?: string;
+          quantity?: number;
+          gapInches?: number | null;
+          divanHeightInches?: number | null;
+          legHeightInches?: number | null;
           jobCards?: Array<{
             id: string;
             departmentCode?: string;
@@ -115,7 +151,13 @@ export default function ProductionFolderDetailPage() {
             dueDate?: string;
             completedDate?: string;
             pic1Name?: string;
+            pic2Name?: string;
+            wipCode?: string;
+            wipType?: string;
+            wipLabel?: string;
             wipQty?: number;
+            productionTimeMinutes?: number;
+            distributedAt?: string | null;
           }>;
         }>;
       };
@@ -126,6 +168,60 @@ export default function ProductionFolderDetailPage() {
           // Prefer the SO number; fall back to CO number for consignment POs
           // (companySOId is null on CO-driven production orders).
           const soNo = po.companySOId ?? po.companyCOId ?? "";
+
+          // -----------------------------------------------------------
+          // Derivation mirrors src/pages/production/index.tsx L2497-2606
+          // (the Production main page's DeptRow assembly). Keeping the
+          // logic identical here so the folder cell values match the
+          // Production-page cells 1:1 — operator should never see a
+          // different gap / colour / WIP / model between the two views.
+          // -----------------------------------------------------------
+          const deptCode = jc.departmentCode ?? "";
+          const gapInches = po.gapInches ?? null;
+          const divanInches = po.divanHeightInches ?? null;
+          const legInches = po.legHeightInches ?? null;
+          const totalH = (gapInches ?? 0) + (divanInches ?? 0) + (legInches ?? 0);
+          const wipDerived = jc.wipLabel || jc.wipCode || (() => {
+            if (po.itemCategory === "BEDFRAME") {
+              if (["WOOD_CUT", "FRAMING", "WEBBING"].includes(deptCode) && divanInches) {
+                return `${divanInches}" Divan-${po.sizeLabel || po.sizeCode || ""}`;
+              }
+              if (["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"].includes(deptCode) && totalH > 0) {
+                return `${po.productCode}-HB${totalH}"`;
+              }
+            }
+            if (po.itemCategory === "SOFA") return po.productCode ?? "";
+            return "";
+          })();
+          const wipTypeRaw = (jc.wipType || "").toUpperCase();
+          const wipTypeShort = (() => {
+            if (wipTypeRaw === "HEADBOARD") return "HB";
+            if (wipTypeRaw === "SOFA_BASE") return "BASE";
+            if (wipTypeRaw === "SOFA_CUSHION") return "CUSHION";
+            if (wipTypeRaw === "SOFA_ARMREST") return "ARMREST";
+            if (wipTypeRaw === "SOFA_HEADREST") return "HEADREST";
+            if (wipTypeRaw === "DIVAN") return "DIVAN";
+            if (wipTypeRaw) return wipTypeRaw;
+            if (po.itemCategory === "BEDFRAME") {
+              if (["WOOD_CUT", "FRAMING", "WEBBING"].includes(deptCode) && divanInches) return "DIVAN";
+              return "HB";
+            }
+            if (po.itemCategory === "SOFA") {
+              if (po.sizeCode?.includes("A")) return "BASE";
+              return "CUSHION";
+            }
+            return "";
+          })();
+          // Sofa drops the variant suffix from the model column (5531-2A → 5531).
+          const modelDisplay = po.itemCategory === "SOFA"
+            ? (po.productCode || "").split("-")[0]
+            : (po.productCode || "");
+          // Gap / Divan / Total H are bedframe-only. Leg is kept for sofa too.
+          const gapDisplay = po.itemCategory === "BEDFRAME" && gapInches != null ? `${gapInches}"` : "";
+          const divanDisplay = po.itemCategory === "BEDFRAME" && divanInches != null ? `${divanInches}"` : "";
+          const legDisplay = legInches != null ? `${legInches}"` : "";
+          const totalHeightDisplay = po.itemCategory === "BEDFRAME" && totalH > 0 ? `${totalH}"` : "";
+
           collected.push({
             id: jc.id,
             poId: po.id,
@@ -135,13 +231,30 @@ export default function ProductionFolderDetailPage() {
             salesOrderId: po.salesOrderId ?? null,
             productCode: po.productCode ?? "",
             productName: po.productName ?? "",
+            customerPOId: po.customerPOId ?? "",
+            customerRef: po.customerReference ?? "",
             customerName: po.customerName ?? "",
-            departmentCode: jc.departmentCode ?? "",
+            customerState: po.customerState ?? "",
+            category: po.itemCategory ?? "",
+            model: modelDisplay,
+            wipType: wipTypeShort,
+            wip: wipDerived,
+            departmentCode: deptCode,
+            size: po.sizeLabel || "",
+            colour: po.fabricCode || "",
+            gap: gapDisplay,
+            divan: divanDisplay,
+            leg: legDisplay,
+            totalHeight: totalHeightDisplay,
+            specialOrder: po.specialOrder || "",
+            qty: jc.wipQty ?? po.quantity ?? 0,
+            prodTime: jc.productionTimeMinutes ?? 0,
             status: jc.status ?? "",
             dueDate: jc.dueDate ?? null,
             completedDate: jc.completedDate ?? null,
             pic1Name: jc.pic1Name ?? "",
-            qty: jc.wipQty ?? 0,
+            pic2Name: jc.pic2Name ?? "",
+            distributedAt: jc.distributedAt ?? null,
           });
         }
       }
@@ -201,25 +314,63 @@ export default function ProductionFolderDetailPage() {
     }
   };
 
+  // Column layout — mirrors src/pages/production/index.tsx L3019-3280 (the
+  // Production main page's `deptColumns`). Wei Siang 2026-05-13: folder
+  // detail must show every column the Production page shows, EXCEPT the 8
+  // per-department completion-date pill columns (sched_FAB_CUT etc.). Those
+  // would force the page to render N × 8 nested-date pickers per row and
+  // were explicitly called out as causing the page to feel laggy.
+  //
+  // Order + widths copied 1:1 from the Production page so the operator's
+  // muscle memory transfers. SO # / PO # are sticky-left so they stay
+  // visible while the operator scrolls horizontally through the wide
+  // sheet — same as `soId` / `customerPOId` on the Production page.
+  //
+  // FAB_CUT-only (fabricUsage) and PACKING-only (rack) columns are skipped
+  // because folder views aggregate across departments — there's no single
+  // "active tab" to scope a dept-specific column to. Dept code itself is
+  // surfaced as its own column instead so operators know which dept a row
+  // belongs to.
   const columns: Column<FolderJcRow>[] = [
-    // SO# is sticky so it stays visible while operator scrolls horizontally.
-    // Clicking the cell navigates to the SO detail page.
-    { key: "salesOrderNo", label: "SO #", width: "120px", render: (_v, r) => r.salesOrderNo ? (
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); if (r.salesOrderId) navigate(`/sales/${r.salesOrderId}`); }}
-        className="text-[#3F6F8B] hover:underline"
-      >{r.salesOrderNo}</button>
-    ) : "" },
-    { key: "poNo", label: "PO #", width: "110px" },
-    { key: "customerName", label: "Customer", width: "160px" },
-    { key: "productCode", label: "Product", width: "160px" },
-    { key: "departmentCode", label: "Dept", width: "90px" },
-    { key: "status", label: "Status", width: "110px" },
-    { key: "qty", label: "Qty", width: "60px" },
-    { key: "dueDate", label: "Due", width: "95px", render: (_v, r) => r.dueDate ?? "" },
-    { key: "completedDate", label: "Completed", width: "95px", render: (_v, r) => r.completedDate ?? "" },
-    { key: "pic1Name", label: "PIC", width: "120px" },
+    {
+      key: "salesOrderNo",
+      label: "SO #",
+      width: "120px",
+      sortable: true,
+      sticky: true,
+      render: (_v, r) => r.salesOrderNo ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); if (r.salesOrderId) navigate(`/sales/${r.salesOrderId}`); }}
+          className="text-[#3F6F8B] hover:underline"
+        >{r.salesOrderNo}</button>
+      ) : "",
+    },
+    { key: "poNo",          label: "PO #",           width: "110px", sortable: true, sticky: true },
+    { key: "customerPOId",  label: "Customer PO ID", width: "130px", sortable: true },
+    { key: "customerRef",   label: "Customer Ref",   width: "120px", sortable: true },
+    { key: "customerName",  label: "Customer Name",  width: "150px", sortable: true },
+    { key: "customerState", label: "State",          width: "70px",  sortable: true },
+    { key: "departmentCode",label: "Dept",           width: "90px",  sortable: true },
+    { key: "category",      label: "Category",       width: "90px",  sortable: true },
+    { key: "model",         label: "Model",          width: "110px", sortable: true },
+    { key: "wipType",       label: "Type",           width: "90px",  sortable: true },
+    { key: "wip",           label: "WIP",            width: "220px", sortable: true },
+    { key: "productCode",   label: "Product",        width: "150px", sortable: true, defaultHidden: true },
+    { key: "size",          label: "Size",           width: "70px",  sortable: true },
+    { key: "colour",        label: "Colour",         width: "100px", sortable: true },
+    { key: "gap",           label: "Gap",            width: "60px",  sortable: true, align: "right" },
+    { key: "divan",         label: "Divan",          width: "70px",  sortable: true, align: "right" },
+    { key: "leg",           label: "Leg",            width: "60px",  sortable: true, align: "right" },
+    { key: "totalHeight",   label: "Total H",        width: "75px",  sortable: true, align: "right" },
+    { key: "specialOrder",  label: "Special Order",  width: "130px", sortable: true },
+    { key: "qty",           label: "Qty",            type: "number", width: "60px", sortable: true, align: "right" },
+    { key: "prodTime",      label: "Prod Time (min)",type: "number", width: "100px", sortable: true, align: "right" },
+    { key: "dueDate",       label: "Due",            type: "date",   width: "100px", sortable: true, render: (_v, r) => r.dueDate ?? "" },
+    { key: "completedDate", label: "Completion",     type: "date",   width: "110px", sortable: true, render: (_v, r) => r.completedDate ?? "" },
+    { key: "pic1Name",      label: "PIC 1",          width: "120px", sortable: true },
+    { key: "pic2Name",      label: "PIC 2",          width: "120px", sortable: true },
+    { key: "status",        label: "Status",         width: "130px", sortable: true },
   ];
 
   // Safe date formatter — `created_at` was previously stringly-typed and an

@@ -6147,25 +6147,29 @@ export default function ProductionPage({
                         Model {s.model}
                       </div>
                     )}
-                    {/* 1. Type-{wipType} — what part of the product. */}
+                    {/* Type-{wipType} — what part of the product. The
+                        "1./2./3." numbering operator used in the spec was
+                        a list marker, not literal display text — dropped
+                        the prefix here per 2026-05-13 follow-up
+                        "123 不要看到啊". */}
                     {s.wipType && (
                       <div
                         className="mt-1 text-center leading-tight w-full text-[#1F1D1B] truncate"
                         style={{ fontSize: "9px" }}
                       >
-                        1. Type-{s.wipType}
+                        Type-{s.wipType}
                       </div>
                     )}
-                    {/* 2. Color-{fabric} — sewing / cutting key info. */}
+                    {/* Color-{fabric} — sewing / cutting key info. */}
                     {s.colour && (
                       <div
                         className="text-center leading-tight w-full text-[#1F1D1B] truncate"
                         style={{ fontSize: "9px" }}
                       >
-                        2. Color-{s.colour}
+                        Color-{s.colour}
                       </div>
                     )}
-                    {/* 3. Leg-{height} — only when the variant carries a
+                    {/* Leg-{height} — only when the variant carries a
                         leg measurement. Suppressed for products with no
                         leg dimension to avoid empty "Leg-" filler. */}
                     {s.leg && (
@@ -6173,7 +6177,7 @@ export default function ProductionPage({
                         className="text-center leading-tight w-full text-[#1F1D1B] truncate"
                         style={{ fontSize: "9px" }}
                       >
-                        3. Leg-{s.leg}
+                        Leg-{s.leg}
                       </div>
                     )}
                     {/* ★ Special — red highlight, only when set. Sits
@@ -6521,14 +6525,16 @@ export default function ProductionPage({
                   </div>
                 )}
                 {/* Labelled rows — only render when the field is present.
-                    Hyphen separator matches the operator's literal spec. */}
+                    Hyphen separator matches the operator's literal spec.
+                    "1./2./3." numbering prefix dropped 2026-05-13 ("123
+                    不要看到啊"). */}
                 <div
                   className="text-center leading-tight w-full"
                   style={{ fontSize: "7pt", marginTop: "0.5mm" }}
                 >
-                  {s.wipType && <div>1. Type-{s.wipType}</div>}
-                  {s.colour && <div>2. Color-{s.colour}</div>}
-                  {s.leg && <div>3. Leg-{s.leg}</div>}
+                  {s.wipType && <div>Type-{s.wipType}</div>}
+                  {s.colour && <div>Color-{s.colour}</div>}
+                  {s.leg && <div>Leg-{s.leg}</div>}
                 </div>
                 {/* ★ Special — red highlight only when set. */}
                 {s.specialOrder && (

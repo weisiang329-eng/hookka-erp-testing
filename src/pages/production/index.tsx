@@ -6077,13 +6077,37 @@ export default function ProductionPage({
                     style={{ width: "180px" }}
                     title={`${s.customerPOId || s.poNo} · ${s.model} · ${s.wipType} · ${s.wipName} · ${s.sizeLabel} · ${s.colour} · Qty ${s.qty}`}
                   >
+                    {/* On-screen QR tile layout — restructured 2026-05-13 per
+                        operator feedback. Pre-fix the tile crammed model,
+                        wipType, wipName, customerPOId+state, poNo,
+                        deptCode+size+colour, height, special, qty across
+                        8-9 stacked lines with significant repetition: the
+                        wipName already encoded model + variant + size +
+                        fabric, and the deptCode line repeated size + fabric
+                        again. Operator asked specifically to drop the
+                        Customer PO row and keep just SO ID, and to organise
+                        the rest by importance:
+                          1. Model         — bold headline
+                          2. Category · WipType — gold accent
+                          3. Fabric · Size — key craft info for sewing /
+                                             cutting (was buried)
+                          4. Height        — optional, when relevant
+                          5. SO ID · State — traceability, was below
+                                             Customer PO before
+                          6. Qty           — bold standalone
+                          7. ★ Special     — red, only when set
+                        Dropped: wipName (info is in lines 1-4), Customer
+                        PO row, deptCode prefix (already in the panel
+                        header). */}
                     <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
+                    {/* 1. Model — big bold headline */}
                     <div
                       className="mt-1.5 font-bold text-center leading-tight w-full truncate"
                       style={{ fontSize: "11px" }}
                     >
                       {s.model || s.wipName}
                     </div>
+                    {/* 2. Category · WipType — accent */}
                     {(s.category || s.wipType) && (
                       <div
                         className="text-center leading-tight w-full text-[#6B5C32] truncate"
@@ -6092,41 +6116,49 @@ export default function ProductionPage({
                         {[s.category, s.wipType].filter(Boolean).join(" · ")}
                       </div>
                     )}
+                    {/* 3. Fabric · Size — key craft info */}
+                    {(s.colour || s.sizeLabel) && (
+                      <div
+                        className="mt-0.5 text-center leading-tight w-full text-[#1F1D1B] truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        {[s.colour, s.sizeLabel].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                    {/* 4. Height — when relevant */}
+                    {heightLine && (
+                      <div
+                        className="text-center leading-tight w-full text-[#6B7280] truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        {heightLine}
+                      </div>
+                    )}
+                    {/* 5. SO ID + state — operator-requested replacement
+                        for the Customer PO row. State stays inline so a
+                        warehouse picker can route at a glance. */}
                     <div
-                      className="mt-0.5 text-center leading-tight w-full text-[#1F1D1B] truncate"
+                      className="mt-1 text-center leading-tight w-full text-[#1F1D1B] font-semibold tabular-nums truncate"
                       style={{ fontSize: "9px" }}
                     >
-                      {s.wipName}
+                      {s.poNo}
+                      {s.customerState ? ` · ${s.customerState}` : ""}
                     </div>
+                    {/* 6. ★ Special — red highlight, only when set */}
+                    {s.specialOrder && (
+                      <div
+                        className="mt-0.5 text-center leading-tight w-full text-[#9A3A2D] font-semibold truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        ★ {s.specialOrder}
+                      </div>
+                    )}
+                    {/* 7. Qty — bold footer */}
                     <div
-                      className="mt-1 text-center leading-tight w-full text-[#6B7280] space-y-[1px]"
+                      className="mt-0.5 text-center font-semibold text-[#1F1D1B]"
                       style={{ fontSize: "9px" }}
                     >
-                      {s.customerPOId && (
-                        <div className="font-semibold text-[#1F1D1B] tabular-nums truncate">
-                          {s.customerPOId}
-                          {s.customerState ? ` · ${s.customerState}` : ""}
-                        </div>
-                      )}
-                      <div className="tabular-nums truncate">
-                        {s.poNo}
-                      </div>
-                      <div className="truncate">
-                        {s.deptCode}
-                        {s.sizeLabel ? ` · ${s.sizeLabel}` : ""}
-                        {s.colour ? ` · ${s.colour}` : ""}
-                      </div>
-                      {heightLine && (
-                        <div className="truncate">{heightLine}</div>
-                      )}
-                      {s.specialOrder && (
-                        <div className="truncate text-[#9A3A2D] font-semibold">
-                          ★ {s.specialOrder}
-                        </div>
-                      )}
-                      <div className="font-semibold text-[#1F1D1B]">
-                        Qty {s.qty}
-                      </div>
+                      Qty {s.qty}
                     </div>
                   </div>
                 );

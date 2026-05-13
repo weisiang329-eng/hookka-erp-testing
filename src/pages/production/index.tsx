@@ -6149,18 +6149,21 @@ export default function ProductionPage({
                     )}
                     {/* WIP-{wipName} — full WIP identifier that already
                         encodes model + variant + type + size + fabric.
-                        Operator 2026-05-13 follow-up: "我们需要 WIP 把
-                        type 和 col remove" — the standalone Type and
-                        Color rows duplicated what wipName already
-                        carried, so they were replaced with this single
-                        WIP row. break-words allows the long code (e.g.
-                        "5531-L(RHF) -Base 24 KN390-1") to wrap on
-                        space / hyphen boundaries instead of being
-                        truncated — operators need the full string. */}
+                        Operator 2026-05-13: replaced the per-field Type
+                        and Color rows ("我们需要 WIP 把 type 和 col
+                        remove"). Reserves 2 line-heights of space so
+                        long codes that wrap to two lines don't push the
+                        rows below down — operator wanted FAB_SEW tiles
+                        to look the same as the printed stickers, which
+                        means stable height across all tiles regardless
+                        of WIP length ("最好是给它两个 row 的空间").
+                        break-words wraps on space / hyphen boundaries
+                        rather than mid-character so the full string
+                        stays readable. */}
                     {s.wipName && (
                       <div
                         className="mt-1 text-center leading-snug w-full text-[#1F1D1B] break-words"
-                        style={{ fontSize: "9px" }}
+                        style={{ fontSize: "9px", minHeight: "25px" }}
                       >
                         WIP-{s.wipName}
                       </div>
@@ -6520,18 +6523,22 @@ export default function ProductionPage({
                     Model {s.model}
                   </div>
                 )}
-                {/* Labelled rows — only render when the field is present.
-                    Type / Color rows collapsed into a single WIP row
-                    2026-05-13 ("我们需要 WIP 把 type 和 col remove") —
-                    wipName already encodes both, so the per-field rows
-                    were duplicate. word-break: break-word lets the long
-                    code wrap on whitespace inside the 50mm-wide label
-                    without spilling out the right edge. */}
+                {/* Labelled rows — Type / Color rows collapsed into a
+                    single WIP row 2026-05-13 (wipName encodes both).
+                    The WIP <div> reserves 2 line-heights so a long
+                    code wrapping to two lines doesn't shift the Qty
+                    footer up or down ("最好是给它两个 row 的空间").
+                    word-break: break-word allows wrapping inside the
+                    50mm-wide label without spilling off the right edge,
+                    and keeps the break on whitespace / hyphen instead
+                    of mid-character. */}
                 <div
                   className="text-center leading-snug w-full"
                   style={{ fontSize: "7pt", marginTop: "0.5mm", wordBreak: "break-word" }}
                 >
-                  {s.wipName && <div>WIP-{s.wipName}</div>}
+                  {s.wipName && (
+                    <div style={{ minHeight: "5mm" }}>WIP-{s.wipName}</div>
+                  )}
                   {s.leg && <div style={{ marginTop: "0.5mm" }}>Leg-{s.leg}</div>}
                 </div>
                 {/* ★ Special — red highlight only when set. */}

@@ -1,0 +1,107 @@
+You are implementing a full ERP system performance and stability refactor.
+This task is NOT limited to Production/Delivery; it includes all major modules.
+
+PROJECT GOAL
+- Improve responsiveness, prevent freezes/hangs, and keep UI/data/behavior semantics unchanged.
+
+NON-NEGOTIABLE CONSTRAINTS
+1) UI parity: same columns, labels, wording, order, interaction behavior.
+2) Data parity: do not remove required fields used by UI.
+3) Behavior parity: search/filter/sort semantics must remain equivalent.
+4) Progressive rendering may change mount timing only, never result membership.
+
+MINIMUM MODULE SCOPE (FULL SYSTEM)
+- Sales / CRM
+- Production (all department views and schedules)
+- Delivery / Logistics
+- Inventory / WIP / FG
+- Procurement / Purchasing
+- Finance / Accounting touchpoints affected by ops flows
+- Workforce / HR pages with similar table/filter/scheduler patterns
+- Dashboard / analytics surfaces with fan-out fetches
+
+EXECUTION PHASES (NO SKIP)
+Phase 0: Baseline capture
+- record baseline screenshots/videos for key pages
+- capture baseline metrics: TTFI, TTFC, filter/search p50/p95/p99, duplicate fetch count, long tasks
+- capture baseline functional fixtures for search/filter/sort outputs
+
+Phase 1: Core architecture
+- enforce Query/State/Render decoupling
+- implement progressive mount pipeline
+- implement unified refresh scheduler
+
+Phase 2: UX stability
+- calendar interaction stability under refresh load
+- sticky/frozen header/column alignment stability
+- cross-page navigation smoothness
+
+Phase 3: Full-flow integration
+- validate SO -> Production -> Delivery -> Inventory side effects
+- validate shared state and refresh behavior across modules
+
+Phase 4: Regression hardening
+- run unit/integration/UI/visual tests
+- compare before/after metrics against baseline
+
+TECHNICAL REQUIREMENTS
+A) Query/State/Render
+- Query layer computes full-domain membership/order
+- State layer holds canonical index + ordered ids
+- Render layer controls viewport/window only
+- chunking must never change result inclusion/exclusion
+
+B) Progressive mount
+- initial render window N0 = 200
+- append batches ΔN = 300
+- schedule with requestIdleCallback (fallback setTimeout(0))
+- cancellation/versioning with queryVersion token
+
+C) Unified scheduler
+- single authority FSM: idle -> fetching -> cooldown -> idle
+- one in-flight lock
+- queryHash dedupe
+- stale response suppression by sequence/version
+- debounce visibility-driven refresh
+
+D) Calendar stability
+- pause non-critical refresh while date picker open/focused
+- resume with debounce after commit/cancel
+- prevent focus theft from global recompute
+
+E) Sticky/frozen stability
+- single scrollLeft authority between header/body
+- explicit z-index ladder for body/sticky/header/popovers
+- avoid transform on sticky ancestor chain
+- deterministic shared width model for header/body
+
+ANTI-REGRESSION RULES
+- stable DOM structure for header/filter row
+- stable row keys and deterministic identity
+- no hidden comparator/null-ordering changes
+- feature-flag rollout with immediate rollback path
+
+REQUIRED OUTPUT
+1) changed files by module + rationale
+2) test evidence (unit/integration/UI/visual)
+3) before/after metrics table:
+   - TTFI
+   - TTFC
+   - filter/search latency p50/p95/p99
+   - duplicate fetch count
+   - long task count/time
+4) open risks + mitigations
+5) rollback verification result
+
+DONE CRITERIA (ALL MUST PASS)
+- UI parity checks pass across in-scope modules
+- filter/search correctness equals baseline fixtures
+- calendar remains stable/clickable during refresh load
+- no sticky/frozen misalignment or overlay artifacts
+- duplicate fetch overlap resolved
+- performance improved or within agreed SLO
+
+IF ANY MODULE IS DEFERRED
+- explicitly report module, reason, risk, owner, and follow-up date.
+
+Do not mark complete unless all done criteria pass.

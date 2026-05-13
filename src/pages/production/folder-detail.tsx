@@ -433,8 +433,18 @@ export default function ProductionFolderDetailPage() {
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             else toast.success(`${date ? "Stamped" : "Cleared"} completion date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
-            setSelected([]);
-            await fetchAll();
+            // Wei Siang 2026-05-13: keep selection + optimistic local
+            // update so the operator can chain Apply Date → Apply PIC
+            // without re-selecting every time. See same change on the
+            // production page for full context.
+            const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+            setRows((prev) =>
+              prev.map((r) =>
+                patchedJcIds.has(r.jobCardId)
+                  ? { ...r, completedDate: date || null, status: date ? "COMPLETED" : "WAITING" }
+                  : r,
+              ),
+            );
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -494,8 +504,20 @@ export default function ProductionFolderDetailPage() {
             const slots = [pic1 !== undefined ? "PIC 1" : null, pic2 !== undefined ? "PIC 2" : null].filter(Boolean).join(" + ");
             if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
             else toast.success(`Set ${slots} on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
-            setSelected([]);
-            await fetchAll();
+            // Keep selection + optimistic local PIC 1 update so operator
+            // can chain into another batch action without re-selecting.
+            // Only PIC 1 is rendered in the folder grid (single PIC column);
+            // PIC 2 changes still hit the server but are invisible here
+            // until the next genuine refetch.
+            const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+            const pic1Name = pic1 ? pic1.name : "";
+            setRows((prev) =>
+              prev.map((r) => {
+                if (!patchedJcIds.has(r.jobCardId)) return r;
+                if (pic1 === undefined) return r;
+                return { ...r, pic1Name };
+              }),
+            );
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
           }

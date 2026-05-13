@@ -5542,9 +5542,33 @@ export default function ProductionPage({
               const verb = date ? "Stamped completion date on" : "Cleared completion date on";
               toast.success(`${verb} ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             }
+            // Wei Siang 2026-05-13: operator wants to chain batch ops
+            // (Apply Date → Apply PIC → Save to Folder) without re-selecting
+            // every time. Optimistic-write the patched fields to local
+            // state + KEEP the selection. fetchOrders() removed because
+            // it would (a) trigger a DataGrid re-render that drops the
+            // checkbox selection, and (b) overwrite the optimistic values
+            // until KV cache fully propagates. The 20s auto-poll catches
+            // cross-operator changes; bumpPoListCacheVersion on the BE
+            // already invalidates for next genuine refetch.
+            const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+            setOrders((prev) =>
+              prev.map((po) => {
+                if (!patches.some((p) => p.poId === po.id)) return po;
+                return {
+                  ...po,
+                  jobCards: po.jobCards.map((jc) => {
+                    if (!patchedJcIds.has(jc.id)) return jc;
+                    return {
+                      ...jc,
+                      completedDate: date || null,
+                      status: (date ? "COMPLETED" : "WAITING") as typeof jc.status,
+                    };
+                  }),
+                };
+              }),
+            );
             invalidateCachePrefix("/api/production-orders");
-            setSelectedDeptRows([]);
-            fetchOrders();
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -5590,9 +5614,34 @@ export default function ProductionPage({
             } else {
               toast.success(`Set ${slots} on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
             }
+            // Keep selection + optimistic-write PIC fields so the operator
+            // can chain into the next batch action. See the Apply Date
+            // branch above for the rationale.
+            const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+            const pic1Name = pic1 ? pic1.name : "";
+            const pic2Name = pic2 ? pic2.name : "";
+            setOrders((prev) =>
+              prev.map((po) => {
+                if (!patches.some((p) => p.poId === po.id)) return po;
+                return {
+                  ...po,
+                  jobCards: po.jobCards.map((jc) => {
+                    if (!patchedJcIds.has(jc.id)) return jc;
+                    const next = { ...jc };
+                    if (pic1 !== undefined) {
+                      next.pic1Id = pic1?.id ?? null;
+                      next.pic1Name = pic1Name;
+                    }
+                    if (pic2 !== undefined) {
+                      next.pic2Id = pic2?.id ?? null;
+                      next.pic2Name = pic2Name;
+                    }
+                    return next;
+                  }),
+                };
+              }),
+            );
             invalidateCachePrefix("/api/production-orders");
-            setSelectedDeptRows([]);
-            fetchOrders();
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
           }

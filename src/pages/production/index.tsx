@@ -3234,12 +3234,23 @@ export default function ProductionPage({
         // same way they'd tick a Status column anywhere else. Sort still
         // runs off the numeric sortKey via column.key, so the existing
         // overdue→pending→done→none sort order is unchanged.
+        //
+        // Wei Siang 2026-05-14: "我现在只能 filter Done、Pending 和
+        // Overdue，我需要能 filter 到日期也是" — include the formatted
+        // date alongside the status label so the Values dropdown lists
+        // every distinct (status, date) combination. Operator can now
+        // tick "Overdue 9 May" / "Done 12 May" / etc. to narrow to a
+        // specific schedule slot. Done cells use completedDate when set
+        // (matches the cell render which prefers completed-on-date).
         filterAccessor: (row) => {
           const s = row[objKey] as DeptSched;
+          if (s.state === "none") return "—";
+          const rawDate = s.state === "done" ? (s.completed || s.due) : s.due;
+          const dateStr = rawDate ? fmtShortDate(rawDate) : "";
           switch (s.state) {
-            case "overdue": return "Overdue";
-            case "pending": return "Pending";
-            case "done":    return "Done";
+            case "overdue": return dateStr ? `Overdue ${dateStr}` : "Overdue";
+            case "pending": return dateStr ? `Pending ${dateStr}` : "Pending";
+            case "done":    return dateStr ? `Done ${dateStr}` : "Done";
             default:        return "—";
           }
         },

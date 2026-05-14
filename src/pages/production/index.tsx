@@ -5321,108 +5321,13 @@ export default function ProductionPage({
                 )}
               </span>
             </h2>
-            <div className="ml-auto flex items-center gap-2">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  // Each dept tab has its own gid in the live Sheet. The map
-                  // is populated once after the sheet is provisioned; until
-                  // then we fall back to the spreadsheet root and the user
-                  // picks the tab manually.
-                  const SHEET_ID = "1hDGUYeKuWHpCXKrZptFI2eIKh9yNdhw7JeKbTjxT-x8";
-                  // FIXME: populate real gids per dept after sheet provisioning.
-                  // Until then the operator gets dropped at the spreadsheet
-                  // root + a toast explaining they need to pick the tab.
-                  const GID_BY_DEPT: Record<string, string> = {
-                    // TODO: fill in real gids after sheet provisioning.
-                  };
-                  const gid = GID_BY_DEPT[activeDept.code];
-                  if (!gid) {
-                    console.warn(`[GID_BY_DEPT] no gid configured for ${activeDept.code} — opening spreadsheet root`);
-                    toast.info(`Sheet tab for ${activeDept.name} not configured — pick the tab manually after the spreadsheet opens.`);
-                  }
-                  const url = gid
-                    ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit#gid=${gid}`
-                    : `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`;
-                  window.open(url, "_blank", "noopener,noreferrer");
-                }}
-                title="Open the live Google Sheet (Completion Date / PIC editable there)"
-                className="h-7 text-xs"
-              >
-                Open in Google Sheets
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  // Export the rows the user is currently looking at —
-                  // gridFilteredDeptRows mirrors the DataGrid's post-filter
-                  // state (id+poId+jobCardId only), so we resolve back to
-                  // the full row via a Map. Falls back to all deptRows
-                  // when no filter is active.
-                  const rowsById = new Map(deptRows.map((r) => [r.id, r]));
-                  const source: DeptRow[] =
-                    gridFilteredDeptRows
-                      ? (gridFilteredDeptRows
-                          .map((f) => rowsById.get(f.id))
-                          .filter((r): r is DeptRow => Boolean(r)))
-                      : deptRows;
-                  if (source.length === 0) {
-                    toast.error("Nothing to export.");
-                    return;
-                  }
-                  // Header order chosen to mirror what a Production
-                  // operator scans for: identifiers first, then product,
-                  // then schedule/PIC. Excel auto-recognises ISO dates
-                  // when the column is consistent yyyy-mm-dd.
-                  const cols: { label: string; get: (r: DeptRow) => string | number }[] = [
-                    { label: "PO No",         get: (r) => r.soId },
-                    { label: "Customer PO",   get: (r) => r.customerPOId },
-                    { label: "Customer Ref",  get: (r) => r.customerRef },
-                    { label: "Customer",      get: (r) => r.customerName },
-                    { label: "State",         get: (r) => r.customerState },
-                    { label: "Model",         get: (r) => r.model },
-                    { label: "WIP",           get: (r) => r.wip },
-                    { label: "Category",      get: (r) => r.category },
-                    { label: "Size",          get: (r) => r.size },
-                    { label: "Colour",        get: (r) => r.colour },
-                    { label: "Qty",           get: (r) => r.qty },
-                    { label: "Prod Time (m)", get: (r) => r.prodTime },
-                    { label: "Due Date",      get: (r) => r.dueDate },
-                    { label: "Completed",     get: (r) => r.completedDate },
-                    { label: "PIC 1",         get: (r) => r.pic1 },
-                    { label: "PIC 2",         get: (r) => r.pic2 },
-                    { label: "Status",        get: (r) => r.status },
-                  ];
-                  function escape(v: string | number): string {
-                    const s = String(v ?? "");
-                    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-                    return s;
-                  }
-                  const lines = [cols.map((c) => escape(c.label)).join(",")];
-                  for (const row of source) {
-                    lines.push(cols.map((c) => escape(c.get(row))).join(","));
-                  }
-                  // UTF-8 BOM prepended so Excel renders ASCII headers and
-                  // any non-ASCII customer names without mojibake.
-                  const csv = "﻿" + lines.join("\r\n");
-                  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  const stamp = new Date().toISOString().slice(0, 10);
-                  a.href = url;
-                  a.download = `${activeDept.code}-production-${stamp}.csv`;
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                  URL.revokeObjectURL(url);
-                }}
-                disabled={deptRows.length === 0}
-                title="Download the currently visible rows as a CSV that opens in Excel / Google Sheets"
-                className="h-7 text-xs"
-              >
-                Export as Excel
-              </Button>
-            </div>
+            {/* Wei Siang 2026-05-14: removed the "Open in Google Sheets" +
+                "Export as Excel" header buttons. The Sheets gids were never
+                populated (the GID_BY_DEPT map was a TODO stub), and the
+                Excel export hasn't been part of the daily workflow —
+                operator wanted a cleaner header. The data-grid still has
+                its own copy/csv path via the Columns ▼ menu's "Export"
+                action if needed in the future. */}
           </div>
           <DataGrid<DeptRow>
             // Including gridResetNonce here forces a fresh mount when Clear

@@ -1053,6 +1053,15 @@ export default function ProductionPage({
   // experience that the operator asked for: "彻彻底底、干干净净地把
   // Filter 都清掉".
   const [gridResetNonce, setGridResetNonce] = useState(0);
+  // Wei Siang 2026-05-14: Clear All v2 — the first version wiped
+  // sessionStorage but the DataGrid's defaultExcludedValues useEffect
+  // re-applied the "hide COMPLETED/TRANSFERRED" Status filter on
+  // remount, so the user still saw the same filtered rowcount. While
+  // this flag is true, defaultExcludedValues passes through as
+  // undefined so the grid mounts with truly empty filter state.
+  // Resets on dept-tab change so navigating to a different dept
+  // restores the first-visit hide-COMPLETED default behaviour.
+  const [clearAllActive, setClearAllActive] = useState(false);
   // Reset selection + close batch dialogs when the dept tab changes.
   /* eslint-disable react-hooks/set-state-in-effect -- reset on tab change */
   useEffect(() => {
@@ -1061,6 +1070,9 @@ export default function ProductionPage({
     setBatchDueDateOpen(false);
     setBatchPicOpen(false);
     setBatchFolderOpen(false);
+    // Tab change resets Clear All — re-entering a dept gets the
+    // default-hide behaviour back.
+    setClearAllActive(false);
   }, [activeTab]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -3580,10 +3592,15 @@ export default function ProductionPage({
         }
       }),
     );
-    // Threshold (kept for documentation purposes — the synthetic leg
-    // sticker generation was removed 2026-05-14 per Wei Siang "为什么
-    // 脚是分开的", so this value no longer gates anything at runtime).
-    // const _LEG_PACK_THRESHOLD_INCHES = 1;
+    // Sofa legs <= 1" sit inside the compartment box (no separate pack).
+    // Anything taller (>= 2") gets its own pack, PHYSICALLY placed
+    // inside Compartment 1 of the SO and labelled with a 2-in-1 sticker
+    // shared with Compartment 1. Wei Siang 2026-05-14 clarification:
+    // the合成 (composite) logic is REQUIRED — the leg should not
+    // print as its own physical sticker, but it also shouldn't
+    // disappear. It goes ON the Compartment 1 sticker as a paired
+    // secondary section (legsPair → comboPairKey machinery below).
+    const LEG_PACK_THRESHOLD_INCHES = 1;
 
     // Mirror of joinModelLabel from src/api/routes/_shared/production-builder.ts:
     // join multiple sofa productCodes into a single composite "fullcompartment"
@@ -3742,14 +3759,16 @@ export default function ProductionPage({
         a.unitNo - b.unitNo ||
         a.pieceNo - b.pieceNo,
       );
-      // Wei Siang 2026-05-14: the standalone "4/4 LEG" sticker is gone
-      // — each compartment sticker already shows the Leg height in its
-      // body. Generating an extra synthetic sticker here was creating
-      // a redundant fourth label that confused packers. The
-      // LEG_PACK_THRESHOLD logic + comboPairKey machinery below stays
-      // intact (kept for the print template's pair-rendering path) but
-      // hasLegs now hard-falses so the extra sticker is never pushed.
-      const hasLegs = false;
+      // Wei Siang 2026-05-14 clarified the leg behaviour: KEEP the
+      // synthetic leg sticker (so the piece count is correct, e.g.
+      // 4/4 for "3 sofa + 1 leg"), but RENDER it as a 2-in-1 with
+      // Compartment 1's physical card — never as a standalone fourth
+      // page. The comboPairKey + pair-lookup below already implements
+      // the 2-in-1 visual; just hasLegs needs to track real legs
+      // again so the legs sticker actually gets generated.
+      const hasLegs = group.some(
+        (s) => (s.legHeightInches ?? 0) > LEG_PACK_THRESHOLD_INCHES,
+      );
       const rawPillows = pillowsBySo.get(soId) ?? [];
       // Group pillows by productCode so the badge shows
       // "Square Pillow x3" instead of producing 3 separate stickers.
@@ -5153,6 +5172,12 @@ export default function ProductionPage({
             //    bump the existing instance keeps its React state and the
             //    operator still sees stale filters until a tab switch.
             setGridResetNonce((n) => n + 1);
+            // 4. Also flip the "bypass default-hide" flag on so the grid's
+            //    defaultExcludedValues useEffect doesn't immediately re-
+            //    apply the hide-COMPLETED Status filter on remount. The
+            //    flag resets on dept-tab change so navigating away +
+            //    back restores the first-visit default.
+            setClearAllActive(true);
           }}
           className="text-[10px] px-2 py-1 rounded border border-[#E6E0D9] text-[#6B5C32] hover:bg-[#FAF8F4]"
           title="Clear every filter on the page, including search + per-column filters in the grid below"
@@ -5393,7 +5418,7 @@ export default function ProductionPage({
             // COMPLETED / TRANSFERRED in the Status filter to see
             // history. Mirrors the operator's request: fewer rows
             // means faster page open and a more focused live view.
-            defaultExcludedValues={{ status: ["COMPLETED", "TRANSFERRED"] }}
+            defaultExcludedValues={clearAllActive ? undefined : { status: ["COMPLETED", "TRANSFERRED"] }}
             // Re-enabled 2026-05-10 after measuring a 5.4s React-render
             // block on Fab Sew (~1.4k rows × 25 cols) immediately after
             // clearing the From-date filter — operator's "卡着 needs refresh"
@@ -6336,9 +6361,12 @@ export default function ProductionPage({
                     : s.customerName;
                   // Pair lookup — back-direction. Each secondary (Legs /
                   // Pillow) carries comboPairKey pointing to its primary;
-                  // we find them by walking the list. Legs are no longer
-                  // generated 2026-05-14, but the pillow pair lookup
-                  // stays so multi-pillow sofa SOs share the right card.
+                  // we find them by walking the list. Both Legs and
+                  // Pillow render INSIDE their primary's tile (never as
+                  // a standalone card) — operator wants 合成 not 分开.
+                  const legsPair = visibleFgStickers.find(
+                    (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
+                  );
                   const pillowPair = visibleFgStickers.find(
                     (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
                   );
@@ -6386,11 +6414,15 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* QR bottom-left (bigger — 130px vs prior 110), piece
-                          position bottom-right. Pillow pair still surfaces
-                          on the right when present. */}
+                      {/* QR bottom-left, piece position bottom-right.
+                          Legs pair (when present on Compartment 1) renders
+                          as a 2-in-1 secondary section to the right of
+                          the primary's piece-position column, dashed
+                          divider in between — same physical card prints
+                          out, not a separate sticker. Pillow pair shares
+                          the same visual pattern on its primary. */}
                       <div className="mt-auto flex items-end gap-2 pt-1">
-                        <QRImg data={trackUrl} size={130} alt="FG unit QR" className="block" />
+                        <QRImg data={trackUrl} size={legsPair || pillowPair ? 110 : 130} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
                           <div className="leading-tight truncate uppercase font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
                             {s.pieceName || "Packing"}
@@ -6401,18 +6433,33 @@ export default function ProductionPage({
                           <div className="font-semibold mt-1 leading-tight truncate text-[#6B7280]" style={{ fontSize: "9px" }}>
                             {s.shortCode}
                           </div>
-                          {pillowPair && (
-                            <>
-                              <div className="border-t border-dashed border-[#6B5C32] my-1" />
-                              <div className="font-bold leading-tight" style={{ fontSize: "14px" }}>
+                        </div>
+                        {legsPair && (
+                          <>
+                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
+                            <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
+                              <div className="font-bold leading-tight" style={{ fontSize: "18px" }}>
+                                {legsPair.pieceNo}/{legsPair.totalPieces}
+                              </div>
+                              <div className="leading-tight text-center uppercase font-semibold" style={{ fontSize: "10px" }}>
+                                {legsPair.pieceName}
+                              </div>
+                            </div>
+                          </>
+                        )}
+                        {pillowPair && (
+                          <>
+                            <div className="border-l border-dashed border-[#6B5C32] self-stretch" />
+                            <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
+                              <div className="font-bold leading-tight" style={{ fontSize: "16px" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}
                               </div>
                               <div className="leading-tight text-center uppercase" style={{ fontSize: "10px" }}>
                                 {pillowPair.pieceName}
                               </div>
-                            </>
-                          )}
-                        </div>
+                            </div>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -6691,6 +6738,14 @@ export default function ProductionPage({
                   : "";
               const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
               const customerLine = s.customerHub ? `${s.customerName} (${s.customerHub})` : s.customerName;
+              // Legs / Pillow render INSIDE their primary's print page —
+              // never as a standalone .sticker-fg-page (Wei Siang spec:
+              // FG sticker 是要合成逻辑的). The standalone case is
+              // filtered out above with `if (s.isSyntheticLegs ||
+              // s.isSyntheticPillow) return null;`.
+              const legsPair = visibleFgStickers.find(
+                (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
+              );
               const pillowPair = visibleFgStickers.find(
                 (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
               );
@@ -6742,17 +6797,20 @@ export default function ProductionPage({
                         </span>
                       </div>
                     </div>
-                    {/* QR bottom-left, piece position bottom-right. Pillow
-                        pair shares the row when present; the synthetic
-                        legs sticker is no longer generated. */}
+                    {/* QR + piece position. Legs / Pillow pair render
+                        side-by-side as 2-in-1 secondaries — they NEVER
+                        get their own physical page (Wei Siang spec: FG
+                        Sticker 是要合成逻辑的). When a pair is present
+                        the primary QR shrinks so the secondary fits in
+                        the same row. */}
                     <div className="mt-auto flex items-end gap-[2mm] pt-[2mm]">
                       <div className="flex items-end gap-[2mm] flex-1 min-w-0">
-                        <QRImg eager data={trackUrl} size={pillowPair ? 150 : 200} alt="FG unit QR" className="block" />
+                        <QRImg eager data={trackUrl} size={legsPair || pillowPair ? 130 : 200} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
                           <div className="uppercase font-semibold" style={{ fontSize: "11pt" }}>
                             {s.pieceName || "Packing"}
                           </div>
-                          <div className="font-bold" style={{ fontSize: "28pt", lineHeight: 1 }}>
+                          <div className="font-bold" style={{ fontSize: legsPair || pillowPair ? "22pt" : "28pt", lineHeight: 1 }}>
                             {s.pieceNo}/{s.totalPieces}
                           </div>
                           <div className="font-semibold mt-[1mm]" style={{ fontSize: "9pt" }}>
@@ -6760,6 +6818,19 @@ export default function ProductionPage({
                           </div>
                         </div>
                       </div>
+                      {legsPair && (
+                        <>
+                          <div className="border-l border-dashed border-black self-stretch" />
+                          <div className="flex flex-col items-center justify-end flex-1 min-w-0">
+                            <div className="font-bold text-center" style={{ fontSize: "22pt", lineHeight: 1 }}>
+                              {legsPair.pieceNo}/{legsPair.totalPieces}
+                            </div>
+                            <div className="font-bold text-center uppercase mt-[1mm]" style={{ fontSize: "12pt" }}>
+                              {legsPair.pieceName}
+                            </div>
+                          </div>
+                        </>
+                      )}
                       {pillowPair && (
                         <>
                           <div className="border-l border-dashed border-black self-stretch" />

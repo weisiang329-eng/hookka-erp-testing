@@ -1045,6 +1045,14 @@ export default function ProductionPage({
   const [batchFolderOpen, setBatchFolderOpen] = useState(false);
   type FolderOption = { id: string; name: string; jc_count: number };
   const [folderList, setFolderList] = useState<FolderOption[]>([]);
+  // Wei Siang 2026-05-13: bumping this counter forces the DataGrid to
+  // remount with a fresh `key`, which causes it to re-read its
+  // sessionStorage-backed filter state. Combined with wiping the
+  // datagrid-filters-* keys in Clear All, this gives a true "wipe every
+  // filter on the page including the per-column ones inside the listing"
+  // experience that the operator asked for: "彻彻底底、干干净净地把
+  // Filter 都清掉".
+  const [gridResetNonce, setGridResetNonce] = useState(0);
   // Reset selection + close batch dialogs when the dept tab changes.
   /* eslint-disable react-hooks/set-state-in-effect -- reset on tab change */
   useEffect(() => {
@@ -5047,31 +5055,13 @@ export default function ProductionPage({
         >
           Sofa ⚠ {sofaOverdueCount}
         </button>
-        {/* "Filter Incomplete" toggle — narrows to POs whose gating-JC
-            isn't COMPLETED/TRANSFERRED. Overview gates on UPHOLSTERY (ship
-            readiness); a dept tab gates on that dept's own JC. Sits on top
-            of the date range so the operator can ask "what's still in
-            scope but hasn't shipped yet?". Persisted via localStorage so
-            reload survives — single shared key applied through the
-            dept-aware predicate at filter time. */}
-        <button
-          type="button"
-          onClick={() => setIncompleteOnly((v) => !v)}
-          className={`text-xs px-2 py-1.5 rounded border transition ${
-            incompleteOnly
-              ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-              : "bg-white text-[#6B5C32] border-[#E6E0D9] hover:bg-[#FAF8F4]"
-          }`}
-          title={
-            activeTab === "ALL"
-              ? "Show only POs whose UPHOLSTERY isn't COMPLETED yet"
-              : `Show only POs whose ${activeDept?.name ?? activeTab} isn't COMPLETED yet`
-          }
-        >
-          {incompleteOnly
-            ? `Filter Incomplete (${filteredOrders.length})`
-            : "Filter Incomplete"}
-        </button>
+        {/* Wei Siang 2026-05-13: removed the "Filter Incomplete" button —
+            its narrowing wasn't matching the operator's mental model
+            ("Production Filter 不完整"). The same effect is available via
+            the Status column's value filter on each dept grid (untick
+            COMPLETED / TRANSFERRED). `incompleteOnly` state is kept
+            (always false) so every place that reads the flag continues to
+            work — removing it would touch ~12 filter-predicate sites. */}
         {/* Wei Siang 2026-05-13: removed the page-level "All PIC" toggle.
             The batch Apply PIC dialog already exposes its own "Show all
             departments" button for cross-dept assignment; inline cells
@@ -5098,15 +5088,44 @@ export default function ProductionPage({
         <button
           type="button"
           onClick={() => {
+            // 1. Page-level filter bar (search / customer / state / category
+            //    / date range) — URL-state-backed, atomic write.
             setUrlBatch({ q: "", state: "", customer: "", cat: "", from: "", to: "" });
             setFltSearchInput("");
             setIncompleteOnly(false);
             setPicShowAll(false);
             clearAllOverviewFilters();
             setOverduePanelMode(null);
+            // 2. DataGrid's INTERNAL filter state for every dept tab —
+            //    Wei Siang 2026-05-13: "Clear All 应该把下面 Listing 在内
+            //    的整个内容、彻彻底底干干净净地把 Filter 都清掉". The grid
+            //    stashes search-text / per-column text filters / value
+            //    filters in sessionStorage under
+            //    `datagrid-filters-${gridId}-${userKey()}` (see
+            //    src/components/ui/data-grid.tsx L1013). Wiping every
+            //    production-dept-* key here covers all 8 dept tabs in one
+            //    pass, even ones the operator hasn't visited this session.
+            if (typeof window !== "undefined") {
+              try {
+                const keysToRemove: string[] = [];
+                for (let i = 0; i < sessionStorage.length; i++) {
+                  const k = sessionStorage.key(i);
+                  if (k && k.startsWith("datagrid-filters-production-dept-")) {
+                    keysToRemove.push(k);
+                  }
+                }
+                for (const k of keysToRemove) sessionStorage.removeItem(k);
+              } catch { /* sessionStorage disabled — best-effort clear */ }
+            }
+            // 3. Force the visible DataGrid to remount so its in-memory
+            //    filter state (searchText / columnFilters / columnValueFilters)
+            //    re-seeds from the now-empty sessionStorage. Without this
+            //    bump the existing instance keeps its React state and the
+            //    operator still sees stale filters until a tab switch.
+            setGridResetNonce((n) => n + 1);
           }}
           className="text-[10px] px-2 py-1 rounded border border-[#E6E0D9] text-[#6B5C32] hover:bg-[#FAF8F4]"
-          title="Clear all filters and date range"
+          title="Clear every filter on the page, including search + per-column filters in the grid below"
         >
           Clear all
         </button>
@@ -5395,7 +5414,10 @@ export default function ProductionPage({
             </div>
           </div>
           <DataGrid<DeptRow>
-            key={`dept-grid-${activeDept.code}`}
+            // Including gridResetNonce here forces a fresh mount when Clear
+            // All fires, so the grid re-reads its now-empty sessionStorage
+            // filter state instead of preserving its in-memory copy.
+            key={`dept-grid-${activeDept.code}-${gridResetNonce}`}
             columns={deptColumns}
             data={deptRows}
             keyField="id"

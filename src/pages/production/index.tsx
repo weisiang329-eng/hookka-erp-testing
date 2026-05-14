@@ -1086,6 +1086,12 @@ export default function ProductionPage({
     // applicable). Keeps the sticker visually 1:1 with the row above it.
     customerPOId?: string;
     customerState?: string;
+    // Customer name + our company SO id — needed by the FAB_CUT 100×150mm
+    // sticker (Wei Siang 2026-05-14 spec). Other dept stickers stay on
+    // the 50×75mm layout and don't render these, so they're optional.
+    customerName?: string;
+    customerRef?: string;
+    salesOrderNo?: string;
     model?: string;
     wipType?: string;
     category?: string;
@@ -3374,10 +3380,17 @@ export default function ProductionPage({
               qty: rowQty,
               customerPOId: o.customerPOId || "",
               customerState: o.customerState || "",
+              customerName: o.customerName || "",
+              customerRef: o.customerReference || "",
+              salesOrderNo: o.companySOId || o.companyCOId || "",
               model: o.productCode || "",
               wipType: (jc as { wipType?: string }).wipType || "",
               category: o.itemCategory || "",
               colour: o.fabricCode || "",
+              gap: o.itemCategory === "BEDFRAME" && o.gapInches != null ? `${o.gapInches}"` : "",
+              divan: o.itemCategory === "BEDFRAME" && o.divanHeightInches != null ? `${o.divanHeightInches}"` : "",
+              leg: o.legHeightInches != null ? `${o.legHeightInches}"` : "",
+              specialOrder: o.specialOrder || "",
               pieceNo: p,
               totalPieces: rowQty,
               qrPayload: generateStickerData(
@@ -3430,6 +3443,9 @@ export default function ProductionPage({
           qty: pieceCount,
           customerPOId: row.customerPOId || "",
           customerState: row.customerState || "",
+          customerName: row.customerName || "",
+          customerRef: row.customerRef || "",
+          salesOrderNo: row.salesOrderNo || "",
           model: row.model || "",
           wipType: row.wipType || "",
           category: row.category || "",
@@ -3564,12 +3580,10 @@ export default function ProductionPage({
         }
       }),
     );
-    // Threshold: sofa legs <= 1" sit inside the compartment box (no
-    // separate pack — Wei Siang clarified 2026-05-09: 5535/5536 standard
-    // 1" legs go inside, only legs >= 2" need their own pack). Anything
-    // taller gets its own pack, physically placed inside Compartment 1
-    // of the SO and labelled with a 2-in-1 sticker shared with Comp 1.
-    const LEG_PACK_THRESHOLD_INCHES = 1;
+    // Threshold (kept for documentation purposes — the synthetic leg
+    // sticker generation was removed 2026-05-14 per Wei Siang "为什么
+    // 脚是分开的", so this value no longer gates anything at runtime).
+    // const _LEG_PACK_THRESHOLD_INCHES = 1;
 
     // Mirror of joinModelLabel from src/api/routes/_shared/production-builder.ts:
     // join multiple sofa productCodes into a single composite "fullcompartment"
@@ -3728,9 +3742,14 @@ export default function ProductionPage({
         a.unitNo - b.unitNo ||
         a.pieceNo - b.pieceNo,
       );
-      const hasLegs = group.some(
-        (s) => (s.legHeightInches ?? 0) > LEG_PACK_THRESHOLD_INCHES,
-      );
+      // Wei Siang 2026-05-14: the standalone "4/4 LEG" sticker is gone
+      // — each compartment sticker already shows the Leg height in its
+      // body. Generating an extra synthetic sticker here was creating
+      // a redundant fourth label that confused packers. The
+      // LEG_PACK_THRESHOLD logic + comboPairKey machinery below stays
+      // intact (kept for the print template's pair-rendering path) but
+      // hasLegs now hard-falses so the extra sticker is never pushed.
+      const hasLegs = false;
       const rawPillows = pillowsBySo.get(soId) ?? [];
       // Group pillows by productCode so the badge shows
       // "Square Pillow x3" instead of producing 3 separate stickers.
@@ -6317,91 +6336,83 @@ export default function ProductionPage({
                     : s.customerName;
                   // Pair lookup — back-direction. Each secondary (Legs /
                   // Pillow) carries comboPairKey pointing to its primary;
-                  // we find them by walking the list. Single-compartment
-                  // SOs may pair the same primary with BOTH secondaries.
-                  const legsPair = visibleFgStickers.find(
-                    (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
-                  );
+                  // we find them by walking the list. Legs are no longer
+                  // generated 2026-05-14, but the pillow pair lookup
+                  // stays so multi-pillow sofa SOs share the right card.
                   const pillowPair = visibleFgStickers.find(
                     (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
                   );
-                  // Both Legs and Pillow sections are text-only (no QR).
                   return (
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
                       style={{ width: "230px", height: "380px" }}
-                      title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
+                      title={`${s.customerName} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}`}
                     >
-                      {/* Top header = Product Code (this box's specific
-                          code, e.g. "1005-(Q)" / "5535-1A(LHF)"). The
-                          full WIP / fullcompartment string sits in the
-                          body just above Divan/Leg, not at the top. */}
-                      <div className="text-center font-bold leading-tight" style={{ fontSize: "13px" }}>
-                        {s.productCode}
+                      {/* Wei Siang 2026-05-14 redesign — customer name takes
+                          the top spot (was previously productCode), so
+                          packers see who they're packing for at a glance.
+                          Model + WIP live in the middle, measurements below,
+                          QR + piece position at the bottom. Removed the
+                          synthetic legs pair UI — each compartment sticker
+                          carries its own Leg line so the separate "4/4 LEG"
+                          sticker no longer prints. */}
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "16px" }}>
+                        {customerLine || s.customerName || "—"}
+                      </div>
+                      <div className="border-t border-black my-1" />
+                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Our SO No</span>: {s.salesOrderNo || "—"}</div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="inline-block w-[72px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="font-bold" style={{ fontSize: "14px" }}>: {s.productCode || "—"}</span>
+                        </div>
+                        {s.boxLabel && (
+                          <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
+                        )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        {s.boxLabel && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
-                        )}
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Colour</span>: {s.fabricCode || "—"}</div>
                         {s.itemCategory === "BEDFRAME" && (
-                          <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                          <>
+                            <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
+                            <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                          </>
                         )}
-                        <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Fabric</span>: {s.fabricCode || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Comp SO</span>: {s.salesOrderNo}</div>
-                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
-                        <div className="flex items-start gap-1"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D] shrink-0">Special</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                        <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* Single shared QR (left) + right column stacked:
-                          SOFA on top (main), LEG and PILLOW below as
-                          text-only with internal dividers. Wei Siang
-                          spec 2026-05-10: swap positions vs the
-                          earlier design — sofa is the main, legs &
-                          pillow are accessories. */}
-                      <div className="mt-auto flex items-end gap-2">
-                        <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
+                      {/* QR bottom-left (bigger — 130px vs prior 110), piece
+                          position bottom-right. Pillow pair still surfaces
+                          on the right when present. */}
+                      <div className="mt-auto flex items-end gap-2 pt-1">
+                        <QRImg data={trackUrl} size={130} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
-                          <div className="font-bold leading-tight uppercase" style={{ fontSize: "13px" }}>
+                          <div className="leading-tight truncate uppercase font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
+                            {s.pieceName || "Packing"}
+                          </div>
+                          <div className="font-bold leading-tight" style={{ fontSize: "22px" }}>
                             {s.pieceNo}/{s.totalPieces}
                           </div>
-                          <div className="leading-tight truncate uppercase" style={{ fontSize: "11px" }}>
-                            {s.pieceName}
-                          </div>
-                          <div className="font-semibold mt-1 leading-tight truncate" style={{ fontSize: "9px" }}>
+                          <div className="font-semibold mt-1 leading-tight truncate text-[#6B7280]" style={{ fontSize: "9px" }}>
                             {s.shortCode}
                           </div>
-                          {legsPair && (
-                            <>
-                              <div className="border-t border-dashed border-[#6B5C32] my-1" />
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
-                                {legsPair.pieceNo}/{legsPair.totalPieces}
-                              </div>
-                              <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
-                                {legsPair.pieceName}
-                              </div>
-                            </>
-                          )}
                           {pillowPair && (
                             <>
                               <div className="border-t border-dashed border-[#6B5C32] my-1" />
-                              <div className="font-bold leading-tight text-center uppercase" style={{ fontSize: "13px" }}>
+                              <div className="font-bold leading-tight" style={{ fontSize: "14px" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}
                               </div>
-                              <div className="leading-tight text-center uppercase" style={{ fontSize: "11px" }}>
+                              <div className="leading-tight text-center uppercase" style={{ fontSize: "10px" }}>
                                 {pillowPair.pieceName}
                               </div>
                             </>
                           )}
                         </div>
-                      </div>
-                      {/* Customer footer — full-width, always visible
-                          even when customerName is missing (fallback "—"). */}
-                      <div className="mt-1 pt-1 border-t border-[#E6E0D9] text-[11px] leading-tight text-[#1F1D1B] truncate text-center font-medium">
-                        {customerLine || s.customerName || "—"}
                       </div>
                     </div>
                   );
@@ -6444,14 +6455,19 @@ export default function ProductionPage({
         aria-hidden
       />
 
-      {/* Batch Job Card stickers — one 50×75mm page per job card across all
-          currently filtered orders. Hidden on screen; the @media print block
-          swaps visibility so only the container is shown when printing. */}
+      {/* Batch Job Card stickers — page size + layout switches by dept.
+          FAB_CUT prints on 100×150mm with a roomy mockup-3 layout (Wei
+          Siang 2026-05-14: PO number big at top, our SO / customer /
+          model / WIP, then measurements, then blank Fabric Cutting +
+          Fabric Sewing sign-off lines). Every other dept stays on the
+          existing 50×75mm thermal layout. The page size is set via
+          conditional @page rule below so a single print job from a
+          dept tab uses one consistent paper size. */}
       {jobCardStickers.length > 0 && (
         <>
           <style>{`
             @media print {
-              @page { size: 50mm 75mm; margin: 0; }
+              @page { size: ${activeTab === "FAB_CUT" ? "100mm 150mm" : "50mm 75mm"}; margin: 0; }
               /* visibility: hidden on ancestors still lets visible:visible
                  descendants render. display:none would clip the whole chain,
                  which is why the old body>* selector produced a blank page
@@ -6463,14 +6479,16 @@ export default function ProductionPage({
               #batch-jobcard-print {
                 position: absolute !important;
                 left: 0 !important; top: 0 !important;
-                width: 50mm !important;
+                width: ${activeTab === "FAB_CUT" ? "100mm" : "50mm"} !important;
                 margin: 0 !important; padding: 0 !important;
               }
               .sticker-jc-page {
-                width: 50mm !important; height: 75mm !important;
+                width: ${activeTab === "FAB_CUT" ? "100mm" : "50mm"} !important;
+                height: ${activeTab === "FAB_CUT" ? "150mm" : "75mm"} !important;
                 page-break-after: always;
                 break-after: page;
-                margin: 0 !important; padding: 2mm !important;
+                margin: 0 !important;
+                padding: ${activeTab === "FAB_CUT" ? "4mm" : "2mm"} !important;
                 overflow: hidden;
               }
               .sticker-jc-page:last-child {
@@ -6480,33 +6498,97 @@ export default function ProductionPage({
             }
           `}</style>
           <div id="batch-jobcard-print" className="hidden print:block">
-            {jobCardStickers.map((s) => (
+            {jobCardStickers.map((s) => activeTab === "FAB_CUT" ? (
+              // ----- FAB_CUT 100×150mm sticker (mockup #3) -----
+              <div
+                key={s.key}
+                className="sticker-jc-page bg-white text-black"
+                style={{ width: "100mm", height: "150mm" }}
+              >
+                <div className="w-full h-full flex flex-col" style={{ fontSize: "10pt" }}>
+                  {/* PO number — huge headline at top per Wei Siang spec:
+                      "把 PO 号码（即顾客的号码）放在最高的位置". Falls
+                      back to our internal PO line number when the customer
+                      didn't supply their own PO number. */}
+                  <div className="text-center font-bold" style={{ fontSize: "24pt", lineHeight: 1.1 }}>
+                    {s.customerPOId || s.poNo}
+                  </div>
+                  <div className="border-t-2 border-black my-[2mm]" />
+                  <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
+                    <div><span className="inline-block w-[34mm] font-semibold">SO No</span>: {s.salesOrderNo || s.poNo}</div>
+                    <div><span className="inline-block w-[34mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
+                    <div className="flex items-baseline gap-[1mm]">
+                      <span className="inline-block w-[34mm] font-semibold">Model</span>
+                      <span className="font-bold" style={{ fontSize: "16pt" }}>: {s.model || "—"}</span>
+                    </div>
+                    {s.wipName && (
+                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "34mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                    )}
+                  </div>
+                  <div className="border-t border-black my-[2mm]" />
+                  <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
+                    <div><span className="inline-block w-[34mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                    <div><span className="inline-block w-[34mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                    {s.gap && <div><span className="inline-block w-[34mm] font-semibold">Gap</span>: {s.gap}</div>}
+                    {s.divan && <div><span className="inline-block w-[34mm] font-semibold">Divan</span>: {s.divan}</div>}
+                    {s.leg && <div><span className="inline-block w-[34mm] font-semibold">Leg</span>: {s.leg}</div>}
+                    {s.totalHeight && <div><span className="inline-block w-[34mm] font-semibold">Total Height</span>: {s.totalHeight}</div>}
+                    <div className="flex items-start gap-[1mm]">
+                      <span className="font-semibold shrink-0" style={{ width: "34mm", color: "#9A3A2D" }}>Notes</span>
+                      <span className="flex-1 break-words">
+                        : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                      </span>
+                    </div>
+                  </div>
+                  {/* Bottom: blank sign-off lines for the shop floor to
+                      write the worker's name when they finish the step.
+                      Two lines side-by-side with a generous gap so a
+                      ballpoint pen lands cleanly on each. QR sits in the
+                      bottom-right corner above the lines. */}
+                  <div className="mt-auto flex items-end gap-[3mm] pt-[3mm]">
+                    <div className="flex-1 space-y-[3mm]" style={{ fontSize: "11pt" }}>
+                      <div className="flex items-end gap-[2mm]">
+                        <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
+                        <span className="flex-1 border-b border-black h-[6mm]" />
+                      </div>
+                      <div className="flex items-end gap-[2mm]">
+                        <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
+                        <span className="flex-1 border-b border-black h-[6mm]" />
+                      </div>
+                    </div>
+                    {s.qrDataUrl && (
+                      <img
+                        src={s.qrDataUrl}
+                        alt="Job card QR"
+                        style={{ width: "24mm", height: "24mm" }}
+                      />
+                    )}
+                  </div>
+                  {s.totalPieces > 1 && (
+                    <div className="text-right font-semibold mt-[1mm]" style={{ fontSize: "10pt" }}>
+                      Piece {s.pieceNo} of {s.totalPieces}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              // ----- Default 50×75mm sticker (other depts) -----
               <div
                 key={s.key}
                 className="sticker-jc-page bg-white text-black flex flex-col items-center"
                 style={{ width: "50mm", height: "75mm" }}
               >
-                {/* Print sticker — v3 layout (operator 2026-05-13).
-                    Pre-fix the print template rendered just wipName as a
-                    long single string ("5531-L(RHF) -Base 24 KN390-1"),
-                    which wrapped mid-word on a 50mm-wide page (operator
-                    screenshot: "KN390-" broke onto a new line just for
-                    "1"). Replaced with the same SO-first, labelled-rows
-                    layout the on-screen tile now uses so the printed
-                    paper matches what the operator sees on screen. */}
                 <img
                   src={s.qrDataUrl}
                   alt="Job card QR"
                   style={{ width: "30mm", height: "30mm" }}
                 />
-                {/* SO ID + state — top of label, no awkward wrap. */}
                 <div
                   className="font-bold text-center leading-tight w-full"
                   style={{ fontSize: "9pt", marginTop: "1mm" }}
                 >
                   {s.poNo}{s.customerState ? ` · ${s.customerState}` : ""}
                 </div>
-                {/* Model — bold accent under SO ID. */}
                 {s.model && (
                   <div
                     className="font-bold text-center leading-tight w-full"
@@ -6515,15 +6597,6 @@ export default function ProductionPage({
                     Model {s.model}
                   </div>
                 )}
-                {/* Labelled rows — Type / Color rows collapsed into a
-                    single WIP row 2026-05-13 (wipName encodes both).
-                    The WIP <div> reserves 2 line-heights so a long
-                    code wrapping to two lines doesn't shift the Qty
-                    footer up or down ("最好是给它两个 row 的空间").
-                    word-break: break-word allows wrapping inside the
-                    50mm-wide label without spilling off the right edge,
-                    and keeps the break on whitespace / hyphen instead
-                    of mid-character. */}
                 <div
                   className="text-center leading-snug w-full"
                   style={{ fontSize: "7pt", marginTop: "0.5mm", wordBreak: "break-word" }}
@@ -6533,7 +6606,6 @@ export default function ProductionPage({
                   )}
                   {s.leg && <div style={{ marginTop: "0.5mm" }}>Leg-{s.leg}</div>}
                 </div>
-                {/* ★ Special — red highlight only when set. */}
                 {s.specialOrder && (
                   <div
                     className="font-bold text-center leading-tight w-full"
@@ -6542,7 +6614,6 @@ export default function ProductionPage({
                     ★ {s.specialOrder}
                   </div>
                 )}
-                {/* Qty / piece marker — bold footer. */}
                 <div
                   className="font-bold text-center leading-tight w-full"
                   style={{ fontSize: "8pt", marginTop: "auto" }}
@@ -6620,13 +6691,9 @@ export default function ProductionPage({
                   : "";
               const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
               const customerLine = s.customerHub ? `${s.customerName} (${s.customerHub})` : s.customerName;
-              const legsPair = visibleFgStickers.find(
-                (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
-              );
               const pillowPair = visibleFgStickers.find(
                 (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
               );
-              // Legs section is text-only (no QR), no track URL needed.
               const pillowTrackUrl = pillowPair
                 ? `${origin}/track?s=${encodeURIComponent(pillowPair.unitSerial)}`
                 : "";
@@ -6636,83 +6703,68 @@ export default function ProductionPage({
                   className="sticker-fg-page bg-white text-black"
                   style={{ width: "100mm", height: "150mm" }}
                 >
-                  <div className="w-full h-full flex flex-col" style={{ fontSize: "9pt" }}>
-                    {/* Top header = Product Code; full WIP sits in body. */}
-                    <div className="text-center font-bold" style={{ fontSize: "14pt", lineHeight: 1.1 }}>
-                      {s.productCode}
+                  <div className="w-full h-full flex flex-col" style={{ fontSize: "10pt" }}>
+                    {/* Wei Siang 2026-05-14 redesign — customer name big
+                        at the top, identifiers + measurements stacked
+                        below, QR + piece position pinned to the bottom.
+                        See the on-screen tile above for the same shape. */}
+                    <div className="text-center font-bold" style={{ fontSize: "22pt", lineHeight: 1.1 }}>
+                      {customerLine || s.customerName || "—"}
                     </div>
-                    <div className="border-t border-black my-[1.5mm]" />
-                    <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
+                    <div className="border-t-2 border-black my-[2mm]" />
+                    <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
+                      <div><span className="inline-block w-[32mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                      <div><span className="inline-block w-[32mm] font-semibold">Cust Ref</span>: {s.customerRef || "—"}</div>
+                      <div><span className="inline-block w-[32mm] font-semibold">Our SO No</span>: {s.salesOrderNo || "—"}</div>
+                      <div className="flex items-baseline gap-[1mm]">
+                        <span className="inline-block w-[32mm] font-semibold">Model</span>
+                        <span className="font-bold" style={{ fontSize: "18pt" }}>: {s.productCode || "—"}</span>
+                      </div>
                       {s.boxLabel && (
-                        <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "26mm" }}>WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
+                        <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "32mm" }}>WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
                       )}
+                    </div>
+                    <div className="border-t border-black my-[2mm]" />
+                    <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
+                      <div><span className="inline-block w-[32mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                      <div><span className="inline-block w-[32mm] font-semibold">Colour</span>: {s.fabricCode || "—"}</div>
                       {s.itemCategory === "BEDFRAME" && (
-                        <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                        <>
+                          <div><span className="inline-block w-[32mm] font-semibold">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
+                          <div><span className="inline-block w-[32mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                        </>
                       )}
-                      <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                      <div><span className="inline-block w-[26mm] font-semibold">Fabric</span>: {s.fabricCode || "—"}</div>
-                      <div><span className="inline-block w-[26mm] font-semibold">Comp SO</span>: {s.salesOrderNo}</div>
-                      <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId || "—"}</div>
-                      <div><span className="inline-block w-[26mm] font-semibold">SO Ref</span>: {s.customerRef || "—"}</div>
-                      <div><span className="inline-block w-[26mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
+                      <div><span className="inline-block w-[32mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                       <div className="flex items-start gap-[1mm]">
-                        <span className="font-semibold shrink-0" style={{ width: "26mm", color: "#9A3A2D" }}>Special</span>
+                        <span className="font-semibold shrink-0" style={{ width: "32mm", color: "#9A3A2D" }}>Notes</span>
                         <span className="flex-1 break-words">
                           : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                         </span>
                       </div>
                     </div>
-                    {/* QR row — HORIZONTAL per section (QR left, badge
-                        right). Legs section text-only (no QR). */}
-                    <div className="mt-auto flex items-end gap-[2mm]">
-                      <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                        {/* QR pixel size doubles as the displayed CSS px
-                            width (1 CSS px ≈ 0.265mm). Pre-2026-05-12 the
-                            print path passed 500 / 320 — values calibrated
-                            for a 50mm-wide thermal label, not the 100mm
-                            FG sticker. With eager mode actually generating
-                            the QR (lazy gate previously hid the bug), the
-                            500px QR (~132mm) overflowed the 100mm page,
-                            shoving the piece-badge column off the right
-                            edge. 180 ≈ 48mm leaves ~42mm for the badge
-                            text in the primary-only layout; 130 ≈ 34mm
-                            fits when a legs / pillow pair shares the row. */}
-                        <QRImg eager data={trackUrl} size={legsPair || pillowPair ? 130 : 180} alt="FG unit QR" className="block" />
+                    {/* QR bottom-left, piece position bottom-right. Pillow
+                        pair shares the row when present; the synthetic
+                        legs sticker is no longer generated. */}
+                    <div className="mt-auto flex items-end gap-[2mm] pt-[2mm]">
+                      <div className="flex items-end gap-[2mm] flex-1 min-w-0">
+                        <QRImg eager data={trackUrl} size={pillowPair ? 150 : 200} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
-                          <div className="font-bold uppercase" style={{ fontSize: "14pt" }}>
+                          <div className="uppercase font-semibold" style={{ fontSize: "11pt" }}>
+                            {s.pieceName || "Packing"}
+                          </div>
+                          <div className="font-bold" style={{ fontSize: "28pt", lineHeight: 1 }}>
                             {s.pieceNo}/{s.totalPieces}
                           </div>
-                          <div className="uppercase" style={{ fontSize: "10pt" }}>
-                            {s.pieceName}
-                          </div>
-                          <div className="font-semibold mt-[1.5mm]" style={{ fontSize: "10pt" }}>
+                          <div className="font-semibold mt-[1mm]" style={{ fontSize: "9pt" }}>
                             {s.shortCode}
                           </div>
                         </div>
                       </div>
-                      {legsPair && (
-                        <>
-                          <div className="border-l border-dashed border-black self-stretch" />
-                          <div className="flex flex-col items-center justify-center flex-1 min-w-0">
-                            <div className="font-bold text-center uppercase" style={{ fontSize: "22pt" }}>
-                              {legsPair.pieceNo}/{legsPair.totalPieces}
-                            </div>
-                            <div className="font-bold text-center mt-[1mm] uppercase" style={{ fontSize: "14pt" }}>
-                              {legsPair.pieceName}
-                            </div>
-                          </div>
-                        </>
-                      )}
                       {pillowPair && (
                         <>
                           <div className="border-l border-dashed border-black self-stretch" />
                           <div className="flex items-end gap-[1mm] flex-1 min-w-0">
-                            {/* Pillow QR sits inside a pair-shared row, so
-                                its display footprint must match the primary
-                                QR's pair-case sizing (130 ≈ 34mm). See the
-                                comment on the primary QR above for why the
-                                pre-2026-05-12 value (300) overflowed. */}
-                            <QRImg eager data={pillowTrackUrl} size={130} alt="Pillow QR" className="block" />
+                            <QRImg eager data={pillowTrackUrl} size={120} alt="Pillow QR" className="block" />
                             <div className="flex-1 text-center min-w-0">
                               <div className="font-bold uppercase" style={{ fontSize: "13pt" }}>
                                 {pillowPair.pieceNo}/{pillowPair.totalPieces}
@@ -6720,17 +6772,10 @@ export default function ProductionPage({
                               <div className="uppercase" style={{ fontSize: "10pt" }}>
                                 {pillowPair.pieceName}
                               </div>
-                              <div className="text-[#4B5563] mt-[1mm]" style={{ fontSize: "8pt" }}>
-                                {pillowPair.shortCode}
-                              </div>
                             </div>
                           </div>
                         </>
                       )}
-                    </div>
-                    {/* Customer footer — full-width, fallback when missing. */}
-                    <div className="mt-[2mm] pt-[1mm] border-t border-black text-center font-semibold" style={{ fontSize: "11pt" }}>
-                      {customerLine || s.customerName || "—"}
                     </div>
                   </div>
                 </div>

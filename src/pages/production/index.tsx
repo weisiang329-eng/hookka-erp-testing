@@ -45,6 +45,7 @@ import { CreateStockPODialog } from "./components/CreateStockPODialog";
 import {
   BatchActionToolbar,
   ApplyBatchDateDialog,
+  ApplyBatchDueDateDialog,
   ApplyBatchPicDialog,
   SaveToFolderDialog,
 } from "./components/BatchActionToolbar";
@@ -1039,6 +1040,7 @@ export default function ProductionPage({
   type DeptRowLite = { id: string; poId: string; jobCardId: string };
   const [selectedDeptRows, setSelectedDeptRows] = useState<DeptRowLite[]>([]);
   const [batchDateOpen, setBatchDateOpen] = useState(false);
+  const [batchDueDateOpen, setBatchDueDateOpen] = useState(false);
   const [batchPicOpen, setBatchPicOpen] = useState(false);
   const [batchFolderOpen, setBatchFolderOpen] = useState(false);
   type FolderOption = { id: string; name: string; jc_count: number };
@@ -1048,6 +1050,7 @@ export default function ProductionPage({
   useEffect(() => {
     setSelectedDeptRows([]);
     setBatchDateOpen(false);
+    setBatchDueDateOpen(false);
     setBatchPicOpen(false);
     setBatchFolderOpen(false);
   }, [activeTab]);
@@ -5497,6 +5500,7 @@ export default function ProductionPage({
             count={selectedDeptRows.length}
             onClear={() => setSelectedDeptRows([])}
             onApplyDate={() => setBatchDateOpen(true)}
+            onApplyDueDate={() => setBatchDueDateOpen(true)}
             onApplyPic={() => setBatchPicOpen(true)}
             onSaveToFolder={async () => {
               // Load folders fresh each open so a folder created in another
@@ -5564,6 +5568,56 @@ export default function ProductionPage({
                       completedDate: date || null,
                       status: (date ? "COMPLETED" : "WAITING") as typeof jc.status,
                     };
+                  }),
+                };
+              }),
+            );
+            invalidateCachePrefix("/api/production-orders");
+          } catch (err) {
+            toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      />
+      <ApplyBatchDueDateDialog
+        open={batchDueDateOpen}
+        count={selectedDeptRows.length}
+        onCancel={() => setBatchDueDateOpen(false)}
+        onApply={async (date) => {
+          setBatchDueDateOpen(false);
+          // Status is INTENTIONALLY not changed here — dueDate is the
+          // scheduled-completion target, not the actual progress flag.
+          // Mirroring the Apply Completion handler otherwise: optimistic
+          // local write + keep selection so operator can chain
+          // (Apply Due → Apply PIC → Save to Folder) without re-selecting.
+          const patches = selectedDeptRows.map((r) => ({
+            poId: r.poId,
+            jobCardId: r.jobCardId,
+            dueDate: date,
+          }));
+          try {
+            const res = await fetch("/api/production-orders/bulk-patch", {
+              method: "POST",
+              headers: csrfHeaders(),
+              body: JSON.stringify({ patches }),
+              credentials: "include",
+            });
+            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
+            const failed = (j.results || []).filter((x) => !x.success);
+            if (failed.length > 0) {
+              toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+            } else {
+              const verb = date ? "Set due date on" : "Cleared due date on";
+              toast.success(`${verb} ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            }
+            const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+            setOrders((prev) =>
+              prev.map((po) => {
+                if (!patches.some((p) => p.poId === po.id)) return po;
+                return {
+                  ...po,
+                  jobCards: po.jobCards.map((jc) => {
+                    if (!patchedJcIds.has(jc.id)) return jc;
+                    return { ...jc, dueDate: date || "" };
                   }),
                 };
               }),

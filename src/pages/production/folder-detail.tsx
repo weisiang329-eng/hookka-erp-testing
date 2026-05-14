@@ -21,6 +21,7 @@ import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
 import {
   BatchActionToolbar,
   ApplyBatchDateDialog,
+  ApplyBatchDueDateDialog,
   ApplyBatchPicDialog,
 } from "./components/BatchActionToolbar";
 
@@ -102,6 +103,7 @@ export default function ProductionFolderDetailPage() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<FolderJcRow[]>([]);
   const [dateOpen, setDateOpen] = useState(false);
+  const [dueDateOpen, setDueDateOpen] = useState(false);
   const [picOpen, setPicOpen] = useState(false);
 
   const fetchAll = async () => {
@@ -556,6 +558,7 @@ export default function ProductionFolderDetailPage() {
         count={selected.length}
         onClear={() => setSelected([])}
         onApplyDate={() => setDateOpen(true)}
+        onApplyDueDate={() => setDueDateOpen(true)}
         onApplyPic={() => setPicOpen(true)}
         onSaveToFolder={() => toast.error("Already inside a folder. Use Apply Date / PIC, or Remove from Folder.")}
         onRemoveFromFolder={handleRemoveFromFolder}
@@ -593,6 +596,43 @@ export default function ProductionFolderDetailPage() {
               prev.map((r) =>
                 patchedJcIds.has(r.jobCardId)
                   ? { ...r, completedDate: date || null, status: date ? "COMPLETED" : "WAITING" }
+                  : r,
+              ),
+            );
+          } catch (err) {
+            toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }}
+      />
+      <ApplyBatchDueDateDialog
+        open={dueDateOpen}
+        count={selected.length}
+        onCancel={() => setDueDateOpen(false)}
+        onApply={async (date) => {
+          setDueDateOpen(false);
+          // Mirrors the production page's batch Due Date handler: writes
+          // dueDate, does NOT touch status (schedule vs progress).
+          const patches = selected.map((r) => ({
+            poId: r.poId,
+            jobCardId: r.jobCardId,
+            dueDate: date,
+          }));
+          try {
+            const res = await fetch("/api/production-orders/bulk-patch", {
+              method: "POST",
+              headers: csrfHeaders(),
+              body: JSON.stringify({ patches }),
+              credentials: "include",
+            });
+            const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
+            const failed = (j.results || []).filter((x) => !x.success);
+            if (failed.length > 0) toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+            else toast.success(`${date ? "Set" : "Cleared"} due date on ${patches.length} job card${patches.length === 1 ? "" : "s"}.`);
+            const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+            setRows((prev) =>
+              prev.map((r) =>
+                patchedJcIds.has(r.jobCardId)
+                  ? { ...r, dueDate: date || null }
                   : r,
               ),
             );

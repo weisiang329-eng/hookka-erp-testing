@@ -18,12 +18,17 @@
 // future overview tab if we want batch there too.
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { X, Calendar, User, FolderPlus, Trash2 } from "lucide-react";
+import { X, Calendar, CalendarClock, User, FolderPlus, Trash2 } from "lucide-react";
 
 export type BatchActionToolbarProps = {
   count: number;
   onClear: () => void;
   onApplyDate: () => void;
+  // Wei Siang 2026-05-13: batch Due Date editing — sits next to Apply Date
+  // (completion). Same dialog shape, different field. Lets operators
+  // reschedule N rows at once (e.g. delivery slipped a week → push every
+  // related JC's due date forward 7 days).
+  onApplyDueDate: () => void;
   onApplyPic: () => void;
   onSaveToFolder: () => void;
   // Optional — used by the folder detail page where "remove from folder"
@@ -35,6 +40,7 @@ export function BatchActionToolbar({
   count,
   onClear,
   onApplyDate,
+  onApplyDueDate,
   onApplyPic,
   onSaveToFolder,
   onRemoveFromFolder,
@@ -46,8 +52,11 @@ export function BatchActionToolbar({
         {count} job card{count === 1 ? "" : "s"} selected
       </div>
       <div className="flex-1" />
+      <Button size="sm" variant="outline" onClick={onApplyDueDate} title="Set the due (schedule) date on every selected row">
+        <CalendarClock className="h-3.5 w-3.5 mr-1" /> Apply Due Date
+      </Button>
       <Button size="sm" variant="outline" onClick={onApplyDate} title="Stamp completion date on every selected row">
-        <Calendar className="h-3.5 w-3.5 mr-1" /> Apply Date
+        <Calendar className="h-3.5 w-3.5 mr-1" /> Apply Completion
       </Button>
       <Button size="sm" variant="outline" onClick={onApplyPic} title="Set PIC 1 on every selected row">
         <User className="h-3.5 w-3.5 mr-1" /> Apply PIC
@@ -114,6 +123,71 @@ export function ApplyBatchDateDialog({ open, count, onCancel, onApply }: ApplyBa
             }}
           >
             Clear date
+          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>
+            <Button size="sm" onClick={() => onApply(date)} disabled={!date}>
+              Apply to {count}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
+// Apply Due Date dialog — one date input + Apply / Cancel.
+//
+// Wei Siang 2026-05-13: counterpart to Apply Completion Date, but writes
+// `dueDate` (the SCHEDULED date the JC should be done) instead of
+// `completedDate`. Status is NOT touched here — a JC's status reflects its
+// actual progress, not the schedule. Operator uses this when delivery dates
+// shift and N upstream JCs need their due dates pushed in one click.
+//
+// Submit handler receives YYYY-MM-DD string or "" to clear. Clear is gated
+// behind a confirm because losing N due dates breaks the overdue colouring
+// on the sheet.
+// ===========================================================================
+type ApplyBatchDueDateDialogProps = {
+  open: boolean;
+  count: number;
+  onCancel: () => void;
+  onApply: (date: string) => void;
+};
+
+export function ApplyBatchDueDateDialog({ open, count, onCancel, onApply }: ApplyBatchDueDateDialogProps) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [date, setDate] = useState<string>(today);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+      <div className="rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg w-[400px]">
+        <h3 className="mb-2 text-[14px] font-semibold text-[#3A2E22]">
+          Apply Due Date
+        </h3>
+        <p className="mb-3 text-[12px] text-[#6B5E50]">
+          Sets the scheduled due date on <strong>{count}</strong> selected job card{count === 1 ? "" : "s"}. Status is unchanged.
+        </p>
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="w-full rounded border border-[#D4CFC7] bg-white px-2 py-1 text-[12px]"
+          autoFocus
+        />
+        <div className="mt-4 flex justify-between items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-red-600 hover:text-red-700"
+            onClick={() => {
+              if (confirm(`Clear due date on ${count} job card${count === 1 ? "" : "s"}? Overdue colouring will be lost on these rows.`)) {
+                onApply("");
+              }
+            }}
+          >
+            Clear due date
           </Button>
           <div className="flex gap-2">
             <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>

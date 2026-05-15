@@ -6446,27 +6446,25 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* Wei Siang 2026-05-15 (revised): leg now sits
-                          ABOVE the QR row instead of below ("你的脚怎么
-                          下去了呢？...我要在第二张照片的上面"). Layout
-                          order: leg row (if any) → dashed line → QR +
-                          main piece info → pillow pair (still side-by-
-                          side because pillow ships with the LAST
-                          compartment box, different pattern from legs). */}
-                      <div className="mt-auto pt-1">
-                        {legsPair && (
-                          <div className="mb-1 pb-1 border-b border-dashed border-[#6B5C32] flex items-center justify-center gap-2">
-                            <div className="font-bold leading-tight" style={{ fontSize: "18px" }}>
-                              {legsPair.pieceNo}/{legsPair.totalPieces}
-                            </div>
-                            <div className="leading-tight uppercase font-semibold" style={{ fontSize: "11px" }}>
-                              {legsPair.pieceName}
-                            </div>
-                          </div>
-                        )}
-                        <div className="flex items-end gap-2">
+                      {/* Wei Siang 2026-05-15 (revised again): leg moves
+                          INTO the right column ABOVE the SOFA piece-name
+                          / pieceNo. Single dashed separator at the top
+                          of the bottom block (between Spec section and
+                          this block). Pillow stays side-by-side. */}
+                      <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
+                        <div className="flex items-end gap-2 pt-1">
                           <QRImg data={trackUrl} size={pillowPair ? 110 : 130} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
+                            {legsPair && (
+                              <>
+                                <div className="font-bold leading-tight" style={{ fontSize: "18px" }}>
+                                  {legsPair.pieceNo}/{legsPair.totalPieces}
+                                </div>
+                                <div className="leading-tight uppercase font-semibold text-[#6B7280] mb-1" style={{ fontSize: "10px" }}>
+                                  {legsPair.pieceName}
+                                </div>
+                              </>
+                            )}
                             <div className="leading-tight truncate uppercase font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
                               {s.pieceName || "Packing"}
                             </div>
@@ -6831,29 +6829,29 @@ export default function ProductionPage({
                         </span>
                       </div>
                     </div>
-                    {/* Wei Siang 2026-05-15 (revised): legs now ABOVE
-                        the QR row, separator below them, then QR + main
-                        piece. Pillow stays side-by-side with the QR row
-                        (different accessory pattern). All still print
-                        on the SAME 100×150mm physical card. */}
-                    <div className="mt-auto pt-[2mm]">
-                      {legsPair && (
-                        <div className="mb-[2mm] pb-[2mm] border-b border-dashed border-black flex items-center justify-center gap-[3mm]">
-                          <div className="font-bold" style={{ fontSize: "26pt", lineHeight: 1 }}>
-                            {legsPair.pieceNo}/{legsPair.totalPieces}
-                          </div>
-                          <div className="font-bold uppercase" style={{ fontSize: "14pt" }}>
-                            {legsPair.pieceName}
-                          </div>
-                        </div>
-                      )}
-                      <div className="flex items-end gap-[2mm]">
+                    {/* Wei Siang 2026-05-15 (revised again): leg moves
+                        INTO the right column ABOVE the main piece
+                        name / pieceNo. Single dashed separator at the
+                        top of this bottom block. Pillow stays side-
+                        by-side. Same 100×150mm physical card. */}
+                    <div className="mt-auto pt-[2mm] border-t border-dashed border-black">
+                      <div className="flex items-end gap-[2mm] pt-[2mm]">
                         <QRImg eager data={trackUrl} size={pillowPair ? 130 : 200} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
+                          {legsPair && (
+                            <>
+                              <div className="font-bold" style={{ fontSize: "22pt", lineHeight: 1 }}>
+                                {legsPair.pieceNo}/{legsPair.totalPieces}
+                              </div>
+                              <div className="font-bold uppercase mb-[2mm]" style={{ fontSize: "12pt" }}>
+                                {legsPair.pieceName}
+                              </div>
+                            </>
+                          )}
                           <div className="uppercase font-semibold" style={{ fontSize: "11pt" }}>
                             {s.pieceName || "Packing"}
                           </div>
-                          <div className="font-bold" style={{ fontSize: pillowPair ? "22pt" : "28pt", lineHeight: 1 }}>
+                          <div className="font-bold" style={{ fontSize: pillowPair || legsPair ? "22pt" : "28pt", lineHeight: 1 }}>
                             {s.pieceNo}/{s.totalPieces}
                           </div>
                           <div className="font-semibold mt-[1mm]" style={{ fontSize: "9pt" }}>

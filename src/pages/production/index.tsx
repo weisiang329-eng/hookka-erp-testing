@@ -3447,15 +3447,15 @@ export default function ProductionPage({
       // its own p=N&t=M marker so the worker portal can reject double-
       // scans. qty=1 stays single-sticker.
       //
-      // Wei Siang 2026-05-15: on FAB_CUT / FAB_SEW (the new big 100×
-      // 150mm sticker mode), collapse the fan-out so sticker count
-      // equals row count regardless of qty. The qty is still shown on
-      // the sticker body ("Qty 3") — the workers don't need separate
-      // 1/3, 2/3, 3/3 cards for one fabric-cut job, they just need
-      // the cutting + sewing sign-off lines per JC.
-      const fanOutByQty = !(activeTab === "FAB_CUT" || activeTab === "FAB_SEW");
-      const pieceCount = fanOutByQty ? Math.max(1, row.qty || 1) : 1;
-      const displayQty = Math.max(1, row.qty || 1);
+      // Wei Siang 2026-05-15 (REVISED later same day): fan out for ALL
+      // dept tabs including FAB_CUT / FAB_SEW. A row with qty=6 now
+      // produces 6 physical stickers, each with its own Fab Cut /
+      // Fab Sew sign-off line and "Piece N of 6" marker. Each fanned-
+      // out sticker represents one physical fabric panel, so displayQty
+      // is 1 (the "Qty" line on the body says "Qty 1" — this sticker
+      // covers 1 piece). The piece-position marker conveys batch context.
+      const pieceCount = Math.max(1, row.qty || 1);
+      const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.qty || 1);
       for (let p = 1; p <= pieceCount; p++) {
         stickers.push({
           key: pieceCount > 1 ? `${row.id}:${p}` : row.id,
@@ -6239,7 +6239,14 @@ export default function ProductionPage({
                                 <span className="flex-1 border-b border-black h-[22px]" />
                               </div>
                             </div>
-                            <div className="font-bold mt-1" style={{ fontSize: "13px" }}>Qty {s.qty}</div>
+                            <div className="flex items-baseline justify-between mt-1">
+                              <span className="font-bold" style={{ fontSize: "13px" }}>Qty {s.qty}</span>
+                              {s.totalPieces > 1 && (
+                                <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
+                                  {s.pieceNo} of {s.totalPieces}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>

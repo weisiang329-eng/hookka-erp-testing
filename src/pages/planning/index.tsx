@@ -146,10 +146,17 @@ const DEPARTMENTS = [
 //
 // EFFICIENCY (0.85) was used by the old theoretical-capacity formula
 // (workers × HOURS_PER_DAY × 60 × EFFICIENCY). Phase 1 spec rewrite
-// replaced that with the rolling 14-day actual-production average,
+// replaced that with the rolling N-day actual-production average,
 // so the EFFICIENCY constant is no longer referenced. Preserved
 // here as a comment for archaeological context.
 const HOURS_PER_DAY = 9;
+
+// Wei Siang 2026-05-15: rolling window size for Daily Capacity +
+// Daily Capacity drilldown. Started at 14 (two weeks of working
+// days, Mon-Sat); shortened to 7 so the average reflects more
+// recent production reality. Pull out as a single constant so a
+// future "make this configurable per-dept" lands in one place.
+const ROLLING_WINDOW_DAYS = 7;
 
 const TABS = [
   { id: "capacity", label: "Capacity Overview", icon: BarChart3 },
@@ -695,24 +702,24 @@ export default function PlanningPage() {
   //   getDeptEfficiency()) so it's excluded from active load and
   //   included in the 14-day actual-production rolling avg.
   const capacityData = useMemo(() => {
-    // Wei Siang 2026-05-15: 14-day window is the 14 most-recent
+    // Wei Siang 2026-05-15: rolling window is the N most-recent
     // working days (Mon-Sat, skip Sundays) — matches the drilldown's
-    // last14WorkingDays so both surfaces see the same denominator.
-    // Previously this used 14 calendar days, so any JC completed on
-    // a Sunday in the window would land in the KPI but not the
-    // drilldown — small but real divergence.
-    const fourteenWorkingDays: string[] = [];
+    // lastWorkingDaysInWindow so both surfaces see the same
+    // denominator. Previously the KPI used N calendar days while
+    // the drilldown used working days, which let Sunday completions
+    // drift between the two surfaces.
+    const rollingWindowDays: string[] = [];
     {
       const cursor = new Date();
       cursor.setHours(0, 0, 0, 0);
-      while (fourteenWorkingDays.length < 14) {
+      while (rollingWindowDays.length < ROLLING_WINDOW_DAYS) {
         if (cursor.getDay() !== 0) {
-          fourteenWorkingDays.push(fmtISO(cursor));
+          rollingWindowDays.push(fmtISO(cursor));
         }
         cursor.setDate(cursor.getDate() - 1);
       }
     }
-    const fourteenWorkingDaysSet = new Set(fourteenWorkingDays);
+    const rollingWindowSet = new Set(rollingWindowDays);
     const scopeFrom = scopeRange.from;
     const scopeTo = scopeRange.to;
     const scopeDays = Math.max(scopeRange.workingDays, 1);
@@ -743,21 +750,21 @@ export default function PlanningPage() {
             ) / 10
           : HOURS_PER_DAY;
 
-      // 14-day rolling actual production — sum (actualMinutes ?? estMinutes)
-      // × wipQty on JCs completed in the last 14 working days, ÷ 14
-      // → daily average. wipQty fix lifted from /api/department-performance
+      // N-day rolling actual production — sum (actualMinutes ?? estMinutes)
+      // × wipQty on JCs completed in the rolling window, ÷ N → daily
+      // average. wipQty fix lifted from /api/department-performance
       // pattern; previously a multi-piece JC counted as one piece's worth.
-      let last14DayActual = 0;
+      let windowTotalMinutes = 0;
       for (const order of orders) {
         for (const jc of order.jobCards) {
           if (jc.departmentCode !== dept.code) continue;
           if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
           if (!jc.completedDate) continue;
-          if (!fourteenWorkingDaysSet.has(jc.completedDate)) continue;
-          last14DayActual += jcMinutes(jc, true);
+          if (!rollingWindowSet.has(jc.completedDate)) continue;
+          windowTotalMinutes += jcMinutes(jc, true);
         }
       }
-      const dailyCapacity = Math.round(last14DayActual / 14);
+      const dailyCapacity = Math.round(windowTotalMinutes / ROLLING_WINDOW_DAYS);
 
       // Active job cards split by SOFA / BEDFRAME / OTHER.
       // TRANSFERRED excluded (already handed to next dept).
@@ -803,7 +810,7 @@ export default function PlanningPage() {
         workerCount,
         avgWorkingHours,
         dailyCapacity,
-        last14DayActual,
+        windowTotalMinutes,
         sofaBacklog,
         bfBacklog,
         totalBacklog,
@@ -998,12 +1005,14 @@ export default function PlanningPage() {
   // same render doesn't recompute). All read from `orders` already in
   // memory — no extra API hits. ──
 
-  // 14 most-recent working days (Mon-Sat, skip Sundays), ending today.
-  const last14WorkingDays = useMemo(() => {
+  // N most-recent working days (Mon-Sat, skip Sundays), ending today.
+  // Window size driven by ROLLING_WINDOW_DAYS constant at module top
+  // so this matches capacityData's rolling-window set exactly.
+  const rollingWindowDates = useMemo(() => {
     const days: string[] = [];
     const cursor = new Date();
     cursor.setHours(0, 0, 0, 0);
-    while (days.length < 14) {
+    while (days.length < ROLLING_WINDOW_DAYS) {
       if (cursor.getDay() !== 0) {
         days.unshift(fmtISO(cursor));
       }
@@ -1014,12 +1023,12 @@ export default function PlanningPage() {
 
   // Per-day total completed minutes (sum across all production depts,
   // both categories). Matches the same formula capacityData uses for
-  // the rolling 14-day avg.
+  // the rolling daily-avg.
   // Wei Siang 2026-05-15: × wipQty so multi-piece JCs aren't
   // under-counted (jc.estMinutes / actualMinutes are per-UNIT).
   const capacityByDay = useMemo(() => {
     const m = new Map<string, number>();
-    for (const d of last14WorkingDays) m.set(d, 0);
+    for (const d of rollingWindowDates) m.set(d, 0);
     for (const order of orders) {
       for (const jc of order.jobCards) {
         if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
@@ -1031,7 +1040,7 @@ export default function PlanningPage() {
       }
     }
     return m;
-  }, [orders, last14WorkingDays]);
+  }, [orders, rollingWindowDates]);
 
   // For a specific date, return per-dept total completed minutes.
   const capacityForDate = useCallback(
@@ -1418,10 +1427,11 @@ export default function PlanningPage() {
             </span>
           </div>
 
-          {/* Top summary — 4 cards. Daily Capacity is rolling
-              14-day avg of actual completed minutes (per Wei Siang
-              spec). Load / Utilization / Backlog scoped to the
-              selected Daily/Weekly/Monthly window. */}
+          {/* Top summary — 5 cards. Daily Capacity is rolling
+              N-day avg of actual completed minutes (per Wei Siang
+              spec, N = ROLLING_WINDOW_DAYS). Load / Utilization /
+              Backlog scoped to the selected Daily/Weekly/Monthly
+              window. */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-5">
             {/* Wei Siang 2026-05-15: Daily Capacity is the entry
                 point to the drilldown — click it to open the 14-day
@@ -1438,7 +1448,7 @@ export default function PlanningPage() {
                 <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
                   {formatHours(totalCapacity)} <span className="text-xs font-medium text-[#6B7280]">/day</span>
                 </p>
-                <p className="text-[10px] text-[#9CA3AF] mt-0.5">14-day rolling actual avg · click for breakdown</p>
+                <p className="text-[10px] text-[#9CA3AF] mt-0.5">{ROLLING_WINDOW_DAYS}-day rolling actual avg · click for breakdown</p>
               </CardContent>
             </Card>
             {/* Wei Siang 2026-05-15: {Scope}'s Load → per-dept drilldown
@@ -1587,7 +1597,7 @@ export default function PlanningPage() {
                       </div>
                       <div>
                         <span className="text-[10px] text-[#6B7280]">Daily Cap</span>
-                        <p className="font-semibold text-[#1F1D1B] tabular-nums" title="14-day rolling actual avg">
+                        <p className="font-semibold text-[#1F1D1B] tabular-nums" title={`${ROLLING_WINDOW_DAYS}-day rolling actual avg`}>
                           {formatHours(dept.dailyCapacity)}
                         </p>
                       </div>
@@ -2378,7 +2388,7 @@ export default function PlanningPage() {
           onClose={closeDrilldown}
           onPush={pushDrilldown}
           orders={orders}
-          last14WorkingDays={last14WorkingDays}
+          rollingWindowDates={rollingWindowDates}
           capacityByDay={capacityByDay}
           capacityForDate={capacityForDate}
           capacityWorkersForDateDept={capacityWorkersForDateDept}
@@ -2433,7 +2443,7 @@ function DrilldownModal(props: {
   onClose: () => void;
   onPush: (level: DrilldownLevel) => void;
   orders: ProductionOrder[];
-  last14WorkingDays: string[];
+  rollingWindowDates: string[];
   capacityByDay: Map<string, number>;
   capacityForDate: (date: string) => Map<string, { sofa: number; bf: number; other: number; total: number }>;
   capacityWorkersForDateDept: (date: string, deptCode: string) => WorkerAgg[];
@@ -2461,7 +2471,7 @@ function DrilldownModal(props: {
     onBack,
     onClose,
     onPush,
-    last14WorkingDays,
+    rollingWindowDates,
     capacityByDay,
     capacityForDate,
     capacityWorkersForDateDept,
@@ -2480,7 +2490,7 @@ function DrilldownModal(props: {
   let body: React.ReactNode = null;
 
   if (level.kind === "capacity-14d") {
-    title = "Daily Capacity — Past 14 Working Days";
+    title = `Daily Capacity — Past ${ROLLING_WINDOW_DAYS} Working Days`;
     subtitle = `Average: ${formatHours(totalCapacity)}/day across all production depts`;
     const maxMin = Math.max(1, ...Array.from(capacityByDay.values()));
     body = (
@@ -2494,7 +2504,7 @@ function DrilldownModal(props: {
           </tr>
         </thead>
         <tbody>
-          {last14WorkingDays.map((date) => {
+          {rollingWindowDates.map((date) => {
             const mins = capacityByDay.get(date) ?? 0;
             const pctOfMax = (mins / maxMin) * 100;
             const diffFromAvg = mins - totalCapacity;
@@ -2847,8 +2857,8 @@ function DrilldownModal(props: {
             {/* Wei Siang 2026-05-15: Daily Capacity column inserted so
                 the Backlog Days arithmetic is visible — operator can
                 see "Total ÷ Daily Capacity = Backlog Days" directly. */}
-            <th className="h-9 px-4 text-right font-medium text-[#374151]" title="Dept's 14-day rolling daily output. Backlog ÷ this = Backlog Days.">Daily Capacity</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]" title="Total backlog ÷ dept's 14-day rolling daily capacity. Wall-clock days the dept needs to clear its queue.">Backlog Days</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]" title={`Dept's ${ROLLING_WINDOW_DAYS}-day rolling daily output. Backlog ÷ this = Backlog Days.`}>Daily Capacity</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]" title={`Total backlog ÷ dept's ${ROLLING_WINDOW_DAYS}-day rolling daily capacity. Wall-clock days the dept needs to clear its queue.`}>Backlog Days</th>
           </tr>
         </thead>
         <tbody>

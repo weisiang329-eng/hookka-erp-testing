@@ -6212,19 +6212,21 @@ export default function ProductionPage({
                         {s.totalHeight && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Total Height</span>: {s.totalHeight}</div>}
                         <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      <div className="mt-auto pt-2 flex items-end gap-2">
-                        <div className="flex-1 space-y-2 text-[10px]">
-                          <div className="flex items-end gap-1">
-                            <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                            <span className="flex-1 border-b border-black h-[14px]" />
-                          </div>
-                          <div className="flex items-end gap-1">
-                            <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                            <span className="flex-1 border-b border-black h-[14px]" />
-                          </div>
-                          <div className="font-bold text-[#1F1D1B]" style={{ fontSize: "11px" }}>Qty {s.qty}</div>
+                      {/* QR centred in the empty area between specs and
+                          sign-off lines (Wei Siang 2026-05-15) */}
+                      <div className="flex justify-center my-2">
+                        <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
+                      </div>
+                      <div className="mt-auto space-y-2 text-[10px]">
+                        <div className="flex items-end gap-1">
+                          <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
+                          <span className="flex-1 border-b border-black h-[14px]" />
                         </div>
-                        <QRImg data={s.qrPayload} size={80} alt="Job card QR" className="block" />
+                        <div className="flex items-end gap-1">
+                          <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
+                          <span className="flex-1 border-b border-black h-[14px]" />
+                        </div>
+                        <div className="font-bold text-[#1F1D1B]" style={{ fontSize: "11px" }}>Qty {s.qty}</div>
                       </div>
                     </div>
                   );
@@ -6642,29 +6644,30 @@ export default function ProductionPage({
                       </span>
                     </div>
                   </div>
-                  {/* Bottom: blank sign-off lines for the shop floor to
-                      write the worker's name when they finish the step.
-                      Two lines side-by-side with a generous gap so a
-                      ballpoint pen lands cleanly on each. QR sits in the
-                      bottom-right corner above the lines. */}
-                  <div className="mt-auto flex items-end gap-[3mm] pt-[3mm]">
-                    <div className="flex-1 space-y-[3mm]" style={{ fontSize: "11pt" }}>
-                      <div className="flex items-end gap-[2mm]">
-                        <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                        <span className="flex-1 border-b border-black h-[6mm]" />
-                      </div>
-                      <div className="flex items-end gap-[2mm]">
-                        <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                        <span className="flex-1 border-b border-black h-[6mm]" />
-                      </div>
-                    </div>
-                    {s.qrDataUrl && (
+                  {/* Wei Siang 2026-05-15 (revised): QR moves UP into the
+                      empty area between the spec block and the sign-off
+                      lines ("QR 应该在这个地方，空白的地方"), centred so
+                      it draws the eye between the measurements above and
+                      the writable lines below. Sign-off lines then live
+                      at the very bottom by themselves. */}
+                  {s.qrDataUrl && (
+                    <div className="flex justify-center my-[2mm]">
                       <img
                         src={s.qrDataUrl}
                         alt="Job card QR"
-                        style={{ width: "24mm", height: "24mm" }}
+                        style={{ width: "28mm", height: "28mm" }}
                       />
-                    )}
+                    </div>
+                  )}
+                  <div className="mt-auto space-y-[3mm]" style={{ fontSize: "11pt" }}>
+                    <div className="flex items-end gap-[2mm]">
+                      <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
+                      <span className="flex-1 border-b border-black h-[6mm]" />
+                    </div>
+                    <div className="flex items-end gap-[2mm]">
+                      <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
+                      <span className="flex-1 border-b border-black h-[6mm]" />
+                    </div>
                   </div>
                   {s.totalPieces > 1 && (
                     <div className="text-right font-semibold mt-[1mm]" style={{ fontSize: "10pt" }}>

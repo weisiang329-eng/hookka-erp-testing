@@ -34,6 +34,86 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-15-002 — Planning page Capacity Overview "Utilization 975%" + misleading Master Tracker "Hookka DD"
+
+**Status:** 🟢 Fixed (2026-05-15)
+**Category:** ui-frontend, data-integrity
+
+**Symptom (user-reported):** Wei Siang on Planning page: "Average
+Utilization 975%" (physically impossible). Asked for full audit. The
+Master Tracker's "Hookka DD" column showed the same date as the
+adjacent "Target End" column. Capacity Loading bar heights felt
+unproportional. Status filter included "On Hold" which always
+returned 0 results.
+
+**Root causes (4 bugs in `src/pages/planning/index.tsx`):**
+
+1. **Utilization formula conflated backlog with daily load.**
+   `utilization = totalBacklog / dailyCapacity × 100` — sum of ALL
+   pending estMinutes across all open POs divided by ONE day's
+   capacity. 975% really meant "9.75 working days of queued work",
+   not "today's load". Same calc per-dept produced 1647% Packing,
+   1418% Webbing, etc. Capacity Loading tab uses correct per-day
+   numbers from `/api/scheduling/capacity` — two tabs disagreed.
+
+2. **TRANSFERRED job cards double-counted.** `capacityData` active
+   filter excluded only COMPLETED + CANCELLED, while
+   `getDeptEfficiency()` treated TRANSFERRED as completed.
+   Inconsistent: same JC appeared as both "active load" and
+   "completed work" depending on which calculation you read.
+
+3. **Master Tracker "Hookka DD" column was a duplicate.** Backend
+   `calculateHookkaDD()` in `scheduling.ts:176` correctly computes
+   customer-delivery-date minus buffer days (2 for BEDFRAME, 1 for
+   SOFA), and the API returns it as `ScheduleEntry.hookkaExpectedDD`.
+   But `schedResp` was `void`ed in the page (`void schedResp;` line
+   277) and the column rendered `formatDate(order.targetEndDate)`,
+   identical to the previous column.
+
+4. **Capacity Loading bar height used a `* 0.8` fudge factor + 120%
+   cap** producing non-linear bar heights that didn't visually match
+   the utilization %.
+
+Plus minor: "On Hold" filter option that never matches real status
+values; "Stocked In" column header that actually rendered
+`rackingNumber`.
+
+**Fix (3 commits, single push):**
+- `src/pages/planning/index.tsx`:
+  - Replaced single misleading "Utilization" metric with TWO honest ones:
+    `Today's Utilization` (% from scheduling API's per-day bucket — same
+    source as Capacity Loading tab) AND `Backlog` (days of queued work).
+    Top summary went from 3 cards to 4.
+  - Per-dept cards now show Workers, Daily Capacity, Today's Load,
+    Today's Utilization, AND Backlog (days + min). Utilization bar
+    now reflects today's % only.
+  - `capacityData` active filter now excludes TRANSFERRED too, matching
+    `getDeptEfficiency()`.
+  - Wired `schedResp` into a `hookkaDDByPoId` Map; Master Tracker's
+    "Hookka DD" column renders the real `s.hookkaExpectedDD` per
+    `productionOrderId`, falls back to "-" if no schedule entry.
+  - Status filter dropdown: removed "On Hold" option.
+  - "Stocked In" column header renamed to "Racking #" (matches what
+    the cell actually shows).
+  - Capacity Loading bar height: `Math.max(barHeight * 0.8, 1)%` →
+    `Math.min(Math.max(day.utilization, 1), 100)%` — linear scale,
+    capped at container height. >100% still flagged by red colour +
+    AlertTriangle icon.
+
+**Verification:**
+- TypeScript clean
+- 4 fixes audited in single pass (per "Fix one → audit whole system")
+- Capacity Overview now consistent with Capacity Loading tab (same
+  data source for today's load)
+- Pattern-matches memory rules:
+  - `Eliminate inconsistency before syncing it` — Capacity Overview
+    and Capacity Loading now share one source of truth
+    (scheduling API per-day buckets)
+  - `Frontend + backend validation must be unified` — TRANSFERRED
+    handling now consistent across efficiency + load calcs
+
+---
+
 ## BUG-2026-05-15-001 — SO edit page silently re-poisoned bare SOFA sizeLabel with trailing `"`, every Save → 400
 
 **Status:** 🟢 Fixed (2026-05-15)

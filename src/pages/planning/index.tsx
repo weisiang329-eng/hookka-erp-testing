@@ -273,8 +273,11 @@ export default function PlanningPage() {
   const orders: ProductionOrder[] = useMemo(() => ordersResp?.data ?? [], [ordersResp]);
   const workers: Worker[] = useMemo(() => workersResp?.data ?? [], [workersResp]);
   const capacityDepts: CapacityDept[] = useMemo(() => capResp?.data ?? [], [capResp]);
+  // Wei Siang 2026-05-15 audit: schedules feed the Master Tracker's
+  // Hookka DD column (was previously voided, leaving the column
+  // duplicating Target End).
+  const schedules: ScheduleEntry[] = useMemo(() => schedResp?.data ?? [], [schedResp]);
   const loading = ordersLoading || workersLoading || capLoading;
-  void schedResp;
 
   // ── Master Tracker state ──
   const [trackerCategoryTab, setTrackerCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -453,14 +456,49 @@ export default function PlanningPage() {
     refreshCap();
   }, [refreshOrders, refreshWorkers, refreshSched, refreshCap]);
 
+  // today (also used by Gantt + capacity calc below)
+  const today = fmtISO(new Date());
+
+  // Wei Siang 2026-05-15 audit: scheduling API carries hookkaExpectedDD
+  // per production order — the Master Tracker's "Hookka DD" column was
+  // previously rendering targetEndDate as a stand-in (identical to the
+  // adjacent "Target End" column, making it a confusing duplicate).
+  // Build an id → hookkaExpectedDD lookup so the column shows the real
+  // customer-DD-minus-buffer date that calculateHookkaDD() computes.
+  const hookkaDDByPoId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of schedules) {
+      if (s.productionOrderId && s.hookkaExpectedDD) {
+        m.set(s.productionOrderId, s.hookkaExpectedDD);
+      }
+    }
+    return m;
+  }, [schedules]);
+
   // ── Capacity data ──
+  // Wei Siang 2026-05-15 audit: Capacity Overview now reports TWO
+  // numbers per dept instead of conflating them:
+  //   1. Today's Utilization — % of today's capacity that's scheduled
+  //      for today (from /api/scheduling/capacity dailyLoading bucket).
+  //      0-100% normal, >100% = overloaded today.
+  //   2. Backlog (days) — sum of estMinutes on all active job cards
+  //      divided by 1 day's capacity. 9.75 means "9.75 working days
+  //      of queued work in this dept".
+  //
+  // The old "Utilization" metric was Backlog ÷ DailyCapacity × 100,
+  // producing 975% readings that operators mis-read as today's load.
+  // TRANSFERRED job cards are now excluded from active-load (was an
+  // inconsistency — getDeptEfficiency() counts them as completed).
   const capacityData = useMemo(() => {
     return DEPARTMENTS.map((dept) => {
       const deptWorkers = workers.filter((w) => w.departmentCode === dept.code && w.status === "ACTIVE");
       const workerCount = deptWorkers.length;
       const dailyCapacity = Math.round(workerCount * HOURS_PER_DAY * 60 * EFFICIENCY);
 
-      // Current load: sum estMinutes from active (non-completed, non-cancelled) job cards
+      // Backlog (total queued work) — active job cards not yet done.
+      // TRANSFERRED = handed to next dept; excluded here so it doesn't
+      // double-count alongside the dept that now owns the JC. Mirrors
+      // getDeptEfficiency() which already treats TRANSFERRED as completed.
       const activeJobs = orders
         .filter((o) => o.status === "IN_PROGRESS" || o.status === "PENDING")
         .flatMap((o) => o.jobCards)
@@ -468,21 +506,41 @@ export default function PlanningPage() {
           (jc) =>
             jc.departmentCode === dept.code &&
             jc.status !== "COMPLETED" &&
-            jc.status !== "CANCELLED"
+            jc.status !== "CANCELLED" &&
+            jc.status !== "TRANSFERRED"
         );
-      const currentLoad = activeJobs.reduce((sum, jc) => sum + jc.estMinutes, 0);
-      const utilization = dailyCapacity > 0 ? Math.round((currentLoad / dailyCapacity) * 100) : 0;
+      const backlog = activeJobs.reduce((sum, jc) => sum + jc.estMinutes, 0);
+      const backlogDays =
+        dailyCapacity > 0 ? Math.round((backlog / dailyCapacity) * 10) / 10 : 0;
 
-      return { ...dept, workerCount, dailyCapacity, currentLoad, utilization };
+      // Today's scheduled load — from the same scheduling API the
+      // Capacity Loading tab uses, so the two tabs report consistent
+      // numbers. Defaults to 0 if today is outside the API window
+      // (weekend, before scheduling computed, etc.).
+      const capDept = capacityDepts.find((cd) => cd.deptCode === dept.code);
+      const todayBucket = capDept?.dailyLoading.find((d) => d.date === today);
+      const todayLoad = todayBucket?.loadedMinutes ?? 0;
+      const todayUtilization = todayBucket?.utilization ?? 0;
+
+      return {
+        ...dept,
+        workerCount,
+        dailyCapacity,
+        backlog,
+        backlogDays,
+        todayLoad,
+        todayUtilization,
+      };
     });
-  }, [orders, workers]);
+  }, [orders, workers, capacityDepts, today]);
 
   const totalCapacity = capacityData.reduce((s, d) => s + d.dailyCapacity, 0);
-  const totalLoad = capacityData.reduce((s, d) => s + d.currentLoad, 0);
-  const avgUtilization = totalCapacity > 0 ? Math.round((totalLoad / totalCapacity) * 100) : 0;
-
-  // today (used by Gantt)
-  const today = fmtISO(new Date());
+  const totalBacklog = capacityData.reduce((s, d) => s + d.backlog, 0);
+  const totalBacklogDays =
+    totalCapacity > 0 ? Math.round((totalBacklog / totalCapacity) * 10) / 10 : 0;
+  const totalTodayLoad = capacityData.reduce((s, d) => s + d.todayLoad, 0);
+  const avgTodayUtilization =
+    totalCapacity > 0 ? Math.round((totalTodayLoad / totalCapacity) * 100) : 0;
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(() => getDeptEfficiency(orders), [orders]);
@@ -588,8 +646,12 @@ export default function PlanningPage() {
       {/* ═══════════════════════════════════════════ */}
       {activeTab === "capacity" && (
         <div className="space-y-6">
-          {/* Summary cards */}
-          <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+          {/* Summary cards — two complementary metrics:
+              "Today's Utilization" answers "are we overloaded TODAY?";
+              "Backlog" answers "how much queued work do we have?". The
+              earlier single "Utilization 975%" metric was conflating
+              both (Backlog ÷ DailyCapacity), which read as nonsense. */}
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card>
               <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
@@ -604,9 +666,9 @@ export default function PlanningPage() {
             <Card>
               <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-[#6B7280]">Total Current Load</p>
+                  <p className="text-xs text-[#6B7280]">Today&apos;s Scheduled Load</p>
                   <p className="text-xl font-bold text-[#1F1D1B]">
-                    {totalLoad.toLocaleString()} min
+                    {totalTodayLoad.toLocaleString()} min
                   </p>
                 </div>
                 <TrendingUp className="h-5 w-5 text-[#3E6570]" />
@@ -615,12 +677,27 @@ export default function PlanningPage() {
             <Card>
               <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-xs text-[#6B7280]">Average Utilization</p>
-                  <p className={`text-xl font-bold ${utilizationColor(avgUtilization).text}`}>
-                    {avgUtilization}%
+                  <p className="text-xs text-[#6B7280]">Today&apos;s Utilization</p>
+                  <p className={`text-xl font-bold ${utilizationColor(avgTodayUtilization).text}`}>
+                    {avgTodayUtilization}%
                   </p>
                 </div>
                 <Clock className="h-5 w-5 text-[#6B5C32]" />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-2.5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-[#6B7280]">Total Backlog</p>
+                  <p className="text-xl font-bold text-[#1F1D1B]">
+                    {totalBacklogDays}{" "}
+                    <span className="text-xs font-medium text-[#6B7280]">days</span>
+                  </p>
+                  <p className="text-[10px] text-[#9CA3AF]">
+                    {totalBacklog.toLocaleString()} min queued
+                  </p>
+                </div>
+                <ClipboardList className="h-5 w-5 text-[#9C6F1E]" />
               </CardContent>
             </Card>
           </div>
@@ -628,7 +705,9 @@ export default function PlanningPage() {
           {/* Department capacity cards */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
             {capacityData.map((dept) => {
-              const uc = utilizationColor(dept.utilization);
+              const uc = utilizationColor(dept.todayUtilization);
+              const backlogColor =
+                dept.backlogDays > 7 ? "text-[#9A3A2D]" : dept.backlogDays > 3 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
               return (
                 <Card key={dept.code} className="overflow-hidden">
                   <div className="h-1.5" style={{ backgroundColor: dept.color }} />
@@ -655,20 +734,27 @@ export default function PlanningPage() {
                         <p className="font-semibold text-[#1F1D1B]">{dept.dailyCapacity.toLocaleString()} min</p>
                       </div>
                       <div>
-                        <span className="text-[#6B7280]">Current Load</span>
-                        <p className="font-semibold text-[#1F1D1B]">{dept.currentLoad.toLocaleString()} min</p>
+                        <span className="text-[#6B7280]">Today&apos;s Load</span>
+                        <p className="font-semibold text-[#1F1D1B]">{dept.todayLoad.toLocaleString()} min</p>
                       </div>
                       <div>
-                        <span className="text-[#6B7280]">Utilization</span>
-                        <p className={`font-semibold ${uc.text}`}>{dept.utilization}%</p>
+                        <span className="text-[#6B7280]">Today&apos;s Utilization</span>
+                        <p className={`font-semibold ${uc.text}`}>{dept.todayUtilization}%</p>
+                      </div>
+                      <div className="col-span-2 pt-1 border-t border-[#E2DDD8]">
+                        <span className="text-[#6B7280]">Backlog</span>
+                        <p className={`font-semibold ${backlogColor}`}>
+                          {dept.backlogDays} <span className="text-[10px] font-medium text-[#6B7280]">days</span>
+                          <span className="text-[10px] font-normal text-[#9CA3AF] ml-1">({dept.backlog.toLocaleString()} min)</span>
+                        </p>
                       </div>
                     </div>
 
-                    {/* Utilization bar */}
+                    {/* Today's utilization bar */}
                     <div className="w-full bg-[#F0ECE9] rounded-full h-2.5 overflow-hidden">
                       <div
                         className={`h-full rounded-full transition-all ${uc.bar}`}
-                        style={{ width: `${Math.min(dept.utilization, 100)}%` }}
+                        style={{ width: `${Math.min(dept.todayUtilization, 100)}%` }}
                       />
                     </div>
                   </CardContent>
@@ -785,13 +871,18 @@ export default function PlanningPage() {
                       const d = parseDate(day.date);
                       const isSat = d.getDay() === 6;
                       const isToday = day.date === today;
-                      const barHeight = Math.min(day.utilization, 120);
 
                       let barColor = "bg-[#4F7C3A]";
                       let textColor = "text-[#4F7C3A]";
-                      if (day.utilization > 100) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
-                      else if (day.utilization > 90) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
+                      if (day.utilization > 90) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
                       else if (day.utilization > 70) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+
+                      // Wei Siang 2026-05-15 audit: bar height now scales
+                      // linearly with utilization, capped at 100% of the
+                      // 80px container. Critical days (>100%) get the red
+                      // colour + the AlertTriangle icon already; no need
+                      // to fake a taller bar with the old `* 0.8` fudge.
+                      const barHeightPct = Math.min(Math.max(day.utilization, 1), 100);
 
                       return (
                         <div
@@ -803,7 +894,7 @@ export default function PlanningPage() {
                           <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
                             <div
                               className={`w-full rounded-t-sm transition-all ${barColor}`}
-                              style={{ height: `${Math.max(barHeight * 0.8, 1)}%` }}
+                              style={{ height: `${barHeightPct}%` }}
                             />
                             {day.utilization > 90 && (
                               <AlertTriangle className="h-2.5 w-2.5 text-[#9A3A2D] absolute -top-3 left-1/2 -translate-x-1/2" />
@@ -931,8 +1022,10 @@ export default function PlanningPage() {
                   <option value="PENDING">Pending</option>
                   <option value="IN_PROGRESS">In Progress</option>
                   <option value="COMPLETED">Completed</option>
-                  <option value="ON_HOLD">On Hold</option>
                   <option value="CANCELLED">Cancelled</option>
+                  {/* Wei Siang 2026-05-15 audit: removed "On Hold" —
+                      ProductionOrder.status never takes ON_HOLD, so the
+                      filter was silently returning zero results. */}
                 </select>
 
                 {/* Date Range */}
@@ -1008,7 +1101,7 @@ export default function PlanningPage() {
                           {dept.name} CD
                         </th>
                       ))}
-                      <th className="h-9 px-2 text-left font-medium text-[#374151]">Stocked In</th>
+                      <th className="h-9 px-2 text-left font-medium text-[#374151]">Racking #</th>
                       <th className="h-9 px-2 text-right font-medium text-[#374151] cursor-pointer" onClick={() => toggleTrackerSort("progress")}>
                         <div className="flex items-center gap-1 justify-end">Progress <TrackerSortIcon field="progress" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
@@ -1061,7 +1154,11 @@ export default function PlanningPage() {
                             </td>
                             <td className="px-2 py-1.5 text-[#6B7280] max-w-[80px] truncate" title={order.notes}>{order.notes || "-"}</td>
                             <td className="px-2 py-1.5 text-[#4B5563]">{formatDate(order.targetEndDate)}</td>
-                            <td className="px-2 py-1.5 text-[#4B5563]">{formatDate(order.targetEndDate)}</td>
+                            <td className="px-2 py-1.5 text-[#4B5563]">
+                              {hookkaDDByPoId.has(order.id)
+                                ? formatDate(hookkaDDByPoId.get(order.id) as string)
+                                : "-"}
+                            </td>
                             <td className="px-2 py-1.5">
                               <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${overdue.className}`}>
                                 {overdue.icon} {overdue.label}

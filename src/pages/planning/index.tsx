@@ -118,20 +118,6 @@ type ScheduleEntry = {
   hookkaExpectedDD: string;
 };
 
-type CapacityDept = {
-  deptCode: string;
-  deptName: string;
-  color: string;
-  workerCount: number;
-  dailyCapacityMinutes: number;
-  dailyLoading: {
-    date: string;
-    loadedMinutes: number;
-    capacityMinutes: number;
-    utilization: number;
-    level: string;
-  }[];
-};
 
 // ── Constants ──
 
@@ -276,15 +262,18 @@ export default function PlanningPage() {
   const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders");
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkers } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: schedResp, refresh: refreshSched } = useCachedJson<{ data?: ScheduleEntry[] }>("/api/scheduling");
-  const { data: capResp, loading: capLoading, refresh: refreshCap } = useCachedJson<{ data?: CapacityDept[]; days?: string[] }>("/api/scheduling/capacity");
   const orders: ProductionOrder[] = useMemo(() => ordersResp?.data ?? [], [ordersResp]);
   const workers: Worker[] = useMemo(() => workersResp?.data ?? [], [workersResp]);
-  const capacityDepts: CapacityDept[] = useMemo(() => capResp?.data ?? [], [capResp]);
   // Wei Siang 2026-05-15 audit: schedules feed the Master Tracker's
   // Hookka DD column (was previously voided, leaving the column
   // duplicating Target End).
   const schedules: ScheduleEntry[] = useMemo(() => schedResp?.data ?? [], [schedResp]);
-  const loading = ordersLoading || workersLoading || capLoading;
+  const loading = ordersLoading || workersLoading;
+  // Wei Siang 2026-05-15 Phase 1: /api/scheduling/capacity is no
+  // longer consumed — Capacity Overview + Capacity Loading both
+  // compute client-side from orders + workers with the new 14-day
+  // rolling actual-capacity baseline. The endpoint may still be
+  // useful as a backend cross-check later; for now it's quiet.
 
   // ── Master Tracker state ──
   const [trackerCategoryTab, setTrackerCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -460,8 +449,7 @@ export default function PlanningPage() {
     refreshOrders();
     refreshWorkers();
     refreshSched();
-    refreshCap();
-  }, [refreshOrders, refreshWorkers, refreshSched, refreshCap]);
+  }, [refreshOrders, refreshWorkers, refreshSched]);
 
   // today (also used by Gantt + capacity calc below)
   const today = fmtISO(new Date());
@@ -658,6 +646,88 @@ export default function PlanningPage() {
     totalScopeCapacity > 0 ? Math.round((totalBfScopeLoad / totalScopeCapacity) * 100) : 0;
   const totalScopeUtilization =
     totalScopeCapacity > 0 ? Math.round((totalScopeLoad / totalScopeCapacity) * 100) : 0;
+
+  // ── Capacity Loading (next 4 weeks daily breakdown) ──
+  // Wei Siang 2026-05-15: rebuilt client-side to use the SAME 14-day
+  // rolling actual-capacity baseline as Capacity Overview, and to
+  // bucket loaded minutes by JC.dueDate. Previously this consumed
+  // /api/scheduling/capacity which used theoretical capacity — the
+  // two tabs disagreed AND every day rendered 0% in production.
+  //
+  // For each day in the next ~28 working days (Mon-Sat, skip Sundays):
+  //   loadedMinutes = sum estMinutes of active JCs whose dueDate
+  //                   equals this day
+  //   utilization   = loadedMinutes / dailyCapacity × 100
+  //
+  // Tells the operator "given my actual daily output, is the
+  // schedule I've handed the floor realistic per day?" If a day
+  // shows 200% it means the dueDate column has scheduled twice as
+  // much work as the floor can produce that day → reschedule or
+  // bring in overtime.
+  const dailyLoadingByDept = useMemo(() => {
+    const days: string[] = [];
+    const cursor = new Date();
+    cursor.setHours(0, 0, 0, 0);
+    while (days.length < 28) {
+      if (cursor.getDay() !== 0) {
+        days.push(fmtISO(cursor));
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    const dayIndex = new Set(days);
+
+    // Pre-bucket all active JCs by (dept, dueDate) once, then read
+    // the buckets per dept. Avoids O(days × orders × jcs) loop.
+    const bucket = new Map<string, Map<string, number>>();
+    for (const order of orders) {
+      if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
+      for (const jc of order.jobCards) {
+        if (
+          jc.status === "COMPLETED" ||
+          jc.status === "CANCELLED" ||
+          jc.status === "TRANSFERRED"
+        ) {
+          continue;
+        }
+        if (!jc.dueDate || !dayIndex.has(jc.dueDate)) continue;
+        if (!bucket.has(jc.departmentCode)) bucket.set(jc.departmentCode, new Map());
+        const deptMap = bucket.get(jc.departmentCode) as Map<string, number>;
+        deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + (jc.estMinutes || 0));
+      }
+    }
+
+    return DEPARTMENTS.map((dept) => {
+      const capDept = capacityData.find((d) => d.code === dept.code);
+      const dailyCap = capDept?.dailyCapacity ?? 0;
+      const denom = dailyCap > 0 ? dailyCap : 1;
+      const deptBucket = bucket.get(dept.code);
+
+      const dailyLoading = days.map((date) => {
+        const loadedMinutes = deptBucket?.get(date) ?? 0;
+        const utilization = dailyCap > 0 ? Math.round((loadedMinutes / denom) * 100) : 0;
+        let level = "low";
+        if (utilization > 100) level = "critical";
+        else if (utilization > 90) level = "high";
+        else if (utilization > 70) level = "medium";
+        return {
+          date,
+          loadedMinutes,
+          capacityMinutes: dailyCap,
+          utilization,
+          level,
+        };
+      });
+
+      return {
+        deptCode: dept.code,
+        deptName: dept.name,
+        color: dept.color,
+        workerCount: capDept?.workerCount ?? 0,
+        dailyCapacityMinutes: dailyCap,
+        dailyLoading,
+      };
+    });
+  }, [orders, capacityData]);
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(() => getDeptEfficiency(orders), [orders]);
@@ -1042,7 +1112,7 @@ export default function PlanningPage() {
           </div>
 
           {/* Per-department capacity loading */}
-          {capacityDepts.map((dept) => (
+          {dailyLoadingByDept.map((dept) => (
             <Card key={dept.deptCode} className="overflow-hidden">
               <div className="h-1" style={{ backgroundColor: dept.color }} />
               <CardHeader className="pb-2">

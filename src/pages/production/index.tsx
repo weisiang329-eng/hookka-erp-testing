@@ -6613,46 +6613,40 @@ export default function ProductionPage({
                 className="sticker-jc-page bg-white text-black"
                 style={{ width: "100mm", height: "150mm" }}
               >
-                <div className="w-full h-full flex flex-col" style={{ fontSize: "10pt" }}>
-                  {/* Wei Siang 2026-05-15 (revised): title is OUR
-                      company's SO No with line suffix (s.poNo,
-                      e.g. "SO-2604-217-01" / "CO-2604-088-01"). The
-                      customer's PO drops down to the first labelled
-                      row (was "SO No"). "应该要把我们公司的 Sales
-                      Order Number 当成标题". */}
-                  <div className="text-center font-bold" style={{ fontSize: "24pt", lineHeight: 1.1 }}>
+                <div className="w-full h-full flex flex-col" style={{ fontSize: "11pt" }}>
+                  {/* Wei Siang 2026-05-15 (revised): "为什么你 squeeze 上去
+                      呢？下面的空白那么多" — content was hugging the top
+                      because fonts were too small for a 100×150mm sheet.
+                      Bumped every font + every gap so the four sections
+                      naturally span the full sticker height (no mt-auto
+                      gymnastics needed). Same QR size (26mm) since Wei
+                      Siang's last instruction was "QR can be smaller". */}
+                  <div className="text-center font-bold" style={{ fontSize: "30pt", lineHeight: 1.1 }}>
                     {s.poNo}
                   </div>
-                  <div className="border-t-2 border-black my-[2mm]" />
-                  <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
-                    <div><span className="inline-block w-[34mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
-                    <div><span className="inline-block w-[34mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
+                  <div className="border-t-2 border-black my-[3mm]" />
+                  <div className="space-y-[2mm]" style={{ fontSize: "14pt", lineHeight: 1.4 }}>
+                    <div><span className="inline-block w-[36mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                    <div><span className="inline-block w-[36mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
                     <div className="flex items-baseline gap-[1mm]">
-                      <span className="inline-block w-[34mm] font-semibold">Model</span>
-                      <span className="font-bold" style={{ fontSize: "16pt" }}>: {s.model || "—"}</span>
+                      <span className="inline-block w-[36mm] font-semibold">Model</span>
+                      <span className="font-bold" style={{ fontSize: "18pt" }}>: {s.model || "—"}</span>
                     </div>
                     {s.wipName && (
-                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "34mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "36mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                     )}
                   </div>
-                  <div className="border-t border-black my-[2mm]" />
-                  {/* Wei Siang 2026-05-15 (revised): "感觉很窄… 中间还有
-                      很多空白" — drop the mt-auto from the sign-off so
-                      it sits right below the spec block, no big middle
-                      gap. QR shrunk slightly (30mm → 26mm) so the spec
-                      values + QR row breathes better. Specs bumped to
-                      13pt so the spec area visually balances the
-                      identifier block above. */}
+                  <div className="border-t border-black my-[3mm]" />
                   <div className="flex items-start gap-[3mm]">
-                    <div className="flex-1 space-y-[1.5mm]" style={{ fontSize: "13pt", lineHeight: 1.3 }}>
-                      <div><span className="inline-block w-[34mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
-                      <div><span className="inline-block w-[34mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
-                      {s.gap && <div><span className="inline-block w-[34mm] font-semibold">Gap</span>: {s.gap}</div>}
-                      {s.divan && <div><span className="inline-block w-[34mm] font-semibold">Divan</span>: {s.divan}</div>}
-                      {s.leg && <div><span className="inline-block w-[34mm] font-semibold">Leg</span>: {s.leg}</div>}
-                      {s.totalHeight && <div><span className="inline-block w-[34mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
+                    <div className="flex-1 space-y-[2mm]" style={{ fontSize: "14pt", lineHeight: 1.4 }}>
+                      <div><span className="inline-block w-[36mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                      <div><span className="inline-block w-[36mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                      {s.gap && <div><span className="inline-block w-[36mm] font-semibold">Gap</span>: {s.gap}</div>}
+                      {s.divan && <div><span className="inline-block w-[36mm] font-semibold">Divan</span>: {s.divan}</div>}
+                      {s.leg && <div><span className="inline-block w-[36mm] font-semibold">Leg</span>: {s.leg}</div>}
+                      {s.totalHeight && <div><span className="inline-block w-[36mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
                       <div className="flex items-start gap-[1mm]">
-                        <span className="font-semibold shrink-0" style={{ width: "34mm", color: "#9A3A2D" }}>Notes</span>
+                        <span className="font-semibold shrink-0" style={{ width: "36mm", color: "#9A3A2D" }}>Notes</span>
                         <span className="flex-1 break-words">
                           : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                         </span>
@@ -6667,23 +6661,31 @@ export default function ProductionPage({
                       />
                     )}
                   </div>
-                  <div className="border-t border-black my-[2mm]" />
-                  <div className="space-y-[3mm]" style={{ fontSize: "11pt" }}>
+                  <div className="border-t border-black my-[3mm]" />
+                  {/* Sign-off block grows to absorb remaining vertical
+                      space — taller writable lines (10mm) + bigger gap
+                      between them so the two rows fill the bottom area
+                      instead of sitting tight. mt-auto so this whole
+                      block hugs the bottom even when QR / specs are
+                      shorter than expected. */}
+                  <div className="mt-auto space-y-[6mm]" style={{ fontSize: "13pt" }}>
                     <div className="flex items-end gap-[2mm]">
                       <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                      <span className="flex-1 border-b border-black h-[6mm]" />
+                      <span className="flex-1 border-b border-black h-[10mm]" />
                     </div>
                     <div className="flex items-end gap-[2mm]">
                       <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                      <span className="flex-1 border-b border-black h-[6mm]" />
+                      <span className="flex-1 border-b border-black h-[10mm]" />
                     </div>
-                    <div className="font-bold" style={{ fontSize: "12pt" }}>Qty {s.qty}</div>
+                    <div className="flex items-baseline justify-between" style={{ fontSize: "14pt" }}>
+                      <span className="font-bold">Qty {s.qty}</span>
+                      {s.totalPieces > 1 && (
+                        <span className="font-semibold" style={{ fontSize: "11pt" }}>
+                          Piece {s.pieceNo} of {s.totalPieces}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  {s.totalPieces > 1 && (
-                    <div className="text-right font-semibold mt-[1mm]" style={{ fontSize: "10pt" }}>
-                      Piece {s.pieceNo} of {s.totalPieces}
-                    </div>
-                  )}
                 </div>
               </div>
             ) : (

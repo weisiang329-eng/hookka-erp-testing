@@ -342,9 +342,30 @@ function ColumnFilterDropdown<T>({
 
   const allChecked = checked.size === uniqueValues.length;
 
+  // Wei Siang 2026-05-15: hold the latest `checked` in a ref so the OK
+  // button's onClick reads the freshest value rather than a closure that
+  // can race a still-committing checkbox click. The user-reported
+  // symptom was "first OK click does nothing, second one filters" —
+  // verified live in the browser by clicking OK immediately after a
+  // checkbox toggle; the React closure on OK saw an empty set and
+  // skipped the setColumnValueFilters call. Update the ref
+  // SYNCHRONOUSLY inside the setChecked callback (NOT via useEffect)
+  // so it's correct even if the next click fires before the next
+  // commit / effect flush. uniqueValues comes from useMemo above and
+  // is stable per-render, so reading it from closure at click time is
+  // safe.
+  const checkedRef = useRef(checked);
+
   const toggleAll = () => {
-    if (allChecked) setChecked(new Set());
-    else setChecked(new Set(uniqueValues.map(([v]) => v)));
+    if (allChecked) {
+      const next = new Set<string>();
+      checkedRef.current = next;
+      setChecked(next);
+    } else {
+      const next = new Set(uniqueValues.map(([v]) => v));
+      checkedRef.current = next;
+      setChecked(next);
+    }
   };
 
   // Quick-filter chips for status-style columns (operator request
@@ -384,6 +405,7 @@ function ColumnFilterDropdown<T>({
       const next = new Set(prev);
       if (next.has(v)) next.delete(v);
       else next.add(v);
+      checkedRef.current = next; // sync ref synchronously — see comment on checkedRef
       return next;
     });
   };
@@ -498,26 +520,36 @@ function ColumnFilterDropdown<T>({
               </label>
             ))}
           </div>
-          {/* Actions */}
+          {/* Actions — `type="button"` everywhere to short-circuit any
+              accidental form-submit behaviour, and OK reads from
+              checkedRef so it's never staler than the latest checkbox
+              click. Wider hit-targets (px-4 py-1.5) so the OK and
+              Close don't overlap on touch (Wei Siang reported tapping
+              the seam between them and missing OK). */}
           <div className="flex items-center justify-between border-t border-[#E2DDD8] px-2 py-1.5">
             <button
+              type="button"
               className="rounded border border-[#D0D0D0] px-3 py-1 text-[11px] text-[#555] hover:bg-[#F0ECE9]"
               onClick={() => { onClear(); onClose(); }}
             >
               Clear Filter
             </button>
-            <div className="flex gap-1">
+            <div className="flex gap-2">
               <button
-                className="rounded border border-[#6B5C32] bg-[#6B5C32] px-3 py-1 text-[11px] text-white hover:bg-[#4D4224]"
+                type="button"
+                className="rounded border border-[#6B5C32] bg-[#6B5C32] px-4 py-1.5 text-[11px] font-semibold text-white hover:bg-[#4D4224]"
                 onClick={() => {
-                  if (allChecked) onApplyValues(null); // no filter
-                  else onApplyValues(new Set(checked));
+                  const latestChecked = checkedRef.current;
+                  const latestAllChecked = latestChecked.size === uniqueValues.length;
+                  if (latestAllChecked) onApplyValues(null); // no filter
+                  else onApplyValues(new Set(latestChecked));
                   onClose();
                 }}
               >
                 OK
               </button>
               <button
+                type="button"
                 className="rounded border border-[#D0D0D0] px-3 py-1 text-[11px] text-[#555] hover:bg-[#F0ECE9]"
                 onClick={onClose}
               >

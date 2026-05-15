@@ -6169,9 +6169,67 @@ export default function ProductionPage({
           <div className="overflow-x-auto">
             <div className="flex gap-3 p-3 min-w-min">
               {onScreenStickers.map((s) => {
-                // v3 layout (operator 2026-05-13) reads individual fields
-                // (s.leg) directly; the pre-fix `heightLine` summary string
-                // is unused now that we render labelled rows.
+                // Wei Siang 2026-05-15: FAB_CUT and FAB_SEW on-screen
+                // tiles must be a 1:1 preview of the 100×150mm print
+                // sticker — same size as the Packing FG tile (230×380px),
+                // mockup #3 layout (PO No huge headline → SO/Customer/
+                // Model/WIP → Size/Colour/Gap/Divan/Leg/Total/Notes →
+                // blank Fabric Cutting + Fabric Sewing sign-off lines).
+                // Other dept tabs keep the old compact 180px tile.
+                const useLargeTile = activeTab === "FAB_CUT" || activeTab === "FAB_SEW";
+                if (useLargeTile) {
+                  return (
+                    <div
+                      key={s.key}
+                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-3"
+                      style={{ width: "260px", height: "420px" }}
+                      title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
+                    >
+                      {/* PO No huge headline — falls back to internal PO
+                          number when customer didn't supply theirs. */}
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "20px" }}>
+                        {s.customerPOId || s.poNo}
+                      </div>
+                      <div className="border-t-2 border-black my-1" />
+                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">SO No</span>: {s.salesOrderNo || s.poNo}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="inline-block w-[88px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="font-bold" style={{ fontSize: "13px" }}>: {s.model || "—"}</span>
+                        </div>
+                        {s.wipName && (
+                          <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                        )}
+                      </div>
+                      <div className="border-t border-[#E6E0D9] my-1" />
+                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                        {s.gap && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                        {s.divan && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                        {s.leg && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                        {s.totalHeight && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Total Height</span>: {s.totalHeight}</div>}
+                        <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                      </div>
+                      <div className="mt-auto pt-2 flex items-end gap-2">
+                        <div className="flex-1 space-y-2 text-[10px]">
+                          <div className="flex items-end gap-1">
+                            <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
+                            <span className="flex-1 border-b border-black h-[14px]" />
+                          </div>
+                          <div className="flex items-end gap-1">
+                            <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
+                            <span className="flex-1 border-b border-black h-[14px]" />
+                          </div>
+                          <div className="font-bold text-[#1F1D1B]" style={{ fontSize: "11px" }}>Qty {s.qty}</div>
+                        </div>
+                        <QRImg data={s.qrPayload} size={80} alt="Job card QR" className="block" />
+                      </div>
+                    </div>
+                  );
+                }
+                // Default 180px compact tile for other dept tabs
                 return (
                   <div
                     key={s.key}
@@ -6179,18 +6237,7 @@ export default function ProductionPage({
                     style={{ width: "180px" }}
                     title={`${s.customerPOId || s.poNo} · ${s.model} · ${s.wipType} · ${s.wipName} · ${s.sizeLabel} · ${s.colour} · Qty ${s.qty}`}
                   >
-                    {/* On-screen QR tile — v3 layout (operator 2026-05-13).
-                        SO ID promoted to the top (was buried), labelled
-                        Model / Type / Color / Leg rows replace the
-                        previous chip-style stack. Pattern: each labelled
-                        row uses "Label-Value" with a hyphen, matching the
-                        operator's literal spec "Type-Armrest / Color /
-                        Leg Quantity". Rows hide themselves when the
-                        backing field is empty so non-bedframe stickers
-                        don't print an awkward "Leg-—" line. */}
                     <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
-                    {/* SO ID + state — operator-requested top-of-tile
-                        position for fastest traceability. */}
                     <div
                       className="mt-1.5 text-center leading-tight w-full font-semibold tabular-nums truncate text-[#1F1D1B]"
                       style={{ fontSize: "11px" }}
@@ -6198,7 +6245,6 @@ export default function ProductionPage({
                       {s.poNo}
                       {s.customerState ? ` · ${s.customerState}` : ""}
                     </div>
-                    {/* Model — bold accent under SO ID. */}
                     {s.model && (
                       <div
                         className="mt-0.5 text-center leading-tight w-full font-bold text-[#6B5C32] truncate"
@@ -6207,19 +6253,6 @@ export default function ProductionPage({
                         Model {s.model}
                       </div>
                     )}
-                    {/* WIP-{wipName} — full WIP identifier that already
-                        encodes model + variant + type + size + fabric.
-                        Operator 2026-05-13: replaced the per-field Type
-                        and Color rows ("我们需要 WIP 把 type 和 col
-                        remove"). Reserves 2 line-heights of space so
-                        long codes that wrap to two lines don't push the
-                        rows below down — operator wanted FAB_SEW tiles
-                        to look the same as the printed stickers, which
-                        means stable height across all tiles regardless
-                        of WIP length ("最好是给它两个 row 的空间").
-                        break-words wraps on space / hyphen boundaries
-                        rather than mid-character so the full string
-                        stays readable. */}
                     {s.wipName && (
                       <div
                         className="mt-1 text-center leading-snug w-full text-[#1F1D1B] break-words"
@@ -6228,9 +6261,6 @@ export default function ProductionPage({
                         WIP-{s.wipName}
                       </div>
                     )}
-                    {/* Leg-{height} — only when the variant carries a
-                        leg measurement. Suppressed for products with no
-                        leg dimension to avoid empty "Leg-" filler. */}
                     {s.leg && (
                       <div
                         className="text-center leading-tight w-full text-[#1F1D1B] truncate"
@@ -6239,9 +6269,6 @@ export default function ProductionPage({
                         Leg-{s.leg}
                       </div>
                     )}
-                    {/* ★ Special — red highlight, only when set. Sits
-                        between the labelled rows and Qty so it can't be
-                        missed by a worker scanning the tile. */}
                     {s.specialOrder && (
                       <div
                         className="mt-0.5 text-center leading-tight w-full text-[#9A3A2D] font-semibold truncate"
@@ -6250,7 +6277,6 @@ export default function ProductionPage({
                         ★ {s.specialOrder}
                       </div>
                     )}
-                    {/* Qty — bold footer. */}
                     <div
                       className="mt-1 text-center font-bold text-[#1F1D1B]"
                       style={{ fontSize: "10px" }}

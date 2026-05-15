@@ -6181,61 +6181,62 @@ export default function ProductionPage({
                   return (
                     <div
                       key={s.key}
-                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-3"
-                      style={{ width: "260px", height: "420px" }}
+                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
+                      style={{ width: "230px", height: "380px" }}
                       title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
                     >
-                      {/* Wei Siang 2026-05-15: same enlarged-fonts +
-                          sign-off-fills-bottom shape as the print
-                          template — fonts up, sign-off block has
-                          mt-auto so it pins to the bottom and the
-                          larger fonts above leave no big middle gap.
-                          Title = our line-suffixed SO No. */}
-                      <div className="text-center font-bold leading-tight" style={{ fontSize: "24px" }}>
+                      {/* Wei Siang 2026-05-15: "FG sticker 你就做到很好啊"
+                          — mirror FG sticker proportions / fonts exactly.
+                          Same 230×380px tile, same 10px row fonts, same
+                          16px title, same w-[72px] label column, same
+                          space-y-[2px] density. Only the BOTTOM block
+                          differs: instead of FG's QR + piece-position,
+                          Fab Cut/Sew puts QR (smaller) + Fabric Cutting /
+                          Fabric Sewing sign-off lines + Qty. */}
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "16px" }}>
                         {s.poNo}
                       </div>
-                      <div className="border-t-2 border-black my-2" />
-                      <div className="space-y-[4px] text-[12px] leading-snug text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
+                      <div className="border-t border-black my-1" />
+                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
                         <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
-                          <span className="font-bold" style={{ fontSize: "15px" }}>: {s.model || "—"}</span>
+                          <span className="inline-block w-[72px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="font-bold" style={{ fontSize: "14px" }}>: {s.model || "—"}</span>
                         </div>
                         {s.wipName && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                          <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                         )}
                       </div>
-                      <div className="border-t border-black my-2" />
-                      <div className="flex items-start gap-2">
-                        <div className="flex-1 space-y-[4px] text-[12px] leading-snug text-[#1F1D1B]">
-                          <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                          <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                          {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                          {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                          {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                          {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-                          <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
-                        </div>
-                        <QRImg data={s.qrPayload} size={80} alt="Job card QR" className="block shrink-0" />
+                      <div className="border-t border-[#E6E0D9] my-1" />
+                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                        {s.gap && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                        {s.divan && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                        {s.leg && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                        {s.totalHeight && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
+                        <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      <div className="border-t border-black my-2" />
-                      <div className="mt-auto space-y-3 text-[12px]">
-                        <div className="flex items-end gap-1">
-                          <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                          <span className="flex-1 border-b border-black h-[24px]" />
-                        </div>
-                        <div className="flex items-end gap-1">
-                          <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                          <span className="flex-1 border-b border-black h-[24px]" />
-                        </div>
-                        <div className="flex items-baseline justify-between">
-                          <span className="font-bold text-[#1F1D1B]" style={{ fontSize: "14px" }}>Qty {s.qty}</span>
-                          {s.totalPieces > 1 && (
-                            <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
-                              Piece {s.pieceNo} of {s.totalPieces}
-                            </span>
-                          )}
+                      {/* Bottom block: QR on left + sign-off + Qty on
+                          right. Same dashed-top + mt-auto pattern as
+                          FG sticker's QR+piece-position section. */}
+                      <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
+                        <div className="flex items-end gap-2 pt-1">
+                          <QRImg data={s.qrPayload} size={90} alt="Job card QR" className="block shrink-0" />
+                          <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between text-[10px]">
+                            <div className="space-y-1">
+                              <div className="flex items-end gap-1">
+                                <span className="font-semibold whitespace-nowrap text-[9px]">Fab Cut :</span>
+                                <span className="flex-1 border-b border-black h-[14px]" />
+                              </div>
+                              <div className="flex items-end gap-1">
+                                <span className="font-semibold whitespace-nowrap text-[9px]">Fab Sew :</span>
+                                <span className="flex-1 border-b border-black h-[14px]" />
+                              </div>
+                            </div>
+                            <div className="font-bold mt-1" style={{ fontSize: "12px" }}>Qty {s.qty}</div>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -6619,77 +6620,76 @@ export default function ProductionPage({
                 className="sticker-jc-page bg-white text-black"
                 style={{ width: "100mm", height: "150mm" }}
               >
-                <div className="w-full h-full flex flex-col" style={{ fontSize: "11pt" }}>
-                  {/* Wei Siang 2026-05-15 (revised): "为什么你 squeeze 上去
-                      呢？下面的空白那么多" — content was hugging the top
-                      because fonts were too small for a 100×150mm sheet.
-                      Bumped every font + every gap so the four sections
-                      naturally span the full sticker height (no mt-auto
-                      gymnastics needed). Same QR size (26mm) since Wei
-                      Siang's last instruction was "QR can be smaller". */}
-                  <div className="text-center font-bold" style={{ fontSize: "30pt", lineHeight: 1.1 }}>
+                <div className="w-full h-full flex flex-col" style={{ fontSize: "9pt" }}>
+                  {/* Wei Siang 2026-05-15: mirror the FG sticker shape
+                      exactly — same density, same proportions, same
+                      mt-auto bottom block. Title = our line-suffixed
+                      SO No. Bottom block swaps FG's "QR + piece
+                      position" for Fab Cut's "QR + sign-off lines +
+                      Qty". */}
+                  <div className="text-center font-bold" style={{ fontSize: "14pt", lineHeight: 1.1 }}>
                     {s.poNo}
                   </div>
-                  <div className="border-t-2 border-black my-[3mm]" />
-                  <div className="space-y-[2mm]" style={{ fontSize: "14pt", lineHeight: 1.4 }}>
-                    <div><span className="inline-block w-[36mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
-                    <div><span className="inline-block w-[36mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
+                  <div className="border-t border-black my-[1.5mm]" />
+                  <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
+                    <div><span className="inline-block w-[26mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                    <div><span className="inline-block w-[26mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
                     <div className="flex items-baseline gap-[1mm]">
-                      <span className="inline-block w-[36mm] font-semibold">Model</span>
-                      <span className="font-bold" style={{ fontSize: "18pt" }}>: {s.model || "—"}</span>
+                      <span className="inline-block w-[26mm] font-semibold">Model</span>
+                      <span className="font-bold" style={{ fontSize: "14pt" }}>: {s.model || "—"}</span>
                     </div>
                     {s.wipName && (
-                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "36mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "26mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                     )}
                   </div>
-                  <div className="border-t border-black my-[3mm]" />
-                  <div className="flex items-start gap-[3mm]">
-                    <div className="flex-1 space-y-[2mm]" style={{ fontSize: "14pt", lineHeight: 1.4 }}>
-                      <div><span className="inline-block w-[36mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
-                      <div><span className="inline-block w-[36mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
-                      {s.gap && <div><span className="inline-block w-[36mm] font-semibold">Gap</span>: {s.gap}</div>}
-                      {s.divan && <div><span className="inline-block w-[36mm] font-semibold">Divan</span>: {s.divan}</div>}
-                      {s.leg && <div><span className="inline-block w-[36mm] font-semibold">Leg</span>: {s.leg}</div>}
-                      {s.totalHeight && <div><span className="inline-block w-[36mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
-                      <div className="flex items-start gap-[1mm]">
-                        <span className="font-semibold shrink-0" style={{ width: "36mm", color: "#9A3A2D" }}>Notes</span>
-                        <span className="flex-1 break-words">
-                          : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
-                        </span>
-                      </div>
+                  <div className="border-t border-[#E6E0D9] my-[1.5mm]" />
+                  <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
+                    <div><span className="inline-block w-[26mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                    <div><span className="inline-block w-[26mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                    {s.gap && <div><span className="inline-block w-[26mm] font-semibold">Gap</span>: {s.gap}</div>}
+                    {s.divan && <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divan}</div>}
+                    {s.leg && <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.leg}</div>}
+                    {s.totalHeight && <div><span className="inline-block w-[26mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
+                    <div className="flex items-start gap-[1mm]">
+                      <span className="font-semibold shrink-0" style={{ width: "26mm", color: "#9A3A2D" }}>Notes</span>
+                      <span className="flex-1 break-words">
+                        : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                      </span>
                     </div>
-                    {s.qrDataUrl && (
-                      <img
-                        src={s.qrDataUrl}
-                        alt="Job card QR"
-                        style={{ width: "26mm", height: "26mm" }}
-                        className="shrink-0"
-                      />
-                    )}
                   </div>
-                  <div className="border-t border-black my-[3mm]" />
-                  {/* Sign-off block grows to absorb remaining vertical
-                      space — taller writable lines (10mm) + bigger gap
-                      between them so the two rows fill the bottom area
-                      instead of sitting tight. mt-auto so this whole
-                      block hugs the bottom even when QR / specs are
-                      shorter than expected. */}
-                  <div className="mt-auto space-y-[6mm]" style={{ fontSize: "13pt" }}>
-                    <div className="flex items-end gap-[2mm]">
-                      <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                      <span className="flex-1 border-b border-black h-[10mm]" />
-                    </div>
-                    <div className="flex items-end gap-[2mm]">
-                      <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                      <span className="flex-1 border-b border-black h-[10mm]" />
-                    </div>
-                    <div className="flex items-baseline justify-between" style={{ fontSize: "14pt" }}>
-                      <span className="font-bold">Qty {s.qty}</span>
-                      {s.totalPieces > 1 && (
-                        <span className="font-semibold" style={{ fontSize: "11pt" }}>
-                          Piece {s.pieceNo} of {s.totalPieces}
-                        </span>
+                  {/* Bottom block — same shape as FG sticker, mt-auto +
+                      dashed top border + QR (left) + content (right).
+                      Content is Fab Cut / Fab Sew sign-off lines + Qty. */}
+                  <div className="mt-auto pt-[1.5mm] border-t border-dashed border-black">
+                    <div className="flex items-end gap-[2mm] pt-[1.5mm]">
+                      {s.qrDataUrl && (
+                        <img
+                          src={s.qrDataUrl}
+                          alt="Job card QR"
+                          style={{ width: "36mm", height: "36mm" }}
+                          className="shrink-0"
+                        />
                       )}
+                      <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between" style={{ fontSize: "11pt" }}>
+                        <div className="space-y-[3mm]">
+                          <div className="flex items-end gap-[1.5mm]">
+                            <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
+                            <span className="flex-1 border-b border-black h-[7mm]" />
+                          </div>
+                          <div className="flex items-end gap-[1.5mm]">
+                            <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
+                            <span className="flex-1 border-b border-black h-[7mm]" />
+                          </div>
+                        </div>
+                        <div className="flex items-baseline justify-between mt-[2mm]" style={{ fontSize: "13pt" }}>
+                          <span className="font-bold">Qty {s.qty}</span>
+                          {s.totalPieces > 1 && (
+                            <span className="font-semibold" style={{ fontSize: "9pt" }}>
+                              Piece {s.pieceNo} of {s.totalPieces}
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -282,8 +282,30 @@ export default function PlanningPage() {
   const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders");
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkers } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: schedResp, refresh: refreshSched } = useCachedJson<{ data?: ScheduleEntry[] }>("/api/scheduling");
+  // Wei Siang 2026-05-15: Capacity Loading lists only production depts.
+  // Drive the list from /api/departments + isProduction flag (matches
+  // the employees.tsx canonical pattern) so non-production depts
+  // (WAREHOUSING, REPAIR, MAINTENANCE, PRODUCTION_SHORTFALL, R_AND_D)
+  // can't sneak in and any new prod dept added via the admin UI
+  // appears automatically — no code change required.
+  const { data: deptsResp } = useCachedJson<{
+    data?: { id: string; code: string; name: string; color: string; sequence: number; isProduction: boolean }[];
+  }>("/api/departments");
   const orders: ProductionOrder[] = useMemo(() => ordersResp?.data ?? [], [ordersResp]);
   const workers: Worker[] = useMemo(() => workersResp?.data ?? [], [workersResp]);
+  // Production-only dept list, sorted by sequence. Falls back to the
+  // hardcoded DEPARTMENTS list while /api/departments is still loading
+  // so first paint doesn't flash an empty Capacity Loading tab.
+  const productionDepartments = useMemo(() => {
+    const live = deptsResp?.data;
+    if (!live || live.length === 0) {
+      return DEPARTMENTS.map((d) => ({ code: d.code, name: d.name, color: d.color }));
+    }
+    return live
+      .filter((d) => d.isProduction)
+      .sort((a, b) => a.sequence - b.sequence)
+      .map((d) => ({ code: d.code, name: d.name, color: d.color }));
+  }, [deptsResp]);
   // Wei Siang 2026-05-15 audit: schedules feed the Master Tracker's
   // Hookka DD column (was previously voided, leaving the column
   // duplicating Target End).
@@ -727,7 +749,13 @@ export default function PlanningPage() {
       }
     }
 
-    return DEPARTMENTS.map((dept) => {
+    // Wei Siang 2026-05-15: iterate productionDepartments (live API +
+    // isProduction flag) instead of the hardcoded DEPARTMENTS so the
+    // Capacity Loading list only ever shows production depts. If
+    // /api/departments hasn't loaded yet, productionDepartments falls
+    // back to the same 8 hardcoded codes, so no visible regression on
+    // first paint.
+    return productionDepartments.map((dept) => {
       const capDept = capacityData.find((d) => d.code === dept.code);
       const dailyCap = capDept?.dailyCapacity ?? 0;
       const denom = dailyCap > 0 ? dailyCap : 1;
@@ -758,7 +786,7 @@ export default function PlanningPage() {
         dailyLoading,
       };
     });
-  }, [orders, capacityData]);
+  }, [orders, capacityData, productionDepartments]);
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(

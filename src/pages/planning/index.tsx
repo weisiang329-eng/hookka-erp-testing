@@ -202,35 +202,55 @@ const TRACKER_DEPARTMENTS = [
   { name: "Packing",   code: "PACKING",    color: "#06B6D4" },
 ];
 
-function getDeptEfficiency(orders: ProductionOrder[]) {
-  return TRACKER_DEPARTMENTS.map((dept) => {
-    let active = 0;
-    let completed = 0;
-    let totalEstHours = 0;
-    let totalActualHours = 0;
+// Wei Siang 2026-05-15 Phase 2: Overview table now splits each dept
+// into SOFA + BEDFRAME rows and honours a completion-date filter.
+//  - Active count is a current snapshot (no date filter applied).
+//  - Completed / Est / Actual / Efficiency all sum only over JCs whose
+//    completedDate falls inside [dateFrom, dateTo] (inclusive).
+//  - Category split = order.itemCategory; rows where itemCategory is
+//    neither SOFA nor BEDFRAME (e.g. ACCESSORY) are skipped.
+function getDeptEfficiency(
+  orders: ProductionOrder[],
+  dateFrom: string,
+  dateTo: string,
+) {
+  const CATEGORIES = ["SOFA", "BEDFRAME"] as const;
+  return TRACKER_DEPARTMENTS.flatMap((dept) =>
+    CATEGORIES.map((cat) => {
+      let active = 0;
+      let completed = 0;
+      let totalEstHours = 0;
+      let totalActualHours = 0;
 
-    for (const order of orders) {
-      const jc = order.jobCards.find((j) => j.departmentCode === dept.code);
-      if (!jc) continue;
-      if (jc.status === "IN_PROGRESS" || jc.status === "PAUSED") active++;
-      if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") {
-        completed++;
-        totalEstHours += jc.estMinutes / 60;
-        totalActualHours += (jc.actualMinutes ?? jc.estMinutes) / 60;
+      for (const order of orders) {
+        if (order.itemCategory !== cat) continue;
+        const jc = order.jobCards.find((j) => j.departmentCode === dept.code);
+        if (!jc) continue;
+        if (jc.status === "IN_PROGRESS" || jc.status === "PAUSED") active++;
+        if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") {
+          // Date filter on completion date. NULL completedDate is
+          // skipped because we can't place it on the timeline.
+          if (!jc.completedDate) continue;
+          if (dateFrom && jc.completedDate < dateFrom) continue;
+          if (dateTo && jc.completedDate > dateTo) continue;
+          completed++;
+          totalEstHours += jc.estMinutes / 60;
+          totalActualHours += (jc.actualMinutes ?? jc.estMinutes) / 60;
+        }
       }
-    }
 
-    const efficiency = totalActualHours > 0 ? Math.round((totalEstHours / totalActualHours) * 100) : 0;
-    let statusLabel: string;
-    let statusColor: string;
-    if (efficiency >= 95)      { statusLabel = "Excellent";          statusColor = "text-[#4F7C3A] bg-[#EEF3E4]"; }
-    else if (efficiency >= 80) { statusLabel = "Good";               statusColor = "text-[#3E6570] bg-[#E0EDF0]"; }
-    else if (efficiency >= 60) { statusLabel = "Fair";               statusColor = "text-[#9C6F1E] bg-[#FAEFCB]"; }
-    else if (efficiency > 0)   { statusLabel = "Needs Improvement";  statusColor = "text-[#9A3A2D] bg-[#F9E1DA]"; }
-    else                       { statusLabel = "No Data";            statusColor = "text-gray-500 bg-gray-50"; }
+      const efficiency = totalActualHours > 0 ? Math.round((totalEstHours / totalActualHours) * 100) : 0;
+      let statusLabel: string;
+      let statusColor: string;
+      if (efficiency >= 95)      { statusLabel = "Excellent";          statusColor = "text-[#4F7C3A] bg-[#EEF3E4]"; }
+      else if (efficiency >= 80) { statusLabel = "Good";               statusColor = "text-[#3E6570] bg-[#E0EDF0]"; }
+      else if (efficiency >= 60) { statusLabel = "Fair";               statusColor = "text-[#9C6F1E] bg-[#FAEFCB]"; }
+      else if (efficiency > 0)   { statusLabel = "Needs Improvement";  statusColor = "text-[#9A3A2D] bg-[#F9E1DA]"; }
+      else                       { statusLabel = "No Data";            statusColor = "text-gray-500 bg-gray-50"; }
 
-    return { ...dept, active, completed, totalEstHours, totalActualHours, efficiency, statusLabel, statusColor };
-  });
+      return { ...dept, category: cat, active, completed, totalEstHours, totalActualHours, efficiency, statusLabel, statusColor };
+    }),
+  );
 }
 
 // ── Helpers ──
@@ -274,6 +294,17 @@ export default function PlanningPage() {
   // compute client-side from orders + workers with the new 14-day
   // rolling actual-capacity baseline. The endpoint may still be
   // useful as a backend cross-check later; for now it's quiet.
+
+  // ── Capacity Overview > Efficiency Overview filter ──
+  // Wei Siang 2026-05-15 Phase 2: filter completed JCs by completion
+  // date. Default = past 30 days ending today. Format YYYY-MM-DD so
+  // string compare works against jc.completedDate.
+  const [effDateFrom, setEffDateFrom] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return fmtISO(d);
+  });
+  const [effDateTo, setEffDateTo] = useState<string>(() => fmtISO(new Date()));
 
   // ── Master Tracker state ──
   const [trackerCategoryTab, setTrackerCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -730,7 +761,10 @@ export default function PlanningPage() {
   }, [orders, capacityData]);
 
   // ── Master Tracker computed values ──
-  const deptEfficiency = useMemo(() => getDeptEfficiency(orders), [orders]);
+  const deptEfficiency = useMemo(
+    () => getDeptEfficiency(orders, effDateFrom, effDateTo),
+    [orders, effDateFrom, effDateTo],
+  );
 
   const filteredTrackerOrders = useMemo(() => {
     let result = [...orders];
@@ -1049,10 +1083,42 @@ export default function PlanningPage() {
           {/* Department Efficiency Overview */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <BarChart3 className="h-5 w-5 text-[#6B5C32]" />
-                All Departments Efficiency Overview
-              </CardTitle>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <BarChart3 className="h-5 w-5 text-[#6B5C32]" />
+                  All Departments Efficiency Overview
+                </CardTitle>
+                {/* Wei Siang 2026-05-15 Phase 2: completion-date filter. */}
+                <div className="flex items-center gap-2 text-xs text-[#6B7280]">
+                  <span>Completed between</span>
+                  <input
+                    type="date"
+                    value={effDateFrom}
+                    onChange={(e) => setEffDateFrom(e.target.value)}
+                    className="h-7 rounded border border-[#E2DDD8] bg-white px-2 text-xs text-[#1F1D1B] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                  />
+                  <span>and</span>
+                  <input
+                    type="date"
+                    value={effDateTo}
+                    onChange={(e) => setEffDateTo(e.target.value)}
+                    className="h-7 rounded border border-[#E2DDD8] bg-white px-2 text-xs text-[#1F1D1B] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const d = new Date();
+                      setEffDateTo(fmtISO(d));
+                      d.setDate(d.getDate() - 30);
+                      setEffDateFrom(fmtISO(d));
+                    }}
+                    className="ml-1 h-7 rounded border border-[#E2DDD8] bg-[#F0ECE9] px-2 text-xs text-[#6B5C32] hover:bg-[#E8E3DE]"
+                    title="Reset to past 30 days"
+                  >
+                    Past 30d
+                  </button>
+                </div>
+              </div>
             </CardHeader>
             <CardContent>
               <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
@@ -1060,6 +1126,7 @@ export default function PlanningPage() {
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                       <th className="h-9 px-3 text-left font-medium text-[#374151]">Department</th>
+                      <th className="h-9 px-3 text-left font-medium text-[#374151]">Category</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Active</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Completed</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Est Hours</th>
@@ -1069,26 +1136,53 @@ export default function PlanningPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {deptEfficiency.map((dept) => (
-                      <tr key={dept.code} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
-                        <td className="px-3 py-2">
-                          <div className="flex items-center gap-2">
-                            <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
-                            <span className="font-medium text-[#1F1D1B]">{dept.name}</span>
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 text-right font-medium text-[#3E6570]">{dept.active}</td>
-                        <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{dept.completed}</td>
-                        <td className="px-3 py-2 text-right text-[#4B5563]">{dept.totalEstHours.toFixed(1)}h</td>
-                        <td className="px-3 py-2 text-right text-[#4B5563]">{dept.totalActualHours.toFixed(1)}h</td>
-                        <td className="px-3 py-2 text-right font-bold">{dept.efficiency > 0 ? `${dept.efficiency}%` : "-"}</td>
-                        <td className="px-3 py-2">
-                          <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${dept.statusColor}`}>
-                            {dept.statusLabel}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {TRACKER_DEPARTMENTS.map((dept) => {
+                      const rows = deptEfficiency.filter((r) => r.code === dept.code);
+                      return rows.map((row, idx) => {
+                        const isLastInGroup = idx === rows.length - 1;
+                        return (
+                          <tr
+                            key={`${dept.code}-${row.category}`}
+                            className={`hover:bg-[#FAF9F7] ${
+                              isLastInGroup ? "border-b border-[#E2DDD8]" : ""
+                            }`}
+                          >
+                            {idx === 0 && (
+                              <td
+                                rowSpan={rows.length}
+                                className="px-3 py-2 align-top border-r border-[#E2DDD8] bg-[#FAF9F7]"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
+                                  <span className="font-medium text-[#1F1D1B]">{dept.name}</span>
+                                </div>
+                              </td>
+                            )}
+                            <td className="px-3 py-2">
+                              <span
+                                className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                                  row.category === "SOFA"
+                                    ? "text-[#3E6570] bg-[#E0EDF0]"
+                                    : "text-[#6B5C32] bg-[#F0ECE9]"
+                                }`}
+                              >
+                                {row.category}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-right font-medium text-[#3E6570]">{row.active}</td>
+                            <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{row.completed}</td>
+                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalEstHours.toFixed(1)}h</td>
+                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalActualHours.toFixed(1)}h</td>
+                            <td className="px-3 py-2 text-right font-bold">{row.efficiency > 0 ? `${row.efficiency}%` : "-"}</td>
+                            <td className="px-3 py-2">
+                              <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${row.statusColor}`}>
+                                {row.statusLabel}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })}
                   </tbody>
                 </table>
               </div>

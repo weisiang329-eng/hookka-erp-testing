@@ -347,6 +347,27 @@ function ColumnFilterDropdown<T>({
     else setChecked(new Set(uniqueValues.map(([v]) => v)));
   };
 
+  // Quick-filter chips for status-style columns (operator request
+  // 2026-05-13). When a column's uniqueValues contain any string
+  // starting with "Done", "Overdue", or "Pending" (case-insensitive),
+  // surface a one-click chip per prefix. Clicking applies the filter
+  // and closes the dropdown so the operator doesn't have to tick the
+  // 10+ "Overdue …" rows individually. Columns whose values don't
+  // match these prefixes (Customer, Product Code, etc.) show no chips
+  // and behave exactly as before — zero impact outside status columns.
+  const quickFilterChips = useMemo(() => {
+    const prefixes = ["Done", "Overdue", "Pending"];
+    return prefixes
+      .map((prefix) => {
+        const lower = prefix.toLowerCase();
+        const matches = uniqueValues
+          .filter(([v]) => v.toLowerCase().startsWith(lower))
+          .map(([v]) => v);
+        return { prefix, matches };
+      })
+      .filter((q) => q.matches.length > 0);
+  }, [uniqueValues]);
+
   const toggleValue = (v: string) => {
     setChecked(prev => {
       const next = new Set(prev);
@@ -434,6 +455,28 @@ function ColumnFilterDropdown<T>({
             <input type="checkbox" checked={allChecked} onChange={toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32]" />
             <span className="font-medium">(All)</span>
           </label>
+          {/* Quick-filter chips — render only when there are matches in
+              uniqueValues for that prefix. One-click apply + close so the
+              operator doesn't have to tick e.g. 14 "Overdue …" rows
+              individually (operator request 2026-05-13). */}
+          {quickFilterChips.length > 0 && (
+            <div className="flex flex-wrap gap-1 px-2 py-1.5 border-t border-[#F0F0F0] bg-[#FAF8F4]">
+              {quickFilterChips.map(({ prefix, matches }) => (
+                <button
+                  key={prefix}
+                  type="button"
+                  className="rounded border border-[#D0D0D0] bg-white px-2 py-0.5 text-[10px] text-[#333] hover:bg-[#6B5C32] hover:text-white hover:border-[#6B5C32] transition-colors"
+                  onClick={() => {
+                    onApplyValues(new Set(matches));
+                    onClose();
+                  }}
+                  title={`Apply: only show ${matches.length} ${prefix.toLowerCase()} value${matches.length === 1 ? "" : "s"}`}
+                >
+                  {prefix} <span className="text-[#888]">({matches.length})</span>
+                </button>
+              ))}
+            </div>
+          )}
           {/* Values list */}
           <div className="max-h-[200px] overflow-y-auto border-t border-[#F0F0F0]">
             {filteredValues.map(([val, count]) => (

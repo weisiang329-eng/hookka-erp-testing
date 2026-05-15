@@ -6181,7 +6181,7 @@ export default function ProductionPage({
                   return (
                     <div
                       key={s.key}
-                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
+                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2 overflow-hidden"
                       style={{ width: "230px", height: "380px" }}
                       title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
                     >
@@ -6197,7 +6197,7 @@ export default function ProductionPage({
                         {s.poNo}
                       </div>
                       <div className="border-t border-black my-1" />
-                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
                         <div className="flex items-baseline gap-1">
@@ -6209,7 +6209,7 @@ export default function ProductionPage({
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
                         {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
@@ -6451,7 +6451,7 @@ export default function ProductionPage({
                   return (
                     <div
                       key={s.key}
-                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
+                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2 overflow-hidden"
                       style={{ width: "230px", height: "380px" }}
                       title={`${s.customerName} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}`}
                     >
@@ -6467,7 +6467,7 @@ export default function ProductionPage({
                         {customerLine || s.customerName || "—"}
                       </div>
                       <div className="border-t border-black my-1" />
-                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
@@ -6481,7 +6481,7 @@ export default function ProductionPage({
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
                         {s.itemCategory === "SOFA" && s.seatSize && (
                           <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Seat</span>: {s.seatSize}"</div>

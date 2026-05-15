@@ -6185,52 +6185,58 @@ export default function ProductionPage({
                       style={{ width: "260px", height: "420px" }}
                       title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
                     >
-                      {/* Title = our line-suffixed SO No (s.poNo).
-                          Customer PO drops to a labelled row below. */}
-                      <div className="text-center font-bold leading-tight" style={{ fontSize: "20px" }}>
+                      {/* Wei Siang 2026-05-15: same enlarged-fonts +
+                          sign-off-fills-bottom shape as the print
+                          template — fonts up, sign-off block has
+                          mt-auto so it pins to the bottom and the
+                          larger fonts above leave no big middle gap.
+                          Title = our line-suffixed SO No. */}
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "24px" }}>
                         {s.poNo}
                       </div>
-                      <div className="border-t-2 border-black my-1" />
-                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
+                      <div className="border-t-2 border-black my-2" />
+                      <div className="space-y-[4px] text-[12px] leading-snug text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
                         <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[88px] font-semibold text-[#6B7280]">Model</span>
-                          <span className="font-bold" style={{ fontSize: "13px" }}>: {s.model || "—"}</span>
+                          <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="font-bold" style={{ fontSize: "15px" }}>: {s.model || "—"}</span>
                         </div>
                         {s.wipName && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                          <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                         )}
                       </div>
-                      <div className="border-t border-[#E6E0D9] my-1" />
-                      {/* Specs LEFT, QR RIGHT — Wei Siang 2026-05-15.
-                          Spec font bumped 10px → 11px and sign-off
-                          flows naturally below (no mt-auto), so the
-                          tile doesn't have a big white gap in the
-                          middle. */}
+                      <div className="border-t border-black my-2" />
                       <div className="flex items-start gap-2">
-                        <div className="flex-1 space-y-[2px] text-[11px] leading-snug text-[#1F1D1B]">
-                          <div className="truncate"><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                          <div className="truncate"><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                          {s.gap && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                          {s.divan && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                          {s.leg && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                          {s.totalHeight && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-                          <div className="flex items-start gap-1"><span className="inline-block w-[80px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div className="flex-1 space-y-[4px] text-[12px] leading-snug text-[#1F1D1B]">
+                          <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                          {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                          {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                          {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                          {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
+                          <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                         </div>
-                        <QRImg data={s.qrPayload} size={88} alt="Job card QR" className="block shrink-0" />
+                        <QRImg data={s.qrPayload} size={80} alt="Job card QR" className="block shrink-0" />
                       </div>
-                      <div className="border-t border-[#E6E0D9] my-2" />
-                      <div className="space-y-2 text-[11px]">
+                      <div className="border-t border-black my-2" />
+                      <div className="mt-auto space-y-3 text-[12px]">
                         <div className="flex items-end gap-1">
                           <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                          <span className="flex-1 border-b border-black h-[14px]" />
+                          <span className="flex-1 border-b border-black h-[24px]" />
                         </div>
                         <div className="flex items-end gap-1">
                           <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                          <span className="flex-1 border-b border-black h-[14px]" />
+                          <span className="flex-1 border-b border-black h-[24px]" />
                         </div>
-                        <div className="font-bold text-[#1F1D1B]" style={{ fontSize: "12px" }}>Qty {s.qty}</div>
+                        <div className="flex items-baseline justify-between">
+                          <span className="font-bold text-[#1F1D1B]" style={{ fontSize: "14px" }}>Qty {s.qty}</span>
+                          {s.totalPieces > 1 && (
+                            <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
+                              Piece {s.pieceNo} of {s.totalPieces}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );

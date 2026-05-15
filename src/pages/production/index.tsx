@@ -6203,19 +6203,20 @@ export default function ProductionPage({
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                        {s.gap && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                        {s.divan && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                        {s.leg && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                        {s.totalHeight && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Total Height</span>: {s.totalHeight}</div>}
-                        <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
-                      </div>
-                      {/* QR centred in the empty area between specs and
-                          sign-off lines (Wei Siang 2026-05-15) */}
-                      <div className="flex justify-center my-2">
-                        <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
+                      {/* Specs LEFT, QR RIGHT — Wei Siang 2026-05-15:
+                          "可以放 QR Code 在这一边" (the empty area
+                          beside the short numeric values). */}
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
+                          <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                          {s.gap && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                          {s.divan && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                          {s.leg && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                          {s.totalHeight && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Total Height</span>: {s.totalHeight}</div>}
+                          <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        </div>
+                        <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block shrink-0" />
                       </div>
                       <div className="mt-auto space-y-2 text-[10px]">
                         <div className="flex items-end gap-1">
@@ -6630,35 +6631,36 @@ export default function ProductionPage({
                     )}
                   </div>
                   <div className="border-t border-black my-[2mm]" />
-                  <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
-                    <div><span className="inline-block w-[34mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
-                    <div><span className="inline-block w-[34mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
-                    {s.gap && <div><span className="inline-block w-[34mm] font-semibold">Gap</span>: {s.gap}</div>}
-                    {s.divan && <div><span className="inline-block w-[34mm] font-semibold">Divan</span>: {s.divan}</div>}
-                    {s.leg && <div><span className="inline-block w-[34mm] font-semibold">Leg</span>: {s.leg}</div>}
-                    {s.totalHeight && <div><span className="inline-block w-[34mm] font-semibold">Total Height</span>: {s.totalHeight}</div>}
-                    <div className="flex items-start gap-[1mm]">
-                      <span className="font-semibold shrink-0" style={{ width: "34mm", color: "#9A3A2D" }}>Notes</span>
-                      <span className="flex-1 break-words">
-                        : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
-                      </span>
+                  {/* Wei Siang 2026-05-15 (revised again): spec values
+                      live in the LEFT column, QR sits in the RIGHT
+                      column alongside them — the "empty area" beside
+                      the short numeric values is exactly where the QR
+                      goes ("可以放 QR Code 在这一边"). Sign-off lines
+                      live at the bottom on their own. */}
+                  <div className="flex items-start gap-[3mm]">
+                    <div className="flex-1 space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
+                      <div><span className="inline-block w-[34mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                      <div><span className="inline-block w-[34mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                      {s.gap && <div><span className="inline-block w-[34mm] font-semibold">Gap</span>: {s.gap}</div>}
+                      {s.divan && <div><span className="inline-block w-[34mm] font-semibold">Divan</span>: {s.divan}</div>}
+                      {s.leg && <div><span className="inline-block w-[34mm] font-semibold">Leg</span>: {s.leg}</div>}
+                      {s.totalHeight && <div><span className="inline-block w-[34mm] font-semibold">Total Height</span>: {s.totalHeight}</div>}
+                      <div className="flex items-start gap-[1mm]">
+                        <span className="font-semibold shrink-0" style={{ width: "34mm", color: "#9A3A2D" }}>Notes</span>
+                        <span className="flex-1 break-words">
+                          : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                  {/* Wei Siang 2026-05-15 (revised): QR moves UP into the
-                      empty area between the spec block and the sign-off
-                      lines ("QR 应该在这个地方，空白的地方"), centred so
-                      it draws the eye between the measurements above and
-                      the writable lines below. Sign-off lines then live
-                      at the very bottom by themselves. */}
-                  {s.qrDataUrl && (
-                    <div className="flex justify-center my-[2mm]">
+                    {s.qrDataUrl && (
                       <img
                         src={s.qrDataUrl}
                         alt="Job card QR"
-                        style={{ width: "28mm", height: "28mm" }}
+                        style={{ width: "30mm", height: "30mm" }}
+                        className="shrink-0"
                       />
-                    </div>
-                  )}
+                    )}
+                  </div>
                   <div className="mt-auto space-y-[3mm]" style={{ fontSize: "11pt" }}>
                     <div className="flex items-end gap-[2mm]">
                       <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>

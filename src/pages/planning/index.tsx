@@ -158,6 +158,15 @@ const HOURS_PER_DAY = 9;
 // future "make this configurable per-dept" lands in one place.
 const ROLLING_WINDOW_DAYS = 7;
 
+// Wei Siang 2026-05-15: Capacity Loading chart window. Operator
+// asked for ~21 days total split as "past production" + "future
+// planned" — past matches the rolling-avg window so the operator
+// sees variance vs the same 7-day baseline shown elsewhere; future
+// runs 14 days out so the chart still answers "when is the next
+// crunch coming?" without going so far it becomes noise.
+const LOADING_CHART_PAST_DAYS = 7;
+const LOADING_CHART_FUTURE_DAYS = 14;
+
 const TABS = [
   { id: "capacity", label: "Capacity Overview", icon: BarChart3 },
   { id: "loading", label: "Capacity Loading", icon: Gauge },
@@ -867,86 +876,116 @@ export default function PlanningPage() {
   const totalScopeUtilization =
     totalScopeCapacity > 0 ? Math.round((totalScopeLoad / totalScopeCapacity) * 100) : 0;
 
-  // ── Capacity Loading (next 4 weeks daily breakdown) ──
-  // Wei Siang 2026-05-15: rebuilt client-side to use the SAME 14-day
-  // rolling actual-capacity baseline as Capacity Overview, and to
-  // bucket loaded minutes by JC.dueDate. Previously this consumed
-  // /api/scheduling/capacity which used theoretical capacity — the
-  // two tabs disagreed AND every day rendered 0% in production.
+  // ── Capacity Loading (two views: past production + future load) ──
+  // Wei Siang 2026-05-15: refactored from a single-future-chart to a
+  // two-view layout per dept:
+  //   Past N days    → completedDate-bucketed actual production
+  //   Future M days  → dueDate-bucketed planned load
+  // Both use the same dailyCapacity denominator (the 7-day rolling avg
+  // from capacityData) so the % is directly comparable between the
+  // two surfaces — past variance vs the avg, future pressure vs the
+  // same avg.
   //
-  // For each day in the next ~28 working days (Mon-Sat, skip Sundays):
-  //   loadedMinutes = sum estMinutes of active JCs whose dueDate
-  //                   equals this day
-  //   utilization   = loadedMinutes / dailyCapacity × 100
-  //
-  // Tells the operator "given my actual daily output, is the
-  // schedule I've handed the floor realistic per day?" If a day
-  // shows 200% it means the dueDate column has scheduled twice as
-  // much work as the floor can produce that day → reschedule or
-  // bring in overtime.
+  // Renders are in /loading tab; the dailyCapacityMinutes is kept on
+  // the dept object for internal % math but no longer shown on the
+  // card title (operator asked to drop it from the display).
   const dailyLoadingByDept = useMemo(() => {
-    const days: string[] = [];
-    const cursor = new Date();
-    cursor.setHours(0, 0, 0, 0);
-    while (days.length < 28) {
-      if (cursor.getDay() !== 0) {
-        days.push(fmtISO(cursor));
-      }
-      cursor.setDate(cursor.getDate() + 1);
-    }
-    const dayIndex = new Set(days);
-
-    // Pre-bucket all active JCs by (dept, dueDate) once, then read
-    // the buckets per dept. Avoids O(days × orders × jcs) loop.
-    // Wei Siang 2026-05-15: estMinutes × wipQty per the per-UNIT
-    // storage convention — single-piece JCs unchanged, multi-piece
-    // JCs no longer under-count.
-    const bucket = new Map<string, Map<string, number>>();
-    for (const order of orders) {
-      if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
-      for (const jc of order.jobCards) {
-        if (
-          jc.status === "COMPLETED" ||
-          jc.status === "CANCELLED" ||
-          jc.status === "TRANSFERRED"
-        ) {
-          continue;
+    // Past N working days (Mon-Sat, skip Sundays) — most-recent first
+    // in iteration but stored chronologically (oldest → today) so the
+    // chart reads left-to-right naturally.
+    const pastDays: string[] = [];
+    {
+      const cursor = new Date();
+      cursor.setHours(0, 0, 0, 0);
+      while (pastDays.length < LOADING_CHART_PAST_DAYS) {
+        if (cursor.getDay() !== 0) {
+          pastDays.unshift(fmtISO(cursor));
         }
-        if (!jc.dueDate || !dayIndex.has(jc.dueDate)) continue;
-        if (!bucket.has(jc.departmentCode)) bucket.set(jc.departmentCode, new Map());
-        const deptMap = bucket.get(jc.departmentCode) as Map<string, number>;
+        cursor.setDate(cursor.getDate() - 1);
+      }
+    }
+    const pastDayIndex = new Set(pastDays);
+
+    // Future M working days starting tomorrow.
+    const futureDays: string[] = [];
+    {
+      const cursor = new Date();
+      cursor.setHours(0, 0, 0, 0);
+      cursor.setDate(cursor.getDate() + 1);
+      while (futureDays.length < LOADING_CHART_FUTURE_DAYS) {
+        if (cursor.getDay() !== 0) {
+          futureDays.push(fmtISO(cursor));
+        }
+        cursor.setDate(cursor.getDate() + 1);
+      }
+    }
+    const futureDayIndex = new Set(futureDays);
+
+    // Pre-bucket two ways: (dept, dueDate) for future load, and
+    // (dept, completedDate) for past production. Avoids O(days × jcs)
+    // loops in the per-dept map below.
+    const futureBucket = new Map<string, Map<string, number>>();
+    const pastBucket = new Map<string, Map<string, number>>();
+
+    for (const order of orders) {
+      for (const jc of order.jobCards) {
         const wipQty = Math.max(1, jc.wipQty ?? 1);
-        const mins = (jc.estMinutes || 0) * wipQty;
-        deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + mins);
+        // Future = active JC, dueDate in future window
+        if (
+          (order.status === "IN_PROGRESS" || order.status === "PENDING") &&
+          jc.dueDate &&
+          futureDayIndex.has(jc.dueDate) &&
+          jc.status !== "COMPLETED" &&
+          jc.status !== "CANCELLED" &&
+          jc.status !== "TRANSFERRED"
+        ) {
+          const mins = (jc.estMinutes || 0) * wipQty;
+          if (!futureBucket.has(jc.departmentCode)) futureBucket.set(jc.departmentCode, new Map());
+          const deptMap = futureBucket.get(jc.departmentCode) as Map<string, number>;
+          deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + mins);
+        }
+        // Past = completed JC, completedDate in past window
+        if (
+          (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") &&
+          jc.completedDate &&
+          pastDayIndex.has(jc.completedDate)
+        ) {
+          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+          if (!pastBucket.has(jc.departmentCode)) pastBucket.set(jc.departmentCode, new Map());
+          const deptMap = pastBucket.get(jc.departmentCode) as Map<string, number>;
+          deptMap.set(jc.completedDate, (deptMap.get(jc.completedDate) ?? 0) + mins);
+        }
       }
     }
 
-    // Wei Siang 2026-05-15: iterate productionDepartments (live API +
-    // isProduction flag) instead of the hardcoded DEPARTMENTS so the
-    // Capacity Loading list only ever shows production depts. If
-    // /api/departments hasn't loaded yet, productionDepartments falls
-    // back to the same 8 hardcoded codes, so no visible regression on
-    // first paint.
     return productionDepartments.map((dept) => {
       const capDept = capacityData.find((d) => d.code === dept.code);
       const dailyCap = capDept?.dailyCapacity ?? 0;
       const denom = dailyCap > 0 ? dailyCap : 1;
-      const deptBucket = bucket.get(dept.code);
 
-      const dailyLoading = days.map((date) => {
-        const loadedMinutes = deptBucket?.get(date) ?? 0;
+      const futureDeptBucket = futureBucket.get(dept.code);
+      const pastDeptBucket = pastBucket.get(dept.code);
+
+      const futureLoad = futureDays.map((date) => {
+        const loadedMinutes = futureDeptBucket?.get(date) ?? 0;
         const utilization = dailyCap > 0 ? Math.round((loadedMinutes / denom) * 100) : 0;
         let level = "low";
         if (utilization > 100) level = "critical";
         else if (utilization > 90) level = "high";
         else if (utilization > 70) level = "medium";
-        return {
-          date,
-          loadedMinutes,
-          capacityMinutes: dailyCap,
-          utilization,
-          level,
-        };
+        return { date, loadedMinutes, capacityMinutes: dailyCap, utilization, level };
+      });
+      const pastProduction = pastDays.map((date) => {
+        const producedMinutes = pastDeptBucket?.get(date) ?? 0;
+        const utilization = dailyCap > 0 ? Math.round((producedMinutes / denom) * 100) : 0;
+        // Past uses the same banding but the "level" semantics are
+        // different — high = "good day, exceeded avg"; low = "slow
+        // day". Color choice flipped in the render below.
+        let level = "low";
+        if (utilization > 100) level = "critical";
+        else if (utilization > 90) level = "high";
+        else if (utilization > 70) level = "medium";
+        return { date, producedMinutes, capacityMinutes: dailyCap, utilization, level };
       });
 
       return {
@@ -955,7 +994,8 @@ export default function PlanningPage() {
         color: dept.color,
         workerCount: capDept?.workerCount ?? 0,
         dailyCapacityMinutes: dailyCap,
-        dailyLoading,
+        pastProduction,
+        futureLoad,
       };
     });
   }, [orders, capacityData, productionDepartments]);
@@ -1920,12 +1960,15 @@ export default function PlanningPage() {
           <div className="flex items-center gap-2">
             <Gauge className="h-5 w-5 text-[#6B5C32]" />
             <span className="text-sm font-medium text-[#1F1D1B]">
-              Daily Capacity Loading - Next 4 Weeks
+              Daily Capacity Loading — Past {LOADING_CHART_PAST_DAYS} days · Next {LOADING_CHART_FUTURE_DAYS} days
             </span>
-            <span className="text-xs text-[#6B7280]">(Mon-Sat, excl. Sundays)</span>
+            <span className="text-xs text-[#6B7280]">(Mon-Sat, excl. Sundays · % vs 7-day rolling capacity)</span>
           </div>
 
-          {/* Per-department capacity loading */}
+          {/* Per-department capacity loading — two stacked sub-charts
+              per dept: Past Production (left) and Planned Load (right).
+              Bar height scales linearly 0-200% (100% = half-height)
+              so an overshoot day visually exceeds an on-target day. */}
           {dailyLoadingByDept.map((dept) => (
             <Card key={dept.deptCode} className="overflow-hidden">
               <div className="h-1" style={{ backgroundColor: dept.color }} />
@@ -1940,94 +1983,119 @@ export default function PlanningPage() {
                       <Users className="h-3 w-3" />
                       {dept.workerCount} workers
                     </span>
-                    <span>{formatHours(dept.dailyCapacityMinutes)}/day capacity</span>
                   </div>
                 </CardTitle>
               </CardHeader>
-              <CardContent className="pb-4">
-                <div className="overflow-x-auto">
-                  <div className="flex gap-1" style={{ minWidth: `${dept.dailyLoading.length * 44}px` }}>
-                    {dept.dailyLoading.map((day) => {
-                      const d = parseDate(day.date);
-                      const isSat = d.getDay() === 6;
-                      const isToday = day.date === today;
-
-                      let barColor = "bg-[#4F7C3A]";
-                      let textColor = "text-[#4F7C3A]";
-                      if (day.utilization > 90) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
-                      else if (day.utilization > 70) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
-
-                      // Wei Siang 2026-05-15 audit: bar height now scales
-                      // linearly with utilization, capped at 100% of the
-                      // 80px container. Critical days (>100%) get the red
-                      // colour + the AlertTriangle icon already; no need
-                      // to fake a taller bar with the old `* 0.8` fudge.
-                      const barHeightPct = Math.min(Math.max(day.utilization, 1), 100);
-
-                      return (
-                        <div
-                          key={day.date}
-                          className={`flex flex-col items-center w-10 min-w-[40px] ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
-                          title={`${day.date}\nLoaded: ${formatHours(day.loadedMinutes)}\nCapacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
-                        >
-                          {/* Bar */}
-                          <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
-                            <div
-                              className={`w-full rounded-t-sm transition-all ${barColor}`}
-                              style={{ height: `${barHeightPct}%` }}
-                            />
-                            {day.utilization > 90 && (
-                              <AlertTriangle className="h-2.5 w-2.5 text-[#9A3A2D] absolute -top-3 left-1/2 -translate-x-1/2" />
-                            )}
+              <CardContent className="pb-4 space-y-4">
+                {/* ─── Past Production ─── */}
+                <div>
+                  <div className="flex items-center justify-between text-xs text-[#6B7280] mb-2">
+                    <span className="font-medium text-[#4F7C3A]">▸ Past Production (Completion)</span>
+                    <span>
+                      Avg:{" "}
+                      <strong className="text-[#1F1D1B] tabular-nums">
+                        {Math.round(dept.pastProduction.reduce((s, d) => s + d.utilization, 0) / Math.max(dept.pastProduction.length, 1))}%
+                      </strong>
+                      {" · "}
+                      Best day:{" "}
+                      <strong className="text-[#1F1D1B] tabular-nums">
+                        {Math.max(...dept.pastProduction.map((d) => d.utilization))}%
+                      </strong>
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <div className="flex gap-1" style={{ minWidth: `${dept.pastProduction.length * 44}px` }}>
+                      {dept.pastProduction.map((day) => {
+                        const d = parseDate(day.date);
+                        const isSat = d.getDay() === 6;
+                        const isToday = day.date === today;
+                        // Past colour palette — green = "good day" (at
+                        // or above 7-day avg), amber/red = "slow day".
+                        // Inverted from future's "high = critical".
+                        let barColor = "bg-[#9A3A2D]"; // <40% slow
+                        let textColor = "text-[#9A3A2D]";
+                        if (day.utilization >= 90) { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
+                        else if (day.utilization >= 60) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                        // 0-200% scale, 100% = half height. Clamped at 200%.
+                        const barHeightPct = Math.min(Math.max(day.utilization, 1), 200) / 2;
+                        return (
+                          <div
+                            key={day.date}
+                            className={`flex flex-col items-center w-10 min-w-[40px] ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
+                            title={`${day.date}\nProduced: ${formatHours(day.producedMinutes)}\n7-day avg capacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
+                          >
+                            {/* Bar with a dashed "100%" line at half-height. */}
+                            <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
+                              <div
+                                className={`w-full rounded-t-sm transition-all ${barColor}`}
+                                style={{ height: `${barHeightPct}%` }}
+                              />
+                              <div className="absolute left-0 right-0 top-1/2 border-t border-dashed border-[#9CA3AF]/60 pointer-events-none" />
+                            </div>
+                            <span className={`text-[9px] font-semibold ${textColor} tabular-nums`}>{day.utilization}%</span>
+                            <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
+                              {d.getDate()}/{d.getMonth() + 1}
+                            </span>
                           </div>
-                          {/* Percentage */}
-                          <span className={`text-[9px] font-semibold ${textColor}`}>{day.utilization}%</span>
-                          {/* Date label — Wei Siang 2026-05-15: "F15" /
-                              "S16" weekday-letter-prefix swapped for a
-                              plain DD/M format (today = 15/5). Saturday
-                              still gets the muted grey so the operator can
-                              eyeball weekends at a glance. */}
-                          <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
-                            {d.getDate()}/{d.getMonth() + 1}
-                          </span>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
 
-                {/* Summary stats */}
-                <div className="flex items-center gap-6 mt-3 text-xs text-[#6B7280] border-t border-[#E2DDD8] pt-2">
-                  <span>
-                    Avg Utilization:{" "}
-                    <strong className={
-                      (dept.dailyLoading.reduce((s, d) => s + d.utilization, 0) / Math.max(dept.dailyLoading.length, 1)) > 90
-                        ? "text-[#9A3A2D]"
-                        : (dept.dailyLoading.reduce((s, d) => s + d.utilization, 0) / Math.max(dept.dailyLoading.length, 1)) > 70
-                          ? "text-[#9C6F1E]"
-                          : "text-[#4F7C3A]"
-                    }>
-                      {Math.round(dept.dailyLoading.reduce((s, d) => s + d.utilization, 0) / Math.max(dept.dailyLoading.length, 1))}%
-                    </strong>
-                  </span>
-                  <span>
-                    Peak:{" "}
-                    <strong className="text-[#1F1D1B]">
-                      {Math.max(...dept.dailyLoading.map((d) => d.utilization))}%
-                    </strong>
-                  </span>
-                  <span>
-                    Warning Days:{" "}
-                    <strong className="text-[#9C6F1E]">
-                      {dept.dailyLoading.filter((d) => d.utilization > 90 && d.utilization <= 100).length}
-                    </strong>
-                  </span>
-                  <span>
-                    Critical Days:{" "}
-                    <strong className="text-[#9A3A2D]">
-                      {dept.dailyLoading.filter((d) => d.utilization > 100).length}
-                    </strong>
-                  </span>
+                {/* ─── Future Planned Load ─── */}
+                <div className="pt-3 border-t border-[#E2DDD8]">
+                  <div className="flex items-center justify-between text-xs text-[#6B7280] mb-2">
+                    <span className="font-medium text-[#3E6570]">▸ Planned Load (Next {LOADING_CHART_FUTURE_DAYS} days)</span>
+                    <span>
+                      Peak:{" "}
+                      <strong className="text-[#1F1D1B] tabular-nums">
+                        {Math.max(...dept.futureLoad.map((d) => d.utilization))}%
+                      </strong>
+                      {" · "}
+                      Critical days:{" "}
+                      <strong className="text-[#9A3A2D] tabular-nums">
+                        {dept.futureLoad.filter((d) => d.utilization > 100).length}
+                      </strong>
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <div className="flex gap-1" style={{ minWidth: `${dept.futureLoad.length * 44}px` }}>
+                      {dept.futureLoad.map((day) => {
+                        const d = parseDate(day.date);
+                        const isSat = d.getDay() === 6;
+                        let barColor = "bg-[#4F7C3A]";
+                        let textColor = "text-[#4F7C3A]";
+                        if (day.utilization > 100) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
+                        else if (day.utilization > 90) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                        else if (day.utilization > 70) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                        // 0-200% scale, 100% = half height. Clamped at 200%.
+                        const barHeightPct = Math.min(Math.max(day.utilization, 1), 200) / 2;
+                        return (
+                          <div
+                            key={day.date}
+                            className="flex flex-col items-center w-10 min-w-[40px]"
+                            title={`${day.date}\nLoaded: ${formatHours(day.loadedMinutes)}\n7-day avg capacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
+                          >
+                            <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
+                              <div
+                                className={`w-full rounded-t-sm transition-all ${barColor}`}
+                                style={{ height: `${barHeightPct}%` }}
+                              />
+                              <div className="absolute left-0 right-0 top-1/2 border-t border-dashed border-[#9CA3AF]/60 pointer-events-none" />
+                              {day.utilization > 100 && (
+                                <AlertTriangle className="h-2.5 w-2.5 text-[#9A3A2D] absolute -top-3 left-1/2 -translate-x-1/2" />
+                              )}
+                            </div>
+                            <span className={`text-[9px] font-semibold ${textColor} tabular-nums`}>{day.utilization}%</span>
+                            <span className={`text-[8px] mt-0.5 ${isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
+                              {d.getDate()}/{d.getMonth() + 1}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               </CardContent>
             </Card>

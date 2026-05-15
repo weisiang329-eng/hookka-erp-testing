@@ -146,7 +146,14 @@ const DEPARTMENTS = [
   { id: "dept-8", code: "PACKING", name: "Packing", shortName: "Packing", color: "#06B6D4" },
 ];
 
-const EFFICIENCY = 0.85;
+// HOURS_PER_DAY: fallback for workers whose workingHoursPerDay is
+// missing. Surfaced as "Hours/day" on each dept card.
+//
+// EFFICIENCY (0.85) was used by the old theoretical-capacity formula
+// (workers × HOURS_PER_DAY × 60 × EFFICIENCY). Phase 1 spec rewrite
+// replaced that with the rolling 14-day actual-production average,
+// so the EFFICIENCY constant is no longer referenced. Preserved
+// here as a comment for archaeological context.
 const HOURS_PER_DAY = 9;
 
 const TABS = [
@@ -475,72 +482,182 @@ export default function PlanningPage() {
     return m;
   }, [schedules]);
 
+  // ── Capacity Overview time scope ──
+  // Wei Siang 2026-05-15 (Phase 1): top-of-page toggle drives every
+  // card. Daily = today only; Weekly = current Mon-Sat; Monthly =
+  // current calendar month. Capacity is always the rolling 14-day
+  // daily average of actually-completed minutes (see capacityData
+  // below) — for Weekly we scale to working days in week, Monthly
+  // to working days in month.
+  type CapacityScope = "daily" | "weekly" | "monthly";
+  const [capacityScope, setCapacityScope] = useState<CapacityScope>("daily");
+
+  // Range covered by the scope toggle (used as the "Today's load"
+  // bucket — JCs whose dueDate falls inside this range).
+  const scopeRange = useMemo(() => {
+    const now = new Date();
+    if (capacityScope === "daily") {
+      return { from: today, to: today, workingDays: 1, label: "Today" };
+    }
+    if (capacityScope === "weekly") {
+      // Mon-Sat (Hookka working week per memory).
+      const day = now.getDay(); // Sun=0..Sat=6
+      const mondayOffset = day === 0 ? -6 : 1 - day;
+      const monday = new Date(now);
+      monday.setDate(now.getDate() + mondayOffset);
+      const saturday = new Date(monday);
+      saturday.setDate(monday.getDate() + 5);
+      return { from: fmtISO(monday), to: fmtISO(saturday), workingDays: 6, label: "This Week" };
+    }
+    // Monthly: 1st → end of current calendar month.
+    const first = new Date(now.getFullYear(), now.getMonth(), 1);
+    const last = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    // Count working days (Mon-Sat) in the month.
+    let wd = 0;
+    for (let d = new Date(first); d <= last; d.setDate(d.getDate() + 1)) {
+      if (d.getDay() !== 0) wd++;
+    }
+    return { from: fmtISO(first), to: fmtISO(last), workingDays: wd, label: "This Month" };
+  }, [capacityScope, today]);
+
   // ── Capacity data ──
-  // Wei Siang 2026-05-15 audit: Capacity Overview now reports TWO
-  // numbers per dept instead of conflating them:
-  //   1. Today's Utilization — % of today's capacity that's scheduled
-  //      for today (from /api/scheduling/capacity dailyLoading bucket).
-  //      0-100% normal, >100% = overloaded today.
-  //   2. Backlog (days) — sum of estMinutes on all active job cards
-  //      divided by 1 day's capacity. 9.75 means "9.75 working days
-  //      of queued work in this dept".
+  // Wei Siang 2026-05-15 spec rewrite:
+  //   Daily Capacity = rolling 14-calendar-day average of ACTUAL
+  //   completed minutes per dept (was: theoretical workers × hours
+  //   × 0.85). Reflects what the floor actually produces.
   //
-  // The old "Utilization" metric was Backlog ÷ DailyCapacity × 100,
-  // producing 975% readings that operators mis-read as today's load.
-  // TRANSFERRED job cards are now excluded from active-load (was an
-  // inconsistency — getDeptEfficiency() counts them as completed).
+  //   Today's Load = sum of estMinutes on job cards whose dueDate
+  //   falls in the active scope (today / this week / this month).
+  //   Split SOFA vs BEDFRAME per Wei Siang's "三层全部分" rule.
+  //
+  //   Backlog = active job cards' estMinutes ÷ Daily Capacity,
+  //   surfaced as days. Also split SOFA/BEDFRAME.
+  //
+  //   TRANSFERRED counts as completed-here (consistent with
+  //   getDeptEfficiency()) so it's excluded from active load and
+  //   included in the 14-day actual-production rolling avg.
   const capacityData = useMemo(() => {
+    const fourteenDaysAgo = new Date();
+    fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
+    const fourteenDaysAgoISO = fmtISO(fourteenDaysAgo);
+    const scopeFrom = scopeRange.from;
+    const scopeTo = scopeRange.to;
+    const scopeDays = Math.max(scopeRange.workingDays, 1);
+
     return DEPARTMENTS.map((dept) => {
       const deptWorkers = workers.filter((w) => w.departmentCode === dept.code && w.status === "ACTIVE");
       const workerCount = deptWorkers.length;
-      const dailyCapacity = Math.round(workerCount * HOURS_PER_DAY * 60 * EFFICIENCY);
+      // Average working hours per day across this dept's active
+      // workers (some may be part-time). Used for the per-card
+      // "Working Hours" surface — purely informational, doesn't
+      // feed Daily Capacity (which is now actual-based).
+      const avgWorkingHours =
+        workerCount > 0
+          ? Math.round(
+              (deptWorkers.reduce((s, w) => s + (w.workingHoursPerDay || HOURS_PER_DAY), 0) /
+                workerCount) *
+                10,
+            ) / 10
+          : HOURS_PER_DAY;
 
-      // Backlog (total queued work) — active job cards not yet done.
-      // TRANSFERRED = handed to next dept; excluded here so it doesn't
-      // double-count alongside the dept that now owns the JC. Mirrors
-      // getDeptEfficiency() which already treats TRANSFERRED as completed.
-      const activeJobs = orders
-        .filter((o) => o.status === "IN_PROGRESS" || o.status === "PENDING")
-        .flatMap((o) => o.jobCards)
-        .filter(
-          (jc) =>
-            jc.departmentCode === dept.code &&
-            jc.status !== "COMPLETED" &&
-            jc.status !== "CANCELLED" &&
-            jc.status !== "TRANSFERRED"
-        );
-      const backlog = activeJobs.reduce((sum, jc) => sum + jc.estMinutes, 0);
-      const backlogDays =
-        dailyCapacity > 0 ? Math.round((backlog / dailyCapacity) * 10) / 10 : 0;
+      // 14-day rolling actual production — sum actualMinutes (fall
+      // back to estMinutes if actual not recorded) on JCs completed
+      // in last 14 calendar days, ÷ 14 → daily average.
+      let last14DayActual = 0;
+      for (const order of orders) {
+        for (const jc of order.jobCards) {
+          if (jc.departmentCode !== dept.code) continue;
+          if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+          if (!jc.completedDate) continue;
+          if (jc.completedDate < fourteenDaysAgoISO) continue;
+          if (jc.completedDate > today) continue;
+          last14DayActual += jc.actualMinutes ?? jc.estMinutes ?? 0;
+        }
+      }
+      const dailyCapacity = Math.round(last14DayActual / 14);
 
-      // Today's scheduled load — from the same scheduling API the
-      // Capacity Loading tab uses, so the two tabs report consistent
-      // numbers. Defaults to 0 if today is outside the API window
-      // (weekend, before scheduling computed, etc.).
-      const capDept = capacityDepts.find((cd) => cd.deptCode === dept.code);
-      const todayBucket = capDept?.dailyLoading.find((d) => d.date === today);
-      const todayLoad = todayBucket?.loadedMinutes ?? 0;
-      const todayUtilization = todayBucket?.utilization ?? 0;
+      // Active job cards split by SOFA / BEDFRAME / OTHER.
+      // TRANSFERRED excluded (already handed to next dept).
+      const sofaActive: JobCard[] = [];
+      const bfActive: JobCard[] = [];
+      for (const order of orders) {
+        if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
+        for (const jc of order.jobCards) {
+          if (jc.departmentCode !== dept.code) continue;
+          if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
+          if (order.itemCategory === "SOFA") sofaActive.push(jc);
+          else if (order.itemCategory === "BEDFRAME") bfActive.push(jc);
+        }
+      }
+
+      const sofaBacklog = sofaActive.reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+      const bfBacklog = bfActive.reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+      const totalBacklog = sofaBacklog + bfBacklog;
+      const denomCapacity = dailyCapacity > 0 ? dailyCapacity : 1;
+      const sofaBacklogDays = Math.round((sofaBacklog / denomCapacity) * 10) / 10;
+      const bfBacklogDays = Math.round((bfBacklog / denomCapacity) * 10) / 10;
+      const totalBacklogDays = Math.round((totalBacklog / denomCapacity) * 10) / 10;
+
+      // Today's / scope's Load — JCs with dueDate in [from, to].
+      const sofaScopeLoad = sofaActive
+        .filter((jc) => jc.dueDate && jc.dueDate >= scopeFrom && jc.dueDate <= scopeTo)
+        .reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+      const bfScopeLoad = bfActive
+        .filter((jc) => jc.dueDate && jc.dueDate >= scopeFrom && jc.dueDate <= scopeTo)
+        .reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+      const totalScopeLoad = sofaScopeLoad + bfScopeLoad;
+
+      // Utilization denominator scales with scope: daily uses 1×
+      // capacity, weekly uses (workingDays × capacity), etc.
+      const scopeCapacity = dailyCapacity * scopeDays;
+      const denomScope = scopeCapacity > 0 ? scopeCapacity : 1;
+      const sofaScopeUtilization = Math.round((sofaScopeLoad / denomScope) * 100);
+      const bfScopeUtilization = Math.round((bfScopeLoad / denomScope) * 100);
+      const totalScopeUtilization = Math.round((totalScopeLoad / denomScope) * 100);
 
       return {
         ...dept,
         workerCount,
+        avgWorkingHours,
         dailyCapacity,
-        backlog,
-        backlogDays,
-        todayLoad,
-        todayUtilization,
+        last14DayActual,
+        sofaBacklog,
+        bfBacklog,
+        totalBacklog,
+        sofaBacklogDays,
+        bfBacklogDays,
+        totalBacklogDays,
+        sofaScopeLoad,
+        bfScopeLoad,
+        totalScopeLoad,
+        sofaScopeUtilization,
+        bfScopeUtilization,
+        totalScopeUtilization,
+        scopeCapacity,
       };
     });
-  }, [orders, workers, capacityDepts, today]);
+  }, [orders, workers, today, scopeRange]);
 
   const totalCapacity = capacityData.reduce((s, d) => s + d.dailyCapacity, 0);
-  const totalBacklog = capacityData.reduce((s, d) => s + d.backlog, 0);
+  const totalScopeCapacity = capacityData.reduce((s, d) => s + d.scopeCapacity, 0);
+  const totalSofaBacklog = capacityData.reduce((s, d) => s + d.sofaBacklog, 0);
+  const totalBfBacklog = capacityData.reduce((s, d) => s + d.bfBacklog, 0);
+  const totalBacklog = totalSofaBacklog + totalBfBacklog;
+  const totalSofaBacklogDays =
+    totalCapacity > 0 ? Math.round((totalSofaBacklog / totalCapacity) * 10) / 10 : 0;
+  const totalBfBacklogDays =
+    totalCapacity > 0 ? Math.round((totalBfBacklog / totalCapacity) * 10) / 10 : 0;
   const totalBacklogDays =
     totalCapacity > 0 ? Math.round((totalBacklog / totalCapacity) * 10) / 10 : 0;
-  const totalTodayLoad = capacityData.reduce((s, d) => s + d.todayLoad, 0);
-  const avgTodayUtilization =
-    totalCapacity > 0 ? Math.round((totalTodayLoad / totalCapacity) * 100) : 0;
+  const totalSofaScopeLoad = capacityData.reduce((s, d) => s + d.sofaScopeLoad, 0);
+  const totalBfScopeLoad = capacityData.reduce((s, d) => s + d.bfScopeLoad, 0);
+  const totalScopeLoad = totalSofaScopeLoad + totalBfScopeLoad;
+  const sofaScopeUtilization =
+    totalScopeCapacity > 0 ? Math.round((totalSofaScopeLoad / totalScopeCapacity) * 100) : 0;
+  const bfScopeUtilization =
+    totalScopeCapacity > 0 ? Math.round((totalBfScopeLoad / totalScopeCapacity) * 100) : 0;
+  const totalScopeUtilization =
+    totalScopeCapacity > 0 ? Math.round((totalScopeLoad / totalScopeCapacity) * 100) : 0;
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(() => getDeptEfficiency(orders), [orders]);
@@ -646,72 +763,114 @@ export default function PlanningPage() {
       {/* ═══════════════════════════════════════════ */}
       {activeTab === "capacity" && (
         <div className="space-y-6">
-          {/* Summary cards — two complementary metrics:
-              "Today's Utilization" answers "are we overloaded TODAY?";
-              "Backlog" answers "how much queued work do we have?". The
-              earlier single "Utilization 975%" metric was conflating
-              both (Backlog ÷ DailyCapacity), which read as nonsense. */}
-          <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
+          {/* Scope toggle — Daily / Weekly / Monthly. Drives every
+              card on the page. Daily = today only; Weekly = current
+              Mon-Sat; Monthly = current calendar month. Capacity
+              denominator scales proportionally (×1 / ×6 / ×N working
+              days). */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-white p-0.5">
+              {(["daily", "weekly", "monthly"] as const).map((scope) => {
+                const isActive = capacityScope === scope;
+                return (
+                  <button
+                    key={scope}
+                    onClick={() => setCapacityScope(scope)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded transition-colors cursor-pointer ${
+                      isActive
+                        ? "bg-[#6B5C32] text-white"
+                        : "text-[#6B7280] hover:bg-[#F0ECE9]"
+                    }`}
+                  >
+                    {scope === "daily" ? "Daily" : scope === "weekly" ? "Weekly" : "Monthly"}
+                  </button>
+                );
+              })}
+            </div>
+            <span className="text-xs text-[#9CA3AF]">
+              {scopeRange.label} · {scopeRange.from}
+              {scopeRange.from !== scopeRange.to ? ` → ${scopeRange.to}` : ""}
+              {" · "}
+              {scopeRange.workingDays} working day{scopeRange.workingDays === 1 ? "" : "s"}
+            </span>
+          </div>
+
+          {/* Top summary — 4 cards. Daily Capacity is rolling
+              14-day avg of actual completed minutes (per Wei Siang
+              spec). Load / Utilization / Backlog scoped to the
+              selected Daily/Weekly/Monthly window. */}
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
             <Card>
-              <CardContent className="p-2.5 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-[#6B7280]">Total Daily Capacity</p>
-                  <p className="text-xl font-bold text-[#1F1D1B]">
-                    {totalCapacity.toLocaleString()} min
-                  </p>
-                </div>
-                <Factory className="h-5 w-5 text-[#6B5C32]" />
+              <CardContent className="p-3">
+                <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
+                  <span>Daily Capacity</span>
+                  <Factory className="h-4 w-4 text-[#6B5C32]" />
+                </p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {totalCapacity.toLocaleString()} <span className="text-xs font-medium text-[#6B7280]">min/day</span>
+                </p>
+                <p className="text-[10px] text-[#9CA3AF] mt-0.5">14-day rolling actual avg</p>
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-2.5 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-[#6B7280]">Today&apos;s Scheduled Load</p>
-                  <p className="text-xl font-bold text-[#1F1D1B]">
-                    {totalTodayLoad.toLocaleString()} min
-                  </p>
+              <CardContent className="p-3">
+                <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
+                  <span>{scopeRange.label}&apos;s Load</span>
+                  <TrendingUp className="h-4 w-4 text-[#3E6570]" />
+                </p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {totalScopeLoad.toLocaleString()} <span className="text-xs font-medium text-[#6B7280]">min</span>
+                </p>
+                <div className="text-[10px] text-[#9CA3AF] mt-0.5 flex gap-3">
+                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {totalSofaScopeLoad.toLocaleString()}</span>
+                  <span><span className="font-semibold text-[#3E6570]">BF</span> {totalBfScopeLoad.toLocaleString()}</span>
                 </div>
-                <TrendingUp className="h-5 w-5 text-[#3E6570]" />
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-2.5 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-[#6B7280]">Today&apos;s Utilization</p>
-                  <p className={`text-xl font-bold ${utilizationColor(avgTodayUtilization).text}`}>
-                    {avgTodayUtilization}%
-                  </p>
+              <CardContent className="p-3">
+                <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
+                  <span>{scopeRange.label}&apos;s Utilization</span>
+                  <Clock className="h-4 w-4 text-[#6B5C32]" />
+                </p>
+                <p className={`text-xl font-bold ${utilizationColor(totalScopeUtilization).text}`}>
+                  {totalScopeUtilization}%
+                </p>
+                <div className="text-[10px] text-[#9CA3AF] mt-0.5 flex gap-3">
+                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {sofaScopeUtilization}%</span>
+                  <span><span className="font-semibold text-[#3E6570]">BF</span> {bfScopeUtilization}%</span>
                 </div>
-                <Clock className="h-5 w-5 text-[#6B5C32]" />
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-2.5 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-[#6B7280]">Total Backlog</p>
-                  <p className="text-xl font-bold text-[#1F1D1B]">
-                    {totalBacklogDays}{" "}
-                    <span className="text-xs font-medium text-[#6B7280]">days</span>
-                  </p>
-                  <p className="text-[10px] text-[#9CA3AF]">
-                    {totalBacklog.toLocaleString()} min queued
-                  </p>
+              <CardContent className="p-3">
+                <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
+                  <span>Total Backlog</span>
+                  <ClipboardList className="h-4 w-4 text-[#9C6F1E]" />
+                </p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {totalBacklogDays} <span className="text-xs font-medium text-[#6B7280]">days</span>
+                </p>
+                <div className="text-[10px] text-[#9CA3AF] mt-0.5 flex gap-3">
+                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {totalSofaBacklogDays}d</span>
+                  <span><span className="font-semibold text-[#3E6570]">BF</span> {totalBfBacklogDays}d</span>
                 </div>
-                <ClipboardList className="h-5 w-5 text-[#9C6F1E]" />
               </CardContent>
             </Card>
           </div>
 
-          {/* Department capacity cards */}
+          {/* Department capacity cards — each card stacks SOFA + BF
+              rows so the operator sees per-category load & backlog
+              at a glance. */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
             {capacityData.map((dept) => {
-              const uc = utilizationColor(dept.todayUtilization);
+              const uc = utilizationColor(dept.totalScopeUtilization);
               const backlogColor =
-                dept.backlogDays > 7 ? "text-[#9A3A2D]" : dept.backlogDays > 3 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
+                dept.totalBacklogDays > 7 ? "text-[#9A3A2D]" : dept.totalBacklogDays > 3 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
               return (
                 <Card key={dept.code} className="overflow-hidden">
                   <div className="h-1.5" style={{ backgroundColor: dept.color }} />
-                  <CardHeader className="pb-2 pt-4">
+                  <CardHeader className="pb-2 pt-3">
                     <CardTitle className="text-sm flex items-center gap-2">
                       <span
                         className="w-2.5 h-2.5 rounded-full inline-block"
@@ -720,42 +879,80 @@ export default function PlanningPage() {
                       {dept.name}
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="space-y-3 pb-4">
-                    <div className="grid grid-cols-2 gap-2 text-xs">
+                  <CardContent className="space-y-2 pb-3 text-xs">
+                    {/* Shared header row: workers + daily capacity */}
+                    <div className="grid grid-cols-3 gap-2 pb-2 border-b border-[#E2DDD8]">
                       <div>
-                        <span className="text-[#6B7280]">Workers</span>
+                        <span className="text-[10px] text-[#6B7280]">Workers</span>
                         <p className="font-semibold text-[#1F1D1B] flex items-center gap-1">
                           <Users className="h-3 w-3" />
                           {dept.workerCount}
                         </p>
                       </div>
                       <div>
-                        <span className="text-[#6B7280]">Daily Capacity</span>
-                        <p className="font-semibold text-[#1F1D1B]">{dept.dailyCapacity.toLocaleString()} min</p>
+                        <span className="text-[10px] text-[#6B7280]">Hours/day</span>
+                        <p className="font-semibold text-[#1F1D1B]">{dept.avgWorkingHours}h</p>
                       </div>
                       <div>
-                        <span className="text-[#6B7280]">Today&apos;s Load</span>
-                        <p className="font-semibold text-[#1F1D1B]">{dept.todayLoad.toLocaleString()} min</p>
-                      </div>
-                      <div>
-                        <span className="text-[#6B7280]">Today&apos;s Utilization</span>
-                        <p className={`font-semibold ${uc.text}`}>{dept.todayUtilization}%</p>
-                      </div>
-                      <div className="col-span-2 pt-1 border-t border-[#E2DDD8]">
-                        <span className="text-[#6B7280]">Backlog</span>
-                        <p className={`font-semibold ${backlogColor}`}>
-                          {dept.backlogDays} <span className="text-[10px] font-medium text-[#6B7280]">days</span>
-                          <span className="text-[10px] font-normal text-[#9CA3AF] ml-1">({dept.backlog.toLocaleString()} min)</span>
+                        <span className="text-[10px] text-[#6B7280]">Daily Cap</span>
+                        <p className="font-semibold text-[#1F1D1B]" title="14-day rolling actual avg">
+                          {dept.dailyCapacity.toLocaleString()}
                         </p>
                       </div>
                     </div>
 
-                    {/* Today's utilization bar */}
-                    <div className="w-full bg-[#F0ECE9] rounded-full h-2.5 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all ${uc.bar}`}
-                        style={{ width: `${Math.min(dept.todayUtilization, 100)}%` }}
-                      />
+                    {/* SOFA row */}
+                    <div className="grid grid-cols-3 gap-2 items-baseline">
+                      <span className="text-[10px] font-semibold text-[#9A3A2D]">SOFA</span>
+                      <div>
+                        <span className="text-[9px] text-[#6B7280]">Load · Util</span>
+                        <p className="font-medium text-[#1F1D1B]">
+                          {dept.sofaScopeLoad.toLocaleString()}
+                          <span className={`ml-1.5 ${utilizationColor(dept.sofaScopeUtilization).text}`}>
+                            ({dept.sofaScopeUtilization}%)
+                          </span>
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-[#6B7280]">Backlog</span>
+                        <p className="font-medium text-[#1F1D1B]">{dept.sofaBacklogDays} <span className="text-[9px] text-[#9CA3AF]">d</span></p>
+                      </div>
+                    </div>
+
+                    {/* BEDFRAME row */}
+                    <div className="grid grid-cols-3 gap-2 items-baseline">
+                      <span className="text-[10px] font-semibold text-[#3E6570]">BEDFRAME</span>
+                      <div>
+                        <span className="text-[9px] text-[#6B7280]">Load · Util</span>
+                        <p className="font-medium text-[#1F1D1B]">
+                          {dept.bfScopeLoad.toLocaleString()}
+                          <span className={`ml-1.5 ${utilizationColor(dept.bfScopeUtilization).text}`}>
+                            ({dept.bfScopeUtilization}%)
+                          </span>
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-[#6B7280]">Backlog</span>
+                        <p className="font-medium text-[#1F1D1B]">{dept.bfBacklogDays} <span className="text-[9px] text-[#9CA3AF]">d</span></p>
+                      </div>
+                    </div>
+
+                    {/* Combined totals + bar */}
+                    <div className="pt-2 border-t border-[#E2DDD8]">
+                      <div className="flex items-baseline justify-between mb-1">
+                        <span className="text-[10px] text-[#6B7280]">Total Util / Backlog</span>
+                        <span className="text-[10px]">
+                          <span className={`font-semibold ${uc.text}`}>{dept.totalScopeUtilization}%</span>
+                          <span className="mx-1.5 text-[#D1CBC5]">|</span>
+                          <span className={`font-semibold ${backlogColor}`}>{dept.totalBacklogDays}d</span>
+                        </span>
+                      </div>
+                      <div className="w-full bg-[#F0ECE9] rounded-full h-2 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${uc.bar}`}
+                          style={{ width: `${Math.min(dept.totalScopeUtilization, 100)}%` }}
+                        />
+                      </div>
                     </div>
                   </CardContent>
                 </Card>

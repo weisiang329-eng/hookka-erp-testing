@@ -6265,7 +6265,17 @@ export default function ProductionPage({
                         {s.wipName && (
                           <div className="flex items-baseline gap-1">
                             <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
-                            <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.wipName}</span>
+                            <span
+                              className="flex-1 break-words"
+                              style={{
+                                fontSize: "11px",
+                                display: "-webkit-box",
+                                WebkitLineClamp: 2,
+                                WebkitBoxOrient: "vertical",
+                                overflow: "hidden",
+                                lineHeight: 1.2,
+                              }}
+                            >: {s.wipName}</span>
                           </div>
                         )}
                       </div>
@@ -6279,7 +6289,17 @@ export default function ProductionPage({
                         {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                          <span
+                            className="flex-1 break-words"
+                            style={{
+                              fontSize: "11px",
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              lineHeight: 1.2,
+                            }}
+                          >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
                         </div>
                       </div>
                       {/* Bottom block: QR on left + sign-off + Qty on
@@ -6543,7 +6563,17 @@ export default function ProductionPage({
                         {s.boxLabel && (
                           <div className="flex items-baseline gap-1">
                             <span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span>
-                            <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.boxLabel}</span>
+                            <span
+                              className="flex-1 break-words"
+                              style={{
+                                fontSize: "11px",
+                                display: "-webkit-box",
+                                WebkitLineClamp: 2,
+                                WebkitBoxOrient: "vertical",
+                                overflow: "hidden",
+                                lineHeight: 1.2,
+                              }}
+                            >: {s.boxLabel}</span>
                           </div>
                         )}
                       </div>
@@ -6563,7 +6593,17 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                          <span
+                            className="flex-1 break-words"
+                            style={{
+                              fontSize: "11px",
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              lineHeight: 1.2,
+                            }}
+                          >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
                         </div>
                       </div>
                       {/* Wei Siang 2026-05-15 (revised again): leg moves
@@ -6721,7 +6761,17 @@ export default function ProductionPage({
                     <div className="truncate"><span className="inline-block w-[35mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="inline-block w-[35mm] font-semibold shrink-0">Customer Name</span>
-                      <span className="flex-1 truncate" style={{ fontSize: "9pt" }}>: {s.customerName || "—"}</span>
+                      <span
+                        className="flex-1 break-words"
+                        style={{
+                          fontSize: "11pt",
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                          lineHeight: 1.2,
+                        }}
+                      >: {s.customerName || "—"}</span>
                     </div>
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="inline-block w-[35mm] font-semibold">Model</span>
@@ -6730,7 +6780,17 @@ export default function ProductionPage({
                     {s.wipName && (
                       <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "35mm" }}>WIP</span>
-                        <span className="flex-1 truncate" style={{ fontSize: "9pt" }}>: {s.wipName}</span>
+                        <span
+                          className="flex-1 break-words"
+                          style={{
+                            fontSize: "11pt",
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                            lineHeight: 1.2,
+                          }}
+                        >: {s.wipName}</span>
                       </div>
                     )}
                   </div>
@@ -6744,7 +6804,17 @@ export default function ProductionPage({
                     {s.totalHeight && <div><span className="inline-block w-[35mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
-                      <span className="flex-1 truncate" style={{ fontSize: "9pt" }}>
+                      <span
+                        className="flex-1 break-words"
+                        style={{
+                          fontSize: "11pt",
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                          lineHeight: 1.2,
+                        }}
+                      >
                         : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                       </span>
                     </div>
@@ -6950,7 +7020,17 @@ export default function ProductionPage({
                       {s.boxLabel && (
                         <div className="flex items-baseline gap-[1mm]">
                           <span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "11pt" }}>: {s.boxLabel}</span>
+                          <span
+                            className="flex-1 break-words"
+                            style={{
+                              fontSize: "11pt",
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              lineHeight: 1.2,
+                            }}
+                          >: {s.boxLabel}</span>
                         </div>
                       )}
                     </div>
@@ -6970,7 +7050,17 @@ export default function ProductionPage({
                       <div><span className="inline-block w-[30mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                       <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
-                        <span className="flex-1 truncate" style={{ fontSize: "11pt" }}>
+                        <span
+                          className="flex-1 break-words"
+                          style={{
+                            fontSize: "11pt",
+                            display: "-webkit-box",
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: "vertical",
+                            overflow: "hidden",
+                            lineHeight: 1.2,
+                          }}
+                        >
                           : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                         </span>
                       </div>

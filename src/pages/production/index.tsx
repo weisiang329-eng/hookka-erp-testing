@@ -6240,7 +6240,23 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.customerName || "—"}</span>
+                          {/* Wei Siang 2026-05-15: 沙发 has empty
+                              vertical space below the spec block — let
+                              Customer Name wrap to 2 lines instead of
+                              truncating at small font. Capped at 2
+                              lines via line-clamp so an extreme value
+                              can't push the bottom QR block out. */}
+                          <span
+                            className="flex-1 break-words"
+                            style={{
+                              fontSize: "12px",
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              lineHeight: 1.2,
+                            }}
+                          >: {s.customerName || "—"}</span>
                         </div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>

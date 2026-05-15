@@ -3439,6 +3439,19 @@ export default function ProductionPage({
     for (const row of rowsSource) {
       const order = orderById.get(row.poId);
       if (!order) continue;
+      // Wei Siang 2026-05-15: on the FAB_SEW tab for sofa, the
+      // operator sews the whole upholstery assembly in one pass —
+      // they don't need separate stickers for Back Cushion / Armrest /
+      // Headrest. Skip those sub-component JCs in the sticker list.
+      // The BASE sticker is the one that travels with the assembly.
+      if (
+        activeTab === "FAB_SEW" &&
+        (row.wipType === "CUSHION" ||
+          row.wipType === "ARMREST" ||
+          row.wipType === "HEADREST")
+      ) {
+        continue;
+      }
       // Each JC gets its own sticker — no FG-FAB_CUT sentinel anymore.
       // Operators scan once per JC, going through the standard
       // scan-complete flow (scan-complete-dept fan-out is dead).
@@ -3456,13 +3469,21 @@ export default function ProductionPage({
       // covers 1 piece). The piece-position marker conveys batch context.
       const pieceCount = Math.max(1, row.qty || 1);
       const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.qty || 1);
+      // Wei Siang 2026-05-15: BASE on FAB_SEW shows the product code
+      // (e.g. "5537") as the WIP label, NOT the long fabric-encoded
+      // string (e.g. "5537-2S -Base 28 GD8371-02"). The sewing
+      // operator just needs to know which sofa they're sewing.
+      const stickerWipName =
+        activeTab === "FAB_SEW" && row.wipType === "BASE"
+          ? row.model || row.wip || ""
+          : row.wip;
       for (let p = 1; p <= pieceCount; p++) {
         stickers.push({
           key: pieceCount > 1 ? `${row.id}:${p}` : row.id,
           poNo: order.poNo,
           deptCode: activeTab,
           jobCardId: opId,
-          wipName: row.wip,
+          wipName: stickerWipName,
           wipCode: "",
           sizeLabel: row.size || "",
           qty: displayQty,
@@ -6197,15 +6218,28 @@ export default function ProductionPage({
                         {s.poNo}
                       </div>
                       <div className="border-t border-black my-1" />
+                      {/* Wei Siang 2026-05-15: template MUST be uniform across
+                          all stickers — same row count, same heights, same
+                          positions. Long-value rows (Customer Name, WIP,
+                          Notes) use a smaller value font + truncate so they
+                          stay on 1 line regardless of content length.
+                          Short-value rows (PO No, Size, Colour, etc.) keep
+                          the bigger 12px font. */}
                       <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.customerName || "—"}</span>
+                        </div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
                           <span className="font-bold" style={{ fontSize: "16px" }}>: {s.model || "—"}</span>
                         </div>
                         {s.wipName && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                          <div className="flex items-baseline gap-1">
+                            <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
+                            <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.wipName}</span>
+                          </div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
@@ -6216,7 +6250,10 @@ export default function ProductionPage({
                         {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
                         {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
                         {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-                        <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                        </div>
                       </div>
                       {/* Bottom block: QR on left + sign-off + Qty on
                           right. Same dashed-top + mt-auto pattern as
@@ -6477,7 +6514,10 @@ export default function ProductionPage({
                           <span className="font-bold" style={{ fontSize: "16px" }}>: {s.productCode || "—"}</span>
                         </div>
                         {s.boxLabel && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
+                          <div className="flex items-baseline gap-1">
+                            <span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span>
+                            <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.boxLabel}</span>
+                          </div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
@@ -6494,7 +6534,10 @@ export default function ProductionPage({
                           </>
                         )}
                         <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                        <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div className="flex items-baseline gap-1">
+                          <span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                        </div>
                       </div>
                       {/* Wei Siang 2026-05-15 (revised again): leg moves
                           INTO the right column ABOVE the SOFA piece-name
@@ -6641,29 +6684,40 @@ export default function ProductionPage({
                   <div className="text-center font-bold" style={{ fontSize: "14pt", lineHeight: 1.1 }}>
                     {s.poNo}
                   </div>
+                  {/* Wei Siang 2026-05-15: uniform template — long-value
+                      rows (Customer Name, WIP, Notes) use smaller value
+                      font + truncate so they stay on 1 line per sticker
+                      regardless of content length. Print mirrors the
+                      on-screen tile. */}
                   <div className="border-t border-black my-[1.5mm]" />
                   <div className="space-y-[1mm]" style={{ fontSize: "11pt", lineHeight: 1.3 }}>
-                    <div><span className="inline-block w-[35mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
-                    <div><span className="inline-block w-[35mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
+                    <div className="truncate"><span className="inline-block w-[35mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                    <div className="flex items-baseline gap-[1mm]">
+                      <span className="inline-block w-[35mm] font-semibold shrink-0">Customer Name</span>
+                      <span className="flex-1 truncate" style={{ fontSize: "9pt" }}>: {s.customerName || "—"}</span>
+                    </div>
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="inline-block w-[35mm] font-semibold">Model</span>
                       <span className="font-bold" style={{ fontSize: "15pt" }}>: {s.model || "—"}</span>
                     </div>
                     {s.wipName && (
-                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "35mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                      <div className="flex items-baseline gap-[1mm]">
+                        <span className="font-semibold shrink-0" style={{ width: "35mm" }}>WIP</span>
+                        <span className="flex-1 truncate" style={{ fontSize: "9pt" }}>: {s.wipName}</span>
+                      </div>
                     )}
                   </div>
                   <div className="border-t border-[#E6E0D9] my-[1.5mm]" />
                   <div className="space-y-[1mm]" style={{ fontSize: "11pt", lineHeight: 1.3 }}>
-                    <div><span className="inline-block w-[35mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
-                    <div><span className="inline-block w-[35mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                    <div className="truncate"><span className="inline-block w-[35mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                    <div className="truncate"><span className="inline-block w-[35mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
                     {s.gap && <div><span className="inline-block w-[35mm] font-semibold">Gap</span>: {s.gap}</div>}
                     {s.divan && <div><span className="inline-block w-[35mm] font-semibold">Divan</span>: {s.divan}</div>}
                     {s.leg && <div><span className="inline-block w-[35mm] font-semibold">Leg</span>: {s.leg}</div>}
                     {s.totalHeight && <div><span className="inline-block w-[35mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
-                    <div className="flex items-start gap-[1mm]">
+                    <div className="flex items-baseline gap-[1mm]">
                       <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
-                      <span className="flex-1 break-words">
+                      <span className="flex-1 truncate" style={{ fontSize: "9pt" }}>
                         : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                       </span>
                     </div>
@@ -6867,7 +6921,10 @@ export default function ProductionPage({
                         <span className="font-bold" style={{ fontSize: "20pt" }}>: {s.productCode || "—"}</span>
                       </div>
                       {s.boxLabel && (
-                        <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
+                        <div className="flex items-baseline gap-[1mm]">
+                          <span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "11pt" }}>: {s.boxLabel}</span>
+                        </div>
                       )}
                     </div>
                     <div className="border-t border-black my-[2mm]" />
@@ -6884,9 +6941,9 @@ export default function ProductionPage({
                         </>
                       )}
                       <div><span className="inline-block w-[30mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                      <div className="flex items-start gap-[1mm]">
+                      <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
-                        <span className="flex-1 break-words">
+                        <span className="flex-1 truncate" style={{ fontSize: "11pt" }}>
                           : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                         </span>
                       </div>

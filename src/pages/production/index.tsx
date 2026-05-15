@@ -6197,45 +6197,49 @@ export default function ProductionPage({
                         {s.poNo}
                       </div>
                       <div className="border-t border-black my-1" />
-                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
+                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
                         <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[72px] font-semibold text-[#6B7280]">Model</span>
-                          <span className="font-bold" style={{ fontSize: "14px" }}>: {s.model || "—"}</span>
+                          <span className="inline-block w-[82px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="font-bold" style={{ fontSize: "16px" }}>: {s.model || "—"}</span>
                         </div>
                         {s.wipName && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                          <div className="flex items-start gap-1"><span className="inline-block w-[82px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                        {s.gap && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                        {s.divan && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                        {s.leg && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                        {s.totalHeight && <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-                        <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                        {s.gap && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                        {s.divan && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                        {s.leg && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                        {s.totalHeight && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
+                        <div className="flex items-start gap-1"><span className="inline-block w-[82px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
                       {/* Bottom block: QR on left + sign-off + Qty on
                           right. Same dashed-top + mt-auto pattern as
-                          FG sticker's QR+piece-position section. */}
+                          FG sticker's QR+piece-position section.
+                          Wei Siang 2026-05-15: bigger top info + more
+                          space between Fabric Cutting / Fabric Sewing
+                          sign-off lines (factory operator writes name
+                          + date on each line). */}
                       <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
                         <div className="flex items-end gap-2 pt-1">
-                          <QRImg data={s.qrPayload} size={90} alt="Job card QR" className="block shrink-0" />
-                          <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between text-[10px]">
-                            <div className="space-y-1">
+                          <QRImg data={s.qrPayload} size={84} alt="Job card QR" className="block shrink-0" />
+                          <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between text-[11px]">
+                            <div className="space-y-3">
                               <div className="flex items-end gap-1">
-                                <span className="font-semibold whitespace-nowrap text-[9px]">Fab Cut :</span>
-                                <span className="flex-1 border-b border-black h-[14px]" />
+                                <span className="font-semibold whitespace-nowrap text-[10px]">Fab Cut :</span>
+                                <span className="flex-1 border-b border-black h-[22px]" />
                               </div>
                               <div className="flex items-end gap-1">
-                                <span className="font-semibold whitespace-nowrap text-[9px]">Fab Sew :</span>
-                                <span className="flex-1 border-b border-black h-[14px]" />
+                                <span className="font-semibold whitespace-nowrap text-[10px]">Fab Sew :</span>
+                                <span className="flex-1 border-b border-black h-[22px]" />
                               </div>
                             </div>
-                            <div className="font-bold mt-1" style={{ fontSize: "12px" }}>Qty {s.qty}</div>
+                            <div className="font-bold mt-1" style={{ fontSize: "13px" }}>Qty {s.qty}</div>
                           </div>
                         </div>
                       </div>
@@ -6631,27 +6635,27 @@ export default function ProductionPage({
                     {s.poNo}
                   </div>
                   <div className="border-t border-black my-[1.5mm]" />
-                  <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
-                    <div><span className="inline-block w-[26mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
-                    <div><span className="inline-block w-[26mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
+                  <div className="space-y-[1mm]" style={{ fontSize: "11pt", lineHeight: 1.3 }}>
+                    <div><span className="inline-block w-[30mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                    <div><span className="inline-block w-[30mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
                     <div className="flex items-baseline gap-[1mm]">
-                      <span className="inline-block w-[26mm] font-semibold">Model</span>
-                      <span className="font-bold" style={{ fontSize: "14pt" }}>: {s.model || "—"}</span>
+                      <span className="inline-block w-[30mm] font-semibold">Model</span>
+                      <span className="font-bold" style={{ fontSize: "15pt" }}>: {s.model || "—"}</span>
                     </div>
                     {s.wipName && (
-                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "26mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                     )}
                   </div>
                   <div className="border-t border-[#E6E0D9] my-[1.5mm]" />
-                  <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
-                    <div><span className="inline-block w-[26mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
-                    <div><span className="inline-block w-[26mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
-                    {s.gap && <div><span className="inline-block w-[26mm] font-semibold">Gap</span>: {s.gap}</div>}
-                    {s.divan && <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divan}</div>}
-                    {s.leg && <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.leg}</div>}
-                    {s.totalHeight && <div><span className="inline-block w-[26mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
+                  <div className="space-y-[1mm]" style={{ fontSize: "11pt", lineHeight: 1.3 }}>
+                    <div><span className="inline-block w-[30mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                    <div><span className="inline-block w-[30mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                    {s.gap && <div><span className="inline-block w-[30mm] font-semibold">Gap</span>: {s.gap}</div>}
+                    {s.divan && <div><span className="inline-block w-[30mm] font-semibold">Divan</span>: {s.divan}</div>}
+                    {s.leg && <div><span className="inline-block w-[30mm] font-semibold">Leg</span>: {s.leg}</div>}
+                    {s.totalHeight && <div><span className="inline-block w-[30mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
                     <div className="flex items-start gap-[1mm]">
-                      <span className="font-semibold shrink-0" style={{ width: "26mm", color: "#9A3A2D" }}>Notes</span>
+                      <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
                       <span className="flex-1 break-words">
                         : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                       </span>
@@ -6659,26 +6663,30 @@ export default function ProductionPage({
                   </div>
                   {/* Bottom block — same shape as FG sticker, mt-auto +
                       dashed top border + QR (left) + content (right).
-                      Content is Fab Cut / Fab Sew sign-off lines + Qty. */}
+                      Content is Fab Cut / Fab Sew sign-off lines + Qty.
+                      Wei Siang 2026-05-15: top info bigger (11pt rows,
+                      30mm label column) and sign-off lines need more
+                      breathing room — taller writing area (10mm) and
+                      bigger gap between Cutting / Sewing rows (6mm). */}
                   <div className="mt-auto pt-[1.5mm] border-t border-dashed border-black">
                     <div className="flex items-end gap-[2mm] pt-[1.5mm]">
                       {s.qrDataUrl && (
                         <img
                           src={s.qrDataUrl}
                           alt="Job card QR"
-                          style={{ width: "36mm", height: "36mm" }}
+                          style={{ width: "34mm", height: "34mm" }}
                           className="shrink-0"
                         />
                       )}
                       <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between" style={{ fontSize: "11pt" }}>
-                        <div className="space-y-[3mm]">
+                        <div className="space-y-[6mm]">
                           <div className="flex items-end gap-[1.5mm]">
                             <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
-                            <span className="flex-1 border-b border-black h-[7mm]" />
+                            <span className="flex-1 border-b border-black h-[10mm]" />
                           </div>
                           <div className="flex items-end gap-[1.5mm]">
                             <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
-                            <span className="flex-1 border-b border-black h-[7mm]" />
+                            <span className="flex-1 border-b border-black h-[10mm]" />
                           </div>
                         </div>
                         <div className="flex items-baseline justify-between mt-[2mm]" style={{ fontSize: "13pt" }}>

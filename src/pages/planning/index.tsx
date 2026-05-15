@@ -11,6 +11,7 @@ import {
   Clock,
   ChevronUp,
   ChevronDown,
+  ChevronRight,
   Users,
   BarChart3,
   Loader2,
@@ -20,6 +21,8 @@ import {
   Search,
   ClipboardList,
   Calendar,
+  X,
+  ArrowLeft,
 } from "lucide-react";
 import { LeadTimeHistoryDialog } from "./LeadTimeHistoryDialog";
 import { EffectiveDateConfirmModal } from "../products/MaintenanceConfigHistoryDialog";
@@ -533,6 +536,30 @@ export default function PlanningPage() {
   type CapacityScope = "daily" | "weekly" | "monthly";
   const [capacityScope, setCapacityScope] = useState<CapacityScope>("daily");
 
+  // ── Capacity Overview KPI drilldown ──
+  // Wei Siang 2026-05-15 spec: clicking "Daily Capacity" KPI opens a
+  // 14-day breakdown; clicking a day opens the per-dept split for
+  // that day; clicking a dept opens the per-worker + per-JC list.
+  // Same idea for "{Scope}'s Load" KPI but starts at per-dept (only
+  // one date involved). We model this as a stack of levels so each
+  // drilldown gets its own back button without prop-drilling state.
+  type DrilldownLevel =
+    | { kind: "capacity-14d" }
+    | { kind: "capacity-day"; date: string }
+    | { kind: "capacity-day-dept"; date: string; deptCode: string }
+    | { kind: "load-by-dept" }
+    | { kind: "load-dept"; deptCode: string };
+  const [drilldownStack, setDrilldownStack] = useState<DrilldownLevel[]>([]);
+  const pushDrilldown = useCallback((level: DrilldownLevel) => {
+    setDrilldownStack((s) => [...s, level]);
+  }, []);
+  const popDrilldown = useCallback(() => {
+    setDrilldownStack((s) => s.slice(0, -1));
+  }, []);
+  const closeDrilldown = useCallback(() => {
+    setDrilldownStack([]);
+  }, []);
+
   // Range covered by the scope toggle (used as the "Today's load"
   // bucket — JCs whose dueDate falls inside this range).
   const scopeRange = useMemo(() => {
@@ -847,6 +874,186 @@ export default function PlanningPage() {
     }
   };
 
+  // ── Drilldown data builders (memoized so reopening a level on the
+  // same render doesn't recompute). All read from `orders` already in
+  // memory — no extra API hits. ──
+
+  // 14 most-recent working days (Mon-Sat, skip Sundays), ending today.
+  const last14WorkingDays = useMemo(() => {
+    const days: string[] = [];
+    const cursor = new Date();
+    cursor.setHours(0, 0, 0, 0);
+    while (days.length < 14) {
+      if (cursor.getDay() !== 0) {
+        days.unshift(fmtISO(cursor));
+      }
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    return days;
+  }, []);
+
+  // Per-day total completed minutes (sum across all production depts,
+  // both categories). Matches the same formula capacityData uses for
+  // the rolling 14-day avg.
+  const capacityByDay = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const d of last14WorkingDays) m.set(d, 0);
+    for (const order of orders) {
+      for (const jc of order.jobCards) {
+        if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+        if (!jc.completedDate) continue;
+        if (!m.has(jc.completedDate)) continue;
+        m.set(
+          jc.completedDate,
+          (m.get(jc.completedDate) ?? 0) +
+            (jc.actualMinutes ?? jc.estMinutes ?? 0),
+        );
+      }
+    }
+    return m;
+  }, [orders, last14WorkingDays]);
+
+  // For a specific date, return per-dept total completed minutes.
+  const capacityForDate = useCallback(
+    (date: string) => {
+      const byDept = new Map<string, { sofa: number; bf: number; other: number; total: number }>();
+      for (const order of orders) {
+        for (const jc of order.jobCards) {
+          if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+          if (jc.completedDate !== date) continue;
+          const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+          const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, other: 0, total: 0 };
+          if (order.itemCategory === "SOFA") existing.sofa += mins;
+          else if (order.itemCategory === "BEDFRAME") existing.bf += mins;
+          else existing.other += mins;
+          existing.total += mins;
+          byDept.set(jc.departmentCode, existing);
+        }
+      }
+      return byDept;
+    },
+    [orders],
+  );
+
+  // For a specific (date, dept), return list of JC + parent PO refs
+  // contributing. Sorted by minutes descending.
+  const capacityJCsForDateDept = useCallback(
+    (date: string, deptCode: string) => {
+      const rows: {
+        jcId: string;
+        pic1Name: string;
+        pic2Name: string;
+        productCode: string;
+        productName: string;
+        wipLabel: string | null;
+        poNo: string;
+        category: string;
+        customerName: string;
+        minutes: number;
+      }[] = [];
+      for (const order of orders) {
+        for (const jc of order.jobCards) {
+          if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+          if (jc.completedDate !== date) continue;
+          if (jc.departmentCode !== deptCode) continue;
+          rows.push({
+            jcId: jc.id,
+            pic1Name: jc.pic1Name || "",
+            pic2Name: jc.pic2Name || "",
+            productCode: order.productCode,
+            productName: order.productName,
+            wipLabel: jc.wipLabel ?? null,
+            poNo: order.poNo,
+            category: order.itemCategory,
+            customerName: order.customerName,
+            minutes: jc.actualMinutes ?? jc.estMinutes ?? 0,
+          });
+        }
+      }
+      rows.sort((a, b) => b.minutes - a.minutes);
+      return rows;
+    },
+    [orders],
+  );
+
+  // For "{Scope}'s Load" → JCs with dueDate inside scopeRange and
+  // active (not completed/cancelled/transferred). Returns per-dept
+  // SOFA/BF/total split — mirrors capacityData's sofaScopeLoad / bfScopeLoad
+  // but exposes the raw counts side-by-side.
+  const loadByDept = useMemo(() => {
+    const byDept = new Map<string, { sofa: number; bf: number; total: number }>();
+    for (const order of orders) {
+      if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
+      for (const jc of order.jobCards) {
+        if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
+        if (!jc.dueDate) continue;
+        if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+        const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, total: 0 };
+        const mins = jc.estMinutes ?? 0;
+        if (order.itemCategory === "SOFA") existing.sofa += mins;
+        else if (order.itemCategory === "BEDFRAME") existing.bf += mins;
+        existing.total += mins;
+        byDept.set(jc.departmentCode, existing);
+      }
+    }
+    return byDept;
+  }, [orders, scopeRange]);
+
+  // For a specific dept → list of JCs in the scope range, with assignee
+  // + product info.
+  const loadJCsForDept = useCallback(
+    (deptCode: string) => {
+      const rows: {
+        jcId: string;
+        dueDate: string;
+        pic1Name: string;
+        pic2Name: string;
+        productCode: string;
+        productName: string;
+        wipLabel: string | null;
+        poNo: string;
+        category: string;
+        customerName: string;
+        minutes: number;
+        status: string;
+      }[] = [];
+      for (const order of orders) {
+        if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
+        for (const jc of order.jobCards) {
+          if (jc.departmentCode !== deptCode) continue;
+          if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
+          if (!jc.dueDate) continue;
+          if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+          rows.push({
+            jcId: jc.id,
+            dueDate: jc.dueDate,
+            pic1Name: jc.pic1Name || "",
+            pic2Name: jc.pic2Name || "",
+            productCode: order.productCode,
+            productName: order.productName,
+            wipLabel: jc.wipLabel ?? null,
+            poNo: order.poNo,
+            category: order.itemCategory,
+            customerName: order.customerName,
+            minutes: jc.estMinutes ?? 0,
+            status: jc.status,
+          });
+        }
+      }
+      rows.sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : b.minutes - a.minutes));
+      return rows;
+    },
+    [orders, scopeRange],
+  );
+
+  const deptNameByCode = useMemo(() => {
+    const m = new Map<string, { name: string; color: string }>();
+    for (const d of productionDepartments) {
+      m.set(d.code, { name: d.name, color: d.color });
+    }
+    return m;
+  }, [productionDepartments]);
+
   // ── Loading state ──
   if (loading) {
     return (
@@ -856,6 +1063,9 @@ export default function PlanningPage() {
       </div>
     );
   }
+
+  // Current drilldown level (top of stack); null = no modal open.
+  const topDrilldown = drilldownStack[drilldownStack.length - 1] ?? null;
 
   return (
     <div className="space-y-6">
@@ -933,7 +1143,13 @@ export default function PlanningPage() {
               spec). Load / Utilization / Backlog scoped to the
               selected Daily/Weekly/Monthly window. */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-            <Card>
+            {/* Wei Siang 2026-05-15: Daily Capacity is the entry
+                point to the drilldown — click it to open the 14-day
+                breakdown modal. Click → day modal → per-dept → per-JC. */}
+            <Card
+              className="cursor-pointer transition-shadow hover:shadow-md"
+              onClick={() => pushDrilldown({ kind: "capacity-14d" })}
+            >
               <CardContent className="p-3">
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
                   <span>Daily Capacity</span>
@@ -942,10 +1158,16 @@ export default function PlanningPage() {
                 <p className="text-xl font-bold text-[#1F1D1B]">
                   {totalCapacity.toLocaleString()} <span className="text-xs font-medium text-[#6B7280]">min/day</span>
                 </p>
-                <p className="text-[10px] text-[#9CA3AF] mt-0.5">14-day rolling actual avg</p>
+                <p className="text-[10px] text-[#9CA3AF] mt-0.5">14-day rolling actual avg · click for breakdown</p>
               </CardContent>
             </Card>
-            <Card>
+            {/* Wei Siang 2026-05-15: {Scope}'s Load → per-dept drilldown
+                → per-JC list. Honours the active Daily/Weekly/Monthly
+                scope toggle. */}
+            <Card
+              className="cursor-pointer transition-shadow hover:shadow-md"
+              onClick={() => pushDrilldown({ kind: "load-by-dept" })}
+            >
               <CardContent className="p-3">
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
                   <span>{scopeRange.label}&apos;s Load</span>
@@ -1821,6 +2043,390 @@ export default function PlanningPage() {
           setShowLtSaveModal(false);
         }}
       />
+
+      {/* Wei Siang 2026-05-15: KPI drilldown modals. Stacked so each
+          level has its own back button. Only the top of the stack
+          renders; popping returns the operator to the previous level. */}
+      {topDrilldown && (
+        <DrilldownModal
+          level={topDrilldown}
+          stackDepth={drilldownStack.length}
+          onBack={drilldownStack.length > 1 ? popDrilldown : undefined}
+          onClose={closeDrilldown}
+          onPush={pushDrilldown}
+          orders={orders}
+          last14WorkingDays={last14WorkingDays}
+          capacityByDay={capacityByDay}
+          capacityForDate={capacityForDate}
+          capacityJCsForDateDept={capacityJCsForDateDept}
+          loadByDept={loadByDept}
+          loadJCsForDept={loadJCsForDept}
+          deptNameByCode={deptNameByCode}
+          scopeRange={scopeRange}
+          totalCapacity={totalCapacity}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Drilldown modal ──
+// Wei Siang 2026-05-15: separate component (still in this file because
+// the level types + data closures live with the parent). Renders
+// whichever level is on top of the stack. Back button only shown when
+// there's a parent level to return to (stackDepth > 1).
+type DrilldownLevel =
+  | { kind: "capacity-14d" }
+  | { kind: "capacity-day"; date: string }
+  | { kind: "capacity-day-dept"; date: string; deptCode: string }
+  | { kind: "load-by-dept" }
+  | { kind: "load-dept"; deptCode: string };
+
+function DrilldownModal(props: {
+  level: DrilldownLevel;
+  stackDepth: number;
+  onBack?: () => void;
+  onClose: () => void;
+  onPush: (level: DrilldownLevel) => void;
+  orders: ProductionOrder[];
+  last14WorkingDays: string[];
+  capacityByDay: Map<string, number>;
+  capacityForDate: (date: string) => Map<string, { sofa: number; bf: number; other: number; total: number }>;
+  capacityJCsForDateDept: (date: string, deptCode: string) => Array<{
+    jcId: string;
+    pic1Name: string;
+    pic2Name: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string | null;
+    poNo: string;
+    category: string;
+    customerName: string;
+    minutes: number;
+  }>;
+  loadByDept: Map<string, { sofa: number; bf: number; total: number }>;
+  loadJCsForDept: (deptCode: string) => Array<{
+    jcId: string;
+    dueDate: string;
+    pic1Name: string;
+    pic2Name: string;
+    productCode: string;
+    productName: string;
+    wipLabel: string | null;
+    poNo: string;
+    category: string;
+    customerName: string;
+    minutes: number;
+    status: string;
+  }>;
+  deptNameByCode: Map<string, { name: string; color: string }>;
+  scopeRange: { from: string; to: string; workingDays: number; label: string };
+  totalCapacity: number;
+}) {
+  const {
+    level,
+    stackDepth,
+    onBack,
+    onClose,
+    onPush,
+    last14WorkingDays,
+    capacityByDay,
+    capacityForDate,
+    capacityJCsForDateDept,
+    loadByDept,
+    loadJCsForDept,
+    deptNameByCode,
+    scopeRange,
+    totalCapacity,
+  } = props;
+
+  let title = "";
+  let subtitle = "";
+  let body: React.ReactNode = null;
+
+  if (level.kind === "capacity-14d") {
+    title = "Daily Capacity — Past 14 Working Days";
+    subtitle = `Average: ${totalCapacity.toLocaleString()} min/day across all production depts`;
+    const maxMin = Math.max(1, ...Array.from(capacityByDay.values()));
+    body = (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Date</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total Min</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Hours</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]" style={{ minWidth: 200 }}>vs Avg</th>
+            <th className="h-9 px-2 w-8"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {last14WorkingDays.map((date) => {
+            const mins = capacityByDay.get(date) ?? 0;
+            const hrs = Math.round((mins / 60) * 10) / 10;
+            const pctOfMax = (mins / maxMin) * 100;
+            const diffFromAvg = mins - totalCapacity;
+            const diffColor = diffFromAvg > 0 ? "text-[#4F7C3A]" : diffFromAvg < 0 ? "text-[#9A3A2D]" : "text-[#6B7280]";
+            return (
+              <tr
+                key={date}
+                className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                onClick={() => onPush({ kind: "capacity-day", date })}
+              >
+                <td className="px-4 py-2 font-medium text-[#1F1D1B]">{date}</td>
+                <td className="px-4 py-2 text-right font-medium text-[#1F1D1B]">{mins.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right text-[#4B5563]">{hrs}h</td>
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
+                      <div className="h-full bg-[#6B5C32]" style={{ width: `${pctOfMax}%` }} />
+                    </div>
+                    <span className={`text-[10px] ${diffColor} w-12 text-right`}>
+                      {diffFromAvg >= 0 ? "+" : ""}{diffFromAvg.toLocaleString()}
+                    </span>
+                  </div>
+                </td>
+                <td className="px-2 py-2 text-[#9CA3AF]">
+                  <ChevronRight className="h-4 w-4" />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "capacity-day") {
+    title = `Production on ${level.date}`;
+    const byDept = capacityForDate(level.date);
+    const dayTotal = Array.from(byDept.values()).reduce((s, v) => s + v.total, 0);
+    subtitle = `${dayTotal.toLocaleString()} min completed across ${byDept.size} dept${byDept.size === 1 ? "" : "s"}`;
+    const entries = Array.from(byDept.entries()).sort((a, b) => b[1].total - a[1].total);
+    body = entries.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No completed work on this date.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Department</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">SOFA</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">BEDFRAME</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total Min</th>
+            <th className="h-9 px-2 w-8"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([deptCode, val]) => {
+            const meta = deptNameByCode.get(deptCode);
+            return (
+              <tr
+                key={deptCode}
+                className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                onClick={() => onPush({ kind: "capacity-day-dept", date: level.date, deptCode })}
+              >
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: meta?.color ?? "#9CA3AF" }} />
+                    <span className="font-medium text-[#1F1D1B]">{meta?.name ?? deptCode}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-2 text-right text-[#3E6570]">{val.sofa.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right text-[#6B5C32]">{val.bf.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B]">{val.total.toLocaleString()}</td>
+                <td className="px-2 py-2 text-[#9CA3AF]">
+                  <ChevronRight className="h-4 w-4" />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "capacity-day-dept") {
+    const meta = deptNameByCode.get(level.deptCode);
+    title = `${meta?.name ?? level.deptCode} on ${level.date}`;
+    const rows = capacityJCsForDateDept(level.date, level.deptCode);
+    const deptTotal = rows.reduce((s, r) => s + r.minutes, 0);
+    subtitle = `${rows.length} job card${rows.length === 1 ? "" : "s"} · ${deptTotal.toLocaleString()} min total`;
+    body = rows.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No completed JCs in this dept on this date.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Worker</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">PO</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Category</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Product</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">WIP</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Customer</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Min</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.jcId} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
+              <td className="px-4 py-2 text-[#1F1D1B]">
+                {r.pic1Name}{r.pic2Name ? ` + ${r.pic2Name}` : ""}
+              </td>
+              <td className="px-4 py-2 text-[#4B5563]">{r.poNo}</td>
+              <td className="px-4 py-2">
+                <span className={`inline-block rounded px-2 py-0.5 text-[10px] font-medium ${
+                  r.category === "SOFA" ? "text-[#3E6570] bg-[#E0EDF0]" : "text-[#6B5C32] bg-[#F0ECE9]"
+                }`}>
+                  {r.category}
+                </span>
+              </td>
+              <td className="px-4 py-2 text-[#4B5563]">
+                <div className="font-medium text-[#1F1D1B]">{r.productCode}</div>
+                <div className="text-[10px] text-[#6B7280]">{r.productName}</div>
+              </td>
+              <td className="px-4 py-2 text-[#4B5563]">{r.wipLabel ?? "—"}</td>
+              <td className="px-4 py-2 text-[#4B5563]">{r.customerName}</td>
+              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B]">{r.minutes.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "load-by-dept") {
+    title = `${scopeRange.label}'s Load — ${scopeRange.from}${scopeRange.from !== scopeRange.to ? ` → ${scopeRange.to}` : ""}`;
+    const total = Array.from(loadByDept.values()).reduce((s, v) => s + v.total, 0);
+    subtitle = `${total.toLocaleString()} min of active work scheduled across ${loadByDept.size} dept${loadByDept.size === 1 ? "" : "s"}`;
+    const entries = Array.from(loadByDept.entries()).sort((a, b) => b[1].total - a[1].total);
+    body = entries.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No active JCs scheduled in this range.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Department</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">SOFA</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">BEDFRAME</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total Min</th>
+            <th className="h-9 px-2 w-8"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([deptCode, val]) => {
+            const meta = deptNameByCode.get(deptCode);
+            return (
+              <tr
+                key={deptCode}
+                className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                onClick={() => onPush({ kind: "load-dept", deptCode })}
+              >
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: meta?.color ?? "#9CA3AF" }} />
+                    <span className="font-medium text-[#1F1D1B]">{meta?.name ?? deptCode}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-2 text-right text-[#3E6570]">{val.sofa.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right text-[#6B5C32]">{val.bf.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B]">{val.total.toLocaleString()}</td>
+                <td className="px-2 py-2 text-[#9CA3AF]">
+                  <ChevronRight className="h-4 w-4" />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "load-dept") {
+    const meta = deptNameByCode.get(level.deptCode);
+    title = `${meta?.name ?? level.deptCode} — ${scopeRange.label}'s Load`;
+    const rows = loadJCsForDept(level.deptCode);
+    const deptTotal = rows.reduce((s, r) => s + r.minutes, 0);
+    subtitle = `${rows.length} active JC${rows.length === 1 ? "" : "s"} · ${deptTotal.toLocaleString()} min total`;
+    body = rows.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No active JCs in this dept for the selected range.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Due Date</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Worker</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">PO</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Category</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Product</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">WIP</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Customer</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Status</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Min</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.jcId} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
+              <td className="px-4 py-2 text-[#4B5563]">{r.dueDate}</td>
+              <td className="px-4 py-2 text-[#1F1D1B]">
+                {r.pic1Name || <span className="text-[#9CA3AF]">unassigned</span>}
+                {r.pic2Name ? ` + ${r.pic2Name}` : ""}
+              </td>
+              <td className="px-4 py-2 text-[#4B5563]">{r.poNo}</td>
+              <td className="px-4 py-2">
+                <span className={`inline-block rounded px-2 py-0.5 text-[10px] font-medium ${
+                  r.category === "SOFA" ? "text-[#3E6570] bg-[#E0EDF0]" : "text-[#6B5C32] bg-[#F0ECE9]"
+                }`}>
+                  {r.category}
+                </span>
+              </td>
+              <td className="px-4 py-2 text-[#4B5563]">
+                <div className="font-medium text-[#1F1D1B]">{r.productCode}</div>
+                <div className="text-[10px] text-[#6B7280]">{r.productName}</div>
+              </td>
+              <td className="px-4 py-2 text-[#4B5563]">{r.wipLabel ?? "—"}</td>
+              <td className="px-4 py-2 text-[#4B5563]">{r.customerName}</td>
+              <td className="px-4 py-2 text-[10px] text-[#6B7280]">{r.status}</td>
+              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B]">{r.minutes.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  // z-index scales with stack depth so a deeper modal overlays its
+  // parent. Backdrop click closes the entire stack — the operator can
+  // still use Back for one level up.
+  const zIndex = 50 + stackDepth * 10;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center p-4"
+      style={{ zIndex }}
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[#E2DDD8] bg-[#FAFAF9]">
+          <div className="flex items-center gap-3">
+            {onBack && (
+              <button
+                onClick={onBack}
+                className="p-1.5 rounded hover:bg-[#F0ECE9] text-[#6B5C32]"
+                title="Back to previous level"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+            )}
+            <div>
+              <h2 className="text-base font-bold text-[#1F1D1B]">{title}</h2>
+              {subtitle && <p className="text-xs text-[#6B7280] mt-0.5">{subtitle}</p>}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded hover:bg-[#F0ECE9] text-[#6B7280]"
+            title="Close all"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto">{body}</div>
+      </div>
     </div>
   );
 }

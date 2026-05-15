@@ -395,6 +395,13 @@ export default function PlanningPage() {
     return fmtISO(d);
   });
   const [effDateTo, setEffDateTo] = useState<string>(() => fmtISO(new Date()));
+  // Wei Siang 2026-05-15: split-vs-combined toggle. Default split
+  // (one row per (dept × SOFA|BEDFRAME)). Combined collapses each
+  // dept's two rows into one row that sums Active / Completed /
+  // Production Time / Working Hrs across categories, then recomputes
+  // Efficiency % + Status from the combined totals. Category column
+  // hides when combined.
+  const [effShowCombined, setEffShowCombined] = useState(false);
 
   // Wei Siang 2026-05-15: Working Hours come from working_hour_entries
   // (per-dept × per-category hour totals for the date range), NOT from
@@ -948,6 +955,67 @@ export default function PlanningPage() {
     () => getDeptEfficiency(orders, effDateFrom, effDateTo, workingHoursByDeptCategory),
     [orders, effDateFrom, effDateTo, workingHoursByDeptCategory],
   );
+
+  // Wei Siang 2026-05-15: combined view — one row per dept, sums of
+  // both categories' Active / Completed / Production / Working, with
+  // Efficiency % + Status recomputed from the combined totals (NOT
+  // averaged — efficiency is a ratio, must come from the summed
+  // numerator ÷ summed denominator to stay accurate).
+  const deptEfficiencyCombined = useMemo(() => {
+    const byCode = new Map<string, {
+      code: string;
+      name: string;
+      color: string;
+      active: number;
+      completed: number;
+      totalProductionMinutes: number;
+      totalWorkingMinutes: number;
+    }>();
+    for (const row of deptEfficiency) {
+      const existing = byCode.get(row.code);
+      if (existing) {
+        existing.active += row.active;
+        existing.completed += row.completed;
+        existing.totalProductionMinutes += row.totalProductionMinutes;
+        existing.totalWorkingMinutes += row.totalWorkingMinutes;
+      } else {
+        byCode.set(row.code, {
+          code: row.code,
+          name: row.name,
+          color: row.color,
+          active: row.active,
+          completed: row.completed,
+          totalProductionMinutes: row.totalProductionMinutes,
+          totalWorkingMinutes: row.totalWorkingMinutes,
+        });
+      }
+    }
+    return TRACKER_DEPARTMENTS.map((dept) => {
+      const cell = byCode.get(dept.code) ?? {
+        code: dept.code,
+        name: dept.name,
+        color: dept.color,
+        active: 0,
+        completed: 0,
+        totalProductionMinutes: 0,
+        totalWorkingMinutes: 0,
+      };
+      const efficiency =
+        cell.totalWorkingMinutes > 0
+          ? Math.round((cell.totalProductionMinutes / cell.totalWorkingMinutes) * 100)
+          : 0;
+      let statusLabel: string;
+      let statusColor: string;
+      if (cell.totalWorkingMinutes === 0 || cell.totalProductionMinutes === 0) {
+        statusLabel = "No Data";
+        statusColor = "text-gray-500 bg-gray-50";
+      } else if (efficiency >= 95) { statusLabel = "Excellent"; statusColor = "text-[#4F7C3A] bg-[#EEF3E4]"; }
+      else if (efficiency >= 80) { statusLabel = "Good"; statusColor = "text-[#3E6570] bg-[#E0EDF0]"; }
+      else if (efficiency >= 60) { statusLabel = "Fair"; statusColor = "text-[#9C6F1E] bg-[#FAEFCB]"; }
+      else { statusLabel = "Needs Improvement"; statusColor = "text-[#9A3A2D] bg-[#F9E1DA]"; }
+      return { ...cell, efficiency, statusLabel, statusColor };
+    });
+  }, [deptEfficiency]);
 
   const filteredTrackerOrders = useMemo(() => {
     let result = [...orders];
@@ -1715,6 +1783,23 @@ export default function PlanningPage() {
                   >
                     Past 30d
                   </button>
+                  {/* Wei Siang 2026-05-15: SOFA / BEDFRAME split toggle.
+                      Click → combine rows (1 per dept); click again →
+                      split back (2 per dept). Combined re-runs the
+                      ratio on summed totals — correct, not just an
+                      average of the two efficiency %s. */}
+                  <button
+                    type="button"
+                    onClick={() => setEffShowCombined((v) => !v)}
+                    className={`ml-1 h-7 rounded border px-2 text-xs ${
+                      effShowCombined
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : "border-[#E2DDD8] bg-[#F0ECE9] text-[#6B5C32] hover:bg-[#E8E3DE]"
+                    }`}
+                    title={effShowCombined ? "Show SOFA + BEDFRAME separately" : "Combine SOFA + BEDFRAME into one row per dept"}
+                  >
+                    {effShowCombined ? "Combined" : "Combine SOFA + BF"}
+                  </button>
                 </div>
               </div>
             </CardHeader>
@@ -1724,7 +1809,7 @@ export default function PlanningPage() {
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                       <th className="h-9 px-3 text-left font-medium text-[#374151]">Department</th>
-                      <th className="h-9 px-3 text-left font-medium text-[#374151]">Category</th>
+                      {!effShowCombined && <th className="h-9 px-3 text-left font-medium text-[#374151]">Category</th>}
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Active</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Completed</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Spec time of completed JCs in the date range — sum of (actualMinutes ?? estMinutes) × wipQty.">Production Time</th>
@@ -1734,38 +1819,17 @@ export default function PlanningPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {TRACKER_DEPARTMENTS.map((dept) => {
-                      const rows = deptEfficiency.filter((r) => r.code === dept.code);
-                      return rows.map((row, idx) => {
-                        const isLastInGroup = idx === rows.length - 1;
-                        return (
+                    {effShowCombined
+                      ? deptEfficiencyCombined.map((row) => (
                           <tr
-                            key={`${dept.code}-${row.category}`}
-                            className={`hover:bg-[#FAF9F7] ${
-                              isLastInGroup ? "border-b border-[#E2DDD8]" : ""
-                            }`}
+                            key={row.code}
+                            className="hover:bg-[#FAF9F7] border-b border-[#E2DDD8]"
                           >
-                            {idx === 0 && (
-                              <td
-                                rowSpan={rows.length}
-                                className="px-3 py-2 align-top border-r border-[#E2DDD8] bg-[#FAF9F7]"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
-                                  <span className="font-medium text-[#1F1D1B]">{dept.name}</span>
-                                </div>
-                              </td>
-                            )}
-                            <td className="px-3 py-2">
-                              <span
-                                className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
-                                  row.category === "SOFA"
-                                    ? "text-[#3E6570] bg-[#E0EDF0]"
-                                    : "text-[#6B5C32] bg-[#F0ECE9]"
-                                }`}
-                              >
-                                {row.category}
-                              </span>
+                            <td className="px-3 py-2 border-r border-[#E2DDD8] bg-[#FAF9F7]">
+                              <div className="flex items-center gap-2">
+                                <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
+                                <span className="font-medium text-[#1F1D1B]">{row.name}</span>
+                              </div>
                             </td>
                             <td className="px-3 py-2 text-right font-medium text-[#3E6570]">{row.active}</td>
                             <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{row.completed}</td>
@@ -1778,9 +1842,54 @@ export default function PlanningPage() {
                               </span>
                             </td>
                           </tr>
-                        );
-                      });
-                    })}
+                        ))
+                      : TRACKER_DEPARTMENTS.map((dept) => {
+                          const rows = deptEfficiency.filter((r) => r.code === dept.code);
+                          return rows.map((row, idx) => {
+                            const isLastInGroup = idx === rows.length - 1;
+                            return (
+                              <tr
+                                key={`${dept.code}-${row.category}`}
+                                className={`hover:bg-[#FAF9F7] ${
+                                  isLastInGroup ? "border-b border-[#E2DDD8]" : ""
+                                }`}
+                              >
+                                {idx === 0 && (
+                                  <td
+                                    rowSpan={rows.length}
+                                    className="px-3 py-2 align-top border-r border-[#E2DDD8] bg-[#FAF9F7]"
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
+                                      <span className="font-medium text-[#1F1D1B]">{dept.name}</span>
+                                    </div>
+                                  </td>
+                                )}
+                                <td className="px-3 py-2">
+                                  <span
+                                    className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${
+                                      row.category === "SOFA"
+                                        ? "text-[#3E6570] bg-[#E0EDF0]"
+                                        : "text-[#6B5C32] bg-[#F0ECE9]"
+                                    }`}
+                                  >
+                                    {row.category}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 text-right font-medium text-[#3E6570]">{row.active}</td>
+                                <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{row.completed}</td>
+                                <td className="px-3 py-2 text-right text-[#4B5563] tabular-nums">{row.totalProductionMinutes > 0 ? formatHours(row.totalProductionMinutes) : <span className="text-[#9CA3AF]">—</span>}</td>
+                                <td className="px-3 py-2 text-right text-[#4B5563] tabular-nums">{row.totalWorkingMinutes > 0 ? formatHours(row.totalWorkingMinutes) : <span className="text-[#9CA3AF]">—</span>}</td>
+                                <td className="px-3 py-2 text-right font-bold">{row.efficiency > 0 ? `${row.efficiency}%` : "-"}</td>
+                                <td className="px-3 py-2">
+                                  <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${row.statusColor}`}>
+                                    {row.statusLabel}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          });
+                        })}
                   </tbody>
                 </table>
               </div>

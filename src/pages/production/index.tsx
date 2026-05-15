@@ -6240,20 +6240,19 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
-                          {/* Wei Siang 2026-05-15: 沙发 has empty
-                              vertical space below the spec block — let
-                              Customer Name wrap to 2 lines instead of
-                              truncating at small font. Capped at 2
-                              lines via line-clamp so an extreme value
-                              can't push the bottom QR block out. */}
+                          {/* Wei Siang 2026-05-15: long-value cells
+                              (Customer Name, WIP, Notes) wrap freely
+                              via break-words at slightly smaller font.
+                              No line-clamp / truncation — Wei Siang's
+                              rule: "你不可以删啊 我还是要看得到东西".
+                              Container-level overflow-hidden on the
+                              tile is the only bound; in practice tiles
+                              have enough vertical slack since sofa
+                              skips Gap/Divan/Total H rows. */}
                           <span
                             className="flex-1 break-words"
                             style={{
                               fontSize: "12px",
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              overflow: "hidden",
                               lineHeight: 1.2,
                             }}
                           >: {s.customerName || "—"}</span>
@@ -6269,10 +6268,6 @@ export default function ProductionPage({
                               className="flex-1 break-words"
                               style={{
                                 fontSize: "11px",
-                                display: "-webkit-box",
-                                WebkitLineClamp: 2,
-                                WebkitBoxOrient: "vertical",
-                                overflow: "hidden",
                                 lineHeight: 1.2,
                               }}
                             >: {s.wipName}</span>
@@ -6293,10 +6288,6 @@ export default function ProductionPage({
                             className="flex-1 break-words"
                             style={{
                               fontSize: "11px",
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              overflow: "hidden",
                               lineHeight: 1.2,
                             }}
                           >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
@@ -6567,10 +6558,6 @@ export default function ProductionPage({
                               className="flex-1 break-words"
                               style={{
                                 fontSize: "11px",
-                                display: "-webkit-box",
-                                WebkitLineClamp: 2,
-                                WebkitBoxOrient: "vertical",
-                                overflow: "hidden",
                                 lineHeight: 1.2,
                               }}
                             >: {s.boxLabel}</span>
@@ -6597,10 +6584,6 @@ export default function ProductionPage({
                             className="flex-1 break-words"
                             style={{
                               fontSize: "11px",
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              overflow: "hidden",
                               lineHeight: 1.2,
                             }}
                           >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
@@ -6765,10 +6748,6 @@ export default function ProductionPage({
                         className="flex-1 break-words"
                         style={{
                           fontSize: "11pt",
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical",
-                          overflow: "hidden",
                           lineHeight: 1.2,
                         }}
                       >: {s.customerName || "—"}</span>
@@ -6784,10 +6763,6 @@ export default function ProductionPage({
                           className="flex-1 break-words"
                           style={{
                             fontSize: "11pt",
-                            display: "-webkit-box",
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical",
-                            overflow: "hidden",
                             lineHeight: 1.2,
                           }}
                         >: {s.wipName}</span>
@@ -6808,10 +6783,6 @@ export default function ProductionPage({
                         className="flex-1 break-words"
                         style={{
                           fontSize: "11pt",
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical",
-                          overflow: "hidden",
                           lineHeight: 1.2,
                         }}
                       >
@@ -7024,10 +6995,6 @@ export default function ProductionPage({
                             className="flex-1 break-words"
                             style={{
                               fontSize: "11pt",
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              overflow: "hidden",
                               lineHeight: 1.2,
                             }}
                           >: {s.boxLabel}</span>
@@ -7054,10 +7021,6 @@ export default function ProductionPage({
                           className="flex-1 break-words"
                           style={{
                             fontSize: "11pt",
-                            display: "-webkit-box",
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: "vertical",
-                            overflow: "hidden",
                             lineHeight: 1.2,
                           }}
                         >

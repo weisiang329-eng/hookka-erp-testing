@@ -1291,9 +1291,13 @@ export default function PlanningPage() {
                           </div>
                           {/* Percentage */}
                           <span className={`text-[9px] font-semibold ${textColor}`}>{day.utilization}%</span>
-                          {/* Date label */}
-                          <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#6B7280]" : "text-[#9CA3AF]"}`}>
-                            {["S","M","T","W","T","F","S"][d.getDay()]}{d.getDate()}
+                          {/* Date label — Wei Siang 2026-05-15: "F15" /
+                              "S16" weekday-letter-prefix swapped for a
+                              plain DD/M format (today = 15/5). Saturday
+                              still gets the muted grey so the operator can
+                              eyeball weekends at a glance. */}
+                          <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
+                            {d.getDate()}/{d.getMonth() + 1}
                           </span>
                         </div>
                       );

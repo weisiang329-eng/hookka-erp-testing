@@ -6240,7 +6240,7 @@ export default function ProductionPage({
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.customerName || "—"}</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.customerName || "—"}</span>
                         </div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>

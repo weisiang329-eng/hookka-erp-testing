@@ -255,31 +255,37 @@ function getDeptEfficiency(
       let completed = 0;
       let totalProductionMinutes = 0;
 
+      // Wei Siang 2026-05-15 (parity fix): iterate ALL JCs per order,
+      // not just the first one matching this dept. A PO can have
+      // multiple JCs at the same dept (e.g. SOFA with sub-WIPs base/
+      // HB/DV/ARM each landing as its own JC at Fab Cut), and the old
+      // `.find()` only credited the first. Mirrors how
+      // /api/department-performance iterates the candidate JC rows
+      // directly — Employees > Department Performance and Planning >
+      // Efficiency Overview now read off the same total per
+      // (dept × category × date range).
       for (const order of orders) {
         if (order.itemCategory !== cat) continue;
-        const jc = order.jobCards.find((j) => j.departmentCode === dept.code);
-        if (!jc) continue;
-        // Wei Siang 2026-05-15: Active = "in the pipeline, not done" =
-        // WAITING + IN_PROGRESS + PAUSED + BLOCKED. The previous narrow
-        // definition (IN_PROGRESS + PAUSED only) showed 0 in every row
-        // when the factory had a queue of WAITING JCs that hadn't been
-        // started yet — which is exactly the situation an operator
-        // cares to see ("how much is queued for this dept right now?").
-        if (
-          jc.status === "WAITING" ||
-          jc.status === "IN_PROGRESS" ||
-          jc.status === "PAUSED" ||
-          jc.status === "BLOCKED"
-        ) {
-          active++;
-        }
-        if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") {
-          if (!jc.completedDate) continue;
-          if (dateFrom && jc.completedDate < dateFrom) continue;
-          if (dateTo && jc.completedDate > dateTo) continue;
-          completed++;
-          const wipQty = Math.max(1, jc.wipQty ?? 1);
-          totalProductionMinutes += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+        for (const jc of order.jobCards) {
+          if (jc.departmentCode !== dept.code) continue;
+          // Active = "in the pipeline, not done" = WAITING +
+          // IN_PROGRESS + PAUSED + BLOCKED.
+          if (
+            jc.status === "WAITING" ||
+            jc.status === "IN_PROGRESS" ||
+            jc.status === "PAUSED" ||
+            jc.status === "BLOCKED"
+          ) {
+            active++;
+          }
+          if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") {
+            if (!jc.completedDate) continue;
+            if (dateFrom && jc.completedDate < dateFrom) continue;
+            if (dateTo && jc.completedDate > dateTo) continue;
+            completed++;
+            const wipQty = Math.max(1, jc.wipQty ?? 1);
+            totalProductionMinutes += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+          }
         }
       }
 

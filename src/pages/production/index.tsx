@@ -3446,7 +3446,16 @@ export default function ProductionPage({
       // qty > 1 fans the row into N physical piece stickers, each with
       // its own p=N&t=M marker so the worker portal can reject double-
       // scans. qty=1 stays single-sticker.
-      const pieceCount = Math.max(1, row.qty || 1);
+      //
+      // Wei Siang 2026-05-15: on FAB_CUT / FAB_SEW (the new big 100×
+      // 150mm sticker mode), collapse the fan-out so sticker count
+      // equals row count regardless of qty. The qty is still shown on
+      // the sticker body ("Qty 3") — the workers don't need separate
+      // 1/3, 2/3, 3/3 cards for one fabric-cut job, they just need
+      // the cutting + sewing sign-off lines per JC.
+      const fanOutByQty = !(activeTab === "FAB_CUT" || activeTab === "FAB_SEW");
+      const pieceCount = fanOutByQty ? Math.max(1, row.qty || 1) : 1;
+      const displayQty = Math.max(1, row.qty || 1);
       for (let p = 1; p <= pieceCount; p++) {
         stickers.push({
           key: pieceCount > 1 ? `${row.id}:${p}` : row.id,
@@ -3456,7 +3465,7 @@ export default function ProductionPage({
           wipName: row.wip,
           wipCode: "",
           sizeLabel: row.size || "",
-          qty: pieceCount,
+          qty: displayQty,
           customerPOId: row.customerPOId || "",
           customerState: row.customerState || "",
           customerName: row.customerName || "",
@@ -3661,13 +3670,17 @@ export default function ProductionPage({
             fabricColor: p?.fabricColor || o.fabricCode || "",
             customerName: u.customerName || o.customerName || "",
             customerHub: u.customerHub || "",
-            // CO-aware: fall back through SO ids → CO ids so the sticker
-            // for a CO-origin PO shows CO-YYMM-NNN instead of blank.
+            // CO-aware + line-suffix: For BEDFRAME / ACCESSORY use the
+            // FG unit's poNo which IS the line-suffixed PO id (e.g.
+            // "CO-2605-007-01" / "SO-2604-218-01"). For SOFA fall back
+            // to the parent SO/CO id (no line suffix) because a sofa
+            // SET spans multiple variant-POs and the parent id is
+            // what identifies the set. Wei Siang 2026-05-15:
+            // "consignment order 也是要 show consignment order 出来".
             salesOrderNo:
-              o.salesOrderNo ||
-              o.companySOId ||
-              o.companyCOId ||
-              "",
+              o.itemCategory === "SOFA"
+                ? (o.salesOrderNo || o.companySOId || o.companyCOId || u.poNo || "")
+                : (u.poNo || o.salesOrderNo || o.companySOId || o.companyCOId || ""),
             // SO id used by aggregateSofaStickers to group sofa POs of
             // the same SO so pieceNo / totalPieces span the whole SO.
             salesOrderId: o.salesOrderId || o.consignmentOrderId || "",
@@ -6433,13 +6446,24 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                         <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
-                      {/* QR + main piece on top row, Legs (if any) stacked
-                          BELOW on a separate row — Wei Siang 2026-05-15:
-                          "脚跟沙发放回上下，沙发上、脚下". Pillow pair
-                          keeps the left-right layout because it's a
-                          different accessory pattern (last compartment +
-                          pillow share a box). */}
+                      {/* Wei Siang 2026-05-15 (revised): leg now sits
+                          ABOVE the QR row instead of below ("你的脚怎么
+                          下去了呢？...我要在第二张照片的上面"). Layout
+                          order: leg row (if any) → dashed line → QR +
+                          main piece info → pillow pair (still side-by-
+                          side because pillow ships with the LAST
+                          compartment box, different pattern from legs). */}
                       <div className="mt-auto pt-1">
+                        {legsPair && (
+                          <div className="mb-1 pb-1 border-b border-dashed border-[#6B5C32] flex items-center justify-center gap-2">
+                            <div className="font-bold leading-tight" style={{ fontSize: "18px" }}>
+                              {legsPair.pieceNo}/{legsPair.totalPieces}
+                            </div>
+                            <div className="leading-tight uppercase font-semibold" style={{ fontSize: "11px" }}>
+                              {legsPair.pieceName}
+                            </div>
+                          </div>
+                        )}
                         <div className="flex items-end gap-2">
                           <QRImg data={trackUrl} size={pillowPair ? 110 : 130} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
@@ -6467,16 +6491,6 @@ export default function ProductionPage({
                             </>
                           )}
                         </div>
-                        {legsPair && (
-                          <div className="mt-1 pt-1 border-t border-dashed border-[#6B5C32] flex items-center justify-center gap-2">
-                            <div className="font-bold leading-tight" style={{ fontSize: "18px" }}>
-                              {legsPair.pieceNo}/{legsPair.totalPieces}
-                            </div>
-                            <div className="leading-tight uppercase font-semibold" style={{ fontSize: "11px" }}>
-                              {legsPair.pieceName}
-                            </div>
-                          </div>
-                        )}
                       </div>
                     </div>
                   );
@@ -6817,14 +6831,22 @@ export default function ProductionPage({
                         </span>
                       </div>
                     </div>
-                    {/* QR + main piece on top, Legs (if any) below on
-                        its own row — Wei Siang 2026-05-15: "脚跟沙发放
-                        回上下，沙发上、脚下". Both still print on the
-                        same 100×150mm physical card. Pillow pair keeps
-                        the side-by-side row layout because it's a
-                        different accessory pattern (last-compartment +
-                        pillow share a box). */}
+                    {/* Wei Siang 2026-05-15 (revised): legs now ABOVE
+                        the QR row, separator below them, then QR + main
+                        piece. Pillow stays side-by-side with the QR row
+                        (different accessory pattern). All still print
+                        on the SAME 100×150mm physical card. */}
                     <div className="mt-auto pt-[2mm]">
+                      {legsPair && (
+                        <div className="mb-[2mm] pb-[2mm] border-b border-dashed border-black flex items-center justify-center gap-[3mm]">
+                          <div className="font-bold" style={{ fontSize: "26pt", lineHeight: 1 }}>
+                            {legsPair.pieceNo}/{legsPair.totalPieces}
+                          </div>
+                          <div className="font-bold uppercase" style={{ fontSize: "14pt" }}>
+                            {legsPair.pieceName}
+                          </div>
+                        </div>
+                      )}
                       <div className="flex items-end gap-[2mm]">
                         <QRImg eager data={trackUrl} size={pillowPair ? 130 : 200} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
@@ -6852,16 +6874,6 @@ export default function ProductionPage({
                           </>
                         )}
                       </div>
-                      {legsPair && (
-                        <div className="mt-[2mm] pt-[2mm] border-t border-dashed border-black flex items-center justify-center gap-[3mm]">
-                          <div className="font-bold" style={{ fontSize: "26pt", lineHeight: 1 }}>
-                            {legsPair.pieceNo}/{legsPair.totalPieces}
-                          </div>
-                          <div className="font-bold uppercase" style={{ fontSize: "14pt" }}>
-                            {legsPair.pieceName}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
                 </div>

@@ -546,6 +546,53 @@ app.get("/summary", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /dept-category-summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Per-(departmentCode, category) hour totals for the date range. Backs the
+// Planning page's Efficiency Overview, which needs the real Working Hours
+// figure (separate from the JC.actualMinutes self-report) so it can compute
+// a meaningful efficiency = production minutes / working minutes.
+//
+// Non-production depts (WAREHOUSING / REPAIR / MAINTENANCE /
+// PRODUCTION_SHORTFALL / R_AND_D) come through as category="" — kept in
+// the response so a future view that wants to display them can, but the
+// Planning page filters them out.
+// ---------------------------------------------------------------------------
+app.get("/dept-category-summary", async (c) => {
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  if (!from || !to) {
+    return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
+  }
+
+  const res = await c.var.DB
+    .prepare(
+      `SELECT departmentCode,
+              COALESCE(category, '') AS category,
+              SUM(hours) AS hours
+         FROM working_hour_entries
+        WHERE date >= ? AND date <= ?
+        GROUP BY departmentCode, COALESCE(category, '')`,
+    )
+    .bind(from, to)
+    .all<{ departmentCode: string; category: string; hours: number | string }>();
+
+  const buckets = (res.results ?? []).map((r) => ({
+    departmentCode: r.departmentCode,
+    category: r.category ?? "",
+    hours: typeof r.hours === "number" ? r.hours : Number(r.hours) || 0,
+  }));
+
+  return c.json({
+    success: true,
+    data: {
+      range: { from, to },
+      buckets,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /daily-breakdown?from=YYYY-MM-DD&to=YYYY-MM-DD[&category=SOFA|BEDFRAME|ACCESSORY]
 //
 // Per-day rollups for the Labor Cost vs Revenue tab's "Daily Breakdown" table.

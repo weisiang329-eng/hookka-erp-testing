@@ -48,6 +48,12 @@ type JobCard = {
   category: string;
   productionTimeMinutes: number;
   overdue: string;
+  wipLabel?: string | null;
+  // wipQty: piece multiplier — JC's actual production minutes are
+  // (estMinutes / actualMinutes) × wipQty per the per-unit-storage
+  // convention documented in /api/department-performance. Optional
+  // because older cached payloads pre-date the field.
+  wipQty?: number;
 };
 
 type ProductionOrder = {
@@ -205,25 +211,42 @@ const TRACKER_DEPARTMENTS = [
   { name: "Packing",   code: "PACKING",    color: "#06B6D4" },
 ];
 
-// Wei Siang 2026-05-15 Phase 2: Overview table now splits each dept
-// into SOFA + BEDFRAME rows and honours a completion-date filter.
+// Wei Siang 2026-05-15: Efficiency Overview rebuilt against the
+// canonical Production Minutes vs Working Hours pattern used by
+// /api/department-performance.
+//
 //  - Active count is a current snapshot (no date filter applied).
-//  - Completed / Est / Actual / Efficiency all sum only over JCs whose
-//    completedDate falls inside [dateFrom, dateTo] (inclusive).
-//  - Category split = order.itemCategory; rows where itemCategory is
-//    neither SOFA nor BEDFRAME (e.g. ACCESSORY) are skipped.
+//  - Production Hours  = sum of (actualMinutes ?? estMinutes) × max(1,wipQty)
+//                        for COMPLETED / TRANSFERRED JCs in [dateFrom, dateTo],
+//                        ÷ 60. This is the "spec time we produced" — same
+//                        formula the dept-performance endpoint uses.
+//  - Working Hours     = sum of working_hour_entries.hours for the same
+//                        (dept × category × date range), looked up in
+//                        workingHoursByDeptCategory. This is what the
+//                        supervisor entered in the flat Working Hours
+//                        grid on /employees.
+//  - Efficiency %      = Production Hours ÷ Working Hours × 100.
+//
+// Why the rename: the old "Est Hours / Actual Hours / Efficiency"
+// columns both summed JC fields and fell back actual → est, making
+// efficiency 100% for every dept that didn't have actualMinutes
+// recorded. Operator (Wei Siang) confirmed Production = "the spec time
+// we produced" and Working = "the time we paid for".
+//
+// Category split = order.itemCategory; ACCESSORY rows are skipped
+// because the table only has SOFA + BEDFRAME columns.
 function getDeptEfficiency(
   orders: ProductionOrder[],
   dateFrom: string,
   dateTo: string,
+  workingHoursByDeptCategory: Map<string, number>,
 ) {
   const CATEGORIES = ["SOFA", "BEDFRAME"] as const;
   return TRACKER_DEPARTMENTS.flatMap((dept) =>
     CATEGORIES.map((cat) => {
       let active = 0;
       let completed = 0;
-      let totalEstHours = 0;
-      let totalActualHours = 0;
+      let totalProductionMinutes = 0;
 
       for (const order of orders) {
         if (order.itemCategory !== cat) continue;
@@ -231,27 +254,46 @@ function getDeptEfficiency(
         if (!jc) continue;
         if (jc.status === "IN_PROGRESS" || jc.status === "PAUSED") active++;
         if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") {
-          // Date filter on completion date. NULL completedDate is
-          // skipped because we can't place it on the timeline.
           if (!jc.completedDate) continue;
           if (dateFrom && jc.completedDate < dateFrom) continue;
           if (dateTo && jc.completedDate > dateTo) continue;
           completed++;
-          totalEstHours += jc.estMinutes / 60;
-          totalActualHours += (jc.actualMinutes ?? jc.estMinutes) / 60;
+          const wipQty = Math.max(1, jc.wipQty ?? 1);
+          totalProductionMinutes += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
         }
       }
 
-      const efficiency = totalActualHours > 0 ? Math.round((totalEstHours / totalActualHours) * 100) : 0;
+      const totalProductionHours = Math.round((totalProductionMinutes / 60) * 10) / 10;
+      const totalWorkingHours =
+        Math.round((workingHoursByDeptCategory.get(`${dept.code}|${cat}`) ?? 0) * 10) / 10;
+      const efficiency =
+        totalWorkingHours > 0
+          ? Math.round((totalProductionHours / totalWorkingHours) * 100)
+          : 0;
+
       let statusLabel: string;
       let statusColor: string;
-      if (efficiency >= 95)      { statusLabel = "Excellent";          statusColor = "text-[#4F7C3A] bg-[#EEF3E4]"; }
+      // No-data heuristic: if either side is zero, we genuinely don't have
+      // enough information — don't penalise the dept with "Needs Improvement".
+      if (totalWorkingHours === 0 || totalProductionHours === 0) {
+        statusLabel = "No Data";
+        statusColor = "text-gray-500 bg-gray-50";
+      } else if (efficiency >= 95)      { statusLabel = "Excellent";          statusColor = "text-[#4F7C3A] bg-[#EEF3E4]"; }
       else if (efficiency >= 80) { statusLabel = "Good";               statusColor = "text-[#3E6570] bg-[#E0EDF0]"; }
       else if (efficiency >= 60) { statusLabel = "Fair";               statusColor = "text-[#9C6F1E] bg-[#FAEFCB]"; }
-      else if (efficiency > 0)   { statusLabel = "Needs Improvement";  statusColor = "text-[#9A3A2D] bg-[#F9E1DA]"; }
-      else                       { statusLabel = "No Data";            statusColor = "text-gray-500 bg-gray-50"; }
+      else                       { statusLabel = "Needs Improvement";  statusColor = "text-[#9A3A2D] bg-[#F9E1DA]"; }
 
-      return { ...dept, category: cat, active, completed, totalEstHours, totalActualHours, efficiency, statusLabel, statusColor };
+      return {
+        ...dept,
+        category: cat,
+        active,
+        completed,
+        totalProductionHours,
+        totalWorkingHours,
+        efficiency,
+        statusLabel,
+        statusColor,
+      };
     }),
   );
 }
@@ -330,6 +372,26 @@ export default function PlanningPage() {
     return fmtISO(d);
   });
   const [effDateTo, setEffDateTo] = useState<string>(() => fmtISO(new Date()));
+
+  // Wei Siang 2026-05-15: Working Hours come from working_hour_entries
+  // (per-dept × per-category hour totals for the date range), NOT from
+  // jc.actualMinutes. The old "Actual Hours" column was falling back to
+  // jc.estMinutes when actualMinutes wasn't recorded, which made every
+  // row read 100% Excellent. Real working time is what supervisors
+  // entered in the Working Hours grid on /employees.
+  const { data: workingHoursResp } = useCachedJson<{
+    data?: {
+      range: { from: string; to: string };
+      buckets: { departmentCode: string; category: string; hours: number }[];
+    };
+  }>(`/api/working-hour-entries/dept-category-summary?from=${effDateFrom}&to=${effDateTo}`);
+  const workingHoursByDeptCategory = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const b of workingHoursResp?.data?.buckets ?? []) {
+      m.set(`${b.departmentCode}|${b.category}`, b.hours);
+    }
+    return m;
+  }, [workingHoursResp]);
 
   // ── Master Tracker state ──
   const [trackerCategoryTab, setTrackerCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -818,8 +880,8 @@ export default function PlanningPage() {
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(
-    () => getDeptEfficiency(orders, effDateFrom, effDateTo),
-    [orders, effDateFrom, effDateTo],
+    () => getDeptEfficiency(orders, effDateFrom, effDateTo, workingHoursByDeptCategory),
+    [orders, effDateFrom, effDateTo, workingHoursByDeptCategory],
   );
 
   const filteredTrackerOrders = useMemo(() => {
@@ -1393,9 +1455,9 @@ export default function PlanningPage() {
                       <th className="h-9 px-3 text-left font-medium text-[#374151]">Category</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Active</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Completed</th>
-                      <th className="h-9 px-3 text-right font-medium text-[#374151]">Est Hours</th>
-                      <th className="h-9 px-3 text-right font-medium text-[#374151]">Actual Hours</th>
-                      <th className="h-9 px-3 text-right font-medium text-[#374151]">Efficiency %</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Sum of (actualMinutes ?? estMinutes) × wipQty for JCs completed in the date range, ÷ 60.">Production Hours</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Sum of hours entered in the Working Hours grid on /employees for this dept × category × date range.">Working Hours</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Production Hours ÷ Working Hours × 100. 100% = produced as much spec time as was clocked in.">Efficiency %</th>
                       <th className="h-9 px-3 text-left font-medium text-[#374151]">Status</th>
                     </tr>
                   </thead>
@@ -1435,8 +1497,8 @@ export default function PlanningPage() {
                             </td>
                             <td className="px-3 py-2 text-right font-medium text-[#3E6570]">{row.active}</td>
                             <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{row.completed}</td>
-                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalEstHours.toFixed(1)}h</td>
-                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalActualHours.toFixed(1)}h</td>
+                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalProductionHours.toFixed(1)}h</td>
+                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalWorkingHours > 0 ? `${row.totalWorkingHours.toFixed(1)}h` : <span className="text-[#9CA3AF]">—</span>}</td>
                             <td className="px-3 py-2 text-right font-bold">{row.efficiency > 0 ? `${row.efficiency}%` : "-"}</td>
                             <td className="px-3 py-2">
                               <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${row.statusColor}`}>

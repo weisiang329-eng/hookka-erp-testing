@@ -6185,14 +6185,14 @@ export default function ProductionPage({
                       style={{ width: "260px", height: "420px" }}
                       title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
                     >
-                      {/* PO No huge headline — falls back to internal PO
-                          number when customer didn't supply theirs. */}
+                      {/* Title = our line-suffixed SO No (s.poNo).
+                          Customer PO drops to a labelled row below. */}
                       <div className="text-center font-bold leading-tight" style={{ fontSize: "20px" }}>
-                        {s.customerPOId || s.poNo}
+                        {s.poNo}
                       </div>
                       <div className="border-t-2 border-black my-1" />
                       <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">SO No</span>: {s.salesOrderNo || s.poNo}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[88px] font-semibold text-[#6B7280]">Model</span>
@@ -6611,16 +6611,18 @@ export default function ProductionPage({
                 style={{ width: "100mm", height: "150mm" }}
               >
                 <div className="w-full h-full flex flex-col" style={{ fontSize: "10pt" }}>
-                  {/* PO number — huge headline at top per Wei Siang spec:
-                      "把 PO 号码（即顾客的号码）放在最高的位置". Falls
-                      back to our internal PO line number when the customer
-                      didn't supply their own PO number. */}
+                  {/* Wei Siang 2026-05-15 (revised): title is OUR
+                      company's SO No with line suffix (s.poNo,
+                      e.g. "SO-2604-217-01" / "CO-2604-088-01"). The
+                      customer's PO drops down to the first labelled
+                      row (was "SO No"). "应该要把我们公司的 Sales
+                      Order Number 当成标题". */}
                   <div className="text-center font-bold" style={{ fontSize: "24pt", lineHeight: 1.1 }}>
-                    {s.customerPOId || s.poNo}
+                    {s.poNo}
                   </div>
                   <div className="border-t-2 border-black my-[2mm]" />
                   <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
-                    <div><span className="inline-block w-[34mm] font-semibold">SO No</span>: {s.salesOrderNo || s.poNo}</div>
+                    <div><span className="inline-block w-[34mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
                     <div><span className="inline-block w-[34mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="inline-block w-[34mm] font-semibold">Model</span>

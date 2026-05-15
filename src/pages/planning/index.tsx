@@ -695,12 +695,37 @@ export default function PlanningPage() {
   //   getDeptEfficiency()) so it's excluded from active load and
   //   included in the 14-day actual-production rolling avg.
   const capacityData = useMemo(() => {
-    const fourteenDaysAgo = new Date();
-    fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
-    const fourteenDaysAgoISO = fmtISO(fourteenDaysAgo);
+    // Wei Siang 2026-05-15: 14-day window is the 14 most-recent
+    // working days (Mon-Sat, skip Sundays) — matches the drilldown's
+    // last14WorkingDays so both surfaces see the same denominator.
+    // Previously this used 14 calendar days, so any JC completed on
+    // a Sunday in the window would land in the KPI but not the
+    // drilldown — small but real divergence.
+    const fourteenWorkingDays: string[] = [];
+    {
+      const cursor = new Date();
+      cursor.setHours(0, 0, 0, 0);
+      while (fourteenWorkingDays.length < 14) {
+        if (cursor.getDay() !== 0) {
+          fourteenWorkingDays.push(fmtISO(cursor));
+        }
+        cursor.setDate(cursor.getDate() - 1);
+      }
+    }
+    const fourteenWorkingDaysSet = new Set(fourteenWorkingDays);
     const scopeFrom = scopeRange.from;
     const scopeTo = scopeRange.to;
     const scopeDays = Math.max(scopeRange.workingDays, 1);
+    // Wei Siang 2026-05-15: helper for the per-UNIT → per-JC multiplier.
+    // jc.estMinutes / jc.actualMinutes are stored per-piece (see
+    // import-completion.ts:538 + job-cards.ts:219 comments). Total
+    // production time for the JC = per-unit × wipQty. Missing this
+    // factor under-counts every multi-piece JC.
+    const jcMinutes = (jc: JobCard, useActual: boolean): number => {
+      const perUnit = useActual ? jc.actualMinutes ?? jc.estMinutes ?? 0 : jc.estMinutes ?? 0;
+      const wipQty = Math.max(1, jc.wipQty ?? 1);
+      return perUnit * wipQty;
+    };
 
     return DEPARTMENTS.map((dept) => {
       const deptWorkers = workers.filter((w) => w.departmentCode === dept.code && w.status === "ACTIVE");
@@ -718,18 +743,18 @@ export default function PlanningPage() {
             ) / 10
           : HOURS_PER_DAY;
 
-      // 14-day rolling actual production — sum actualMinutes (fall
-      // back to estMinutes if actual not recorded) on JCs completed
-      // in last 14 calendar days, ÷ 14 → daily average.
+      // 14-day rolling actual production — sum (actualMinutes ?? estMinutes)
+      // × wipQty on JCs completed in the last 14 working days, ÷ 14
+      // → daily average. wipQty fix lifted from /api/department-performance
+      // pattern; previously a multi-piece JC counted as one piece's worth.
       let last14DayActual = 0;
       for (const order of orders) {
         for (const jc of order.jobCards) {
           if (jc.departmentCode !== dept.code) continue;
           if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
           if (!jc.completedDate) continue;
-          if (jc.completedDate < fourteenDaysAgoISO) continue;
-          if (jc.completedDate > today) continue;
-          last14DayActual += jc.actualMinutes ?? jc.estMinutes ?? 0;
+          if (!fourteenWorkingDaysSet.has(jc.completedDate)) continue;
+          last14DayActual += jcMinutes(jc, true);
         }
       }
       const dailyCapacity = Math.round(last14DayActual / 14);
@@ -748,8 +773,8 @@ export default function PlanningPage() {
         }
       }
 
-      const sofaBacklog = sofaActive.reduce((s, jc) => s + (jc.estMinutes || 0), 0);
-      const bfBacklog = bfActive.reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+      const sofaBacklog = sofaActive.reduce((s, jc) => s + jcMinutes(jc, false), 0);
+      const bfBacklog = bfActive.reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const totalBacklog = sofaBacklog + bfBacklog;
       const denomCapacity = dailyCapacity > 0 ? dailyCapacity : 1;
       const sofaBacklogDays = Math.round((sofaBacklog / denomCapacity) * 10) / 10;
@@ -759,10 +784,10 @@ export default function PlanningPage() {
       // Today's / scope's Load — JCs with dueDate in [from, to].
       const sofaScopeLoad = sofaActive
         .filter((jc) => jc.dueDate && jc.dueDate >= scopeFrom && jc.dueDate <= scopeTo)
-        .reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+        .reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const bfScopeLoad = bfActive
         .filter((jc) => jc.dueDate && jc.dueDate >= scopeFrom && jc.dueDate <= scopeTo)
-        .reduce((s, jc) => s + (jc.estMinutes || 0), 0);
+        .reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const totalScopeLoad = sofaScopeLoad + bfScopeLoad;
 
       // Utilization denominator scales with scope: daily uses 1×
@@ -849,6 +874,9 @@ export default function PlanningPage() {
 
     // Pre-bucket all active JCs by (dept, dueDate) once, then read
     // the buckets per dept. Avoids O(days × orders × jcs) loop.
+    // Wei Siang 2026-05-15: estMinutes × wipQty per the per-UNIT
+    // storage convention — single-piece JCs unchanged, multi-piece
+    // JCs no longer under-count.
     const bucket = new Map<string, Map<string, number>>();
     for (const order of orders) {
       if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
@@ -863,7 +891,9 @@ export default function PlanningPage() {
         if (!jc.dueDate || !dayIndex.has(jc.dueDate)) continue;
         if (!bucket.has(jc.departmentCode)) bucket.set(jc.departmentCode, new Map());
         const deptMap = bucket.get(jc.departmentCode) as Map<string, number>;
-        deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + (jc.estMinutes || 0));
+        const wipQty = Math.max(1, jc.wipQty ?? 1);
+        const mins = (jc.estMinutes || 0) * wipQty;
+        deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + mins);
       }
     }
 
@@ -985,6 +1015,8 @@ export default function PlanningPage() {
   // Per-day total completed minutes (sum across all production depts,
   // both categories). Matches the same formula capacityData uses for
   // the rolling 14-day avg.
+  // Wei Siang 2026-05-15: × wipQty so multi-piece JCs aren't
+  // under-counted (jc.estMinutes / actualMinutes are per-UNIT).
   const capacityByDay = useMemo(() => {
     const m = new Map<string, number>();
     for (const d of last14WorkingDays) m.set(d, 0);
@@ -993,11 +1025,9 @@ export default function PlanningPage() {
         if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
         if (!jc.completedDate) continue;
         if (!m.has(jc.completedDate)) continue;
-        m.set(
-          jc.completedDate,
-          (m.get(jc.completedDate) ?? 0) +
-            (jc.actualMinutes ?? jc.estMinutes ?? 0),
-        );
+        const wipQty = Math.max(1, jc.wipQty ?? 1);
+        const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+        m.set(jc.completedDate, (m.get(jc.completedDate) ?? 0) + mins);
       }
     }
     return m;
@@ -1011,7 +1041,8 @@ export default function PlanningPage() {
         for (const jc of order.jobCards) {
           if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
           if (jc.completedDate !== date) continue;
-          const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+          const wipQty = Math.max(1, jc.wipQty ?? 1);
+          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
           const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, other: 0, total: 0 };
           if (order.itemCategory === "SOFA") existing.sofa += mins;
           else if (order.itemCategory === "BEDFRAME") existing.bf += mins;
@@ -1038,7 +1069,8 @@ export default function PlanningPage() {
         if (!jc.dueDate) continue;
         if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
         const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, total: 0 };
-        const mins = jc.estMinutes ?? 0;
+        const wipQty = Math.max(1, jc.wipQty ?? 1);
+        const mins = (jc.estMinutes ?? 0) * wipQty;
         if (order.itemCategory === "SOFA") existing.sofa += mins;
         else if (order.itemCategory === "BEDFRAME") existing.bf += mins;
         existing.total += mins;
@@ -1073,6 +1105,7 @@ export default function PlanningPage() {
           if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
           if (!jc.dueDate) continue;
           if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+          const wipQty = Math.max(1, jc.wipQty ?? 1);
           rows.push({
             jcId: jc.id,
             dueDate: jc.dueDate,
@@ -1084,7 +1117,7 @@ export default function PlanningPage() {
             poNo: order.poNo,
             category: order.itemCategory,
             customerName: order.customerName,
-            minutes: jc.estMinutes ?? 0,
+            minutes: (jc.estMinutes ?? 0) * wipQty,
             status: jc.status,
           });
         }
@@ -1129,7 +1162,8 @@ export default function PlanningPage() {
           if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
           if (jc.completedDate !== date) continue;
           if (jc.departmentCode !== deptCode) continue;
-          const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+          const wipQty = Math.max(1, jc.wipQty ?? 1);
+          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
           const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
           if (picCount === 0) {
             credit("", "", mins);
@@ -1157,6 +1191,7 @@ export default function PlanningPage() {
         productCode: string;
         productName: string;
         wipLabel: string | null;
+        wipQty: number;
         poNo: string;
         category: string;
         customerName: string;
@@ -1172,6 +1207,7 @@ export default function PlanningPage() {
             ? !jc.pic1Id && !jc.pic2Id
             : jc.pic1Id === workerId || jc.pic2Id === workerId;
           if (!matches) continue;
+          const wipQty = Math.max(1, jc.wipQty ?? 1);
           rows.push({
             jcId: jc.id,
             pic1Name: jc.pic1Name || "",
@@ -1179,10 +1215,11 @@ export default function PlanningPage() {
             productCode: order.productCode,
             productName: order.productName,
             wipLabel: jc.wipLabel ?? null,
+            wipQty,
             poNo: order.poNo,
             category: order.itemCategory,
             customerName: order.customerName,
-            minutes: jc.actualMinutes ?? jc.estMinutes ?? 0,
+            minutes: (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty,
           });
         }
       }
@@ -1213,7 +1250,8 @@ export default function PlanningPage() {
           if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
           if (!jc.dueDate) continue;
           if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
-          const mins = jc.estMinutes ?? 0;
+          const wipQty = Math.max(1, jc.wipQty ?? 1);
+          const mins = (jc.estMinutes ?? 0) * wipQty;
           const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
           if (picCount === 0) {
             credit("", "", mins);

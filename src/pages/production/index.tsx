@@ -2176,6 +2176,13 @@ export default function ProductionPage({
     customerName: string;
     customerState: string;
     model: string;
+    // Full product code (includes variant suffix for SOFA, e.g.
+    // "5540-1A(LHF)" / "5540-2A(LHF)"). Bedframe/Accessory share the
+    // same value as `model` since their productCode IS the model. Used
+    // by the FAB_SEW BASE sticker so workers see which sofa variant
+    // they're sewing (1A LHF / 2A RHF / etc.), not just the bare base
+    // model number.
+    productCode: string;
     wip: string;
     category: string;     // SOFA / BEDFRAME / ACCESSORY (from PO/SO item)
     wipType: string;      // DIVAN / HEADBOARD / SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST
@@ -2570,6 +2577,7 @@ export default function ProductionPage({
           model: o.itemCategory === "SOFA"
             ? (o.productCode || "").split("-")[0]
             : (o.productCode || ""),
+          productCode: o.productCode || "",
           wip: jc.wipLabel || jc.wipCode || (() => {
             // Derive WIP code from PO data when job card doesn't carry it
             if (o.itemCategory === "BEDFRAME") {
@@ -3469,13 +3477,16 @@ export default function ProductionPage({
       // covers 1 piece). The piece-position marker conveys batch context.
       const pieceCount = Math.max(1, row.qty || 1);
       const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.qty || 1);
-      // Wei Siang 2026-05-15: BASE on FAB_SEW shows the product code
-      // (e.g. "5537") as the WIP label, NOT the long fabric-encoded
-      // string (e.g. "5537-2S -Base 28 GD8371-02"). The sewing
-      // operator just needs to know which sofa they're sewing.
+      // Wei Siang 2026-05-15: BASE on FAB_SEW shows the variant-
+      // qualified product code (e.g. "5540-1A(LHF)" / "5540-2A(RHF)")
+      // as the WIP label, NOT the long fabric-encoded string
+      // (e.g. "5537-2S -Base 28 GD8371-02") and NOT just the bare
+      // model ("5540"). The sewing operator needs to see the variant
+      // marker so they know WHICH compartment of the sofa they're
+      // assembling.
       const stickerWipName =
         activeTab === "FAB_SEW" && row.wipType === "BASE"
-          ? row.model || row.wip || ""
+          ? row.productCode || row.model || row.wip || ""
           : row.wip;
       for (let p = 1; p <= pieceCount; p++) {
         stickers.push({
@@ -6225,11 +6236,11 @@ export default function ProductionPage({
                           stay on 1 line regardless of content length.
                           Short-value rows (PO No, Size, Colour, etc.) keep
                           the bigger 12px font. */}
-                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.customerName || "—"}</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.customerName || "—"}</span>
                         </div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
@@ -6238,12 +6249,12 @@ export default function ProductionPage({
                         {s.wipName && (
                           <div className="flex items-baseline gap-1">
                             <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
-                            <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.wipName}</span>
+                            <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.wipName}</span>
                           </div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
                         {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
@@ -6252,7 +6263,7 @@ export default function ProductionPage({
                         {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
                         </div>
                       </div>
                       {/* Bottom block: QR on left + sign-off + Qty on
@@ -6504,7 +6515,7 @@ export default function ProductionPage({
                         {customerLine || s.customerName || "—"}
                       </div>
                       <div className="border-t border-black my-1" />
-                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
@@ -6516,12 +6527,12 @@ export default function ProductionPage({
                         {s.boxLabel && (
                           <div className="flex items-baseline gap-1">
                             <span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span>
-                            <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.boxLabel}</span>
+                            <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.boxLabel}</span>
                           </div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[12px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
                         <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
                         {s.itemCategory === "SOFA" && s.seatSize && (
                           <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Seat</span>: {s.seatSize}"</div>
@@ -6536,7 +6547,7 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
-                          <span className="flex-1 truncate" style={{ fontSize: "10px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+                          <span className="flex-1 truncate" style={{ fontSize: "11px" }}>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
                         </div>
                       </div>
                       {/* Wei Siang 2026-05-15 (revised again): leg moves

@@ -351,21 +351,32 @@ function ColumnFilterDropdown<T>({
   // 2026-05-13). When a column's uniqueValues contain any string
   // starting with "Done", "Overdue", or "Pending" (case-insensitive),
   // surface a one-click chip per prefix. Clicking applies the filter
-  // and closes the dropdown so the operator doesn't have to tick the
-  // 10+ "Overdue …" rows individually. Columns whose values don't
-  // match these prefixes (Customer, Product Code, etc.) show no chips
-  // and behave exactly as before — zero impact outside status columns.
+  // (the full set of matching distinct labels) and closes the dropdown.
+  // Columns whose values don't match these prefixes (Customer, Product
+  // Code, etc.) show no chips and behave exactly as before — zero
+  // impact outside status columns.
+  //
+  // The displayed count is the TOTAL ROW count across all matching
+  // labels, not the number of distinct labels. Same semantic as the
+  // per-row count shown to the right of each value in the list below,
+  // so the operator sees "Overdue (100)" and gets the same 100 rows
+  // they'd see by ticking every "Overdue …" row individually.
   const quickFilterChips = useMemo(() => {
     const prefixes = ["Done", "Overdue", "Pending"];
     return prefixes
       .map((prefix) => {
         const lower = prefix.toLowerCase();
-        const matches = uniqueValues
-          .filter(([v]) => v.toLowerCase().startsWith(lower))
-          .map(([v]) => v);
-        return { prefix, matches };
+        const matchingEntries = uniqueValues.filter(([v]) =>
+          v.toLowerCase().startsWith(lower),
+        );
+        const matchValues = matchingEntries.map(([v]) => v);
+        const rowCount = matchingEntries.reduce(
+          (sum, [, count]) => sum + count,
+          0,
+        );
+        return { prefix, matchValues, rowCount };
       })
-      .filter((q) => q.matches.length > 0);
+      .filter((q) => q.matchValues.length > 0);
   }, [uniqueValues]);
 
   const toggleValue = (v: string) => {
@@ -461,18 +472,18 @@ function ColumnFilterDropdown<T>({
               individually (operator request 2026-05-13). */}
           {quickFilterChips.length > 0 && (
             <div className="flex flex-wrap gap-1 px-2 py-1.5 border-t border-[#F0F0F0] bg-[#FAF8F4]">
-              {quickFilterChips.map(({ prefix, matches }) => (
+              {quickFilterChips.map(({ prefix, matchValues, rowCount }) => (
                 <button
                   key={prefix}
                   type="button"
                   className="rounded border border-[#D0D0D0] bg-white px-2 py-0.5 text-[10px] text-[#333] hover:bg-[#6B5C32] hover:text-white hover:border-[#6B5C32] transition-colors"
                   onClick={() => {
-                    onApplyValues(new Set(matches));
+                    onApplyValues(new Set(matchValues));
                     onClose();
                   }}
-                  title={`Apply: only show ${matches.length} ${prefix.toLowerCase()} value${matches.length === 1 ? "" : "s"}`}
+                  title={`Apply: show ${rowCount} ${prefix.toLowerCase()} row${rowCount === 1 ? "" : "s"} across ${matchValues.length} distinct value${matchValues.length === 1 ? "" : "s"}`}
                 >
-                  {prefix} <span className="text-[#888]">({matches.length})</span>
+                  {prefix} <span className="text-[#888]">({rowCount})</span>
                 </button>
               ))}
             </div>

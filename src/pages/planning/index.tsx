@@ -684,10 +684,11 @@ export default function PlanningPage() {
   const totalSofaBacklog = capacityData.reduce((s, d) => s + d.sofaBacklog, 0);
   const totalBfBacklog = capacityData.reduce((s, d) => s + d.bfBacklog, 0);
   const totalBacklog = totalSofaBacklog + totalBfBacklog;
-  const totalSofaBacklogDays =
-    totalCapacity > 0 ? Math.round((totalSofaBacklog / totalCapacity) * 10) / 10 : 0;
-  const totalBfBacklogDays =
-    totalCapacity > 0 ? Math.round((totalBfBacklog / totalCapacity) * 10) / 10 : 0;
+  // Wei Siang 2026-05-15: totalSofaBacklogDays / totalBfBacklogDays
+  // dropped — per-category Backlog now renders in raw hours, so the
+  // days-form of those two splits has no remaining consumer. Total
+  // Backlog (across both categories) still renders in days because
+  // that IS the real wall-clock to clear the queue.
   const totalBacklogDays =
     totalCapacity > 0 ? Math.round((totalBacklog / totalCapacity) * 10) / 10 : 0;
   const totalSofaScopeLoad = capacityData.reduce((s, d) => s + d.sofaScopeLoad, 0);
@@ -984,8 +985,12 @@ export default function PlanningPage() {
                   {totalBacklogDays} <span className="text-xs font-medium text-[#6B7280]">days</span>
                 </p>
                 <div className="text-[10px] text-[#9CA3AF] mt-0.5 flex gap-3">
-                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {totalSofaBacklogDays}d</span>
-                  <span><span className="font-semibold text-[#3E6570]">BF</span> {totalBfBacklogDays}d</span>
+                  {/* Wei Siang 2026-05-15: per-category breakdown shows
+                      hours (raw quantity), not days. Days would imply
+                      each side runs full-cap alone, which double-counts
+                      against the wall-clock days on the line above. */}
+                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {Math.round(totalSofaBacklog / 60)}h</span>
+                  <span><span className="font-semibold text-[#3E6570]">BF</span> {Math.round(totalBfBacklog / 60)}h</span>
                 </div>
               </CardContent>
             </Card>
@@ -1047,7 +1052,16 @@ export default function PlanningPage() {
                       </div>
                       <div>
                         <span className="text-[9px] text-[#6B7280]">Backlog</span>
-                        <p className="font-medium text-[#1F1D1B]">{dept.sofaBacklogDays} <span className="text-[9px] text-[#9CA3AF]">d</span></p>
+                        {/* Wei Siang 2026-05-15: per-category Backlog now
+                            shows raw hours, NOT days. The previous "6.9d"
+                            was computed assuming the whole dept ran on
+                            SOFA only — invariant under worker split when
+                            workers are fungible (which they are here),
+                            but read as "SOFA self-contained needs 6.9d",
+                            which then made the Total Util / Backlog =
+                            sum confusing. Total Backlog stays in days
+                            because that's the real wall-clock. */}
+                        <p className="font-medium text-[#1F1D1B]">{Math.round(dept.sofaBacklog / 60)} <span className="text-[9px] text-[#9CA3AF]">h</span></p>
                       </div>
                     </div>
 
@@ -1065,7 +1079,7 @@ export default function PlanningPage() {
                       </div>
                       <div>
                         <span className="text-[9px] text-[#6B7280]">Backlog</span>
-                        <p className="font-medium text-[#1F1D1B]">{dept.bfBacklogDays} <span className="text-[9px] text-[#9CA3AF]">d</span></p>
+                        <p className="font-medium text-[#1F1D1B]">{Math.round(dept.bfBacklog / 60)} <span className="text-[9px] text-[#9CA3AF]">h</span></p>
                       </div>
                     </div>
 

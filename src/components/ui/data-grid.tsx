@@ -1739,7 +1739,7 @@ export function DataGrid<T extends Record<string, any>>({
             {hasContextMenu && <col style={{ width: "40px" }} />}
           </colgroup>
 
-          <thead className={cn(stickyHeader && "sticky top-0 z-10")}>
+          <thead className={cn(stickyHeader && "sticky top-0 z-30")}>
             {/* Header row */}
             <tr className="border-b border-[#D0D0D0] bg-[#F0ECE9]">
               {selectable && (

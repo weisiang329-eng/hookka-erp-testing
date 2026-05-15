@@ -6198,25 +6198,25 @@ export default function ProductionPage({
                       </div>
                       <div className="border-t border-black my-1" />
                       <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Customer Name</span>: {s.customerName || "—"}</div>
                         <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[82px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
                           <span className="font-bold" style={{ fontSize: "16px" }}>: {s.model || "—"}</span>
                         </div>
                         {s.wipName && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[82px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                          <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                        {s.gap && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                        {s.divan && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                        {s.leg && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                        {s.totalHeight && <div><span className="inline-block w-[82px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-                        <div className="flex items-start gap-1"><span className="inline-block w-[82px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                        {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                        {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                        {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                        {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
+                        <div className="flex items-start gap-1"><span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
                       {/* Bottom block: QR on left + sign-off + Qty on
                           right. Same dashed-top + mt-auto pattern as
@@ -6636,26 +6636,26 @@ export default function ProductionPage({
                   </div>
                   <div className="border-t border-black my-[1.5mm]" />
                   <div className="space-y-[1mm]" style={{ fontSize: "11pt", lineHeight: 1.3 }}>
-                    <div><span className="inline-block w-[30mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
-                    <div><span className="inline-block w-[30mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
+                    <div><span className="inline-block w-[35mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                    <div><span className="inline-block w-[35mm] font-semibold">Customer Name</span>: {s.customerName || "—"}</div>
                     <div className="flex items-baseline gap-[1mm]">
-                      <span className="inline-block w-[30mm] font-semibold">Model</span>
+                      <span className="inline-block w-[35mm] font-semibold">Model</span>
                       <span className="font-bold" style={{ fontSize: "15pt" }}>: {s.model || "—"}</span>
                     </div>
                     {s.wipName && (
-                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
+                      <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "35mm" }}>WIP</span><span className="flex-1 break-words">: {s.wipName}</span></div>
                     )}
                   </div>
                   <div className="border-t border-[#E6E0D9] my-[1.5mm]" />
                   <div className="space-y-[1mm]" style={{ fontSize: "11pt", lineHeight: 1.3 }}>
-                    <div><span className="inline-block w-[30mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
-                    <div><span className="inline-block w-[30mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
-                    {s.gap && <div><span className="inline-block w-[30mm] font-semibold">Gap</span>: {s.gap}</div>}
-                    {s.divan && <div><span className="inline-block w-[30mm] font-semibold">Divan</span>: {s.divan}</div>}
-                    {s.leg && <div><span className="inline-block w-[30mm] font-semibold">Leg</span>: {s.leg}</div>}
-                    {s.totalHeight && <div><span className="inline-block w-[30mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
+                    <div><span className="inline-block w-[35mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                    <div><span className="inline-block w-[35mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
+                    {s.gap && <div><span className="inline-block w-[35mm] font-semibold">Gap</span>: {s.gap}</div>}
+                    {s.divan && <div><span className="inline-block w-[35mm] font-semibold">Divan</span>: {s.divan}</div>}
+                    {s.leg && <div><span className="inline-block w-[35mm] font-semibold">Leg</span>: {s.leg}</div>}
+                    {s.totalHeight && <div><span className="inline-block w-[35mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
                     <div className="flex items-start gap-[1mm]">
-                      <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
+                      <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
                       <span className="flex-1 break-words">
                         : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                       </span>

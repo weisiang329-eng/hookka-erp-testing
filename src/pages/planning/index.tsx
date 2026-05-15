@@ -733,7 +733,6 @@ export default function PlanningPage() {
       }
     }
     const rollingWindowSet = new Set(rollingWindowDays);
-    const scopeFrom = scopeRange.from;
     const scopeTo = scopeRange.to;
     const scopeDays = Math.max(scopeRange.workingDays, 1);
     // Wei Siang 2026-05-15: helper for the per-UNIT → per-JC multiplier.
@@ -801,12 +800,17 @@ export default function PlanningPage() {
       const bfBacklogDays = Math.round((bfBacklog / denomCapacity) * 10) / 10;
       const totalBacklogDays = Math.round((totalBacklog / denomCapacity) * 10) / 10;
 
-      // Today's / scope's Load — JCs with dueDate in [from, to].
+      // Wei Siang 2026-05-15: {Scope}'s Load = JCs with dueDate
+      // <= scopeTo, still active. Includes overdue (dueDate before
+      // scopeFrom) because that work is "pressing on us today" —
+      // operator should see it on the Load card, not just hidden in
+      // Backlog. Util % exceeding 100% on Daily scope means "we have
+      // more pressure than one day's capacity can clear".
       const sofaScopeLoad = sofaActive
-        .filter((jc) => jc.dueDate && jc.dueDate >= scopeFrom && jc.dueDate <= scopeTo)
+        .filter((jc) => jc.dueDate && jc.dueDate <= scopeTo)
         .reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const bfScopeLoad = bfActive
-        .filter((jc) => jc.dueDate && jc.dueDate >= scopeFrom && jc.dueDate <= scopeTo)
+        .filter((jc) => jc.dueDate && jc.dueDate <= scopeTo)
         .reduce((s, jc) => s + jcMinutes(jc, false), 0);
       const totalScopeLoad = sofaScopeLoad + bfScopeLoad;
 
@@ -1143,6 +1147,9 @@ export default function PlanningPage() {
   // active (not completed/cancelled/transferred). Returns per-dept
   // SOFA/BF/total split — mirrors capacityData's sofaScopeLoad / bfScopeLoad
   // but exposes the raw counts side-by-side.
+  // Wei Siang 2026-05-15: Load filter is "dueDate <= scopeTo, still
+  // active" — includes overdue JCs so the Load card reflects total
+  // pressure on the dept, not just the strict scope bucket.
   const loadByDept = useMemo(() => {
     const byDept = new Map<string, { sofa: number; bf: number; total: number }>();
     for (const order of orders) {
@@ -1150,7 +1157,7 @@ export default function PlanningPage() {
       for (const jc of order.jobCards) {
         if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
         if (!jc.dueDate) continue;
-        if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+        if (jc.dueDate > scopeRange.to) continue;
         const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, total: 0 };
         const wipQty = Math.max(1, jc.wipQty ?? 1);
         const mins = (jc.estMinutes ?? 0) * wipQty;
@@ -1187,7 +1194,7 @@ export default function PlanningPage() {
           if (jc.departmentCode !== deptCode) continue;
           if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
           if (!jc.dueDate) continue;
-          if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+          if (jc.dueDate > scopeRange.to) continue;
           const wipQty = Math.max(1, jc.wipQty ?? 1);
           rows.push({
             jcId: jc.id,
@@ -1332,7 +1339,7 @@ export default function PlanningPage() {
           if (jc.departmentCode !== deptCode) continue;
           if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
           if (!jc.dueDate) continue;
-          if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+          if (jc.dueDate > scopeRange.to) continue;
           const wipQty = Math.max(1, jc.wipQty ?? 1);
           const mins = (jc.estMinutes ?? 0) * wipQty;
           const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);

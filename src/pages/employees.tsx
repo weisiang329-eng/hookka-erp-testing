@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatCurrency, formatDate, formatDateDMY, formatRM } from "@/lib/utils";
+import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM } from "@/lib/utils";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -134,12 +134,9 @@ type LeaveRecord = {
 
 // --------------- HELPERS ---------------
 
-function formatHours(minutes: number): string {
-  if (minutes <= 0) return "-";
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
-}
+// formatHours moved to src/lib/utils.ts so other pages (Planning's
+// Efficiency Overview etc.) can share the same "8h 30m" canonical
+// display without re-implementing.
 
 function todayStr(): string {
   return new Date().toISOString().split("T")[0];

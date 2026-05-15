@@ -192,3 +192,16 @@ export function formatRM(sen: number): string {
   const amount = sen / 100;
   return `RM ${amount.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
+
+/**
+ * Format a minute count as "8h 30m" / "8h" / "-". The canonical
+ * hours+minutes display used across the Hookka ERP UI — Employees
+ * Working Hours grid, Department Performance KPIs, Planning page
+ * Efficiency Overview, etc. Returns "-" for zero / negative.
+ */
+export function formatHours(minutes: number): string {
+  if (minutes <= 0) return "-";
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}

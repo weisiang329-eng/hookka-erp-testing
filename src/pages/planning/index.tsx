@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatHours } from "@/lib/utils";
 import {
   Factory,
   TrendingUp,
@@ -263,19 +263,22 @@ function getDeptEfficiency(
         }
       }
 
-      const totalProductionHours = Math.round((totalProductionMinutes / 60) * 10) / 10;
-      const totalWorkingHours =
-        Math.round((workingHoursByDeptCategory.get(`${dept.code}|${cat}`) ?? 0) * 10) / 10;
+      // Keep raw minutes for the formatHours display ("8h 30m") and
+      // for the efficiency ratio. Hours-form (decimal) dropped — the
+      // canonical Hookka format is hours + minutes per utils.formatHours.
+      const totalWorkingMinutes = Math.round(
+        (workingHoursByDeptCategory.get(`${dept.code}|${cat}`) ?? 0) * 60,
+      );
       const efficiency =
-        totalWorkingHours > 0
-          ? Math.round((totalProductionHours / totalWorkingHours) * 100)
+        totalWorkingMinutes > 0
+          ? Math.round((totalProductionMinutes / totalWorkingMinutes) * 100)
           : 0;
 
       let statusLabel: string;
       let statusColor: string;
       // No-data heuristic: if either side is zero, we genuinely don't have
       // enough information — don't penalise the dept with "Needs Improvement".
-      if (totalWorkingHours === 0 || totalProductionHours === 0) {
+      if (totalWorkingMinutes === 0 || totalProductionMinutes === 0) {
         statusLabel = "No Data";
         statusColor = "text-gray-500 bg-gray-50";
       } else if (efficiency >= 95)      { statusLabel = "Excellent";          statusColor = "text-[#4F7C3A] bg-[#EEF3E4]"; }
@@ -288,8 +291,8 @@ function getDeptEfficiency(
         category: cat,
         active,
         completed,
-        totalProductionHours,
-        totalWorkingHours,
+        totalProductionMinutes,
+        totalWorkingMinutes,
         efficiency,
         statusLabel,
         statusColor,
@@ -1455,9 +1458,9 @@ export default function PlanningPage() {
                       <th className="h-9 px-3 text-left font-medium text-[#374151]">Category</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Active</th>
                       <th className="h-9 px-3 text-right font-medium text-[#374151]">Completed</th>
-                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Sum of (actualMinutes ?? estMinutes) × wipQty for JCs completed in the date range, ÷ 60.">Production Hours</th>
-                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Sum of hours entered in the Working Hours grid on /employees for this dept × category × date range.">Working Hours</th>
-                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Production Hours ÷ Working Hours × 100. 100% = produced as much spec time as was clocked in.">Efficiency %</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Spec time of completed JCs in the date range — sum of (actualMinutes ?? estMinutes) × wipQty.">Production Time</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Hours entered in the Working Hours grid (Employees page) for this dept × category × date range.">Working Hrs</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]" title="Production Time ÷ Working Hrs × 100. 100% = produced as much spec time as workers were clocked in for.">Efficiency %</th>
                       <th className="h-9 px-3 text-left font-medium text-[#374151]">Status</th>
                     </tr>
                   </thead>
@@ -1497,8 +1500,8 @@ export default function PlanningPage() {
                             </td>
                             <td className="px-3 py-2 text-right font-medium text-[#3E6570]">{row.active}</td>
                             <td className="px-3 py-2 text-right font-medium text-[#4F7C3A]">{row.completed}</td>
-                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalProductionHours.toFixed(1)}h</td>
-                            <td className="px-3 py-2 text-right text-[#4B5563]">{row.totalWorkingHours > 0 ? `${row.totalWorkingHours.toFixed(1)}h` : <span className="text-[#9CA3AF]">—</span>}</td>
+                            <td className="px-3 py-2 text-right text-[#4B5563] tabular-nums">{row.totalProductionMinutes > 0 ? formatHours(row.totalProductionMinutes) : <span className="text-[#9CA3AF]">—</span>}</td>
+                            <td className="px-3 py-2 text-right text-[#4B5563] tabular-nums">{row.totalWorkingMinutes > 0 ? formatHours(row.totalWorkingMinutes) : <span className="text-[#9CA3AF]">—</span>}</td>
                             <td className="px-3 py-2 text-right font-bold">{row.efficiency > 0 ? `${row.efficiency}%` : "-"}</td>
                             <td className="px-3 py-2">
                               <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${row.statusColor}`}>
@@ -2215,8 +2218,7 @@ function DrilldownModal(props: {
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Date</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total Min</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]">Hours</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]" style={{ minWidth: 200 }}>vs Avg</th>
             <th className="h-9 px-2 w-8"></th>
           </tr>
@@ -2224,7 +2226,6 @@ function DrilldownModal(props: {
         <tbody>
           {last14WorkingDays.map((date) => {
             const mins = capacityByDay.get(date) ?? 0;
-            const hrs = Math.round((mins / 60) * 10) / 10;
             const pctOfMax = (mins / maxMin) * 100;
             const diffFromAvg = mins - totalCapacity;
             const diffColor = diffFromAvg > 0 ? "text-[#4F7C3A]" : diffFromAvg < 0 ? "text-[#9A3A2D]" : "text-[#6B7280]";
@@ -2235,15 +2236,16 @@ function DrilldownModal(props: {
                 onClick={() => onPush({ kind: "capacity-day", date })}
               >
                 <td className="px-4 py-2 font-medium text-[#1F1D1B]">{date}</td>
-                <td className="px-4 py-2 text-right font-medium text-[#1F1D1B]">{mins.toLocaleString()}</td>
-                <td className="px-4 py-2 text-right text-[#4B5563]">{hrs}h</td>
+                <td className="px-4 py-2 text-right font-medium text-[#1F1D1B] tabular-nums">{formatHours(mins)}</td>
                 <td className="px-4 py-2">
                   <div className="flex items-center gap-2">
                     <div className="flex-1 h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
                       <div className="h-full bg-[#6B5C32]" style={{ width: `${pctOfMax}%` }} />
                     </div>
-                    <span className={`text-[10px] ${diffColor} w-12 text-right`}>
-                      {diffFromAvg >= 0 ? "+" : ""}{diffFromAvg.toLocaleString()}
+                    <span className={`text-[10px] ${diffColor} w-16 text-right tabular-nums`}>
+                      {diffFromAvg === 0
+                        ? "0"
+                        : (diffFromAvg > 0 ? "+" : "−") + formatHours(Math.abs(diffFromAvg))}
                     </span>
                   </div>
                 </td>
@@ -2260,7 +2262,7 @@ function DrilldownModal(props: {
     title = `Production on ${level.date}`;
     const byDept = capacityForDate(level.date);
     const dayTotal = Array.from(byDept.values()).reduce((s, v) => s + v.total, 0);
-    subtitle = `${dayTotal.toLocaleString()} min completed across ${byDept.size} dept${byDept.size === 1 ? "" : "s"}`;
+    subtitle = `${formatHours(dayTotal)} of production completed across ${byDept.size} dept${byDept.size === 1 ? "" : "s"}`;
     const entries = Array.from(byDept.entries()).sort((a, b) => b[1].total - a[1].total);
     body = entries.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No completed work on this date.</div>
@@ -2271,7 +2273,7 @@ function DrilldownModal(props: {
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Department</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">SOFA</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">BEDFRAME</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total Min</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
             <th className="h-9 px-2 w-8"></th>
           </tr>
         </thead>
@@ -2290,9 +2292,9 @@ function DrilldownModal(props: {
                     <span className="font-medium text-[#1F1D1B]">{meta?.name ?? deptCode}</span>
                   </div>
                 </td>
-                <td className="px-4 py-2 text-right text-[#3E6570]">{val.sofa.toLocaleString()}</td>
-                <td className="px-4 py-2 text-right text-[#6B5C32]">{val.bf.toLocaleString()}</td>
-                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B]">{val.total.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right text-[#3E6570] tabular-nums">{formatHours(val.sofa)}</td>
+                <td className="px-4 py-2 text-right text-[#6B5C32] tabular-nums">{formatHours(val.bf)}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B] tabular-nums">{formatHours(val.total)}</td>
                 <td className="px-2 py-2 text-[#9CA3AF]">
                   <ChevronRight className="h-4 w-4" />
                 </td>
@@ -2307,7 +2309,7 @@ function DrilldownModal(props: {
     title = `${meta?.name ?? level.deptCode} on ${level.date}`;
     const rows = capacityJCsForDateDept(level.date, level.deptCode);
     const deptTotal = rows.reduce((s, r) => s + r.minutes, 0);
-    subtitle = `${rows.length} job card${rows.length === 1 ? "" : "s"} · ${deptTotal.toLocaleString()} min total`;
+    subtitle = `${rows.length} job card${rows.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of production`;
     body = rows.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No completed JCs in this dept on this date.</div>
     ) : (
@@ -2320,7 +2322,7 @@ function DrilldownModal(props: {
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Product</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">WIP</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Customer</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]">Min</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
           </tr>
         </thead>
         <tbody>
@@ -2343,7 +2345,7 @@ function DrilldownModal(props: {
               </td>
               <td className="px-4 py-2 text-[#4B5563]">{r.wipLabel ?? "—"}</td>
               <td className="px-4 py-2 text-[#4B5563]">{r.customerName}</td>
-              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B]">{r.minutes.toLocaleString()}</td>
+              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B] tabular-nums">{formatHours(r.minutes)}</td>
             </tr>
           ))}
         </tbody>
@@ -2352,7 +2354,7 @@ function DrilldownModal(props: {
   } else if (level.kind === "load-by-dept") {
     title = `${scopeRange.label}'s Load — ${scopeRange.from}${scopeRange.from !== scopeRange.to ? ` → ${scopeRange.to}` : ""}`;
     const total = Array.from(loadByDept.values()).reduce((s, v) => s + v.total, 0);
-    subtitle = `${total.toLocaleString()} min of active work scheduled across ${loadByDept.size} dept${loadByDept.size === 1 ? "" : "s"}`;
+    subtitle = `${formatHours(total)} of active work scheduled across ${loadByDept.size} dept${loadByDept.size === 1 ? "" : "s"}`;
     const entries = Array.from(loadByDept.entries()).sort((a, b) => b[1].total - a[1].total);
     body = entries.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No active JCs scheduled in this range.</div>
@@ -2363,7 +2365,7 @@ function DrilldownModal(props: {
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Department</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">SOFA</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">BEDFRAME</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total Min</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
             <th className="h-9 px-2 w-8"></th>
           </tr>
         </thead>
@@ -2382,9 +2384,9 @@ function DrilldownModal(props: {
                     <span className="font-medium text-[#1F1D1B]">{meta?.name ?? deptCode}</span>
                   </div>
                 </td>
-                <td className="px-4 py-2 text-right text-[#3E6570]">{val.sofa.toLocaleString()}</td>
-                <td className="px-4 py-2 text-right text-[#6B5C32]">{val.bf.toLocaleString()}</td>
-                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B]">{val.total.toLocaleString()}</td>
+                <td className="px-4 py-2 text-right text-[#3E6570] tabular-nums">{formatHours(val.sofa)}</td>
+                <td className="px-4 py-2 text-right text-[#6B5C32] tabular-nums">{formatHours(val.bf)}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B] tabular-nums">{formatHours(val.total)}</td>
                 <td className="px-2 py-2 text-[#9CA3AF]">
                   <ChevronRight className="h-4 w-4" />
                 </td>
@@ -2399,9 +2401,9 @@ function DrilldownModal(props: {
     title = `${meta?.name ?? level.deptCode} — ${scopeRange.label}'s Load`;
     const rows = loadJCsForDept(level.deptCode);
     const deptTotal = rows.reduce((s, r) => s + r.minutes, 0);
-    subtitle = `${rows.length} active JC${rows.length === 1 ? "" : "s"} · ${deptTotal.toLocaleString()} min total`;
+    subtitle = `${rows.length} active job card${rows.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of production`;
     body = rows.length === 0 ? (
-      <div className="p-8 text-center text-sm text-[#6B7280]">No active JCs in this dept for the selected range.</div>
+      <div className="p-8 text-center text-sm text-[#6B7280]">No active job cards in this dept for the selected range.</div>
     ) : (
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
@@ -2414,7 +2416,7 @@ function DrilldownModal(props: {
             <th className="h-9 px-4 text-left font-medium text-[#374151]">WIP</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Customer</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Status</th>
-            <th className="h-9 px-4 text-right font-medium text-[#374151]">Min</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
           </tr>
         </thead>
         <tbody>
@@ -2440,7 +2442,7 @@ function DrilldownModal(props: {
               <td className="px-4 py-2 text-[#4B5563]">{r.wipLabel ?? "—"}</td>
               <td className="px-4 py-2 text-[#4B5563]">{r.customerName}</td>
               <td className="px-4 py-2 text-[10px] text-[#6B7280]">{r.status}</td>
-              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B]">{r.minutes.toLocaleString()}</td>
+              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B] tabular-nums">{formatHours(r.minutes)}</td>
             </tr>
           ))}
         </tbody>

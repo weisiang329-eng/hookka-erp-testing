@@ -1291,6 +1291,31 @@ export default function PlanningPage() {
     [orders, loadJCsForDept],
   );
 
+  // Wei Siang 2026-05-15: scope-aware completion — total production
+  // minutes for JCs whose completedDate falls inside the current
+  // scopeRange. Compared against {Scope}'s Load to show progress.
+  // For Daily scope this is "today's actual production"; Weekly is
+  // "this week's so-far"; Monthly is "this month's so-far".
+  const scopeCompletedMinutes = useMemo(() => {
+    let total = 0;
+    for (const order of orders) {
+      for (const jc of order.jobCards) {
+        if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+        if (!jc.completedDate) continue;
+        if (jc.completedDate < scopeRange.from || jc.completedDate > scopeRange.to) continue;
+        const wipQty = Math.max(1, jc.wipQty ?? 1);
+        total += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+      }
+    }
+    return total;
+  }, [orders, scopeRange]);
+  // Progress % = how much of the scope's scheduled load is already done.
+  // Capped at 999 so an overshoot scope (workers ate into the next
+  // bucket early) doesn't blow the bar layout.
+  const scopeProgressPct = totalScopeLoad > 0
+    ? Math.min(999, Math.round((scopeCompletedMinutes / totalScopeLoad) * 100))
+    : 0;
+
   // Wei Siang 2026-05-15: Total Backlog drilldown — per-dept backlog
   // days table. Reads capacityData (already memoised) which has each
   // dept's totalBacklog (minutes), totalBacklogDays, sofa/bf splits.
@@ -1397,7 +1422,7 @@ export default function PlanningPage() {
               14-day avg of actual completed minutes (per Wei Siang
               spec). Load / Utilization / Backlog scoped to the
               selected Daily/Weekly/Monthly window. */}
-          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-5">
             {/* Wei Siang 2026-05-15: Daily Capacity is the entry
                 point to the drilldown — click it to open the 14-day
                 breakdown modal. Click → day modal → per-dept → per-JC. */}
@@ -1418,7 +1443,9 @@ export default function PlanningPage() {
             </Card>
             {/* Wei Siang 2026-05-15: {Scope}'s Load → per-dept drilldown
                 → per-JC list. Honours the active Daily/Weekly/Monthly
-                scope toggle. */}
+                scope toggle. Now includes a "Done" progress bar
+                showing how much of today's plan has actually been
+                completed (real-time relative to the orders payload). */}
             <Card
               className="cursor-pointer transition-shadow hover:shadow-md"
               onClick={() => pushDrilldown({ kind: "load-by-dept" })}
@@ -1434,6 +1461,52 @@ export default function PlanningPage() {
                 <div className="text-[10px] text-[#9CA3AF] mt-0.5 flex gap-3">
                   <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {formatHours(totalSofaScopeLoad)}</span>
                   <span><span className="font-semibold text-[#3E6570]">BF</span> {formatHours(totalBfScopeLoad)}</span>
+                </div>
+              </CardContent>
+            </Card>
+            {/* Wei Siang 2026-05-15: NEW — {Scope}'s Completed. Real
+                production output for the active scope. Click reuses
+                the capacity-day drilldown (for Daily) so operator can
+                see per-dept → per-worker → per-JC names contributing
+                to today's progress. For Weekly/Monthly we drop to the
+                14-day list since there's no single-day modal to land
+                on. */}
+            <Card
+              className="cursor-pointer transition-shadow hover:shadow-md"
+              onClick={() =>
+                capacityScope === "daily"
+                  ? pushDrilldown({ kind: "capacity-day", date: today })
+                  : pushDrilldown({ kind: "capacity-14d" })
+              }
+            >
+              <CardContent className="p-3">
+                <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
+                  <span>{scopeRange.label}&apos;s Completed</span>
+                  <CheckCircle2 className="h-4 w-4 text-[#4F7C3A]" />
+                </p>
+                <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
+                  {formatHours(scopeCompletedMinutes)}
+                </p>
+                {/* Progress bar: completed / load. Bar fills the card
+                    width up to 100% and turns red on overshoot
+                    (>100%). Helps the operator see at a glance "are
+                    we ahead, on track, or behind?". */}
+                <div className="mt-1">
+                  <div className="h-1.5 rounded-full bg-[#F0ECE9] overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${
+                        scopeProgressPct >= 100
+                          ? "bg-[#4F7C3A]"
+                          : scopeProgressPct >= 70
+                            ? "bg-[#9C6F1E]"
+                            : "bg-[#9A3A2D]"
+                      }`}
+                      style={{ width: `${Math.min(100, scopeProgressPct)}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-[#9CA3AF] mt-0.5">
+                    {scopeProgressPct}% of {scopeRange.label.toLowerCase()}&apos;s load · click for names
+                  </p>
                 </div>
               </CardContent>
             </Card>
@@ -2771,6 +2844,10 @@ function DrilldownModal(props: {
             <th className="h-9 px-4 text-right font-medium text-[#374151]">SOFA</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">BEDFRAME</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">Total</th>
+            {/* Wei Siang 2026-05-15: Daily Capacity column inserted so
+                the Backlog Days arithmetic is visible — operator can
+                see "Total ÷ Daily Capacity = Backlog Days" directly. */}
+            <th className="h-9 px-4 text-right font-medium text-[#374151]" title="Dept's 14-day rolling daily output. Backlog ÷ this = Backlog Days.">Daily Capacity</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]" title="Total backlog ÷ dept's 14-day rolling daily capacity. Wall-clock days the dept needs to clear its queue.">Backlog Days</th>
           </tr>
         </thead>
@@ -2793,6 +2870,7 @@ function DrilldownModal(props: {
                 <td className="px-4 py-2 text-right text-[#3E6570] tabular-nums">{formatHours(d.sofaBacklog)}</td>
                 <td className="px-4 py-2 text-right text-[#6B5C32] tabular-nums">{formatHours(d.bfBacklog)}</td>
                 <td className="px-4 py-2 text-right font-bold text-[#1F1D1B] tabular-nums">{formatHours(d.totalBacklog)}</td>
+                <td className="px-4 py-2 text-right text-[#4B5563] tabular-nums">{d.dailyCapacity > 0 ? `${formatHours(d.dailyCapacity)}/day` : <span className="text-[#9CA3AF]">—</span>}</td>
                 <td className={`px-4 py-2 text-right font-bold tabular-nums ${daysColor}`}>{d.totalBacklogDays}d</td>
               </tr>
             );

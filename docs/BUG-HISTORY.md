@@ -34,6 +34,64 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-15-001 — SO edit page silently re-poisoned bare SOFA sizeLabel with trailing `"`, every Save → 400
+
+**Status:** 🟢 Fixed (2026-05-15)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** Wei Siang opened `Edit SO-2605-104` and got two
+stacked toasts: `Unknown SOFA sizeLabel: "32"". Must match one of the
+dropdown values: 24, 26, 28, 30, 32, 35.` The SO loaded fine in the form
+but every Save Changes attempt was rejected. Operator: "为什么这一个 SO
+不能 edit?"
+
+**Root cause:** `src/pages/sales/edit.tsx` had a leftover frontend
+normalize-add-quote step that survived the 2026-05-09 DUP-001 cleanup:
+
+1. KV `variants-config.sofaSizes` canonical = bare `["24","26","28","30","32","35"]` (matches Maintenance page UI)
+2. Backfill (commit `af372e8`) cleaned all 259+13 dirty rows in
+   `sales_order_items` / `consignment_order_items` / `production_orders`
+   from `32"` → bare `32`
+3. Backend normalize-add-quote removed (commit `f2fa7a9`)
+4. `validateSofaSizeLabels` gate added to SO/CO POST/PUT (commit `2d332c0`)
+5. **BUT** the frontend `normalizeSeat()` helper at `sales/edit.tsx:543`
+   + the dropdown options builder at `sales/edit.tsx:1107` still ran
+   `/^\d+(\.\d+)?$/.test(t) ? \`${t}"\` : t` against the seat-size value
+   on form hydration AND on every dropdown render.
+
+So on every SO edit:
+- Frontend read bare `32` from DB into form state
+- normalizeSeat() rewrote it to `32"` in form's `seatHeight` + `sizeLabel`
+- Save Changes sent `sizeLabel: '32"'` to backend
+- `validateSofaSizeLabels` rejected → 400 → toast
+
+Two contradictions hidden inside the same page:
+- Frontend canonical: quoted
+- Backend canonical: bare
+- KV / Maintenance / DB / consignment-edit / sales-create all bare
+- Only `sales/edit.tsx` was the outlier
+
+Plus `src/lib/pricing-options.ts` had `SEAT_HEIGHT_OPTIONS = ['24"', '28"', '30"', '32"', '35"']` (quoted AND missing 26) as the fallback when KV hasn't hydrated — same contradiction.
+
+**Fix (commits pending push):**
+- `src/pages/sales/edit.tsx`: removed `normalizeSeat()` helper (lines 543-547),
+  inlined `rawSizeLabel || rawSizeCode` at the hydration site, removed the
+  `${t}"` map step in the dropdown options builder
+- `src/lib/pricing-options.ts`: changed `SEAT_HEIGHT_OPTIONS` to bare
+  `['24', '26', '28', '30', '32', '35']` to match Maintenance + KV
+
+Pattern-match: applies the memory rules
+- `Eliminate inconsistency before syncing it` — picked ONE canonical (bare, per Maintenance/DB/backend), removed the outlier rather than patching both sides
+- `Reject bad inputs, don't normalize` — frontend now passes DB values through verbatim instead of silently transforming
+- `Frontend + backend validation must be unified` — the rejection at backend is now mirrored by frontend simply not generating bad data
+
+**Verification:**
+- `consignment/edit.tsx`, `sales/create.tsx`, `consignment/create.tsx` already use raw KV values (no normalize) — verified via grep for `\\${t}\"`
+- Operator UI now matches Maintenance page (bare numbers in dropdown), same as the consignment side already does
+- Legacy-tolerant fallback at `sales/edit.tsx:1115` preserves any stored `32"` value as `"(legacy)"` entry so old data still pre-fills
+
+---
+
 ## BUG-2026-05-13-005 — Production Folder detail showed only 10 columns vs Production main page's 25
 
 **Status:** 🟢 Fixed (2026-05-13)

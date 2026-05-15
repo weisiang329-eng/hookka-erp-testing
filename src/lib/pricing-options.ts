@@ -15,8 +15,15 @@
 // Sprint 5, Goal 2 — see PROGRAM-EXECUTION.md.
 // ---------------------------------------------------------------------------
 
-// Seat height pricing tiers for sofa modules (in sen = RM * 100)
-export const SEAT_HEIGHT_OPTIONS = ['24"', '28"', '30"', '32"', '35"'] as const;
+// Seat height pricing tiers for sofa modules (in sen = RM * 100).
+// Wei Siang 2026-05-15: canonical format is BARE numerics (matches
+// kv_config.variants-config.sofaSizes + the validateSofaSizeLabels
+// gate at SO/CO POST/PUT). Previously this fallback was quoted
+// (`['24"', '28"', ...]`) which contradicted the backend canonical
+// and caused SO edits to fail validation when KV config wasn't
+// hydrated. Aligned to bare to match Maintenance page + DB +
+// backend validator.
+export const SEAT_HEIGHT_OPTIONS = ['24', '26', '28', '30', '32', '35'] as const;
 
 // ============================================================
 // PRICING CONFIG — Special Orders (from Google Sheet "Special orders" tab)

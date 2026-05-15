@@ -540,16 +540,15 @@ export default function EditSalesOrderPage() {
             const parsed = isSofa ? parseSofaCode(productCode) : { baseModel: "", module: "" };
             const rawSizeLabel = (item.sizeLabel as string) || "";
             const rawSizeCode = (item.sizeCode as string) || "";
-            const normalizeSeat = (s: string): string => {
-              const t = s.trim();
-              if (!t) return "";
-              if (t.includes('"')) return t;
-              return /^\d+(\.\d+)?$/.test(t) ? `${t}"` : t;
-            };
+            // Wei Siang 2026-05-15: SOFA seat height canonical is BARE
+            // numerics (matches kv_config.variants-config.sofaSizes
+            // + the validateSofaSizeLabels backend gate). The previous
+            // normalizeSeat() here added trailing `"` to bare values,
+            // poisoning the form state — any saved SO with bare
+            // sizeLabel got re-sent to backend as `32"` and rejected.
+            // Removed: just pass DB values through verbatim.
             const seatHeight = isSofa
-              ? ((item.seatHeight as string) ||
-                 normalizeSeat(rawSizeLabel) ||
-                 normalizeSeat(rawSizeCode))
+              ? ((item.seatHeight as string) || rawSizeLabel || rawSizeCode)
               : "";
             return {
               id: item.id as string,
@@ -1090,10 +1089,14 @@ export default function EditSalesOrderPage() {
                           // Source from kv_config.sofaSizes so anything the user
                           // adds in Product Maintenance is picked up. Fall back
                           // to the hardcoded list only when the config hasn't
-                          // hydrated yet. Normalize bare numerics to quoted
-                          // form ("24" → '24"') so the dropdown value matches
-                          // the SO's sizeLabel/seatHeight format — kv_config
-                          // is inconsistent (some entries quoted, some not).
+                          // hydrated yet.
+                          //
+                          // Wei Siang 2026-05-15: canonical is BARE numerics
+                          // (matches Maintenance page + DB + backend validator).
+                          // Previously this builder normalized bare values to
+                          // quoted form (`24` → `24"`) which contradicted the
+                          // backend. Removed the normalize step — dropdown now
+                          // shows whatever Maintenance config stores, verbatim.
                           const cfg = maintenanceConfig?.sofaSizes;
                           const arr = Array.isArray(cfg) && cfg.length > 0
                             ? cfg.map((v) =>
@@ -1102,15 +1105,13 @@ export default function EditSalesOrderPage() {
                                   : String(v),
                               )
                             : (SEAT_HEIGHT_OPTIONS as unknown as string[]);
-                          const normalized = arr.map((h) => {
-                            const t = h.trim();
-                            return /^\d+(\.\d+)?$/.test(t) ? `${t}"` : t;
-                          });
-                          const opts = normalized.map(h => ({ value: h, label: h }));
+                          const opts = arr.map(h => ({ value: h, label: h }));
                           // 2026-05-09: if the SO's stored seatHeight isn't in
-                          // current config (operator may have removed an option),
-                          // surface it as a legacy entry so the dropdown still
-                          // pre-fills instead of going blank.
+                          // current config (operator may have removed an option
+                          // OR the value was a legacy quoted form from before
+                          // the 2026-05-09 backfill), surface it as a legacy
+                          // entry so the dropdown still pre-fills instead of
+                          // going blank.
                           if (item.seatHeight && !opts.some(o => o.value === item.seatHeight)) {
                             opts.unshift({ value: item.seatHeight, label: `${item.seatHeight} (legacy)` });
                           }

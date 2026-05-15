@@ -6203,22 +6203,25 @@ export default function ProductionPage({
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      {/* Specs LEFT, QR RIGHT — Wei Siang 2026-05-15:
-                          "可以放 QR Code 在这一边" (the empty area
-                          beside the short numeric values). */}
+                      {/* Specs LEFT, QR RIGHT — Wei Siang 2026-05-15.
+                          Spec font bumped 10px → 11px and sign-off
+                          flows naturally below (no mt-auto), so the
+                          tile doesn't have a big white gap in the
+                          middle. */}
                       <div className="flex items-start gap-2">
-                        <div className="flex-1 space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                          <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                          <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                          {s.gap && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                          {s.divan && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                          {s.leg && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                          {s.totalHeight && <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Total Height</span>: {s.totalHeight}</div>}
-                          <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div className="flex-1 space-y-[2px] text-[11px] leading-snug text-[#1F1D1B]">
+                          <div className="truncate"><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+                          {s.gap && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+                          {s.divan && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+                          {s.leg && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+                          {s.totalHeight && <div><span className="inline-block w-[80px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
+                          <div className="flex items-start gap-1"><span className="inline-block w-[80px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                         </div>
-                        <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block shrink-0" />
+                        <QRImg data={s.qrPayload} size={88} alt="Job card QR" className="block shrink-0" />
                       </div>
-                      <div className="mt-auto space-y-2 text-[10px]">
+                      <div className="border-t border-[#E6E0D9] my-2" />
+                      <div className="space-y-2 text-[11px]">
                         <div className="flex items-end gap-1">
                           <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
                           <span className="flex-1 border-b border-black h-[14px]" />
@@ -6227,7 +6230,7 @@ export default function ProductionPage({
                           <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
                           <span className="flex-1 border-b border-black h-[14px]" />
                         </div>
-                        <div className="font-bold text-[#1F1D1B]" style={{ fontSize: "11px" }}>Qty {s.qty}</div>
+                        <div className="font-bold text-[#1F1D1B]" style={{ fontSize: "12px" }}>Qty {s.qty}</div>
                       </div>
                     </div>
                   );
@@ -6633,20 +6636,21 @@ export default function ProductionPage({
                     )}
                   </div>
                   <div className="border-t border-black my-[2mm]" />
-                  {/* Wei Siang 2026-05-15 (revised again): spec values
-                      live in the LEFT column, QR sits in the RIGHT
-                      column alongside them — the "empty area" beside
-                      the short numeric values is exactly where the QR
-                      goes ("可以放 QR Code 在这一边"). Sign-off lines
-                      live at the bottom on their own. */}
+                  {/* Wei Siang 2026-05-15 (revised): "感觉很窄… 中间还有
+                      很多空白" — drop the mt-auto from the sign-off so
+                      it sits right below the spec block, no big middle
+                      gap. QR shrunk slightly (30mm → 26mm) so the spec
+                      values + QR row breathes better. Specs bumped to
+                      13pt so the spec area visually balances the
+                      identifier block above. */}
                   <div className="flex items-start gap-[3mm]">
-                    <div className="flex-1 space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
+                    <div className="flex-1 space-y-[1.5mm]" style={{ fontSize: "13pt", lineHeight: 1.3 }}>
                       <div><span className="inline-block w-[34mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
                       <div><span className="inline-block w-[34mm] font-semibold">Colour</span>: {s.colour || "—"}</div>
                       {s.gap && <div><span className="inline-block w-[34mm] font-semibold">Gap</span>: {s.gap}</div>}
                       {s.divan && <div><span className="inline-block w-[34mm] font-semibold">Divan</span>: {s.divan}</div>}
                       {s.leg && <div><span className="inline-block w-[34mm] font-semibold">Leg</span>: {s.leg}</div>}
-                      {s.totalHeight && <div><span className="inline-block w-[34mm] font-semibold">Total Height</span>: {s.totalHeight}</div>}
+                      {s.totalHeight && <div><span className="inline-block w-[34mm] font-semibold">Total H</span>: {s.totalHeight}</div>}
                       <div className="flex items-start gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "34mm", color: "#9A3A2D" }}>Notes</span>
                         <span className="flex-1 break-words">
@@ -6658,12 +6662,13 @@ export default function ProductionPage({
                       <img
                         src={s.qrDataUrl}
                         alt="Job card QR"
-                        style={{ width: "30mm", height: "30mm" }}
+                        style={{ width: "26mm", height: "26mm" }}
                         className="shrink-0"
                       />
                     )}
                   </div>
-                  <div className="mt-auto space-y-[3mm]" style={{ fontSize: "11pt" }}>
+                  <div className="border-t border-black my-[2mm]" />
+                  <div className="space-y-[3mm]" style={{ fontSize: "11pt" }}>
                     <div className="flex items-end gap-[2mm]">
                       <span className="font-semibold whitespace-nowrap">Fabric Cutting :</span>
                       <span className="flex-1 border-b border-black h-[6mm]" />
@@ -6672,6 +6677,7 @@ export default function ProductionPage({
                       <span className="font-semibold whitespace-nowrap">Fabric Sewing :</span>
                       <span className="flex-1 border-b border-black h-[6mm]" />
                     </div>
+                    <div className="font-bold" style={{ fontSize: "12pt" }}>Qty {s.qty}</div>
                   </div>
                   {s.totalPieces > 1 && (
                     <div className="text-right font-semibold mt-[1mm]" style={{ fontSize: "10pt" }}>

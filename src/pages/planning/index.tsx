@@ -252,7 +252,20 @@ function getDeptEfficiency(
         if (order.itemCategory !== cat) continue;
         const jc = order.jobCards.find((j) => j.departmentCode === dept.code);
         if (!jc) continue;
-        if (jc.status === "IN_PROGRESS" || jc.status === "PAUSED") active++;
+        // Wei Siang 2026-05-15: Active = "in the pipeline, not done" =
+        // WAITING + IN_PROGRESS + PAUSED + BLOCKED. The previous narrow
+        // definition (IN_PROGRESS + PAUSED only) showed 0 in every row
+        // when the factory had a queue of WAITING JCs that hadn't been
+        // started yet — which is exactly the situation an operator
+        // cares to see ("how much is queued for this dept right now?").
+        if (
+          jc.status === "WAITING" ||
+          jc.status === "IN_PROGRESS" ||
+          jc.status === "PAUSED" ||
+          jc.status === "BLOCKED"
+        ) {
+          active++;
+        }
         if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") {
           if (!jc.completedDate) continue;
           if (dateFrom && jc.completedDate < dateFrom) continue;
@@ -608,12 +621,24 @@ export default function PlanningPage() {
   // Same idea for "{Scope}'s Load" KPI but starts at per-dept (only
   // one date involved). We model this as a stack of levels so each
   // drilldown gets its own back button without prop-drilling state.
+  // Wei Siang 2026-05-15: drilldown shape
+  //   capacity-14d              → 14-day list (one row per day)
+  //   capacity-day              → per-dept production on a date
+  //   capacity-day-dept         → per-worker on that date × dept
+  //   capacity-day-dept-worker  → per-JC for that worker
+  //   load-by-dept              → per-dept scheduled load in current scope
+  //   load-dept                 → per-worker for that dept (active JCs)
+  //   load-dept-worker          → per-JC for that worker
+  //   backlog-by-dept           → per-dept backlog days table
   type DrilldownLevel =
     | { kind: "capacity-14d" }
     | { kind: "capacity-day"; date: string }
     | { kind: "capacity-day-dept"; date: string; deptCode: string }
+    | { kind: "capacity-day-dept-worker"; date: string; deptCode: string; workerId: string; workerName: string }
     | { kind: "load-by-dept" }
-    | { kind: "load-dept"; deptCode: string };
+    | { kind: "load-dept"; deptCode: string }
+    | { kind: "load-dept-worker"; deptCode: string; workerId: string; workerName: string }
+    | { kind: "backlog-by-dept" };
   const [drilldownStack, setDrilldownStack] = useState<DrilldownLevel[]>([]);
   const pushDrilldown = useCallback((level: DrilldownLevel) => {
     setDrilldownStack((s) => [...s, level]);
@@ -1000,47 +1025,6 @@ export default function PlanningPage() {
     [orders],
   );
 
-  // For a specific (date, dept), return list of JC + parent PO refs
-  // contributing. Sorted by minutes descending.
-  const capacityJCsForDateDept = useCallback(
-    (date: string, deptCode: string) => {
-      const rows: {
-        jcId: string;
-        pic1Name: string;
-        pic2Name: string;
-        productCode: string;
-        productName: string;
-        wipLabel: string | null;
-        poNo: string;
-        category: string;
-        customerName: string;
-        minutes: number;
-      }[] = [];
-      for (const order of orders) {
-        for (const jc of order.jobCards) {
-          if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
-          if (jc.completedDate !== date) continue;
-          if (jc.departmentCode !== deptCode) continue;
-          rows.push({
-            jcId: jc.id,
-            pic1Name: jc.pic1Name || "",
-            pic2Name: jc.pic2Name || "",
-            productCode: order.productCode,
-            productName: order.productName,
-            wipLabel: jc.wipLabel ?? null,
-            poNo: order.poNo,
-            category: order.itemCategory,
-            customerName: order.customerName,
-            minutes: jc.actualMinutes ?? jc.estMinutes ?? 0,
-          });
-        }
-      }
-      rows.sort((a, b) => b.minutes - a.minutes);
-      return rows;
-    },
-    [orders],
-  );
-
   // For "{Scope}'s Load" → JCs with dueDate inside scopeRange and
   // active (not completed/cancelled/transferred). Returns per-dept
   // SOFA/BF/total split — mirrors capacityData's sofaScopeLoad / bfScopeLoad
@@ -1118,6 +1102,174 @@ export default function PlanningPage() {
     }
     return m;
   }, [productionDepartments]);
+
+  // Wei Siang 2026-05-15: per-worker aggregation slots in between dept
+  // and per-JC, so the operator sees "who contributed what" before
+  // drilling into the specific JCs. A JC with 2 PICs (pic1 + pic2)
+  // splits its minutes evenly between them — keeps the per-worker sum
+  // exactly equal to the dept total without double-counting.
+
+  // For a (date × dept), return per-worker aggregation. workerKey
+  // encodes pic1Id or pic2Id (treated symmetrically). Unassigned JCs
+  // collapse under a single "(unassigned)" pseudo-worker so they're
+  // not dropped from view.
+  const capacityWorkersForDateDept = useCallback(
+    (date: string, deptCode: string) => {
+      const byWorker = new Map<string, { workerId: string; workerName: string; totalMinutes: number; jcCount: number }>();
+      const credit = (id: string, name: string, mins: number) => {
+        const key = id || "__unassigned__";
+        const display = id ? name : "(unassigned)";
+        const cell = byWorker.get(key) ?? { workerId: key, workerName: display, totalMinutes: 0, jcCount: 0 };
+        cell.totalMinutes += mins;
+        cell.jcCount += 1;
+        byWorker.set(key, cell);
+      };
+      for (const order of orders) {
+        for (const jc of order.jobCards) {
+          if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+          if (jc.completedDate !== date) continue;
+          if (jc.departmentCode !== deptCode) continue;
+          const mins = jc.actualMinutes ?? jc.estMinutes ?? 0;
+          const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
+          if (picCount === 0) {
+            credit("", "", mins);
+          } else {
+            const share = mins / picCount;
+            if (jc.pic1Id) credit(jc.pic1Id, jc.pic1Name || "", share);
+            if (jc.pic2Id) credit(jc.pic2Id, jc.pic2Name || "", share);
+          }
+        }
+      }
+      return Array.from(byWorker.values()).sort((a, b) => b.totalMinutes - a.totalMinutes);
+    },
+    [orders],
+  );
+
+  // For a (date × dept × worker) → list of that worker's specific JCs.
+  // Reuses the same per-JC shape as capacityJCsForDateDept; the worker
+  // filter is a string id match against pic1Id / pic2Id.
+  const capacityJCsForDateDeptWorker = useCallback(
+    (date: string, deptCode: string, workerId: string) => {
+      const rows: {
+        jcId: string;
+        pic1Name: string;
+        pic2Name: string;
+        productCode: string;
+        productName: string;
+        wipLabel: string | null;
+        poNo: string;
+        category: string;
+        customerName: string;
+        minutes: number;
+      }[] = [];
+      const isUnassigned = workerId === "__unassigned__";
+      for (const order of orders) {
+        for (const jc of order.jobCards) {
+          if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+          if (jc.completedDate !== date) continue;
+          if (jc.departmentCode !== deptCode) continue;
+          const matches = isUnassigned
+            ? !jc.pic1Id && !jc.pic2Id
+            : jc.pic1Id === workerId || jc.pic2Id === workerId;
+          if (!matches) continue;
+          rows.push({
+            jcId: jc.id,
+            pic1Name: jc.pic1Name || "",
+            pic2Name: jc.pic2Name || "",
+            productCode: order.productCode,
+            productName: order.productName,
+            wipLabel: jc.wipLabel ?? null,
+            poNo: order.poNo,
+            category: order.itemCategory,
+            customerName: order.customerName,
+            minutes: jc.actualMinutes ?? jc.estMinutes ?? 0,
+          });
+        }
+      }
+      rows.sort((a, b) => b.minutes - a.minutes);
+      return rows;
+    },
+    [orders],
+  );
+
+  // Same per-worker aggregation for the Load drilldown — looks at
+  // ACTIVE JCs (dueDate in scopeRange, status not done) instead of
+  // completed ones, and uses estMinutes as the work-content number.
+  const loadWorkersForDept = useCallback(
+    (deptCode: string) => {
+      const byWorker = new Map<string, { workerId: string; workerName: string; totalMinutes: number; jcCount: number }>();
+      const credit = (id: string, name: string, mins: number) => {
+        const key = id || "__unassigned__";
+        const display = id ? name : "(unassigned)";
+        const cell = byWorker.get(key) ?? { workerId: key, workerName: display, totalMinutes: 0, jcCount: 0 };
+        cell.totalMinutes += mins;
+        cell.jcCount += 1;
+        byWorker.set(key, cell);
+      };
+      for (const order of orders) {
+        if (order.status !== "IN_PROGRESS" && order.status !== "PENDING") continue;
+        for (const jc of order.jobCards) {
+          if (jc.departmentCode !== deptCode) continue;
+          if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
+          if (!jc.dueDate) continue;
+          if (jc.dueDate < scopeRange.from || jc.dueDate > scopeRange.to) continue;
+          const mins = jc.estMinutes ?? 0;
+          const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
+          if (picCount === 0) {
+            credit("", "", mins);
+          } else {
+            const share = mins / picCount;
+            if (jc.pic1Id) credit(jc.pic1Id, jc.pic1Name || "", share);
+            if (jc.pic2Id) credit(jc.pic2Id, jc.pic2Name || "", share);
+          }
+        }
+      }
+      return Array.from(byWorker.values()).sort((a, b) => b.totalMinutes - a.totalMinutes);
+    },
+    [orders, scopeRange],
+  );
+
+  const loadJCsForDeptWorker = useCallback(
+    (deptCode: string, workerId: string) => {
+      const isUnassigned = workerId === "__unassigned__";
+      return loadJCsForDept(deptCode).filter((r) => {
+        // r.pic1Name / pic2Name are display strings, not ids — we need
+        // to re-check against pic1Id / pic2Id via the source orders.
+        // Cheaper: duplicate the filter against orders directly.
+        return isUnassigned ? r.pic1Name === "" && r.pic2Name === "" : true;
+      }).filter((r) => {
+        if (isUnassigned) return true;
+        // Find the source JC to compare ids.
+        for (const order of orders) {
+          for (const jc of order.jobCards) {
+            if (jc.id === r.jcId) {
+              return jc.pic1Id === workerId || jc.pic2Id === workerId;
+            }
+          }
+        }
+        return false;
+      });
+    },
+    [orders, loadJCsForDept],
+  );
+
+  // Wei Siang 2026-05-15: Total Backlog drilldown — per-dept backlog
+  // days table. Reads capacityData (already memoised) which has each
+  // dept's totalBacklog (minutes), totalBacklogDays, sofa/bf splits.
+  const backlogByDept = useMemo(() => {
+    return capacityData
+      .map((d) => ({
+        deptCode: d.code,
+        deptName: d.name,
+        color: d.color,
+        sofaBacklog: d.sofaBacklog,
+        bfBacklog: d.bfBacklog,
+        totalBacklog: d.totalBacklog,
+        totalBacklogDays: d.totalBacklogDays,
+        dailyCapacity: d.dailyCapacity,
+      }))
+      .sort((a, b) => b.totalBacklogDays - a.totalBacklogDays);
+  }, [capacityData]);
 
   // ── Loading state ──
   if (loading) {
@@ -1220,8 +1372,8 @@ export default function PlanningPage() {
                   <span>Daily Capacity</span>
                   <Factory className="h-4 w-4 text-[#6B5C32]" />
                 </p>
-                <p className="text-xl font-bold text-[#1F1D1B]">
-                  {totalCapacity.toLocaleString()} <span className="text-xs font-medium text-[#6B7280]">min/day</span>
+                <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
+                  {formatHours(totalCapacity)} <span className="text-xs font-medium text-[#6B7280]">/day</span>
                 </p>
                 <p className="text-[10px] text-[#9CA3AF] mt-0.5">14-day rolling actual avg · click for breakdown</p>
               </CardContent>
@@ -1238,12 +1390,12 @@ export default function PlanningPage() {
                   <span>{scopeRange.label}&apos;s Load</span>
                   <TrendingUp className="h-4 w-4 text-[#3E6570]" />
                 </p>
-                <p className="text-xl font-bold text-[#1F1D1B]">
-                  {totalScopeLoad.toLocaleString()} <span className="text-xs font-medium text-[#6B7280]">min</span>
+                <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
+                  {formatHours(totalScopeLoad)}
                 </p>
                 <div className="text-[10px] text-[#9CA3AF] mt-0.5 flex gap-3">
-                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {totalSofaScopeLoad.toLocaleString()}</span>
-                  <span><span className="font-semibold text-[#3E6570]">BF</span> {totalBfScopeLoad.toLocaleString()}</span>
+                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {formatHours(totalSofaScopeLoad)}</span>
+                  <span><span className="font-semibold text-[#3E6570]">BF</span> {formatHours(totalBfScopeLoad)}</span>
                 </div>
               </CardContent>
             </Card>
@@ -1262,7 +1414,12 @@ export default function PlanningPage() {
                 </div>
               </CardContent>
             </Card>
-            <Card>
+            {/* Wei Siang 2026-05-15: Total Backlog click → per-dept
+                breakdown showing each dept's backlog days. */}
+            <Card
+              className="cursor-pointer transition-shadow hover:shadow-md"
+              onClick={() => pushDrilldown({ kind: "backlog-by-dept" })}
+            >
               <CardContent className="p-3">
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
                   <span>Total Backlog</span>
@@ -1276,8 +1433,8 @@ export default function PlanningPage() {
                       hours (raw quantity), not days. Days would imply
                       each side runs full-cap alone, which double-counts
                       against the wall-clock days on the line above. */}
-                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {Math.round(totalSofaBacklog / 60)}h</span>
-                  <span><span className="font-semibold text-[#3E6570]">BF</span> {Math.round(totalBfBacklog / 60)}h</span>
+                  <span><span className="font-semibold text-[#9A3A2D]">SOFA</span> {formatHours(totalSofaBacklog)}</span>
+                  <span><span className="font-semibold text-[#3E6570]">BF</span> {formatHours(totalBfBacklog)}</span>
                 </div>
               </CardContent>
             </Card>
@@ -1319,8 +1476,8 @@ export default function PlanningPage() {
                       </div>
                       <div>
                         <span className="text-[10px] text-[#6B7280]">Daily Cap</span>
-                        <p className="font-semibold text-[#1F1D1B]" title="14-day rolling actual avg">
-                          {dept.dailyCapacity.toLocaleString()}
+                        <p className="font-semibold text-[#1F1D1B] tabular-nums" title="14-day rolling actual avg">
+                          {formatHours(dept.dailyCapacity)}
                         </p>
                       </div>
                     </div>
@@ -1330,8 +1487,8 @@ export default function PlanningPage() {
                       <span className="text-[10px] font-semibold text-[#9A3A2D]">SOFA</span>
                       <div>
                         <span className="text-[9px] text-[#6B7280]">Load · Util</span>
-                        <p className="font-medium text-[#1F1D1B]">
-                          {dept.sofaScopeLoad.toLocaleString()}
+                        <p className="font-medium text-[#1F1D1B] tabular-nums">
+                          {formatHours(dept.sofaScopeLoad)}
                           <span className={`ml-1.5 ${utilizationColor(dept.sofaScopeUtilization).text}`}>
                             ({dept.sofaScopeUtilization}%)
                           </span>
@@ -1339,16 +1496,7 @@ export default function PlanningPage() {
                       </div>
                       <div>
                         <span className="text-[9px] text-[#6B7280]">Backlog</span>
-                        {/* Wei Siang 2026-05-15: per-category Backlog now
-                            shows raw hours, NOT days. The previous "6.9d"
-                            was computed assuming the whole dept ran on
-                            SOFA only — invariant under worker split when
-                            workers are fungible (which they are here),
-                            but read as "SOFA self-contained needs 6.9d",
-                            which then made the Total Util / Backlog =
-                            sum confusing. Total Backlog stays in days
-                            because that's the real wall-clock. */}
-                        <p className="font-medium text-[#1F1D1B]">{Math.round(dept.sofaBacklog / 60)} <span className="text-[9px] text-[#9CA3AF]">h</span></p>
+                        <p className="font-medium text-[#1F1D1B] tabular-nums">{formatHours(dept.sofaBacklog)}</p>
                       </div>
                     </div>
 
@@ -1357,8 +1505,8 @@ export default function PlanningPage() {
                       <span className="text-[10px] font-semibold text-[#3E6570]">BEDFRAME</span>
                       <div>
                         <span className="text-[9px] text-[#6B7280]">Load · Util</span>
-                        <p className="font-medium text-[#1F1D1B]">
-                          {dept.bfScopeLoad.toLocaleString()}
+                        <p className="font-medium text-[#1F1D1B] tabular-nums">
+                          {formatHours(dept.bfScopeLoad)}
                           <span className={`ml-1.5 ${utilizationColor(dept.bfScopeUtilization).text}`}>
                             ({dept.bfScopeUtilization}%)
                           </span>
@@ -1366,7 +1514,7 @@ export default function PlanningPage() {
                       </div>
                       <div>
                         <span className="text-[9px] text-[#6B7280]">Backlog</span>
-                        <p className="font-medium text-[#1F1D1B]">{Math.round(dept.bfBacklog / 60)} <span className="text-[9px] text-[#9CA3AF]">h</span></p>
+                        <p className="font-medium text-[#1F1D1B] tabular-nums">{formatHours(dept.bfBacklog)}</p>
                       </div>
                     </div>
 
@@ -1549,8 +1697,7 @@ export default function PlanningPage() {
                       <Users className="h-3 w-3" />
                       {dept.workerCount} workers
                     </span>
-                    <span>{dept.dailyCapacityMinutes.toLocaleString()} min/day capacity</span>
-                    <span>({Math.round(dept.dailyCapacityMinutes / 60 * 10) / 10} hrs)</span>
+                    <span>{formatHours(dept.dailyCapacityMinutes)}/day capacity</span>
                   </div>
                 </CardTitle>
               </CardHeader>
@@ -1578,7 +1725,7 @@ export default function PlanningPage() {
                         <div
                           key={day.date}
                           className={`flex flex-col items-center w-10 min-w-[40px] ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
-                          title={`${day.date}\nLoaded: ${day.loadedMinutes} min\nCapacity: ${day.capacityMinutes} min\nUtilization: ${day.utilization}%`}
+                          title={`${day.date}\nLoaded: ${formatHours(day.loadedMinutes)}\nCapacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
                         >
                           {/* Bar */}
                           <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
@@ -2123,9 +2270,12 @@ export default function PlanningPage() {
           last14WorkingDays={last14WorkingDays}
           capacityByDay={capacityByDay}
           capacityForDate={capacityForDate}
-          capacityJCsForDateDept={capacityJCsForDateDept}
+          capacityWorkersForDateDept={capacityWorkersForDateDept}
+          capacityJCsForDateDeptWorker={capacityJCsForDateDeptWorker}
           loadByDept={loadByDept}
-          loadJCsForDept={loadJCsForDept}
+          loadWorkersForDept={loadWorkersForDept}
+          loadJCsForDeptWorker={loadJCsForDeptWorker}
+          backlogByDept={backlogByDept}
           deptNameByCode={deptNameByCode}
           scopeRange={scopeRange}
           totalCapacity={totalCapacity}
@@ -2144,8 +2294,26 @@ type DrilldownLevel =
   | { kind: "capacity-14d" }
   | { kind: "capacity-day"; date: string }
   | { kind: "capacity-day-dept"; date: string; deptCode: string }
+  | { kind: "capacity-day-dept-worker"; date: string; deptCode: string; workerId: string; workerName: string }
   | { kind: "load-by-dept" }
-  | { kind: "load-dept"; deptCode: string };
+  | { kind: "load-dept"; deptCode: string }
+  | { kind: "load-dept-worker"; deptCode: string; workerId: string; workerName: string }
+  | { kind: "backlog-by-dept" };
+
+type WorkerAgg = { workerId: string; workerName: string; totalMinutes: number; jcCount: number };
+type CapacityJCRow = {
+  jcId: string;
+  pic1Name: string;
+  pic2Name: string;
+  productCode: string;
+  productName: string;
+  wipLabel: string | null;
+  poNo: string;
+  category: string;
+  customerName: string;
+  minutes: number;
+};
+type LoadJCRow = CapacityJCRow & { dueDate: string; status: string };
 
 function DrilldownModal(props: {
   level: DrilldownLevel;
@@ -2157,32 +2325,20 @@ function DrilldownModal(props: {
   last14WorkingDays: string[];
   capacityByDay: Map<string, number>;
   capacityForDate: (date: string) => Map<string, { sofa: number; bf: number; other: number; total: number }>;
-  capacityJCsForDateDept: (date: string, deptCode: string) => Array<{
-    jcId: string;
-    pic1Name: string;
-    pic2Name: string;
-    productCode: string;
-    productName: string;
-    wipLabel: string | null;
-    poNo: string;
-    category: string;
-    customerName: string;
-    minutes: number;
-  }>;
+  capacityWorkersForDateDept: (date: string, deptCode: string) => WorkerAgg[];
+  capacityJCsForDateDeptWorker: (date: string, deptCode: string, workerId: string) => CapacityJCRow[];
   loadByDept: Map<string, { sofa: number; bf: number; total: number }>;
-  loadJCsForDept: (deptCode: string) => Array<{
-    jcId: string;
-    dueDate: string;
-    pic1Name: string;
-    pic2Name: string;
-    productCode: string;
-    productName: string;
-    wipLabel: string | null;
-    poNo: string;
-    category: string;
-    customerName: string;
-    minutes: number;
-    status: string;
+  loadWorkersForDept: (deptCode: string) => WorkerAgg[];
+  loadJCsForDeptWorker: (deptCode: string, workerId: string) => LoadJCRow[];
+  backlogByDept: Array<{
+    deptCode: string;
+    deptName: string;
+    color: string;
+    sofaBacklog: number;
+    bfBacklog: number;
+    totalBacklog: number;
+    totalBacklogDays: number;
+    dailyCapacity: number;
   }>;
   deptNameByCode: Map<string, { name: string; color: string }>;
   scopeRange: { from: string; to: string; workingDays: number; label: string };
@@ -2197,9 +2353,12 @@ function DrilldownModal(props: {
     last14WorkingDays,
     capacityByDay,
     capacityForDate,
-    capacityJCsForDateDept,
+    capacityWorkersForDateDept,
+    capacityJCsForDateDeptWorker,
     loadByDept,
-    loadJCsForDept,
+    loadWorkersForDept,
+    loadJCsForDeptWorker,
+    backlogByDept,
     deptNameByCode,
     scopeRange,
     totalCapacity,
@@ -2211,7 +2370,7 @@ function DrilldownModal(props: {
 
   if (level.kind === "capacity-14d") {
     title = "Daily Capacity — Past 14 Working Days";
-    subtitle = `Average: ${totalCapacity.toLocaleString()} min/day across all production depts`;
+    subtitle = `Average: ${formatHours(totalCapacity)}/day across all production depts`;
     const maxMin = Math.max(1, ...Array.from(capacityByDay.values()));
     body = (
       <table className="w-full text-sm">
@@ -2305,49 +2464,109 @@ function DrilldownModal(props: {
       </table>
     );
   } else if (level.kind === "capacity-day-dept") {
+    // Wei Siang 2026-05-15: this level NOW shows per-worker performance
+    // for the (date × dept), not a flat JC list. Click a worker → next
+    // level shows just that worker's specific JCs.
     const meta = deptNameByCode.get(level.deptCode);
     title = `${meta?.name ?? level.deptCode} on ${level.date}`;
-    const rows = capacityJCsForDateDept(level.date, level.deptCode);
-    const deptTotal = rows.reduce((s, r) => s + r.minutes, 0);
-    subtitle = `${rows.length} job card${rows.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of production`;
-    body = rows.length === 0 ? (
-      <div className="p-8 text-center text-sm text-[#6B7280]">No completed JCs in this dept on this date.</div>
+    const workers = capacityWorkersForDateDept(level.date, level.deptCode);
+    const deptTotal = workers.reduce((s, w) => s + w.totalMinutes, 0);
+    subtitle = `${workers.length} worker${workers.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of production`;
+    body = workers.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No completed work in this dept on this date.</div>
     ) : (
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Worker</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Job Cards</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]" style={{ minWidth: 200 }}>Share</th>
+            <th className="h-9 px-2 w-8"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {workers.map((w) => {
+            const sharePct = deptTotal > 0 ? Math.round((w.totalMinutes / deptTotal) * 100) : 0;
+            return (
+              <tr
+                key={w.workerId}
+                className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                onClick={() => onPush({ kind: "capacity-day-dept-worker", date: level.date, deptCode: level.deptCode, workerId: w.workerId, workerName: w.workerName })}
+              >
+                <td className="px-4 py-2 font-medium text-[#1F1D1B]">
+                  {w.workerName || <span className="text-[#9CA3AF]">(unassigned)</span>}
+                </td>
+                <td className="px-4 py-2 text-right text-[#4B5563] tabular-nums">{w.jcCount}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B] tabular-nums">{formatHours(Math.round(w.totalMinutes))}</td>
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
+                      <div className="h-full bg-[#6B5C32]" style={{ width: `${sharePct}%` }} />
+                    </div>
+                    <span className="text-[10px] text-[#6B7280] w-10 text-right tabular-nums">{sharePct}%</span>
+                  </div>
+                </td>
+                <td className="px-2 py-2 text-[#9CA3AF]">
+                  <ChevronRight className="h-4 w-4" />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "capacity-day-dept-worker") {
+    // Leaf level: per-JC list for the picked worker.
+    const meta = deptNameByCode.get(level.deptCode);
+    title = `${level.workerName} — ${meta?.name ?? level.deptCode} on ${level.date}`;
+    const rows = capacityJCsForDateDeptWorker(level.date, level.deptCode, level.workerId);
+    const workerTotal = rows.reduce((s, r) => s + r.minutes, 0);
+    subtitle = `${rows.length} job card${rows.length === 1 ? "" : "s"} · ${formatHours(workerTotal)} of production`;
+    body = rows.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No completed JCs for this worker on this date.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
             <th className="h-9 px-4 text-left font-medium text-[#374151]">PO</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Category</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Product</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">WIP</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Customer</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Co-worker</th>
             <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.jcId} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
-              <td className="px-4 py-2 text-[#1F1D1B]">
-                {r.pic1Name}{r.pic2Name ? ` + ${r.pic2Name}` : ""}
-              </td>
-              <td className="px-4 py-2 text-[#4B5563]">{r.poNo}</td>
-              <td className="px-4 py-2">
-                <span className={`inline-block rounded px-2 py-0.5 text-[10px] font-medium ${
-                  r.category === "SOFA" ? "text-[#3E6570] bg-[#E0EDF0]" : "text-[#6B5C32] bg-[#F0ECE9]"
-                }`}>
-                  {r.category}
-                </span>
-              </td>
-              <td className="px-4 py-2 text-[#4B5563]">
-                <div className="font-medium text-[#1F1D1B]">{r.productCode}</div>
-                <div className="text-[10px] text-[#6B7280]">{r.productName}</div>
-              </td>
-              <td className="px-4 py-2 text-[#4B5563]">{r.wipLabel ?? "—"}</td>
-              <td className="px-4 py-2 text-[#4B5563]">{r.customerName}</td>
-              <td className="px-4 py-2 text-right font-medium text-[#1F1D1B] tabular-nums">{formatHours(r.minutes)}</td>
-            </tr>
-          ))}
+          {rows.map((r) => {
+            // Other PIC, if any. Skip the current worker from the display.
+            const coWorker = r.pic1Name && r.pic2Name && r.pic1Name !== level.workerName
+              ? r.pic1Name
+              : r.pic2Name && r.pic2Name !== level.workerName
+                ? r.pic2Name
+                : "";
+            return (
+              <tr key={r.jcId} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
+                <td className="px-4 py-2 text-[#4B5563]">{r.poNo}</td>
+                <td className="px-4 py-2">
+                  <span className={`inline-block rounded px-2 py-0.5 text-[10px] font-medium ${
+                    r.category === "SOFA" ? "text-[#3E6570] bg-[#E0EDF0]" : "text-[#6B5C32] bg-[#F0ECE9]"
+                  }`}>
+                    {r.category}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-[#4B5563]">
+                  <div className="font-medium text-[#1F1D1B]">{r.productCode}</div>
+                  <div className="text-[10px] text-[#6B7280]">{r.productName}</div>
+                </td>
+                <td className="px-4 py-2 text-[#4B5563]">{r.wipLabel ?? "—"}</td>
+                <td className="px-4 py-2 text-[#4B5563]">{r.customerName}</td>
+                <td className="px-4 py-2 text-[#6B7280] text-[11px]">{coWorker || "—"}</td>
+                <td className="px-4 py-2 text-right font-medium text-[#1F1D1B] tabular-nums">{formatHours(r.minutes)}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     );
@@ -2397,19 +2616,70 @@ function DrilldownModal(props: {
       </table>
     );
   } else if (level.kind === "load-dept") {
+    // Per-worker scheduled load for the picked dept.
     const meta = deptNameByCode.get(level.deptCode);
     title = `${meta?.name ?? level.deptCode} — ${scopeRange.label}'s Load`;
-    const rows = loadJCsForDept(level.deptCode);
-    const deptTotal = rows.reduce((s, r) => s + r.minutes, 0);
-    subtitle = `${rows.length} active job card${rows.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of production`;
-    body = rows.length === 0 ? (
+    const workers = loadWorkersForDept(level.deptCode);
+    const deptTotal = workers.reduce((s, w) => s + w.totalMinutes, 0);
+    subtitle = `${workers.length} worker${workers.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of active work`;
+    body = workers.length === 0 ? (
       <div className="p-8 text-center text-sm text-[#6B7280]">No active job cards in this dept for the selected range.</div>
     ) : (
       <table className="w-full text-sm">
         <thead className="sticky top-0 bg-[#F0ECE9]">
           <tr className="border-b border-[#E2DDD8]">
-            <th className="h-9 px-4 text-left font-medium text-[#374151]">Due Date</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Worker</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Job Cards</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Production Time</th>
+            <th className="h-9 px-4 text-left font-medium text-[#374151]" style={{ minWidth: 200 }}>Share</th>
+            <th className="h-9 px-2 w-8"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {workers.map((w) => {
+            const sharePct = deptTotal > 0 ? Math.round((w.totalMinutes / deptTotal) * 100) : 0;
+            return (
+              <tr
+                key={w.workerId}
+                className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                onClick={() => onPush({ kind: "load-dept-worker", deptCode: level.deptCode, workerId: w.workerId, workerName: w.workerName })}
+              >
+                <td className="px-4 py-2 font-medium text-[#1F1D1B]">
+                  {w.workerName || <span className="text-[#9CA3AF]">(unassigned)</span>}
+                </td>
+                <td className="px-4 py-2 text-right text-[#4B5563] tabular-nums">{w.jcCount}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B] tabular-nums">{formatHours(Math.round(w.totalMinutes))}</td>
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 rounded-full bg-[#F0ECE9] overflow-hidden">
+                      <div className="h-full bg-[#3E6570]" style={{ width: `${sharePct}%` }} />
+                    </div>
+                    <span className="text-[10px] text-[#6B7280] w-10 text-right tabular-nums">{sharePct}%</span>
+                  </div>
+                </td>
+                <td className="px-2 py-2 text-[#9CA3AF]">
+                  <ChevronRight className="h-4 w-4" />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "load-dept-worker") {
+    // Leaf — per-JC list for the picked worker in this dept's scheduled load.
+    const meta = deptNameByCode.get(level.deptCode);
+    title = `${level.workerName} — ${meta?.name ?? level.deptCode} ${scopeRange.label}'s Load`;
+    const rows = loadJCsForDeptWorker(level.deptCode, level.workerId);
+    const workerTotal = rows.reduce((s, r) => s + r.minutes, 0);
+    subtitle = `${rows.length} active job card${rows.length === 1 ? "" : "s"} · ${formatHours(workerTotal)} of scheduled work`;
+    body = rows.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No active job cards for this worker in this dept.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Due Date</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">PO</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Category</th>
             <th className="h-9 px-4 text-left font-medium text-[#374151]">Product</th>
@@ -2423,10 +2693,6 @@ function DrilldownModal(props: {
           {rows.map((r) => (
             <tr key={r.jcId} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
               <td className="px-4 py-2 text-[#4B5563]">{r.dueDate}</td>
-              <td className="px-4 py-2 text-[#1F1D1B]">
-                {r.pic1Name || <span className="text-[#9CA3AF]">unassigned</span>}
-                {r.pic2Name ? ` + ${r.pic2Name}` : ""}
-              </td>
               <td className="px-4 py-2 text-[#4B5563]">{r.poNo}</td>
               <td className="px-4 py-2">
                 <span className={`inline-block rounded px-2 py-0.5 text-[10px] font-medium ${
@@ -2445,6 +2711,54 @@ function DrilldownModal(props: {
               <td className="px-4 py-2 text-right font-medium text-[#1F1D1B] tabular-nums">{formatHours(r.minutes)}</td>
             </tr>
           ))}
+        </tbody>
+      </table>
+    );
+  } else if (level.kind === "backlog-by-dept") {
+    // Wei Siang 2026-05-15: Total Backlog click → per-dept breakdown.
+    // Each row shows SOFA + BEDFRAME backlog hours, total hours, and
+    // wall-clock backlog days (= total minutes ÷ that dept's
+    // dailyCapacity). Sorted by days descending so the biggest
+    // bottleneck floats to the top.
+    title = "Total Backlog — per Department";
+    const grand = backlogByDept.reduce((s, d) => s + d.totalBacklog, 0);
+    subtitle = `${formatHours(grand)} of active work across ${backlogByDept.length} dept${backlogByDept.length === 1 ? "" : "s"}`;
+    body = backlogByDept.length === 0 ? (
+      <div className="p-8 text-center text-sm text-[#6B7280]">No active backlog.</div>
+    ) : (
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#F0ECE9]">
+          <tr className="border-b border-[#E2DDD8]">
+            <th className="h-9 px-4 text-left font-medium text-[#374151]">Department</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">SOFA</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">BEDFRAME</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]">Total</th>
+            <th className="h-9 px-4 text-right font-medium text-[#374151]" title="Total backlog ÷ dept's 14-day rolling daily capacity. Wall-clock days the dept needs to clear its queue.">Backlog Days</th>
+          </tr>
+        </thead>
+        <tbody>
+          {backlogByDept.map((d) => {
+            const daysColor =
+              d.totalBacklogDays > 7
+                ? "text-[#9A3A2D]"
+                : d.totalBacklogDays > 3
+                  ? "text-[#9C6F1E]"
+                  : "text-[#4F7C3A]";
+            return (
+              <tr key={d.deptCode} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: d.color }} />
+                    <span className="font-medium text-[#1F1D1B]">{d.deptName}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-2 text-right text-[#3E6570] tabular-nums">{formatHours(d.sofaBacklog)}</td>
+                <td className="px-4 py-2 text-right text-[#6B5C32] tabular-nums">{formatHours(d.bfBacklog)}</td>
+                <td className="px-4 py-2 text-right font-bold text-[#1F1D1B] tabular-nums">{formatHours(d.totalBacklog)}</td>
+                <td className={`px-4 py-2 text-right font-bold tabular-nums ${daysColor}`}>{d.totalBacklogDays}d</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     );

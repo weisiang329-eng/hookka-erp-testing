@@ -6456,38 +6456,38 @@ export default function ProductionPage({
                           synthetic legs pair UI — each compartment sticker
                           carries its own Leg line so the separate "4/4 LEG"
                           sticker no longer prints. */}
-                      <div className="text-center font-bold leading-tight" style={{ fontSize: "16px" }}>
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "18px" }}>
                         {customerLine || s.customerName || "—"}
                       </div>
                       <div className="border-t border-black my-1" />
-                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Our SO No</span>: {s.salesOrderNo || "—"}</div>
+                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Our SO No</span>: {s.salesOrderNo || "—"}</div>
                         <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[72px] font-semibold text-[#6B7280]">Model</span>
-                          <span className="font-bold" style={{ fontSize: "14px" }}>: {s.productCode || "—"}</span>
+                          <span className="inline-block w-[88px] font-semibold text-[#6B7280]">Model</span>
+                          <span className="font-bold" style={{ fontSize: "16px" }}>: {s.productCode || "—"}</span>
                         </div>
                         {s.boxLabel && (
-                          <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
+                          <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#6B7280] shrink-0">WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
                         )}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[10px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                      <div className="space-y-[3px] text-[12px] leading-tight text-[#1F1D1B]">
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
                         {s.itemCategory === "SOFA" && s.seatSize && (
-                          <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Seat</span>: {s.seatSize}"</div>
+                          <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Seat</span>: {s.seatSize}"</div>
                         )}
-                        <div className="truncate"><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Colour</span>: {s.fabricCode || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Colour</span>: {s.fabricCode || "—"}</div>
                         {s.itemCategory === "BEDFRAME" && (
                           <>
-                            <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
-                            <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                            <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
+                            <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                           </>
                         )}
-                        <div><span className="inline-block w-[72px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                        <div className="flex items-start gap-1"><span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
+                        <div><span className="inline-block w-[88px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                        <div className="flex items-start gap-1"><span className="inline-block w-[88px] font-semibold text-[#9A3A2D] shrink-0">Notes</span><span className="flex-1 break-words">: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span></div>
                       </div>
                       {/* Wei Siang 2026-05-15 (revised again): leg moves
                           INTO the right column ABOVE the SOFA piece-name
@@ -6496,7 +6496,7 @@ export default function ProductionPage({
                           this block). Pillow stays side-by-side. */}
                       <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
                         <div className="flex items-end gap-2 pt-1">
-                          <QRImg data={trackUrl} size={pillowPair ? 110 : 130} alt="FG unit QR" className="block" />
+                          <QRImg data={trackUrl} size={pillowPair ? 82 : 98} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0 self-stretch flex flex-col justify-end">
                             {legsPair && (
                               <>
@@ -6850,35 +6850,35 @@ export default function ProductionPage({
                       {customerLine || s.customerName || "—"}
                     </div>
                     <div className="border-t-2 border-black my-[2mm]" />
-                    <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
-                      <div><span className="inline-block w-[32mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
-                      <div><span className="inline-block w-[32mm] font-semibold">Cust Ref</span>: {s.customerRef || "—"}</div>
-                      <div><span className="inline-block w-[32mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
-                      <div><span className="inline-block w-[32mm] font-semibold">Our SO No</span>: {s.salesOrderNo || "—"}</div>
+                    <div className="space-y-[1.5mm]" style={{ fontSize: "14pt", lineHeight: 1.25 }}>
+                      <div><span className="inline-block w-[36mm] font-semibold">PO No</span>: {s.customerPOId || "—"}</div>
+                      <div><span className="inline-block w-[36mm] font-semibold">Cust Ref</span>: {s.customerRef || "—"}</div>
+                      <div><span className="inline-block w-[36mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
+                      <div><span className="inline-block w-[36mm] font-semibold">Our SO No</span>: {s.salesOrderNo || "—"}</div>
                       <div className="flex items-baseline gap-[1mm]">
-                        <span className="inline-block w-[32mm] font-semibold">Model</span>
-                        <span className="font-bold" style={{ fontSize: "18pt" }}>: {s.productCode || "—"}</span>
+                        <span className="inline-block w-[36mm] font-semibold">Model</span>
+                        <span className="font-bold" style={{ fontSize: "20pt" }}>: {s.productCode || "—"}</span>
                       </div>
                       {s.boxLabel && (
-                        <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "32mm" }}>WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
+                        <div className="flex items-start gap-[1mm]"><span className="font-semibold shrink-0" style={{ width: "36mm" }}>WIP</span><span className="flex-1 break-words">: {s.boxLabel}</span></div>
                       )}
                     </div>
                     <div className="border-t border-black my-[2mm]" />
-                    <div className="space-y-[1mm]" style={{ fontSize: "12pt", lineHeight: 1.25 }}>
-                      <div><span className="inline-block w-[32mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
+                    <div className="space-y-[1.5mm]" style={{ fontSize: "14pt", lineHeight: 1.25 }}>
+                      <div><span className="inline-block w-[36mm] font-semibold">Size</span>: {s.sizeLabel || "—"}</div>
                       {s.itemCategory === "SOFA" && s.seatSize && (
-                        <div><span className="inline-block w-[32mm] font-semibold">Seat</span>: {s.seatSize}"</div>
+                        <div><span className="inline-block w-[36mm] font-semibold">Seat</span>: {s.seatSize}"</div>
                       )}
-                      <div><span className="inline-block w-[32mm] font-semibold">Colour</span>: {s.fabricCode || "—"}</div>
+                      <div><span className="inline-block w-[36mm] font-semibold">Colour</span>: {s.fabricCode || "—"}</div>
                       {s.itemCategory === "BEDFRAME" && (
                         <>
-                          <div><span className="inline-block w-[32mm] font-semibold">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
-                          <div><span className="inline-block w-[32mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                          <div><span className="inline-block w-[36mm] font-semibold">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
+                          <div><span className="inline-block w-[36mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                         </>
                       )}
-                      <div><span className="inline-block w-[32mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                      <div><span className="inline-block w-[36mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                       <div className="flex items-start gap-[1mm]">
-                        <span className="font-semibold shrink-0" style={{ width: "32mm", color: "#9A3A2D" }}>Notes</span>
+                        <span className="font-semibold shrink-0" style={{ width: "36mm", color: "#9A3A2D" }}>Notes</span>
                         <span className="flex-1 break-words">
                           : {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
                         </span>
@@ -6891,7 +6891,7 @@ export default function ProductionPage({
                         by-side. Same 100×150mm physical card. */}
                     <div className="mt-auto pt-[2mm] border-t border-dashed border-black">
                       <div className="flex items-end gap-[2mm] pt-[2mm]">
-                        <QRImg eager data={trackUrl} size={pillowPair ? 130 : 200} alt="FG unit QR" className="block" />
+                        <QRImg eager data={trackUrl} size={pillowPair ? 98 : 150} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">
                           {legsPair && (
                             <>

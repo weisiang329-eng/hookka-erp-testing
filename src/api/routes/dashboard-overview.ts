@@ -188,11 +188,12 @@ app.get("/", async (c) => {
           qtySold: number;
           valueSen: number;
         }>(),
+      // NOTE: `workers` is NOT org-scoped (no org_id column — the workers
+      // route never filters by org). Do not add `WHERE orgId = ?` here.
       db
         .prepare(
-          "SELECT departmentCode AS dept, COUNT(*) AS n FROM workers WHERE orgId = ? AND status = 'ACTIVE' GROUP BY departmentCode",
+          "SELECT departmentCode AS dept, COUNT(*) AS n FROM workers WHERE status = 'ACTIVE' GROUP BY departmentCode",
         )
-        .bind(orgId)
         .all<{ dept: string; n: number }>(),
     ]);
 

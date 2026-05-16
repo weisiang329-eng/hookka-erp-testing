@@ -1454,39 +1454,58 @@ export default function DeliveryPage() {
     setPrintDialog(selected);
   };
 
+  // Wei Siang 2026-05-16: bulk Mark Dispatched / Mark Delivered run
+  // the DO PUTs SEQUENTIALLY, not in parallel. Each DO transition is
+  // a heavy multi-statement batch (fg_units, COGS, auto-invoice, SO
+  // status cascade). Firing 25 in parallel caused:
+  //   - "deadlock detected": two DELIVERED batches UPDATE the same
+  //     shared sales_orders row (DOs frequently share SOs) in
+  //     different lock order.
+  //   - "duplicate key ux_invoices_invoice_no": nextInvoiceNo() is
+  //     read-MAX-then-+1; parallel auto-invoice creation all read the
+  //     same max (none committed yet) → same invoiceNo → unique
+  //     constraint violation.
+  // Running one-at-a-time lets each batch commit before the next
+  // starts: invoice numbers stay unique, no concurrent SO-row locks.
+  // Slower for big selections but correct; the operator does this
+  // once per dispatch run, not in a hot loop.
+  const runBulkDoTransition = async (
+    doIds: string[],
+    nextStatus: "LOADED" | "DELIVERED",
+    successVerb: string,
+  ) => {
+    if (doIds.length === 0) return;
+    const failures: string[] = [];
+    for (const id of doIds) {
+      try {
+        const r = await fetch(`/api/delivery-orders/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { error?: string };
+          failures.push(body?.error || `HTTP ${r.status}`);
+        }
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (failures.length) {
+      toast.error(`${failures.length} of ${doIds.length} failed: ${failures[0]}`);
+    } else {
+      toast.success(`${doIds.length} delivery orders ${successVerb}`);
+      setSelectedIds(new Set());
+    }
+    fetchData();
+  };
+
   const handleMarkDispatched = async () => {
     if (selectedIds.size === 0) return;
     const doIds = deliveryOrders
       .filter((d) => selectedIds.has(d.id) && d.status === "DRAFT")
       .map((d) => d.id);
-    if (doIds.length === 0) return;
-    const results = await Promise.allSettled(
-      doIds.map((id) =>
-        fetch(`/api/delivery-orders/${id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "LOADED" }),
-        }).then((r) =>
-          r.ok
-            ? null
-            : r.json().then((j) => {
-                const body = j as { error?: string };
-                return Promise.reject(
-                  new Error(body?.error || `HTTP ${r.status}`),
-                );
-              })
-        )
-      )
-    );
-    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-    if (failures.length) {
-      const firstMsg = failures[0].reason instanceof Error ? failures[0].reason.message : String(failures[0].reason);
-      toast.error(`${failures.length} of ${doIds.length} failed: ${firstMsg}`);
-    } else {
-      toast.success(`${doIds.length} delivery orders marked dispatched`);
-      setSelectedIds(new Set());
-    }
-    fetchData();
+    await runBulkDoTransition(doIds, "LOADED", "marked dispatched");
   };
 
   const handleMarkDelivered = async () => {
@@ -1494,34 +1513,7 @@ export default function DeliveryPage() {
     const doIds = deliveryOrders
       .filter((d) => selectedIds.has(d.id) && (d.status === "LOADED" || d.status === "IN_TRANSIT"))
       .map((d) => d.id);
-    if (doIds.length === 0) return;
-    const results = await Promise.allSettled(
-      doIds.map((doId) =>
-        fetch(`/api/delivery-orders/${doId}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "DELIVERED" }),
-        }).then((r) =>
-          r.ok
-            ? null
-            : r.json().then((j) => {
-                const body = j as { error?: string };
-                return Promise.reject(
-                  new Error(body?.error || `HTTP ${r.status}`),
-                );
-              })
-        )
-      )
-    );
-    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-    if (failures.length) {
-      const firstMsg = failures[0].reason instanceof Error ? failures[0].reason.message : String(failures[0].reason);
-      toast.error(`${failures.length} of ${doIds.length} failed: ${firstMsg}`);
-    } else {
-      toast.success(`${doIds.length} delivery orders marked delivered`);
-      setSelectedIds(new Set());
-    }
-    fetchData();
+    await runBulkDoTransition(doIds, "DELIVERED", "marked delivered");
   };
 
   const handleGenerateInvoice = (doRow: DeliveryOrderRow) => {

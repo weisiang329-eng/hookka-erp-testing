@@ -34,6 +34,52 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-002 — Bulk Mark Delivered: deadlock detected + duplicate ux_invoices_invoice_no
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** delivery-orders, infrastructure, data-integrity
+
+**Symptom (user-reported):** After BUG-2026-05-16-001 unblocked the
+DELIVERED path, Wei Siang bulk Mark Delivered on ~25 dispatched DOs:
+"20 of 25 failed: deadlock detected", "17 of 17 failed: duplicate
+key value violates unique constraint ux_invoices_invoice_no". No
+DOs could convert dispatched → delivered.
+
+**Root cause:** `src/pages/delivery/index.tsx` `handleMarkDelivered`
+(and `handleMarkDispatched`) fired every selected DO's PUT in
+parallel via `Promise.allSettled(doIds.map(...))`. Each DO →
+DELIVERED is a heavy multi-statement batch (fg_units, FIFO COGS,
+auto-invoice, SO status cascade). Parallel execution caused two
+distinct failures, both surfaced only now that the product_code bug
+no longer failed first:
+  1. **Deadlock:** DOs frequently share SOs (e.g. SO-2604-191 in
+     two different DOs). Two concurrent DELIVERED batches `UPDATE
+     sales_orders` the same row in different lock order → Postgres
+     deadlock.
+  2. **Duplicate invoice_no:** `nextInvoiceNo()` (invoices.ts:169)
+     is read-MAX-then-+1, not concurrency-safe. Parallel auto-invoice
+     creation all read the same max (none committed) → identical
+     invoiceNo → unique-constraint violation.
+
+**Fix (`src/pages/delivery/index.tsx`):** extracted
+`runBulkDoTransition()` — a sequential `for…await` loop. One DO PUT
+commits before the next starts, so invoice numbers stay unique and
+no two transactions hold overlapping sales_orders locks. Both
+`handleMarkDispatched` and `handleMarkDelivered` route through it.
+Frontend-only; backend untouched. `handleQuickDispatch` was already
+sequential — no change.
+
+**Known follow-up (not fixed here):** `nextInvoiceNo()` is still
+racy for genuinely-simultaneous *different users*. Serializing the
+bulk button removes the realistic trigger; a proper sequence/locking
+fix on invoice numbering is finance-sensitive and deferred to its
+own change.
+
+**Verified:** tsc clean; 185/185 tests. Deployed; operator to
+re-run bulk Mark Delivered.
+
+---
+
 ## BUG-2026-05-16-001 — DO → DELIVERED cascade dies: `column "product_code" does not exist`
 
 **Status:** 🟢 Fixed (2026-05-16)

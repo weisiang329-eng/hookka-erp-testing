@@ -34,6 +34,47 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-010 — Dashboard rebuilt (fake KPIs) + /api/dashboard/overview 500 (workers has no org_id)
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** ui-frontend, dashboard
+
+**Symptom:** Old dashboard showed misleading KPIs — "Monthly Revenue"
+was the all-time invoice sum, "Accounts Payable" was an item count not
+money, "Overdue Invoices" ignored due dates, every trend % was a
+hardcoded literal. Operator asked to rebuild it around Sales/Delivery,
+Production, Employee, Purchasing + AOV by customer×category, fabric
+cost/meter, top sellers.
+
+**Build:** new server-aggregated `GET /api/dashboard/overview` (60s
+KV-cached) — production summary, purchasing summary, fabric cost/meter
+by CONSUMPTION (total + excl Bedframe/Sofa = accessory-only, operator's
+choice), AOV by customer × Bedframe/Sofa, top sellers by category
+(BEDFRAME/SOFA/ACCESSORY — "mattress" is not a category), active
+headcount, and a not-yet-delivered pipeline (Planning / Pending
+Delivery / Pending Dispatch). Goods-value resolver extracted to
+`src/api/lib/do-value.ts` (one source of truth, also used by Sales).
+Page consumes that + `/api/sales-orders/stats` + the real
+`/api/dashboard/revenue` MV (replaces the fake Monthly Revenue).
+
+**Bugs hit & fixed during rollout:**
+1. 500 `column "org_id" does not exist` — the `workers` table is NOT
+   org-scoped (no org_id; the workers route never filters by org).
+   Dropped `WHERE orgId = ?` from the headcount query.
+2. Pending Delivery card read RM 0 (DRAFT/LOADED bucket empty). Added
+   a pipeline split; card = Pending Delivery + Pending Dispatch.
+3. KV cache served the pre-`pipeline` payload — bumped key v1→v2.
+
+**Verified on prod (read-only):** Planning 248,042 + Pending Delivery
+25,218 + Pending Dispatch 0 = Outstanding **273,259** (to the cent);
+Delivered **328,356**. Pipeline reconciles exactly with Sales stats.
+NOTE: dashboard "Pending Delivery" uses production-order COMPLETE as
+the ready gate; the Delivery page uses an upholstery-card gate, so that
+page's Pending-Delivery tab figure can differ — the dashboard TOTAL
+still ties exactly to Outstanding. `tsc` clean; `npm test` 185/185.
+
+---
+
 ## BUG-2026-05-16-009 — Sales Orders Delivered/Outstanding used whole-SO header totals (over-counted partial deliveries)
 
 **Status:** 🟢 Fixed (2026-05-16)

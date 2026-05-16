@@ -949,18 +949,21 @@ app.post("/backfill-delivered-cascade", async (c) => {
 //
 // One-shot finance repair (Wei Siang 2026-05-16). Multi-SO delivery notes
 // carry an OLD invoice the pre-fix single-SO auto-invoice created — it
-// billed only ONE sales order's slice (~30%) of a note that delivered
-// several. The combined-invoice backfill skipped them ("already has an
-// invoice"). This corrects each such invoice IN PLACE to the full
-// delivered goods value (computeDoInvoiceLines — same basis as live
-// creation), keeping the invoice id + number, and adjusts the customer's
-// outstanding A/R by the delta.
+// billed only ONE sales order's slice of a note that delivered several
+// (under-billed); a few are over-billed. Every delivered DO's invoice must
+// EXACTLY equal the delivered goods value (computeDoInvoiceLines — same
+// basis as live creation). ZERO tolerance: any cent of mismatch, up OR
+// down, is corrected; the invoice id + number are kept; the customer's
+// outstanding A/R is adjusted by the exact signed delta.
 //
-// SAFETY: only touches a DO whose single non-cancelled invoice is DRAFT
-// (never sent, never paid, not in accounting). SENT/PARTIAL/PAID/OVERDUE,
-// or a DO with several invoices → skipped + reported for manual handling.
-// Only tops UP under-billed invoices; over-billed are left alone.
-// Idempotent (already-correct → skip).
+// SAFETY: only rewrites a DO whose single non-cancelled invoice is DRAFT
+// (never sent, never paid, not in accounting). Anything that can't be
+// safely auto-fixed — non-DRAFT (SENT/PARTIAL/PAID/OVERDUE), several
+// invoices on one DO, no invoice at all, or a computed value of 0 (SO
+// resolution failed — never zero out a real invoice on a failed compute)
+// — is NOT touched but its exact discrepancy is still tallied so the
+// manual backlog is quantified to the cent, not hand-waved. Every scanned
+// DO lands in exactly one bucket and the buckets reconcile.
 //
 //   ?dry=1  → preview only, no writes.
 // Temporary migration endpoint; delete once the book is corrected.
@@ -973,7 +976,6 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
   const orgId = getOrgId(c);
   const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
   const now = new Date().toISOString();
-  const TOL = 100; // RM 1 tolerance — ignore sub-ringgit rounding
 
   const dosRes = await c.var.DB.prepare(
     "SELECT * FROM delivery_orders WHERE orgId = ? AND status IN ('DELIVERED','INVOICED') ORDER BY created_at ASC",
@@ -983,12 +985,26 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
   const dos = dosRes.results ?? [];
 
   let scanned = 0;
-  let invoicesFixed = 0;
-  let addedInvoiceSen = 0;
-  let alreadyOk = 0;
-  let skippedNoInvoice = 0;
-  let skippedNonDraft = 0;
-  let skippedMultiInvoice = 0;
+  // Auto-fixed (DRAFT, single invoice)
+  let upN = 0,
+    upSen = 0; // under-billed → topped up (sen added)
+  let downN = 0,
+    downSen = 0; // over-billed → reduced (sen removed, positive)
+  let exactN = 0; // already exactly right
+  // Not auto-fixed — tallied for manual handling, exact discrepancy kept
+  let lockedN = 0,
+    lockedUnderSen = 0,
+    lockedOverSen = 0; // non-DRAFT invoice
+  let multiN = 0,
+    multiUnderSen = 0,
+    multiOverSen = 0; // >1 invoice on the DO
+  let noInvN = 0,
+    noInvMissingSen = 0; // delivered, zero invoice
+  let noComputeN = 0; // SO resolution gave 0 — left untouched
+  // Grand reconciliation
+  let totalGoodsSen = 0; // Σ correct delivered value over ALL scanned
+  let totalInvoicedNowSen = 0; // Σ current non-cancelled invoice value
+  let netOutstandingChangeSen = 0; // signed Σ of deltas actually applied
   const errors: { doId: string; doNo: string; error: string }[] = [];
 
   for (const doRow of dos) {
@@ -1002,19 +1018,11 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
             .bind(doRow.id)
             .all<{ id: string; status: string; totalSen: number }>()
         ).results ?? [];
-      if (invs.length === 0) {
-        skippedNoInvoice++;
-        continue;
-      }
-      if (invs.length > 1) {
-        skippedMultiInvoice++;
-        continue;
-      }
-      const inv = invs[0];
-      if (inv.status !== "DRAFT") {
-        skippedNonDraft++;
-        continue;
-      }
+      const curInvoiced = invs.reduce(
+        (s, v) => s + (Number(v.totalSen) || 0),
+        0,
+      );
+      totalInvoicedNowSen += curInvoiced;
 
       const soIds = await resolveDoSalesOrderIds(
         c.var.DB,
@@ -1026,15 +1034,48 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
         doRow.id,
         soIds,
       );
-      const oldTotal = Number(inv.totalSen) || 0;
-      // Only top UP genuine under-billing; leave matched/over-billed alone.
-      if (computedTotal <= oldTotal + TOL) {
-        alreadyOk++;
+      totalGoodsSen += computedTotal;
+      const diff = computedTotal - curInvoiced; // + = under, - = over
+
+      // --- Cannot safely auto-fix: tally exact discrepancy, do not touch ---
+      if (invs.length === 0) {
+        noInvN++;
+        noInvMissingSen += computedTotal;
+        continue;
+      }
+      if (computedTotal === 0) {
+        noComputeN++;
+        continue;
+      }
+      if (invs.length > 1) {
+        multiN++;
+        if (diff > 0) multiUnderSen += diff;
+        else if (diff < 0) multiOverSen += -diff;
+        continue;
+      }
+      const inv = invs[0];
+      if (inv.status !== "DRAFT") {
+        lockedN++;
+        if (diff > 0) lockedUnderSen += diff;
+        else if (diff < 0) lockedOverSen += -diff;
         continue;
       }
 
-      invoicesFixed++;
-      addedInvoiceSen += computedTotal - oldTotal;
+      const oldTotal = Number(inv.totalSen) || 0;
+      if (computedTotal === oldTotal) {
+        exactN++;
+        continue;
+      }
+
+      // --- Auto-fix this DRAFT invoice to EXACTLY the delivered value ---
+      if (computedTotal > oldTotal) {
+        upN++;
+        upSen += computedTotal - oldTotal;
+      } else {
+        downN++;
+        downSen += oldTotal - computedTotal;
+      }
+      netOutstandingChangeSen += computedTotal - oldTotal;
       if (dry) continue;
 
       const stmts: D1PreparedStatement[] = [
@@ -1080,16 +1121,46 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
     }
   }
 
+  const bucketSum =
+    upN +
+    downN +
+    exactN +
+    lockedN +
+    multiN +
+    noInvN +
+    noComputeN +
+    errors.length;
+
   return c.json({
     success: true,
     mode: dry ? "dry-run" : "executed",
     deliveredDosScanned: scanned,
-    invoicesFixed,
-    addedInvoiceSen,
-    alreadyOk,
-    skippedNoInvoice,
-    skippedNonDraft,
-    skippedMultiInvoice,
+    bucketsReconcile: bucketSum === scanned,
+    autoFixed: {
+      underBilled: { n: upN, addedSen: upSen },
+      overBilled: { n: downN, removedSen: downSen },
+      exactAlready: { n: exactN },
+      netOutstandingChangeSen,
+    },
+    needsManual: {
+      lockedNonDraft: {
+        n: lockedN,
+        underSen: lockedUnderSen,
+        overSen: lockedOverSen,
+      },
+      multipleInvoices: {
+        n: multiN,
+        underSen: multiUnderSen,
+        overSen: multiOverSen,
+      },
+      noInvoice: { n: noInvN, missingSen: noInvMissingSen },
+      computeReturnedZero: { n: noComputeN },
+    },
+    reconciliation: {
+      totalDeliveredGoodsSen: totalGoodsSen,
+      totalInvoicedBeforeSen: totalInvoicedNowSen,
+      gapBeforeSen: totalGoodsSen - totalInvoicedNowSen,
+    },
     errors,
   });
 });

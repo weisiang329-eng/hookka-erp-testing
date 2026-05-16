@@ -1832,6 +1832,21 @@ export default function DeliveryPage() {
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
       {
+        // Sales Figure \u2014 this PO's SO line value (SO unit price \u00D7 qty),
+        // same basis as the DO-based tabs so the money is comparable
+        // across every delivery stage.
+        key: "valueSen",
+        label: "Amount",
+        type: "text",
+        width: "120px",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="font-medium text-[#1F1D1B] tabular-nums">
+            {formatRM(row.valueSen ?? 0)}
+          </span>
+        ),
+      },
+      {
         key: "unitM3",
         label: "Unit (m\u00B3)",
         type: "number",
@@ -1942,6 +1957,21 @@ export default function DeliveryPage() {
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
+      {
+        // Sales Figure \u2014 this PO's SO line value (SO unit price \u00d7 qty),
+        // same basis as the DO-based tabs so the money is comparable
+        // across every delivery stage.
+        key: "valueSen",
+        label: "Amount",
+        type: "text",
+        width: "120px",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="font-medium text-[#1F1D1B] tabular-nums">
+            {formatRM(row.valueSen ?? 0)}
+          </span>
+        ),
+      },
       {
         // Set Status column (added 2026-05-06) \u2014 flags SOFA rows whose
         // sibling compartments aren't all ready, so an operator doesn't

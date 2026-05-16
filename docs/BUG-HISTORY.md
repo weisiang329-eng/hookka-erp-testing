@@ -34,6 +34,47 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-004 — Sales Orders: picking Status = Delivered/Closed/Cancelled showed an empty grid ("0 of 66")
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** sales-orders, ui-frontend
+
+**Symptom (user-reported):** On the Sales Orders page, selecting
+Status = Delivered showed the header "Showing 66 of 516 orders · RM
+102,483.00" but the grid rendered "No confirmed orders." with "0 of
+66 records · 1 filter active". Same for Closed / Cancelled (and the
+operator felt every stage was affected) — none of the finished
+stages would display their rows.
+
+**Root cause:** Two independent status filters fought each other.
+The page-level Status dropdown narrows `filteredOrders` correctly
+(66 delivered → header is right). But the DataGrid ALSO carried
+`defaultExcludedValues={{ status: ["SHIPPED","DELIVERED","CLOSED",
+"CANCELLED"] }}` to hide finished orders from the day-to-day funnel.
+That grid-level value filter is seeded once, then persisted to
+sessionStorage (`datagrid-filters-sales-orders-list-*`) and never
+re-evaluated (`valueFilterTouched` latches true once a seed exists).
+So once the funnel default had been seeded, picking "Delivered" in
+the dropdown left the stale grid filter excluding DELIVERED → every
+matching row hidden, header count and grid disagreeing.
+
+**Fix:**
+- `src/components/ui/data-grid.tsx`: added optional `valueFilterKey`
+  prop that sub-scopes ONLY the value-filter / search sessionStorage
+  bucket (not the column-layout localStorage). Backward compatible —
+  grids that don't pass it are unchanged.
+- `src/pages/sales/index.tsx`: pass `valueFilterKey={filterStatus ||
+  "all"}` so each Status selection gets a clean filter session, and
+  apply `defaultExcludedValues` ONLY when no explicit Status is
+  chosen (`filterStatus === ""`). An explicit pick means
+  `filteredOrders` is already scoped to exactly that status, so the
+  grid must not second-guess it. The "All Statuses" funnel default
+  (hide finished) is preserved.
+
+**Verified:** `npx tsc --noEmit` clean; `npm test` 185/185 pass.
+
+---
+
 ## BUG-2026-05-16-003 — Delivery Orders Amount column + tab totals all showed RM 0.00
 
 **Status:** 🟢 Fixed (2026-05-16)

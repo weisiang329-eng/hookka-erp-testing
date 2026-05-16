@@ -122,6 +122,14 @@ export type DataGridProps<T> = {
   // explicit filter choice rather than re-applying the default. Pass an
   // empty object / undefined to skip.
   defaultExcludedValues?: Record<string, string[]>;
+  // Optional sub-scope for the VALUE-filter / search session bucket only
+  // (not the column layout). When the caller has its own authoritative
+  // filter above the grid (e.g. a Status dropdown), pass that value here
+  // so each selection gets a clean filter session instead of inheriting a
+  // sticky column-filter persisted from a previous selection — which would
+  // silently blank the grid (Sales Orders "Delivered" showed 0 of 66).
+  // Omit on grids without an external filter to keep current behaviour.
+  valueFilterKey?: string;
 };
 
 type SavedView = {
@@ -913,6 +921,7 @@ export function DataGrid<T extends Record<string, any>>({
   onFilteredDataChange,
   virtualize = false,
   defaultExcludedValues,
+  valueFilterKey,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
   // Two-tier persistence per gridId:
@@ -1096,7 +1105,9 @@ export function DataGrid<T extends Record<string, any>>({
   // report Apr 26 2026: 'I search something, switch tabs, come back, it's
   // gone'). sessionStorage clears on browser close — the user explicitly
   // wants the search to NOT persist across days, just across tab hops.
-  const filterStoreKey = gridId ? `datagrid-filters-${gridId}-${userKey()}` : null;
+  const filterStoreKey = gridId
+    ? `datagrid-filters-${gridId}${valueFilterKey ? `-${valueFilterKey}` : ""}-${userKey()}`
+    : null;
   const readFilterState = (): {
     searchText: string;
     columnFilters: Record<string, string>;

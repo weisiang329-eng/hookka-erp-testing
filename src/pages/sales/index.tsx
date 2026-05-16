@@ -894,15 +894,23 @@ export default function SalesPage() {
             selectable
             onSelectionChange={setSelectedRows}
             gridId="sales-orders-list"
+            // Give each Status-dropdown selection its own filter session
+            // so a sticky column-filter from a previous selection can't
+            // blank the grid. BUG (Wei Siang 2026-05-16): picking
+            // "Delivered" showed "0 of 66 · 1 filter active" because the
+            // grid had persisted the funnel-default status exclusion and
+            // never re-applied it against the new selection.
+            valueFilterKey={filterStatus || "all"}
             // Hide already-shipped / delivered / closed / cancelled rows
-            // by default — once an SO has left the active funnel the
-            // operator rarely needs to see it day-to-day. Tick them
-            // back in via the Status filter to see history. The Status
-            // chips above the grid still show the raw counts so the
-            // hidden rows aren't invisible at a glance.
-            defaultExcludedValues={{
-              status: ["SHIPPED", "DELIVERED", "CLOSED", "CANCELLED"],
-            }}
+            // ONLY in the default "All Statuses" funnel view — once the
+            // operator explicitly picks a Status above, filteredOrders is
+            // already scoped to exactly that status, so a second grid-level
+            // exclusion would wrongly hide every matching row.
+            defaultExcludedValues={
+              filterStatus
+                ? undefined
+                : { status: ["SHIPPED", "DELIVERED", "CLOSED", "CANCELLED"] }
+            }
             rowClassName={(row) =>
               row.status === "DRAFT"
                 ? "!bg-[#FAEFCB]/60 border-l-2 border-l-amber-400"

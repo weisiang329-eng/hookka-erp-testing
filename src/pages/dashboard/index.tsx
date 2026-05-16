@@ -182,6 +182,16 @@ const PROD_DEPTS = new Set([
   "UPHOLSTERY",
   "PACKING",
 ]);
+const DEPT_LABEL: Record<string, string> = {
+  FAB_CUT: "Fabric Cutting",
+  FAB_SEW: "Fabric Sewing",
+  WOOD_CUT: "Wood Cutting",
+  FOAM: "Foam Bonding",
+  FRAMING: "Framing",
+  WEBBING: "Webbing",
+  UPHOLSTERY: "Upholstery",
+  PACKING: "Packing",
+};
 
 // Last 7 working days (Mon–Sat), ending yesterday — same window the
 // dashboard's Daily Capacity uses, so efficiency lines up with it.
@@ -394,17 +404,26 @@ export default function DashboardPage() {
     for (const r of jcSumRaw?.data ?? [])
       prodMin.set(r.workerId, Number(r.productionMinutes) || 0);
     const name = new Map<string, string>();
-    for (const w of workersRaw?.data ?? []) name.set(w.id, w.name || w.id);
-    const rows: { name: string; pct: number }[] = [];
+    const dept = new Map<string, string>();
+    for (const w of workersRaw?.data ?? []) {
+      name.set(w.id, w.name || w.id);
+      const code = w.departmentCode || "";
+      dept.set(w.id, DEPT_LABEL[code] ?? code ?? "");
+    }
+    const rows: { name: string; dept: string; pct: number }[] = [];
     for (const e of wheSumRaw?.data ?? []) {
       if ((e.daysWithEntries ?? 0) === 0) continue;
       let prodHours = 0;
-      for (const [dept, h] of Object.entries(e.byDept ?? {}))
-        if (PROD_DEPTS.has(dept)) prodHours += Number(h) || 0;
+      for (const [d, h] of Object.entries(e.byDept ?? {}))
+        if (PROD_DEPTS.has(d)) prodHours += Number(h) || 0;
       if (prodHours <= 0) continue;
       const mins = prodMin.get(e.workerId) ?? 0;
       const pct = (mins / (prodHours * 60)) * 100;
-      rows.push({ name: name.get(e.workerId) ?? e.workerId, pct });
+      rows.push({
+        name: name.get(e.workerId) ?? e.workerId,
+        dept: dept.get(e.workerId) ?? "",
+        pct,
+      });
     }
     rows.sort((a, b) => b.pct - a.pct);
     return {
@@ -733,8 +752,14 @@ export default function DashboardPage() {
                       key={`t${i}-${r.name}`}
                       className="flex items-center justify-between text-sm py-0.5"
                     >
-                      <span className="text-[#5A5550] truncate pr-2">
-                        {r.name}
+                      <span className="truncate pr-2">
+                        <span className="text-[#5A5550]">{r.name}</span>
+                        {r.dept && (
+                          <span className="text-[10px] text-[#9CA3AF]">
+                            {" "}
+                            · {r.dept}
+                          </span>
+                        )}
                       </span>
                       <span className="font-semibold text-[#15803D] tabular-nums">
                         {Math.round(r.pct)}%
@@ -751,8 +776,14 @@ export default function DashboardPage() {
                       key={`b${i}-${r.name}`}
                       className="flex items-center justify-between text-sm py-0.5"
                     >
-                      <span className="text-[#5A5550] truncate pr-2">
-                        {r.name}
+                      <span className="truncate pr-2">
+                        <span className="text-[#5A5550]">{r.name}</span>
+                        {r.dept && (
+                          <span className="text-[10px] text-[#9CA3AF]">
+                            {" "}
+                            · {r.dept}
+                          </span>
+                        )}
                       </span>
                       <span className="font-semibold text-[#DC2626] tabular-nums">
                         {Math.round(r.pct)}%

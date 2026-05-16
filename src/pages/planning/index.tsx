@@ -2050,11 +2050,30 @@ export default function PlanningPage() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="pb-4">
-                  <div className="flex items-center gap-4 text-[10px] text-[#6B7280] mb-1">
-                    <span className="font-medium text-[#4F7C3A]">◂ Past {LOADING_CHART_PAST_DAYS}d Production</span>
-                    <span className="font-medium text-[#3E6570]">Planned Capacity Next {LOADING_CHART_FUTURE_DAYS}d ▸</span>
-                  </div>
                   <div className="overflow-x-auto">
+                    {/* Wei Siang 2026-05-16: section labels now sit
+                        directly ABOVE their own bars — past label over
+                        the past block, "Planned Capacity" over the
+                        future block — instead of both crammed onto one
+                        line. Widths match the bar columns (44px each)
+                        and the header scrolls with the chart. */}
+                    <div
+                      className="flex text-[10px] text-[#6B7280] mb-1"
+                      style={{ minWidth: `${combined.length * 44}px` }}
+                    >
+                      <div
+                        className="font-medium text-[#4F7C3A]"
+                        style={{ width: `${dept.pastProduction.length * 44}px` }}
+                      >
+                        ◂ Past {LOADING_CHART_PAST_DAYS}d Production
+                      </div>
+                      <div
+                        className="font-medium text-[#3E6570] pl-2 border-l border-dashed border-[#6B5C32]/50"
+                        style={{ width: `${dept.futureLoad.length * 44}px` }}
+                      >
+                        Planned Capacity · Next {LOADING_CHART_FUTURE_DAYS}d ▸
+                      </div>
+                    </div>
                     <div
                       className="flex gap-1"
                       style={{ minWidth: `${combined.length * 44}px` }}

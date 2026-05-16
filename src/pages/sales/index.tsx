@@ -175,6 +175,8 @@ export default function SalesPage() {
     total?: number;
     totalRevenueSen?: number;
     csRevenueSen?: number;
+    deliveredItemsSen?: number;
+    outstandingItemsSen?: number;
   }>("/api/sales-orders/stats");
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
@@ -614,6 +616,21 @@ export default function SalesPage() {
     [filteredOrders],
   );
 
+  // Wei Siang 2026-05-16: Delivered / Outstanding shown ITEM-level — a
+  // partially-delivered SO counts only the items that actually went on a
+  // delivery note as Delivered, the rest stays Outstanding. Same resolver
+  // the Delivery side uses, so the headline reconciles to the cent (no
+  // more whole-SO-header over-count of partial deliveries). Other filters
+  // keep the header-total behaviour.
+  const displayRevenue =
+    filterStatus === "DELIVERED"
+      ? statsResp?.deliveredItemsSen ?? 0
+      : filterStatus === "OUTSTANDING"
+        ? statsResp?.outstandingItemsSen ?? 0
+        : hasActiveFilters
+          ? filteredRevenue
+          : totalRevenue;
+
   // Quick date presets — see useUrlBatch jsdoc for why we can't just call
   // setFilterDateFrom + setFilterDateTo in sequence (React 18 batches the
   // two setSearchParams calls and the second's prev snapshot drops the
@@ -668,7 +685,7 @@ export default function SalesPage() {
               "text-xl font-bold",
               hasActiveFilters && "text-[#6B5C32]"
             )}>
-              {formatCurrency(hasActiveFilters ? filteredRevenue : totalRevenue)}
+              {formatCurrency(displayRevenue)}
             </p>
           </CardContent>
         </Card>
@@ -699,7 +716,7 @@ export default function SalesPage() {
                 <span className="text-sm text-[#6B7280]">
                   Showing {filteredOrders.length} of {orders.length} orders ·{" "}
                   <span className="font-semibold text-[#6B5C32]">
-                    {formatCurrency(filteredRevenue)}
+                    {formatCurrency(displayRevenue)}
                   </span>
                 </span>
               )}

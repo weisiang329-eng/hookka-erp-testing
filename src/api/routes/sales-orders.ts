@@ -32,7 +32,8 @@ import {
   snapItemToCatalog,
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
-import { withOrgScope } from "../lib/tenant";
+import { withOrgScope, getOrgId } from "../lib/tenant";
+import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
   createProductionOrdersForOrder,
   type CreatedProductionOrder,
@@ -871,6 +872,15 @@ app.get("/stats", async (c) => {
       csRevenueSen += Number(row.revenueSen) || 0;
     }
   }
+  // Wei Siang 2026-05-16: item-level delivered value. A partially-
+  // delivered SO must count only the value of the items that actually
+  // went on a delivery note as "Delivered" — not its whole header total.
+  // Same resolver the Delivery side uses, so the two reconcile to the
+  // cent. Outstanding (item-level) = confirmed book − this.
+  const deliveredItemsSen = await loadDeliveredItemsValueSen(
+    c.var.DB,
+    getOrgId(c),
+  );
   return c.json({
     success: true,
     byStatus,
@@ -878,6 +888,8 @@ app.get("/stats", async (c) => {
     total,
     totalRevenueSen,
     csRevenueSen,
+    deliveredItemsSen,
+    outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
   });
 });
 

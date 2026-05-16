@@ -27,7 +27,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v1`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v2`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);

@@ -4,6 +4,11 @@ import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import { useCachedJson } from "@/lib/cached-fetch";
 import {
+  buildLinkedPOIds,
+  poReadyForDelivery,
+  type PipelinePO,
+} from "@/lib/delivery-pipeline";
+import {
   DollarSign,
   Package,
   Factory,
@@ -48,11 +53,6 @@ type Overview = {
     grnsPendingQC: number;
     topSuppliers: { name: string; spendSen: number }[];
   };
-  pipeline?: {
-    planningSen: number;
-    pendingDeliverySen: number;
-    pendingDispatchSen: number;
-  };
   fabricCostPerMeterSen?: { total: number; exclBedframeSofa: number };
   aovByCustomer?: {
     customerName: string;
@@ -70,6 +70,27 @@ type Overview = {
     activeHeadcount: number;
     byDept: { dept: string; count: number }[];
   };
+};
+
+// Pending Delivery is computed client-side from the SAME payloads the
+// Delivery page uses, through the shared src/lib/delivery-pipeline.ts
+// predicates — so the dashboard card and the Delivery page's "Pending
+// Delivery" tab can never drift (they previously did: RM 25,218 vs RM
+// 50,793 when the server replicated the gate off the raw job_cards table).
+type PODeliveryShape = PipelinePO & {
+  salesOrderId?: string;
+  productCode?: string;
+  quantity?: number;
+};
+type POResp = { success?: boolean; data?: PODeliveryShape[] };
+type DOResp = {
+  success?: boolean;
+  data?: { id: string; status: string; items?: { productionOrderId?: string | null }[] }[];
+};
+type POValuesResp = { success?: boolean; values?: Record<string, number> };
+type SOItemsResp = {
+  success?: boolean;
+  data?: { id: string; items?: { productCode?: string; unitPriceSen?: number }[] }[];
 };
 
 // ---------- helpers ----------
@@ -129,8 +150,22 @@ export default function DashboardPage() {
   const { data: revRaw, loading: revL } = useCachedJson<RevenueResp>(
     "/api/dashboard/revenue?months=12",
   );
+  // Same four payloads the Delivery page reads. fields=minimal&include=jobCards
+  // keeps the response small while carrying the upholstery JC statuses the
+  // pipeline gate needs. limit=200 covers the whole DO table (83 rows).
+  const { data: poRaw, loading: poL } = useCachedJson<POResp>(
+    "/api/production-orders?fields=minimal&include=jobCards",
+  );
+  const { data: doRaw, loading: doL } = useCachedJson<DOResp>(
+    "/api/delivery-orders?page=1&limit=200",
+  );
+  const { data: poValRaw, loading: poValL } = useCachedJson<POValuesResp>(
+    "/api/delivery-orders/po-values",
+  );
+  const { data: soItemsRaw, loading: soItemsL } =
+    useCachedJson<SOItemsResp>("/api/sales-orders");
 
-  const loading = soL || ovL || revL;
+  const loading = soL || ovL || revL || poL || doL || poValL || soItemsL;
 
   const so = soRaw ?? {};
   const ov = ovRaw ?? {};
@@ -139,11 +174,42 @@ export default function DashboardPage() {
   const fab = ov.fabricCostPerMeterSen;
   const emp = ov.employee;
 
-  // Pending Delivery (made, not on a DO) + Pending Dispatch (DRAFT DOs)
-  // — the ready-but-not-delivered figure, like the Delivery page shows.
-  const pendingDeliveryValueSen =
-    (ov.pipeline?.pendingDeliverySen ?? 0) +
-    (ov.pipeline?.pendingDispatchSen ?? 0);
+  // Pending Delivery — production complete (all upholstery JCs done) but
+  // not yet on a delivery order. Computed here from the exact same payloads
+  // and shared predicates as the Delivery page's "Pending Delivery" tab, so
+  // the two figures are guaranteed identical (target: RM 50,793 / 80 POs).
+  // Per-PO value mirrors the Delivery page: server po-value first, SO unit
+  // price × qty as the fallback.
+  const pendingDeliveryValueSen = useMemo(() => {
+    const pos = poRaw?.success ? poRaw.data ?? [] : [];
+    const dos = doRaw?.success ? doRaw.data ?? [] : [];
+    const linkedPOIds = buildLinkedPOIds(dos);
+
+    const poValMap = new Map<string, number>();
+    for (const [k, v] of Object.entries(poValRaw?.values ?? {})) {
+      poValMap.set(k, Number(v) || 0);
+    }
+    const soPriceByProduct = new Map<string, Map<string, number>>();
+    const sos = soItemsRaw?.success ? soItemsRaw.data ?? [] : [];
+    for (const s of sos) {
+      const m = new Map<string, number>();
+      for (const it of s.items ?? []) {
+        if (it.productCode) m.set(it.productCode, Number(it.unitPriceSen) || 0);
+      }
+      soPriceByProduct.set(s.id, m);
+    }
+
+    let total = 0;
+    for (const po of pos) {
+      if (!poReadyForDelivery(po, linkedPOIds)) continue;
+      const v =
+        poValMap.get(po.id) ??
+        (soPriceByProduct.get(po.salesOrderId || "")?.get(po.productCode || "") ??
+          0) * (po.quantity || 0);
+      total += v;
+    }
+    return total;
+  }, [poRaw, doRaw, poValRaw, soItemsRaw]);
 
   const revMax = useMemo(
     () => Math.max(1, ...((revRaw?.data ?? []).map((r) => r.revenueSen))),
@@ -209,7 +275,7 @@ export default function DashboardPage() {
           <KPICard
             title="Pending Delivery"
             value={rm(pendingDeliveryValueSen)}
-            subtitle="Made (uph done), not yet on a DO + pending dispatch"
+            subtitle="Made, not yet on a DO — same as Delivery page"
             icon={Package}
           />
         </div>

@@ -13,7 +13,6 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
-import { loadPoValueMap, loadDoValueMap } from "../lib/do-value";
 
 const app = new Hono<Env>();
 
@@ -23,18 +22,11 @@ function fmtISO(d: Date): string {
   return d.toISOString().split("T")[0];
 }
 
-// Mirror of src/pages/delivery/index.tsx isHbOnlySpecial — used so the
-// dashboard's "Pending Delivery" uses the SAME upholstery-cards-done gate
-// the Delivery page's Pending Delivery tab uses (same number on both).
-function isHbOnlySpecial(s: string | null | undefined): boolean {
-  return !!s && s.toLowerCase().includes("headboard only");
-}
-
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v3`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v4`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -285,101 +277,6 @@ app.get("/", async (c) => {
         .slice(0, 5);
     }
 
-    // ---- Not-yet-delivered pipeline ----
-    // EXACT mirror of the Delivery page's Planning / Pending Delivery
-    // tabs (pickRelevantUphCards + readyPOs gate) so the dashboard
-    // "Pending Delivery" card == that page's Pending Delivery tab to the
-    // cent. Pending Delivery = POs whose relevant UPHOLSTERY job cards
-    // are ALL done and not on a DO; Planning = same universe but uph not
-    // all done; Pending Dispatch = DRAFT DOs. (This is the upholstery-
-    // gated shop view — it is NOT the same universe as Sales Outstanding,
-    // which also covers POs with no upholstery step, so the three need
-    // not sum to Outstanding.)
-    const [poValMap, doValMap, poRowsRes, jcRowsRes, linkedRes, doRowsRes] =
-      await Promise.all([
-        loadPoValueMap(db, orgId),
-        loadDoValueMap(db, orgId),
-        db
-          .prepare(
-            "SELECT id, status, consignmentOrderId, itemCategory, specialOrder FROM production_orders WHERE orgId = ?",
-          )
-          .bind(orgId)
-          .all<{
-            id: string;
-            status: string;
-            consignmentOrderId: string | null;
-            itemCategory: string | null;
-            specialOrder: string | null;
-          }>(),
-        db
-          .prepare(
-            "SELECT productionOrderId, departmentCode, status, wipType FROM job_cards WHERE orgId = ?",
-          )
-          .bind(orgId)
-          .all<{
-            productionOrderId: string;
-            departmentCode: string | null;
-            status: string;
-            wipType: string | null;
-          }>(),
-        db
-          .prepare(
-            `SELECT DISTINCT di.productionOrderId AS poId
-               FROM delivery_order_items di
-               JOIN delivery_orders d ON d.id = di.deliveryOrderId
-              WHERE d.orgId = ? AND d.status != 'CANCELLED'
-                AND di.productionOrderId IS NOT NULL AND di.productionOrderId != ''`,
-          )
-          .bind(orgId)
-          .all<{ poId: string }>(),
-        db
-          .prepare("SELECT id, status FROM delivery_orders WHERE orgId = ?")
-          .bind(orgId)
-          .all<{ id: string; status: string }>(),
-      ]);
-    const onDO = new Set((linkedRes.results ?? []).map((r) => r.poId));
-    const jcByPo = new Map<
-      string,
-      { departmentCode: string | null; status: string; wipType: string | null }[]
-    >();
-    for (const j of jcRowsRes.results ?? []) {
-      const arr = jcByPo.get(j.productionOrderId) ?? [];
-      arr.push({
-        departmentCode: j.departmentCode,
-        status: j.status,
-        wipType: j.wipType,
-      });
-      jcByPo.set(j.productionOrderId, arr);
-    }
-    const doneSet = new Set(["COMPLETED", "TRANSFERRED"]);
-    let planningSen = 0;
-    let pendingDeliverySen = 0;
-    for (const p of poRowsRes.results ?? []) {
-      if (p.consignmentOrderId) continue;
-      if (p.status === "CANCELLED") continue;
-      const all = jcByPo.get(p.id) ?? [];
-      let uph = all.filter((j) => j.departmentCode === "UPHOLSTERY");
-      if (
-        (p.itemCategory ?? "").toUpperCase() === "BEDFRAME" &&
-        isHbOnlySpecial(p.specialOrder)
-      ) {
-        uph = uph.filter((j) => (j.wipType ?? "").toUpperCase() !== "DIVAN");
-      }
-      if (uph.length === 0) continue; // Delivery page shows neither tab for these
-      const v = poValMap.get(p.id) ?? 0;
-      const allDone = uph.every((j) => doneSet.has(j.status));
-      if (allDone) {
-        if (!onDO.has(p.id)) pendingDeliverySen += v; // == Pending Delivery tab
-      } else if (p.status !== "COMPLETED") {
-        planningSen += v; // == Planning tab
-      }
-    }
-    let pendingDispatchSen = 0;
-    for (const d of doRowsRes.results ?? []) {
-      if (d.status === "DRAFT")
-        pendingDispatchSen += doValMap.get(d.id) ?? 0;
-    }
-
     const headByDept = (headRes.results ?? []).map((r) => ({
       dept: r.dept || "—",
       count: Number(r.n) || 0,
@@ -407,11 +304,6 @@ app.get("/", async (c) => {
       fabricCostPerMeterSen: {
         total: avgPerMeter(fabTotRes),
         exclBedframeSofa: avgPerMeter(fabExclRes),
-      },
-      pipeline: {
-        planningSen,
-        pendingDeliverySen,
-        pendingDispatchSen,
       },
       aovByCustomer,
       topSellers: sellersByCat,

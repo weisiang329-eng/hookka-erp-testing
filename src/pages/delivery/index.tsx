@@ -36,6 +36,12 @@ import { mutationWithData, MutationResultSchema } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
 import { SalesOrderSchema } from "@/lib/schemas/sales-order";
 import { InvoiceSchema } from "@/lib/schemas/invoice";
+import {
+  pickRelevantUphCards,
+  poInPlanning,
+  poReadyForDelivery,
+  buildLinkedPOIds,
+} from "@/lib/delivery-pipeline";
 
 const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
@@ -299,27 +305,10 @@ type ProductionOrderApiShape = {
   }[];
 };
 
-// Mirrors api/routes/fg-units.ts isHeadboardOnlySpecial — single rule shared
-// across the codebase so the planning/ready filters stay in sync with the
-// backend cascade.
-function isHbOnlySpecial(specialOrder: string | null | undefined): boolean {
-  if (!specialOrder) return false;
-  return specialOrder.toLowerCase().includes("headboard only");
-}
-
-// Drop DIVAN UPH JCs when the PO is a BEDFRAME + Headboard Only — matches
-// filterJcsForCompletionGate in the backend production-orders route. Legacy
-// HB-only POs (created before commit 9086352) carry stranded DIVAN job cards
-// that will never complete; ignoring them lets the row qualify for Pending
-// Delivery the moment the HB pieces are packed.
-function pickRelevantUphCards(po: ProductionOrderApiShape) {
-  const uph = (po.jobCards || []).filter(
-    (j) => j.departmentCode === "UPHOLSTERY",
-  );
-  const isBf = (po.itemCategory || "").toUpperCase() === "BEDFRAME";
-  if (!isBf || !isHbOnlySpecial(po.specialOrder)) return uph;
-  return uph.filter((j) => (j.wipType || "").toUpperCase() !== "DIVAN");
-}
+// isHbOnlySpecial / pickRelevantUphCards / poInPlanning / poReadyForDelivery
+// / buildLinkedPOIds now live in src/lib/delivery-pipeline.ts so the
+// dashboard's "Pending Delivery" card and this page's "Pending Delivery"
+// tab share ONE gate and can never drift apart.
 
 export default function DeliveryPage() {
   const { toast } = useToast();
@@ -639,15 +628,11 @@ export default function DeliveryPage() {
           // visible whose SO's OTHER POs were on a multi-SO DO — the DO
           // stores only one representative salesOrderId, so SO-level
           // matching missed siblings carried via the items array).
-          const linkedPOIds = new Set<string>();
-          if (dRes.success && Array.isArray(dRes.data)) {
-            for (const d of dRes.data as DeliveryOrder[]) {
-              if (d.status === "CANCELLED" || d.id.startsWith("virt-")) continue;
-              for (const it of d.items || []) {
-                if (it.productionOrderId) linkedPOIds.add(it.productionOrderId);
-              }
-            }
-          }
+          const linkedPOIds = buildLinkedPOIds(
+            dRes.success && Array.isArray(dRes.data)
+              ? (dRes.data as DeliveryOrder[])
+              : [],
+          );
 
           const allPOs = poRes.data as ProductionOrderApiShape[];
 
@@ -738,18 +723,7 @@ export default function DeliveryPage() {
           // flow (parallel branch), not Delivery. Mirror of the same guard
           // on the Pending Delivery filter below; bug surfaced 2026-05-06
           // (CO POs were leaking into Delivery's Planning tab).
-          const planning = allPOs
-            .filter((po) => {
-              if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
-              if (po.consignmentOrderId) return false;
-              // Must have upholstery cards (HB-only filter excludes DIVAN
-              // UPH so the PO leaves Planning the moment the HB UPH is done).
-              const uphCards = pickRelevantUphCards(po);
-              if (uphCards.length === 0) return false;
-              // At least one upholstery card not yet done
-              return uphCards.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
-            })
-            .map(mapPO);
+          const planning = allPOs.filter(poInPlanning).map(mapPO);
           setPlanningPOs(planning);
 
           // Pending Delivery: production complete, not yet on a real DO.
@@ -759,17 +733,7 @@ export default function DeliveryPage() {
           // per user: a CO that finished production was wrongly
           // appearing in DO's "Ready for DO" list.
           const ready = allPOs
-            .filter((po) => {
-              if (po.status === "CANCELLED") return false;
-              if (po.consignmentOrderId) return false;
-              // Check that upholstery cards exist and ALL are done
-              // (HB-only filter applied so legacy DIVAN UPH stragglers
-              // don't keep the row out of Pending Delivery).
-              const uphCards = pickRelevantUphCards(po);
-              if (uphCards.length === 0) return false;
-              return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
-            })
-            .filter((po) => !linkedPOIds.has(po.id))
+            .filter((po) => poReadyForDelivery(po, linkedPOIds))
             .map(mapPO);
           setReadyPOs(ready);
         }

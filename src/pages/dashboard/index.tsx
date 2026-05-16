@@ -76,19 +76,58 @@ type Overview = {
     sofaSets: number;
     totalSen: number;
   }[];
+  aovCompany?: {
+    bedframeAvgSen: number;
+    bedframeUnits: number;
+    sofaAvgSen: number;
+    sofaSets: number;
+    totalSen: number;
+  };
+  aovMonthlyByCustomer?: Record<
+    string,
+    {
+      month: string;
+      bedframeAvgSen: number;
+      bedframeUnits: number;
+      sofaAvgSen: number;
+      sofaSets: number;
+    }[]
+  >;
   topSellers?: {
     BEDFRAME: { productCode: string; productName: string; qtySold: number; valueSen: number }[];
     SOFA: { model: string; setsSold: number; valueSen: number }[];
   };
-  topFabrics?: { fabCode: string; fabName: string; meters: number; costSen: number }[];
+  topSellersByCustomer?: {
+    BEDFRAME: Record<
+      string,
+      { customer: string; qty: number; valueSen: number }[]
+    >;
+    SOFA: Record<
+      string,
+      { customer: string; sets: number; valueSen: number }[]
+    >;
+  };
+  fabric?: {
+    BEDFRAME: {
+      top: { fabCode: string; fabName: string; meters: number; costSen: number }[];
+      monthly: { month: string; meters: number }[];
+    };
+    SOFA: {
+      top: { fabCode: string; fabName: string; meters: number; costSen: number }[];
+      monthly: { month: string; meters: number }[];
+    };
+  };
   monthlySales?: { month: string; bedframeUnits: number; sofaSets: number }[];
+  monthlySalesByCustomer?: Record<
+    string,
+    { customer: string; bedframeUnits: number; sofaSets: number }[]
+  >;
   monthlyRevenue?: {
     month: string;
     salesOrderSen: number;
     invoiceSen: number;
     productionSen: number;
   }[];
-  fabricMonthly?: { month: string; meters: number }[];
   employee?: {
     activeHeadcount: number;
     byDept: { dept: string; count: number }[];
@@ -429,11 +468,6 @@ export default function DashboardPage() {
     return total;
   }, [poRaw, doRaw, poValRaw, soItemsRaw]);
 
-  const fabMonthMax = useMemo(
-    () =>
-      Math.max(1, ...((ov.fabricMonthly ?? []).map((m) => m.meters))),
-    [ov.fabricMonthly],
-  );
 
   if (loading) {
     return (
@@ -915,35 +949,133 @@ export default function DashboardPage() {
                   </td>
                 </tr>
               )}
-              {(ov.aovByCustomer ?? []).map((r) => (
-                <tr
-                  key={r.customerName}
-                  className="border-b border-[#F0ECE6]"
-                >
-                  <td className="py-1.5 text-[#1F1D1B]">{r.customerName}</td>
-                  <td className="py-1.5 text-right tabular-nums">
-                    {r.bedframeUnits ? rm(r.bedframeAvgSen) : "—"}
+              {ov.aovCompany && (ov.aovByCustomer ?? []).length > 0 && (
+                <tr className="border-b-2 border-[#E2DDD8] bg-[#FAF8F4]">
+                  <td className="py-1.5 font-bold text-[#1F1D1B]">
+                    All customers
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums font-semibold">
+                    {ov.aovCompany.bedframeUnits
+                      ? rm(ov.aovCompany.bedframeAvgSen)
+                      : "—"}
                   </td>
                   <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
-                    {r.bedframeUnits || "—"}
+                    {ov.aovCompany.bedframeUnits || "—"}
                   </td>
-                  <td className="py-1.5 text-right tabular-nums">
-                    {r.sofaSets ? rm(r.sofaAvgSen) : "—"}
+                  <td className="py-1.5 text-right tabular-nums font-semibold">
+                    {ov.aovCompany.sofaSets
+                      ? rm(ov.aovCompany.sofaAvgSen)
+                      : "—"}
                   </td>
                   <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
-                    {r.sofaSets || "—"}
+                    {ov.aovCompany.sofaSets || "—"}
                   </td>
-                  <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
-                    {rm(r.totalSen)}
+                  <td className="py-1.5 text-right tabular-nums font-bold text-[#1F1D1B]">
+                    {rm(ov.aovCompany.totalSen)}
                   </td>
                 </tr>
-              ))}
+              )}
+              {(ov.aovByCustomer ?? []).map((r) => {
+                const monthly = ov.aovMonthlyByCustomer?.[r.customerName];
+                return (
+                  <tr
+                    key={r.customerName}
+                    onClick={
+                      monthly && monthly.length
+                        ? () =>
+                            setDrill({
+                              title: `${r.customerName} — monthly AOV`,
+                              subtitle:
+                                "Average per month, by SO date. Bedframe per unit · Sofa per set.",
+                              node: (
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                                      <th className="py-1.5 font-medium">
+                                        Month
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Bedframe AOV
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Units
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Sofa AOV
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Sets
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {monthly.map((m) => (
+                                      <tr
+                                        key={m.month}
+                                        className="border-b border-[#F0ECE6]"
+                                      >
+                                        <td className="py-1.5 text-[#1F1D1B] tabular-nums">
+                                          {m.month}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums">
+                                          {m.bedframeUnits
+                                            ? rm(m.bedframeAvgSen)
+                                            : "—"}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
+                                          {m.bedframeUnits || "—"}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums">
+                                          {m.sofaSets
+                                            ? rm(m.sofaAvgSen)
+                                            : "—"}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
+                                          {m.sofaSets || "—"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ),
+                            })
+                        : undefined
+                    }
+                    className={`border-b border-[#F0ECE6] ${monthly && monthly.length ? "cursor-pointer hover:bg-[#FAF8F4]" : ""}`}
+                  >
+                    <td className="py-1.5 text-[#1F1D1B]">
+                      {r.customerName}
+                      {monthly && monthly.length ? (
+                        <span className="text-[10px] text-[#9CA3AF]">
+                          {" "}
+                          · monthly
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      {r.bedframeUnits ? rm(r.bedframeAvgSen) : "—"}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
+                      {r.bedframeUnits || "—"}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums">
+                      {r.sofaSets ? rm(r.sofaAvgSen) : "—"}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
+                      {r.sofaSets || "—"}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                      {rm(r.totalSen)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           <p className="text-[10px] text-[#9CA3AF] mt-2">
             Bedframe AOV = total bedframe value ÷ total bedframe units. Sofa
             AOV = total Sales-Order value ÷ number of sofa sets (1 SO = 1
-            set).
+            set). Click a customer for the monthly breakdown.
           </p>
         </CardContent>
       </Card>
@@ -973,22 +1105,43 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(ov.monthlySales ?? []).map((m) => (
-                    <tr
-                      key={m.month}
-                      className="border-b border-[#F0ECE6]"
-                    >
-                      <td className="py-1.5 text-[#5A5550] tabular-nums">
-                        {m.month}
-                      </td>
-                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
-                        {m.bedframeUnits.toLocaleString()}
-                      </td>
-                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
-                        {m.sofaSets.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
+                  {(ov.monthlySales ?? []).map((m) => {
+                    const rows =
+                      ov.monthlySalesByCustomer?.[m.month] ?? [];
+                    return (
+                      <tr
+                        key={m.month}
+                        onClick={
+                          rows.length
+                            ? () =>
+                                setDrill({
+                                  title: `${m.month} — by customer`,
+                                  subtitle:
+                                    "Who contributed this month's bedframe units / sofa sets",
+                                  node: <CustomerJobsTable rows={rows} />,
+                                })
+                            : undefined
+                        }
+                        className={`border-b border-[#F0ECE6] ${rows.length ? "cursor-pointer hover:bg-[#FAF8F4]" : ""}`}
+                      >
+                        <td className="py-1.5 text-[#5A5550] tabular-nums">
+                          {m.month}
+                          {rows.length ? (
+                            <span className="text-[10px] text-[#9CA3AF]">
+                              {" "}
+                              · who
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                          {m.bedframeUnits.toLocaleString()}
+                        </td>
+                        <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                          {m.sofaSets.toLocaleString()}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
@@ -999,49 +1152,105 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
-        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Scissors className="h-4 w-4 text-[#6B5C32]" /> Fabric Usage
-              (meters) — last 12 months
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {(ov.fabricMonthly ?? []).length === 0 ? (
-              <p className="text-xs text-[#9CA3AF]">No fabric issued.</p>
-            ) : (
-              <div className="space-y-1.5">
-                {(ov.fabricMonthly ?? []).map((m) => (
-                  <div key={m.month} className="flex items-center gap-2">
-                    <span className="text-[11px] text-[#9CA3AF] w-16 shrink-0 tabular-nums">
-                      {m.month}
-                    </span>
-                    <div className="flex-1 bg-[#F5F2ED] rounded h-4 overflow-hidden">
+      </div>
+
+      {/* Fabric — Bedframe vs Sofa (one module: top fabrics + monthly) */}
+      <div>
+        <SectionHeader label="Fabric Usage — Bedframe vs Sofa" />
+        <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
+          {(["BEDFRAME", "SOFA"] as const).map((cat) => {
+            const blk = ov.fabric?.[cat];
+            const monthMax = Math.max(
+              1,
+              ...((blk?.monthly ?? []).map((m) => m.meters)),
+            );
+            return (
+              <Card
+                key={cat}
+                className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+              >
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    <Scissors className="h-4 w-4 text-[#6B5C32]" />{" "}
+                    {cat === "BEDFRAME" ? "Bedframe" : "Sofa"} Fabric
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div>
+                    <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
+                      Top fabrics (meters used)
+                    </p>
+                    {(blk?.top ?? []).length === 0 && (
+                      <p className="text-xs text-[#9CA3AF]">
+                        No fabric issued.
+                      </p>
+                    )}
+                    {(blk?.top ?? []).map((f) => (
                       <div
-                        className="h-full bg-[#6B5C32]/70 rounded"
-                        style={{
-                          width: `${Math.max(2, (m.meters / fabMonthMax) * 100)}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-[11px] font-semibold text-[#1F1D1B] w-20 text-right tabular-nums">
-                      {Math.round(m.meters).toLocaleString()} m
-                    </span>
+                        key={f.fabCode}
+                        className="flex items-center justify-between text-sm py-0.5"
+                      >
+                        <span className="text-[#5A5550] truncate pr-2">
+                          <span className="font-medium text-[#1F1D1B]">
+                            {f.fabCode}
+                          </span>{" "}
+                          <span className="text-xs text-[#9CA3AF]">
+                            {Math.round(f.meters).toLocaleString()} m
+                          </span>
+                        </span>
+                        <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                          {rm(f.costSen)}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            )}
-            <p className="text-[10px] text-[#9CA3AF] mt-2">
-              Fabric actually issued to production (RM_ISSUE).
-            </p>
-          </CardContent>
-        </Card>
+                  <div className="border-t border-[#E2DDD8] pt-2">
+                    <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
+                      Monthly meters — last 12
+                    </p>
+                    {(blk?.monthly ?? []).length === 0 ? (
+                      <p className="text-xs text-[#9CA3AF]">No data.</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {(blk?.monthly ?? []).map((m) => (
+                          <div
+                            key={m.month}
+                            className="flex items-center gap-2"
+                          >
+                            <span className="text-[11px] text-[#9CA3AF] w-14 shrink-0 tabular-nums">
+                              {m.month}
+                            </span>
+                            <div className="flex-1 bg-[#F5F2ED] rounded h-3 overflow-hidden">
+                              <div
+                                className="h-full bg-[#6B5C32]/70 rounded"
+                                style={{
+                                  width: `${Math.max(2, (m.meters / monthMax) * 100)}%`,
+                                }}
+                              />
+                            </div>
+                            <span className="text-[11px] font-semibold text-[#1F1D1B] w-16 text-right tabular-nums">
+                              {Math.round(m.meters).toLocaleString()} m
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-[#9CA3AF]">
+                    Fabric issued to {cat === "BEDFRAME" ? "bedframe" : "sofa"}{" "}
+                    production (RM_ISSUE).
+                  </p>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
       </div>
 
       {/* Top sellers */}
       <div>
         <SectionHeader label="Top Sellers" />
-        <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
           <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm">
@@ -1055,24 +1264,72 @@ export default function DashboardPage() {
               {(ov.topSellers?.BEDFRAME ?? []).length === 0 && (
                 <p className="text-xs text-[#9CA3AF]">No sales.</p>
               )}
-              {(ov.topSellers?.BEDFRAME ?? []).map((p) => (
-                <div
-                  key={p.productCode}
-                  className="flex items-center justify-between text-sm"
-                >
-                  <span className="text-[#5A5550] truncate pr-2">
-                    <span className="font-medium text-[#1F1D1B]">
-                      {p.productCode}
-                    </span>{" "}
-                    <span className="text-xs text-[#9CA3AF]">
-                      ×{p.qtySold.toLocaleString()}
+              {(ov.topSellers?.BEDFRAME ?? []).map((p) => {
+                const custRows =
+                  ov.topSellersByCustomer?.BEDFRAME?.[p.productCode] ?? [];
+                return (
+                  <div
+                    key={p.productCode}
+                    onClick={
+                      custRows.length
+                        ? () =>
+                            setDrill({
+                              title: `${p.productCode} — by customer`,
+                              subtitle: `${p.qtySold.toLocaleString()} units · ${rm(p.valueSen)}`,
+                              node: (
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                                      <th className="py-1.5 font-medium">
+                                        Customer
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Units
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Value
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {custRows.map((c) => (
+                                      <tr
+                                        key={c.customer}
+                                        className="border-b border-[#F0ECE6]"
+                                      >
+                                        <td className="py-1.5 text-[#1F1D1B]">
+                                          {c.customer}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums">
+                                          {c.qty.toLocaleString()}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums">
+                                          {rm(c.valueSen)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ),
+                            })
+                        : undefined
+                    }
+                    className={`flex items-center justify-between text-sm ${custRows.length ? "cursor-pointer hover:bg-[#FAF8F4] -mx-1 px-1 rounded" : ""}`}
+                  >
+                    <span className="text-[#5A5550] truncate pr-2">
+                      <span className="font-medium text-[#1F1D1B]">
+                        {p.productCode}
+                      </span>{" "}
+                      <span className="text-xs text-[#9CA3AF]">
+                        ×{p.qtySold.toLocaleString()}
+                      </span>
                     </span>
-                  </span>
-                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                    {rm(p.valueSen)}
-                  </span>
-                </div>
-              ))}
+                    <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(p.valueSen)}
+                    </span>
+                  </div>
+                );
+              })}
             </CardContent>
           </Card>
 
@@ -1089,58 +1346,72 @@ export default function DashboardPage() {
               {(ov.topSellers?.SOFA ?? []).length === 0 && (
                 <p className="text-xs text-[#9CA3AF]">No sales.</p>
               )}
-              {(ov.topSellers?.SOFA ?? []).map((p) => (
-                <div
-                  key={p.model}
-                  className="flex items-center justify-between text-sm"
-                >
-                  <span className="text-[#5A5550] truncate pr-2">
-                    <span className="font-medium text-[#1F1D1B]">
-                      {p.model}
-                    </span>{" "}
-                    <span className="text-xs text-[#9CA3AF]">
-                      ×{p.setsSold.toLocaleString()} sets
+              {(ov.topSellers?.SOFA ?? []).map((p) => {
+                const custRows =
+                  ov.topSellersByCustomer?.SOFA?.[p.model] ?? [];
+                return (
+                  <div
+                    key={p.model}
+                    onClick={
+                      custRows.length
+                        ? () =>
+                            setDrill({
+                              title: `Sofa ${p.model} — by customer`,
+                              subtitle: `${p.setsSold.toLocaleString()} sets · ${rm(p.valueSen)}`,
+                              node: (
+                                <table className="w-full text-sm">
+                                  <thead>
+                                    <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                                      <th className="py-1.5 font-medium">
+                                        Customer
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Sets
+                                      </th>
+                                      <th className="py-1.5 font-medium text-right">
+                                        Value
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {custRows.map((c) => (
+                                      <tr
+                                        key={c.customer}
+                                        className="border-b border-[#F0ECE6]"
+                                      >
+                                        <td className="py-1.5 text-[#1F1D1B]">
+                                          {c.customer}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums">
+                                          {c.sets.toLocaleString()}
+                                        </td>
+                                        <td className="py-1.5 text-right tabular-nums">
+                                          {rm(c.valueSen)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ),
+                            })
+                        : undefined
+                    }
+                    className={`flex items-center justify-between text-sm ${custRows.length ? "cursor-pointer hover:bg-[#FAF8F4] -mx-1 px-1 rounded" : ""}`}
+                  >
+                    <span className="text-[#5A5550] truncate pr-2">
+                      <span className="font-medium text-[#1F1D1B]">
+                        {p.model}
+                      </span>{" "}
+                      <span className="text-xs text-[#9CA3AF]">
+                        ×{p.setsSold.toLocaleString()} sets
+                      </span>
                     </span>
-                  </span>
-                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                    {rm(p.valueSen)}
-                  </span>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <Scissors className="h-4 w-4 text-[#6B5C32]" /> Fabric
-                <span className="text-[10px] text-[#9CA3AF] font-normal">
-                  by meters used
-                </span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-1.5">
-              {(ov.topFabrics ?? []).length === 0 && (
-                <p className="text-xs text-[#9CA3AF]">No fabric issued.</p>
-              )}
-              {(ov.topFabrics ?? []).map((f) => (
-                <div
-                  key={f.fabCode}
-                  className="flex items-center justify-between text-sm"
-                >
-                  <span className="text-[#5A5550] truncate pr-2">
-                    <span className="font-medium text-[#1F1D1B]">
-                      {f.fabCode}
-                    </span>{" "}
-                    <span className="text-xs text-[#9CA3AF]">
-                      {Math.round(f.meters).toLocaleString()} m
+                    <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(p.valueSen)}
                     </span>
-                  </span>
-                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                    {rm(f.costSen)}
-                  </span>
-                </div>
-              ))}
+                  </div>
+                );
+              })}
             </CardContent>
           </Card>
         </div>

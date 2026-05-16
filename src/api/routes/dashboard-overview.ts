@@ -37,7 +37,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v8`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v11`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -230,11 +230,13 @@ app.get("/", async (c) => {
           bfQty: number;
           hasSofa: number;
         }>(),
-      // Top sellers — BEDFRAME by product code (qty basis). Accessory
-      // dropped per Wei Siang (not wanted on the dashboard).
+      // Top sellers — BEDFRAME by product code (qty basis), also split
+      // by customer for the click-through. Accessory dropped per Wei
+      // Siang (not wanted on the dashboard).
       db
         .prepare(
           `SELECT si.productCode AS "productCode",
+                  so.customerName AS "custName",
                   MAX(si.productName) AS "productName",
                   COALESCE(SUM(si.quantity),0) AS "qtySold",
                   COALESCE(SUM(si.lineTotalSen),0) AS "valueSen"
@@ -242,11 +244,12 @@ app.get("/", async (c) => {
              JOIN sales_orders so ON so.id = si.salesOrderId
             WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
               AND si.itemCategory = 'BEDFRAME'
-            GROUP BY si.productCode`,
+            GROUP BY si.productCode, so.customerName`,
         )
         .bind(orgId)
         .all<{
           productCode: string;
+          custName: string | null;
           productName: string;
           qtySold: number;
           valueSen: number;
@@ -257,44 +260,62 @@ app.get("/", async (c) => {
       db
         .prepare(
           `SELECT si.salesOrderId AS "soId", si.productCode AS "productCode",
-                  so.totalSen AS "soTotalSen"
+                  so.customerName AS "custName", so.totalSen AS "soTotalSen"
              FROM sales_order_items si
              JOIN sales_orders so ON so.id = si.salesOrderId
             WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
               AND si.itemCategory = 'SOFA'`,
         )
         .bind(orgId)
-        .all<{ soId: string; productCode: string; soTotalSen: number }>(),
-      // Top fabrics by ACTUAL production consumption (RM_ISSUE meters).
+        .all<{
+          soId: string;
+          productCode: string;
+          custName: string | null;
+          soTotalSen: number;
+        }>(),
+      // Top fabrics by ACTUAL production consumption (RM_ISSUE meters),
+      // split Bedframe vs Sofa via the consuming PO's category (same
+      // join the fabric-cost-excl query uses).
       db
         .prepare(
-          `SELECT rm.itemCode AS "fabCode", MAX(rm.description) AS "fabName",
+          `SELECT po.itemCategory AS "cat", rm.itemCode AS "fabCode",
+                  MAX(rm.description) AS "fabName",
                   COALESCE(SUM(cl.qty),0) AS "meters",
                   COALESCE(SUM(cl.totalCostSen),0) AS "costSen"
              FROM cost_ledger cl
              JOIN raw_materials rm ON rm.id = cl.itemId
-            WHERE rm.orgId = ? AND cl.type = 'RM_ISSUE'
+             JOIN production_orders po ON po.id = cl.refId
+            WHERE po.orgId = ? AND cl.type = 'RM_ISSUE'
+              AND cl.refType = 'PRODUCTION_ORDER'
               AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')
-            GROUP BY rm.itemCode
-            ORDER BY SUM(cl.qty) DESC
-            LIMIT 10`,
+              AND po.itemCategory IN ('BEDFRAME','SOFA')
+            GROUP BY po.itemCategory, rm.itemCode`,
         )
         .bind(orgId)
-        .all<{ fabCode: string; fabName: string; meters: number; costSen: number }>(),
-      // Monthly fabric meters consumed (RM_ISSUE) — last-12 trend in JS.
+        .all<{
+          cat: string;
+          fabCode: string;
+          fabName: string;
+          meters: number;
+          costSen: number;
+        }>(),
+      // Monthly fabric meters (RM_ISSUE), split Bedframe vs Sofa.
       db
         .prepare(
-          `SELECT substr(cl.date::text, 1, 7) AS "ym",
+          `SELECT po.itemCategory AS "cat",
+                  substr(cl.date::text, 1, 7) AS "ym",
                   COALESCE(SUM(cl.qty),0) AS "meters"
              FROM cost_ledger cl
              JOIN raw_materials rm ON rm.id = cl.itemId
-            WHERE rm.orgId = ? AND cl.type = 'RM_ISSUE'
+             JOIN production_orders po ON po.id = cl.refId
+            WHERE po.orgId = ? AND cl.type = 'RM_ISSUE'
+              AND cl.refType = 'PRODUCTION_ORDER'
               AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')
-            GROUP BY substr(cl.date::text, 1, 7)
-            ORDER BY substr(cl.date::text, 1, 7)`,
+              AND po.itemCategory IN ('BEDFRAME','SOFA')
+            GROUP BY po.itemCategory, substr(cl.date::text, 1, 7)`,
         )
         .bind(orgId)
-        .all<{ ym: string | null; meters: number }>(),
+        .all<{ cat: string; ym: string | null; meters: number }>(),
       // Invoiced per month — by invoiceDate, every invoice except
       // CANCELLED (incl. DRAFT, per Wei Siang: all current invoices are
       // still DRAFT, so excluding them would leave the line empty).
@@ -632,10 +653,16 @@ app.get("/", async (c) => {
     // Bedframe is sold per piece: AOV = Σ bedframe line value ÷ Σ qty.
     // Sofa is sold per SET: one SO = one set, the set's price is the
     // whole SO total; AOV = Σ SO total ÷ number of sofa SOs.
-    const aovMap = new Map<
-      string,
-      { bfVal: number; bfQty: number; soVal: number; soSets: number }
-    >();
+    type AovAcc = {
+      bfVal: number;
+      bfQty: number;
+      soVal: number;
+      soSets: number;
+    };
+    const aovMap = new Map<string, AovAcc>();
+    // Per-customer → per-month AOV accumulator (drill-through: a
+    // customer's monthly average, by SO date).
+    const aovCustMonth = new Map<string, Map<string, AovAcc>>();
     const monthMap = new Map<
       string,
       { bedframeUnits: number; sofaSets: number }
@@ -667,6 +694,20 @@ app.get("/", async (c) => {
           r.ym,
           (soRevMap.get(r.ym) ?? 0) + (Number(r.soTotalSen) || 0),
         );
+        let cm = aovCustMonth.get(name);
+        if (!cm) {
+          cm = new Map();
+          aovCustMonth.set(name, cm);
+        }
+        const me =
+          cm.get(r.ym) ?? { bfVal: 0, bfQty: 0, soVal: 0, soSets: 0 };
+        me.bfVal += bfVal;
+        me.bfQty += bfQty;
+        if (isSofa) {
+          me.soVal += Number(r.soTotalSen) || 0;
+          me.soSets += 1;
+        }
+        cm.set(r.ym, me);
       }
     }
     // This-Month Sales = Σ confirmed-SO total for the current month.
@@ -682,6 +723,50 @@ app.get("/", async (c) => {
       }))
       .sort((a, b) => b.totalSen - a.totalSen)
       .slice(0, 12);
+    // Whole-company AOV (all customers combined).
+    const aovCompany = (() => {
+      let bfVal = 0,
+        bfQty = 0,
+        soVal = 0,
+        soSets = 0;
+      for (const e of aovMap.values()) {
+        bfVal += e.bfVal;
+        bfQty += e.bfQty;
+        soVal += e.soVal;
+        soSets += e.soSets;
+      }
+      return {
+        bedframeAvgSen: bfQty > 0 ? Math.round(bfVal / bfQty) : 0,
+        bedframeUnits: bfQty,
+        sofaAvgSen: soSets > 0 ? Math.round(soVal / soSets) : 0,
+        sofaSets: soSets,
+        totalSen: bfVal + soVal,
+      };
+    })();
+    // Per-customer monthly AOV (only the customers shown in the table).
+    const aovMonthlyByCustomer: Record<
+      string,
+      {
+        month: string;
+        bedframeAvgSen: number;
+        bedframeUnits: number;
+        sofaAvgSen: number;
+        sofaSets: number;
+      }[]
+    > = {};
+    for (const { customerName } of aovByCustomer) {
+      const cm = aovCustMonth.get(customerName);
+      if (!cm) continue;
+      aovMonthlyByCustomer[customerName] = [...cm.entries()]
+        .map(([month, e]) => ({
+          month,
+          bedframeAvgSen: e.bfQty > 0 ? Math.round(e.bfVal / e.bfQty) : 0,
+          bedframeUnits: e.bfQty,
+          sofaAvgSen: e.soSets > 0 ? Math.round(e.soVal / e.soSets) : 0,
+          sofaSets: e.soSets,
+        }))
+        .sort((a, b) => a.month.localeCompare(b.month));
+    }
     const monthlySales = [...monthMap.entries()]
       .map(([month, m]) => ({
         month,
@@ -721,42 +806,91 @@ app.get("/", async (c) => {
     }));
 
     // ---- Top sellers ----
-    // BEDFRAME / ACCESSORY: by product code, ranked by qty sold.
     type SellerRow = {
       productCode: string;
       productName: string;
       qtySold: number;
       valueSen: number;
     };
-    const bfList: SellerRow[] = (catTopRes.results ?? []).map((r) => ({
-      productCode: r.productCode ?? "",
-      productName: r.productName ?? "",
-      qtySold: Number(r.qtySold) || 0,
-      valueSen: Number(r.valueSen) || 0,
+    // BEDFRAME by product code (rows are per product × customer).
+    const bfAgg = new Map<
+      string,
+      { productName: string; qtySold: number; valueSen: number }
+    >();
+    const bfCust = new Map<
+      string,
+      Map<string, { qty: number; valueSen: number }>
+    >();
+    for (const r of catTopRes.results ?? []) {
+      const code = r.productCode ?? "";
+      const q = Number(r.qtySold) || 0;
+      const v = Number(r.valueSen) || 0;
+      const a =
+        bfAgg.get(code) ?? {
+          productName: r.productName ?? "",
+          qtySold: 0,
+          valueSen: 0,
+        };
+      a.qtySold += q;
+      a.valueSen += v;
+      if (!a.productName && r.productName) a.productName = r.productName;
+      bfAgg.set(code, a);
+      let cm = bfCust.get(code);
+      if (!cm) {
+        cm = new Map();
+        bfCust.set(code, cm);
+      }
+      const cust = r.custName || "—";
+      const ce = cm.get(cust) ?? { qty: 0, valueSen: 0 };
+      ce.qty += q;
+      ce.valueSen += v;
+      cm.set(cust, ce);
+    }
+    const bfList: SellerRow[] = [...bfAgg.entries()].map(([code, a]) => ({
+      productCode: code,
+      productName: a.productName,
+      qtySold: a.qtySold,
+      valueSen: a.valueSen,
     }));
     const byQty = (a: { qtySold: number }, b: { qtySold: number }) =>
       b.qtySold - a.qtySold;
     // SOFA: by model = the number prefix of the code (5530-1A(RHF) →
-    // 5530). One SO = one set; the set's value is the whole SO total,
-    // counted once per SO.
-    const sofaBySo = new Map<string, { code: string; total: number }>();
+    // 5530). One SO = one set; value = whole SO total, once per SO.
+    const sofaBySo = new Map<
+      string,
+      { code: string; total: number; cust: string }
+    >();
     for (const r of sofaLineRes.results ?? []) {
       if (!r.soId || sofaBySo.has(r.soId)) continue;
       sofaBySo.set(r.soId, {
         code: r.productCode ?? "",
         total: Number(r.soTotalSen) || 0,
+        cust: r.custName || "—",
       });
     }
     const sofaModelMap = new Map<
       string,
       { setsSold: number; valueSen: number }
     >();
-    for (const { code, total } of sofaBySo.values()) {
+    const sofaCust = new Map<
+      string,
+      Map<string, { sets: number; valueSen: number }>
+    >();
+    for (const { code, total, cust } of sofaBySo.values()) {
       const model = (code.split("-")[0] || code).trim().toUpperCase() || "—";
       const e = sofaModelMap.get(model) ?? { setsSold: 0, valueSen: 0 };
       e.setsSold += 1;
       e.valueSen += total;
       sofaModelMap.set(model, e);
+      let cm = sofaCust.get(model);
+      if (!cm) {
+        cm = new Map();
+        sofaCust.set(model, cm);
+      }
+      const ce = cm.get(cust) ?? { sets: 0, valueSen: 0 };
+      ce.sets += 1;
+      ce.valueSen += total;
+      cm.set(cust, ce);
     }
     const topSellers = {
       BEDFRAME: bfList.sort(byQty).slice(0, 5),
@@ -769,22 +903,99 @@ app.get("/", async (c) => {
         .sort((a, b) => b.setsSold - a.setsSold)
         .slice(0, 5),
     };
+    // Customer breakdown for the Top-Seller click-through (shown keys
+    // only — keeps the payload small).
+    const topSellersByCustomer = {
+      BEDFRAME: Object.fromEntries(
+        topSellers.BEDFRAME.map((p) => [
+          p.productCode,
+          [...(bfCust.get(p.productCode)?.entries() ?? [])]
+            .map(([customer, v]) => ({
+              customer,
+              qty: v.qty,
+              valueSen: v.valueSen,
+            }))
+            .sort((a, b) => b.qty - a.qty),
+        ]),
+      ) as Record<
+        string,
+        { customer: string; qty: number; valueSen: number }[]
+      >,
+      SOFA: Object.fromEntries(
+        topSellers.SOFA.map((p) => [
+          p.model,
+          [...(sofaCust.get(p.model)?.entries() ?? [])]
+            .map(([customer, v]) => ({
+              customer,
+              sets: v.sets,
+              valueSen: v.valueSen,
+            }))
+            .sort((a, b) => b.sets - a.sets),
+        ]),
+      ) as Record<
+        string,
+        { customer: string; sets: number; valueSen: number }[]
+      >,
+    };
+    // Which customers make up each month's Bedframe units / Sofa sets.
+    const monthCustMap = new Map<
+      string,
+      Map<string, { bedframeUnits: number; sofaSets: number }>
+    >();
+    for (const r of soAggRes.results ?? []) {
+      if (!r.ym) continue;
+      let cm = monthCustMap.get(r.ym);
+      if (!cm) {
+        cm = new Map();
+        monthCustMap.set(r.ym, cm);
+      }
+      const cust = r.custName || "—";
+      const ce =
+        cm.get(cust) ?? { bedframeUnits: 0, sofaSets: 0 };
+      ce.bedframeUnits += Number(r.bfQty) || 0;
+      if (Number(r.hasSofa) === 1) ce.sofaSets += 1;
+      cm.set(cust, ce);
+    }
+    const monthlySalesByCustomer: Record<
+      string,
+      { customer: string; bedframeUnits: number; sofaSets: number }[]
+    > = {};
+    for (const [month, cm] of monthCustMap.entries()) {
+      monthlySalesByCustomer[month] = [...cm.entries()]
+        .map(([customer, v]) => ({ customer, ...v }))
+        .filter((v) => v.bedframeUnits > 0 || v.sofaSets > 0)
+        .sort(
+          (a, b) =>
+            b.bedframeUnits + b.sofaSets - (a.bedframeUnits + a.sofaSets),
+        );
+    }
 
-    // ---- Top fabrics + monthly fabric meters (consumption basis) ----
-    const topFabrics = (fabTopRes.results ?? [])
-      .map((r) => ({
-        fabCode: r.fabCode ?? "—",
-        fabName: r.fabName ?? "",
-        meters: Number(r.meters) || 0,
-        costSen: Number(r.costSen) || 0,
-      }))
-      .filter((f) => f.meters > 0)
-      .slice(0, 8);
-    const fabricMonthly = (fabMonthRes.results ?? [])
-      .filter((r) => r.ym)
-      .map((r) => ({ month: r.ym as string, meters: Number(r.meters) || 0 }))
-      .sort((a, b) => a.month.localeCompare(b.month))
-      .slice(-12);
+    // ---- Fabric module — split Bedframe vs Sofa (consumption) ----
+    const fabTopByCat = (cat: string) =>
+      (fabTopRes.results ?? [])
+        .filter((r) => (r.cat ?? "").toUpperCase() === cat)
+        .map((r) => ({
+          fabCode: r.fabCode ?? "—",
+          fabName: r.fabName ?? "",
+          meters: Number(r.meters) || 0,
+          costSen: Number(r.costSen) || 0,
+        }))
+        .filter((f) => f.meters > 0)
+        .sort((a, b) => b.meters - a.meters)
+        .slice(0, 8);
+    const fabMonthByCat = (cat: string) =>
+      (fabMonthRes.results ?? [])
+        .filter((r) => r.ym && (r.cat ?? "").toUpperCase() === cat)
+        .map((r) => ({
+          month: r.ym as string,
+          meters: Number(r.meters) || 0,
+        }))
+        .sort((a, b) => a.month.localeCompare(b.month))
+        .slice(-12);
+    const fabric = {
+      BEDFRAME: { top: fabTopByCat("BEDFRAME"), monthly: fabMonthByCat("BEDFRAME") },
+      SOFA: { top: fabTopByCat("SOFA"), monthly: fabMonthByCat("SOFA") },
+    };
 
     const headByDept = (headRes.results ?? []).map((r) => ({
       dept: r.dept || "—",
@@ -820,11 +1031,14 @@ app.get("/", async (c) => {
         exclBedframeSofa: avgPerMeter(fabExclRes),
       },
       aovByCustomer,
+      aovCompany,
+      aovMonthlyByCustomer,
       topSellers,
-      topFabrics,
+      topSellersByCustomer,
+      fabric,
       monthlySales,
+      monthlySalesByCustomer,
       monthlyRevenue,
-      fabricMonthly,
       employee: {
         activeHeadcount: headByDept.reduce((s, d) => s + d.count, 0),
         byDept: headByDept.sort((a, b) => b.count - a.count),

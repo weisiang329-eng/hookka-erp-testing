@@ -57,15 +57,19 @@ type Overview = {
   aovByCustomer?: {
     customerName: string;
     bedframeAvgSen: number;
-    bedframeOrders: number;
+    bedframeUnits: number;
     sofaAvgSen: number;
-    sofaOrders: number;
+    sofaSets: number;
     totalSen: number;
   }[];
-  topSellers?: Record<
-    string,
-    { productCode: string; productName: string; qtySold: number; valueSen: number }[]
-  >;
+  topSellers?: {
+    BEDFRAME: { productCode: string; productName: string; qtySold: number; valueSen: number }[];
+    SOFA: { model: string; setsSold: number; valueSen: number }[];
+    ACCESSORY: { productCode: string; productName: string; qtySold: number; valueSen: number }[];
+  };
+  topFabrics?: { fabCode: string; fabName: string; meters: number; costSen: number }[];
+  monthlySales?: { month: string; bedframeUnits: number; sofaSets: number }[];
+  fabricMonthly?: { month: string; meters: number }[];
   employee?: {
     activeHeadcount: number;
     byDept: { dept: string; count: number }[];
@@ -214,6 +218,11 @@ export default function DashboardPage() {
   const revMax = useMemo(
     () => Math.max(1, ...((revRaw?.data ?? []).map((r) => r.revenueSen))),
     [revRaw],
+  );
+  const fabMonthMax = useMemo(
+    () =>
+      Math.max(1, ...((ov.fabricMonthly ?? []).map((m) => m.meters))),
+    [ov.fabricMonthly],
   );
 
   if (loading) {
@@ -468,7 +477,7 @@ export default function DashboardPage() {
       <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm">
-            Avg Order Value by Customer — Bedframe vs Sofa
+            Avg Order Value by Customer — Bedframe (per unit) vs Sofa (per set)
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -479,9 +488,9 @@ export default function DashboardPage() {
                 <th className="py-1.5 font-medium text-right">
                   Bedframe AOV
                 </th>
-                <th className="py-1.5 font-medium text-right">Orders</th>
+                <th className="py-1.5 font-medium text-right">Units</th>
                 <th className="py-1.5 font-medium text-right">Sofa AOV</th>
-                <th className="py-1.5 font-medium text-right">Orders</th>
+                <th className="py-1.5 font-medium text-right">Sets</th>
               </tr>
             </thead>
             <tbody>
@@ -502,63 +511,258 @@ export default function DashboardPage() {
                 >
                   <td className="py-1.5 text-[#1F1D1B]">{r.customerName}</td>
                   <td className="py-1.5 text-right tabular-nums">
-                    {r.bedframeOrders ? rm(r.bedframeAvgSen) : "—"}
+                    {r.bedframeUnits ? rm(r.bedframeAvgSen) : "—"}
                   </td>
                   <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
-                    {r.bedframeOrders || "—"}
+                    {r.bedframeUnits || "—"}
                   </td>
                   <td className="py-1.5 text-right tabular-nums">
-                    {r.sofaOrders ? rm(r.sofaAvgSen) : "—"}
+                    {r.sofaSets ? rm(r.sofaAvgSen) : "—"}
                   </td>
                   <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
-                    {r.sofaOrders || "—"}
+                    {r.sofaSets || "—"}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="text-[10px] text-[#9CA3AF] mt-2">
+            Bedframe AOV = total bedframe value ÷ total bedframe units. Sofa
+            AOV = total Sales-Order value ÷ number of sofa sets (1 SO = 1
+            set).
+          </p>
         </CardContent>
       </Card>
 
-      {/* Top sellers by category */}
-      <div>
-        <SectionHeader label="Top Sellers by Category" />
-        <div className="grid gap-4 grid-cols-1 lg:grid-cols-3">
-          {(["BEDFRAME", "SOFA", "ACCESSORY"] as const).map((cat) => (
-            <Card
-              key={cat}
-              className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-            >
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-sm">
-                  <ClipboardCheck className="h-4 w-4 text-[#6B5C32]" /> {cat}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-1.5">
-                {(ov.topSellers?.[cat] ?? []).length === 0 && (
-                  <p className="text-xs text-[#9CA3AF]">No sales.</p>
-                )}
-                {(ov.topSellers?.[cat] ?? []).map((p) => (
-                  <div
-                    key={p.productCode}
-                    className="flex items-center justify-between text-sm"
-                  >
-                    <span className="text-[#5A5550] truncate pr-2">
-                      <span className="font-medium text-[#1F1D1B]">
-                        {p.productCode}
-                      </span>{" "}
-                      <span className="text-xs text-[#9CA3AF]">
-                        ×{p.qtySold}
-                      </span>
+      {/* Monthly Bedframe units & Sofa sets + Fabric meters */}
+      <div className="grid gap-6 grid-cols-1 lg:grid-cols-2">
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">
+              Monthly — Bedframe Units &amp; Sofa Sets
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(ov.monthlySales ?? []).length === 0 ? (
+              <p className="text-xs text-[#9CA3AF]">No sales data.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                    <th className="py-1.5 font-medium">Month</th>
+                    <th className="py-1.5 font-medium text-right">
+                      Bedframe units
+                    </th>
+                    <th className="py-1.5 font-medium text-right">
+                      Sofa sets
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(ov.monthlySales ?? []).map((m) => (
+                    <tr
+                      key={m.month}
+                      className="border-b border-[#F0ECE6]"
+                    >
+                      <td className="py-1.5 text-[#5A5550] tabular-nums">
+                        {m.month}
+                      </td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                        {m.bedframeUnits.toLocaleString()}
+                      </td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                        {m.sofaSets.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p className="text-[10px] text-[#9CA3AF] mt-2">
+              By SO date. Bedframe = pieces sold; Sofa = sets (1 SO = 1
+              set). Confirmed orders only.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Scissors className="h-4 w-4 text-[#6B5C32]" /> Fabric Usage
+              (meters) — last 12 months
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(ov.fabricMonthly ?? []).length === 0 ? (
+              <p className="text-xs text-[#9CA3AF]">No fabric issued.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {(ov.fabricMonthly ?? []).map((m) => (
+                  <div key={m.month} className="flex items-center gap-2">
+                    <span className="text-[11px] text-[#9CA3AF] w-16 shrink-0 tabular-nums">
+                      {m.month}
                     </span>
-                    <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                      {rm(p.valueSen)}
+                    <div className="flex-1 bg-[#F5F2ED] rounded h-4 overflow-hidden">
+                      <div
+                        className="h-full bg-[#6B5C32]/70 rounded"
+                        style={{
+                          width: `${Math.max(2, (m.meters / fabMonthMax) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="text-[11px] font-semibold text-[#1F1D1B] w-20 text-right tabular-nums">
+                      {Math.round(m.meters).toLocaleString()} m
                     </span>
                   </div>
                 ))}
-              </CardContent>
-            </Card>
-          ))}
+              </div>
+            )}
+            <p className="text-[10px] text-[#9CA3AF] mt-2">
+              Fabric actually issued to production (RM_ISSUE).
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Top sellers */}
+      <div>
+        <SectionHeader label="Top Sellers" />
+        <div className="grid gap-4 grid-cols-1 lg:grid-cols-2 xl:grid-cols-4">
+          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <ClipboardCheck className="h-4 w-4 text-[#6B5C32]" /> Bedframe
+                <span className="text-[10px] text-[#9CA3AF] font-normal">
+                  by units
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1.5">
+              {(ov.topSellers?.BEDFRAME ?? []).length === 0 && (
+                <p className="text-xs text-[#9CA3AF]">No sales.</p>
+              )}
+              {(ov.topSellers?.BEDFRAME ?? []).map((p) => (
+                <div
+                  key={p.productCode}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-[#5A5550] truncate pr-2">
+                    <span className="font-medium text-[#1F1D1B]">
+                      {p.productCode}
+                    </span>{" "}
+                    <span className="text-xs text-[#9CA3AF]">
+                      ×{p.qtySold.toLocaleString()}
+                    </span>
+                  </span>
+                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                    {rm(p.valueSen)}
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <ClipboardCheck className="h-4 w-4 text-[#6B5C32]" /> Sofa
+                <span className="text-[10px] text-[#9CA3AF] font-normal">
+                  by model / sets
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1.5">
+              {(ov.topSellers?.SOFA ?? []).length === 0 && (
+                <p className="text-xs text-[#9CA3AF]">No sales.</p>
+              )}
+              {(ov.topSellers?.SOFA ?? []).map((p) => (
+                <div
+                  key={p.model}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-[#5A5550] truncate pr-2">
+                    <span className="font-medium text-[#1F1D1B]">
+                      {p.model}
+                    </span>{" "}
+                    <span className="text-xs text-[#9CA3AF]">
+                      ×{p.setsSold.toLocaleString()} sets
+                    </span>
+                  </span>
+                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                    {rm(p.valueSen)}
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <ClipboardCheck className="h-4 w-4 text-[#6B5C32]" /> Accessory
+                <span className="text-[10px] text-[#9CA3AF] font-normal">
+                  by units
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1.5">
+              {(ov.topSellers?.ACCESSORY ?? []).length === 0 && (
+                <p className="text-xs text-[#9CA3AF]">No sales.</p>
+              )}
+              {(ov.topSellers?.ACCESSORY ?? []).map((p) => (
+                <div
+                  key={p.productCode}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-[#5A5550] truncate pr-2">
+                    <span className="font-medium text-[#1F1D1B]">
+                      {p.productCode}
+                    </span>{" "}
+                    <span className="text-xs text-[#9CA3AF]">
+                      ×{p.qtySold.toLocaleString()}
+                    </span>
+                  </span>
+                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                    {rm(p.valueSen)}
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Scissors className="h-4 w-4 text-[#6B5C32]" /> Fabric
+                <span className="text-[10px] text-[#9CA3AF] font-normal">
+                  by meters used
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1.5">
+              {(ov.topFabrics ?? []).length === 0 && (
+                <p className="text-xs text-[#9CA3AF]">No fabric issued.</p>
+              )}
+              {(ov.topFabrics ?? []).map((f) => (
+                <div
+                  key={f.fabCode}
+                  className="flex items-center justify-between text-sm"
+                >
+                  <span className="text-[#5A5550] truncate pr-2">
+                    <span className="font-medium text-[#1F1D1B]">
+                      {f.fabCode}
+                    </span>{" "}
+                    <span className="text-xs text-[#9CA3AF]">
+                      {Math.round(f.meters).toLocaleString()} m
+                    </span>
+                  </span>
+                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                    {rm(f.costSen)}
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>

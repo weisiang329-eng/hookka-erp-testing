@@ -34,6 +34,49 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-012 — Dashboard Top Sellers all ×0 / RM 0.00 (unquoted SQL aggregate aliases) + AOV/Top-Seller rebuilt per Wei Siang's basis
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** dashboard, infrastructure
+
+**Symptom:** Top Sellers cards listed product codes but every row
+showed `×0` and `RM 0.00`. (Same class silently zeroed Purchasing
+"Top suppliers by spend".)
+
+**Root cause:** The SupabaseAdapter (`supabase-compat.ts`) rewrites
+camelCase identifiers to snake_case via `column-rename-map.json`, and
+`db-pg.ts` maps result columns back snake→camel. An alias that is NOT
+a real DB column (`qtySold`, `valueSen`, `spendSen`) is absent from
+the rename map, so it is left as-is and Postgres folds the unquoted
+alias to lowercase (`qtysold`). The result-key mapper can't reproduce
+`qtySold`, so `r.qtySold` reads back `undefined` → `Number(undefined)
+|| 0` → **0**. Aliases that happen to equal a real column
+(`totalSen`→`total_sen`) round-trip fine — which is why AOV worked but
+Top Sellers didn't. Proven-correct pattern already in the codebase:
+`dashboard-revenue.ts` double-quotes its alias (`AS "revenueSen"`).
+
+**Fix:** Double-quote every non-column alias in
+[dashboard-overview.ts](../src/api/routes/dashboard-overview.ts) so
+Postgres preserves the exact casing the code reads (Top Sellers,
+`spendSen`, and all new queries). While in there, the AOV / Top-Seller
+**definitions** were rebuilt per Wei Siang:
+- Bedframe AOV = Σ bedframe line value ÷ Σ bedframe **units** (sold
+  per piece); table now shows Units, not SO count.
+- Sofa AOV = Σ whole-SO total ÷ number of **sofa sets** (1 SO = 1
+  set; set price includes pillows/accessories).
+- Top Sellers: Bedframe & Accessory by product code ranked by units;
+  Sofa by **model** (number prefix of the code, 5530-1A(RHF)→5530)
+  ranked by sets sold; new **Fabric** card by meters consumed.
+- New cards: Monthly Bedframe units & Sofa sets (by SO date); Fabric
+  Usage meters/month (RM_ISSUE), last 12 months. Overview cache v4→v5.
+
+**Verified (read-only, prod data replica before deploy):** Houzs
+Century bedframe AOV RM 593.97 over 509 units, sofa AOV RM 2,304.30
+over 71 sets; sofa models 5530 ×33, 5531 ×32, 5537 ×16; bedframe
+1013-(Q) ×128. `tsc` clean; `npm test` 185/185.
+
+---
+
 ## BUG-2026-05-16-011 — Dashboard "Pending Delivery" ≠ Delivery page "Pending Delivery" tab (RM 25,218 vs RM 50,793)
 
 **Status:** 🟢 Fixed (2026-05-16)

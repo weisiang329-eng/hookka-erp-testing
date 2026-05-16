@@ -23,11 +23,18 @@ function fmtISO(d: Date): string {
   return d.toISOString().split("T")[0];
 }
 
+// Mirror of src/pages/delivery/index.tsx isHbOnlySpecial — used so the
+// dashboard's "Pending Delivery" uses the SAME upholstery-cards-done gate
+// the Delivery page's Pending Delivery tab uses (same number on both).
+function isHbOnlySpecial(s: string | null | undefined): boolean {
+  return !!s && s.toLowerCase().includes("headboard only");
+}
+
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v2`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v3`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -279,24 +286,41 @@ app.get("/", async (c) => {
     }
 
     // ---- Not-yet-delivered pipeline ----
-    // Mirrors the Delivery page split so the dashboard "Pending Delivery"
-    // card == that page's Pending Delivery + Pending Dispatch (the
-    // ready-but-not-delivered figure), not the empty DRAFT/LOADED bucket.
-    // Pending Delivery = production-complete POs not on a DO; Planning =
-    // POs still in production not on a DO; Pending Dispatch = DRAFT DOs.
-    const [poValMap, doValMap, poRowsRes, linkedRes, doRowsRes] =
+    // EXACT mirror of the Delivery page's Planning / Pending Delivery
+    // tabs (pickRelevantUphCards + readyPOs gate) so the dashboard
+    // "Pending Delivery" card == that page's Pending Delivery tab to the
+    // cent. Pending Delivery = POs whose relevant UPHOLSTERY job cards
+    // are ALL done and not on a DO; Planning = same universe but uph not
+    // all done; Pending Dispatch = DRAFT DOs. (This is the upholstery-
+    // gated shop view — it is NOT the same universe as Sales Outstanding,
+    // which also covers POs with no upholstery step, so the three need
+    // not sum to Outstanding.)
+    const [poValMap, doValMap, poRowsRes, jcRowsRes, linkedRes, doRowsRes] =
       await Promise.all([
         loadPoValueMap(db, orgId),
         loadDoValueMap(db, orgId),
         db
           .prepare(
-            "SELECT id, status, consignmentOrderId FROM production_orders WHERE orgId = ?",
+            "SELECT id, status, consignmentOrderId, itemCategory, specialOrder FROM production_orders WHERE orgId = ?",
           )
           .bind(orgId)
           .all<{
             id: string;
             status: string;
             consignmentOrderId: string | null;
+            itemCategory: string | null;
+            specialOrder: string | null;
+          }>(),
+        db
+          .prepare(
+            "SELECT productionOrderId, departmentCode, status, wipType FROM job_cards WHERE orgId = ?",
+          )
+          .bind(orgId)
+          .all<{
+            productionOrderId: string;
+            departmentCode: string | null;
+            status: string;
+            wipType: string | null;
           }>(),
         db
           .prepare(
@@ -314,15 +338,41 @@ app.get("/", async (c) => {
           .all<{ id: string; status: string }>(),
       ]);
     const onDO = new Set((linkedRes.results ?? []).map((r) => r.poId));
+    const jcByPo = new Map<
+      string,
+      { departmentCode: string | null; status: string; wipType: string | null }[]
+    >();
+    for (const j of jcRowsRes.results ?? []) {
+      const arr = jcByPo.get(j.productionOrderId) ?? [];
+      arr.push({
+        departmentCode: j.departmentCode,
+        status: j.status,
+        wipType: j.wipType,
+      });
+      jcByPo.set(j.productionOrderId, arr);
+    }
+    const doneSet = new Set(["COMPLETED", "TRANSFERRED"]);
     let planningSen = 0;
     let pendingDeliverySen = 0;
     for (const p of poRowsRes.results ?? []) {
       if (p.consignmentOrderId) continue;
       if (p.status === "CANCELLED") continue;
-      if (onDO.has(p.id)) continue;
+      const all = jcByPo.get(p.id) ?? [];
+      let uph = all.filter((j) => j.departmentCode === "UPHOLSTERY");
+      if (
+        (p.itemCategory ?? "").toUpperCase() === "BEDFRAME" &&
+        isHbOnlySpecial(p.specialOrder)
+      ) {
+        uph = uph.filter((j) => (j.wipType ?? "").toUpperCase() !== "DIVAN");
+      }
+      if (uph.length === 0) continue; // Delivery page shows neither tab for these
       const v = poValMap.get(p.id) ?? 0;
-      if (p.status === "COMPLETED") pendingDeliverySen += v;
-      else planningSen += v;
+      const allDone = uph.every((j) => doneSet.has(j.status));
+      if (allDone) {
+        if (!onDO.has(p.id)) pendingDeliverySen += v; // == Pending Delivery tab
+      } else if (p.status !== "COMPLETED") {
+        planningSen += v; // == Planning tab
+      }
     }
     let pendingDispatchSen = 0;
     for (const d of doRowsRes.results ?? []) {

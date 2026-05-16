@@ -209,7 +209,7 @@ export default function DashboardPage() {
           <KPICard
             title="Pending Delivery"
             value={rm(pendingDeliveryValueSen)}
-            subtitle="On a DO, not yet delivered"
+            subtitle="Made (uph done), not yet on a DO + pending dispatch"
             icon={Package}
           />
         </div>

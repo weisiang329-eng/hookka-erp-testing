@@ -890,13 +890,18 @@ export default function PlanningPage() {
   // the dept object for internal % math but no longer shown on the
   // card title (operator asked to drop it from the display).
   const dailyLoadingByDept = useMemo(() => {
-    // Past N working days (Mon-Sat, skip Sundays) — most-recent first
-    // in iteration but stored chronologically (oldest → today) so the
-    // chart reads left-to-right naturally.
+    // Wei Siang 2026-05-16 cut-off rule: TODAY belongs to the PLAN
+    // side, not Past Production. Today's completion isn't recorded
+    // until the floor reports at end of day, so a "today" bar in the
+    // Past section is permanently 0% and misleading. Instead:
+    //   Past Production = N working days ending YESTERDAY
+    //   Planned Capacity = TODAY + next (M-1) working days
+    // So today's bar shows today's dueDate-scheduled plan.
     const pastDays: string[] = [];
     {
       const cursor = new Date();
       cursor.setHours(0, 0, 0, 0);
+      cursor.setDate(cursor.getDate() - 1); // start at yesterday
       while (pastDays.length < LOADING_CHART_PAST_DAYS) {
         if (cursor.getDay() !== 0) {
           pastDays.unshift(fmtISO(cursor));
@@ -906,12 +911,12 @@ export default function PlanningPage() {
     }
     const pastDayIndex = new Set(pastDays);
 
-    // Future M working days starting tomorrow.
+    // Future M working days starting TODAY (today included — its bar
+    // is the plan, not the not-yet-recorded production).
     const futureDays: string[] = [];
     {
       const cursor = new Date();
       cursor.setHours(0, 0, 0, 0);
-      cursor.setDate(cursor.getDate() + 1);
       while (futureDays.length < LOADING_CHART_FUTURE_DAYS) {
         if (cursor.getDay() !== 0) {
           futureDays.push(fmtISO(cursor));

@@ -293,6 +293,36 @@ function genInvoiceId(): string {
   return `inv-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// Wei Siang 2026-05-16: resolve EVERY sales order a DO touches.
+// delivery_orders.salesOrderId is only set for single-SO DOs (POST
+// leaves it NULL when the DO spans multiple SOs — see lines ~509-521).
+// Multi-SO DOs were therefore never cascading SO status at all. Walk
+// delivery_order_items → production_orders.salesOrderId to catch the
+// multi-SO case, union with the legacy single-SO FK, dedupe.
+async function resolveDoSalesOrderIds(
+  db: D1Database,
+  doId: string,
+  existingSalesOrderId: string | null,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  if (existingSalesOrderId) ids.add(existingSalesOrderId);
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT po.salesOrderId AS soId
+         FROM delivery_order_items di
+         JOIN production_orders po ON po.id = di.productionOrderId
+        WHERE di.deliveryOrderId = ?
+          AND po.salesOrderId IS NOT NULL
+          AND po.salesOrderId != ''`,
+    )
+    .bind(doId)
+    .all<{ soId: string | null }>();
+  for (const r of rows.results ?? []) {
+    if (r.soId) ids.add(r.soId);
+  }
+  return Array.from(ids);
+}
+
 function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -1533,6 +1563,52 @@ app.put("/:id", async (c) => {
     }
 
     // -------------------------------------------------------------------
+    // Wei Siang 2026-05-16: SO status cascade on dispatch.
+    // DRAFT → LOADED = goods left the warehouse = "dispatched". The SO
+    // is no longer Outstanding (operator's definition: dispatched =
+    // sent out). Flip every READY_TO_SHIP SO this DO touches →
+    // SHIPPED. Multi-SO DOs handled via resolveDoSalesOrderIds.
+    // Guard: only READY_TO_SHIP advances (matches sales-orders.ts
+    // VALID_TRANSITIONS READY_TO_SHIP → SHIPPED); SOs already
+    // DELIVERED/INVOICED/CLOSED or still IN_PRODUCTION are left alone.
+    // -------------------------------------------------------------------
+    if (stampedOnDispatch) {
+      const soIds = await resolveDoSalesOrderIds(
+        c.var.DB,
+        id,
+        existing.salesOrderId,
+      );
+      for (const soId of soIds) {
+        const soRow = await c.var.DB.prepare(
+          "SELECT id, status FROM sales_orders WHERE id = ?",
+        )
+          .bind(soId)
+          .first<{ id: string; status: string }>();
+        if (soRow && soRow.status === "READY_TO_SHIP") {
+          statements.push(
+            c.var.DB.prepare(
+              "UPDATE sales_orders SET status = 'SHIPPED', updated_at = ? WHERE id = ?",
+            ).bind(now, soRow.id),
+            c.var.DB.prepare(
+              `INSERT INTO so_status_changes
+                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              genStatusChangeId(),
+              soRow.id,
+              soRow.status,
+              "SHIPPED",
+              "System",
+              now,
+              "DO dispatched",
+              JSON.stringify([`DO ${existing.doNo} dispatched (LOADED)`]),
+            ),
+          );
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------
     // Reversal on LOADED → DRAFT transition (phase-4 finish, 2026-04-26):
     // unstamp fg_units that were marked LOADED + tied to this DO when the
     // operator reopens the DO for editing. Without this, units stay
@@ -1601,6 +1677,50 @@ app.put("/:id", async (c) => {
       // is no longer needed and would now drive stockQty positive past
       // its true balance. fg_units rollback (the unstamp loop above)
       // remains intact (formerly BUG-2026-04-27-021 reverse).
+    }
+
+    // -------------------------------------------------------------------
+    // Wei Siang 2026-05-16: SO status reversal on un-dispatch.
+    // LOADED → DRAFT means the operator pulled the DO back (goods
+    // didn't actually leave). Any SO this DO bumped to SHIPPED must
+    // drop back to READY_TO_SHIP so it re-enters Outstanding. Only
+    // reverse SHIPPED — an SO already DELIVERED/INVOICED/CLOSED by a
+    // different DO is left untouched.
+    // -------------------------------------------------------------------
+    if (revertedToDraft) {
+      const soIds = await resolveDoSalesOrderIds(
+        c.var.DB,
+        id,
+        existing.salesOrderId,
+      );
+      for (const soId of soIds) {
+        const soRow = await c.var.DB.prepare(
+          "SELECT id, status FROM sales_orders WHERE id = ?",
+        )
+          .bind(soId)
+          .first<{ id: string; status: string }>();
+        if (soRow && soRow.status === "SHIPPED") {
+          statements.push(
+            c.var.DB.prepare(
+              "UPDATE sales_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+            ).bind(now, soRow.id),
+            c.var.DB.prepare(
+              `INSERT INTO so_status_changes
+                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              genStatusChangeId(),
+              soRow.id,
+              soRow.status,
+              "READY_TO_SHIP",
+              "System",
+              now,
+              "DO reverted to DRAFT",
+              JSON.stringify([`DO ${existing.doNo} un-dispatched (LOADED→DRAFT)`]),
+            ),
+          );
+        }
+      }
     }
 
     // -------------------------------------------------------------------

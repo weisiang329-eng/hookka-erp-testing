@@ -49,16 +49,18 @@ type SOStatusChangeEntry = {
   autoActions: string[];
 };
 
-// `OUTSTANDING` is a synthetic option (not a stored status). It groups
-// every SO that's been confirmed but isn't yet fully off the sales desk
-// — i.e. customer is still owed goods OR an invoice but the order isn't
-// closed/cancelled/on hold. Filter logic in filteredOrders.
+// `OUTSTANDING` is a synthetic option (not a stored status).
+// Wei Siang 2026-05-16: Outstanding = goods NOT yet out the door.
+// "Pending dispatch" (READY_TO_SHIP) still counts; the moment a DO
+// dispatches the SO cascades to SHIPPED (delivery-orders.ts) and it
+// drops out of Outstanding — dispatched = sent out = not outstanding.
+// SHIPPED / DELIVERED / INVOICED / CLOSED are all excluded. ON_HOLD
+// stays in because the order is still owed, just paused.
 const OUTSTANDING_STATUSES = new Set([
   "CONFIRMED",
   "IN_PRODUCTION",
   "READY_TO_SHIP",
-  "SHIPPED",
-  "INVOICED",
+  "ON_HOLD",
 ]);
 // `CONFIRMED` is also a synthetic group — Wei Siang's "CS" (Confirmed
 // Sales) reads as "every order I've actually sold", which in practice means
@@ -159,15 +161,14 @@ export default function SalesPage() {
     statuses.reduce((n, s) => n + (statsByStatus[s] ?? 0), 0);
   const draftCount = statsByStatus.DRAFT ?? 0;
   const confirmedCount = Math.max(0, statsTotal - draftCount);
-  // Outstanding = post-DRAFT, pre-CLOSED, not CANCELLED. Everything that
-  // still has work / money outstanding to the business.
+  // Wei Siang 2026-05-16: Outstanding = goods not yet dispatched.
+  // Must match OUTSTANDING_STATUSES exactly (the count card and the
+  // filter were previously two different sets — fixed). Dispatched
+  // (SHIPPED) onward is excluded; ON_HOLD stays (still owed, paused).
   const outstandingCount = sumStatuses([
     "CONFIRMED",
     "IN_PRODUCTION",
     "READY_TO_SHIP",
-    "SHIPPED",
-    "DELIVERED",
-    "INVOICED",
     "ON_HOLD",
   ]);
   // Pending Delivery = goods ready/in-transit but not yet marked DELIVERED.

@@ -34,6 +34,46 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-011 — Dashboard "Pending Delivery" ≠ Delivery page "Pending Delivery" tab (RM 25,218 vs RM 50,793)
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** dashboard, delivery-orders
+
+**Symptom:** Operator put the dashboard and the Delivery page side by
+side: Delivery page "Pending Delivery" tab = 80 POs / **RM 50,793**,
+dashboard "Pending Delivery" card = **RM 25,217.50**. Asked twice
+"为什么不一样" — these must be the same number.
+
+**Root cause:** Two different implementations of the same "production
+done, not yet on a DO" gate. The Delivery page filters
+`/api/production-orders?fields=minimal&include=jobCards` (the API
+*shapes* each PO's jobCards array) through `pickRelevantUphCards`
+(UPHOLSTERY cards, HB-only DIVAN dropped) + `linkedPOIds`. The
+dashboard's server route `dashboard-overview.ts` re-derived the gate
+off the **raw `job_cards` table**, which is shaped differently than
+the production-orders feed → a different PO set → RM 25,218. Two
+sources of truth that drifted.
+
+**Fix:** One shared gate — `src/lib/delivery-pipeline.ts` exporting
+`isHbOnlySpecial`, `pickRelevantUphCards`, `poInPlanning`,
+`poReadyForDelivery`, `buildLinkedPOIds`. The dashboard
+([src/pages/dashboard/index.tsx](../src/pages/dashboard/index.tsx))
+now computes Pending Delivery client-side from the SAME payloads the
+Delivery page reads (production-orders + delivery-orders + po-values),
+through that shared util — card == tab, by construction. The wrong
+server-side pipeline was deleted from
+[dashboard-overview.ts](../src/api/routes/dashboard-overview.ts)
+(overview cache key v3→v4). `delivery/index.tsx` now imports the
+shared predicates instead of its own copies (DRY — they can never
+drift again).
+
+**Verified on prod (read-only):** ran the shared-util logic against
+live prod data in the browser — 80 POs / **RM 50,793**, identical to
+the Delivery page's Pending Delivery tab. `tsc` clean; `npm test`
+185/185.
+
+---
+
 ## BUG-2026-05-16-010 — Dashboard rebuilt (fake KPIs) + /api/dashboard/overview 500 (workers has no org_id)
 
 **Status:** 🟢 Fixed (2026-05-16)

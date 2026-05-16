@@ -1377,6 +1377,141 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-dedupe-delivered
+//
+// One-shot cleanup (Wei Siang 2026-05-16): a production order can only be
+// delivered once. Where the SAME production order's items sit on >1
+// non-cancelled DO (the historical duplicates — root cause now blocked at
+// POST), keep the items on the EARLIEST DO and DELETE the duplicate
+// delivery_order_items rows from the later DO(s). Deliberately does NOT
+// touch cost_ledger / fg_batches / fg_units / invoices — per operator,
+// the cost step isn't in use yet; this only removes the duplicate
+// delivery lines so Delivered value (derived from the remaining items)
+// recomputes correctly and reconciles.
+//
+// Only the duplicate PO's lines are removed — a mixed DO keeps its other
+// (legitimate) orders' lines. Idempotent (re-run: each PO on 1 DO → 0).
+//   ?dry=1 → preview only, no writes.
+// Temporary migration endpoint; delete once the book is clean.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-dedupe-delivered", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+
+  const [doRes, itemRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT id, doNo, deliveredAt, dispatchedAt, created_at FROM delivery_orders WHERE orgId = ? AND status != 'CANCELLED'",
+    )
+      .bind(orgId)
+      .all<{
+        id: string;
+        doNo: string;
+        deliveredAt: string | null;
+        dispatchedAt: string | null;
+        created_at: string | null;
+      }>(),
+    c.var.DB.prepare(
+      "SELECT id, deliveryOrderId, productionOrderId FROM delivery_order_items WHERE orgId = ? AND productionOrderId IS NOT NULL AND productionOrderId != ''",
+    )
+      .bind(orgId)
+      .all<{
+        id: string;
+        deliveryOrderId: string;
+        productionOrderId: string;
+      }>(),
+  ]);
+
+  const doDate = new Map<string, string>();
+  const doNo = new Map<string, string>();
+  for (const d of doRes.results ?? []) {
+    doDate.set(d.id, d.deliveredAt || d.dispatchedAt || d.created_at || "");
+    doNo.set(d.id, d.doNo);
+  }
+  const allItems = (itemRes.results ?? []).filter((i) =>
+    doDate.has(i.deliveryOrderId),
+  );
+
+  // Total live item count per DO (to flag any DO emptied by the cleanup).
+  const doItemCount = new Map<string, number>();
+  for (const it of allItems)
+    doItemCount.set(
+      it.deliveryOrderId,
+      (doItemCount.get(it.deliveryOrderId) ?? 0) + 1,
+    );
+
+  // Group item rows by production order.
+  const byPO = new Map<
+    string,
+    { itemId: string; doId: string }[]
+  >();
+  for (const it of allItems) {
+    const arr = byPO.get(it.productionOrderId) ?? [];
+    arr.push({ itemId: it.id, doId: it.deliveryOrderId });
+    byPO.set(it.productionOrderId, arr);
+  }
+
+  const deleteItemIds: string[] = [];
+  const dupDOs = new Set<string>();
+  const keeperDOs = new Set<string>();
+  let duplicatedPOs = 0;
+  const removedPerDO = new Map<string, number>();
+
+  for (const [, rows] of byPO) {
+    const dosForPO = new Set(rows.map((r) => r.doId));
+    if (dosForPO.size < 2) continue; // PO on a single DO — fine
+    duplicatedPOs++;
+    // Keeper = earliest DO (by date, then id) carrying this PO.
+    const ordered = [...dosForPO].sort((a, b) => {
+      const da = doDate.get(a) ?? "";
+      const db = doDate.get(b) ?? "";
+      if (da !== db) return da < db ? -1 : 1;
+      return a < b ? -1 : 1;
+    });
+    const keeper = ordered[0];
+    keeperDOs.add(keeper);
+    for (const r of rows) {
+      if (r.doId === keeper) continue;
+      deleteItemIds.push(r.itemId);
+      dupDOs.add(r.doId);
+      removedPerDO.set(r.doId, (removedPerDO.get(r.doId) ?? 0) + 1);
+    }
+  }
+
+  // Any DO that loses ALL its items? (Forensic said none — flag if so.)
+  const emptiedDOs: string[] = [];
+  for (const [doId, removed] of removedPerDO) {
+    if (removed >= (doItemCount.get(doId) ?? 0))
+      emptiedDOs.push(doNo.get(doId) ?? doId);
+  }
+
+  if (!dry && deleteItemIds.length > 0) {
+    for (let i = 0; i < deleteItemIds.length; i += 100) {
+      const chunk = deleteItemIds.slice(i, i + 100);
+      const ph = chunk.map(() => "?").join(",");
+      await c.var.DB.prepare(
+        `DELETE FROM delivery_order_items WHERE id IN (${ph})`,
+      )
+        .bind(...chunk)
+        .run();
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: dry ? "dry-run" : "executed",
+    duplicatedProductionOrders: duplicatedPOs,
+    duplicateItemRowsRemoved: deleteItemIds.length,
+    duplicateDOsTouched: dupDOs.size,
+    keeperDOs: keeperDOs.size,
+    dosEmptiedByCleanup: emptiedDOs,
+  });
+});
+
 // POST /api/delivery-orders — create
 app.post("/", async (c) => {
   // RBAC gate — only roles with delivery-orders:create may insert a new DO.

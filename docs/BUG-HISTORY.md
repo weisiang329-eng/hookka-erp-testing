@@ -34,6 +34,46 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-008 — DO creation allowed POs already on another DO → duplicate deliveries, double FG consumption
+
+**Status:** 🟡 Root cause FIXED + deployed; existing-data corruption (25 SOs) NOT yet remediated — owner-directed correction pending
+
+**Category:** delivery-orders, inventory-cascade, data-integrity
+
+**Symptom (discovered during reconciliation):** 25 sales orders were
+"over-delivered" — the same order's goods recorded on 2-3 separate
+delivery notes (EXACT duplicates). SO/Delivered value inflated by RM
+38,563 gross (RM 33,813 net of 7 under-delivered). Forensic on
+cost_ledger: all 13 duplicate DOs carry their OWN FG_DELIVERED
+entries → **real double-consumption: 200 finished-goods units and RM
+24,647 of COGS deducted again** for goods already delivered. 0 of the
+duplicates are "phantom"; none of the 23 involved DOs are pure
+duplicates (all mixed multi-SO notes also carrying legitimate orders).
+
+**Root cause:** `POST /api/delivery-orders` validated consignment POs
+but had NO guard against `productionOrderIds` already on a
+non-cancelled DO. The frontend hides already-linked POs (display
+only); a bulk/quick-dispatch path or repeated submit could still put
+the same POs onto a 2nd/3rd DO. Delivering each re-ran the FG FIFO
+consumption (`consumeFGBatchesForDO` → cost_ledger FG_DELIVERED +
+fg_batches decrement) and the SO→DELIVERED + value cascade.
+
+**Fix (root cause, shipped):** `POST /` now rejects (409) any PO
+already on a non-cancelled DO, listing `PO → DO (status)`. Stops all
+new duplicates. Authoritative backend block, mirrors the CO-PO guard.
+
+**Existing corruption — NOT auto-fixed (deliberate):** cost_ledger is
+an append-only audit ledger and delivered fg_units/COGS are inviolate
+— a blind reversal/delete script is the wrong tool and risks worse
+corruption. The 13 duplicate DOs (200 units, RM 24,647 double-COGS,
+RM 33,813 value, duplicate-invoice exposure) need a controlled,
+owner-directed correction (reversing entries / careful line removal),
+not an automated migration. Invoice fixer remains BLOCKED until done.
+
+**Verified:** `npx tsc --noEmit` clean; `npm test` 185/185 pass.
+
+---
+
 ## BUG-2026-05-16-007 — Daily Capacity rolling window included today, deflating the average
 
 **Status:** 🟢 Fixed (2026-05-16)

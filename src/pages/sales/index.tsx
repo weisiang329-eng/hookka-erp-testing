@@ -427,12 +427,18 @@ export default function SalesPage() {
           );
         }
 
-        // All production done but not yet delivered
+        // Wei Siang 2026-05-16: this column = the NEXT outstanding
+        // action, not a status. Bare "Ship" / "Deliver" read as
+        // past-tense and collided with the Status column ("is it
+        // shipped or not?"). Prefix with "To " so it's unambiguously
+        // a to-do, not a done-state. READY_TO_SHIP = made, not yet
+        // dispatched → "To dispatch". SHIPPED = dispatched, not yet
+        // delivered → "To deliver".
         if (row.status === "READY_TO_SHIP") {
-          return <span className="font-semibold text-[#3E6570]">Ship</span>;
+          return <span className="font-semibold text-[#9C6F1E]">To dispatch</span>;
         }
         if (row.status === "SHIPPED") {
-          return <span className="font-semibold text-[#3E6570]">Deliver</span>;
+          return <span className="font-semibold text-[#3E6570]">To deliver</span>;
         }
         return <span className="text-[#4F7C3A]">Done</span>;
       },

@@ -415,6 +415,113 @@ const SO_TERMINAL_FOR_DELIVERED = new Set([
   "CANCELLED",
 ]);
 
+type InvItem = {
+  id: string;
+  productCode: string;
+  productName: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  unitPriceSen: number;
+  totalSen: number;
+};
+
+// Combined invoice lines for a DO across ALL its linked SOs: each DO item
+// priced at its product's SO unit price; fall back to billing the SO lines
+// directly, then to the SOs' header totals. Shared by live invoice
+// creation AND the under-billed-invoice repair so the two can't drift —
+// "every delivered item has an amount" must mean the same thing in both.
+async function computeDoInvoiceLines(
+  db: D1Database,
+  doId: string,
+  soIds: string[],
+): Promise<{ invItems: InvItem[]; computedTotal: number }> {
+  if (soIds.length === 0) return { invItems: [], computedTotal: 0 };
+  const soPh = soIds.map(() => "?").join(",");
+  const [doItemsRes, soItemsRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT productCode, productName, sizeLabel, fabricCode, quantity
+           FROM delivery_order_items WHERE deliveryOrderId = ?`,
+      )
+      .bind(doId)
+      .all<{
+        productCode: string | null;
+        productName: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        quantity: number;
+      }>(),
+    db
+      .prepare(
+        `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
+           FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
+      )
+      .bind(...soIds)
+      .all<{
+        productCode: string | null;
+        productName: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        quantity: number;
+        unitPriceSen: number;
+        lineTotalSen: number;
+      }>(),
+  ]);
+
+  const priceByCode = new Map<string, number>();
+  for (const si of soItemsRes.results ?? []) {
+    if (si.productCode && !priceByCode.has(si.productCode))
+      priceByCode.set(si.productCode, si.unitPriceSen);
+  }
+
+  let invItems: InvItem[] = (doItemsRes.results ?? []).map((di) => {
+    const unitPriceSen = di.productCode
+      ? priceByCode.get(di.productCode) ?? 0
+      : 0;
+    return {
+      id: genInvoiceItemId(),
+      productCode: di.productCode ?? "",
+      productName: di.productName ?? "",
+      sizeLabel: di.sizeLabel ?? "",
+      fabricCode: di.fabricCode ?? "",
+      quantity: di.quantity,
+      unitPriceSen,
+      totalSen: unitPriceSen * di.quantity,
+    };
+  });
+  let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+
+  // Fallback 1: DO had no priced lines → bill the SO lines themselves.
+  if (computedTotal === 0 && (soItemsRes.results ?? []).length > 0) {
+    invItems = (soItemsRes.results ?? []).map((si) => ({
+      id: genInvoiceItemId(),
+      productCode: si.productCode ?? "",
+      productName: si.productName ?? "",
+      sizeLabel: si.sizeLabel ?? "",
+      fabricCode: si.fabricCode ?? "",
+      quantity: si.quantity,
+      unitPriceSen: si.unitPriceSen,
+      totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
+    }));
+    computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+  }
+
+  // Fallback 2: still 0 → sum of every linked SO's header total.
+  if (computedTotal === 0) {
+    const soTotal = await db
+      .prepare(
+        `SELECT COALESCE(SUM(totalSen), 0) AS t
+           FROM sales_orders WHERE id IN (${soPh})`,
+      )
+      .bind(...soIds)
+      .first<{ t: number }>();
+    computedTotal = Number(soTotal?.t) || 0;
+  }
+
+  return { invItems, computedTotal };
+}
+
 async function buildDoDeliveredSoAndInvoice(
   db: D1Database,
   doRow: DoForDeliveredCascade,
@@ -476,99 +583,11 @@ async function buildDoDeliveredSoAndInvoice(
     .first<{ id: string }>();
 
   if (!existingInvoice && soIds.length > 0) {
-    const soPh = soIds.map(() => "?").join(",");
-    const [doItemsRes, soItemsRes] = await Promise.all([
-      db
-        .prepare(
-          `SELECT productCode, productName, sizeLabel, fabricCode, quantity
-             FROM delivery_order_items WHERE deliveryOrderId = ?`,
-        )
-        .bind(doRow.id)
-        .all<{
-          productCode: string | null;
-          productName: string | null;
-          sizeLabel: string | null;
-          fabricCode: string | null;
-          quantity: number;
-        }>(),
-      db
-        .prepare(
-          `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
-             FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
-        )
-        .bind(...soIds)
-        .all<{
-          productCode: string | null;
-          productName: string | null;
-          sizeLabel: string | null;
-          fabricCode: string | null;
-          quantity: number;
-          unitPriceSen: number;
-          lineTotalSen: number;
-        }>(),
-    ]);
-
-    // Price by product code across ALL linked SOs.
-    const priceByCode = new Map<string, number>();
-    for (const si of soItemsRes.results ?? []) {
-      if (si.productCode && !priceByCode.has(si.productCode))
-        priceByCode.set(si.productCode, si.unitPriceSen);
-    }
-
-    type InvItem = {
-      id: string;
-      productCode: string;
-      productName: string;
-      sizeLabel: string;
-      fabricCode: string;
-      quantity: number;
-      unitPriceSen: number;
-      totalSen: number;
-    };
-
-    let invItems: InvItem[] = (doItemsRes.results ?? []).map((di) => {
-      const unitPriceSen = di.productCode
-        ? priceByCode.get(di.productCode) ?? 0
-        : 0;
-      return {
-        id: genInvoiceItemId(),
-        productCode: di.productCode ?? "",
-        productName: di.productName ?? "",
-        sizeLabel: di.sizeLabel ?? "",
-        fabricCode: di.fabricCode ?? "",
-        quantity: di.quantity,
-        unitPriceSen,
-        totalSen: unitPriceSen * di.quantity,
-      };
-    });
-    let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
-
-    // Fallback 1: DO had no priced lines → bill the SO lines themselves.
-    if (computedTotal === 0 && (soItemsRes.results ?? []).length > 0) {
-      invItems = (soItemsRes.results ?? []).map((si) => ({
-        id: genInvoiceItemId(),
-        productCode: si.productCode ?? "",
-        productName: si.productName ?? "",
-        sizeLabel: si.sizeLabel ?? "",
-        fabricCode: si.fabricCode ?? "",
-        quantity: si.quantity,
-        unitPriceSen: si.unitPriceSen,
-        totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
-      }));
-      computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
-    }
-
-    // Fallback 2: still 0 → sum of every linked SO's header total.
-    if (computedTotal === 0) {
-      const soTotal = await db
-        .prepare(
-          `SELECT COALESCE(SUM(totalSen), 0) AS t
-             FROM sales_orders WHERE id IN (${soPh})`,
-        )
-        .bind(...soIds)
-        .first<{ t: number }>();
-      computedTotal = Number(soTotal?.t) || 0;
-    }
+    const { invItems, computedTotal } = await computeDoInvoiceLines(
+      db,
+      doRow.id,
+      soIds,
+    );
 
     const invId = genInvoiceId();
     const invoiceNo = await nextInvoiceNo(db);
@@ -921,6 +940,156 @@ app.post("/backfill-delivered-cascade", async (c) => {
     sosAdvanced,
     invoicesCreated,
     totalInvoicedSen,
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-fix-underbilled-invoices
+//
+// One-shot finance repair (Wei Siang 2026-05-16). Multi-SO delivery notes
+// carry an OLD invoice the pre-fix single-SO auto-invoice created — it
+// billed only ONE sales order's slice (~30%) of a note that delivered
+// several. The combined-invoice backfill skipped them ("already has an
+// invoice"). This corrects each such invoice IN PLACE to the full
+// delivered goods value (computeDoInvoiceLines — same basis as live
+// creation), keeping the invoice id + number, and adjusts the customer's
+// outstanding A/R by the delta.
+//
+// SAFETY: only touches a DO whose single non-cancelled invoice is DRAFT
+// (never sent, never paid, not in accounting). SENT/PARTIAL/PAID/OVERDUE,
+// or a DO with several invoices → skipped + reported for manual handling.
+// Only tops UP under-billed invoices; over-billed are left alone.
+// Idempotent (already-correct → skip).
+//
+//   ?dry=1  → preview only, no writes.
+// Temporary migration endpoint; delete once the book is corrected.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-fix-underbilled-invoices", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const now = new Date().toISOString();
+  const TOL = 100; // RM 1 tolerance — ignore sub-ringgit rounding
+
+  const dosRes = await c.var.DB.prepare(
+    "SELECT * FROM delivery_orders WHERE orgId = ? AND status IN ('DELIVERED','INVOICED') ORDER BY created_at ASC",
+  )
+    .bind(orgId)
+    .all<DeliveryOrderRow>();
+  const dos = dosRes.results ?? [];
+
+  let scanned = 0;
+  let invoicesFixed = 0;
+  let addedInvoiceSen = 0;
+  let alreadyOk = 0;
+  let skippedNoInvoice = 0;
+  let skippedNonDraft = 0;
+  let skippedMultiInvoice = 0;
+  const errors: { doId: string; doNo: string; error: string }[] = [];
+
+  for (const doRow of dos) {
+    scanned++;
+    try {
+      const invs =
+        (
+          await c.var.DB.prepare(
+            "SELECT id, status, totalSen FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED'",
+          )
+            .bind(doRow.id)
+            .all<{ id: string; status: string; totalSen: number }>()
+        ).results ?? [];
+      if (invs.length === 0) {
+        skippedNoInvoice++;
+        continue;
+      }
+      if (invs.length > 1) {
+        skippedMultiInvoice++;
+        continue;
+      }
+      const inv = invs[0];
+      if (inv.status !== "DRAFT") {
+        skippedNonDraft++;
+        continue;
+      }
+
+      const soIds = await resolveDoSalesOrderIds(
+        c.var.DB,
+        doRow.id,
+        doRow.salesOrderId,
+      );
+      const { invItems, computedTotal } = await computeDoInvoiceLines(
+        c.var.DB,
+        doRow.id,
+        soIds,
+      );
+      const oldTotal = Number(inv.totalSen) || 0;
+      // Only top UP genuine under-billing; leave matched/over-billed alone.
+      if (computedTotal <= oldTotal + TOL) {
+        alreadyOk++;
+        continue;
+      }
+
+      invoicesFixed++;
+      addedInvoiceSen += computedTotal - oldTotal;
+      if (dry) continue;
+
+      const stmts: D1PreparedStatement[] = [
+        c.var.DB.prepare(
+          "DELETE FROM invoice_items WHERE invoiceId = ?",
+        ).bind(inv.id),
+      ];
+      for (const it of invItems) {
+        stmts.push(
+          c.var.DB.prepare(
+            `INSERT INTO invoice_items (
+               id, invoiceId, productCode, productName, sizeLabel, fabricCode,
+               quantity, unitPriceSen, totalSen
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            it.id,
+            inv.id,
+            it.productCode,
+            it.productName,
+            it.sizeLabel,
+            it.fabricCode,
+            it.quantity,
+            it.unitPriceSen,
+            it.totalSen,
+          ),
+        );
+      }
+      stmts.push(
+        c.var.DB.prepare(
+          "UPDATE invoices SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?",
+        ).bind(computedTotal, computedTotal, now, inv.id),
+        c.var.DB.prepare(
+          "UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?",
+        ).bind(computedTotal - oldTotal, doRow.customerId),
+      );
+      await c.var.DB.batch(stmts);
+    } catch (e) {
+      errors.push({
+        doId: doRow.id,
+        doNo: doRow.doNo,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: dry ? "dry-run" : "executed",
+    deliveredDosScanned: scanned,
+    invoicesFixed,
+    addedInvoiceSen,
+    alreadyOk,
+    skippedNoInvoice,
+    skippedNonDraft,
+    skippedMultiInvoice,
     errors,
   });
 });

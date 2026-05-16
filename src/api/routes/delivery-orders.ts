@@ -324,22 +324,24 @@ async function resolveDoSalesOrderIds(
 }
 
 // ---------------------------------------------------------------------------
-// DO "Sales Figure" derivation.
+// DO "Sales Figure" derivation = the VALUE OF GOODS on the delivery note.
 //
 // delivery_orders carries NO monetary column (no total_sen). A DO's value is
 // the linked sales-order line value: each DO item's quantity × the SO unit
 // price for that product code. The SO is resolved via the item's production
 // order (covers multi-SO DOs, where delivery_orders.salesOrderId is NULL),
-// falling back to the DO's own salesOrderId for legacy single-SO DOs. This
-// mirrors the auto-invoice computedTotal PRIMARY path so the per-row Amount
-// column sums exactly to the per-status tab aggregate.
+// falling back to the DO's own salesOrderId for legacy single-SO DOs.
 //
-// A DO's value is anchored to its linked invoice when one exists (the
-// invoice total is the billed truth — migration 0103's intent), and
-// falls back to the line-level SO price computation for DOs not yet
-// invoiced. This makes the Delivered bucket reconcile exactly with the
-// Invoice bucket once a delivered DO has been invoiced, instead of the
-// two disagreeing because the line-level join missed a product code.
+// This is GOODS value, NOT invoiced value. It was briefly anchored to the
+// linked invoice total (2026-05-16) so the Delivered bucket would tie to the
+// Invoice bucket — but that made "Delivered" read RM 167k (what's billed)
+// while RM 333k+ of goods had actually shipped, which is the wrong thing for
+// this column. Reverted: Delivered must reflect goods delivered so it
+// reconciles with the Sales Orders "Delivered" total. Billing coverage is a
+// separate question (invoices vs goods), not this display.
+//
+// Both the per-row map and the per-status /stats aggregate use this same
+// FROM/WHERE + SUM expression, so the column always sums to the tab total.
 const DO_VALUE_FROM = `
   FROM delivery_orders d
   LEFT JOIN delivery_order_items di ON di.deliveryOrderId = d.id
@@ -352,46 +354,18 @@ const DO_VALUE_FROM = `
 const DO_VALUE_EXPR =
   "COALESCE(SUM(di.quantity * COALESCE(si.unitPriceSen, 0)), 0)";
 
-// Per-DO sum of its non-cancelled invoices. Scoped via the DO join so
-// it is correct whether or not the invoices row carries orgId.
-async function loadDoInvoiceTotalMap(
+async function loadDoValueMap(
   db: D1Database,
   orgId: string,
 ): Promise<Map<string, number>> {
   const res = await db
     .prepare(
-      `SELECT i.deliveryOrderId AS id, COALESCE(SUM(i.totalSen), 0) AS v
-         FROM invoices i
-         JOIN delivery_orders d ON d.id = i.deliveryOrderId
-        WHERE d.orgId = ? AND i.status != 'CANCELLED'
-          AND i.deliveryOrderId IS NOT NULL AND i.deliveryOrderId != ''
-        GROUP BY i.deliveryOrderId`,
+      `SELECT d.id AS id, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.id`,
     )
     .bind(orgId)
     .all<{ id: string; v: number }>();
   const m = new Map<string, number>();
   for (const r of res.results ?? []) m.set(r.id, Number(r.v) || 0);
-  return m;
-}
-
-// Merged per-DO value: linked invoice total when present, else the
-// line-level SO price computation.
-async function loadDoValueMap(
-  db: D1Database,
-  orgId: string,
-): Promise<Map<string, number>> {
-  const [lineRes, invMap] = await Promise.all([
-    db
-      .prepare(
-        `SELECT d.id AS id, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.id`,
-      )
-      .bind(orgId)
-      .all<{ id: string; v: number }>(),
-    loadDoInvoiceTotalMap(db, orgId),
-  ]);
-  const m = new Map<string, number>();
-  for (const r of lineRes.results ?? []) m.set(r.id, Number(r.v) || 0);
-  for (const [id, v] of invMap) m.set(id, v);
   return m;
 }
 
@@ -816,28 +790,25 @@ app.get("/stats", async (c) => {
   if (denied) return denied;
 
   const orgId = getOrgId(c);
-  // Wei Siang 2026-05-16: per-status count + RM value so the tab strip
-  // shows the money in each bucket. Value uses the SAME merged per-DO
-  // map as the per-row Amount column (linked invoice total when present,
-  // else line-level SO price), so the Delivered bucket reconciles with
-  // the Invoice bucket and the column sums to the tab total. Counts come
-  // from one row-per-DO read (exact, no item-join multiplication).
-  const [statusRes, valueMap] = await Promise.all([
-    c.var.DB.prepare(
-      "SELECT id, status FROM delivery_orders WHERE orgId = ?",
+  // Per-status count + RM value so the tab strip shows the money in each
+  // bucket. Value = GOODS delivered (same DO_VALUE_EXPR/FROM as the
+  // per-row Amount column), so the column sums to the tab total AND the
+  // Delivered bucket reconciles with the Sales Orders "Delivered" total
+  // — NOT the invoiced amount. COUNT(DISTINCT d.id) because the item
+  // join multiplies rows.
+  const res = await c.var.DB
+    .prepare(
+      `SELECT d.status AS status, COUNT(DISTINCT d.id) AS n, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.status`,
     )
-      .bind(orgId)
-      .all<{ id: string; status: string }>(),
-    loadDoValueMap(c.var.DB, orgId),
-  ]);
+    .bind(orgId)
+    .all<{ status: string; n: number; v: number }>();
   const byStatus: Record<string, number> = {};
   const valueByStatus: Record<string, number> = {};
   let total = 0;
-  for (const row of statusRes.results ?? []) {
-    byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
-    valueByStatus[row.status] =
-      (valueByStatus[row.status] ?? 0) + (valueMap.get(row.id) ?? 0);
-    total += 1;
+  for (const row of res.results ?? []) {
+    byStatus[row.status] = row.n;
+    valueByStatus[row.status] = Number(row.v) || 0;
+    total += row.n;
   }
   return c.json({ success: true, byStatus, valueByStatus, total });
 });

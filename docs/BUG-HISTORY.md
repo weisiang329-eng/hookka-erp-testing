@@ -34,6 +34,42 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-006 — DO "Delivered" amount showed invoiced value (RM 167k) not goods delivered (RM 333k+)
+
+**Status:** 🟢 Fixed (2026-05-16) — regression introduced by BUG-2026-05-16-005, reverted
+
+**Category:** delivery-orders, ui-frontend, data-integrity
+
+**Symptom (user-reported):** Sales Orders "Delivered" = RM 333,596
+(286 orders) but Delivery Orders "Delivered" tab = RM 167,361 — a ~2×
+gap the operator correctly flagged as obviously wrong.
+
+**Root cause:** BUG-2026-05-16-005 anchored the DO value to the linked
+**invoice total** (falling back to line-level) so the Delivered bucket
+would tie to the Invoice bucket. Wrong call: once the backfill gave
+every delivered DO an invoice, the tab showed *invoiced* value
+(RM 167,361) instead of *goods delivered* (~RM 333k–366k). Verified
+against live data: of 286 DELIVERED SOs, 278 (RM 322,084) are fully
+delivered, only 8 (RM 11,512) partial, 0 mis-flipped — so the SO side
+is right; the DO side was mis-valued. Actual delivered line value
+(DO qty × SO unit price) = RM 366,467.
+
+**Fix:** reverted the invoice anchoring. `loadDoValueMap` and `/stats`
+use the line-level `DO_VALUE_EXPR`/`DO_VALUE_FROM` again (goods value);
+removed `loadDoInvoiceTotalMap`; `/stats` back to the single grouped
+`COUNT(DISTINCT d.id)` query. DO Delivered now ≈ RM 366k, same
+magnitude as SO Delivered RM 333k, and the per-row Amount still sums
+to the tab.
+
+**Separate finding (not a code bug — flagged to operator):** goods
+delivered ≈ RM 333k–366k but only ≈ RM 167k has been invoiced → a real
+~RM 170k+ under-billing gap across delivered notes. Listing/closing
+that gap is a finance follow-up, deferred pending operator decision.
+
+**Verified:** `npx tsc --noEmit` clean; `npm test` 185/185 pass.
+
+---
+
 ## BUG-2026-05-16-005 — Multi-SO delivered DOs never cascaded SO→DELIVERED and never auto-invoiced
 
 **Status:** 🟢 Fixed (2026-05-16) — forward fix shipped + deployed; historical repair EXECUTED against prod (83 DOs scanned, 220 SOs advanced to DELIVERED, 17 combined invoices created RM 51,453.26, 0 errors; idempotent re-check clean)

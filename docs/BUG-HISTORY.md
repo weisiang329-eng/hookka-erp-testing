@@ -36,7 +36,7 @@ Entries themselves stay newest-first.
 
 ## BUG-2026-05-16-005 — Multi-SO delivered DOs never cascaded SO→DELIVERED and never auto-invoiced
 
-**Status:** 🟢 Fixed (2026-05-16) — forward fix shipped; historical repair endpoint built (run pending operator go-ahead)
+**Status:** 🟢 Fixed (2026-05-16) — forward fix shipped + deployed; historical repair EXECUTED against prod (83 DOs scanned, 220 SOs advanced to DELIVERED, 17 combined invoices created RM 51,453.26, 0 errors; idempotent re-check clean)
 **Category:** delivery-orders, sales-orders, data-integrity
 
 **Symptom (user-reported):** Physically delivered orders still showed

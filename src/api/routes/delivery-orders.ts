@@ -1441,6 +1441,19 @@ app.put("/:id", async (c) => {
       ),
     ];
 
+    // Wei Siang 2026-05-16: invoice-number collision guard. The
+    // auto-DRAFT-invoice on DELIVERED uses nextInvoiceNo() (read-MAX
+    // +1). Even with the frontend serialized, the SELECT can lag the
+    // previous batch's commit under the Hyperdrive/Supabase pooler →
+    // two DOs compute the same INV-YYMM-NNN → ux_invoices_invoice_no
+    // violation rolls the whole DO→DELIVERED back ("N of M failed").
+    // We track the invoice INSERT so the batch can be retried with a
+    // freshly-regenerated number (by retry time the conflicting row
+    // is definitely visible). Stays NULL when no invoice is created.
+    let invoiceStmtIdx = -1;
+    let rebuildInvoiceInsert: ((no: string) => D1PreparedStatement) | null =
+      null;
+
     if (newItems !== null) {
       statements.push(
         c.var.DB.prepare(
@@ -1909,7 +1922,9 @@ app.put("/:id", async (c) => {
           due.setDate(due.getDate() + 30);
           const dueDate = due.toISOString().split("T")[0];
 
-          statements.push(
+          // Closure so the batch-retry can rebuild this one statement
+          // with a fresh number on a ux_invoices_invoice_no conflict.
+          rebuildInvoiceInsert = (no: string) =>
             c.var.DB.prepare(
               `INSERT INTO invoices (
                  id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
@@ -1919,7 +1934,7 @@ app.put("/:id", async (c) => {
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ).bind(
               invId,
-              invoiceNo,
+              no,
               id,
               existing.doNo,
               existing.salesOrderId,
@@ -1940,8 +1955,9 @@ app.put("/:id", async (c) => {
               "",
               now,
               now,
-            ),
-          );
+            );
+          invoiceStmtIdx = statements.length;
+          statements.push(rebuildInvoiceInsert(invoiceNo));
           for (const item of invItems) {
             statements.push(
               c.var.DB.prepare(
@@ -1991,7 +2007,42 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.var.DB.batch(statements);
+    // Wei Siang 2026-05-16: retry the batch on an invoice-number
+    // collision. The conflicting invoice IS committed by the time we
+    // catch (the other request's batch finished), so a fresh
+    // nextInvoiceNo() now reads past it. Only the invoice INSERT
+    // statement is swapped; everything else (fg_units, COGS, SO
+    // cascade) is unchanged and idempotent under the same `existing`
+    // snapshot. Cap at 5 tries so a genuinely-stuck unique error
+    // still surfaces instead of looping forever.
+    {
+      let attempt = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          await c.var.DB.batch(statements);
+          break;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isInvoiceDup =
+            /ux_invoices_invoice_no|invoices_invoice_no|duplicate key/i.test(
+              msg,
+            );
+          if (
+            isInvoiceDup &&
+            rebuildInvoiceInsert &&
+            invoiceStmtIdx >= 0 &&
+            attempt < 5
+          ) {
+            attempt++;
+            const freshNo = await nextInvoiceNo(c.var.DB);
+            statements[invoiceStmtIdx] = rebuildInvoiceInsert(freshNo);
+            continue;
+          }
+          throw e;
+        }
+      }
+    }
 
     const updated = await fetchOrderWithItems(c.var.DB, id);
 

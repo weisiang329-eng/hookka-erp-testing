@@ -734,6 +734,12 @@ export default function PlanningPage() {
     {
       const cursor = new Date();
       cursor.setHours(0, 0, 0, 0);
+      // Wei Siang 2026-05-16: EXCLUDE today. Completion dates are
+      // recorded after the fact, so today always reads ~0 and would
+      // deflate the rolling average. Window = N most-recent COMPLETE
+      // working days ending YESTERDAY (matches the loading chart's
+      // "Past Production ends yesterday").
+      cursor.setDate(cursor.getDate() - 1);
       while (rollingWindowDays.length < ROLLING_WINDOW_DAYS) {
         if (cursor.getDay() !== 0) {
           rollingWindowDays.push(fmtISO(cursor));
@@ -1149,13 +1155,16 @@ export default function PlanningPage() {
   // same render doesn't recompute). All read from `orders` already in
   // memory — no extra API hits. ──
 
-  // N most-recent working days (Mon-Sat, skip Sundays), ending today.
-  // Window size driven by ROLLING_WINDOW_DAYS constant at module top
-  // so this matches capacityData's rolling-window set exactly.
+  // N most-recent COMPLETE working days (Mon-Sat, skip Sundays),
+  // ending YESTERDAY — today is excluded because completions aren't
+  // recorded same-day (would read ~0 and deflate the average). Window
+  // size driven by ROLLING_WINDOW_DAYS so this matches capacityData's
+  // rolling-window set exactly.
   const rollingWindowDates = useMemo(() => {
     const days: string[] = [];
     const cursor = new Date();
     cursor.setHours(0, 0, 0, 0);
+    cursor.setDate(cursor.getDate() - 1); // exclude today
     while (days.length < ROLLING_WINDOW_DAYS) {
       if (cursor.getDay() !== 0) {
         days.unshift(fmtISO(cursor));

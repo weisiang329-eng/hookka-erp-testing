@@ -531,6 +531,10 @@ export default function DeliveryPage() {
   // the response from 2-6 MB to 200-600 KB.
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
   const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
+  // Exact per-PO Sales Figure from the server (same resolver the DO /
+  // invoice path uses) so Planning / Pending Delivery reconcile to the
+  // cent instead of the page guessing price by product code.
+  const { data: poValRaw, refresh: refreshPoVals } = useCachedJson<{ success?: boolean; values?: Record<string, number> }>("/api/delivery-orders/po-values");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   // Pull product master data so each Planning / Pending Delivery row can
   // surface its per-unit m³ next to the qty. Source-of-truth is the
@@ -550,9 +554,10 @@ export default function DeliveryPage() {
     refreshDOStats();
     refreshPOs();
     refreshSOs();
+    refreshPoVals();
     refreshCustomers();
     refreshProducts();
-  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshCustomers, refreshProducts]);
+  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshPoVals, refreshCustomers, refreshProducts]);
 
   // Lookup map from productCode → unitM3, rebuilt whenever /api/products
   // resolves. Used by mapPO to stamp each Planning row with its product's
@@ -576,6 +581,15 @@ export default function DeliveryPage() {
     const poRes = poRaw || { success: false };
     const soRes = soRaw || { success: false };
     const custRes = custRaw || { success: false };
+    // Exact server-computed value per production order (same resolver as
+    // the DO/invoice path). Used for Planning / Pending Delivery so they
+    // reconcile to the cent; falls back to the product-code estimate if
+    // a PO isn't in the map yet.
+    const poValMap = new Map<string, number>();
+    if (poValRaw?.values) {
+      for (const [k, v] of Object.entries(poValRaw.values))
+        poValMap.set(k, Number(v) || 0);
+    }
     {
       {
         // Store customers for hub address lookup
@@ -693,6 +707,7 @@ export default function DeliveryPage() {
               fabricCode: po.fabricCode || "",
               quantity: po.quantity || 0,
               valueSen:
+                poValMap.get(po.id) ??
                 (soPriceByProduct
                   .get(po.salesOrderId || "")
                   ?.get(po.productCode || "") ?? 0) * (po.quantity || 0),
@@ -760,7 +775,7 @@ export default function DeliveryPage() {
         }
       }
     }
-  }, [doRaw, poRaw, soRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
+  }, [doRaw, poRaw, soRaw, poValRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ----- 3PL Provider helpers -----

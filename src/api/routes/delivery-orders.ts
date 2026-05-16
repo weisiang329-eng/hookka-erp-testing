@@ -483,6 +483,37 @@ async function loadDoValueMap(
   return m;
 }
 
+// Exact value per production order = its own SO-line unit price × qty,
+// resolved by the SAME priceForItem the DO/invoice path uses. Lets the
+// Planning / Pending Delivery tabs (PO-based, no DO yet) show the exact
+// figure instead of the page guessing price by product code (~RM 875
+// drift). One shared resolver → every stage reconciles to the cent.
+async function loadPoValueMap(
+  db: D1Database,
+  orgId: string,
+): Promise<Map<string, number>> {
+  const [idx, poRes] = await Promise.all([
+    loadSoLinePriceIndex(db, orgId),
+    db
+      .prepare(
+        "SELECT id, salesOrderId, productCode, quantity FROM production_orders WHERE orgId = ?",
+      )
+      .bind(orgId)
+      .all<{
+        id: string;
+        salesOrderId: string | null;
+        productCode: string | null;
+        quantity: number;
+      }>(),
+  ]);
+  const m = new Map<string, number>();
+  for (const p of poRes.results ?? []) {
+    const price = priceForItem(idx, p.id, p.salesOrderId, p.productCode);
+    m.set(p.id, price * (p.quantity || 0));
+  }
+  return m;
+}
+
 function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -996,6 +1027,21 @@ app.get("/stats", async (c) => {
     total += 1;
   }
   return c.json({ success: true, byStatus, valueByStatus, total });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/delivery-orders/po-values — exact value per production order
+// (its own SO-line unit price × qty). The Planning / Pending Delivery
+// tabs are PO-based (goods not yet on a DO); this lets the page show the
+// exact Sales Figure from the same resolver the DO/invoice path uses,
+// instead of guessing price by product code. Registered BEFORE /:id.
+// ---------------------------------------------------------------------------
+app.get("/po-values", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const map = await loadPoValueMap(c.var.DB, orgId);
+  return c.json({ success: true, values: Object.fromEntries(map) });
 });
 
 // ---------------------------------------------------------------------------

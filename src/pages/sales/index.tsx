@@ -96,6 +96,39 @@ const ALL_STATUSES = [
 // stay on page 1.
 const PAGE_SIZE = 200;
 
+// Coarse pipeline stage for the Outstanding column. Used by BOTH the
+// cell render and the column's filterAccessor so the filter dropdown
+// offers real stages ("To dispatch", "Delivered", ...) instead of the
+// "(blank)" it showed before (the column had no real field to read —
+// the value only existed inside render). Also makes the column reflect
+// the TRUE stage (Delivered / Invoiced / Closed) instead of a bare "—"
+// once an order has actually shipped.
+function soStageLabel(status: string): string {
+  switch (status) {
+    case "DRAFT":
+      return "Draft";
+    case "CONFIRMED":
+    case "IN_PRODUCTION":
+      return "In production";
+    case "READY_TO_SHIP":
+      return "To dispatch";
+    case "SHIPPED":
+      return "To deliver";
+    case "DELIVERED":
+      return "Delivered";
+    case "INVOICED":
+      return "Invoiced";
+    case "CLOSED":
+      return "Closed";
+    case "ON_HOLD":
+      return "On hold";
+    case "CANCELLED":
+      return "Cancelled";
+    default:
+      return status || "—";
+  }
+}
+
 export default function SalesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -401,46 +434,72 @@ export default function SalesPage() {
       key: "outstanding",
       label: "Outstanding",
       type: "text",
-      width: "100px",
+      width: "110px",
       sortable: true,
+      // The dropdown reads this (real, enumerable pipeline stages)
+      // instead of the non-existent "outstanding" field — which is why
+      // it used to offer only "(blank)".
+      filterAccessor: (row: SalesOrder) => soStageLabel(row.status),
       render: (_value: unknown, row: SalesOrder) => {
-        // Completed statuses - no outstanding
-        if (["DELIVERED", "INVOICED", "CLOSED", "CANCELLED", "DRAFT"].includes(row.status)) {
+        const stage = soStageLabel(row.status);
+        if (row.status === "DRAFT") {
           return <span className="text-[#9CA3AF]">—</span>;
         }
-        const totalQty = row.items.reduce((s, i) => s + i.quantity, 0);
-        const linkedPOs = linkedPOMap[row.id] || [];
-        const completedPOs = linkedPOs.filter(p => p.status === "COMPLETED").length;
-        const totalPOs = linkedPOs.length;
-
-        if (totalPOs === 0) {
-          // CONFIRMED but no production orders yet
-          return <span className="font-semibold text-[#9A3A2D]">{totalQty} pcs</span>;
+        if (row.status === "CANCELLED") {
+          return <span className="text-[#9CA3AF]">Cancelled</span>;
         }
-
-        const outstandingPOs = totalPOs - completedPOs;
-        if (outstandingPOs > 0) {
+        // Past the warehouse door — show the true stage, not a "—".
+        if (
+          row.status === "DELIVERED" ||
+          row.status === "INVOICED" ||
+          row.status === "CLOSED"
+        ) {
+          return <span className="text-[#4F7C3A]">{stage}</span>;
+        }
+        // Still being made — keep the production-progress detail
+        // operators rely on (filter still buckets it as "In production").
+        if (row.status === "CONFIRMED" || row.status === "IN_PRODUCTION") {
+          const totalQty = row.items.reduce((s, i) => s + i.quantity, 0);
+          const linkedPOs = linkedPOMap[row.id] || [];
+          const completedPOs = linkedPOs.filter(
+            (p) => p.status === "COMPLETED",
+          ).length;
+          const totalPOs = linkedPOs.length;
+          if (totalPOs === 0) {
+            return (
+              <span className="font-semibold text-[#9A3A2D]">
+                {totalQty} pcs
+              </span>
+            );
+          }
+          const outstandingPOs = totalPOs - completedPOs;
+          if (outstandingPOs > 0) {
+            return (
+              <span className="font-semibold text-[#9C6F1E]">
+                {outstandingPOs}/{totalPOs}
+              </span>
+            );
+          }
+          return <span className="text-[#4F7C3A]">Done</span>;
+        }
+        // Wei Siang 2026-05-16: this column = the NEXT outstanding
+        // action. READY_TO_SHIP = made, not yet dispatched → "To
+        // dispatch". SHIPPED = dispatched, not yet delivered → "To
+        // deliver". ON_HOLD = paused, still owed.
+        if (row.status === "READY_TO_SHIP") {
           return (
-            <span className="font-semibold text-[#9C6F1E]">
-              {outstandingPOs}/{totalPOs}
-            </span>
+            <span className="font-semibold text-[#9C6F1E]">To dispatch</span>
           );
         }
-
-        // Wei Siang 2026-05-16: this column = the NEXT outstanding
-        // action, not a status. Bare "Ship" / "Deliver" read as
-        // past-tense and collided with the Status column ("is it
-        // shipped or not?"). Prefix with "To " so it's unambiguously
-        // a to-do, not a done-state. READY_TO_SHIP = made, not yet
-        // dispatched → "To dispatch". SHIPPED = dispatched, not yet
-        // delivered → "To deliver".
-        if (row.status === "READY_TO_SHIP") {
-          return <span className="font-semibold text-[#9C6F1E]">To dispatch</span>;
-        }
         if (row.status === "SHIPPED") {
-          return <span className="font-semibold text-[#3E6570]">To deliver</span>;
+          return (
+            <span className="font-semibold text-[#3E6570]">To deliver</span>
+          );
         }
-        return <span className="text-[#4F7C3A]">Done</span>;
+        if (row.status === "ON_HOLD") {
+          return <span className="font-semibold text-[#9A3A2D]">On hold</span>;
+        }
+        return <span className="text-[#6B7280]">{stage}</span>;
       },
     },
     { key: "totalSen", label: "Total", type: "currency", width: "100px", sortable: true },

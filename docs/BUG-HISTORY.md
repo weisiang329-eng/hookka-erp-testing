@@ -34,6 +34,63 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-005 — Multi-SO delivered DOs never cascaded SO→DELIVERED and never auto-invoiced
+
+**Status:** 🟢 Fixed (2026-05-16) — forward fix shipped; historical repair endpoint built (run pending operator go-ahead)
+**Category:** delivery-orders, sales-orders, data-integrity
+
+**Symptom (user-reported):** Physically delivered orders still showed
+Sales Order status `IN_PRODUCTION` / `READY_TO_SHIP`; Delivery Orders
+page showed Delivered ≈ RM 437,951 but Invoice = RM 0.00 / 0 count;
+no stage total reconciled with the Sales Order book; the Outstanding
+column only ever read "To dispatch".
+
+**Root cause:** The DO PUT `→ DELIVERED` block gated the SO→DELIVERED
+cascade AND the auto-invoice on `if (existing.salesOrderId)` — the
+legacy single-SO FK, which is **NULL for every multi-SO DO** (the
+common case: one lorry batches many SOs). The DRAFT→LOADED (SHIPPED)
+and LOADED→DRAFT cascades had been upgraded to `resolveDoSalesOrderIds`
+(multi-SO aware) earlier this session, but the DELIVERED block was
+missed. So multi-SO deliveries: skipped SO status advance, skipped
+invoice, skipped A/R bump. No backfill existed, so every such order
+(and anything delivered before the cascade landed) was permanently
+stranded. Secondary: the DO value query had no fallback so a delivered
+DO whose product codes didn't match its SO lines counted as RM 0,
+under-stating the Delivered bucket.
+
+**Fix:**
+- `src/api/routes/delivery-orders.ts`: extracted
+  `buildDoDeliveredSoAndInvoice()` — resolves EVERY linked SO
+  (`resolveDoSalesOrderIds`), advances each non-terminal SO to
+  DELIVERED, and builds ONE combined DRAFT invoice for the whole DO
+  spanning all those SOs (operator chose one-invoice-per-delivery-note;
+  multi-SO header anchored to a representative SO, true link is
+  `deliveryOrderId`). The live PUT DELIVERED block now calls it
+  (replacing the single-SO gate); shared with the backfill so they
+  can't drift.
+- DO value is now anchored to the linked **invoice total** when one
+  exists (migration-0103 intent), falling back to the line-level SO
+  price; `loadDoValueMap` + `/stats` use this merged map so the
+  Delivered bucket reconciles with the Invoice bucket and the per-row
+  Amount sums to the tab total. `/stats` counts now come from a
+  row-per-DO read (exact).
+- `POST /api/delivery-orders/backfill-delivered-cascade` — one-shot,
+  idempotent historical repair over every DELIVERED/INVOICED DO,
+  running the SAME helper; `?dry=1` previews counts + estimated
+  invoice value with no writes; real run is sequential per-DO atomic
+  batches with the invoice-number-collision retry (BUG-2026-05-16-002
+  lesson). Temporary migration endpoint.
+- `src/pages/sales/index.tsx`: `soStageLabel()` drives the Outstanding
+  column's new `filterAccessor` (the column had no real field, so its
+  filter only offered "(blank)") and makes the cell reflect the true
+  stage (Delivered / Invoiced / Closed) instead of a bare "—".
+
+**Verified:** `npx tsc --noEmit` clean; `npm test` 185/185 pass.
+Backfill not yet executed against prod — awaiting operator go-ahead
+(dry-run first).
+
+---
+
 ## BUG-2026-05-16-004 — Sales Orders: picking Status = Delivered/Closed/Cancelled showed an empty grid ("0 of 66")
 
 **Status:** 🟢 Fixed (2026-05-16)

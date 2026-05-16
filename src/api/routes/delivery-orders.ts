@@ -334,11 +334,12 @@ async function resolveDoSalesOrderIds(
 // mirrors the auto-invoice computedTotal PRIMARY path so the per-row Amount
 // column sums exactly to the per-status tab aggregate.
 //
-// Both the per-row map and the per-status /stats aggregate use this same
-// FROM/WHERE + SUM expression, so the column always reconciles with the tab
-// total. (No SO.totalSen final fallback here — the invoice path has one for
-// billing correctness, but adding it on only one of the two queries would
-// break row↔tab reconciliation, which is the whole point of this display.)
+// A DO's value is anchored to its linked invoice when one exists (the
+// invoice total is the billed truth — migration 0103's intent), and
+// falls back to the line-level SO price computation for DOs not yet
+// invoiced. This makes the Delivered bucket reconcile exactly with the
+// Invoice bucket once a delivered DO has been invoiced, instead of the
+// two disagreeing because the line-level join missed a product code.
 const DO_VALUE_FROM = `
   FROM delivery_orders d
   LEFT JOIN delivery_order_items di ON di.deliveryOrderId = d.id
@@ -351,13 +352,20 @@ const DO_VALUE_FROM = `
 const DO_VALUE_EXPR =
   "COALESCE(SUM(di.quantity * COALESCE(si.unitPriceSen, 0)), 0)";
 
-async function loadDoValueMap(
+// Per-DO sum of its non-cancelled invoices. Scoped via the DO join so
+// it is correct whether or not the invoices row carries orgId.
+async function loadDoInvoiceTotalMap(
   db: D1Database,
   orgId: string,
 ): Promise<Map<string, number>> {
   const res = await db
     .prepare(
-      `SELECT d.id AS id, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.id`,
+      `SELECT i.deliveryOrderId AS id, COALESCE(SUM(i.totalSen), 0) AS v
+         FROM invoices i
+         JOIN delivery_orders d ON d.id = i.deliveryOrderId
+        WHERE d.orgId = ? AND i.status != 'CANCELLED'
+          AND i.deliveryOrderId IS NOT NULL AND i.deliveryOrderId != ''
+        GROUP BY i.deliveryOrderId`,
     )
     .bind(orgId)
     .all<{ id: string; v: number }>();
@@ -366,8 +374,318 @@ async function loadDoValueMap(
   return m;
 }
 
+// Merged per-DO value: linked invoice total when present, else the
+// line-level SO price computation.
+async function loadDoValueMap(
+  db: D1Database,
+  orgId: string,
+): Promise<Map<string, number>> {
+  const [lineRes, invMap] = await Promise.all([
+    db
+      .prepare(
+        `SELECT d.id AS id, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.id`,
+      )
+      .bind(orgId)
+      .all<{ id: string; v: number }>(),
+    loadDoInvoiceTotalMap(db, orgId),
+  ]);
+  const m = new Map<string, number>();
+  for (const r of lineRes.results ?? []) m.set(r.id, Number(r.v) || 0);
+  for (const [id, v] of invMap) m.set(id, v);
+  return m;
+}
+
 function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+// ---------------------------------------------------------------------------
+// buildDoDeliveredSoAndInvoice — the DELIVERED-side cascade, shared by the
+// live PUT transition and the one-shot historical backfill.
+//
+// For a delivered DO it produces the statements that:
+//   1. advance EVERY sales order the DO touches (resolveDoSalesOrderIds —
+//      multi-SO aware) to DELIVERED, unless that SO is already at/past
+//      DELIVERED or is CANCELLED;
+//   2. create ONE combined DRAFT invoice for the whole DO spanning all
+//      those SOs (Wei Siang 2026-05-16 chose one invoice per delivery
+//      note), idempotent — skipped if any invoice already references the
+//      DO; the customer's outstanding A/R is bumped in the same set.
+//
+// fg_units / FIFO-COGS are deliberately NOT here — those are live-dispatch
+// concerns the PUT path owns and the backfill must not re-run.
+//
+// The caller owns the batch + the invoice-number retry. invoiceStmtIdx is
+// the index of the invoice INSERT WITHIN the returned `statements` array
+// (or -1); the caller offsets it if it concatenates into a larger batch.
+// ---------------------------------------------------------------------------
+type DoForDeliveredCascade = {
+  id: string;
+  doNo: string;
+  salesOrderId: string | null;
+  companySOId: string | null;
+  customerId: string;
+  customerName: string;
+  customerState: string | null;
+  hubId: string | null;
+  hubName: string | null;
+};
+
+// An SO at/past DELIVERED, or cancelled, must not be touched by a
+// delivered DO (don't downgrade INVOICED/CLOSED, don't resurrect
+// CANCELLED, don't re-stamp DELIVERED).
+const SO_TERMINAL_FOR_DELIVERED = new Set([
+  "DELIVERED",
+  "INVOICED",
+  "CLOSED",
+  "CANCELLED",
+]);
+
+async function buildDoDeliveredSoAndInvoice(
+  db: D1Database,
+  doRow: DoForDeliveredCascade,
+  now: string,
+): Promise<{
+  statements: D1PreparedStatement[];
+  rebuildInvoiceInsert: ((no: string) => D1PreparedStatement) | null;
+  invoiceStmtIdx: number;
+  createdInvoice: boolean;
+  invoiceTotalSen: number;
+  soAdvanced: string[];
+}> {
+  const statements: D1PreparedStatement[] = [];
+  const soAdvanced: string[] = [];
+  let rebuildInvoiceInsert: ((no: string) => D1PreparedStatement) | null = null;
+  let invoiceStmtIdx = -1;
+  let createdInvoice = false;
+  let invoiceTotalSen = 0;
+
+  const soIds = await resolveDoSalesOrderIds(db, doRow.id, doRow.salesOrderId);
+
+  // 1. Advance every linked SO to DELIVERED (skip terminal/cancelled).
+  for (const soId of soIds) {
+    const soRow = await db
+      .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+      .bind(soId)
+      .first<{ id: string; status: string }>();
+    if (!soRow || SO_TERMINAL_FOR_DELIVERED.has(soRow.status)) continue;
+    soAdvanced.push(soId);
+    statements.push(
+      db
+        .prepare(
+          "UPDATE sales_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, soRow.id),
+      db
+        .prepare(
+          `INSERT INTO so_status_changes
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genStatusChangeId(),
+          soRow.id,
+          soRow.status,
+          "DELIVERED",
+          "System",
+          now,
+          "DO delivered",
+          JSON.stringify([`DO ${doRow.doNo} marked DELIVERED`]),
+        ),
+    );
+  }
+
+  // 2. One combined invoice for the whole DO — idempotent.
+  const existingInvoice = await db
+    .prepare("SELECT id FROM invoices WHERE deliveryOrderId = ? LIMIT 1")
+    .bind(doRow.id)
+    .first<{ id: string }>();
+
+  if (!existingInvoice && soIds.length > 0) {
+    const soPh = soIds.map(() => "?").join(",");
+    const [doItemsRes, soItemsRes] = await Promise.all([
+      db
+        .prepare(
+          `SELECT productCode, productName, sizeLabel, fabricCode, quantity
+             FROM delivery_order_items WHERE deliveryOrderId = ?`,
+        )
+        .bind(doRow.id)
+        .all<{
+          productCode: string | null;
+          productName: string | null;
+          sizeLabel: string | null;
+          fabricCode: string | null;
+          quantity: number;
+        }>(),
+      db
+        .prepare(
+          `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
+             FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
+        )
+        .bind(...soIds)
+        .all<{
+          productCode: string | null;
+          productName: string | null;
+          sizeLabel: string | null;
+          fabricCode: string | null;
+          quantity: number;
+          unitPriceSen: number;
+          lineTotalSen: number;
+        }>(),
+    ]);
+
+    // Price by product code across ALL linked SOs.
+    const priceByCode = new Map<string, number>();
+    for (const si of soItemsRes.results ?? []) {
+      if (si.productCode && !priceByCode.has(si.productCode))
+        priceByCode.set(si.productCode, si.unitPriceSen);
+    }
+
+    type InvItem = {
+      id: string;
+      productCode: string;
+      productName: string;
+      sizeLabel: string;
+      fabricCode: string;
+      quantity: number;
+      unitPriceSen: number;
+      totalSen: number;
+    };
+
+    let invItems: InvItem[] = (doItemsRes.results ?? []).map((di) => {
+      const unitPriceSen = di.productCode
+        ? priceByCode.get(di.productCode) ?? 0
+        : 0;
+      return {
+        id: genInvoiceItemId(),
+        productCode: di.productCode ?? "",
+        productName: di.productName ?? "",
+        sizeLabel: di.sizeLabel ?? "",
+        fabricCode: di.fabricCode ?? "",
+        quantity: di.quantity,
+        unitPriceSen,
+        totalSen: unitPriceSen * di.quantity,
+      };
+    });
+    let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+
+    // Fallback 1: DO had no priced lines → bill the SO lines themselves.
+    if (computedTotal === 0 && (soItemsRes.results ?? []).length > 0) {
+      invItems = (soItemsRes.results ?? []).map((si) => ({
+        id: genInvoiceItemId(),
+        productCode: si.productCode ?? "",
+        productName: si.productName ?? "",
+        sizeLabel: si.sizeLabel ?? "",
+        fabricCode: si.fabricCode ?? "",
+        quantity: si.quantity,
+        unitPriceSen: si.unitPriceSen,
+        totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
+      }));
+      computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+    }
+
+    // Fallback 2: still 0 → sum of every linked SO's header total.
+    if (computedTotal === 0) {
+      const soTotal = await db
+        .prepare(
+          `SELECT COALESCE(SUM(totalSen), 0) AS t
+             FROM sales_orders WHERE id IN (${soPh})`,
+        )
+        .bind(...soIds)
+        .first<{ t: number }>();
+      computedTotal = Number(soTotal?.t) || 0;
+    }
+
+    const invId = genInvoiceId();
+    const invoiceNo = await nextInvoiceNo(db);
+    const invoiceDate = now.split("T")[0];
+    const due = new Date();
+    due.setDate(due.getDate() + 30);
+    const dueDate = due.toISOString().split("T")[0];
+    // Combined invoice spans multiple SOs — anchor the header SO to the
+    // DO's own (legacy single-SO) or the first resolved one so the row
+    // isn't orphaned; the authoritative link is deliveryOrderId.
+    const headerSoId = doRow.salesOrderId || soIds[0] || null;
+
+    rebuildInvoiceInsert = (no: string) =>
+      db
+        .prepare(
+          `INSERT INTO invoices (
+             id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
+             customerId, customerName, customerState, hubId, hubName,
+             subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+             paymentDate, paymentMethod, notes, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          invId,
+          no,
+          doRow.id,
+          doRow.doNo,
+          headerSoId,
+          doRow.companySOId ?? "",
+          doRow.customerId,
+          doRow.customerName,
+          doRow.customerState,
+          doRow.hubId,
+          doRow.hubName,
+          computedTotal,
+          computedTotal,
+          "DRAFT",
+          invoiceDate,
+          dueDate,
+          0,
+          null,
+          "",
+          soIds.length > 1 ? `Combined invoice for ${soIds.length} SOs` : "",
+          now,
+          now,
+        );
+    invoiceStmtIdx = statements.length;
+    statements.push(rebuildInvoiceInsert(invoiceNo));
+    for (const item of invItems) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO invoice_items (
+               id, invoiceId, productCode, productName, sizeLabel, fabricCode,
+               quantity, unitPriceSen, totalSen
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            item.id,
+            invId,
+            item.productCode,
+            item.productName,
+            item.sizeLabel,
+            item.fabricCode,
+            item.quantity,
+            item.unitPriceSen,
+            item.totalSen,
+          ),
+      );
+    }
+    // Outstanding A/R follows delivered goods (same batch as the invoice
+    // so a partial failure can't strand one without the other).
+    statements.push(
+      db
+        .prepare(
+          `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+        )
+        .bind(computedTotal, doRow.customerId),
+    );
+    createdInvoice = true;
+    invoiceTotalSen = computedTotal;
+  }
+
+  return {
+    statements,
+    rebuildInvoiceInsert,
+    invoiceStmtIdx,
+    createdInvoice,
+    invoiceTotalSen,
+    soAdvanced,
+  };
 }
 
 async function fetchOrderWithItems(db: D1Database, id: string) {
@@ -498,28 +816,142 @@ app.get("/stats", async (c) => {
   if (denied) return denied;
 
   const orgId = getOrgId(c);
-  // Wei Siang 2026-05-16: per-status RM value so the Delivery Orders
-  // tab strip shows the money in each bucket (Pending Dispatch /
-  // Dispatched / In Transit / Delivered / Invoice), not just counts.
-  // A DO has no monetary column — value is the linked SO line value
-  // (see DO_VALUE_FROM). COUNT(DISTINCT d.id) because the item join
-  // multiplies rows; identical FROM/SUM as the per-row map so the
-  // column reconciles with this aggregate.
-  const res = await c.var.DB
-    .prepare(
-      `SELECT d.status AS status, COUNT(DISTINCT d.id) AS n, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.status`,
+  // Wei Siang 2026-05-16: per-status count + RM value so the tab strip
+  // shows the money in each bucket. Value uses the SAME merged per-DO
+  // map as the per-row Amount column (linked invoice total when present,
+  // else line-level SO price), so the Delivered bucket reconciles with
+  // the Invoice bucket and the column sums to the tab total. Counts come
+  // from one row-per-DO read (exact, no item-join multiplication).
+  const [statusRes, valueMap] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT id, status FROM delivery_orders WHERE orgId = ?",
     )
-    .bind(orgId)
-    .all<{ status: string; n: number; v: number }>();
+      .bind(orgId)
+      .all<{ id: string; status: string }>(),
+    loadDoValueMap(c.var.DB, orgId),
+  ]);
   const byStatus: Record<string, number> = {};
   const valueByStatus: Record<string, number> = {};
   let total = 0;
-  for (const row of res.results ?? []) {
-    byStatus[row.status] = row.n;
-    valueByStatus[row.status] = Number(row.v) || 0;
-    total += row.n;
+  for (const row of statusRes.results ?? []) {
+    byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
+    valueByStatus[row.status] =
+      (valueByStatus[row.status] ?? 0) + (valueMap.get(row.id) ?? 0);
+    total += 1;
   }
   return c.json({ success: true, byStatus, valueByStatus, total });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-delivered-cascade
+//
+// One-shot historical repair (Wei Siang 2026-05-16). Every DO that is
+// physically DELIVERED/INVOICED but whose sales orders were never advanced
+// (multi-SO DOs the old gate skipped, or DOs delivered before the cascade
+// existed) and whose combined invoice was never created. Walks each such
+// DO through the EXACT same buildDoDeliveredSoAndInvoice helper the live
+// transition now uses, so the repair and the live path can never drift.
+//
+//   ?dry=1  → preview only: counts + estimated invoice value, no writes.
+//   (default) → execute: one atomic batch per DO, sequential (a shared SO
+//                across DOs would deadlock if parallel — BUG-2026-05-16-002),
+//                with the same invoice-number retry the PUT path uses.
+//
+// Idempotent: the helper skips SOs already at/past DELIVERED and skips the
+// invoice if one already references the DO — safe to run repeatedly.
+// Temporary migration endpoint; delete once the book is repaired.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-delivered-cascade", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const now = new Date().toISOString();
+
+  const dosRes = await c.var.DB.prepare(
+    "SELECT * FROM delivery_orders WHERE orgId = ? AND status IN ('DELIVERED','INVOICED') ORDER BY created_at ASC",
+  )
+    .bind(orgId)
+    .all<DeliveryOrderRow>();
+  const dos = dosRes.results ?? [];
+
+  let dosScanned = 0;
+  let invoicesCreated = 0;
+  let sosAdvanced = 0;
+  let totalInvoicedSen = 0;
+  // Dedupe SO counting across DOs: in dry-run nothing is written so a
+  // shared SO would be counted by every DO that touches it; the real
+  // run self-dedupes via DB state but the Set keeps both consistent.
+  const advancedSoSet = new Set<string>();
+  const errors: { doId: string; doNo: string; error: string }[] = [];
+
+  for (const doRow of dos) {
+    dosScanned++;
+    try {
+      const dc = await buildDoDeliveredSoAndInvoice(c.var.DB, doRow, now);
+      if (dc.statements.length === 0) continue;
+      if (dc.createdInvoice) {
+        invoicesCreated++;
+        totalInvoicedSen += dc.invoiceTotalSen;
+      }
+      for (const soId of dc.soAdvanced) {
+        if (!advancedSoSet.has(soId)) {
+          advancedSoSet.add(soId);
+          sosAdvanced++;
+        }
+      }
+      if (dry) continue;
+
+      // Execute this DO's repair as its own atomic batch, with the
+      // same invoice-number-collision retry as the live PUT path.
+      let attempt = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          await c.var.DB.batch(dc.statements);
+          break;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isInvoiceDup =
+            /ux_invoices_invoice_no|invoices_invoice_no|duplicate key/i.test(
+              msg,
+            );
+          if (
+            isInvoiceDup &&
+            dc.rebuildInvoiceInsert &&
+            dc.invoiceStmtIdx >= 0 &&
+            attempt < 5
+          ) {
+            attempt++;
+            dc.statements[dc.invoiceStmtIdx] = dc.rebuildInvoiceInsert(
+              await nextInvoiceNo(c.var.DB),
+            );
+            continue;
+          }
+          throw e;
+        }
+      }
+    } catch (e) {
+      errors.push({
+        doId: doRow.id,
+        doNo: doRow.doNo,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: dry ? "dry-run" : "executed",
+    deliveredDosFound: dos.length,
+    dosScanned,
+    sosAdvanced,
+    invoicesCreated,
+    totalInvoicedSen,
+    errors,
+  });
 });
 
 // POST /api/delivery-orders — create
@@ -1851,220 +2283,25 @@ app.put("/:id", async (c) => {
         statements.push(...cogs.statements);
       }
 
-      // SO status cascade — only if this DO is linked to a SO.
-      if (existing.salesOrderId) {
-        const soRow = await c.var.DB.prepare(
-          "SELECT id, status, totalSen FROM sales_orders WHERE id = ?",
-        )
-          .bind(existing.salesOrderId)
-          .first<{ id: string; status: string; totalSen: number }>();
-
-        if (soRow && soRow.status !== "DELIVERED") {
-          statements.push(
-            c.var.DB.prepare(
-              "UPDATE sales_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
-            ).bind(now, soRow.id),
-            c.var.DB.prepare(
-              `INSERT INTO so_status_changes
-                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            ).bind(
-              genStatusChangeId(),
-              soRow.id,
-              soRow.status,
-              "DELIVERED",
-              "System",
-              now,
-              "DO delivered",
-              JSON.stringify([`DO ${existing.doNo} marked DELIVERED`]),
-            ),
-          );
-        }
-
-        // Auto-create DRAFT invoice — idempotent check.
-        const existingInvoice = await c.var.DB.prepare(
-          "SELECT id FROM invoices WHERE deliveryOrderId = ? LIMIT 1",
-        )
-          .bind(id)
-          .first<{ id: string }>();
-
-        if (!existingInvoice) {
-          // Build invoice line items from DO items joined with SO unit prices
-          // (same pattern used by the invoices POST route). Fall back to the
-          // SO items themselves if the DO has no lines.
-          const [doItemsRes, soItemsRes] = await Promise.all([
-            c.var.DB.prepare(
-              `SELECT productCode, productName, sizeLabel, fabricCode, quantity
-                 FROM delivery_order_items WHERE deliveryOrderId = ?`,
-            )
-              .bind(id)
-              .all<{
-                productCode: string | null;
-                productName: string | null;
-                sizeLabel: string | null;
-                fabricCode: string | null;
-                quantity: number;
-              }>(),
-            c.var.DB.prepare(
-              `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
-                 FROM sales_order_items WHERE salesOrderId = ?`,
-            )
-              .bind(existing.salesOrderId)
-              .all<{
-                productCode: string | null;
-                productName: string | null;
-                sizeLabel: string | null;
-                fabricCode: string | null;
-                quantity: number;
-                unitPriceSen: number;
-                lineTotalSen: number;
-              }>(),
-          ]);
-
-          const priceByCode = new Map<string, number>();
-          for (const si of soItemsRes.results ?? []) {
-            if (si.productCode) priceByCode.set(si.productCode, si.unitPriceSen);
+      // SO status cascade + ONE combined invoice across EVERY sales
+      // order this DO touches (multi-SO aware via resolveDoSalesOrderIds).
+      // Replaces the old `if (existing.salesOrderId)` gate that silently
+      // skipped multi-SO DOs — leaving their SOs stranded at
+      // IN_PRODUCTION/READY_TO_SHIP and creating no invoice
+      // (BUG-2026-05-16-005). Shared with the historical backfill.
+      {
+        const dc = await buildDoDeliveredSoAndInvoice(
+          c.var.DB,
+          existing,
+          now,
+        );
+        if (dc.statements.length > 0) {
+          const base = statements.length;
+          statements.push(...dc.statements);
+          if (dc.invoiceStmtIdx >= 0 && dc.rebuildInvoiceInsert) {
+            invoiceStmtIdx = base + dc.invoiceStmtIdx;
+            rebuildInvoiceInsert = dc.rebuildInvoiceInsert;
           }
-
-          type InvItem = {
-            id: string;
-            productCode: string;
-            productName: string;
-            sizeLabel: string;
-            fabricCode: string;
-            quantity: number;
-            unitPriceSen: number;
-            totalSen: number;
-          };
-
-          let invItems: InvItem[] = (doItemsRes.results ?? []).map((di) => {
-            const unitPriceSen = di.productCode
-              ? priceByCode.get(di.productCode) ?? 0
-              : 0;
-            return {
-              id: genInvoiceItemId(),
-              productCode: di.productCode ?? "",
-              productName: di.productName ?? "",
-              sizeLabel: di.sizeLabel ?? "",
-              fabricCode: di.fabricCode ?? "",
-              quantity: di.quantity,
-              unitPriceSen,
-              totalSen: unitPriceSen * di.quantity,
-            };
-          });
-
-          let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
-
-          // Fall back to SO line items if DO had no lines OR all prices
-          // resolved to 0 (DO items not aligned with SO productCodes).
-          if (computedTotal === 0 && (soItemsRes.results ?? []).length > 0) {
-            invItems = (soItemsRes.results ?? []).map((si) => ({
-              id: genInvoiceItemId(),
-              productCode: si.productCode ?? "",
-              productName: si.productName ?? "",
-              sizeLabel: si.sizeLabel ?? "",
-              fabricCode: si.fabricCode ?? "",
-              quantity: si.quantity,
-              unitPriceSen: si.unitPriceSen,
-              totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
-            }));
-            computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
-          }
-
-          // Final fallback — use SO total (e.g. if DO lines exist but all
-          // priced at 0 and SO has no matching items).
-          if (computedTotal === 0 && soRow?.totalSen) {
-            computedTotal = soRow.totalSen;
-          }
-
-          const invId = genInvoiceId();
-          const invoiceNo = await nextInvoiceNo(c.var.DB);
-          const invoiceDate = now.split("T")[0];
-          const due = new Date();
-          due.setDate(due.getDate() + 30);
-          const dueDate = due.toISOString().split("T")[0];
-
-          // Closure so the batch-retry can rebuild this one statement
-          // with a fresh number on a ux_invoices_invoice_no conflict.
-          rebuildInvoiceInsert = (no: string) =>
-            c.var.DB.prepare(
-              `INSERT INTO invoices (
-                 id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
-                 customerId, customerName, customerState, hubId, hubName,
-                 subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
-                 paymentDate, paymentMethod, notes, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            ).bind(
-              invId,
-              no,
-              id,
-              existing.doNo,
-              existing.salesOrderId,
-              existing.companySOId,
-              existing.customerId,
-              existing.customerName,
-              existing.customerState,
-              existing.hubId,
-              existing.hubName,
-              computedTotal,
-              computedTotal,
-              "DRAFT",
-              invoiceDate,
-              dueDate,
-              0,
-              null,
-              "",
-              "",
-              now,
-              now,
-            );
-          invoiceStmtIdx = statements.length;
-          statements.push(rebuildInvoiceInsert(invoiceNo));
-          for (const item of invItems) {
-            statements.push(
-              c.var.DB.prepare(
-                `INSERT INTO invoice_items (
-                   id, invoiceId, productCode, productName, sizeLabel, fabricCode,
-                   quantity, unitPriceSen, totalSen
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              ).bind(
-                item.id,
-                invId,
-                item.productCode,
-                item.productName,
-                item.sizeLabel,
-                item.fabricCode,
-                item.quantity,
-                item.unitPriceSen,
-                item.totalSen,
-              ),
-            );
-          }
-
-          // -------------------------------------------------------------
-          // Outstanding-A/R bump on DELIVERED (Policy A — single anchor).
-          //
-          // outstandingSen follows DISPATCHED goods, not SO confirmation:
-          // pre-fix the field was only ever moved by Debit/Credit Notes and
-          // Payments, so it didn't reflect "what the customer owes for
-          // goods that have left our warehouse". Bumping here in the same
-          // batch as the auto-DRAFT-invoice keeps state consistent — a
-          // partial failure rolls back both, so we can't strand
-          // outstanding without an invoice (or vice versa).
-          //
-          // Inside `if (!existingInvoice)` so it's idempotent — a re-run
-          // of the DELIVERED transition (rare, e.g. retry after partial
-          // batch failure caught by db.batch) won't double-count.
-          //
-          // TODO: if a future flow takes a DO out of DELIVERED back to a
-          // pre-delivery status, mirror this as `outstandingSen -= ...`
-          // in the same batch. No such reverse path exists today.
-          // -------------------------------------------------------------
-          statements.push(
-            c.var.DB.prepare(
-              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
-            ).bind(computedTotal, existing.customerId),
-          );
         }
       }
     }

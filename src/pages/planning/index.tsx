@@ -988,6 +988,23 @@ export default function PlanningPage() {
         return { date, producedMinutes, capacityMinutes: dailyCap, utilization, level };
       });
 
+      // Wei Siang 2026-05-16: surface the actual-hours averages so the
+      // operator reads Production Time, not just %. Past avg = mean
+      // produced minutes across the past window; Plan avg = mean
+      // dueDate-loaded minutes across the future window.
+      const pastAvgMinutes = pastProduction.length
+        ? Math.round(pastProduction.reduce((s, d) => s + d.producedMinutes, 0) / pastProduction.length)
+        : 0;
+      const pastAvgPct = pastProduction.length
+        ? Math.round(pastProduction.reduce((s, d) => s + d.utilization, 0) / pastProduction.length)
+        : 0;
+      const futureAvgMinutes = futureLoad.length
+        ? Math.round(futureLoad.reduce((s, d) => s + d.loadedMinutes, 0) / futureLoad.length)
+        : 0;
+      const futureAvgPct = futureLoad.length
+        ? Math.round(futureLoad.reduce((s, d) => s + d.utilization, 0) / futureLoad.length)
+        : 0;
+
       return {
         deptCode: dept.code,
         deptName: dept.name,
@@ -996,6 +1013,10 @@ export default function PlanningPage() {
         dailyCapacityMinutes: dailyCap,
         pastProduction,
         futureLoad,
+        pastAvgMinutes,
+        pastAvgPct,
+        futureAvgMinutes,
+        futureAvgPct,
       };
     });
   }, [orders, capacityData, productionDepartments]);
@@ -1965,72 +1986,116 @@ export default function PlanningPage() {
             <span className="text-xs text-[#6B7280]">(Mon-Sat, excl. Sundays · % vs 7-day rolling capacity)</span>
           </div>
 
-          {/* Per-department capacity loading — two stacked sub-charts
-              per dept: Past Production (left) and Planned Load (right).
-              Bar height scales linearly 0-200% (100% = half-height)
-              so an overshoot day visually exceeds an on-target day. */}
-          {dailyLoadingByDept.map((dept) => (
-            <Card key={dept.deptCode} className="overflow-hidden">
-              <div className="h-1" style={{ backgroundColor: dept.color }} />
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
-                    {dept.deptName}
-                  </div>
-                  <div className="flex items-center gap-4 text-xs font-normal text-[#6B7280]">
-                    <span className="flex items-center gap-1">
-                      <Users className="h-3 w-3" />
-                      {dept.workerCount} workers
-                    </span>
-                  </div>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pb-4 space-y-4">
-                {/* ─── Past Production ─── */}
-                <div>
-                  <div className="flex items-center justify-between text-xs text-[#6B7280] mb-2">
-                    <span className="font-medium text-[#4F7C3A]">▸ Past Production (Completion)</span>
-                    <span>
-                      Avg:{" "}
-                      <strong className="text-[#1F1D1B] tabular-nums">
-                        {Math.round(dept.pastProduction.reduce((s, d) => s + d.utilization, 0) / Math.max(dept.pastProduction.length, 1))}%
-                      </strong>
-                      {" · "}
-                      Best day:{" "}
-                      <strong className="text-[#1F1D1B] tabular-nums">
-                        {Math.max(...dept.pastProduction.map((d) => d.utilization))}%
-                      </strong>
-                    </span>
+          {/* Wei Siang 2026-05-16: ONE continuous chart per dept —
+              past production bars + a vertical dashed divider at the
+              past/future boundary + future planned-load bars. Bar
+              heights scale to the dept's own max value across all 21
+              days so every % gets a visibly distinct height (lively),
+              and a horizontal dashed line marks the 100% (= 7-day
+              rolling capacity) reference at its proportional spot. */}
+          {dailyLoadingByDept.map((dept) => {
+            const combined = [
+              ...dept.pastProduction.map((d) => ({ ...d, phase: "past" as const, minutes: d.producedMinutes })),
+              ...dept.futureLoad.map((d) => ({ ...d, phase: "future" as const, minutes: d.loadedMinutes })),
+            ];
+            // Scale to the dept's own peak so the tallest bar fills
+            // the chart. Floor at 100 so the dashed reference line
+            // stays on-screen even when nothing exceeds capacity.
+            const scaleMax = Math.max(100, ...combined.map((d) => d.utilization));
+            const refLineBottomPct = (100 / scaleMax) * 100;
+            return (
+              <Card key={dept.deptCode} className="overflow-hidden">
+                <div className="h-1" style={{ backgroundColor: dept.color }} />
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
+                      {dept.deptName}
+                    </div>
+                    <div className="flex items-center gap-4 text-xs font-normal text-[#6B7280]">
+                      <span className="flex items-center gap-1">
+                        <Users className="h-3 w-3" />
+                        {dept.workerCount} workers
+                      </span>
+                      <span>
+                        <span className="text-[#4F7C3A] font-medium">Past avg</span>{" "}
+                        <strong className="text-[#1F1D1B] tabular-nums">{formatHours(dept.pastAvgMinutes)}</strong>
+                        <span className="text-[#9CA3AF]"> ({dept.pastAvgPct}%)</span>
+                      </span>
+                      <span>
+                        <span className="text-[#3E6570] font-medium">Plan avg</span>{" "}
+                        <strong className="text-[#1F1D1B] tabular-nums">{formatHours(dept.futureAvgMinutes)}</strong>
+                        <span className="text-[#9CA3AF]"> ({dept.futureAvgPct}%)</span>
+                      </span>
+                    </div>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="pb-4">
+                  <div className="flex items-center gap-4 text-[10px] text-[#6B7280] mb-1">
+                    <span className="font-medium text-[#4F7C3A]">◂ Past {LOADING_CHART_PAST_DAYS}d Production</span>
+                    <span className="font-medium text-[#3E6570]">Planned Load Next {LOADING_CHART_FUTURE_DAYS}d ▸</span>
                   </div>
                   <div className="overflow-x-auto">
-                    <div className="flex gap-1" style={{ minWidth: `${dept.pastProduction.length * 44}px` }}>
-                      {dept.pastProduction.map((day) => {
+                    <div
+                      className="flex gap-1"
+                      style={{ minWidth: `${combined.length * 44}px` }}
+                    >
+                      {combined.map((day, idx) => {
                         const d = parseDate(day.date);
                         const isSat = d.getDay() === 6;
                         const isToday = day.date === today;
-                        // Past colour palette — green = "good day" (at
-                        // or above 7-day avg), amber/red = "slow day".
-                        // Inverted from future's "high = critical".
-                        let barColor = "bg-[#9A3A2D]"; // <40% slow
-                        let textColor = "text-[#9A3A2D]";
-                        if (day.utilization >= 90) { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
-                        else if (day.utilization >= 60) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
-                        // 0-200% scale, 100% = half height. Clamped at 200%.
-                        const barHeightPct = Math.min(Math.max(day.utilization, 1), 200) / 2;
+                        const isPast = day.phase === "past";
+                        const isFirstFuture =
+                          day.phase === "future" &&
+                          (idx === 0 || combined[idx - 1].phase === "past");
+
+                        let barColor: string;
+                        let textColor: string;
+                        if (isPast) {
+                          // Past: green = good (met/beat avg), red = slow.
+                          if (day.utilization >= 90) { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
+                          else if (day.utilization >= 60) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                          else { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
+                        } else {
+                          // Future: green = ok, red = overloaded.
+                          if (day.utilization > 100) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
+                          else if (day.utilization > 70) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                          else { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
+                        }
+                        // Lively scaling — relative to the dept's own
+                        // peak. Min 2% so a non-zero day is always a
+                        // visible sliver, 0% stays flat.
+                        const barHeightPct = day.utilization > 0
+                          ? Math.max(2, (day.utilization / scaleMax) * 100)
+                          : 0;
                         return (
                           <div
-                            key={day.date}
-                            className={`flex flex-col items-center w-10 min-w-[40px] ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
-                            title={`${day.date}\nProduced: ${formatHours(day.producedMinutes)}\n7-day avg capacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
+                            key={`${day.phase}-${day.date}`}
+                            className={`flex flex-col items-center w-10 min-w-[40px] relative ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
+                            title={`${day.date}\n${isPast ? "Produced" : "Loaded"}: ${formatHours(day.minutes)}\n7-day avg capacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
                           >
-                            {/* Bar with a dashed "100%" line at half-height. */}
+                            {/* Vertical dashed divider before the first
+                                future bar = the past/future boundary. */}
+                            {isFirstFuture && (
+                              <div className="absolute left-[-2px] top-0 bottom-0 border-l border-dashed border-[#6B5C32]/50 pointer-events-none z-20" />
+                            )}
                             <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
                               <div
                                 className={`w-full rounded-t-sm transition-all ${barColor}`}
                                 style={{ height: `${barHeightPct}%` }}
                               />
-                              <div className="absolute left-0 right-0 top-1/2 border-t border-dashed border-[#9CA3AF]/60 pointer-events-none" />
+                              {/* 100% reference: a tick at the height
+                                  that = 7-day capacity on this dept's
+                                  own scale. Adjacent ticks line up into
+                                  a continuous dashed rule across the
+                                  whole chart. */}
+                              <div
+                                className="absolute left-0 right-0 border-t border-dashed border-[#9CA3AF]/70 pointer-events-none"
+                                style={{ bottom: `${refLineBottomPct}%` }}
+                              />
+                              {!isPast && day.utilization > 100 && (
+                                <AlertTriangle className="h-2.5 w-2.5 text-[#9A3A2D] absolute -top-3 left-1/2 -translate-x-1/2" />
+                              )}
                             </div>
                             <span className={`text-[9px] font-semibold ${textColor} tabular-nums`}>{day.utilization}%</span>
                             <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
@@ -2041,65 +2106,10 @@ export default function PlanningPage() {
                       })}
                     </div>
                   </div>
-                </div>
-
-                {/* ─── Future Planned Load ─── */}
-                <div className="pt-3 border-t border-[#E2DDD8]">
-                  <div className="flex items-center justify-between text-xs text-[#6B7280] mb-2">
-                    <span className="font-medium text-[#3E6570]">▸ Planned Load (Next {LOADING_CHART_FUTURE_DAYS} days)</span>
-                    <span>
-                      Peak:{" "}
-                      <strong className="text-[#1F1D1B] tabular-nums">
-                        {Math.max(...dept.futureLoad.map((d) => d.utilization))}%
-                      </strong>
-                      {" · "}
-                      Critical days:{" "}
-                      <strong className="text-[#9A3A2D] tabular-nums">
-                        {dept.futureLoad.filter((d) => d.utilization > 100).length}
-                      </strong>
-                    </span>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <div className="flex gap-1" style={{ minWidth: `${dept.futureLoad.length * 44}px` }}>
-                      {dept.futureLoad.map((day) => {
-                        const d = parseDate(day.date);
-                        const isSat = d.getDay() === 6;
-                        let barColor = "bg-[#4F7C3A]";
-                        let textColor = "text-[#4F7C3A]";
-                        if (day.utilization > 100) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
-                        else if (day.utilization > 90) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
-                        else if (day.utilization > 70) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
-                        // 0-200% scale, 100% = half height. Clamped at 200%.
-                        const barHeightPct = Math.min(Math.max(day.utilization, 1), 200) / 2;
-                        return (
-                          <div
-                            key={day.date}
-                            className="flex flex-col items-center w-10 min-w-[40px]"
-                            title={`${day.date}\nLoaded: ${formatHours(day.loadedMinutes)}\n7-day avg capacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
-                          >
-                            <div className="h-20 w-6 bg-[#F0ECE9] rounded-t-sm relative flex items-end mb-1">
-                              <div
-                                className={`w-full rounded-t-sm transition-all ${barColor}`}
-                                style={{ height: `${barHeightPct}%` }}
-                              />
-                              <div className="absolute left-0 right-0 top-1/2 border-t border-dashed border-[#9CA3AF]/60 pointer-events-none" />
-                              {day.utilization > 100 && (
-                                <AlertTriangle className="h-2.5 w-2.5 text-[#9A3A2D] absolute -top-3 left-1/2 -translate-x-1/2" />
-                              )}
-                            </div>
-                            <span className={`text-[9px] font-semibold ${textColor} tabular-nums`}>{day.utilization}%</span>
-                            <span className={`text-[8px] mt-0.5 ${isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
-                              {d.getDate()}/{d.getMonth() + 1}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            );
+          })}
 
           {/* Legend */}
           <div className="flex items-center gap-6 text-xs text-[#6B7280]">

@@ -34,6 +34,33 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-009 — Sales Orders Delivered/Outstanding used whole-SO header totals (over-counted partial deliveries)
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** sales-orders, ui-frontend, data-integrity
+
+**Symptom:** Sales Orders "Delivered" (RM 333,596) didn't match the
+Delivery side (RM 328,356) — a RM 5,240 gap. Cause: a partially-
+delivered SO flips wholesale to DELIVERED and the page summed its
+**full header total**, so the un-shipped portion was wrongly counted
+as Delivered instead of Outstanding.
+
+**Fix (operator chose: item-level, totals only):** extracted the
+goods-value resolver into `src/api/lib/do-value.ts` (single source of
+truth; delivery-orders.ts now imports it instead of its own copy).
+`sales-orders /stats` adds `deliveredItemsSen` (Σ value of items
+actually on a shipped/non-cancelled DO, via the same resolver) and
+`outstandingItemsSen` (csRevenue − delivered). Sales Orders page: when
+Status=Delivered the headline shows item-level delivered value; when
+Status=Outstanding the not-yet-delivered value. SO status lifecycle &
+per-row display unchanged.
+
+**Verified on prod (read-only):** SO Delivered RM 328,356 == DO
+delivered RM 328,356 (to the cent); Delivered + Outstanding (273,259)
+== confirmed book RM 601,615 (to the cent). RM 5,240 gap eliminated.
+
+---
+
 ## BUG-2026-05-16-008 — DO creation allowed POs already on another DO → duplicate deliveries, double FG consumption
 
 **Status:** 🟢 Fixed (2026-05-16) — root cause blocked at POST; existing duplicates removed via one-shot dedupe (66 duplicate delivery_order_items rows dropped across 14 DOs, earliest kept, 0 DOs emptied, idempotent re-check = 0). Per operator the cost step isn't in use, so cost_ledger/fg_batches were deliberately NOT reversed (out of scope). DO Delivered went RM 367,409→328,356; residual SO-vs-DO gap RM 5,240 is the known partial-delivery residue, not corruption.

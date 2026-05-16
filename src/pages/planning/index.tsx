@@ -1604,7 +1604,7 @@ export default function PlanningPage() {
             >
               <CardContent className="p-3">
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
-                  <span>{scopeRange.label}&apos;s Load</span>
+                  <span>{scopeRange.label}&apos;s Capacity</span>
                   <TrendingUp className="h-4 w-4 text-[#3E6570]" />
                 </p>
                 <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
@@ -1657,7 +1657,7 @@ export default function PlanningPage() {
                     />
                   </div>
                   <p className="text-[10px] text-[#9CA3AF] mt-0.5">
-                    {scopeProgressPct}% of {scopeRange.label.toLowerCase()}&apos;s load · click for names
+                    {scopeProgressPct}% of {scopeRange.label.toLowerCase()}&apos;s capacity · click for names
                   </p>
                 </div>
               </CardContent>
@@ -1665,7 +1665,7 @@ export default function PlanningPage() {
             <Card>
               <CardContent className="p-3">
                 <p className="text-xs text-[#6B7280] mb-1 flex items-center justify-between">
-                  <span>{scopeRange.label}&apos;s Utilization</span>
+                  <span>{scopeRange.label}&apos;s Capacity Used %</span>
                   <Clock className="h-4 w-4 text-[#6B5C32]" />
                 </p>
                 <p className={`text-xl font-bold ${utilizationColor(totalScopeUtilization).text}`}>
@@ -1708,9 +1708,10 @@ export default function PlanningPage() {
               at a glance. */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
             {capacityData.map((dept) => {
-              const uc = utilizationColor(dept.totalScopeUtilization);
+              // Backlog-days colour: ≤7 healthy, ≤14 watch, >14 backed
+              // up. Matches the bar fill + the Total Backlog drilldown.
               const backlogColor =
-                dept.totalBacklogDays > 7 ? "text-[#9A3A2D]" : dept.totalBacklogDays > 3 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
+                dept.totalBacklogDays > 14 ? "text-[#9A3A2D]" : dept.totalBacklogDays > 7 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
               return (
                 <Card key={dept.code} className="overflow-hidden">
                   <div className="h-1.5" style={{ backgroundColor: dept.color }} />
@@ -1749,7 +1750,7 @@ export default function PlanningPage() {
                     <div className="grid grid-cols-3 gap-2 items-baseline">
                       <span className="text-[10px] font-semibold text-[#9A3A2D]">SOFA</span>
                       <div>
-                        <span className="text-[9px] text-[#6B7280]">Load · Util</span>
+                        <span className="text-[9px] text-[#6B7280]">Capacity · Used %</span>
                         <p className="font-medium text-[#1F1D1B] tabular-nums">
                           {formatHours(dept.sofaScopeLoad)}
                           <span className={`ml-1.5 ${utilizationColor(dept.sofaScopeUtilization).text}`}>
@@ -1767,7 +1768,7 @@ export default function PlanningPage() {
                     <div className="grid grid-cols-3 gap-2 items-baseline">
                       <span className="text-[10px] font-semibold text-[#3E6570]">BEDFRAME</span>
                       <div>
-                        <span className="text-[9px] text-[#6B7280]">Load · Util</span>
+                        <span className="text-[9px] text-[#6B7280]">Capacity · Used %</span>
                         <p className="font-medium text-[#1F1D1B] tabular-nums">
                           {formatHours(dept.bfScopeLoad)}
                           <span className={`ml-1.5 ${utilizationColor(dept.bfScopeUtilization).text}`}>
@@ -1781,21 +1782,39 @@ export default function PlanningPage() {
                       </div>
                     </div>
 
-                    {/* Combined totals + bar */}
+                    {/* Wei Siang 2026-05-16: was "Total Util / Backlog"
+                        with a util% bar — but util% is now always
+                        hundreds-of-% (lenient Load includes all
+                        overdue), so the bar was permanently maxed and
+                        useless. Replaced with a Backlog-Days bar on a
+                        fixed 0–21 day scale: short = healthy queue,
+                        long = backed up. Colour matches the ≤7 / ≤14 /
+                        >14 day thresholds used in the Total Backlog
+                        drilldown. */}
                     <div className="pt-2 border-t border-[#E2DDD8]">
                       <div className="flex items-baseline justify-between mb-1">
-                        <span className="text-[10px] text-[#6B7280]">Total Util / Backlog</span>
-                        <span className="text-[10px]">
-                          <span className={`font-semibold ${uc.text}`}>{dept.totalScopeUtilization}%</span>
-                          <span className="mx-1.5 text-[#D1CBC5]">|</span>
-                          <span className={`font-semibold ${backlogColor}`}>{dept.totalBacklogDays}d</span>
+                        <span className="text-[10px] text-[#6B7280]">Backlog (days of work queued)</span>
+                        <span className={`text-[10px] font-semibold ${backlogColor}`}>
+                          {dept.totalBacklogDays}d
                         </span>
                       </div>
-                      <div className="w-full bg-[#F0ECE9] rounded-full h-2 overflow-hidden">
+                      <div className="w-full bg-[#F0ECE9] rounded-full h-2 overflow-hidden relative">
                         <div
-                          className={`h-full rounded-full transition-all ${uc.bar}`}
-                          style={{ width: `${Math.min(dept.totalScopeUtilization, 100)}%` }}
+                          className={`h-full rounded-full transition-all ${
+                            dept.totalBacklogDays > 14
+                              ? "bg-[#9A3A2D]"
+                              : dept.totalBacklogDays > 7
+                                ? "bg-[#9C6F1E]"
+                                : "bg-[#4F7C3A]"
+                          }`}
+                          style={{ width: `${Math.min((dept.totalBacklogDays / 21) * 100, 100)}%` }}
                         />
+                      </div>
+                      <div className="flex justify-between text-[8px] text-[#9CA3AF] mt-0.5">
+                        <span>0d</span>
+                        <span>7d</span>
+                        <span>14d</span>
+                        <span>21d+</span>
                       </div>
                     </div>
                   </CardContent>
@@ -2033,7 +2052,7 @@ export default function PlanningPage() {
                 <CardContent className="pb-4">
                   <div className="flex items-center gap-4 text-[10px] text-[#6B7280] mb-1">
                     <span className="font-medium text-[#4F7C3A]">◂ Past {LOADING_CHART_PAST_DAYS}d Production</span>
-                    <span className="font-medium text-[#3E6570]">Planned Load Next {LOADING_CHART_FUTURE_DAYS}d ▸</span>
+                    <span className="font-medium text-[#3E6570]">Planned Capacity Next {LOADING_CHART_FUTURE_DAYS}d ▸</span>
                   </div>
                   <div className="overflow-x-auto">
                     <div
@@ -2892,7 +2911,7 @@ function DrilldownModal(props: {
       </table>
     );
   } else if (level.kind === "load-by-dept") {
-    title = `${scopeRange.label}'s Load — ${scopeRange.from}${scopeRange.from !== scopeRange.to ? ` → ${scopeRange.to}` : ""}`;
+    title = `${scopeRange.label}'s Capacity — ${scopeRange.from}${scopeRange.from !== scopeRange.to ? ` → ${scopeRange.to}` : ""}`;
     const total = Array.from(loadByDept.values()).reduce((s, v) => s + v.total, 0);
     subtitle = `${formatHours(total)} of active work scheduled across ${loadByDept.size} dept${loadByDept.size === 1 ? "" : "s"}`;
     const entries = Array.from(loadByDept.entries()).sort((a, b) => b[1].total - a[1].total);
@@ -2939,7 +2958,7 @@ function DrilldownModal(props: {
   } else if (level.kind === "load-dept") {
     // Per-worker scheduled load for the picked dept.
     const meta = deptNameByCode.get(level.deptCode);
-    title = `${meta?.name ?? level.deptCode} — ${scopeRange.label}'s Load`;
+    title = `${meta?.name ?? level.deptCode} — ${scopeRange.label}'s Capacity`;
     const workers = loadWorkersForDept(level.deptCode);
     const deptTotal = workers.reduce((s, w) => s + w.totalMinutes, 0);
     subtitle = `${workers.length} worker${workers.length === 1 ? "" : "s"} · ${formatHours(deptTotal)} of active work`;
@@ -2990,7 +3009,7 @@ function DrilldownModal(props: {
   } else if (level.kind === "load-dept-worker") {
     // Leaf — per-JC list for the picked worker in this dept's scheduled load.
     const meta = deptNameByCode.get(level.deptCode);
-    title = `${level.workerName} — ${meta?.name ?? level.deptCode} ${scopeRange.label}'s Load`;
+    title = `${level.workerName} — ${meta?.name ?? level.deptCode} ${scopeRange.label}'s Capacity`;
     const rows = loadJCsForDeptWorker(level.deptCode, level.workerId);
     const workerTotal = rows.reduce((s, r) => s + r.minutes, 0);
     subtitle = `${rows.length} active job card${rows.length === 1 ? "" : "s"} · ${formatHours(workerTotal)} of scheduled work`;

@@ -1448,6 +1448,40 @@ app.post("/", async (c) => {
           400,
         );
       }
+      // ROOT-CAUSE GUARD (Wei Siang 2026-05-16): a production order can
+      // only be delivered ONCE. Reject any PO already on a non-cancelled
+      // DO. Without this, the same POs could be put on a 2nd/3rd DO and
+      // re-delivered — each re-delivery re-ran the FG FIFO consumption
+      // (cost_ledger FG_DELIVERED) and inflated SO/Delivered value
+      // (BUG-2026-05-16: 13 duplicate DOs, 200 units & RM 24,647 of FG
+      // double-consumed). Frontend hides already-linked POs, but that's
+      // display-only — this is the authoritative backend block.
+      const dupLinkRes = await c.var.DB.prepare(
+        `SELECT DISTINCT di.productionOrderId AS poId, d.doNo AS doNo, d.status AS status
+           FROM delivery_order_items di
+           JOIN delivery_orders d ON d.id = di.deliveryOrderId
+          WHERE di.productionOrderId IN (${placeholders})
+            AND d.status != 'CANCELLED'`,
+      )
+        .bind(...productionOrderIds)
+        .all<{ poId: string; doNo: string; status: string }>();
+      const alreadyLinked = dupLinkRes.results ?? [];
+      if (alreadyLinked.length > 0) {
+        const poNoById = new Map(poRowsForItems.map((r) => [r.id, r.poNo]));
+        const lines = alreadyLinked
+          .map(
+            (r) =>
+              `${poNoById.get(r.poId) ?? r.poId} → ${r.doNo} (${r.status})`,
+          )
+          .join(", ");
+        return c.json(
+          {
+            success: false,
+            error: `These production orders are already on a delivery order (a PO can only be delivered once): ${lines}. Remove them from the selection.`,
+          },
+          409,
+        );
+      }
       // No customer/state/SO restriction (2026-04-27 user request) —
       // operators can mix any POs onto one DO regardless of destination.
       // The page UI groups by customer for readability but doesn't enforce

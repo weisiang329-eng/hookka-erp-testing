@@ -445,19 +445,26 @@ app.get("/stats", async (c) => {
   if (denied) return denied;
 
   const orgId = getOrgId(c);
+  // Wei Siang 2026-05-16: also sum totalSen per status so the
+  // Delivery Orders tab strip can show the RM value of each bucket
+  // (Pending Dispatch / Dispatched / In Transit / Delivered /
+  // Invoice). totalSen on a DO is the goods value (SO unit prices ×
+  // qty, set at DO creation), not the delivery cost.
   const res = await c.var.DB
     .prepare(
-      "SELECT status, COUNT(*) AS n FROM delivery_orders WHERE orgId = ? GROUP BY status",
+      "SELECT status, COUNT(*) AS n, COALESCE(SUM(totalSen),0) AS v FROM delivery_orders WHERE orgId = ? GROUP BY status",
     )
     .bind(orgId)
-    .all<{ status: string; n: number }>();
+    .all<{ status: string; n: number; v: number }>();
   const byStatus: Record<string, number> = {};
+  const valueByStatus: Record<string, number> = {};
   let total = 0;
   for (const row of res.results ?? []) {
     byStatus[row.status] = row.n;
+    valueByStatus[row.status] = Number(row.v) || 0;
     total += row.n;
   }
-  return c.json({ success: true, byStatus, total });
+  return c.json({ success: true, byStatus, valueByStatus, total });
 });
 
 // POST /api/delivery-orders — create

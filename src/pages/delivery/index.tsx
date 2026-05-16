@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Truck,
@@ -491,6 +491,7 @@ export default function DeliveryPage() {
   const { data: doStatsRaw, refresh: refreshDOStats } = useCachedJson<{
     success?: boolean;
     byStatus?: Record<string, number>;
+    valueByStatus?: Record<string, number>;
     total?: number;
   }>("/api/delivery-orders/stats");
   const totalDOsServer = doRaw?.total ?? (doRaw?.data?.length ?? 0);
@@ -1162,6 +1163,18 @@ export default function DeliveryPage() {
       inTransit: byStatus.IN_TRANSIT ?? 0,
       delivered: byStatus.DELIVERED ?? 0,
       invoiced: byStatus.INVOICED ?? 0,
+    };
+  }, [doStatsRaw]);
+  // Wei Siang 2026-05-16: RM value per DO-status bucket so the tab
+  // strip shows the money in each stage, not just the count.
+  const valueDOsByStatus = useMemo(() => {
+    const v = doStatsRaw?.valueByStatus ?? {};
+    return {
+      draft: v.DRAFT ?? 0,
+      dispatched: v.LOADED ?? 0,
+      inTransit: v.IN_TRANSIT ?? 0,
+      delivered: v.DELIVERED ?? 0,
+      invoiced: v.INVOICED ?? 0,
     };
   }, [doStatsRaw]);
   const pendingDispatchCount = uniqueDOsByStatus.draft;
@@ -2331,6 +2344,20 @@ export default function DeliveryPage() {
     invoiced: uniqueDOsByStatus.invoiced,
   };
 
+  // ---------- Tab RM value (DO-based tabs only) ----------
+  // Wei Siang 2026-05-16: show the money in each bucket. Planning /
+  // Pending Delivery are production-order based (no price loaded on
+  // this page yet) so they stay value-less for now — flagged for a
+  // follow-up SO-price aggregate.
+  const tabValueSen: Record<string, number | null> = {
+    planning: null,
+    pending_delivery: null,
+    pending_dispatch: valueDOsByStatus.draft,
+    dispatched: valueDOsByStatus.dispatched,
+    delivered: valueDOsByStatus.delivered,
+    invoiced: valueDOsByStatus.invoiced,
+  };
+
   return (
     <div className="space-y-6">
       {/* Top-level tab bar */}
@@ -2444,22 +2471,32 @@ export default function DeliveryPage() {
                 setSelectedIds(new Set());
                 setSelectedReadyPOs(new Set());
               }}
-              className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
+              className={`flex flex-col items-start gap-0.5 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key
                   ? "border-[#6B5C32] text-[#6B5C32]"
                   : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
               }`}
             >
-              {tab.label}
-              <span
-                className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                  activeTab === tab.key
-                    ? "bg-[#6B5C32] text-white"
-                    : "bg-[#F0ECE9] text-[#6B7280]"
-                }`}
-              >
-                {tabCounts[tab.key] ?? 0}
+              <span className="flex items-center gap-2">
+                {tab.label}
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    activeTab === tab.key
+                      ? "bg-[#6B5C32] text-white"
+                      : "bg-[#F0ECE9] text-[#6B7280]"
+                  }`}
+                >
+                  {tabCounts[tab.key] ?? 0}
+                </span>
               </span>
+              {/* Wei Siang 2026-05-16: RM value of the bucket. DO-based
+                  tabs only; Planning / Pending Delivery show nothing
+                  (PO-based, price not loaded here yet). */}
+              {tabValueSen[tab.key] != null && (
+                <span className="text-[10px] font-normal text-[#9CA3AF] tabular-nums">
+                  {formatRM(tabValueSen[tab.key] as number)}
+                </span>
+              )}
             </button>
           ))}
         </nav>

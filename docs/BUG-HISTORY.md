@@ -34,6 +34,41 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-013 — Dashboard "Monthly Revenue" empty (revenue MV 500) → rebuilt from SO + Invoices + Production; Accessory dropped; AOV Total column
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** dashboard
+
+**Symptom:** "Monthly Revenue — last 12 months" showed "No revenue
+data." `/api/dashboard/revenue` returns **HTTP 500** on prod —
+`mv_revenue_by_month_by_org` isn't present/refreshed there.
+
+**Fix:** Dropped the MV-backed `/api/dashboard/revenue` dependency.
+Monthly Revenue is now computed in `dashboard-overview.ts` as three
+lenses, last 12 months:
+- **Sales Orders** = Σ SO total by `companySODate` month (confirmed).
+- **Invoices** = Σ invoice total by `invoiceDate` month, excl
+  CANCELLED (incl. DRAFT per Wei Siang — all current invoices are
+  DRAFT, so excluding them would blank the line).
+- **Production** = EXACT mirror of the Employee page's
+  `/api/working-hour-entries/production-revenue` gate: a PO's value
+  (SO line → CO line → product master price × qty) recognised the
+  month its LAST upholstery JC completes. Same SQL `per_po` CTE so
+  the dashboard and Employee revenue reconcile.
+
+Also per Wei Siang's review of the live page: **Accessory** Top-Seller
+card removed (UI + server query + types), and an **AOV Total** column
+added (customer's bedframe + sofa value, already computed for sort).
+Overview cache v5→v6.
+
+**Verified (read-only, prod-data replica + Employee endpoint
+cross-check):** SO 2026-04 RM 427,735 / 2026-05 RM 173,881; Invoices
+2026-05 RM 167,361; Production 2026-04 RM 176,365 / 2026-05 RM
+168,167 (matches `/production-revenue` totals). `tsc` clean; `npm
+test` 185/185.
+
+---
+
 ## BUG-2026-05-16-012 — Dashboard Top Sellers all ×0 / RM 0.00 (unquoted SQL aggregate aliases) + AOV/Top-Seller rebuilt per Wei Siang's basis
 
 **Status:** 🟢 Fixed (2026-05-16)

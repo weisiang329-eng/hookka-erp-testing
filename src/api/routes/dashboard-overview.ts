@@ -26,7 +26,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v5`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v6`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -64,6 +64,8 @@ app.get("/", async (c) => {
       sofaLineRes,
       fabTopRes,
       fabMonthRes,
+      invMonthRes,
+      prodRevRes,
       headRes,
     ] = await Promise.all([
       db
@@ -192,22 +194,22 @@ app.get("/", async (c) => {
           bfQty: number;
           hasSofa: number;
         }>(),
-      // Top sellers — BEDFRAME & ACCESSORY by product code (qty basis).
+      // Top sellers — BEDFRAME by product code (qty basis). Accessory
+      // dropped per Wei Siang (not wanted on the dashboard).
       db
         .prepare(
-          `SELECT si.itemCategory AS "cat", si.productCode AS "productCode",
+          `SELECT si.productCode AS "productCode",
                   MAX(si.productName) AS "productName",
                   COALESCE(SUM(si.quantity),0) AS "qtySold",
                   COALESCE(SUM(si.lineTotalSen),0) AS "valueSen"
              FROM sales_order_items si
              JOIN sales_orders so ON so.id = si.salesOrderId
             WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
-              AND si.itemCategory IN ('BEDFRAME','ACCESSORY')
-            GROUP BY si.itemCategory, si.productCode`,
+              AND si.itemCategory = 'BEDFRAME'
+            GROUP BY si.productCode`,
         )
         .bind(orgId)
         .all<{
-          cat: string;
           productCode: string;
           productName: string;
           qtySold: number;
@@ -257,6 +259,73 @@ app.get("/", async (c) => {
         )
         .bind(orgId)
         .all<{ ym: string | null; meters: number }>(),
+      // Invoiced per month — by invoiceDate, every invoice except
+      // CANCELLED (incl. DRAFT, per Wei Siang: all current invoices are
+      // still DRAFT, so excluding them would leave the line empty).
+      db
+        .prepare(
+          `SELECT substr(invoiceDate::text, 1, 7) AS "ym",
+                  COALESCE(SUM(totalSen),0) AS "revenueSen"
+             FROM invoices
+            WHERE orgId = ? AND status != 'CANCELLED'
+              AND invoiceDate IS NOT NULL
+            GROUP BY substr(invoiceDate::text, 1, 7)
+            ORDER BY substr(invoiceDate::text, 1, 7)`,
+        )
+        .bind(orgId)
+        .all<{ ym: string | null; revenueSen: number }>(),
+      // Production revenue per month — EXACT mirror of the Employee
+      // page's /production-revenue gate: a PO's revenue is recognised
+      // the month its LAST upholstery job card completes (all UPH JCs
+      // COMPLETED/TRANSFERRED), priced SO line → CO line → product
+      // master, × qty. Same SQL as working-hour-entries.ts so the two
+      // screens reconcile.
+      db
+        .prepare(
+          `WITH per_po AS (
+             SELECT productionOrderId,
+                    COUNT(*) AS total_uph,
+                    SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN 1 ELSE 0 END) AS done_uph,
+                    MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN completedDate END) AS unit_completed_at
+               FROM job_cards
+              WHERE departmentCode = 'UPHOLSTERY'
+              GROUP BY productionOrderId
+             HAVING COUNT(*) > 0
+                AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN 1 ELSE 0 END) = COUNT(*)
+           )
+           SELECT substr(per_po.unit_completed_at::text, 1, 7) AS "ym",
+                  COALESCE(SUM(
+                    COALESCE(
+                      soi.unitPriceSen,
+                      coi.unitPriceSen,
+                      (SELECT COALESCE(p.basePriceSen, p.price1Sen)
+                         FROM products p
+                        WHERE p.code = po.productCode
+                        ORDER BY p.basePriceSen DESC NULLS LAST, p.id
+                        LIMIT 1),
+                      0
+                    ) * po.quantity
+                  ),0) AS "revenueSen"
+             FROM per_po
+             JOIN production_orders po ON po.id = per_po.productionOrderId
+             LEFT JOIN sales_order_items soi
+                    ON soi.salesOrderId = po.salesOrderId
+                   AND soi.lineNo = po.lineNo
+             LEFT JOIN consignment_order_items coi
+                    ON coi.consignmentOrderId = po.consignmentOrderId
+                   AND coi.lineNo = po.lineNo
+            WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
+              AND per_po.unit_completed_at IS NOT NULL
+            GROUP BY substr(per_po.unit_completed_at::text, 1, 7)
+            ORDER BY substr(per_po.unit_completed_at::text, 1, 7)`,
+        )
+        .all<{ ym: string | null; revenueSen: number }>(),
       // NOTE: `workers` is NOT org-scoped (no org_id column — the workers
       // route never filters by org). Do not add `WHERE orgId = ?` here.
       db
@@ -308,6 +377,9 @@ app.get("/", async (c) => {
       string,
       { bedframeUnits: number; sofaSets: number }
     >();
+    // Sales-Order revenue per month (every confirmed SO total, by SO
+    // date) — one of the three Monthly Revenue lenses.
+    const soRevMap = new Map<string, number>();
     for (const r of soAggRes.results ?? []) {
       const name = r.custName || "—";
       const e =
@@ -328,6 +400,10 @@ app.get("/", async (c) => {
         m.bedframeUnits += bfQty;
         if (isSofa) m.sofaSets += 1;
         monthMap.set(r.ym, m);
+        soRevMap.set(
+          r.ym,
+          (soRevMap.get(r.ym) ?? 0) + (Number(r.soTotalSen) || 0),
+        );
       }
     }
     const aovByCustomer = [...aovMap.entries()]
@@ -350,6 +426,35 @@ app.get("/", async (c) => {
       .sort((a, b) => a.month.localeCompare(b.month))
       .slice(-12);
 
+    // ---- Monthly Revenue — three lenses (last 12 months) ----
+    //   Sales Orders : Σ SO total, by SO date (orders taken)
+    //   Invoices     : Σ invoice total (excl CANCELLED), by invoice date
+    //   Production    : value of production finished, by the month its
+    //                   last upholstery JC completed (Employee-page rule)
+    const invRevMap = new Map<string, number>();
+    for (const r of invMonthRes.results ?? []) {
+      if (r.ym) invRevMap.set(r.ym, Number(r.revenueSen) || 0);
+    }
+    const prodRevMap = new Map<string, number>();
+    for (const r of prodRevRes.results ?? []) {
+      if (r.ym) prodRevMap.set(r.ym, Number(r.revenueSen) || 0);
+    }
+    const allMonths = [
+      ...new Set([
+        ...soRevMap.keys(),
+        ...invRevMap.keys(),
+        ...prodRevMap.keys(),
+      ]),
+    ]
+      .sort((a, b) => a.localeCompare(b))
+      .slice(-12);
+    const monthlyRevenue = allMonths.map((month) => ({
+      month,
+      salesOrderSen: soRevMap.get(month) ?? 0,
+      invoiceSen: invRevMap.get(month) ?? 0,
+      productionSen: prodRevMap.get(month) ?? 0,
+    }));
+
     // ---- Top sellers ----
     // BEDFRAME / ACCESSORY: by product code, ranked by qty sold.
     type SellerRow = {
@@ -358,18 +463,12 @@ app.get("/", async (c) => {
       qtySold: number;
       valueSen: number;
     };
-    const bfList: SellerRow[] = [];
-    const accList: SellerRow[] = [];
-    for (const r of catTopRes.results ?? []) {
-      const row: SellerRow = {
-        productCode: r.productCode ?? "",
-        productName: r.productName ?? "",
-        qtySold: Number(r.qtySold) || 0,
-        valueSen: Number(r.valueSen) || 0,
-      };
-      if (r.cat === "BEDFRAME") bfList.push(row);
-      else accList.push(row);
-    }
+    const bfList: SellerRow[] = (catTopRes.results ?? []).map((r) => ({
+      productCode: r.productCode ?? "",
+      productName: r.productName ?? "",
+      qtySold: Number(r.qtySold) || 0,
+      valueSen: Number(r.valueSen) || 0,
+    }));
     const byQty = (a: { qtySold: number }, b: { qtySold: number }) =>
       b.qtySold - a.qtySold;
     // SOFA: by model = the number prefix of the code (5530-1A(RHF) →
@@ -404,7 +503,6 @@ app.get("/", async (c) => {
         }))
         .sort((a, b) => b.setsSold - a.setsSold)
         .slice(0, 5),
-      ACCESSORY: accList.sort(byQty).slice(0, 5),
     };
 
     // ---- Top fabrics + monthly fabric meters (consumption basis) ----
@@ -455,6 +553,7 @@ app.get("/", async (c) => {
       topSellers,
       topFabrics,
       monthlySales,
+      monthlyRevenue,
       fabricMonthly,
       employee: {
         activeHeadcount: headByDept.reduce((s, d) => s + d.count, 0),

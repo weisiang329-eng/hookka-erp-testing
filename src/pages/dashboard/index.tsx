@@ -32,10 +32,6 @@ type SoStats = {
   deliveredItemsSen?: number;
   outstandingItemsSen?: number;
 };
-type RevenueResp = {
-  success?: boolean;
-  data?: { month: string; revenueSen: number; orderCount: number }[];
-};
 type Overview = {
   success?: boolean;
   production?: {
@@ -65,10 +61,15 @@ type Overview = {
   topSellers?: {
     BEDFRAME: { productCode: string; productName: string; qtySold: number; valueSen: number }[];
     SOFA: { model: string; setsSold: number; valueSen: number }[];
-    ACCESSORY: { productCode: string; productName: string; qtySold: number; valueSen: number }[];
   };
   topFabrics?: { fabCode: string; fabName: string; meters: number; costSen: number }[];
   monthlySales?: { month: string; bedframeUnits: number; sofaSets: number }[];
+  monthlyRevenue?: {
+    month: string;
+    salesOrderSen: number;
+    invoiceSen: number;
+    productionSen: number;
+  }[];
   fabricMonthly?: { month: string; meters: number }[];
   employee?: {
     activeHeadcount: number;
@@ -151,9 +152,6 @@ export default function DashboardPage() {
     useCachedJson<SoStats>("/api/sales-orders/stats");
   const { data: ovRaw, loading: ovL } =
     useCachedJson<Overview>("/api/dashboard/overview");
-  const { data: revRaw, loading: revL } = useCachedJson<RevenueResp>(
-    "/api/dashboard/revenue?months=12",
-  );
   // Same four payloads the Delivery page reads. fields=minimal&include=jobCards
   // keeps the response small while carrying the upholstery JC statuses the
   // pipeline gate needs. limit=200 covers the whole DO table (83 rows).
@@ -169,7 +167,7 @@ export default function DashboardPage() {
   const { data: soItemsRaw, loading: soItemsL } =
     useCachedJson<SOItemsResp>("/api/sales-orders");
 
-  const loading = soL || ovL || revL || poL || doL || poValL || soItemsL;
+  const loading = soL || ovL || poL || doL || poValL || soItemsL;
 
   const so = soRaw ?? {};
   const ov = ovRaw ?? {};
@@ -215,10 +213,6 @@ export default function DashboardPage() {
     return total;
   }, [poRaw, doRaw, poValRaw, soItemsRaw]);
 
-  const revMax = useMemo(
-    () => Math.max(1, ...((revRaw?.data ?? []).map((r) => r.revenueSen))),
-    [revRaw],
-  );
   const fabMonthMax = useMemo(
     () =>
       Math.max(1, ...((ov.fabricMonthly ?? []).map((m) => m.meters))),
@@ -445,30 +439,53 @@ export default function DashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {(revRaw?.data ?? []).length === 0 ? (
+            {(ov.monthlyRevenue ?? []).length === 0 ? (
               <p className="text-xs text-[#9CA3AF]">No revenue data.</p>
             ) : (
-              <div className="space-y-1.5">
-                {(revRaw?.data ?? []).map((r) => (
-                  <div key={r.month} className="flex items-center gap-2">
-                    <span className="text-[11px] text-[#9CA3AF] w-16 shrink-0 tabular-nums">
-                      {r.month}
-                    </span>
-                    <div className="flex-1 bg-[#F5F2ED] rounded h-4 overflow-hidden">
-                      <div
-                        className="h-full bg-[#6B5C32]/70 rounded"
-                        style={{
-                          width: `${Math.max(2, (r.revenueSen / revMax) * 100)}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-[11px] font-semibold text-[#1F1D1B] w-24 text-right tabular-nums">
-                      {rm(r.revenueSen)}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                    <th className="py-1.5 font-medium">Month</th>
+                    <th className="py-1.5 font-medium text-right">
+                      Sales Orders
+                    </th>
+                    <th className="py-1.5 font-medium text-right">
+                      Invoices
+                    </th>
+                    <th className="py-1.5 font-medium text-right">
+                      Production
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(ov.monthlyRevenue ?? []).map((r) => (
+                    <tr
+                      key={r.month}
+                      className="border-b border-[#F0ECE6]"
+                    >
+                      <td className="py-1.5 text-[#5A5550] tabular-nums">
+                        {r.month}
+                      </td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                        {rm(r.salesOrderSen)}
+                      </td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                        {rm(r.invoiceSen)}
+                      </td>
+                      <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                        {rm(r.productionSen)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
+            <p className="text-[10px] text-[#9CA3AF] mt-2">
+              Sales Orders = order total by SO date. Invoices = invoiced
+              total by invoice date (excl. cancelled). Production = value
+              finished, by the month its last upholstery completed (same
+              rule as the Employee revenue).
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -491,13 +508,14 @@ export default function DashboardPage() {
                 <th className="py-1.5 font-medium text-right">Units</th>
                 <th className="py-1.5 font-medium text-right">Sofa AOV</th>
                 <th className="py-1.5 font-medium text-right">Sets</th>
+                <th className="py-1.5 font-medium text-right">Total</th>
               </tr>
             </thead>
             <tbody>
               {(ov.aovByCustomer ?? []).length === 0 && (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="py-3 text-center text-xs text-[#9CA3AF]"
                   >
                     No confirmed orders.
@@ -521,6 +539,9 @@ export default function DashboardPage() {
                   </td>
                   <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
                     {r.sofaSets || "—"}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                    {rm(r.totalSen)}
                   </td>
                 </tr>
               ))}
@@ -627,7 +648,7 @@ export default function DashboardPage() {
       {/* Top sellers */}
       <div>
         <SectionHeader label="Top Sellers" />
-        <div className="grid gap-4 grid-cols-1 lg:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
           <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm">
@@ -686,40 +707,6 @@ export default function DashboardPage() {
                     </span>{" "}
                     <span className="text-xs text-[#9CA3AF]">
                       ×{p.setsSold.toLocaleString()} sets
-                    </span>
-                  </span>
-                  <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                    {rm(p.valueSen)}
-                  </span>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <ClipboardCheck className="h-4 w-4 text-[#6B5C32]" /> Accessory
-                <span className="text-[10px] text-[#9CA3AF] font-normal">
-                  by units
-                </span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-1.5">
-              {(ov.topSellers?.ACCESSORY ?? []).length === 0 && (
-                <p className="text-xs text-[#9CA3AF]">No sales.</p>
-              )}
-              {(ov.topSellers?.ACCESSORY ?? []).map((p) => (
-                <div
-                  key={p.productCode}
-                  className="flex items-center justify-between text-sm"
-                >
-                  <span className="text-[#5A5550] truncate pr-2">
-                    <span className="font-medium text-[#1F1D1B]">
-                      {p.productCode}
-                    </span>{" "}
-                    <span className="text-xs text-[#9CA3AF]">
-                      ×{p.qtySold.toLocaleString()}
                     </span>
                   </span>
                   <span className="font-semibold text-[#1F1D1B] tabular-nums">

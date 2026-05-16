@@ -34,6 +34,35 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-007 — Daily Capacity rolling window included today, deflating the average
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** ui-frontend, scheduling
+
+**Symptom (user-reported):** The Planning "Daily Capacity — Past 7
+Working Days" drilldown listed today (2026-05-16) at 0h 40m, and the
+average (174h 32m/day) was dragged down by it. Completion dates are
+recorded after the fact, so the current day always reads ~0 and
+shouldn't be in the rolling average.
+
+**Root cause:** `src/pages/planning/index.tsx` built BOTH the
+`capacityData` rolling window (KPI + per-dept dailyCapacity) and the
+drilldown's `rollingWindowDates` starting the cursor at `new Date()`
+(today) and walking back ROLLING_WINDOW_DAYS non-Sunday days — so
+today was always one of the 7, and `windowTotalMinutes /
+ROLLING_WINDOW_DAYS` divided a near-zero day into the average. The
+loading chart already excluded today ("Past Production ends
+yesterday"); these two surfaces were inconsistent with it.
+
+**Fix:** both windows now step the cursor back one day before the
+collect loop, so the window is the N most-recent COMPLETE working days
+ending YESTERDAY. KPI average, per-dept capacity, and the drilldown
+list/avg all rise to the accurate figure and match the loading chart.
+
+**Verified:** `npx tsc --noEmit` clean; `npm test` 185/185 pass.
+
+---
+
 ## BUG-2026-05-16-006 — DO "Delivered" amount showed invoiced value (RM 167k) not goods delivered (RM 333k+)
 
 **Status:** 🟢 Fixed (2026-05-16) — regression introduced by BUG-2026-05-16-005, reverted

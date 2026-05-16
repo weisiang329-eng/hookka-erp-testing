@@ -36,7 +36,7 @@ Entries themselves stay newest-first.
 
 ## BUG-2026-05-16-008 — DO creation allowed POs already on another DO → duplicate deliveries, double FG consumption
 
-**Status:** 🟡 Root cause FIXED + deployed; existing-data corruption (25 SOs) NOT yet remediated — owner-directed correction pending
+**Status:** 🟢 Fixed (2026-05-16) — root cause blocked at POST; existing duplicates removed via one-shot dedupe (66 duplicate delivery_order_items rows dropped across 14 DOs, earliest kept, 0 DOs emptied, idempotent re-check = 0). Per operator the cost step isn't in use, so cost_ledger/fg_batches were deliberately NOT reversed (out of scope). DO Delivered went RM 367,409→328,356; residual SO-vs-DO gap RM 5,240 is the known partial-delivery residue, not corruption.
 
 **Category:** delivery-orders, inventory-cascade, data-integrity
 

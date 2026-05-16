@@ -13,6 +13,17 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
+import { loadSoLinePriceIndex, priceForItem } from "../lib/do-value";
+
+// DO statuses that mean goods have shipped — same set the all-time
+// "Delivered" figure uses (loadDeliveredItemsValueSen) so This-Month
+// Delivered reconciles with it.
+const SHIPPED_DO_STATUSES = new Set([
+  "LOADED",
+  "IN_TRANSIT",
+  "DELIVERED",
+  "INVOICED",
+]);
 
 const app = new Hono<Env>();
 
@@ -26,7 +37,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v6`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v7`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -34,6 +45,12 @@ app.get("/", async (c) => {
     const monthStart = fmtISO(
       new Date(today.getFullYear(), today.getMonth(), 1),
     );
+    const monthPrefix = todayISO.slice(0, 7); // current calendar month
+    const yesterdayISO = (() => {
+      const y = new Date(today);
+      y.setDate(y.getDate() - 1);
+      return fmtISO(y);
+    })();
 
     // 7 most-recent COMPLETE working days (Mon-Sat), ending YESTERDAY —
     // same window the Planning page uses for Daily Capacity.
@@ -66,6 +83,10 @@ app.get("/", async (c) => {
       fabMonthRes,
       invMonthRes,
       prodRevRes,
+      soPriceIdx,
+      delivItemsRes,
+      delivDoRes,
+      compYestRes,
       headRes,
     ] = await Promise.all([
       db
@@ -81,12 +102,26 @@ app.get("/", async (c) => {
           completedDate: string | null;
           dueDate: string | null;
         }>(),
+      // Active Jobs — still-in-production POs, split Bedframe (units =
+      // qty) vs Sofa (sets = distinct SOs), with the customer for the
+      // click-through breakdown.
       db
         .prepare(
-          "SELECT COUNT(*) AS n FROM production_orders WHERE orgId = ? AND status IN ('IN_PROGRESS','PENDING')",
+          `SELECT po.itemCategory AS "cat",
+                  po.customerName AS "customerName",
+                  COALESCE(SUM(po.quantity),0) AS "units",
+                  COUNT(DISTINCT po.salesOrderId) AS "sos"
+             FROM production_orders po
+            WHERE po.orgId = ? AND po.status NOT IN ('COMPLETED','CANCELLED')
+            GROUP BY po.itemCategory, po.customerName`,
         )
         .bind(orgId)
-        .first<{ n: number }>(),
+        .all<{
+          cat: string | null;
+          customerName: string | null;
+          units: number;
+          sos: number;
+        }>(),
       db
         .prepare(
           "SELECT COUNT(*) AS n FROM purchase_orders WHERE orgId = ? AND status NOT IN ('RECEIVED','CLOSED','CANCELLED')",
@@ -326,6 +361,69 @@ app.get("/", async (c) => {
             ORDER BY substr(per_po.unit_completed_at::text, 1, 7)`,
         )
         .all<{ ym: string | null; revenueSen: number }>(),
+      // SO-line price index — exact per-item price resolver (same one
+      // the DO/invoice path uses) for This-Month Delivered.
+      loadSoLinePriceIndex(db, orgId),
+      db
+        .prepare(
+          "SELECT deliveryOrderId, productionOrderId, productCode, quantity FROM delivery_order_items WHERE orgId = ?",
+        )
+        .bind(orgId)
+        .all<{
+          deliveryOrderId: string;
+          productionOrderId: string | null;
+          productCode: string | null;
+          quantity: number;
+        }>(),
+      db
+        .prepare(
+          "SELECT id, salesOrderId, status, deliveredAt, dispatchedAt, created_at FROM delivery_orders WHERE orgId = ?",
+        )
+        .bind(orgId)
+        .all<{
+          id: string;
+          salesOrderId: string | null;
+          status: string;
+          deliveredAt: string | null;
+          dispatchedAt: string | null;
+          created_at: string | null;
+        }>(),
+      // Completed YESTERDAY — POs whose LAST upholstery JC completed
+      // yesterday (same per_po gate as production revenue). Bedframe =
+      // units (qty), Sofa = sets (distinct SO), + customer for the
+      // click-through.
+      db
+        .prepare(
+          `WITH per_po AS (
+             SELECT productionOrderId,
+                    MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN completedDate END) AS unit_completed_at
+               FROM job_cards
+              WHERE departmentCode = 'UPHOLSTERY'
+              GROUP BY productionOrderId
+             HAVING COUNT(*) > 0
+                AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN 1 ELSE 0 END) = COUNT(*)
+           )
+           SELECT po.itemCategory AS "cat",
+                  po.customerName AS "customerName",
+                  COALESCE(SUM(po.quantity),0) AS "units",
+                  COUNT(DISTINCT po.salesOrderId) AS "sos"
+             FROM per_po
+             JOIN production_orders po ON po.id = per_po.productionOrderId
+            WHERE po.orgId = ?
+              AND substr(per_po.unit_completed_at::text, 1, 10) = ?
+            GROUP BY po.itemCategory, po.customerName`,
+        )
+        .bind(orgId, yesterdayISO)
+        .all<{
+          cat: string | null;
+          customerName: string | null;
+          units: number;
+          sos: number;
+        }>(),
       // NOTE: `workers` is NOT org-scoped (no org_id column — the workers
       // route never filters by org). Do not add `WHERE orgId = ?` here.
       db
@@ -338,12 +436,10 @@ app.get("/", async (c) => {
     // ---- Production ----
     let capacityMin = 0;
     let backlogMin = 0;
-    let completedToday = 0;
     for (const jc of jcRes.results ?? []) {
       const wip = Math.max(1, jc.wipQty ?? 1);
       const done = jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
       if (done && jc.completedDate) {
-        if (jc.completedDate === todayISO) completedToday++;
         if (windowSet.has(jc.completedDate))
           capacityMin += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wip;
       }
@@ -360,6 +456,80 @@ app.get("/", async (c) => {
       dailyCapacityMin > 0
         ? Math.round((backlogMin / dailyCapacityMin) * 10) / 10
         : 0;
+
+    // ---- Active Jobs (pending) & Completed Yesterday ----
+    // Bedframe counts as units (Σ qty); Sofa as sets (distinct SO).
+    // Both keep a per-customer list for the click-through.
+    const rollUp = (
+      rows: {
+        cat: string | null;
+        customerName: string | null;
+        units: number;
+        sos: number;
+      }[],
+    ) => {
+      let bedframeUnits = 0;
+      let sofaSets = 0;
+      const byCust = new Map<
+        string,
+        { bedframeUnits: number; sofaSets: number }
+      >();
+      for (const r of rows) {
+        const cat = (r.cat ?? "").toUpperCase();
+        const cust = r.customerName || "—";
+        const u = Number(r.units) || 0;
+        const s = Number(r.sos) || 0;
+        const e =
+          byCust.get(cust) ?? { bedframeUnits: 0, sofaSets: 0 };
+        if (cat === "BEDFRAME") {
+          bedframeUnits += u;
+          e.bedframeUnits += u;
+        } else if (cat === "SOFA") {
+          sofaSets += s;
+          e.sofaSets += s;
+        }
+        byCust.set(cust, e);
+      }
+      const byCustomer = [...byCust.entries()]
+        .map(([customer, v]) => ({ customer, ...v }))
+        .filter((v) => v.bedframeUnits > 0 || v.sofaSets > 0)
+        .sort(
+          (a, b) =>
+            b.bedframeUnits + b.sofaSets - (a.bedframeUnits + a.sofaSets),
+        );
+      return { bedframeUnits, sofaSets, byCustomer };
+    };
+    const activeJobs = rollUp(activeJobsRes.results ?? []);
+    const completedYesterday = rollUp(compYestRes.results ?? []);
+
+    // ---- This-Month Delivered (item-level, shipped DOs, this month) ----
+    // Mirrors loadDeliveredItemsValueSen but scoped to DOs whose
+    // effective date (deliveredAt → dispatchedAt → created_at) is in
+    // the current calendar month.
+    const doInfo = new Map<
+      string,
+      { soId: string; shipped: boolean; ym: string }
+    >();
+    for (const d of delivDoRes.results ?? []) {
+      const eff = d.deliveredAt || d.dispatchedAt || d.created_at || "";
+      doInfo.set(d.id, {
+        soId: d.salesOrderId ?? "",
+        shipped: SHIPPED_DO_STATUSES.has(d.status),
+        ym: String(eff).slice(0, 7),
+      });
+    }
+    let thisMonthDeliveredSen = 0;
+    for (const di of delivItemsRes.results ?? []) {
+      const info = doInfo.get(di.deliveryOrderId);
+      if (!info || !info.shipped || info.ym !== monthPrefix) continue;
+      thisMonthDeliveredSen +=
+        priceForItem(
+          soPriceIdx,
+          di.productionOrderId,
+          info.soId,
+          di.productCode,
+        ) * (di.quantity || 0);
+    }
 
     // ---- Fabric cost per meter (consumption basis) ----
     const avgPerMeter = (r: { sen: number; qty: number } | null): number =>
@@ -406,6 +576,8 @@ app.get("/", async (c) => {
         );
       }
     }
+    // This-Month Sales = Σ confirmed-SO total for the current month.
+    const thisMonthSalesSen = soRevMap.get(monthPrefix) ?? 0;
     const aovByCustomer = [...aovMap.entries()]
       .map(([customerName, e]) => ({
         customerName,
@@ -527,12 +699,14 @@ app.get("/", async (c) => {
     }));
 
     return {
+      salesThisMonthSen: thisMonthSalesSen,
+      deliveredThisMonthSen: thisMonthDeliveredSen,
       production: {
         dailyCapacityMin,
         backlogMin,
         backlogDays,
-        completedToday,
-        activeJobs: Number(activeJobsRes?.n) || 0,
+        activeJobs,
+        completedYesterday,
       },
       purchasing: {
         openPOCount: Number(poOpenRes?.n) || 0,

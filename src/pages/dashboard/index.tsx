@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
@@ -20,6 +20,7 @@ import {
   Clock,
   Loader2,
   Scissors,
+  X,
 } from "lucide-react";
 
 // ---------- API response types ----------
@@ -32,14 +33,21 @@ type SoStats = {
   deliveredItemsSen?: number;
   outstandingItemsSen?: number;
 };
+type JobsBreakdown = {
+  bedframeUnits: number;
+  sofaSets: number;
+  byCustomer: { customer: string; bedframeUnits: number; sofaSets: number }[];
+};
 type Overview = {
   success?: boolean;
+  salesThisMonthSen?: number;
+  deliveredThisMonthSen?: number;
   production?: {
     dailyCapacityMin: number;
     backlogMin: number;
     backlogDays: number;
-    completedToday: number;
-    activeJobs: number;
+    activeJobs: JobsBreakdown;
+    completedYesterday: JobsBreakdown;
   };
   purchasing?: {
     openPOCount: number;
@@ -109,18 +117,32 @@ function KPICard({
   value,
   subtitle,
   icon: Icon,
+  onClick,
 }: {
   title: string;
   value: string;
   subtitle?: string;
   icon: React.ElementType;
+  onClick?: () => void;
 }) {
   return (
-    <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+    <Card
+      onClick={onClick}
+      className={`bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] ${
+        onClick
+          ? "cursor-pointer hover:shadow-[0_2px_8px_rgba(0,0,0,0.12)] transition-shadow"
+          : ""
+      }`}
+    >
       <CardContent className="p-6">
         <div className="flex items-start justify-between">
           <div>
-            <p className="text-xs text-[#5A5550] font-medium mb-1">{title}</p>
+            <p className="text-xs text-[#5A5550] font-medium mb-1">
+              {title}
+              {onClick && (
+                <span className="text-[#9CA3AF] font-normal"> · view</span>
+              )}
+            </p>
             <p className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B]">
               {value}
             </p>
@@ -134,6 +156,83 @@ function KPICard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// Lightweight centred modal used by every dashboard drill-through.
+function Modal({
+  title,
+  subtitle,
+  onClose,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-8 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl w-full max-w-3xl my-8"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between border-b border-[#E2DDD8] px-6 py-4">
+          <div>
+            <h3 className="text-base font-bold text-[#1F1D1B]">{title}</h3>
+            {subtitle && (
+              <p className="text-xs text-[#9CA3AF] mt-0.5">{subtitle}</p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 hover:bg-[#F5F2ED] text-[#5A5550]"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="px-6 py-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Customer-contribution table shared by the Active Jobs / Completed
+// Yesterday drill-throughs.
+function CustomerJobsTable({
+  rows,
+}: {
+  rows: { customer: string; bedframeUnits: number; sofaSets: number }[];
+}) {
+  if (rows.length === 0)
+    return <p className="text-xs text-[#9CA3AF]">Nothing here.</p>;
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+          <th className="py-1.5 font-medium">Customer</th>
+          <th className="py-1.5 font-medium text-right">Bedframe units</th>
+          <th className="py-1.5 font-medium text-right">Sofa sets</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.customer} className="border-b border-[#F0ECE6]">
+            <td className="py-1.5 text-[#1F1D1B]">{r.customer}</td>
+            <td className="py-1.5 text-right tabular-nums">
+              {r.bedframeUnits ? r.bedframeUnits.toLocaleString() : "—"}
+            </td>
+            <td className="py-1.5 text-right tabular-nums">
+              {r.sofaSets ? r.sofaSets.toLocaleString() : "—"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -175,6 +274,17 @@ export default function DashboardPage() {
   const pur = ov.purchasing;
   const fab = ov.fabricCostPerMeterSen;
   const emp = ov.employee;
+
+  const [drill, setDrill] = useState<{
+    title: string;
+    subtitle?: string;
+    node: React.ReactNode;
+  } | null>(null);
+
+  const monthLabel = new Date().toLocaleDateString("en-MY", {
+    month: "long",
+    year: "numeric",
+  });
 
   // Pending Delivery — production complete (all upholstery JCs done) but
   // not yet on a delivery order. Computed here from the exact same payloads
@@ -258,15 +368,15 @@ export default function DashboardPage() {
         <SectionHeader label="Sales & Delivery" />
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           <KPICard
-            title="Confirmed Sales"
-            value={rm(so.csRevenueSen)}
-            subtitle={`${so.total ?? 0} orders`}
+            title="This Month Sales"
+            value={rm(ov.salesThisMonthSen)}
+            subtitle={`Confirmed SO total · ${monthLabel}`}
             icon={DollarSign}
           />
           <KPICard
-            title="Delivered"
-            value={rm(so.deliveredItemsSen)}
-            subtitle="Goods actually shipped (item-level)"
+            title="This Month Delivered"
+            value={rm(ov.deliveredThisMonthSen)}
+            subtitle={`Goods shipped (item-level) · ${monthLabel}`}
             icon={Truck}
           />
           <KPICard
@@ -302,15 +412,45 @@ export default function DashboardPage() {
           />
           <KPICard
             title="Active Jobs"
-            value={(prod?.activeJobs ?? 0).toLocaleString()}
-            subtitle="In production / pending"
+            value={`${(prod?.activeJobs?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.activeJobs?.sofaSets ?? 0).toLocaleString()}`}
+            subtitle="Pending bedframe units / sofa sets"
             icon={Package}
+            onClick={
+              prod?.activeJobs
+                ? () =>
+                    setDrill({
+                      title: "Active Jobs — pending by customer",
+                      subtitle:
+                        "Bedframe = pieces still in production · Sofa = sets (1 SO = 1 set)",
+                      node: (
+                        <CustomerJobsTable
+                          rows={prod.activeJobs.byCustomer}
+                        />
+                      ),
+                    })
+                : undefined
+            }
           />
           <KPICard
-            title="Completed Today"
-            value={(prod?.completedToday ?? 0).toLocaleString()}
-            subtitle="Job cards finished today"
+            title="Completed Yesterday"
+            value={`${(prod?.completedYesterday?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.completedYesterday?.sofaSets ?? 0).toLocaleString()}`}
+            subtitle="Bedframe units / sofa sets finished yesterday"
             icon={CheckCircle2}
+            onClick={
+              prod?.completedYesterday
+                ? () =>
+                    setDrill({
+                      title: "Completed Yesterday — by customer",
+                      subtitle:
+                        "Production finished (last upholstery completed yesterday)",
+                      node: (
+                        <CustomerJobsTable
+                          rows={prod.completedYesterday.byCustomer}
+                        />
+                      ),
+                    })
+                : undefined
+            }
           />
         </div>
       </div>
@@ -752,6 +892,16 @@ export default function DashboardPage() {
           </Card>
         </div>
       </div>
+
+      {drill && (
+        <Modal
+          title={drill.title}
+          subtitle={drill.subtitle}
+          onClose={() => setDrill(null)}
+        >
+          {drill.node}
+        </Modal>
+      )}
     </div>
   );
 }

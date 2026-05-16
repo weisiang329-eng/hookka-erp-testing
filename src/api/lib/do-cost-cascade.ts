@@ -95,9 +95,15 @@ export async function consumeFGBatchesForDO(
       continue;
     }
 
-    // Resolve productId by productCode. fg_batches keys on productId.
+    // Resolve productId by product code. fg_batches keys on productId.
+    // NOTE: the products table column is `code`, NOT `productCode`.
+    // Using `productCode` here made the SupabaseAdapter rename map
+    // rewrite it to `product_code` (its global mapping), and
+    // `products` has no such column → "column product_code does not
+    // exist", failing every DO → DELIVERED cascade. Mirrors the
+    // working sibling query in lib/fg-completion.ts:77.
     const product = await db
-      .prepare("SELECT id FROM products WHERE productCode = ? LIMIT 1")
+      .prepare("SELECT id FROM products WHERE code = ? LIMIT 1")
       .bind(productCode)
       .first<{ id: string }>();
     if (!product) {

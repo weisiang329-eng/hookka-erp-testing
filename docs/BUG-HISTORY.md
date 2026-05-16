@@ -34,6 +34,39 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-001 — DO → DELIVERED cascade dies: `column "product_code" does not exist`
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** delivery-orders, data-integrity, infrastructure
+
+**Symptom (user-reported):** Wei Siang bulk-selected 83 dispatched DOs
+on the Delivery Orders page and clicked "Mark Delivered". Toast:
+"83 of 83 failed: column 'product_code' does not exist". Every DO →
+DELIVERED transition failed — no COGS, no auto-invoice, no SO
+status cascade.
+
+**Root cause:** `src/api/lib/do-cost-cascade.ts:100`
+(`consumeFGBatchesForDO`, runs on every DO → DELIVERED) queried
+`SELECT id FROM products WHERE productCode = ?`. The SupabaseAdapter
+column-rename-map (`src/api/lib/column-rename-map.json:580`) maps
+`productCode` → `product_code` globally. But the `products` table's
+column is `code`, NOT `product_code` (see
+`migrations-postgres/0001_init.sql:79`). So the rewritten query hit
+a non-existent column and threw, aborting the whole DELIVERED batch.
+The working sibling `lib/fg-completion.ts:77` already does it
+correctly with `WHERE code = ?`.
+
+**Fix (`src/api/lib/do-cost-cascade.ts:99-105`):** changed the
+predicate from `WHERE productCode = ?` to `WHERE code = ?`, matching
+fg-completion.ts. Module-wide scan: this was the only `FROM products
+WHERE productCode` in `src/api/` — every other products-by-code
+lookup already uses `code`.
+
+**Verified:** `npx tsc --noEmit` clean; full test suite 185/185.
+Deployed to main; operator to re-run bulk Mark Delivered.
+
+---
+
 ## BUG-2026-05-15-002 — Planning page Capacity Overview "Utilization 975%" + misleading Master Tracker "Hookka DD"
 
 **Status:** 🟢 Fixed (2026-05-15)

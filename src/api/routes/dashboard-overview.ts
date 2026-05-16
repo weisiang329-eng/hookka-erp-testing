@@ -37,7 +37,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v7`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v8`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -87,6 +87,7 @@ app.get("/", async (c) => {
       delivItemsRes,
       delivDoRes,
       compYestRes,
+      backlogJcRes,
       headRes,
     ] = await Promise.all([
       db
@@ -424,6 +425,30 @@ app.get("/", async (c) => {
           units: number;
           sos: number;
         }>(),
+      // Per-JC rows for the Backlog-by-department drill-down — exact
+      // mirror of the Planning page's capacityData: needs the JC's dept
+      // + its production order's category & status.
+      db
+        .prepare(
+          `SELECT jc.departmentCode AS "dept", jc.status AS "jcStatus",
+                  jc.estMinutes AS "estMinutes", jc.actualMinutes AS "actualMinutes",
+                  jc.wipQty AS "wipQty", jc.completedDate AS "completedDate",
+                  po.itemCategory AS "cat", po.status AS "poStatus"
+             FROM job_cards jc
+             JOIN production_orders po ON po.id = jc.productionOrderId
+            WHERE jc.orgId = ?`,
+        )
+        .bind(orgId)
+        .all<{
+          dept: string | null;
+          jcStatus: string;
+          estMinutes: number | null;
+          actualMinutes: number | null;
+          wipQty: number | null;
+          completedDate: string | null;
+          cat: string | null;
+          poStatus: string;
+        }>(),
       // NOTE: `workers` is NOT org-scoped (no org_id column — the workers
       // route never filters by org). Do not add `WHERE orgId = ?` here.
       db
@@ -436,12 +461,19 @@ app.get("/", async (c) => {
     // ---- Production ----
     let capacityMin = 0;
     let backlogMin = 0;
+    const capByDay = new Map<string, number>();
     for (const jc of jcRes.results ?? []) {
       const wip = Math.max(1, jc.wipQty ?? 1);
       const done = jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
       if (done && jc.completedDate) {
-        if (windowSet.has(jc.completedDate))
-          capacityMin += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wip;
+        if (windowSet.has(jc.completedDate)) {
+          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wip;
+          capacityMin += mins;
+          capByDay.set(
+            jc.completedDate,
+            (capByDay.get(jc.completedDate) ?? 0) + mins,
+          );
+        }
       }
       if (
         jc.status !== "COMPLETED" &&
@@ -456,6 +488,67 @@ app.get("/", async (c) => {
       dailyCapacityMin > 0
         ? Math.round((backlogMin / dailyCapacityMin) * 10) / 10
         : 0;
+    // Daily Capacity drill-down: last 7 working days, oldest first.
+    const capacityDays = [...windowDays]
+      .sort((a, b) => a.localeCompare(b))
+      .map((date) => ({ date, minutes: capByDay.get(date) ?? 0 }));
+
+    // ---- Backlog per department (mirror of Planning capacityData) ----
+    const DEPARTMENTS: { code: string; name: string }[] = [
+      { code: "FAB_CUT", name: "Fabric Cutting" },
+      { code: "FAB_SEW", name: "Fabric Sewing" },
+      { code: "WOOD_CUT", name: "Wood Cutting" },
+      { code: "FOAM", name: "Foam Bonding" },
+      { code: "FRAMING", name: "Framing" },
+      { code: "WEBBING", name: "Webbing" },
+      { code: "UPHOLSTERY", name: "Upholstery" },
+      { code: "PACKING", name: "Packing" },
+    ];
+    const backlogRows = backlogJcRes.results ?? [];
+    const backlogByDept = DEPARTMENTS.map(({ code, name }) => {
+      let windowTotal = 0;
+      let sofaMin = 0;
+      let bedframeMin = 0;
+      for (const r of backlogRows) {
+        if (r.dept !== code) continue;
+        const wip = Math.max(1, r.wipQty ?? 1);
+        if (
+          (r.jcStatus === "COMPLETED" || r.jcStatus === "TRANSFERRED") &&
+          r.completedDate &&
+          windowSet.has(r.completedDate)
+        ) {
+          windowTotal += (r.actualMinutes ?? r.estMinutes ?? 0) * wip;
+        }
+        if (
+          (r.poStatus === "IN_PROGRESS" || r.poStatus === "PENDING") &&
+          r.jcStatus !== "COMPLETED" &&
+          r.jcStatus !== "CANCELLED" &&
+          r.jcStatus !== "TRANSFERRED"
+        ) {
+          const m = (r.estMinutes ?? 0) * wip;
+          if ((r.cat ?? "").toUpperCase() === "SOFA") sofaMin += m;
+          else if ((r.cat ?? "").toUpperCase() === "BEDFRAME")
+            bedframeMin += m;
+        }
+      }
+      const dailyCapMin = Math.round(windowTotal / 7);
+      const totalMin = sofaMin + bedframeMin;
+      const denom = dailyCapMin > 0 ? dailyCapMin : 1;
+      return {
+        dept: name,
+        sofaMin,
+        bedframeMin,
+        totalMin,
+        dailyCapMin,
+        backlogDays: Math.round((totalMin / denom) * 10) / 10,
+      };
+    })
+      .filter((d) => d.totalMin > 0 || d.dailyCapMin > 0)
+      .sort((a, b) => b.backlogDays - a.backlogDays);
+    const backlogGrandMin = backlogByDept.reduce(
+      (s, d) => s + d.totalMin,
+      0,
+    );
 
     // ---- Active Jobs (pending) & Completed Yesterday ----
     // Bedframe counts as units (Σ qty); Sofa as sets (distinct SO).
@@ -707,6 +800,9 @@ app.get("/", async (c) => {
         backlogDays,
         activeJobs,
         completedYesterday,
+        capacityDays,
+        backlogByDept,
+        backlogGrandMin,
       },
       purchasing: {
         openPOCount: Number(poOpenRes?.n) || 0,

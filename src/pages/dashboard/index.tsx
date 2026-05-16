@@ -48,6 +48,16 @@ type Overview = {
     backlogDays: number;
     activeJobs: JobsBreakdown;
     completedYesterday: JobsBreakdown;
+    capacityDays: { date: string; minutes: number }[];
+    backlogByDept: {
+      dept: string;
+      sofaMin: number;
+      bedframeMin: number;
+      totalMin: number;
+      dailyCapMin: number;
+      backlogDays: number;
+    }[];
+    backlogGrandMin: number;
   };
   purchasing?: {
     openPOCount: number;
@@ -105,12 +115,62 @@ type SOItemsResp = {
   success?: boolean;
   data?: { id: string; items?: { productCode?: string; unitPriceSen?: number }[] }[];
 };
+// Employee efficiency = production minutes ÷ (clocked production hours
+// × 60) × 100 — exact same formula as the Employee page, over the
+// last 7 working days.
+type JcSummaryResp = {
+  data?: { workerId: string; productionMinutes: number; jcCount: number }[];
+};
+type WheSummaryResp = {
+  data?: {
+    workerId: string;
+    totalHours: number;
+    byDept: Record<string, number>;
+    daysWithEntries: number;
+  }[];
+};
+type WorkersResp = {
+  data?: { id: string; name: string; departmentCode?: string; status?: string }[];
+};
+
+const PROD_DEPTS = new Set([
+  "FAB_CUT",
+  "FAB_SEW",
+  "WOOD_CUT",
+  "FOAM",
+  "FRAMING",
+  "WEBBING",
+  "UPHOLSTERY",
+  "PACKING",
+]);
+
+// Last 7 working days (Mon–Sat), ending yesterday — same window the
+// dashboard's Daily Capacity uses, so efficiency lines up with it.
+function last7WorkingDays(): { from: string; to: string } {
+  const iso = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const days: string[] = [];
+  const cur = new Date();
+  cur.setHours(0, 0, 0, 0);
+  cur.setDate(cur.getDate() - 1);
+  while (days.length < 7) {
+    if (cur.getDay() !== 0) days.push(iso(cur));
+    cur.setDate(cur.getDate() - 1);
+  }
+  days.sort((a, b) => a.localeCompare(b));
+  return { from: days[0], to: days[days.length - 1] };
+}
 
 // ---------- helpers ----------
 
 const rm = (sen: number | undefined) => formatCurrency(sen ?? 0);
 const hrs = (min: number | undefined) =>
   `${Math.round((min ?? 0) / 60).toLocaleString()}h`;
+// "201h 50m" — matches the Planning page's capacity/backlog modals.
+const hm = (min: number | undefined) => {
+  const m = Math.max(0, Math.round(min ?? 0));
+  return `${Math.floor(m / 60).toLocaleString()}h ${m % 60}m`;
+};
 
 function KPICard({
   title,
@@ -266,14 +326,60 @@ export default function DashboardPage() {
   const { data: soItemsRaw, loading: soItemsL } =
     useCachedJson<SOItemsResp>("/api/sales-orders");
 
-  const loading = soL || ovL || poL || doL || poValL || soItemsL;
+  // Employee efficiency — last 7 working days (Employee-page formula).
+  const effWin = useMemo(() => last7WorkingDays(), []);
+  const { data: jcSumRaw, loading: jcSumL } = useCachedJson<JcSummaryResp>(
+    `/api/job-cards/summary?from=${effWin.from}&to=${effWin.to}`,
+  );
+  const { data: wheSumRaw, loading: wheSumL } = useCachedJson<WheSummaryResp>(
+    `/api/working-hour-entries/summary?from=${effWin.from}&to=${effWin.to}`,
+  );
+  const { data: workersRaw, loading: workersL } =
+    useCachedJson<WorkersResp>("/api/workers");
+
+  const loading =
+    soL ||
+    ovL ||
+    poL ||
+    doL ||
+    poValL ||
+    soItemsL ||
+    jcSumL ||
+    wheSumL ||
+    workersL;
+
+  // Top / bottom 5 by efficiency = prodMins ÷ (prodHours × 60) × 100,
+  // production-dept hours only, workers with real activity.
+  const efficiency = useMemo(() => {
+    const prodMin = new Map<string, number>();
+    for (const r of jcSumRaw?.data ?? [])
+      prodMin.set(r.workerId, Number(r.productionMinutes) || 0);
+    const name = new Map<string, string>();
+    for (const w of workersRaw?.data ?? []) name.set(w.id, w.name || w.id);
+    const rows: { name: string; pct: number }[] = [];
+    for (const e of wheSumRaw?.data ?? []) {
+      if ((e.daysWithEntries ?? 0) === 0) continue;
+      let prodHours = 0;
+      for (const [dept, h] of Object.entries(e.byDept ?? {}))
+        if (PROD_DEPTS.has(dept)) prodHours += Number(h) || 0;
+      if (prodHours <= 0) continue;
+      const mins = prodMin.get(e.workerId) ?? 0;
+      const pct = (mins / (prodHours * 60)) * 100;
+      rows.push({ name: name.get(e.workerId) ?? e.workerId, pct });
+    }
+    rows.sort((a, b) => b.pct - a.pct);
+    return {
+      top: rows.slice(0, 5),
+      bottom: rows.slice(-5).reverse(),
+      count: rows.length,
+    };
+  }, [jcSumRaw, wheSumRaw, workersRaw]);
 
   const so = soRaw ?? {};
   const ov = ovRaw ?? {};
   const prod = ov.production;
   const pur = ov.purchasing;
   const fab = ov.fabricCostPerMeterSen;
-  const emp = ov.employee;
 
   const [drill, setDrill] = useState<{
     title: string;
@@ -403,12 +509,123 @@ export default function DashboardPage() {
             value={hrs(prod?.dailyCapacityMin)}
             subtitle="7-working-day actual avg"
             icon={Factory}
+            onClick={
+              prod?.capacityDays
+                ? () =>
+                    setDrill({
+                      title: "Daily Capacity — Past 7 Working Days",
+                      subtitle: `Average: ${hm(prod.dailyCapacityMin)}/day across all production depts`,
+                      node: (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                              <th className="py-1.5 font-medium">Date</th>
+                              <th className="py-1.5 font-medium text-right">
+                                Production Time
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                vs Avg
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {prod.capacityDays.map((d) => {
+                              const diff =
+                                d.minutes - prod.dailyCapacityMin;
+                              return (
+                                <tr
+                                  key={d.date}
+                                  className="border-b border-[#F0ECE6]"
+                                >
+                                  <td className="py-1.5 text-[#1F1D1B] tabular-nums">
+                                    {d.date}
+                                  </td>
+                                  <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                                    {hm(d.minutes)}
+                                  </td>
+                                  <td
+                                    className={`py-1.5 text-right tabular-nums ${diff >= 0 ? "text-[#15803D]" : "text-[#DC2626]"}`}
+                                  >
+                                    {diff >= 0 ? "+" : "−"}
+                                    {hm(Math.abs(diff))}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ),
+                    })
+                : undefined
+            }
           />
           <KPICard
             title="Backlog"
             value={`${(prod?.backlogDays ?? 0).toLocaleString()} days`}
             subtitle={`${hrs(prod?.backlogMin)} of work queued`}
             icon={Clock}
+            onClick={
+              prod?.backlogByDept
+                ? () =>
+                    setDrill({
+                      title: "Total Backlog — per Department",
+                      subtitle: `${hm(prod.backlogGrandMin)} of active work across ${prod.backlogByDept.length} dept${prod.backlogByDept.length === 1 ? "" : "s"}`,
+                      node: (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                              <th className="py-1.5 font-medium">
+                                Department
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                SOFA
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                BEDFRAME
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                Total
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                Daily Capacity
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                Backlog Days
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {prod.backlogByDept.map((d) => (
+                              <tr
+                                key={d.dept}
+                                className="border-b border-[#F0ECE6]"
+                              >
+                                <td className="py-1.5 text-[#1F1D1B]">
+                                  {d.dept}
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums text-[#5A5550]">
+                                  {hm(d.sofaMin)}
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums text-[#5A5550]">
+                                  {hm(d.bedframeMin)}
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                                  {hm(d.totalMin)}
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums text-[#5A5550]">
+                                  {hm(d.dailyCapMin)}/day
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums font-semibold text-[#B45309]">
+                                  {d.backlogDays.toLocaleString()}d
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ),
+                    })
+                : undefined
+            }
           />
           <KPICard
             title="Active Jobs"
@@ -460,25 +677,61 @@ export default function DashboardPage() {
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Users className="h-4 w-4 text-[#6B5C32]" /> Workforce —{" "}
-              {emp?.activeHeadcount ?? 0} active
+              <Users className="h-4 w-4 text-[#6B5C32]" /> Worker Efficiency
+              <span className="text-[10px] text-[#9CA3AF] font-normal">
+                7-working-day avg
+              </span>
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-1.5">
-            {(emp?.byDept ?? []).length === 0 && (
-              <p className="text-xs text-[#9CA3AF]">No active workers.</p>
+          <CardContent className="space-y-3">
+            {efficiency.count === 0 ? (
+              <p className="text-xs text-[#9CA3AF]">
+                No production activity in the window.
+              </p>
+            ) : (
+              <>
+                <div>
+                  <p className="text-[11px] font-semibold text-[#15803D] mb-1">
+                    Top 5
+                  </p>
+                  {efficiency.top.map((r, i) => (
+                    <div
+                      key={`t${i}-${r.name}`}
+                      className="flex items-center justify-between text-sm py-0.5"
+                    >
+                      <span className="text-[#5A5550] truncate pr-2">
+                        {r.name}
+                      </span>
+                      <span className="font-semibold text-[#15803D] tabular-nums">
+                        {Math.round(r.pct)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="border-t border-[#E2DDD8] pt-2">
+                  <p className="text-[11px] font-semibold text-[#DC2626] mb-1">
+                    Lowest 5
+                  </p>
+                  {efficiency.bottom.map((r, i) => (
+                    <div
+                      key={`b${i}-${r.name}`}
+                      className="flex items-center justify-between text-sm py-0.5"
+                    >
+                      <span className="text-[#5A5550] truncate pr-2">
+                        {r.name}
+                      </span>
+                      <span className="font-semibold text-[#DC2626] tabular-nums">
+                        {Math.round(r.pct)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
-            {(emp?.byDept ?? []).map((d) => (
-              <div
-                key={d.dept}
-                className="flex items-center justify-between text-sm"
-              >
-                <span className="text-[#5A5550]">{d.dept}</span>
-                <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                  {d.count}
-                </span>
-              </div>
-            ))}
+            <p className="text-[10px] text-[#9CA3AF]">
+              Production minutes ÷ clocked production hours. {effWin.from} →{" "}
+              {effWin.to}.
+            </p>
           </CardContent>
         </Card>
 

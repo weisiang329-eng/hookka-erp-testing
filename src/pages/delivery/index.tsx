@@ -80,7 +80,7 @@ type DeliveryOrderRow = {
   hubState: string;     // delivery_hubs.state resolved via hubId on the API; preferred display in the State column when present
   itemCount: number;    // number of items in this DO
   totalM3: number;
-  totalSen: number;     // goods value (SO unit price × qty, stamped at DO creation) — the Sales Figure
+  valueSen: number;     // Sales Figure — linked SO line value (server-derived; delivery_orders has no monetary column)
   items: DOItem[];      // all items for detail view
   dispatchDate: string | null;
   receivedDate: string | null;
@@ -143,7 +143,7 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     hubState: ((d as Record<string, unknown>).hubState as string) || "",
     itemCount: items.length,
     totalM3: d.totalM3 ?? 0,
-    totalSen: d.totalSen ?? 0,
+    valueSen: d.valueSen ?? 0,
     items,
     dispatchDate: d.dispatchedAt || null,
     receivedDate: d.deliveredAt || null,
@@ -226,6 +226,7 @@ type ReadyPORow = {
   sizeLabel: string;
   fabricCode: string;
   quantity: number;
+  valueSen: number;              // Sales Figure — this PO's SO line value (SO unit price × qty)
   unitM3: number;                // per-unit volume from /api/products (Products page · Unit M³)
   completedDate: string | null;
   uphCompletedDate: string | null;
@@ -591,13 +592,30 @@ export default function DeliveryPage() {
         if (poRes.success && Array.isArray(poRes.data)) {
           // Build SO lookup for hookkaExpectedDD + customerId
           const soMap = new Map<string, { hookkaExpectedDD: string; companySOId: string; customerId: string }>();
+          // Wei Siang 2026-05-16: SO unit price per product code, so the
+          // PO-based tabs (Planning / Pending Delivery) can show the same
+          // Sales Figure the DO tabs do — value = SO unit price × PO qty.
+          // Mirrors the DO value formula (productCode → SO unitPriceSen).
+          const soPriceByProduct = new Map<string, Map<string, number>>();
           if (soRes.success && Array.isArray(soRes.data)) {
-            for (const so of soRes.data as { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[]) {
+            for (const so of soRes.data as {
+              id: string;
+              hookkaExpectedDD?: string;
+              companySOId?: string;
+              customerId?: string;
+              items?: { productCode?: string; unitPriceSen?: number }[];
+            }[]) {
               soMap.set(so.id, {
                 hookkaExpectedDD: so.hookkaExpectedDD || "",
                 companySOId: so.companySOId || "",
                 customerId: so.customerId || "",
               });
+              const priceMap = new Map<string, number>();
+              for (const it of so.items ?? []) {
+                if (it.productCode)
+                  priceMap.set(it.productCode, Number(it.unitPriceSen) || 0);
+              }
+              soPriceByProduct.set(so.id, priceMap);
             }
           }
 
@@ -674,6 +692,10 @@ export default function DeliveryPage() {
               sizeLabel: po.sizeLabel || "",
               fabricCode: po.fabricCode || "",
               quantity: po.quantity || 0,
+              valueSen:
+                (soPriceByProduct
+                  .get(po.salesOrderId || "")
+                  ?.get(po.productCode || "") ?? 0) * (po.quantity || 0),
               unitM3: productM3Map.get(po.productCode || "") ?? 0,
               completedDate: po.completedDate || null,
               uphCompletedDate: (() => {
@@ -2156,17 +2178,18 @@ export default function DeliveryPage() {
         },
       },
       {
-        // Wei Siang 2026-05-16: per-row Sales Figure — the DO's goods
-        // value (SO unit price × qty, stamped at DO creation). Same
-        // number that feeds the tab-strip aggregate.
-        key: "totalSen",
+        // Wei Siang 2026-05-16: per-row Sales Figure — the DO's linked
+        // sales-order line value (qty × SO unit price). Server-derived
+        // (delivery_orders has no monetary column); same formula that
+        // feeds the tab-strip aggregate so the column sums to the tab.
+        key: "valueSen",
         label: "Amount",
         type: "text",
         width: "120px",
         sortable: true,
         render: (_value, row) => (
           <span className="font-medium text-[#1F1D1B] tabular-nums">
-            {formatRM(row.totalSen ?? 0)}
+            {formatRM(row.valueSen ?? 0)}
           </span>
         ),
       },
@@ -2361,16 +2384,18 @@ export default function DeliveryPage() {
     invoiced: uniqueDOsByStatus.invoiced,
   };
 
-  // ---------- Tab RM value (DO-based tabs only) ----------
-  // Wei Siang 2026-05-16: show the money in each bucket. Planning /
-  // Pending Delivery are production-order based (no price loaded on
-  // this page yet) so they stay value-less for now — flagged for a
-  // follow-up SO-price aggregate.
+  // ---------- Tab RM value (Sales Figure in every bucket) ----------
+  // Wei Siang 2026-05-16: show the money at every stage. Planning /
+  // Pending Delivery are PO-based — sum each PO's SO line value (same
+  // productCode × SO unit price basis the DO tabs use, so the figure is
+  // comparable across the whole flow). DO tabs read the whole-dataset
+  // /stats aggregate. "Dispatched" shows LOADED + IN_TRANSIT because the
+  // tab lists both (TAB_DO_STATUSES.dispatched), so its money must too.
   const tabValueSen: Record<string, number | null> = {
-    planning: null,
-    pending_delivery: null,
+    planning: planningPOs.reduce((s, p) => s + (p.valueSen || 0), 0),
+    pending_delivery: readyPOs.reduce((s, p) => s + (p.valueSen || 0), 0),
     pending_dispatch: valueDOsByStatus.draft,
-    dispatched: valueDOsByStatus.dispatched,
+    dispatched: valueDOsByStatus.dispatched + valueDOsByStatus.inTransit,
     delivered: valueDOsByStatus.delivered,
     invoiced: valueDOsByStatus.invoiced,
   };

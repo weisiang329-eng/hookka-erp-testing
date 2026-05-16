@@ -34,6 +34,47 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-16-003 — Delivery Orders Amount column + tab totals all showed RM 0.00
+
+**Status:** 🟢 Fixed (2026-05-16)
+**Category:** delivery-orders, ui-frontend
+
+**Symptom (user-reported):** The new per-DO "Amount" column and the
+tab-strip Sales Figure totals (Pending Dispatch / Dispatched /
+Delivered / Invoice) all rendered `RM 0.00`. Wei Siang: "怎么那么
+丑" — wanted real RM numbers like the Sales Orders "Total" column,
+at every stage including Pending Delivery.
+
+**Root cause:** The first cut of the Amount feature read
+`delivery_orders.totalSen` per row and `SUM(totalSen)` in
+`/api/delivery-orders/stats`. **`delivery_orders` has no monetary
+column** — no `total_sen` (confirmed migrations-postgres/0001_init.sql;
+migration 0103 states a DO's value anchors in the linked
+invoice/SO, not the DO row). So `d.totalSen` was always `undefined`
+→ `0`, and `SUM(totalSen)` summed a non-existent column → `0`.
+
+**Fix:**
+- `src/api/routes/delivery-orders.ts`: added `DO_VALUE_FROM` /
+  `DO_VALUE_EXPR` + `loadDoValueMap()`. A DO's value is the linked
+  sales-order line value — each DO item's `quantity × SO
+  unitPriceSen` for its `productCode`, SO resolved via the item's
+  production order (multi-SO DOs) falling back to the DO's own
+  `salesOrderId`. Mirrors the auto-invoice computedTotal primary
+  path. `GET /` attaches `valueSen` per DO; `/stats` groups the
+  identical FROM/SUM by status with `COUNT(DISTINCT d.id)` so the
+  per-row column always reconciles with the per-tab aggregate.
+- `src/types/index.ts`: added `DeliveryOrder.valueSen?`.
+- `src/pages/delivery/index.tsx`: row + map renamed `totalSen` →
+  `valueSen` (server-derived); Planning / Pending Delivery (PO-based,
+  no DO yet) now sum each PO's SO line value (same productCode × SO
+  unit price basis) so every stage shows a comparable Sales Figure;
+  "Dispatched" tab money = LOADED + IN_TRANSIT to match the rows it
+  lists.
+
+**Verified:** `npx tsc --noEmit` clean; `npm test` 185/185 pass.
+
+---
+
 ## BUG-2026-05-16-002 — Bulk Mark Delivered: deadlock detected + duplicate ux_invoices_invoice_no
 
 **Status:** 🟢 Fixed (2026-05-16)

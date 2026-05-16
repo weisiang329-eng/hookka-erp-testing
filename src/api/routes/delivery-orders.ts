@@ -323,6 +323,49 @@ async function resolveDoSalesOrderIds(
   return Array.from(ids);
 }
 
+// ---------------------------------------------------------------------------
+// DO "Sales Figure" derivation.
+//
+// delivery_orders carries NO monetary column (no total_sen). A DO's value is
+// the linked sales-order line value: each DO item's quantity × the SO unit
+// price for that product code. The SO is resolved via the item's production
+// order (covers multi-SO DOs, where delivery_orders.salesOrderId is NULL),
+// falling back to the DO's own salesOrderId for legacy single-SO DOs. This
+// mirrors the auto-invoice computedTotal PRIMARY path so the per-row Amount
+// column sums exactly to the per-status tab aggregate.
+//
+// Both the per-row map and the per-status /stats aggregate use this same
+// FROM/WHERE + SUM expression, so the column always reconciles with the tab
+// total. (No SO.totalSen final fallback here — the invoice path has one for
+// billing correctness, but adding it on only one of the two queries would
+// break row↔tab reconciliation, which is the whole point of this display.)
+const DO_VALUE_FROM = `
+  FROM delivery_orders d
+  LEFT JOIN delivery_order_items di ON di.deliveryOrderId = d.id
+  LEFT JOIN production_orders po ON po.id = di.productionOrderId
+  LEFT JOIN sales_order_items si
+        ON si.salesOrderId = COALESCE(NULLIF(po.salesOrderId, ''), d.salesOrderId)
+       AND si.productCode = di.productCode
+ WHERE d.orgId = ?`;
+
+const DO_VALUE_EXPR =
+  "COALESCE(SUM(di.quantity * COALESCE(si.unitPriceSen, 0)), 0)";
+
+async function loadDoValueMap(
+  db: D1Database,
+  orgId: string,
+): Promise<Map<string, number>> {
+  const res = await db
+    .prepare(
+      `SELECT d.id AS id, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.id`,
+    )
+    .bind(orgId)
+    .all<{ id: string; v: number }>();
+  const m = new Map<string, number>();
+  for (const r of res.results ?? []) m.set(r.id, Number(r.v) || 0);
+  return m;
+}
+
 function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -371,7 +414,7 @@ app.get("/", async (c) => {
   const paginate = pageParam !== undefined || limitParam !== undefined;
 
   if (!paginate) {
-    const [orders, items] = await Promise.all([
+    const [orders, items, valueMap] = await Promise.all([
       db
         .prepare("SELECT * FROM delivery_orders WHERE orgId = ? ORDER BY created_at DESC")
         .bind(orgId)
@@ -380,6 +423,7 @@ app.get("/", async (c) => {
         .prepare("SELECT * FROM delivery_order_items WHERE orgId = ?")
         .bind(orgId)
         .all<DeliveryOrderItemRow>(),
+      loadDoValueMap(db, orgId),
     ]);
     const itemRows = items.results ?? [];
     const orderRows = orders.results ?? [];
@@ -387,7 +431,11 @@ app.get("/", async (c) => {
       loadProductM3Map(db, itemRows.map((i) => i.productCode)),
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
     ]);
-    const data = orderRows.map((o) => rowToOrder(o, itemRows, m3Map, hubStateMap));
+    const data = orderRows.map((o) => {
+      const order = rowToOrder(o, itemRows, m3Map, hubStateMap);
+      order.valueSen = valueMap.get(o.id) ?? 0;
+      return order;
+    });
     return c.json({ success: true, data, total: data.length });
   }
 
@@ -423,11 +471,16 @@ app.get("/", async (c) => {
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const [m3Map, hubStateMap] = await Promise.all([
+  const [m3Map, hubStateMap, valueMap] = await Promise.all([
     loadProductM3Map(db, items.map((i) => i.productCode)),
     loadHubStateMap(db, orderRows.map((o) => o.hubId)),
+    loadDoValueMap(db, orgId),
   ]);
-  const data = orderRows.map((o) => rowToOrder(o, items, m3Map, hubStateMap));
+  const data = orderRows.map((o) => {
+    const order = rowToOrder(o, items, m3Map, hubStateMap);
+    order.valueSen = valueMap.get(o.id) ?? 0;
+    return order;
+  });
   return c.json({ success: true, data, page, limit, total });
 });
 
@@ -445,14 +498,16 @@ app.get("/stats", async (c) => {
   if (denied) return denied;
 
   const orgId = getOrgId(c);
-  // Wei Siang 2026-05-16: also sum totalSen per status so the
-  // Delivery Orders tab strip can show the RM value of each bucket
-  // (Pending Dispatch / Dispatched / In Transit / Delivered /
-  // Invoice). totalSen on a DO is the goods value (SO unit prices ×
-  // qty, set at DO creation), not the delivery cost.
+  // Wei Siang 2026-05-16: per-status RM value so the Delivery Orders
+  // tab strip shows the money in each bucket (Pending Dispatch /
+  // Dispatched / In Transit / Delivered / Invoice), not just counts.
+  // A DO has no monetary column — value is the linked SO line value
+  // (see DO_VALUE_FROM). COUNT(DISTINCT d.id) because the item join
+  // multiplies rows; identical FROM/SUM as the per-row map so the
+  // column reconciles with this aggregate.
   const res = await c.var.DB
     .prepare(
-      "SELECT status, COUNT(*) AS n, COALESCE(SUM(totalSen),0) AS v FROM delivery_orders WHERE orgId = ? GROUP BY status",
+      `SELECT d.status AS status, COUNT(DISTINCT d.id) AS n, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.status`,
     )
     .bind(orgId)
     .all<{ status: string; n: number; v: number }>();

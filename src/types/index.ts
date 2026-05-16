@@ -375,6 +375,10 @@ export type DeliveryOrder = {
   items: DeliveryOrderItem[];
   totalM3: number;
   totalItems: number;
+  // Sales Figure — derived from the linked sales-order line totals
+  // (delivery_orders has no monetary column). Server-computed in the
+  // GET /api/delivery-orders payload; absent on locally-built rows.
+  valueSen?: number;
   status: DeliveryStatus;
   overdue: string;
   dispatchedAt: string | null;

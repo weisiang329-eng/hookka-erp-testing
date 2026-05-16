@@ -27,12 +27,6 @@ type SoStats = {
   deliveredItemsSen?: number;
   outstandingItemsSen?: number;
 };
-type DoStats = {
-  success?: boolean;
-  byStatus?: Record<string, number>;
-  valueByStatus?: Record<string, number>;
-  total?: number;
-};
 type RevenueResp = {
   success?: boolean;
   data?: { month: string; revenueSen: number; orderCount: number }[];
@@ -53,6 +47,11 @@ type Overview = {
     itemsPendingReceipt: number;
     grnsPendingQC: number;
     topSuppliers: { name: string; spendSen: number }[];
+  };
+  pipeline?: {
+    planningSen: number;
+    pendingDeliverySen: number;
+    pendingDispatchSen: number;
   };
   fabricCostPerMeterSen?: { total: number; exclBedframeSofa: number };
   aovByCustomer?: {
@@ -125,28 +124,26 @@ function SectionHeader({ label }: { label: string }) {
 export default function DashboardPage() {
   const { data: soRaw, loading: soL } =
     useCachedJson<SoStats>("/api/sales-orders/stats");
-  const { data: doRaw, loading: doL } =
-    useCachedJson<DoStats>("/api/delivery-orders/stats");
   const { data: ovRaw, loading: ovL } =
     useCachedJson<Overview>("/api/dashboard/overview");
   const { data: revRaw, loading: revL } = useCachedJson<RevenueResp>(
     "/api/dashboard/revenue?months=12",
   );
 
-  const loading = soL || doL || ovL || revL;
+  const loading = soL || ovL || revL;
 
   const so = soRaw ?? {};
-  const doS = doRaw ?? {};
   const ov = ovRaw ?? {};
   const prod = ov.production;
   const pur = ov.purchasing;
   const fab = ov.fabricCostPerMeterSen;
   const emp = ov.employee;
 
-  const pendingDeliveryValueSen = useMemo(() => {
-    const v = doS.valueByStatus ?? {};
-    return (v.DRAFT ?? 0) + (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
-  }, [doS]);
+  // Pending Delivery (made, not on a DO) + Pending Dispatch (DRAFT DOs)
+  // — the ready-but-not-delivered figure, like the Delivery page shows.
+  const pendingDeliveryValueSen =
+    (ov.pipeline?.pendingDeliverySen ?? 0) +
+    (ov.pipeline?.pendingDispatchSen ?? 0);
 
   const revMax = useMemo(
     () => Math.max(1, ...((revRaw?.data ?? []).map((r) => r.revenueSen))),

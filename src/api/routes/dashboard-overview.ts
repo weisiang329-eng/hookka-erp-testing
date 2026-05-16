@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
+import { loadPoValueMap, loadDoValueMap } from "../lib/do-value";
 
 const app = new Hono<Env>();
 
@@ -277,6 +278,58 @@ app.get("/", async (c) => {
         .slice(0, 5);
     }
 
+    // ---- Not-yet-delivered pipeline ----
+    // Mirrors the Delivery page split so the dashboard "Pending Delivery"
+    // card == that page's Pending Delivery + Pending Dispatch (the
+    // ready-but-not-delivered figure), not the empty DRAFT/LOADED bucket.
+    // Pending Delivery = production-complete POs not on a DO; Planning =
+    // POs still in production not on a DO; Pending Dispatch = DRAFT DOs.
+    const [poValMap, doValMap, poRowsRes, linkedRes, doRowsRes] =
+      await Promise.all([
+        loadPoValueMap(db, orgId),
+        loadDoValueMap(db, orgId),
+        db
+          .prepare(
+            "SELECT id, status, consignmentOrderId FROM production_orders WHERE orgId = ?",
+          )
+          .bind(orgId)
+          .all<{
+            id: string;
+            status: string;
+            consignmentOrderId: string | null;
+          }>(),
+        db
+          .prepare(
+            `SELECT DISTINCT di.productionOrderId AS poId
+               FROM delivery_order_items di
+               JOIN delivery_orders d ON d.id = di.deliveryOrderId
+              WHERE d.orgId = ? AND d.status != 'CANCELLED'
+                AND di.productionOrderId IS NOT NULL AND di.productionOrderId != ''`,
+          )
+          .bind(orgId)
+          .all<{ poId: string }>(),
+        db
+          .prepare("SELECT id, status FROM delivery_orders WHERE orgId = ?")
+          .bind(orgId)
+          .all<{ id: string; status: string }>(),
+      ]);
+    const onDO = new Set((linkedRes.results ?? []).map((r) => r.poId));
+    let planningSen = 0;
+    let pendingDeliverySen = 0;
+    for (const p of poRowsRes.results ?? []) {
+      if (p.consignmentOrderId) continue;
+      if (p.status === "CANCELLED") continue;
+      if (onDO.has(p.id)) continue;
+      const v = poValMap.get(p.id) ?? 0;
+      if (p.status === "COMPLETED") pendingDeliverySen += v;
+      else planningSen += v;
+    }
+    let pendingDispatchSen = 0;
+    for (const d of doRowsRes.results ?? []) {
+      if (d.status === "DRAFT")
+        pendingDispatchSen += doValMap.get(d.id) ?? 0;
+    }
+
     const headByDept = (headRes.results ?? []).map((r) => ({
       dept: r.dept || "—",
       count: Number(r.n) || 0,
@@ -304,6 +357,11 @@ app.get("/", async (c) => {
       fabricCostPerMeterSen: {
         total: avgPerMeter(fabTotRes),
         exclBedframeSofa: avgPerMeter(fabExclRes),
+      },
+      pipeline: {
+        planningSen,
+        pendingDeliverySen,
+        pendingDispatchSen,
       },
       aovByCustomer,
       topSellers: sellersByCat,

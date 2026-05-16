@@ -1,176 +1,110 @@
 import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
-import { asArray } from "@/lib/safe-json";
 import { useCachedJson } from "@/lib/cached-fetch";
 import {
-  TrendingUp,
-  TrendingDown,
   DollarSign,
   Package,
   Factory,
   Truck,
   Users,
-  AlertTriangle,
-  Clock,
-  CheckCircle2,
-  ArrowUpRight,
-  Loader2,
-  ShoppingCart,
-  FileText,
-  Beaker,
   ClipboardCheck,
+  ShoppingCart,
+  CheckCircle2,
+  Clock,
+  Loader2,
+  Scissors,
 } from "lucide-react";
 
-// ---------- Types ----------
+// ---------- API response types ----------
 
-interface SalesOrderItem {
-  id: string;
-  lineNo: number;
-  productName: string;
-  quantity: number;
-  lineTotalSen: number;
-}
+type SoStats = {
+  success?: boolean;
+  byStatus?: Record<string, number>;
+  total?: number;
+  csRevenueSen?: number;
+  deliveredItemsSen?: number;
+  outstandingItemsSen?: number;
+};
+type DoStats = {
+  success?: boolean;
+  byStatus?: Record<string, number>;
+  valueByStatus?: Record<string, number>;
+  total?: number;
+};
+type RevenueResp = {
+  success?: boolean;
+  data?: { month: string; revenueSen: number; orderCount: number }[];
+};
+type Overview = {
+  success?: boolean;
+  production?: {
+    dailyCapacityMin: number;
+    backlogMin: number;
+    backlogDays: number;
+    completedToday: number;
+    activeJobs: number;
+  };
+  purchasing?: {
+    openPOCount: number;
+    spendThisMonthSen: number;
+    outstandingPOValueSen: number;
+    itemsPendingReceipt: number;
+    grnsPendingQC: number;
+    topSuppliers: { name: string; spendSen: number }[];
+  };
+  fabricCostPerMeterSen?: { total: number; exclBedframeSofa: number };
+  aovByCustomer?: {
+    customerName: string;
+    bedframeAvgSen: number;
+    bedframeOrders: number;
+    sofaAvgSen: number;
+    sofaOrders: number;
+    totalSen: number;
+  }[];
+  topSellers?: Record<
+    string,
+    { productCode: string; productName: string; qtySold: number; valueSen: number }[]
+  >;
+  employee?: {
+    activeHeadcount: number;
+    byDept: { dept: string; count: number }[];
+  };
+};
 
-interface SalesOrder {
-  id: string;
-  companySOId: string;
-  customerName: string;
-  status: string;
-  totalSen: number;
-  items: SalesOrderItem[];
-}
+// ---------- helpers ----------
 
-interface JobCard {
-  departmentCode: string;
-  departmentName: string;
-  status: string;
-  completedDate: string | null;
-  // Piece counts emitted by the minimal /api/production-orders payload.
-  // Legacy responses without them fall back to wipQty (or 1) — matches
-  // production/utils.ts:cellFor() so the dashboard counts pieces, not JCs.
-  wipQty: number | null;
-  piecesTotal?: number;
-  piecesDone?: number;
-}
-
-interface ProductionOrder {
-  id: string;
-  status: string;
-  progress: number;
-  currentDepartment: string;
-  completedDate: string | null;
-  jobCards: JobCard[];
-}
-
-interface DeliveryOrder {
-  id: string;
-  status: string;
-}
-
-interface Invoice {
-  id: string;
-  totalSen: number;
-  paidAmount: number;
-  status: string;
-  dueDate?: string;
-}
-
-interface PurchaseOrderItem {
-  quantity: number;
-  receivedQty: number;
-}
-
-interface PurchaseOrder {
-  id: string;
-  poNo: string;
-  status: string;
-  items: PurchaseOrderItem[];
-}
-
-interface QCInspection {
-  id: string;
-  result: "PASS" | "FAIL" | "CONDITIONAL_PASS";
-}
-
-interface RawMaterial {
-  itemCode: string;
-  description: string;
-  balanceQty: number;
-}
-
-interface RDProject {
-  id: string;
-  status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
-  currentStage?: string;
-  name?: string;
-}
-
-// ---------- Department config ----------
-
-const DEPARTMENTS = [
-  { code: "FAB_CUT", name: "Fab Cut", color: "#3B82F6" },
-  { code: "FAB_SEW", name: "Fab Sew", color: "#6366F1" },
-  { code: "FOAM", name: "Foam", color: "#8B5CF6" },
-  { code: "WOOD_CUT", name: "Wood Cut", color: "#F59E0B" },
-  { code: "FRAMING", name: "Framing", color: "#F97316" },
-  { code: "WEBBING", name: "Webbing", color: "#10B981" },
-  { code: "UPHOLSTERY", name: "Upholstery", color: "#F43F5E" },
-  { code: "PACKING", name: "Packing", color: "#06B6D4" },
-];
-
-// ---------- KPI Card component ----------
+const rm = (sen: number | undefined) => formatCurrency(sen ?? 0);
+const hrs = (min: number | undefined) =>
+  `${Math.round((min ?? 0) / 60).toLocaleString()}h`;
 
 function KPICard({
   title,
   value,
   subtitle,
   icon: Icon,
-  trend,
-  trendValue,
-  onClick,
 }: {
   title: string;
   value: string;
   subtitle?: string;
   icon: React.ElementType;
-  trend?: "up" | "down";
-  trendValue?: string;
-  onClick?: () => void;
 }) {
   return (
-    <Card
-      className={`bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] ${onClick ? "cursor-pointer hover:shadow-[0_2px_8px_rgba(107,92,50,0.12)] transition-shadow" : ""}`}
-      onClick={onClick}
-    >
+    <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
       <CardContent className="p-6">
         <div className="flex items-start justify-between">
           <div>
             <p className="text-xs text-[#5A5550] font-medium mb-1">{title}</p>
-            <p className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B]">{value}</p>
-            {subtitle && <p className="text-xs text-[#9CA3AF] mt-1">{subtitle}</p>}
-          </div>
-          <div className="flex flex-col items-end gap-2">
-            <div className="rounded-lg bg-[#F5F2ED] p-2.5">
-              <Icon className="h-5 w-5 text-[#6B5C32]" />
-            </div>
-            {trend && (
-              <div
-                className={`flex items-center gap-1 text-[11px] font-semibold ${
-                  trend === "up" ? "text-[#16A34A]" : "text-[#DC2626]"
-                }`}
-              >
-                {trend === "up" ? (
-                  <TrendingUp className="h-3 w-3" />
-                ) : (
-                  <TrendingDown className="h-3 w-3" />
-                )}
-                {trendValue}
-              </div>
+            <p className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B]">
+              {value}
+            </p>
+            {subtitle && (
+              <p className="text-xs text-[#9CA3AF] mt-1">{subtitle}</p>
             )}
+          </div>
+          <div className="rounded-lg bg-[#F5F2ED] p-2.5">
+            <Icon className="h-5 w-5 text-[#6B5C32]" />
           </div>
         </div>
       </CardContent>
@@ -178,181 +112,46 @@ function KPICard({
   );
 }
 
-// ---------- Section Header ----------
-
 function SectionHeader({ label }: { label: string }) {
   return (
-    <h2 className="text-xs font-bold text-[#5A5550] uppercase tracking-wider mb-3">{label}</h2>
+    <h2 className="text-xs font-bold text-[#5A5550] uppercase tracking-wider mb-3">
+      {label}
+    </h2>
   );
 }
 
-// ---------- R&D Stage Badge ----------
-
-const STAGE_COLORS: Record<string, string> = {
-  ACTIVE: "bg-[#DCFCE7] text-[#15803D]",
-  ON_HOLD: "bg-[#FEF9C3] text-[#A16207]",
-  COMPLETED: "bg-[#E0E7FF] text-[#3730A3]",
-  CANCELLED: "bg-[#FEE2E2] text-[#B91C1C]",
-};
-
-function StageBadge({ status }: { status: string }) {
-  const cls = STAGE_COLORS[status] ?? "bg-[#F5F2ED] text-[#5A5550]";
-  return (
-    <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full ${cls}`}>
-      {status}
-    </span>
-  );
-}
-
-// ---------- Main Dashboard ----------
+// ---------- Dashboard ----------
 
 export default function DashboardPage() {
-  const navigate = useNavigate();
+  const { data: soRaw, loading: soL } =
+    useCachedJson<SoStats>("/api/sales-orders/stats");
+  const { data: doRaw, loading: doL } =
+    useCachedJson<DoStats>("/api/delivery-orders/stats");
+  const { data: ovRaw, loading: ovL } =
+    useCachedJson<Overview>("/api/dashboard/overview");
+  const { data: revRaw, loading: revL } = useCachedJson<RevenueResp>(
+    "/api/dashboard/revenue?months=12",
+  );
 
-  const { data: soData, loading: soLoading } = useCachedJson<unknown>("/api/sales-orders");
-  const { data: prodData, loading: prodLoading } = useCachedJson<unknown>("/api/production-orders");
-  const { data: doData, loading: doLoading } = useCachedJson<unknown>("/api/delivery-orders");
-  const { data: invData, loading: invLoading } = useCachedJson<unknown>("/api/invoices");
-  const { data: wData, loading: wLoading } = useCachedJson<unknown>("/api/workers");
-  const { data: cData, loading: cLoading } = useCachedJson<unknown>("/api/customers");
-  const { data: poData, loading: poLoading } = useCachedJson<unknown>("/api/purchase-orders");
-  const { data: qcData, loading: qcLoading } = useCachedJson<unknown>("/api/qc-inspections");
-  const { data: invtData, loading: invtLoading } = useCachedJson<unknown>("/api/inventory");
-  const { data: rdData, loading: rdLoading } = useCachedJson<unknown>("/api/rd-projects");
+  const loading = soL || doL || ovL || revL;
 
-  const loading =
-    soLoading || prodLoading || doLoading || invLoading || wLoading ||
-    cLoading || poLoading || qcLoading || invtLoading || rdLoading;
+  const so = soRaw ?? {};
+  const doS = doRaw ?? {};
+  const ov = ovRaw ?? {};
+  const prod = ov.production;
+  const pur = ov.purchasing;
+  const fab = ov.fabricCostPerMeterSen;
+  const emp = ov.employee;
 
-  const salesOrders: SalesOrder[] = useMemo(() => asArray(soData) as SalesOrder[], [soData]);
-  const productionOrders: ProductionOrder[] = useMemo(() => asArray(prodData) as ProductionOrder[], [prodData]);
-  const deliveryOrders: DeliveryOrder[] = useMemo(() => asArray(doData) as DeliveryOrder[], [doData]);
-  const invoices: Invoice[] = useMemo(() => asArray(invData) as Invoice[], [invData]);
-  const purchaseOrders: PurchaseOrder[] = useMemo(() => asArray(poData) as PurchaseOrder[], [poData]);
-  const qcInspections: QCInspection[] = useMemo(() => asArray(qcData) as QCInspection[], [qcData]);
-  const rawMaterials: RawMaterial[] = useMemo(() => {
-    const rmNested =
-      invtData && typeof invtData === "object" && !Array.isArray(invtData)
-        ? ((invtData as { data?: { rawMaterials?: unknown } }).data?.rawMaterials ?? [])
-        : [];
-    return Array.isArray(rmNested) ? (rmNested as RawMaterial[]) : [];
-  }, [invtData]);
-  const rdProjects: RDProject[] = useMemo(() => asArray(rdData) as RDProject[], [rdData]);
-  const workerCount = useMemo(() => asArray(wData).length, [wData]);
-  const customerCount = useMemo(() => asArray(cData).length, [cData]);
+  const pendingDeliveryValueSen = useMemo(() => {
+    const v = doS.valueByStatus ?? {};
+    return (v.DRAFT ?? 0) + (v.LOADED ?? 0) + (v.IN_TRANSIT ?? 0);
+  }, [doS]);
 
-  // --- Computed KPIs ---
-
-  // Financial
-  const monthlyRevenue = invoices.reduce((sum, inv) => sum + inv.totalSen, 0);
-
-  const accountsReceivable = invoices
-    .filter((inv) => inv.status !== "PAID" && inv.status !== "CANCELLED")
-    .reduce((sum, inv) => sum + (inv.totalSen - (inv.paidAmount ?? 0)), 0);
-
-  const accountsPayable = purchaseOrders
-    .filter((po) => po.status !== "RECEIVED" && po.status !== "CANCELLED")
-    .reduce((sum, po) => {
-      // Sum outstanding quantity as proxy for AP (no unit price in type, so count items)
-      return (
-        sum +
-        (po.items ?? []).reduce(
-          (s, item) => s + Math.max(0, item.quantity - (item.receivedQty ?? 0)),
-          0
-        )
-      );
-    }, 0);
-
-  const ordersPipelineValue = salesOrders
-    .filter((so) => so.status === "CONFIRMED" || so.status === "IN_PRODUCTION")
-    .reduce((sum, so) => sum + so.totalSen, 0);
-
-  // Sales & Delivery
-  const totalOrders = salesOrders.length;
-  const outstandingOrders = salesOrders.filter(
-    (so) => so.status === "CONFIRMED" || so.status === "IN_PRODUCTION"
-  ).length;
-  const pendingDeliveries = deliveryOrders.filter(
-    (d) => d.status === "DRAFT" || d.status === "LOADED" || d.status === "IN_TRANSIT"
-  ).length;
-  const overdueInvoices = invoices.filter(
-    (inv) => inv.status !== "PAID" && inv.status !== "CANCELLED"
-  ).length;
-
-  // Production
-  const activeJobs = productionOrders.filter((po) => po.status === "IN_PROGRESS").length;
-  const inQueue = productionOrders.filter((po) => po.status === "PENDING").length;
-  const today = new Date().toISOString().split("T")[0];
-  const completedToday = productionOrders.filter(
-    (po) => po.completedDate && po.completedDate.startsWith(today)
-  ).length;
-  const passCount = qcInspections.filter(
-    (q) => q.result === "PASS" || q.result === "CONDITIONAL_PASS"
-  ).length;
-  const qcPassRate =
-    qcInspections.length > 0
-      ? Math.round((passCount / qcInspections.length) * 100)
-      : 0;
-
-  // Procurement & Inventory
-  const openPOs = purchaseOrders.filter(
-    (po) => po.status !== "RECEIVED" && po.status !== "CANCELLED"
-  ).length;
-  const poOutstandingItems = purchaseOrders
-    .filter((po) => po.status !== "RECEIVED" && po.status !== "CANCELLED")
-    .reduce(
-      (sum, po) =>
-        sum +
-        (po.items ?? []).reduce(
-          (s, item) => s + Math.max(0, item.quantity - (item.receivedQty ?? 0)),
-          0
-        ),
-      0
-    );
-  const lowStockItems = rawMaterials.filter((rm) => rm.balanceQty < 10).length;
-  const activeRD = rdProjects.filter((p) => p.status === "ACTIVE").length;
-
-  // Department status from jobCards — piece-level counts so the
-  // dashboard agrees with the per-department production cells
-  // (production/utils.ts:cellFor). Sofa JCs commonly carry wipQty=N
-  // pieces; counting JCs would treat a 3-piece JC the same as a
-  // 1-piece JC and disagree with what the floor actually sees.
-  // Falls back to wipQty (or 1) when the minimal payload's
-  // piecesTotal / piecesDone aren't present.
-  const deptStatus = DEPARTMENTS.map((dept) => {
-    let active = 0;
-    let queue = 0;
-    let done = 0;
-    for (const po of productionOrders) {
-      for (const jc of po.jobCards ?? []) {
-        if (jc.departmentCode !== dept.code) continue;
-        const total = Math.max(1, jc.piecesTotal ?? jc.wipQty ?? 1);
-        const isDone =
-          jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
-        const cardDone =
-          jc.piecesDone != null ? Math.min(total, jc.piecesDone) : isDone ? total : 0;
-        if (isDone) {
-          done += cardDone;
-        } else if (jc.status === "IN_PROGRESS" || jc.status === "PAUSED") {
-          // In-progress: pieces already done count toward "done" tally,
-          // and the remaining pieces are "active" work.
-          done += cardDone;
-          active += total - cardDone;
-        } else if (jc.status === "WAITING" || jc.status === "BLOCKED") {
-          queue += total;
-        }
-      }
-    }
-    return { ...dept, active, queue, done };
-  });
-
-  // Recent orders (latest 8)
-  const recentOrders = salesOrders.slice(0, 8);
-
-  // Active R&D projects for sidebar
-  const activeRDProjects = rdProjects.filter((p) => p.status === "ACTIVE").slice(0, 4);
-
-  // --- Loading state ---
+  const revMax = useMemo(
+    () => Math.max(1, ...((revRaw?.data ?? []).map((r) => r.revenueSen))),
+    [revRaw],
+  );
 
   if (loading) {
     return (
@@ -367,15 +166,15 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Page header */}
+      {/* Header */}
       <div>
         <h1 className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B]">
           {(() => {
-            const hour = new Date().getHours();
-            const greeting =
-              hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-            const name = getCurrentUser()?.displayName?.split(/\s+/)[0] || "there";
-            return `${greeting}, ${name}`;
+            const h = new Date().getHours();
+            const g =
+              h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+            const n = getCurrentUser()?.displayName?.split(/\s+/)[0] || "there";
+            return `${g}, ${n}`;
           })()}
         </h1>
         <p className="text-sm text-[#5A5550] mt-0.5">
@@ -388,334 +187,315 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      {/* 1. Financial Overview */}
-      <div>
-        <SectionHeader label="Financial Overview" />
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-          <KPICard
-            title="Monthly Revenue"
-            value={formatCurrency(monthlyRevenue)}
-            subtitle={`From ${invoices.length} invoices`}
-            icon={DollarSign}
-            trend="up"
-            trendValue="+12%"
-            onClick={() => navigate("/finance/invoices")}
-          />
-          <KPICard
-            title="Accounts Receivable"
-            value={formatCurrency(accountsReceivable)}
-            subtitle="Total outstanding"
-            icon={TrendingUp}
-            trend="up"
-            trendValue="+5%"
-            onClick={() => navigate("/finance/receivables")}
-          />
-          <KPICard
-            title="Accounts Payable"
-            value={accountsPayable.toString()}
-            subtitle="Outstanding PO items"
-            icon={TrendingDown}
-            onClick={() => navigate("/procurement")}
-          />
-          <KPICard
-            title="Orders Pipeline"
-            value={formatCurrency(ordersPipelineValue)}
-            subtitle="Confirmed + In Production"
-            icon={DollarSign}
-            trend="up"
-            trendValue="+8%"
-            onClick={() => navigate("/sales")}
-          />
-        </div>
-      </div>
-
-      {/* 2. Sales & Delivery */}
+      {/* Sales & Delivery */}
       <div>
         <SectionHeader label="Sales & Delivery" />
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           <KPICard
-            title="Total Orders"
-            value={totalOrders.toString()}
-            subtitle="All sales orders"
-            icon={ShoppingCart}
-            trend="up"
-            trendValue="+3"
-            onClick={() => navigate("/sales")}
+            title="Confirmed Sales"
+            value={rm(so.csRevenueSen)}
+            subtitle={`${so.total ?? 0} orders`}
+            icon={DollarSign}
           />
           <KPICard
-            title="Outstanding Orders"
-            value={outstandingOrders.toString()}
-            subtitle="Confirmed + In Production"
+            title="Delivered"
+            value={rm(so.deliveredItemsSen)}
+            subtitle="Goods actually shipped (item-level)"
+            icon={Truck}
+          />
+          <KPICard
+            title="Outstanding"
+            value={rm(so.outstandingItemsSen)}
+            subtitle="Confirmed but not yet delivered"
             icon={Clock}
-            onClick={() => navigate("/sales")}
           />
           <KPICard
             title="Pending Delivery"
-            value={pendingDeliveries.toString()}
-            subtitle="Draft / Loaded / In Transit"
-            icon={Truck}
-            onClick={() => navigate("/tms")}
-          />
-          <KPICard
-            title="Overdue Invoices"
-            value={overdueInvoices.toString()}
-            subtitle="Unpaid invoices"
-            icon={AlertTriangle}
-            onClick={() => navigate("/finance/invoices")}
+            value={rm(pendingDeliveryValueSen)}
+            subtitle="On a DO, not yet delivered"
+            icon={Package}
           />
         </div>
       </div>
 
-      {/* 3. Production */}
+      {/* Production */}
       <div>
         <SectionHeader label="Production" />
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           <KPICard
-            title="Active Jobs"
-            value={activeJobs.toString()}
-            subtitle={`${completedToday} completed today`}
+            title="Daily Capacity"
+            value={hrs(prod?.dailyCapacityMin)}
+            subtitle="7-working-day actual avg"
             icon={Factory}
-            trend="up"
-            trendValue="+2"
-            onClick={() => navigate("/production")}
           />
           <KPICard
-            title="In Queue"
-            value={inQueue.toString()}
-            subtitle="Pending production"
+            title="Backlog"
+            value={`${(prod?.backlogDays ?? 0).toLocaleString()} days`}
+            subtitle={`${hrs(prod?.backlogMin)} of work queued`}
             icon={Clock}
-            onClick={() => navigate("/production")}
+          />
+          <KPICard
+            title="Active Jobs"
+            value={(prod?.activeJobs ?? 0).toLocaleString()}
+            subtitle="In production / pending"
+            icon={Package}
           />
           <KPICard
             title="Completed Today"
-            value={completedToday.toString()}
-            subtitle="Production orders"
+            value={(prod?.completedToday ?? 0).toLocaleString()}
+            subtitle="Job cards finished today"
             icon={CheckCircle2}
-            onClick={() => navigate("/production")}
-          />
-          <KPICard
-            title="QC Pass Rate"
-            value={`${qcPassRate}%`}
-            subtitle={`${qcInspections.length} inspections total`}
-            icon={ClipboardCheck}
-            trend="up"
-            trendValue="+2%"
-            onClick={() => navigate("/qms")}
           />
         </div>
       </div>
 
-      {/* 4. Procurement & Inventory */}
-      <div>
-        <SectionHeader label="Procurement & Inventory" />
-        <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
-          <KPICard
-            title="Open POs"
-            value={openPOs.toString()}
-            subtitle="Not fully received"
-            icon={FileText}
-            onClick={() => navigate("/procurement")}
-          />
-          <KPICard
-            title="PO Outstanding"
-            value={poOutstandingItems.toString()}
-            subtitle="Items pending receipt"
-            icon={Package}
-            onClick={() => navigate("/procurement")}
-          />
-          <KPICard
-            title="Low Stock Items"
-            value={lowStockItems.toString()}
-            subtitle="Raw materials < 10 units"
-            icon={AlertTriangle}
-            onClick={() => navigate("/inventory")}
-          />
-          <KPICard
-            title="R&D Projects"
-            value={activeRD.toString()}
-            subtitle="Active projects"
-            icon={Beaker}
-            trend="up"
-            trendValue="+1"
-            onClick={() => navigate("/rd")}
-          />
-        </div>
-      </div>
-
-      {/* Bottom section: Recent Orders + Quick Stats sidebar */}
+      {/* Employees + Purchasing */}
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
-        {/* Recent Sales Orders (span 2) */}
-        <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-bold">Recent Sales Orders</CardTitle>
-              <button
-                onClick={() => navigate("/sales")}
-                className="text-sm text-[#6B5C32] hover:underline flex items-center gap-1"
-              >
-                View All <ArrowUpRight className="h-3 w-3" />
-              </button>
-            </div>
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Users className="h-4 w-4 text-[#6B5C32]" /> Workforce —{" "}
+              {emp?.activeHeadcount ?? 0} active
+            </CardTitle>
           </CardHeader>
-          <CardContent>
-            <table className="w-full">
-              <thead>
-                <tr>
-                  <th className="text-left text-xs text-[#5A5550] font-semibold pb-2 border-b-2 border-[#E2DDD8] px-3">
-                    Order No
-                  </th>
-                  <th className="text-left text-xs text-[#5A5550] font-semibold pb-2 border-b-2 border-[#E2DDD8] px-3">
-                    Customer
-                  </th>
-                  <th className="text-left text-xs text-[#5A5550] font-semibold pb-2 border-b-2 border-[#E2DDD8] px-3 hidden sm:table-cell">
-                    Items
-                  </th>
-                  <th className="text-left text-xs text-[#5A5550] font-semibold pb-2 border-b-2 border-[#E2DDD8] px-3">
-                    Status
-                  </th>
-                  <th className="text-right text-xs text-[#5A5550] font-semibold pb-2 border-b-2 border-[#E2DDD8] px-3">
-                    Amount
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentOrders.length === 0 && (
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="text-[13px] text-[#9CA3AF] text-center py-4"
-                    >
-                      No sales orders yet
-                    </td>
-                  </tr>
-                )}
-                {recentOrders.map((order) => (
-                  <tr
-                    key={order.id}
-                    onDoubleClick={() => navigate(`/sales/${order.id}`)}
-                    onClick={() => navigate(`/sales/${order.id}`)}
-                    className="hover:bg-[#6B5C32]/[0.03] transition-colors cursor-pointer border-b border-[#E2DDD8] last:border-b-0"
-                  >
-                    <td className="text-[13px] py-2.5 px-3">
-                      <span className="font-medium text-[#6B5C32]">{order.companySOId}</span>
-                    </td>
-                    <td className="text-[13px] py-2.5 px-3 text-[#374151]">
-                      {order.customerName}
-                    </td>
-                    <td className="text-[13px] py-2.5 px-3 text-[#9CA3AF] hidden sm:table-cell">
-                      {order.items?.length ?? 0} items
-                    </td>
-                    <td className="text-[13px] py-2.5 px-3">
-                      <Badge variant="status" status={order.status} />
-                    </td>
-                    <td className="text-[13px] py-2.5 px-3 text-right font-medium">
-                      {formatCurrency(order.totalSen)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <CardContent className="space-y-1.5">
+            {(emp?.byDept ?? []).length === 0 && (
+              <p className="text-xs text-[#9CA3AF]">No active workers.</p>
+            )}
+            {(emp?.byDept ?? []).map((d) => (
+              <div
+                key={d.dept}
+                className="flex items-center justify-between text-sm"
+              >
+                <span className="text-[#5A5550]">{d.dept}</span>
+                <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                  {d.count}
+                </span>
+              </div>
+            ))}
           </CardContent>
         </Card>
 
-        {/* Quick Stats sidebar */}
-        <div className="flex flex-col gap-4">
-          {/* Department Status */}
-          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-bold">Department Status</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2.5">
-                {deptStatus.map((dept) => {
-                  const total = dept.active + dept.queue;
-                  const pct = total > 0 ? (dept.active / total) * 100 : 0;
-                  return (
-                    <div
-                      key={dept.code}
-                      onClick={() => navigate(`/production/department/${dept.code}`)}
-                      className="flex items-center gap-3 cursor-pointer hover:bg-[#6B5C32]/[0.03] rounded-lg p-1 -mx-1 transition-colors"
-                    >
-                      <span className="w-[90px] shrink-0 text-xs font-semibold text-[#374151] truncate">
-                        {dept.name}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="h-2 w-full rounded-full border border-[#E2DDD8] bg-[#F5F2ED]">
-                          <div
-                            className="h-full rounded-full transition-all"
-                            style={{ width: `${pct}%`, backgroundColor: dept.color }}
-                          />
-                        </div>
-                      </div>
-                      <span className="text-[11px] text-[#5A5550] whitespace-nowrap shrink-0">
-                        {total}
-                      </span>
-                    </div>
-                  );
-                })}
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] lg:col-span-2">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ShoppingCart className="h-4 w-4 text-[#6B5C32]" /> Purchasing
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+              <div>
+                <p className="text-xs text-[#5A5550]">Open POs</p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {pur?.openPOCount ?? 0}
+                </p>
               </div>
-            </CardContent>
-          </Card>
-
-          {/* Workforce & Customers */}
-          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-bold">Workforce & Customers</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div
-                className="flex items-center justify-between cursor-pointer hover:bg-[#6B5C32]/[0.03] rounded-lg p-1.5 -mx-1.5 transition-colors"
-                onClick={() => navigate("/hr")}
-              >
-                <div className="flex items-center gap-2">
-                  <Users className="h-4 w-4 text-[#6B5C32]" />
-                  <span className="text-sm text-[#374151]">Total Workers</span>
-                </div>
-                <span className="text-sm font-bold text-[#1F1D1B]">{workerCount}</span>
+              <div>
+                <p className="text-xs text-[#5A5550]">Outstanding Value</p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {rm(pur?.outstandingPOValueSen)}
+                </p>
               </div>
-              <div
-                className="flex items-center justify-between cursor-pointer hover:bg-[#6B5C32]/[0.03] rounded-lg p-1.5 -mx-1.5 transition-colors"
-                onClick={() => navigate("/customers")}
-              >
-                <div className="flex items-center gap-2">
-                  <Users className="h-4 w-4 text-[#6B5C32]" />
-                  <span className="text-sm text-[#374151]">Total Customers</span>
-                </div>
-                <span className="text-sm font-bold text-[#1F1D1B]">{customerCount}</span>
+              <div>
+                <p className="text-xs text-[#5A5550]">Spend This Month</p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {rm(pur?.spendThisMonthSen)}
+                </p>
               </div>
-            </CardContent>
-          </Card>
-
-          {/* Active R&D Projects */}
-          {activeRDProjects.length > 0 && (
-            <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-              <CardHeader className="pb-2">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm font-bold">Active R&D Projects</CardTitle>
-                  <button
-                    onClick={() => navigate("/rd")}
-                    className="text-xs text-[#6B5C32] hover:underline flex items-center gap-0.5"
-                  >
-                    All <ArrowUpRight className="h-3 w-3" />
-                  </button>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-2.5">
-                {activeRDProjects.map((project) => (
+              <div>
+                <p className="text-xs text-[#5A5550]">Pending Receipt</p>
+                <p className="text-xl font-bold text-[#1F1D1B]">
+                  {pur?.itemsPendingReceipt ?? 0}
+                  <span className="text-xs text-[#9CA3AF] font-normal">
+                    {" "}
+                    · {pur?.grnsPendingQC ?? 0} GRN QC
+                  </span>
+                </p>
+              </div>
+            </div>
+            {(pur?.topSuppliers ?? []).length > 0 && (
+              <div className="border-t border-[#E2DDD8] pt-3">
+                <p className="text-xs font-semibold text-[#5A5550] mb-1.5">
+                  Top suppliers by spend
+                </p>
+                {(pur?.topSuppliers ?? []).map((s) => (
                   <div
-                    key={project.id}
-                    className="flex items-center justify-between gap-2 cursor-pointer hover:bg-[#6B5C32]/[0.03] rounded-lg p-1.5 -mx-1.5 transition-colors"
-                    onClick={() => navigate(`/rd/${project.id}`)}
+                    key={s.name}
+                    className="flex items-center justify-between text-sm py-0.5"
                   >
-                    <span className="text-[13px] text-[#374151] truncate">
-                      {project.name ?? project.id}
+                    <span className="text-[#5A5550] truncate pr-2">
+                      {s.name}
                     </span>
-                    <StageBadge status={project.status} />
+                    <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(s.spendSen)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Fabric cost + Monthly revenue trend */}
+      <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Scissors className="h-4 w-4 text-[#6B5C32]" /> Fabric Cost / Meter
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <p className="text-xs text-[#5A5550]">Overall (all issued)</p>
+              <p className="text-2xl font-bold text-[#1F1D1B]">
+                {rm(fab?.total)}
+              </p>
+            </div>
+            <div className="border-t border-[#E2DDD8] pt-3">
+              <p className="text-xs text-[#5A5550]">
+                Excl. Bedframe &amp; Sofa
+              </p>
+              <p className="text-2xl font-bold text-[#1F1D1B]">
+                {rm(fab?.exclBedframeSofa)}
+              </p>
+            </div>
+            <p className="text-[10px] text-[#9CA3AF]">
+              Weighted avg of fabric actually issued to production.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] lg:col-span-2">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">
+              Monthly Revenue — last 12 months
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(revRaw?.data ?? []).length === 0 ? (
+              <p className="text-xs text-[#9CA3AF]">No revenue data.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {(revRaw?.data ?? []).map((r) => (
+                  <div key={r.month} className="flex items-center gap-2">
+                    <span className="text-[11px] text-[#9CA3AF] w-16 shrink-0 tabular-nums">
+                      {r.month}
+                    </span>
+                    <div className="flex-1 bg-[#F5F2ED] rounded h-4 overflow-hidden">
+                      <div
+                        className="h-full bg-[#6B5C32]/70 rounded"
+                        style={{
+                          width: `${Math.max(2, (r.revenueSen / revMax) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="text-[11px] font-semibold text-[#1F1D1B] w-24 text-right tabular-nums">
+                      {rm(r.revenueSen)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* AOV by customer × category */}
+      <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">
+            Avg Order Value by Customer — Bedframe vs Sofa
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                <th className="py-1.5 font-medium">Customer</th>
+                <th className="py-1.5 font-medium text-right">
+                  Bedframe AOV
+                </th>
+                <th className="py-1.5 font-medium text-right">Orders</th>
+                <th className="py-1.5 font-medium text-right">Sofa AOV</th>
+                <th className="py-1.5 font-medium text-right">Orders</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(ov.aovByCustomer ?? []).length === 0 && (
+                <tr>
+                  <td
+                    colSpan={5}
+                    className="py-3 text-center text-xs text-[#9CA3AF]"
+                  >
+                    No confirmed orders.
+                  </td>
+                </tr>
+              )}
+              {(ov.aovByCustomer ?? []).map((r) => (
+                <tr
+                  key={r.customerName}
+                  className="border-b border-[#F0ECE6]"
+                >
+                  <td className="py-1.5 text-[#1F1D1B]">{r.customerName}</td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {r.bedframeOrders ? rm(r.bedframeAvgSen) : "—"}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
+                    {r.bedframeOrders || "—"}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums">
+                    {r.sofaOrders ? rm(r.sofaAvgSen) : "—"}
+                  </td>
+                  <td className="py-1.5 text-right tabular-nums text-[#9CA3AF]">
+                    {r.sofaOrders || "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+
+      {/* Top sellers by category */}
+      <div>
+        <SectionHeader label="Top Sellers by Category" />
+        <div className="grid gap-4 grid-cols-1 lg:grid-cols-3">
+          {(["BEDFRAME", "SOFA", "ACCESSORY"] as const).map((cat) => (
+            <Card
+              key={cat}
+              className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+            >
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <ClipboardCheck className="h-4 w-4 text-[#6B5C32]" /> {cat}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-1.5">
+                {(ov.topSellers?.[cat] ?? []).length === 0 && (
+                  <p className="text-xs text-[#9CA3AF]">No sales.</p>
+                )}
+                {(ov.topSellers?.[cat] ?? []).map((p) => (
+                  <div
+                    key={p.productCode}
+                    className="flex items-center justify-between text-sm"
+                  >
+                    <span className="text-[#5A5550] truncate pr-2">
+                      <span className="font-medium text-[#1F1D1B]">
+                        {p.productCode}
+                      </span>{" "}
+                      <span className="text-xs text-[#9CA3AF]">
+                        ×{p.qtySold}
+                      </span>
+                    </span>
+                    <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(p.valueSen)}
+                    </span>
                   </div>
                 ))}
               </CardContent>
             </Card>
-          )}
+          ))}
         </div>
       </div>
     </div>

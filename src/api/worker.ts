@@ -566,6 +566,7 @@ import jobCards from "./routes/job-cards";
 import auditEvents from "./routes/audit-events";
 // Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
 import dashboardRevenue from "./routes/dashboard-revenue";
+import dashboardOverview from "./routes/dashboard-overview";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes/mdm";
 // Phase B.4 — file_assets storage (Supabase Storage-backed; was R2 before
@@ -725,6 +726,7 @@ app.route("/api/audit-events", auditEvents);
 // MUST be mounted BEFORE the catch-all /api/* stub at the bottom and
 // AFTER authMiddleware so the orgId scope is in place.
 app.route("/api/dashboard/revenue", dashboardRevenue);
+app.route("/api/dashboard/overview", dashboardOverview);
 // Phase C #4 quick-win — MDM duplicate-detection review queue. Routes
 // scoped by orgId via getOrgId(c); detection-pass endpoint is admin-only
 // in spirit (gated by the existing auth middleware until role-aware

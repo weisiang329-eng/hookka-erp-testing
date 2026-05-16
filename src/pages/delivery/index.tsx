@@ -80,6 +80,7 @@ type DeliveryOrderRow = {
   hubState: string;     // delivery_hubs.state resolved via hubId on the API; preferred display in the State column when present
   itemCount: number;    // number of items in this DO
   totalM3: number;
+  totalSen: number;     // goods value (SO unit price × qty, stamped at DO creation) — the Sales Figure
   items: DOItem[];      // all items for detail view
   dispatchDate: string | null;
   receivedDate: string | null;
@@ -142,6 +143,7 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     hubState: ((d as Record<string, unknown>).hubState as string) || "",
     itemCount: items.length,
     totalM3: d.totalM3 ?? 0,
+    totalSen: d.totalSen ?? 0,
     items,
     dispatchDate: d.dispatchedAt || null,
     receivedDate: d.deliveredAt || null,
@@ -2152,6 +2154,21 @@ export default function DeliveryPage() {
           }
           return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
         },
+      },
+      {
+        // Wei Siang 2026-05-16: per-row Sales Figure — the DO's goods
+        // value (SO unit price × qty, stamped at DO creation). Same
+        // number that feeds the tab-strip aggregate.
+        key: "totalSen",
+        label: "Amount",
+        type: "text",
+        width: "120px",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="font-medium text-[#1F1D1B] tabular-nums">
+            {formatRM(row.totalSen ?? 0)}
+          </span>
+        ),
       },
       {
         key: "status",

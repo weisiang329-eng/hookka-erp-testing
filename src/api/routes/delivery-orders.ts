@@ -324,48 +324,162 @@ async function resolveDoSalesOrderIds(
 }
 
 // ---------------------------------------------------------------------------
-// DO "Sales Figure" derivation = the VALUE OF GOODS on the delivery note.
+// DO "Sales Figure" derivation = the EXACT value of goods on the note.
 //
-// delivery_orders carries NO monetary column (no total_sen). A DO's value is
-// the linked sales-order line value: each DO item's quantity × the SO unit
-// price for that product code. The SO is resolved via the item's production
-// order (covers multi-SO DOs, where delivery_orders.salesOrderId is NULL),
-// falling back to the DO's own salesOrderId for legacy single-SO DOs.
+// delivery_orders has no monetary column. Each delivered item is priced at
+// the unit price of ITS OWN sales-order line, resolved deterministically
+// via the item's production order: the PO records exactly which SO + line
+// (productCode + sizeCode + fabricCode) it was made for, so there is no
+// fuzzy "first price for this product code" guessing and no double-count
+// when a product appears on more than one SO line.
 //
-// This is GOODS value, NOT invoiced value. It was briefly anchored to the
-// linked invoice total (2026-05-16) so the Delivered bucket would tie to the
-// Invoice bucket — but that made "Delivered" read RM 167k (what's billed)
-// while RM 333k+ of goods had actually shipped, which is the wrong thing for
-// this column. Reverted: Delivered must reflect goods delivered so it
-// reconciles with the Sales Orders "Delivered" total. Billing coverage is a
-// separate question (invoices vs goods), not this display.
+// Resolution order per item (first hit wins):
+//   1. PO's (salesOrderId, productCode, sizeCode, fabricCode) → SO line
+//   2. PO's (salesOrderId, productCode) → SO line   (size/fabric drift)
+//   3. (anySO, productCode) → SO line                (legacy / no PO)
+//   4. 0 (surfaced as a shortfall elsewhere, never silently "close enough")
 //
-// Both the per-row map and the per-status /stats aggregate use this same
-// FROM/WHERE + SUM expression, so the column always sums to the tab total.
-const DO_VALUE_FROM = `
-  FROM delivery_orders d
-  LEFT JOIN delivery_order_items di ON di.deliveryOrderId = d.id
-  LEFT JOIN production_orders po ON po.id = di.productionOrderId
-  LEFT JOIN sales_order_items si
-        ON si.salesOrderId = COALESCE(NULLIF(po.salesOrderId, ''), d.salesOrderId)
-       AND si.productCode = di.productCode
- WHERE d.orgId = ?`;
+// The OLD SQL join (si.productCode = di.productCode, no size/fabric, no
+// dedupe) over-counted by ~RM 70k whenever a product sat on 2 SO lines —
+// removed. This same resolver feeds the per-row Amount, the /stats tab
+// totals, AND the invoices, so all three are identical to the cent.
+// ---------------------------------------------------------------------------
+type SoLinePriceIndex = {
+  poById: Map<
+    string,
+    { salesOrderId: string; productCode: string; sizeCode: string; fabricCode: string }
+  >;
+  byFull: Map<string, number>; // `${soId}|${code}|${size}|${fab}` → unitPriceSen
+  byCode: Map<string, number>; // `${soId}|${code}` → unitPriceSen
+  byAnyCode: Map<string, number>; // `${code}` → unitPriceSen (last resort)
+};
 
-const DO_VALUE_EXPR =
-  "COALESCE(SUM(di.quantity * COALESCE(si.unitPriceSen, 0)), 0)";
+function priceForItem(
+  idx: SoLinePriceIndex,
+  productionOrderId: string | null | undefined,
+  fallbackSoId: string | null | undefined,
+  productCode: string | null | undefined,
+): number {
+  const code = productCode ?? "";
+  const po = productionOrderId ? idx.poById.get(productionOrderId) : undefined;
+  const soId = po?.salesOrderId || fallbackSoId || "";
+  if (po && soId) {
+    const full = idx.byFull.get(
+      `${soId}|${po.productCode}|${po.sizeCode}|${po.fabricCode}`,
+    );
+    if (full != null) return full;
+    const byCode = idx.byCode.get(`${soId}|${po.productCode}`);
+    if (byCode != null) return byCode;
+  }
+  if (soId && code) {
+    const byCode = idx.byCode.get(`${soId}|${code}`);
+    if (byCode != null) return byCode;
+  }
+  return idx.byAnyCode.get(code) ?? 0;
+}
+
+// Whole-org price index (3 bulk reads, no N+1) — scopes SO items via their
+// SO so it is correct whether or not sales_order_items carries orgId.
+async function loadSoLinePriceIndex(
+  db: D1Database,
+  orgId: string,
+): Promise<SoLinePriceIndex> {
+  const [poRes, siRes] = await Promise.all([
+    db
+      .prepare(
+        "SELECT id, salesOrderId, productCode, sizeCode, fabricCode FROM production_orders WHERE orgId = ?",
+      )
+      .bind(orgId)
+      .all<{
+        id: string;
+        salesOrderId: string | null;
+        productCode: string | null;
+        sizeCode: string | null;
+        fabricCode: string | null;
+      }>(),
+    db
+      .prepare(
+        `SELECT si.salesOrderId AS salesOrderId, si.productCode AS productCode,
+                si.sizeCode AS sizeCode, si.fabricCode AS fabricCode,
+                si.unitPriceSen AS unitPriceSen
+           FROM sales_order_items si
+           JOIN sales_orders s ON s.id = si.salesOrderId
+          WHERE s.orgId = ?`,
+      )
+      .bind(orgId)
+      .all<{
+        salesOrderId: string | null;
+        productCode: string | null;
+        sizeCode: string | null;
+        fabricCode: string | null;
+        unitPriceSen: number;
+      }>(),
+  ]);
+  const poById = new Map<
+    string,
+    { salesOrderId: string; productCode: string; sizeCode: string; fabricCode: string }
+  >();
+  for (const p of poRes.results ?? []) {
+    poById.set(p.id, {
+      salesOrderId: p.salesOrderId ?? "",
+      productCode: p.productCode ?? "",
+      sizeCode: p.sizeCode ?? "",
+      fabricCode: p.fabricCode ?? "",
+    });
+  }
+  const byFull = new Map<string, number>();
+  const byCode = new Map<string, number>();
+  const byAnyCode = new Map<string, number>();
+  for (const si of siRes.results ?? []) {
+    const so = si.salesOrderId ?? "";
+    const code = si.productCode ?? "";
+    const up = si.unitPriceSen || 0;
+    const fk = `${so}|${code}|${si.sizeCode ?? ""}|${si.fabricCode ?? ""}`;
+    if (!byFull.has(fk)) byFull.set(fk, up);
+    const ck = `${so}|${code}`;
+    if (!byCode.has(ck)) byCode.set(ck, up);
+    if (code && !byAnyCode.has(code)) byAnyCode.set(code, up);
+  }
+  return { poById, byFull, byCode, byAnyCode };
+}
 
 async function loadDoValueMap(
   db: D1Database,
   orgId: string,
 ): Promise<Map<string, number>> {
-  const res = await db
-    .prepare(
-      `SELECT d.id AS id, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.id`,
-    )
+  const [idx, itemsRes] = await Promise.all([
+    loadSoLinePriceIndex(db, orgId),
+    db
+      .prepare(
+        "SELECT deliveryOrderId, productionOrderId, productCode, quantity FROM delivery_order_items WHERE orgId = ?",
+      )
+      .bind(orgId)
+      .all<{
+        deliveryOrderId: string;
+        productionOrderId: string | null;
+        productCode: string | null;
+        quantity: number;
+      }>(),
+  ]);
+  // DO → its own salesOrderId, for the no-PO fallback.
+  const doSo = new Map<string, string>();
+  const doRows = await db
+    .prepare("SELECT id, salesOrderId FROM delivery_orders WHERE orgId = ?")
     .bind(orgId)
-    .all<{ id: string; v: number }>();
+    .all<{ id: string; salesOrderId: string | null }>();
+  for (const d of doRows.results ?? []) doSo.set(d.id, d.salesOrderId ?? "");
+
   const m = new Map<string, number>();
-  for (const r of res.results ?? []) m.set(r.id, Number(r.v) || 0);
+  for (const di of itemsRes.results ?? []) {
+    const price = priceForItem(
+      idx,
+      di.productionOrderId,
+      doSo.get(di.deliveryOrderId) ?? "",
+      di.productCode,
+    );
+    const add = price * (di.quantity || 0);
+    m.set(di.deliveryOrderId, (m.get(di.deliveryOrderId) ?? 0) + add);
+  }
   return m;
 }
 
@@ -438,30 +552,57 @@ async function computeDoInvoiceLines(
 ): Promise<{ invItems: InvItem[]; computedTotal: number }> {
   if (soIds.length === 0) return { invItems: [], computedTotal: 0 };
   const soPh = soIds.map(() => "?").join(",");
-  const [doItemsRes, soItemsRes] = await Promise.all([
+  const doItemsRes = await db
+    .prepare(
+      `SELECT productionOrderId, productCode, productName, sizeLabel, fabricCode, quantity
+         FROM delivery_order_items WHERE deliveryOrderId = ?`,
+    )
+    .bind(doId)
+    .all<{
+      productionOrderId: string | null;
+      productCode: string | null;
+      productName: string | null;
+      sizeLabel: string | null;
+      fabricCode: string | null;
+      quantity: number;
+    }>();
+  const doItems = doItemsRes.results ?? [];
+
+  // Per-DO exact price index: the POs behind this DO's items + the SO
+  // lines of every linked SO. Same resolver (priceForItem) the whole-org
+  // map uses, so an invoice equals the displayed Amount to the cent.
+  const poIds = doItems
+    .map((i) => i.productionOrderId)
+    .filter((s): s is string => !!s);
+  const poPh = poIds.length ? poIds.map(() => "?").join(",") : "";
+  const [poRes, soItemsRes] = await Promise.all([
+    poIds.length
+      ? db
+          .prepare(
+            `SELECT id, salesOrderId, productCode, sizeCode, fabricCode
+               FROM production_orders WHERE id IN (${poPh})`,
+          )
+          .bind(...poIds)
+          .all<{
+            id: string;
+            salesOrderId: string | null;
+            productCode: string | null;
+            sizeCode: string | null;
+            fabricCode: string | null;
+          }>()
+      : Promise.resolve({ results: [] as never[] }),
     db
       .prepare(
-        `SELECT productCode, productName, sizeLabel, fabricCode, quantity
-           FROM delivery_order_items WHERE deliveryOrderId = ?`,
-      )
-      .bind(doId)
-      .all<{
-        productCode: string | null;
-        productName: string | null;
-        sizeLabel: string | null;
-        fabricCode: string | null;
-        quantity: number;
-      }>(),
-    db
-      .prepare(
-        `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
+        `SELECT salesOrderId, productCode, productName, sizeLabel, sizeCode, fabricCode, quantity, unitPriceSen, lineTotalSen
            FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
       )
       .bind(...soIds)
       .all<{
+        salesOrderId: string | null;
         productCode: string | null;
         productName: string | null;
         sizeLabel: string | null;
+        sizeCode: string | null;
         fabricCode: string | null;
         quantity: number;
         unitPriceSen: number;
@@ -469,16 +610,38 @@ async function computeDoInvoiceLines(
       }>(),
   ]);
 
-  const priceByCode = new Map<string, number>();
+  const idx: SoLinePriceIndex = {
+    poById: new Map(),
+    byFull: new Map(),
+    byCode: new Map(),
+    byAnyCode: new Map(),
+  };
+  for (const p of poRes.results ?? []) {
+    idx.poById.set(p.id, {
+      salesOrderId: p.salesOrderId ?? "",
+      productCode: p.productCode ?? "",
+      sizeCode: p.sizeCode ?? "",
+      fabricCode: p.fabricCode ?? "",
+    });
+  }
   for (const si of soItemsRes.results ?? []) {
-    if (si.productCode && !priceByCode.has(si.productCode))
-      priceByCode.set(si.productCode, si.unitPriceSen);
+    const so = si.salesOrderId ?? "";
+    const code = si.productCode ?? "";
+    const up = si.unitPriceSen || 0;
+    const fk = `${so}|${code}|${si.sizeCode ?? ""}|${si.fabricCode ?? ""}`;
+    if (!idx.byFull.has(fk)) idx.byFull.set(fk, up);
+    const ck = `${so}|${code}`;
+    if (!idx.byCode.has(ck)) idx.byCode.set(ck, up);
+    if (code && !idx.byAnyCode.has(code)) idx.byAnyCode.set(code, up);
   }
 
-  let invItems: InvItem[] = (doItemsRes.results ?? []).map((di) => {
-    const unitPriceSen = di.productCode
-      ? priceByCode.get(di.productCode) ?? 0
-      : 0;
+  let invItems: InvItem[] = doItems.map((di) => {
+    const unitPriceSen = priceForItem(
+      idx,
+      di.productionOrderId,
+      soIds[0] ?? "",
+      di.productCode,
+    );
     return {
       id: genInvoiceItemId(),
       productCode: di.productCode ?? "",
@@ -809,25 +972,28 @@ app.get("/stats", async (c) => {
   if (denied) return denied;
 
   const orgId = getOrgId(c);
-  // Per-status count + RM value so the tab strip shows the money in each
-  // bucket. Value = GOODS delivered (same DO_VALUE_EXPR/FROM as the
-  // per-row Amount column), so the column sums to the tab total AND the
-  // Delivered bucket reconciles with the Sales Orders "Delivered" total
-  // — NOT the invoiced amount. COUNT(DISTINCT d.id) because the item
-  // join multiplies rows.
-  const res = await c.var.DB
-    .prepare(
-      `SELECT d.status AS status, COUNT(DISTINCT d.id) AS n, ${DO_VALUE_EXPR} AS v ${DO_VALUE_FROM} GROUP BY d.status`,
+  // Per-status count + RM value. Value = exact goods value (the SAME
+  // per-DO resolver loadDoValueMap feeds the per-row Amount column), so
+  // the column sums to the tab total to the cent and "Delivered"
+  // reconciles with the Sales Orders "Delivered" total — no SQL-join
+  // double-count, no invoiced-amount anchoring. Counts come from one
+  // row-per-DO read (exact, no item-join multiplication).
+  const [statusRes, valueMap] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT id, status FROM delivery_orders WHERE orgId = ?",
     )
-    .bind(orgId)
-    .all<{ status: string; n: number; v: number }>();
+      .bind(orgId)
+      .all<{ id: string; status: string }>(),
+    loadDoValueMap(c.var.DB, orgId),
+  ]);
   const byStatus: Record<string, number> = {};
   const valueByStatus: Record<string, number> = {};
   let total = 0;
-  for (const row of res.results ?? []) {
-    byStatus[row.status] = row.n;
-    valueByStatus[row.status] = Number(row.v) || 0;
-    total += row.n;
+  for (const row of statusRes.results ?? []) {
+    byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
+    valueByStatus[row.status] =
+      (valueByStatus[row.status] ?? 0) + (valueMap.get(row.id) ?? 0);
+    total += 1;
   }
   return c.json({ success: true, byStatus, valueByStatus, total });
 });

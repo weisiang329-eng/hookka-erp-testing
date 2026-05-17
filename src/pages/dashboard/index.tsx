@@ -40,6 +40,8 @@ type JobsBreakdown = {
 };
 type Overview = {
   success?: boolean;
+  period?: string;
+  salesMonths?: string[];
   salesThisMonthSen?: number;
   deliveredThisMonthSen?: number;
   production?: {
@@ -391,13 +393,51 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
+// Sales period selector: All-time / This month / a specific past month.
+const CUR_YM = new Date().toISOString().slice(0, 7);
+function periodLabel(p: string): string {
+  if (p === "all") return "All-time";
+  if (p === CUR_YM) return `This month (${p})`;
+  return p;
+}
+function PeriodSelector({
+  value,
+  months,
+  onChange,
+}: {
+  value: string;
+  months: string[];
+  onChange: (v: string) => void;
+}) {
+  // "all" + every month present (current month shown as "This month").
+  const opts = ["all", ...months];
+  if (!months.includes(CUR_YM)) opts.splice(1, 0, CUR_YM);
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="text-xs rounded-md border border-[#E2DDD8] bg-[#F5F2ED] px-2.5 py-1 font-medium text-[#5A5550] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+    >
+      {opts.map((o) => (
+        <option key={o} value={o}>
+          {periodLabel(o)}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 // ---------- Dashboard ----------
 
 export default function DashboardPage() {
+  // Sales period filter ("all" or "YYYY-MM") — drives the overview
+  // fetch so AOV / Monthly / Top Sellers reflect the chosen period.
+  const [salesPeriod, setSalesPeriod] = useState<string>("all");
   const { data: soRaw, loading: soL } =
     useCachedJson<SoStats>("/api/sales-orders/stats");
-  const { data: ovRaw, loading: ovL } =
-    useCachedJson<Overview>("/api/dashboard/overview");
+  const { data: ovRaw, loading: ovL } = useCachedJson<Overview>(
+    `/api/dashboard/overview?period=${salesPeriod}`,
+  );
   // Same four payloads the Delivery page reads. fields=minimal&include=jobCards
   // keeps the response small while carrying the upholstery JC statuses the
   // pipeline gate needs. limit=200 covers the whole DO table (83 rows).
@@ -992,7 +1032,21 @@ export default function DashboardPage() {
       {/* Sales by Customer & Month (merged module) */}
       <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Sales by Customer &amp; Month</CardTitle>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-sm">
+              Sales by Customer &amp; Month
+            </CardTitle>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-[#9CA3AF] uppercase tracking-wider">
+                Period
+              </span>
+              <PeriodSelector
+                value={salesPeriod}
+                months={ov.salesMonths ?? []}
+                onChange={setSalesPeriod}
+              />
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="grid gap-6 lg:grid-cols-3">
@@ -1430,7 +1484,21 @@ export default function DashboardPage() {
 
       {/* Top sellers */}
       <div>
-        <SectionHeader label="Top Sellers" />
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xs font-bold text-[#5A5550] uppercase tracking-wider">
+            Top Sellers
+          </h2>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-[#9CA3AF] uppercase tracking-wider">
+              Period
+            </span>
+            <PeriodSelector
+              value={salesPeriod}
+              months={ov.salesMonths ?? []}
+              onChange={setSalesPeriod}
+            />
+          </div>
+        </div>
         <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
           <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
             <CardHeader className="pb-2">

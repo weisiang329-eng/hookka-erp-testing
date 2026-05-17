@@ -38,7 +38,13 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v13`, 60, async () => {
+  // Period filter for the sales-derived sections (AOV, Monthly,
+  // Top Sellers): "all" or a specific "YYYY-MM". Everything else in
+  // the payload is period-independent. Cached per period.
+  const periodRaw = c.req.query("period") ?? "all";
+  const period = /^\d{4}-\d{2}$/.test(periodRaw) ? periodRaw : "all";
+
+  const data = await cached(c, `dashboard:overview:${orgId}:v14:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -246,6 +252,7 @@ app.get("/", async (c) => {
         .prepare(
           `SELECT si.productCode AS "productCode",
                   so.customerName AS "custName",
+                  substr(so.companySODate::text, 1, 7) AS "ym",
                   MAX(si.productName) AS "productName",
                   COALESCE(SUM(si.quantity),0) AS "qtySold",
                   COALESCE(SUM(si.lineTotalSen),0) AS "valueSen"
@@ -253,12 +260,14 @@ app.get("/", async (c) => {
              JOIN sales_orders so ON so.id = si.salesOrderId
             WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
               AND si.itemCategory = 'BEDFRAME'
-            GROUP BY si.productCode, so.customerName`,
+            GROUP BY si.productCode, so.customerName,
+                     substr(so.companySODate::text, 1, 7)`,
         )
         .bind(orgId)
         .all<{
           productCode: string;
           custName: string | null;
+          ym: string | null;
           productName: string;
           qtySold: number;
           valueSen: number;
@@ -269,7 +278,8 @@ app.get("/", async (c) => {
       db
         .prepare(
           `SELECT si.salesOrderId AS "soId", si.productCode AS "productCode",
-                  so.customerName AS "custName", so.totalSen AS "soTotalSen"
+                  so.customerName AS "custName", so.totalSen AS "soTotalSen",
+                  substr(so.companySODate::text, 1, 7) AS "ym"
              FROM sales_order_items si
              JOIN sales_orders so ON so.id = si.salesOrderId
             WHERE so.orgId = ? AND so.status NOT IN ('DRAFT','CANCELLED')
@@ -281,6 +291,7 @@ app.get("/", async (c) => {
           productCode: string;
           custName: string | null;
           soTotalSen: number;
+          ym: string | null;
         }>(),
       // Top fabrics by ACTUAL production consumption (RM_ISSUE meters),
       // split Bedframe vs Sofa via the consuming PO's category (same
@@ -749,37 +760,30 @@ app.get("/", async (c) => {
       soVal: number;
       soSets: number;
     };
+    // Period gate: AOV table / Monthly bedframe-sofa / Top Sellers
+    // honour the selected period. Monthly Revenue + This-Month KPIs
+    // stay period-independent (computed from the full set).
+    const inPeriod = (ym: string | null | undefined) =>
+      period === "all" || ym === period;
+    const salesMonthsSet = new Set<string>();
     const aovMap = new Map<string, AovAcc>();
     // Per-customer → per-month AOV accumulator (drill-through: a
-    // customer's monthly average, by SO date).
+    // customer's monthly average, by SO date). Always all months.
     const aovCustMonth = new Map<string, Map<string, AovAcc>>();
     const monthMap = new Map<
       string,
       { bedframeUnits: number; sofaSets: number }
     >();
     // Sales-Order revenue per month (every confirmed SO total, by SO
-    // date) — one of the three Monthly Revenue lenses.
+    // date) — one of the three Monthly Revenue lenses. Period-free.
     const soRevMap = new Map<string, number>();
     for (const r of soAggRes.results ?? []) {
       const name = r.custName || "—";
-      const e =
-        aovMap.get(name) ?? { bfVal: 0, bfQty: 0, soVal: 0, soSets: 0 };
       const bfVal = Number(r.bfValueSen) || 0;
       const bfQty = Number(r.bfQty) || 0;
       const isSofa = Number(r.hasSofa) === 1;
-      e.bfVal += bfVal;
-      e.bfQty += bfQty;
-      if (isSofa) {
-        e.soVal += Number(r.soTotalSen) || 0;
-        e.soSets += 1;
-      }
-      aovMap.set(name, e);
       if (r.ym) {
-        const m =
-          monthMap.get(r.ym) ?? { bedframeUnits: 0, sofaSets: 0 };
-        m.bedframeUnits += bfQty;
-        if (isSofa) m.sofaSets += 1;
-        monthMap.set(r.ym, m);
+        salesMonthsSet.add(r.ym);
         soRevMap.set(
           r.ym,
           (soRevMap.get(r.ym) ?? 0) + (Number(r.soTotalSen) || 0),
@@ -799,7 +803,27 @@ app.get("/", async (c) => {
         }
         cm.set(r.ym, me);
       }
+      if (!inPeriod(r.ym)) continue;
+      const e =
+        aovMap.get(name) ?? { bfVal: 0, bfQty: 0, soVal: 0, soSets: 0 };
+      e.bfVal += bfVal;
+      e.bfQty += bfQty;
+      if (isSofa) {
+        e.soVal += Number(r.soTotalSen) || 0;
+        e.soSets += 1;
+      }
+      aovMap.set(name, e);
+      if (r.ym) {
+        const m =
+          monthMap.get(r.ym) ?? { bedframeUnits: 0, sofaSets: 0 };
+        m.bedframeUnits += bfQty;
+        if (isSofa) m.sofaSets += 1;
+        monthMap.set(r.ym, m);
+      }
     }
+    const salesMonths = [...salesMonthsSet].sort((a, b) =>
+      b.localeCompare(a),
+    );
     // This-Month Sales = Σ confirmed-SO total for the current month.
     const thisMonthSalesSen = soRevMap.get(monthPrefix) ?? 0;
     const aovByCustomer = [...aovMap.entries()]
@@ -912,6 +936,7 @@ app.get("/", async (c) => {
       Map<string, { qty: number; valueSen: number }>
     >();
     for (const r of catTopRes.results ?? []) {
+      if (!inPeriod(r.ym)) continue;
       const code = r.productCode ?? "";
       const q = Number(r.qtySold) || 0;
       const v = Number(r.valueSen) || 0;
@@ -951,6 +976,7 @@ app.get("/", async (c) => {
       { code: string; total: number; cust: string }
     >();
     for (const r of sofaLineRes.results ?? []) {
+      if (!inPeriod(r.ym)) continue;
       if (!r.soId || sofaBySo.has(r.soId)) continue;
       sofaBySo.set(r.soId, {
         code: r.productCode ?? "",
@@ -1033,7 +1059,7 @@ app.get("/", async (c) => {
       Map<string, { bedframeUnits: number; sofaSets: number }>
     >();
     for (const r of soAggRes.results ?? []) {
-      if (!r.ym) continue;
+      if (!r.ym || !inPeriod(r.ym)) continue;
       let cm = monthCustMap.get(r.ym);
       if (!cm) {
         cm = new Map();
@@ -1156,6 +1182,8 @@ app.get("/", async (c) => {
       monthlySales,
       monthlySalesByCustomer,
       monthlyRevenue,
+      period,
+      salesMonths,
       employee: {
         activeHeadcount: headByDept.reduce((s, d) => s + d.count, 0),
         byDept: headByDept.sort((a, b) => b.count - a.count),

@@ -424,6 +424,8 @@ export default function DashboardBPage() {
                     stroke="#D8B25A"
                     strokeWidth={2}
                     fill="url(#gSO)"
+                    isAnimationActive={false}
+                    dot={false}
                   />
                   <Area
                     type="monotone"
@@ -431,6 +433,8 @@ export default function DashboardBPage() {
                     stroke="#4ADE80"
                     strokeWidth={2}
                     fill="url(#gPr)"
+                    isAnimationActive={false}
+                    dot={false}
                   />
                   <Area
                     type="monotone"
@@ -439,6 +443,8 @@ export default function DashboardBPage() {
                     strokeWidth={2}
                     fill="none"
                     strokeDasharray="4 3"
+                    isAnimationActive={false}
+                    dot={false}
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -768,7 +774,7 @@ const DB_CSS = `
 .db-card-h h3{font-size:.92rem;font-weight:700;margin:0;letter-spacing:-.01em}
 .db-card-h p{font-size:.7rem;color:var(--db-dim);margin:.25rem 0 0}
 .db-legend{display:flex;gap:.85rem;font-family:'IBM Plex Mono',monospace;font-size:.66rem;color:var(--db-dim)}
-.db-chart{flex:1;min-height:230px}
+.db-chart{height:280px;width:100%}
 .db-empty{display:flex;align-items:center;justify-content:center;height:100%;color:var(--db-dim);font-size:.8rem}
 
 .db-tip{background:rgba(12,15,17,0.96);border:1px solid var(--db-line);border-radius:10px;

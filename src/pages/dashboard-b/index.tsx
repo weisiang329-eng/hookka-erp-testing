@@ -500,6 +500,60 @@ function RevTooltip(props: {
   );
 }
 
+// Donut leader-line label — customer name + share % pointing at the slice.
+interface PieLabelArg {
+  cx?: number;
+  cy?: number;
+  midAngle?: number;
+  outerRadius?: number;
+  percent?: number;
+  index?: number;
+  name?: string | number;
+}
+function renderPieLabel(a: PieLabelArg): React.ReactElement {
+  const RAD = Math.PI / 180;
+  const cx = a.cx ?? 0;
+  const cy = a.cy ?? 0;
+  const mid = a.midAngle ?? 0;
+  const oR = a.outerRadius ?? 0;
+  const cos = Math.cos(-mid * RAD);
+  const sin = Math.sin(-mid * RAD);
+  const sx = cx + oR * cos;
+  const sy = cy + oR * sin;
+  const mx = cx + (oR + 13) * cos;
+  const my = cy + (oR + 13) * sin;
+  const right = cos >= 0;
+  const ex = mx + (right ? 15 : -15);
+  const ey = my;
+  const idx = a.index ?? 0;
+  const color = PIE_COLORS[idx % PIE_COLORS.length];
+  const nm = String(a.name ?? "");
+  const short = nm.length > 12 ? `${nm.slice(0, 11)}…` : nm;
+  const pct = ((a.percent ?? 0) * 100).toFixed(0);
+  return (
+    <g>
+      <polyline
+        points={`${sx},${sy} ${mx},${my} ${ex},${ey}`}
+        stroke={color}
+        strokeWidth={1}
+        fill="none"
+        opacity={0.55}
+      />
+      <text
+        x={ex + (right ? 4 : -4)}
+        y={ey}
+        textAnchor={right ? "start" : "end"}
+        dominantBaseline="central"
+        fontSize={10}
+        fill="#5A5550"
+      >
+        {short}
+        <tspan fill="#9CA3AF"> {pct}%</tspan>
+      </text>
+    </g>
+  );
+}
+
 // Light radial gauge — track in brand cream, arc in accent.
 function Gauge({
   value,
@@ -557,6 +611,14 @@ function Gauge({
 // ---------- page ----------
 export default function DashboardBPage() {
   const [period, setPeriod] = useState("all");
+  const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
+  const toggleSeries = (k: string) =>
+    setHiddenSeries((prev) => {
+      const n = new Set(prev);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
   const [drill, setDrill] = useState<{
     title: string;
     subtitle?: string;
@@ -784,73 +846,6 @@ export default function DashboardBPage() {
           icon={Package}
           accent={C_GREEN}
         />
-        <KTile
-          label="Daily Capacity"
-          value={hrs(prod?.dailyCapacityMin)}
-          sub="7-working-day actual avg · view"
-          icon={Factory}
-          accent={C_SO}
-          onClick={
-            prod?.capacityDays
-              ? () =>
-                  setDrill({
-                    title: "Daily Capacity — Past 7 Working Days",
-                    subtitle: `Average ${hm(prod.dailyCapacityMin)}/day across all production depts`,
-                    node: (
-                      <MiniTable
-                        cols={["Date", "Production time", "vs Avg"]}
-                        rows={[...prod.capacityDays]
-                          .sort((a, b) => a.date.localeCompare(b.date))
-                          .map((d) => {
-                            const diff = d.minutes - prod.dailyCapacityMin;
-                            return [
-                              d.date,
-                              hm(d.minutes),
-                              `${diff >= 0 ? "+" : "−"}${hm(Math.abs(diff))}`,
-                            ];
-                          })}
-                      />
-                    ),
-                  })
-              : undefined
-          }
-        />
-        <KTile
-          label="Backlog"
-          value={`${backlogDays.toLocaleString()} days`}
-          sub={`${hrs(prod?.backlogMin)} queued · view`}
-          icon={Clock}
-          accent={C_RED}
-          onClick={
-            prod?.backlogByDept
-              ? () =>
-                  setDrill({
-                    title: "Total Backlog — per Department",
-                    subtitle: `${hm(prod.backlogGrandMin)} of active work across ${prod.backlogByDept.length} dept${prod.backlogByDept.length === 1 ? "" : "s"}`,
-                    node: (
-                      <MiniTable
-                        cols={[
-                          "Department",
-                          "Sofa",
-                          "Bedframe",
-                          "Total",
-                          "Daily cap",
-                          "Backlog",
-                        ]}
-                        rows={prod.backlogByDept.map((d) => [
-                          d.dept,
-                          hm(d.sofaMin),
-                          hm(d.bedframeMin),
-                          hm(d.totalMin),
-                          `${hm(d.dailyCapMin)}/d`,
-                          `${d.backlogDays.toLocaleString()}d`,
-                        ])}
-                      />
-                    ),
-                  })
-              : undefined
-          }
-        />
       </div>
 
       {/* Revenue + Plant load */}
@@ -859,12 +854,33 @@ export default function DashboardBPage() {
           <CardContent className="p-5">
             <SectionTitle
               title="Revenue — last 12 months"
-              sub="Sales Orders · Invoices · Production"
+              sub="Sales Orders · Invoices · Production · click a legend to toggle"
               right={
-                <div className="flex gap-3 text-xs text-[#9CA3AF]">
-                  <span style={{ color: C_SO }}>● Sales Orders</span>
-                  <span style={{ color: C_PROD }}>● Production</span>
-                  <span style={{ color: C_INV }}>● Invoices</span>
+                <div className="flex gap-3 text-xs">
+                  {(
+                    [
+                      ["Sales Orders", C_SO],
+                      ["Production", C_PROD],
+                      ["Invoices", C_INV],
+                    ] as const
+                  ).map(([k, c]) => {
+                    const off = hiddenSeries.has(k);
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => toggleSeries(k)}
+                        className="inline-flex items-center gap-1 transition-opacity"
+                        style={{
+                          color: off ? "#C2BBAE" : c,
+                          opacity: off ? 0.55 : 1,
+                          textDecoration: off ? "line-through" : "none",
+                        }}
+                      >
+                        ● {k}
+                      </button>
+                    );
+                  })}
                 </div>
               }
             />
@@ -914,6 +930,7 @@ export default function DashboardBPage() {
                       fill="url(#bSO)"
                       isAnimationActive={false}
                       dot={false}
+                      hide={hiddenSeries.has("Sales Orders")}
                     />
                     <Area
                       type="monotone"
@@ -923,6 +940,7 @@ export default function DashboardBPage() {
                       fill="url(#bPR)"
                       isAnimationActive={false}
                       dot={false}
+                      hide={hiddenSeries.has("Production")}
                     />
                     <Area
                       type="monotone"
@@ -933,6 +951,7 @@ export default function DashboardBPage() {
                       strokeDasharray="4 3"
                       isAnimationActive={false}
                       dot={false}
+                      hide={hiddenSeries.has("Invoices")}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -950,25 +969,97 @@ export default function DashboardBPage() {
               cap="queue"
               accent={gaugeAccent}
             />
-            <div className="mt-3 flex gap-8 text-center">
-              <div>
-                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                  Daily cap
-                </p>
-                <p className="text-base font-bold text-[#1F1D1B]">
-                  {hrs(prod?.dailyCapacityMin)}
-                </p>
-              </div>
-              <div>
-                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                  Workforce
-                </p>
-                <p className="text-base font-bold text-[#1F1D1B]">
-                  {ov.employee?.activeHeadcount ?? 0}
-                </p>
-              </div>
+            <div className="mt-3 text-center">
+              <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                Workforce
+              </p>
+              <p className="text-base font-bold text-[#1F1D1B]">
+                {ov.employee?.activeHeadcount ?? 0}
+              </p>
             </div>
             <div className="mt-4 w-full border-t border-[#F0ECE6] pt-3 space-y-2">
+              <button
+                type="button"
+                disabled={!prod?.capacityDays}
+                onClick={() =>
+                  prod?.capacityDays &&
+                  setDrill({
+                    title: "Daily Capacity — Past 7 Working Days",
+                    subtitle: `Average ${hm(prod.dailyCapacityMin)}/day across all production depts`,
+                    node: (
+                      <MiniTable
+                        cols={["Date", "Production time", "vs Avg"]}
+                        rows={[...prod.capacityDays]
+                          .sort((a, b) => a.date.localeCompare(b.date))
+                          .map((d) => {
+                            const diff = d.minutes - prod.dailyCapacityMin;
+                            return [
+                              d.date,
+                              hm(d.minutes),
+                              `${diff >= 0 ? "+" : "−"}${hm(Math.abs(diff))}`,
+                            ];
+                          })}
+                      />
+                    ),
+                  })
+                }
+                className="w-full flex items-center justify-between rounded-lg bg-[#F7F4EF] hover:bg-[#F0ECE6] px-3 py-2 text-left transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <Factory className="h-4 w-4 text-[#6B5C32]" />
+                  <span className="text-xs text-[#5A5550]">
+                    Daily Capacity{" "}
+                    <span className="text-[#C2BBAE]">· 7-day avg</span>
+                  </span>
+                </span>
+                <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
+                  {hrs(prod?.dailyCapacityMin)}
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={!prod?.backlogByDept}
+                onClick={() =>
+                  prod?.backlogByDept &&
+                  setDrill({
+                    title: "Total Backlog — per Department",
+                    subtitle: `${hm(prod.backlogGrandMin)} of active work across ${prod.backlogByDept.length} dept${prod.backlogByDept.length === 1 ? "" : "s"}`,
+                    node: (
+                      <MiniTable
+                        cols={[
+                          "Department",
+                          "Sofa",
+                          "Bedframe",
+                          "Total",
+                          "Daily cap",
+                          "Backlog",
+                        ]}
+                        rows={prod.backlogByDept.map((d) => [
+                          d.dept,
+                          hm(d.sofaMin),
+                          hm(d.bedframeMin),
+                          hm(d.totalMin),
+                          `${hm(d.dailyCapMin)}/d`,
+                          `${d.backlogDays.toLocaleString()}d`,
+                        ])}
+                      />
+                    ),
+                  })
+                }
+                className="w-full flex items-center justify-between rounded-lg bg-[#F7F4EF] hover:bg-[#F0ECE6] px-3 py-2 text-left transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-[#DC2626]" />
+                  <span className="text-xs text-[#5A5550]">
+                    Total Backlog{" "}
+                    <span className="text-[#C2BBAE]">· per dept</span>
+                  </span>
+                </span>
+                <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
+                  {backlogDays.toLocaleString()}d ·{" "}
+                  {hrs(prod?.backlogMin)}
+                </span>
+              </button>
               <button
                 type="button"
                 disabled={!prod?.activeJobs}
@@ -1170,33 +1261,45 @@ export default function DashboardBPage() {
             title="Revenue by Customer"
             sub="customer concentration · share & cumulative % · click a customer for monthly AOV"
             right={
-              ov.aovCompany ? (
-                <div className="text-right text-[11px] text-[#9CA3AF]">
-                  <div>
-                    Co. BF{" "}
-                    <span className="font-semibold text-[#1F1D1B]">
-                      {rm(ov.aovCompany.bedframeAvgSen)}
-                    </span>
-                    /u
-                  </div>
-                  <div>
-                    Co. Sofa{" "}
-                    <span className="font-semibold text-[#1F1D1B]">
-                      {rm(ov.aovCompany.sofaAvgSen)}
-                    </span>
-                    /set
-                  </div>
-                </div>
-              ) : (
-                <span className="text-[11px] text-[#9CA3AF]">
-                  Total{" "}
-                  <span className="font-semibold text-[#1F1D1B]">
-                    {rm(totalCustRev)}
-                  </span>
+              <span className="text-[11px] text-[#9CA3AF]">
+                Total customer revenue{" "}
+                <span className="font-semibold text-[#1F1D1B]">
+                  {rm(totalCustRev)}
                 </span>
-              )
+              </span>
             }
           />
+          {ov.aovCompany && (
+            <div className="mb-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-px rounded-lg overflow-hidden border border-[#F0ECE6] bg-[#F0ECE6]">
+              {(
+                [
+                  ["Bedframe AOV", rm(ov.aovCompany.bedframeAvgSen), "per unit · all customers"],
+                  [
+                    "Bedframe Units",
+                    ov.aovCompany.bedframeUnits.toLocaleString(),
+                    "all customers",
+                  ],
+                  ["Sofa AOV", rm(ov.aovCompany.sofaAvgSen), "per set · all customers"],
+                  [
+                    "Sofa Sets",
+                    ov.aovCompany.sofaSets.toLocaleString(),
+                    "all customers",
+                  ],
+                  ["Total Revenue", rm(ov.aovCompany.totalSen), "company-wide"],
+                ] as const
+              ).map(([l, v, s]) => (
+                <div key={l} className="bg-white px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                    {l}
+                  </p>
+                  <p className="text-sm font-bold text-[#1F1D1B] tabular-nums mt-0.5">
+                    {v}
+                  </p>
+                  <p className="text-[10px] text-[#C2BBAE] mt-0.5">{s}</p>
+                </div>
+              ))}
+            </div>
+          )}
           {pieData.length === 0 ? (
             <p className="text-xs text-[#9CA3AF] py-6 text-center">
               No customer revenue.
@@ -1206,22 +1309,26 @@ export default function DashboardBPage() {
               <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 items-center">
                 <div
                   className="lg:col-span-2 relative"
-                  style={{ width: "100%", height: 248 }}
+                  style={{ width: "100%", height: 280 }}
                 >
                   <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
+                    <PieChart
+                      margin={{ top: 10, right: 10, bottom: 10, left: 10 }}
+                    >
                       <Pie
                         data={pieData}
                         dataKey="value"
                         nameKey="name"
                         cx="50%"
                         cy="50%"
-                        innerRadius={62}
-                        outerRadius={96}
+                        innerRadius={48}
+                        outerRadius={74}
                         paddingAngle={2}
                         stroke="#fff"
                         strokeWidth={2}
                         isAnimationActive={false}
+                        labelLine={false}
+                        label={renderPieLabel}
                       >
                         {pieData.map((_, i) => (
                           <Cell

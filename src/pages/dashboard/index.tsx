@@ -109,11 +109,25 @@ type Overview = {
   };
   fabric?: {
     BEDFRAME: {
-      top: { fabCode: string; fabName: string; meters: number; costSen: number }[];
+      top: {
+        fabCode: string;
+        fabName: string;
+        meters: number;
+        costSen: number;
+        past30Meters: number;
+        next30Meters: number;
+      }[];
       monthly: { month: string; meters: number }[];
     };
     SOFA: {
-      top: { fabCode: string; fabName: string; meters: number; costSen: number }[];
+      top: {
+        fabCode: string;
+        fabName: string;
+        meters: number;
+        costSen: number;
+        past30Meters: number;
+        next30Meters: number;
+      }[];
       monthly: { month: string; meters: number }[];
     };
   };
@@ -220,6 +234,23 @@ const hm = (min: number | undefined) => {
   const m = Math.max(0, Math.round(min ?? 0));
   return `${Math.floor(m / 60).toLocaleString()}h ${m % 60}m`;
 };
+// Roll a monthly [{month:"YYYY-MM",meters}] series up into quarters
+// ("YYYY-Qn"), summing meters. Keeps the last 8 quarters.
+function toQuarterly(
+  monthly: { month: string; meters: number }[],
+): { label: string; meters: number }[] {
+  const q = new Map<string, number>();
+  for (const m of monthly) {
+    const [y, mm] = m.month.split("-");
+    const qn = Math.ceil((Number(mm) || 1) / 3);
+    const key = `${y}-Q${qn}`;
+    q.set(key, (q.get(key) ?? 0) + m.meters);
+  }
+  return [...q.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-8)
+    .map(([label, meters]) => ({ label, meters }));
+}
 
 function KPICard({
   title,
@@ -444,6 +475,8 @@ export default function DashboardPage() {
     subtitle?: string;
     node: React.ReactNode;
   } | null>(null);
+  // Fabric trend granularity toggle (Monthly ↔ Quarterly).
+  const [fabGran, setFabGran] = useState<"month" | "quarter">("month");
 
   const monthLabel = new Date().toLocaleDateString("en-MY", {
     month: "long",
@@ -1187,14 +1220,37 @@ export default function DashboardPage() {
 
       {/* Fabric — Bedframe vs Sofa (one module: top fabrics + monthly) */}
       <div>
-        <SectionHeader label="Fabric Usage — Bedframe vs Sofa" />
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xs font-bold text-[#5A5550] uppercase tracking-wider">
+            Fabric Usage — Bedframe vs Sofa
+          </h2>
+          <div className="flex items-center gap-1 text-xs">
+            {(["month", "quarter"] as const).map((g) => (
+              <button
+                key={g}
+                onClick={() => setFabGran(g)}
+                className={`px-2.5 py-1 rounded-md font-medium ${
+                  fabGran === g
+                    ? "bg-[#6B5C32] text-white"
+                    : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
+                }`}
+              >
+                {g === "month" ? "Monthly" : "Quarterly"}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
           {(["BEDFRAME", "SOFA"] as const).map((cat) => {
             const blk = ov.fabric?.[cat];
-            const monthMax = Math.max(
-              1,
-              ...((blk?.monthly ?? []).map((m) => m.meters)),
-            );
+            const trend =
+              fabGran === "quarter"
+                ? toQuarterly(blk?.monthly ?? [])
+                : (blk?.monthly ?? []).map((m) => ({
+                    label: m.month,
+                    meters: m.meters,
+                  }));
+            const monthMax = Math.max(1, ...trend.map((t) => t.meters));
             return (
               <Card
                 key={cat}
@@ -1237,19 +1293,62 @@ export default function DashboardPage() {
                   </div>
                   <div className="border-t border-[#E2DDD8] pt-2">
                     <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
-                      Monthly meters — last 12
+                      Past 30 days → Next 30 days (forecast)
                     </p>
-                    {(blk?.monthly ?? []).length === 0 ? (
+                    {(blk?.top ?? []).length === 0 ? (
+                      <p className="text-xs text-[#9CA3AF]">No data.</p>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-[10px] text-[#9CA3AF]">
+                            <th className="font-medium pb-1">Fabric</th>
+                            <th className="font-medium pb-1 text-right">
+                              Past 30d
+                            </th>
+                            <th className="font-medium pb-1 text-right">
+                              Next 30d
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(blk?.top ?? []).map((f) => (
+                            <tr key={f.fabCode}>
+                              <td className="py-0.5 text-[#1F1D1B] font-medium">
+                                {f.fabCode}
+                              </td>
+                              <td className="py-0.5 text-right tabular-nums text-[#5A5550]">
+                                {f.past30Meters.toLocaleString()} m
+                              </td>
+                              <td className="py-0.5 text-right tabular-nums font-semibold text-[#6B5C32]">
+                                {f.next30Meters.toLocaleString()} m
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    <p className="text-[10px] text-[#9CA3AF] mt-1">
+                      Past = actual issued. Next = forecast from Fabric
+                      Cutting jobs due ≤ 30 days (BOM).
+                    </p>
+                  </div>
+                  <div className="border-t border-[#E2DDD8] pt-2">
+                    <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
+                      {fabGran === "quarter"
+                        ? "Quarterly meters — last 8"
+                        : "Monthly meters — last 12"}
+                    </p>
+                    {trend.length === 0 ? (
                       <p className="text-xs text-[#9CA3AF]">No data.</p>
                     ) : (
                       <div className="space-y-1">
-                        {(blk?.monthly ?? []).map((m) => (
+                        {trend.map((m) => (
                           <div
-                            key={m.month}
+                            key={m.label}
                             className="flex items-center gap-2"
                           >
                             <span className="text-[11px] text-[#9CA3AF] w-14 shrink-0 tabular-nums">
-                              {m.month}
+                              {m.label}
                             </span>
                             <div className="flex-1 bg-[#F5F2ED] rounded h-3 overflow-hidden">
                               <div

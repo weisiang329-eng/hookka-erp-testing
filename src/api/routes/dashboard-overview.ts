@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { loadSoLinePriceIndex, priceForItem } from "../lib/do-value";
+import { computeFabricMetrics } from "../lib/fabric-usage";
 
 // DO statuses that mean goods have shipped — same set the all-time
 // "Delivered" figure uses (loadDeliveredItemsValueSen) so This-Month
@@ -37,7 +38,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v11`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v12`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -971,15 +972,24 @@ app.get("/", async (c) => {
     }
 
     // ---- Fabric module — split Bedframe vs Sofa (consumption) ----
+    // Past-30-days actual + Next-30-days forecast (by Fab Cut due date,
+    // BOM-computed) per fabric SKU — reuses the same engine the Fab Cut
+    // page uses so the numbers reconcile system-wide.
+    const fabMetrics = await computeFabricMetrics(db);
     const fabTopByCat = (cat: string) =>
       (fabTopRes.results ?? [])
         .filter((r) => (r.cat ?? "").toUpperCase() === cat)
-        .map((r) => ({
-          fabCode: r.fabCode ?? "—",
-          fabName: r.fabName ?? "",
-          meters: Number(r.meters) || 0,
-          costSen: Number(r.costSen) || 0,
-        }))
+        .map((r) => {
+          const fm = fabMetrics.get(r.fabCode ?? "");
+          return {
+            fabCode: r.fabCode ?? "—",
+            fabName: r.fabName ?? "",
+            meters: Number(r.meters) || 0,
+            costSen: Number(r.costSen) || 0,
+            past30Meters: Math.round(fm?.lastMonthUsage ?? 0),
+            next30Meters: Math.round(fm?.oneMonthUsage ?? 0),
+          };
+        })
         .filter((f) => f.meters > 0)
         .sort((a, b) => b.meters - a.meters)
         .slice(0, 8);

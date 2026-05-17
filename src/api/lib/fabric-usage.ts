@@ -602,5 +602,103 @@ export async function computeFabricMetrics(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Next-30-day fabric demand split by item CATEGORY (BEDFRAME / SOFA / ...).
+//
+// Same engine as computeFabricMetrics' demand loop (active FAB_CUT JCs,
+// BOM-computed meters, due ≤ 30 days) but bucketed by the JC's production
+// order category as well as fabric code. This is what lets the dashboard
+// show category-correct forecasts — computeFabricMetrics is SKU-total
+// only, so a bedframe fabric would otherwise show its full demand under
+// Sofa too.
+//
+// Returns Map<CATEGORY, Map<fabricCode, meters>>.
+// ---------------------------------------------------------------------------
+export async function computeFabricNext30ByCategory(
+  db: D1Database,
+): Promise<Map<string, Map<string, number>>> {
+  const out = new Map<string, Map<string, number>>();
+  const add = (cat: string, code: string, meters: number) => {
+    let m = out.get(cat);
+    if (!m) {
+      m = new Map();
+      out.set(cat, m);
+    }
+    m.set(code, (m.get(code) ?? 0) + meters);
+  };
+
+  const today = new Date();
+  const monthEnd = (() => {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() + 30);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  const [bomMap, siblingsIdx] = await Promise.all([
+    fetchBomWipComponentsByCode(db),
+    fetchSofaSiblingsByGroupKey(db),
+  ]);
+  const siblingsByGroup = siblingsIdx.byGroupKey;
+  const baseModelByProductCode = siblingsIdx.baseModelByProductCode;
+
+  const jcsRes = await db
+    .prepare(
+      `SELECT jc.id AS jcId, jc.dueDate, jc.wipType, jc.departmentCode,
+              po.id AS poId, po.fabricCode, po.quantity, po.productCode,
+              po.itemCategory, po.gapInches, po.divanHeightInches,
+              po.legHeightInches, po.sizeCode, po.sizeLabel,
+              po.companySOId, po.companyCOId
+         FROM job_cards jc
+         INNER JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE jc.departmentCode = 'FAB_CUT'
+          AND jc.status IN ('WAITING', 'IN_PROGRESS', 'PAUSED', 'BLOCKED')
+          AND po.status NOT IN ('CANCELLED', 'COMPLETED', 'ON_HOLD')
+          AND po.fabricCode IS NOT NULL
+          AND po.fabricCode <> ''`,
+    )
+    .all<ActiveFcJcRow>();
+
+  for (const jc of jcsRes.results ?? []) {
+    if (!jc.fabricCode) continue;
+    if (!jc.dueDate || jc.dueDate > monthEnd) continue;
+    const cat = (jc.itemCategory ?? "").toUpperCase();
+    if (!cat) continue;
+    const wipComponents = jc.productCode ? bomMap.get(jc.productCode) : null;
+    const baseModel = jc.productCode
+      ? baseModelByProductCode.get(jc.productCode)
+      : null;
+    const groupKey = sofaSiblingGroupKey(
+      {
+        itemCategory: jc.itemCategory,
+        companySOId: jc.companySOId,
+        companyCOId: jc.companyCOId,
+        fabricCode: jc.fabricCode,
+        productCode: jc.productCode,
+      },
+      baseModel,
+    );
+    const siblings = groupKey ? siblingsByGroup.get(groupKey) : undefined;
+    if (!wipComponents && (!siblings || siblings.length === 0)) continue;
+    const meters = computeFcFabricUsageMeters(
+      {
+        quantity: jc.quantity,
+        itemCategory: jc.itemCategory,
+        gapInches: jc.gapInches,
+        divanHeightInches: jc.divanHeightInches,
+        legHeightInches: jc.legHeightInches,
+        sizeCode: jc.sizeCode,
+        sizeLabel: jc.sizeLabel,
+      },
+      { departmentCode: jc.departmentCode, wipType: jc.wipType },
+      wipComponents,
+      bomMap,
+      siblings,
+    );
+    if (meters <= 0) continue;
+    add(cat, jc.fabricCode, meters);
+  }
+  return out;
+}
+
 // Re-export for callers that don't want to recompute date arithmetic.
 export const FABRIC_METRICS_TODAY = () => new Date().toISOString().slice(0, 10);

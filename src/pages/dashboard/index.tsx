@@ -1357,16 +1357,18 @@ export default function DashboardPage() {
                     meters: m.meters,
                   }));
             const monthMax = Math.max(1, ...trend.map((t) => t.meters));
+            // Sofa carries more colourways — show 10; bedframe 8.
+            const fabLimit = cat === "SOFA" ? 10 : 8;
             const fabRows =
               fabMode === "next"
                 ? (blk?.list ?? [])
                     .filter((f) => f.next30Meters > 0)
                     .sort((a, b) => b.next30Meters - a.next30Meters)
-                    .slice(0, 8)
+                    .slice(0, fabLimit)
                 : (blk?.list ?? [])
                     .filter((f) => f.meters > 0)
                     .sort((a, b) => b.meters - a.meters)
-                    .slice(0, 8);
+                    .slice(0, fabLimit);
             return (
               <Card
                 key={cat}

@@ -14,7 +14,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { loadSoLinePriceIndex, priceForItem } from "../lib/do-value";
-import { computeFabricMetrics } from "../lib/fabric-usage";
+import { computeFabricNext30ByCategory } from "../lib/fabric-usage";
 
 // DO statuses that mean goods have shipped — same set the all-time
 // "Delivered" figure uses (loadDeliveredItemsValueSen) so This-Month
@@ -44,7 +44,7 @@ app.get("/", async (c) => {
   const periodRaw = c.req.query("period") ?? "all";
   const period = /^\d{4}-\d{2}$/.test(periodRaw) ? periodRaw : "all";
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v15:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v16:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -62,6 +62,12 @@ app.get("/", async (c) => {
     const last7StartISO = (() => {
       const d = new Date(today);
       d.setDate(d.getDate() - 7);
+      return fmtISO(d);
+    })();
+    // Last 30 days (for category-specific fabric Past-30 actuals).
+    const last30StartISO = (() => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - 30);
       return fmtISO(d);
     })();
 
@@ -102,7 +108,7 @@ app.get("/", async (c) => {
       compYestRes,
       compLast7Res,
       fabRecvRes,
-      fabPoCatRes,
+      fabPast30CatRes,
       backlogJcRes,
       headRes,
     ] = await Promise.all([
@@ -522,20 +528,25 @@ app.get("/", async (c) => {
           minUnitSen: number | null;
           maxUnitSen: number | null;
         }>(),
-      // Fabric → category map (a fabric's bedframe/sofa side) so the
-      // "Next" forecast view can surface upcoming fabrics even if they
-      // have no historical consumption in that category yet.
+      // Category-specific Past-30-days actual fabric issued (RM_ISSUE
+      // in the last 30 days), so Bedframe/Sofa Past-30 is correct
+      // instead of the SKU total.
       db
         .prepare(
-          `SELECT DISTINCT po.fabricCode AS "fabCode",
-                  po.itemCategory AS "cat"
-             FROM production_orders po
-            WHERE po.orgId = ? AND po.fabricCode IS NOT NULL
-              AND po.fabricCode <> ''
-              AND po.itemCategory IN ('BEDFRAME','SOFA')`,
+          `SELECT po.itemCategory AS "cat", rm.itemCode AS "fabCode",
+                  COALESCE(SUM(cl.qty),0) AS "meters"
+             FROM cost_ledger cl
+             JOIN raw_materials rm ON rm.id = cl.itemId
+             JOIN production_orders po ON po.id = cl.refId
+            WHERE po.orgId = ? AND cl.type = 'RM_ISSUE'
+              AND cl.refType = 'PRODUCTION_ORDER'
+              AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')
+              AND po.itemCategory IN ('BEDFRAME','SOFA')
+              AND substr(cl.date::text, 1, 10) >= ?
+            GROUP BY po.itemCategory, rm.itemCode`,
         )
-        .bind(orgId)
-        .all<{ fabCode: string; cat: string }>(),
+        .bind(orgId, last30StartISO)
+        .all<{ cat: string; fabCode: string; meters: number }>(),
       // Per-JC rows for the Backlog-by-department drill-down — exact
       // mirror of the Planning page's capacityData: needs the JC's dept
       // + its production order's category & status.
@@ -1105,7 +1116,22 @@ app.get("/", async (c) => {
     // Past-30-days actual + Next-30-days forecast (by Fab Cut due date,
     // BOM-computed) per fabric SKU — reuses the same engine the Fab Cut
     // page uses so the numbers reconcile system-wide.
-    const fabMetrics = await computeFabricMetrics(db);
+    // Category-correct Next-30 forecast (BOM, FAB_CUT jobs due ≤30d),
+    // bucketed by the JC's PO category — so a bedframe fabric never
+    // shows its demand under Sofa. Same engine as the Fab Cut page.
+    const fabNext30Cat = await computeFabricNext30ByCategory(db);
+    // Category-correct Past-30 actual issued (RM_ISSUE last 30 days).
+    const fabPast30Cat = new Map<string, Map<string, number>>();
+    for (const r of fabPast30CatRes.results ?? []) {
+      const cat = (r.cat ?? "").toUpperCase();
+      if (cat !== "BEDFRAME" && cat !== "SOFA") continue;
+      let m = fabPast30Cat.get(cat);
+      if (!m) {
+        m = new Map();
+        fabPast30Cat.set(cat, m);
+      }
+      m.set(r.fabCode ?? "", Number(r.meters) || 0);
+    }
     // Purchase price per fabric SKU (from RM_RECEIPT ledger).
     const fabPrice = new Map<
       string,
@@ -1118,21 +1144,6 @@ app.get("/", async (c) => {
         minSen: Math.round(Number(r.minUnitSen) || 0),
         maxSen: Math.round(Number(r.maxUnitSen) || 0),
       });
-    }
-    // Which category(ies) each fabric belongs to (from the POs that
-    // use it) — lets the "Next" forecast surface fabrics with no
-    // historical consumption in that category yet.
-    const fabCatMap = new Map<string, Set<string>>();
-    for (const r of fabPoCatRes.results ?? []) {
-      const code = r.fabCode ?? "";
-      const cat = (r.cat ?? "").toUpperCase();
-      if (!code || (cat !== "BEDFRAME" && cat !== "SOFA")) continue;
-      let s = fabCatMap.get(code);
-      if (!s) {
-        s = new Set();
-        fabCatMap.set(code, s);
-      }
-      s.add(cat);
     }
     // Historical used (categorised) per fabric, keyed by category.
     const fabUsedByCat = new Map<
@@ -1154,28 +1165,27 @@ app.get("/", async (c) => {
       });
     }
     // Combined per-category list: every fabric with history OR upcoming
-    // demand in that category. The client toggles the ranking
-    // (Previous = by Used, Next = by Next-30 forecast).
+    // demand IN THAT CATEGORY. Past-30 / Next-30 are category-specific
+    // (not SKU totals). Client toggles the ranking.
     const fabListByCat = (cat: string) => {
-      const used = fabUsedByCat.get(cat) ?? new Map();
-      const codes = new Set<string>(used.keys());
-      for (const [code, cats] of fabCatMap.entries()) {
-        if (!cats.has(cat)) continue;
-        const fm = fabMetrics.get(code);
-        if ((fm?.oneMonthUsage ?? 0) > 0) codes.add(code);
-      }
+      const used: Map<
+        string,
+        { fabName: string; meters: number; costSen: number }
+      > = fabUsedByCat.get(cat) ?? new Map();
+      const next30 = fabNext30Cat.get(cat) ?? new Map<string, number>();
+      const past30 = fabPast30Cat.get(cat) ?? new Map<string, number>();
+      const codes = new Set<string>([...used.keys(), ...next30.keys()]);
       return [...codes]
         .map((code) => {
           const u = used.get(code);
-          const fm = fabMetrics.get(code);
           const fp = fabPrice.get(code);
           return {
             fabCode: code || "—",
             fabName: u?.fabName ?? "",
             meters: u?.meters ?? 0,
             costSen: u?.costSen ?? 0,
-            past30Meters: Math.round(fm?.lastMonthUsage ?? 0),
-            next30Meters: Math.round(fm?.oneMonthUsage ?? 0),
+            past30Meters: Math.round(past30.get(code) ?? 0),
+            next30Meters: Math.round(next30.get(code) ?? 0),
             buyAvgSen: fp?.avgSen ?? 0,
             buyMinSen: fp?.minSen ?? 0,
             buyMaxSen: fp?.maxSen ?? 0,
@@ -1186,7 +1196,7 @@ app.get("/", async (c) => {
           (a, b) =>
             b.meters - a.meters || b.next30Meters - a.next30Meters,
         )
-        .slice(0, 20);
+        .slice(0, 25);
     };
     const fabMonthByCat = (cat: string) =>
       (fabMonthRes.results ?? [])

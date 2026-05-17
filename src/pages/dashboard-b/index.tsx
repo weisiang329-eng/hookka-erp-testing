@@ -38,6 +38,7 @@ import {
   X,
   ArrowUpRight,
   ArrowDownRight,
+  Scissors,
 } from "lucide-react";
 
 // ---------- API response types (mirror /dashboard) ----------
@@ -242,6 +243,23 @@ const hm = (min: number | undefined) => {
   return `${Math.floor(m / 60).toLocaleString()}h ${m % 60}m`;
 };
 const CUR_YM = new Date().toISOString().slice(0, 7);
+
+// Roll the last-12 monthly fabric series up into the last 8 quarters.
+function toQuarterly(
+  monthly: { month: string; meters: number }[],
+): { label: string; meters: number }[] {
+  const q = new Map<string, number>();
+  for (const m of monthly) {
+    const [y, mm] = m.month.split("-");
+    const qn = Math.ceil((Number(mm) || 1) / 3);
+    const key = `${y}-Q${qn}`;
+    q.set(key, (q.get(key) ?? 0) + m.meters);
+  }
+  return [...q.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(-8)
+    .map(([label, meters]) => ({ label, meters }));
+}
 
 // Customer-mix donut palette — professional financial-report scheme
 // (deep navy → teal → steel, grey tail for "Others"). The blue/teal
@@ -531,7 +549,7 @@ function renderPieLabel(a: PieLabelArg): React.ReactElement {
   const idx = a.index ?? 0;
   const color = PIE_COLORS[idx % PIE_COLORS.length];
   const nm = String(a.name ?? "");
-  const short = nm.length > 12 ? `${nm.slice(0, 11)}…` : nm;
+  const short = nm.length > 15 ? `${nm.slice(0, 14)}…` : nm;
   const pct = ((a.percent ?? 0) * 100).toFixed(0);
   return (
     <g>
@@ -570,40 +588,40 @@ function Gauge({
   accent: string;
 }) {
   const pct = Math.max(0, Math.min(1, value));
-  const r = 50;
+  const r = 60;
   const c = 2 * Math.PI * r;
   const arc = c * 0.75;
   return (
     <div className="relative flex items-center justify-center">
-      <svg width="150" height="150" viewBox="0 0 150 150">
+      <svg width="184" height="184" viewBox="0 0 184 184">
         <circle
-          cx="75"
-          cy="75"
+          cx="92"
+          cy="92"
           r={r}
           fill="none"
           stroke="#F0ECE6"
-          strokeWidth="10"
+          strokeWidth="12"
           strokeDasharray={`${arc} ${c}`}
           strokeLinecap="round"
-          transform="rotate(135 75 75)"
+          transform="rotate(135 92 92)"
         />
         <circle
-          cx="75"
-          cy="75"
+          cx="92"
+          cy="92"
           r={r}
           fill="none"
           stroke={accent}
-          strokeWidth="10"
+          strokeWidth="12"
           strokeDasharray={`${arc * pct} ${c}`}
           strokeLinecap="round"
-          transform="rotate(135 75 75)"
+          transform="rotate(135 92 92)"
         />
       </svg>
       <div className="absolute flex flex-col items-center">
-        <span className="text-2xl font-[800] text-[#1F1D1B] tabular-nums">
+        <span className="text-[34px] leading-none font-[800] text-[#1F1D1B] tabular-nums">
           {big}
         </span>
-        <span className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+        <span className="mt-1 text-[10px] uppercase tracking-wider text-[#9CA3AF]">
           {cap}
         </span>
       </div>
@@ -622,6 +640,8 @@ export default function DashboardBPage() {
       else n.add(k);
       return n;
     });
+  const [fabMode, setFabMode] = useState<"prev" | "next">("prev");
+  const [fabGran, setFabGran] = useState<"month" | "quarter">("month");
   const [hiddenDept, setHiddenDept] = useState<Set<string>>(new Set());
   const toggleDept = (k: string) =>
     setHiddenDept((prev) => {
@@ -980,13 +1000,26 @@ export default function DashboardBPage() {
               cap="queue"
               accent={gaugeAccent}
             />
-            <div className="mt-3 text-center">
-              <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                Workforce
-              </p>
-              <p className="text-base font-bold text-[#1F1D1B]">
-                {ov.employee?.activeHeadcount ?? 0}
-              </p>
+            <div className="mt-4 grid w-full grid-cols-2 gap-3 text-center">
+              <div className="rounded-lg bg-[#F7F4EF] px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Workforce
+                </p>
+                <p className="text-lg font-bold text-[#1F1D1B] tabular-nums">
+                  {ov.employee?.activeHeadcount ?? 0}
+                </p>
+              </div>
+              <div className="rounded-lg bg-[#F7F4EF] px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Queue load
+                </p>
+                <p
+                  className="text-lg font-bold tabular-nums"
+                  style={{ color: gaugeAccent }}
+                >
+                  {Math.round(util * 100)}%
+                </p>
+              </div>
             </div>
             <div className="mt-4 w-full border-t border-[#F0ECE6] pt-3 space-y-2">
               <button
@@ -1320,7 +1353,7 @@ export default function DashboardBPage() {
               <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 items-center">
                 <div
                   className="lg:col-span-2 relative"
-                  style={{ width: "100%", height: 280 }}
+                  style={{ width: "100%", height: 340 }}
                 >
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart
@@ -1332,8 +1365,8 @@ export default function DashboardBPage() {
                         nameKey="name"
                         cx="50%"
                         cy="50%"
-                        innerRadius={48}
-                        outerRadius={74}
+                        innerRadius={66}
+                        outerRadius={104}
                         paddingAngle={2}
                         stroke="#fff"
                         strokeWidth={2}
@@ -1365,10 +1398,10 @@ export default function DashboardBPage() {
                     </PieChart>
                   </ResponsiveContainer>
                   <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                    <span className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                    <span className="text-[11px] uppercase tracking-wider text-[#9CA3AF]">
                       Top 3
                     </span>
-                    <span className="text-xl font-[800] text-[#1F1D1B]">
+                    <span className="text-3xl font-[800] text-[#1F1D1B]">
                       {(
                         (aovAll
                           .slice(0, 3)
@@ -1699,100 +1732,241 @@ export default function DashboardBPage() {
       </div>
 
       {/* Fabric */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {(["BEDFRAME", "SOFA"] as const).map((cat) => {
-          const blk = ov.fabric?.[cat];
-          const rows = (blk?.list ?? [])
-            .filter((f) => f.meters > 0 || f.next30Meters > 0)
-            .sort((a, b) => b.meters - a.meters)
-            .slice(0, 10);
-          const mMax = Math.max(
-            1,
-            ...(blk?.monthly ?? []).map((m) => m.meters),
-          );
-          return (
-            <Card
-              key={cat}
-              className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-            >
-              <CardContent className="p-5">
-                <SectionTitle
-                  title={`${cat === "BEDFRAME" ? "Bedframe" : "Sofa"} Fabric`}
-                  sub="used · purchase price /m · forecast"
-                  right={
-                    <div className="text-right">
-                      <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                        Avg cost /m
-                      </p>
-                      <p className="text-sm font-bold text-[#1F1D1B]">
-                        {rm(cat === "BEDFRAME" ? fc?.bedframe : fc?.sofa)}
-                      </p>
-                    </div>
-                  }
-                />
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-left text-[10px] text-[#9CA3AF] border-b border-[#F0ECE6]">
-                      <th className="font-medium pb-1.5">Fabric</th>
-                      <th className="font-medium pb-1.5 text-right">Used</th>
-                      <th className="font-medium pb-1.5 text-right">Next 30d</th>
-                      <th className="font-medium pb-1.5 text-right">Avg buy</th>
-                      <th className="font-medium pb-1.5 text-right">Min–Max</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((f) => (
-                      <tr key={f.fabCode} className="border-b border-[#F7F4EF]">
-                        <td className="py-1 font-medium text-[#1F1D1B]">
-                          {f.fabCode}
-                        </td>
-                        <td className="py-1 text-right tabular-nums text-[#5A5550]">
-                          {Math.round(f.meters).toLocaleString()} m
-                        </td>
-                        <td className="py-1 text-right tabular-nums font-semibold text-[#6B5C32]">
-                          {f.next30Meters.toLocaleString()} m
-                        </td>
-                        <td className="py-1 text-right tabular-nums text-[#1F1D1B]">
-                          {f.buyAvgSen ? rm(f.buyAvgSen) : "—"}
-                        </td>
-                        <td className="py-1 text-right tabular-nums text-[#9CA3AF]">
-                          {f.buyMinSen || f.buyMaxSen
-                            ? `${rm(f.buyMinSen)}–${rm(f.buyMaxSen)}`
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="mt-3 border-t border-[#F0ECE6] pt-2 space-y-1">
-                  <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
-                    Monthly meters
-                  </p>
-                  {(blk?.monthly ?? []).map((m) => (
-                    <div key={m.month} className="flex items-center gap-2">
-                      <span className="w-14 shrink-0 text-[11px] text-[#9CA3AF] tabular-nums">
-                        {m.month}
-                      </span>
-                      <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden">
-                        <div
-                          className="h-full rounded"
-                          style={{
-                            width: `${Math.max(2, (m.meters / mMax) * 100)}%`,
-                            background: C_SO,
-                            opacity: 0.7,
-                          }}
-                        />
+      <div>
+        <div className="flex items-end justify-between mb-3">
+          <div>
+            <h3 className="text-sm font-bold text-[#1F1D1B] tracking-[-0.2px]">
+              Fabric Usage — Bedframe vs Sofa
+            </h3>
+            <p className="text-xs text-[#9CA3AF] mt-0.5">
+              {fabMode === "next"
+                ? "forecast — fabric needed next 30 days"
+                : "history — fabric used to date"}{" "}
+              · {fabGran === "quarter" ? "quarterly trend" : "monthly trend"}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              {(["prev", "next"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setFabMode(m)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    fabMode === m
+                      ? "bg-[#6B5C32] text-white"
+                      : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
+                  }`}
+                >
+                  {m === "prev" ? "Previous" : "Next"}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1">
+              {(["month", "quarter"] as const).map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() => setFabGran(g)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    fabGran === g
+                      ? "bg-[#6B5C32] text-white"
+                      : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
+                  }`}
+                >
+                  {g === "month" ? "Monthly" : "Quarterly"}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        {fc && (
+          <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] mb-4">
+            <CardContent className="py-4 px-5 flex flex-wrap items-center gap-x-10 gap-y-3">
+              <div className="flex items-center gap-2">
+                <Scissors className="h-4 w-4 text-[#6B5C32]" />
+                <span className="text-xs font-semibold text-[#5A5550]">
+                  Fabric Cost / Meter
+                </span>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9CA3AF]">
+                  Overall (all issued)
+                </p>
+                <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
+                  {rm(fc.total)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#9CA3AF]">
+                  Excl. Bedframe &amp; Sofa
+                </p>
+                <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
+                  {rm(fc.exclBedframeSofa)}
+                </p>
+              </div>
+              <p className="text-[10px] text-[#9CA3AF] max-w-[16rem]">
+                Weighted avg of fabric actually issued to production
+                (consumption).
+              </p>
+            </CardContent>
+          </Card>
+        )}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {(["BEDFRAME", "SOFA"] as const).map((cat) => {
+            const blk = ov.fabric?.[cat];
+            const trend =
+              fabGran === "quarter"
+                ? toQuarterly(blk?.monthly ?? [])
+                : (blk?.monthly ?? []).map((m) => ({
+                    label: m.month,
+                    meters: m.meters,
+                  }));
+            const mMax = Math.max(1, ...trend.map((t) => t.meters));
+            const fabRows =
+              fabMode === "next"
+                ? (blk?.list ?? [])
+                    .filter((f) => f.next30Meters > 0)
+                    .sort((a, b) => b.next30Meters - a.next30Meters)
+                    .slice(0, 10)
+                : (blk?.list ?? [])
+                    .filter((f) => f.meters > 0)
+                    .sort((a, b) => b.meters - a.meters)
+                    .slice(0, 10);
+            return (
+              <Card
+                key={cat}
+                className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+              >
+                <CardContent className="p-5">
+                  <SectionTitle
+                    title={`${cat === "BEDFRAME" ? "Bedframe" : "Sofa"} Fabric`}
+                    sub={
+                      fabMode === "next"
+                        ? "forecast — next 30 days · purchase price /m"
+                        : "used (history) · purchase price /m"
+                    }
+                    right={
+                      <div className="text-right">
+                        <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                          Avg cost /m
+                        </p>
+                        <p className="text-sm font-bold text-[#1F1D1B] tabular-nums">
+                          {rm(cat === "BEDFRAME" ? fc?.bedframe : fc?.sofa)}
+                        </p>
                       </div>
-                      <span className="w-16 text-right text-[11px] font-semibold text-[#1F1D1B] tabular-nums">
-                        {Math.round(m.meters).toLocaleString()} m
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
+                    }
+                  />
+                  {fabRows.length === 0 ? (
+                    <p className="text-xs text-[#9CA3AF] py-3">
+                      {fabMode === "next"
+                        ? "No upcoming fabric demand."
+                        : "No fabric issued."}
+                    </p>
+                  ) : (
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-[10px] text-[#9CA3AF] border-b border-[#F0ECE6]">
+                          <th className="font-medium pb-1.5">Fabric</th>
+                          <th className="font-medium pb-1.5 text-right">
+                            {fabMode === "next" ? "Next 30d" : "Used"}
+                          </th>
+                          <th className="font-medium pb-1.5 text-right">
+                            Past 30d
+                          </th>
+                          <th className="font-medium pb-1.5 text-right">
+                            Avg buy
+                          </th>
+                          <th className="font-medium pb-1.5 text-right">
+                            Min–Max
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {fabRows.map((f) => (
+                          <tr
+                            key={f.fabCode}
+                            className="border-b border-[#F7F4EF]"
+                          >
+                            <td className="py-1 font-medium text-[#1F1D1B]">
+                              {f.fabCode}
+                            </td>
+                            <td
+                              className={`py-1 text-right tabular-nums font-semibold ${
+                                fabMode === "next"
+                                  ? "text-[#6B5C32]"
+                                  : "text-[#1F1D1B]"
+                              }`}
+                            >
+                              {fabMode === "next"
+                                ? `${f.next30Meters.toLocaleString()} m`
+                                : `${Math.round(
+                                    f.meters,
+                                  ).toLocaleString()} m`}
+                            </td>
+                            <td className="py-1 text-right tabular-nums text-[#5A5550]">
+                              {f.past30Meters.toLocaleString()} m
+                            </td>
+                            <td className="py-1 text-right tabular-nums text-[#1F1D1B]">
+                              {f.buyAvgSen ? rm(f.buyAvgSen) : "—"}
+                            </td>
+                            <td className="py-1 text-right tabular-nums text-[#9CA3AF]">
+                              {f.buyMinSen || f.buyMaxSen
+                                ? `${rm(f.buyMinSen)}–${rm(f.buyMaxSen)}`
+                                : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                  <div className="mt-3 border-t border-[#F0ECE6] pt-2 space-y-1">
+                    <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
+                      {fabGran === "quarter"
+                        ? "Quarterly meters — last 8"
+                        : "Monthly meters — last 12"}
+                    </p>
+                    {trend.length === 0 ? (
+                      <p className="text-xs text-[#9CA3AF]">No data.</p>
+                    ) : (
+                      trend.map((t) => (
+                        <div
+                          key={t.label}
+                          className="flex items-center gap-2"
+                        >
+                          <span className="w-14 shrink-0 text-[11px] text-[#9CA3AF] tabular-nums">
+                            {t.label}
+                          </span>
+                          <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden">
+                            <div
+                              className="h-full rounded"
+                              style={{
+                                width: `${Math.max(
+                                  2,
+                                  (t.meters / mMax) * 100,
+                                )}%`,
+                                background: C_SO,
+                                opacity: 0.7,
+                              }}
+                            />
+                          </div>
+                          <span className="w-16 text-right text-[11px] font-semibold text-[#1F1D1B] tabular-nums">
+                            {Math.round(t.meters).toLocaleString()} m
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <p className="text-[10px] text-[#9CA3AF] mt-2">
+                    Fabric issued to{" "}
+                    {cat === "BEDFRAME" ? "bedframe" : "sofa"} production
+                    (RM_ISSUE).
+                  </p>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
       </div>
 
       {/* Department backlog + Purchasing */}
@@ -1840,34 +2014,49 @@ export default function DashboardBPage() {
                     (sofaOn ? x.sofaMin : 0) + (bedOn ? x.bedframeMin : 0),
                 ),
               );
-              return (prod?.backlogByDept ?? []).map((d) => (
-                <div key={d.dept} className="flex items-center gap-3 py-1">
-                  <span className="w-28 text-xs text-[#1F1D1B]">{d.dept}</span>
-                  <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden flex">
-                    {sofaOn && (
-                      <div
-                        className="h-full"
-                        style={{
-                          width: `${(d.sofaMin / mx) * 100}%`,
-                          background: C_INV,
-                        }}
-                      />
-                    )}
-                    {bedOn && (
-                      <div
-                        className="h-full"
-                        style={{
-                          width: `${(d.bedframeMin / mx) * 100}%`,
-                          background: C_SO,
-                        }}
-                      />
-                    )}
+              const filtered = !(sofaOn && bedOn);
+              return (prod?.backlogByDept ?? []).map((d) => {
+                const visMin =
+                  (sofaOn ? d.sofaMin : 0) + (bedOn ? d.bedframeMin : 0);
+                const showDays = filtered
+                  ? d.dailyCapMin > 0
+                    ? visMin / d.dailyCapMin
+                    : 0
+                  : d.backlogDays;
+                return (
+                  <div
+                    key={d.dept}
+                    className="flex items-center gap-3 py-1"
+                  >
+                    <span className="w-28 text-xs text-[#1F1D1B]">
+                      {d.dept}
+                    </span>
+                    <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden flex">
+                      {sofaOn && (
+                        <div
+                          className="h-full"
+                          style={{
+                            width: `${(d.sofaMin / mx) * 100}%`,
+                            background: C_INV,
+                          }}
+                        />
+                      )}
+                      {bedOn && (
+                        <div
+                          className="h-full"
+                          style={{
+                            width: `${(d.bedframeMin / mx) * 100}%`,
+                            background: C_SO,
+                          }}
+                        />
+                      )}
+                    </div>
+                    <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
+                      {showDays.toFixed(1)}d
+                    </span>
                   </div>
-                  <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
-                    {d.backlogDays.toLocaleString()}d
-                  </span>
-                </div>
-              ));
+                );
+              });
             })()}
           </CardContent>
         </Card>

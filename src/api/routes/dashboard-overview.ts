@@ -38,7 +38,7 @@ app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const { cached } = await import("../lib/kv-cache");
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v12`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v13`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -51,6 +51,12 @@ app.get("/", async (c) => {
       const y = new Date(today);
       y.setDate(y.getDate() - 1);
       return fmtISO(y);
+    })();
+    // Last 7 calendar days ending yesterday (for the Completed list).
+    const last7StartISO = (() => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - 7);
+      return fmtISO(d);
     })();
 
     // 7 most-recent COMPLETE working days (Mon-Sat), ending YESTERDAY —
@@ -88,6 +94,8 @@ app.get("/", async (c) => {
       delivItemsRes,
       delivDoRes,
       compYestRes,
+      compLast7Res,
+      fabRecvRes,
       backlogJcRes,
       headRes,
     ] = await Promise.all([
@@ -447,6 +455,61 @@ app.get("/", async (c) => {
           units: number;
           sos: number;
         }>(),
+      // Completed in the LAST 7 DAYS — per completion date, Bedframe
+      // units + Sofa sets (no customer split). Same per_po gate.
+      db
+        .prepare(
+          `WITH per_po AS (
+             SELECT productionOrderId,
+                    MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN completedDate END) AS unit_completed_at
+               FROM job_cards
+              WHERE departmentCode = 'UPHOLSTERY'
+              GROUP BY productionOrderId
+             HAVING COUNT(*) > 0
+                AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN 1 ELSE 0 END) = COUNT(*)
+           )
+           SELECT substr(per_po.unit_completed_at::text, 1, 10) AS "d",
+                  COALESCE(SUM(CASE WHEN po.itemCategory = 'BEDFRAME'
+                                    THEN po.quantity ELSE 0 END),0) AS "bfUnits",
+                  COUNT(DISTINCT CASE WHEN po.itemCategory = 'SOFA'
+                                      THEN po.salesOrderId END) AS "sofaSets"
+             FROM per_po
+             JOIN production_orders po ON po.id = per_po.productionOrderId
+            WHERE po.orgId = ?
+              AND substr(per_po.unit_completed_at::text, 1, 10) >= ?
+              AND substr(per_po.unit_completed_at::text, 1, 10) <= ?
+            GROUP BY substr(per_po.unit_completed_at::text, 1, 10)
+            ORDER BY substr(per_po.unit_completed_at::text, 1, 10)`,
+        )
+        .bind(orgId, last7StartISO, yesterdayISO)
+        .all<{ d: string | null; bfUnits: number; sofaSets: number }>(),
+      // Fabric PURCHASE price per SKU — from RM_RECEIPT ledger rows.
+      // weighted avg = Σ cost ÷ Σ qty; plus min/max per-meter unit cost.
+      db
+        .prepare(
+          `SELECT rm.itemCode AS "fabCode",
+                  COALESCE(SUM(cl.totalCostSen),0) AS "totCostSen",
+                  COALESCE(SUM(cl.qty),0) AS "totQty",
+                  MIN(NULLIF(cl.unitCostSen,0)) AS "minUnitSen",
+                  MAX(cl.unitCostSen) AS "maxUnitSen"
+             FROM cost_ledger cl
+             JOIN raw_materials rm ON rm.id = cl.itemId
+            WHERE rm.orgId = ? AND cl.type = 'RM_RECEIPT'
+              AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')
+            GROUP BY rm.itemCode`,
+        )
+        .bind(orgId)
+        .all<{
+          fabCode: string;
+          totCostSen: number;
+          totQty: number;
+          minUnitSen: number | null;
+          maxUnitSen: number | null;
+        }>(),
       // Per-JC rows for the Backlog-by-department drill-down — exact
       // mirror of the Planning page's capacityData: needs the JC's dept
       // + its production order's category & status.
@@ -616,6 +679,32 @@ app.get("/", async (c) => {
     };
     const activeJobs = rollUp(activeJobsRes.results ?? []);
     const completedYesterday = rollUp(compYestRes.results ?? []);
+    // Completed in the last 7 days, per day (no customer split). Fill
+    // every day so the list is continuous (0 on idle days).
+    const compByDay = new Map<string, { bf: number; sofa: number }>();
+    for (const r of compLast7Res.results ?? []) {
+      if (!r.d) continue;
+      compByDay.set(r.d, {
+        bf: Number(r.bfUnits) || 0,
+        sofa: Number(r.sofaSets) || 0,
+      });
+    }
+    const completedLast7: {
+      date: string;
+      bedframeUnits: number;
+      sofaSets: number;
+    }[] = [];
+    for (let i = 7; i >= 1; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      const iso = fmtISO(d);
+      const v = compByDay.get(iso) ?? { bf: 0, sofa: 0 };
+      completedLast7.push({
+        date: iso,
+        bedframeUnits: v.bf,
+        sofaSets: v.sofa,
+      });
+    }
 
     // ---- This-Month Delivered (item-level, shipped DOs, this month) ----
     // Mirrors loadDeliveredItemsValueSen but scoped to DOs whose
@@ -976,11 +1065,25 @@ app.get("/", async (c) => {
     // BOM-computed) per fabric SKU — reuses the same engine the Fab Cut
     // page uses so the numbers reconcile system-wide.
     const fabMetrics = await computeFabricMetrics(db);
+    // Purchase price per fabric SKU (from RM_RECEIPT ledger).
+    const fabPrice = new Map<
+      string,
+      { avgSen: number; minSen: number; maxSen: number }
+    >();
+    for (const r of fabRecvRes.results ?? []) {
+      const q = Number(r.totQty) || 0;
+      fabPrice.set(r.fabCode ?? "", {
+        avgSen: q > 0 ? Math.round((Number(r.totCostSen) || 0) / q) : 0,
+        minSen: Math.round(Number(r.minUnitSen) || 0),
+        maxSen: Math.round(Number(r.maxUnitSen) || 0),
+      });
+    }
     const fabTopByCat = (cat: string) =>
       (fabTopRes.results ?? [])
         .filter((r) => (r.cat ?? "").toUpperCase() === cat)
         .map((r) => {
           const fm = fabMetrics.get(r.fabCode ?? "");
+          const fp = fabPrice.get(r.fabCode ?? "");
           return {
             fabCode: r.fabCode ?? "—",
             fabName: r.fabName ?? "",
@@ -988,6 +1091,9 @@ app.get("/", async (c) => {
             costSen: Number(r.costSen) || 0,
             past30Meters: Math.round(fm?.lastMonthUsage ?? 0),
             next30Meters: Math.round(fm?.oneMonthUsage ?? 0),
+            buyAvgSen: fp?.avgSen ?? 0,
+            buyMinSen: fp?.minSen ?? 0,
+            buyMaxSen: fp?.maxSen ?? 0,
           };
         })
         .filter((f) => f.meters > 0)
@@ -1021,6 +1127,7 @@ app.get("/", async (c) => {
         backlogDays,
         activeJobs,
         completedYesterday,
+        completedLast7,
         capacityDays,
         backlogByDept,
         backlogGrandMin,

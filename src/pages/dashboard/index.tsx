@@ -48,6 +48,7 @@ type Overview = {
     backlogDays: number;
     activeJobs: JobsBreakdown;
     completedYesterday: JobsBreakdown;
+    completedLast7: { date: string; bedframeUnits: number; sofaSets: number }[];
     capacityDays: { date: string; minutes: number }[];
     backlogByDept: {
       dept: string;
@@ -116,6 +117,9 @@ type Overview = {
         costSen: number;
         past30Meters: number;
         next30Meters: number;
+        buyAvgSen: number;
+        buyMinSen: number;
+        buyMaxSen: number;
       }[];
       monthly: { month: string; meters: number }[];
     };
@@ -127,6 +131,9 @@ type Overview = {
         costSen: number;
         past30Meters: number;
         next30Meters: number;
+        buyAvgSen: number;
+        buyMinSen: number;
+        buyMaxSen: number;
       }[];
       monthly: { month: string; meters: number }[];
     };
@@ -740,16 +747,44 @@ export default function DashboardPage() {
             subtitle="Bedframe units / sofa sets finished yesterday"
             icon={CheckCircle2}
             onClick={
-              prod?.completedYesterday
+              prod?.completedLast7
                 ? () =>
                     setDrill({
-                      title: "Completed Yesterday — by customer",
+                      title: "Completed — last 7 days",
                       subtitle:
-                        "Production finished (last upholstery completed yesterday)",
+                        "Production finished per day (last upholstery completed). Bedframe = units, Sofa = sets.",
                       node: (
-                        <CustomerJobsTable
-                          rows={prod.completedYesterday.byCustomer}
-                        />
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+                              <th className="py-1.5 font-medium">Date</th>
+                              <th className="py-1.5 font-medium text-right">
+                                Bedframe units
+                              </th>
+                              <th className="py-1.5 font-medium text-right">
+                                Sofa sets
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {prod.completedLast7.map((d) => (
+                              <tr
+                                key={d.date}
+                                className="border-b border-[#F0ECE6]"
+                              >
+                                <td className="py-1.5 text-[#1F1D1B] tabular-nums">
+                                  {d.date}
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                                  {d.bedframeUnits.toLocaleString()}
+                                </td>
+                                <td className="py-1.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                                  {d.sofaSets.toLocaleString()}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       ),
                     })
                 : undefined
@@ -894,36 +929,9 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* Fabric cost + Monthly revenue trend */}
-      <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
+      {/* Monthly revenue trend */}
+      <div>
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Scissors className="h-4 w-4 text-[#6B5C32]" /> Fabric Cost / Meter
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div>
-              <p className="text-xs text-[#5A5550]">Overall (all issued)</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">
-                {rm(fab?.total)}
-              </p>
-            </div>
-            <div className="border-t border-[#E2DDD8] pt-3">
-              <p className="text-xs text-[#5A5550]">
-                Excl. Bedframe &amp; Sofa
-              </p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">
-                {rm(fab?.exclBedframeSofa)}
-              </p>
-            </div>
-            <p className="text-[10px] text-[#9CA3AF]">
-              Weighted avg of fabric actually issued to production.
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] lg:col-span-2">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">
               Monthly Revenue — last 12 months
@@ -981,15 +989,18 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* AOV by customer × category */}
+      {/* Sales by Customer & Month (merged module) */}
       <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">
-            Avg Order Value by Customer — Bedframe (per unit) vs Sofa (per set)
-          </CardTitle>
+          <CardTitle className="text-sm">Sales by Customer &amp; Month</CardTitle>
         </CardHeader>
         <CardContent>
-          <table className="w-full text-sm">
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="lg:col-span-2">
+              <p className="text-[11px] font-semibold text-[#5A5550] uppercase tracking-wider mb-2">
+                Avg Order Value — Bedframe (per unit) vs Sofa (per set)
+              </p>
+              <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
                 <th className="py-1.5 font-medium">Customer</th>
@@ -1136,24 +1147,17 @@ export default function DashboardPage() {
               })}
             </tbody>
           </table>
-          <p className="text-[10px] text-[#9CA3AF] mt-2">
-            Bedframe AOV = total bedframe value ÷ total bedframe units. Sofa
-            AOV = total Sales-Order value ÷ number of sofa sets (1 SO = 1
-            set). Click a customer for the monthly breakdown.
-          </p>
-        </CardContent>
-      </Card>
-
-      {/* Monthly Bedframe units & Sofa sets + Fabric meters */}
-      <div className="grid gap-6 grid-cols-1 lg:grid-cols-2">
-        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">
-              Monthly — Bedframe Units &amp; Sofa Sets
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {(ov.monthlySales ?? []).length === 0 ? (
+              <p className="text-[10px] text-[#9CA3AF] mt-2">
+                Bedframe AOV = total bedframe value ÷ total bedframe units.
+                Sofa AOV = total Sales-Order value ÷ number of sofa sets (1
+                SO = 1 set). Click a customer for the monthly breakdown.
+              </p>
+            </div>
+            <div className="lg:col-span-1 lg:border-l lg:border-[#E2DDD8] lg:pl-6">
+              <p className="text-[11px] font-semibold text-[#5A5550] uppercase tracking-wider mb-2">
+                Monthly — Bedframe Units &amp; Sofa Sets
+              </p>
+              {(ov.monthlySales ?? []).length === 0 ? (
               <p className="text-xs text-[#9CA3AF]">No sales data.</p>
             ) : (
               <table className="w-full text-sm">
@@ -1209,14 +1213,14 @@ export default function DashboardPage() {
                 </tbody>
               </table>
             )}
-            <p className="text-[10px] text-[#9CA3AF] mt-2">
-              By SO date. Bedframe = pieces sold; Sofa = sets (1 SO = 1
-              set). Confirmed orders only.
-            </p>
-          </CardContent>
-        </Card>
-
-      </div>
+              <p className="text-[10px] text-[#9CA3AF] mt-2">
+                By SO date. Bedframe = pieces sold; Sofa = sets (1 SO = 1
+                set). Click a month for the customer breakdown.
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Fabric — Bedframe vs Sofa (one module: top fabrics + monthly) */}
       <div>
@@ -1240,6 +1244,34 @@ export default function DashboardPage() {
             ))}
           </div>
         </div>
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] mb-4">
+          <CardContent className="py-4 flex flex-wrap items-center gap-x-10 gap-y-3">
+            <div className="flex items-center gap-2">
+              <Scissors className="h-4 w-4 text-[#6B5C32]" />
+              <span className="text-xs font-semibold text-[#5A5550]">
+                Fabric Cost / Meter
+              </span>
+            </div>
+            <div>
+              <p className="text-[11px] text-[#9CA3AF]">Overall (all issued)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">
+                {rm(fab?.total)}
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] text-[#9CA3AF]">
+                Excl. Bedframe &amp; Sofa
+              </p>
+              <p className="text-xl font-bold text-[#1F1D1B]">
+                {rm(fab?.exclBedframeSofa)}
+              </p>
+            </div>
+            <p className="text-[10px] text-[#9CA3AF] max-w-[16rem]">
+              Weighted avg of fabric actually issued to production
+              (consumption).
+            </p>
+          </CardContent>
+        </Card>
         <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
           {(["BEDFRAME", "SOFA"] as const).map((cat) => {
             const blk = ov.fabric?.[cat];
@@ -1265,31 +1297,50 @@ export default function DashboardPage() {
                 <CardContent className="space-y-3">
                   <div>
                     <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
-                      Top fabrics (meters used)
+                      Top fabrics — used &amp; purchase price /m
                     </p>
-                    {(blk?.top ?? []).length === 0 && (
+                    {(blk?.top ?? []).length === 0 ? (
                       <p className="text-xs text-[#9CA3AF]">
                         No fabric issued.
                       </p>
+                    ) : (
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-[10px] text-[#9CA3AF]">
+                            <th className="font-medium pb-1">Fabric</th>
+                            <th className="font-medium pb-1 text-right">
+                              Used
+                            </th>
+                            <th className="font-medium pb-1 text-right">
+                              Avg buy
+                            </th>
+                            <th className="font-medium pb-1 text-right">
+                              Min–Max
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(blk?.top ?? []).map((f) => (
+                            <tr key={f.fabCode}>
+                              <td className="py-0.5 font-medium text-[#1F1D1B]">
+                                {f.fabCode}
+                              </td>
+                              <td className="py-0.5 text-right tabular-nums text-[#5A5550]">
+                                {Math.round(f.meters).toLocaleString()} m
+                              </td>
+                              <td className="py-0.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                                {f.buyAvgSen ? rm(f.buyAvgSen) : "—"}
+                              </td>
+                              <td className="py-0.5 text-right tabular-nums text-[#9CA3AF]">
+                                {f.buyMinSen || f.buyMaxSen
+                                  ? `${rm(f.buyMinSen)}–${rm(f.buyMaxSen)}`
+                                  : "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     )}
-                    {(blk?.top ?? []).map((f) => (
-                      <div
-                        key={f.fabCode}
-                        className="flex items-center justify-between text-sm py-0.5"
-                      >
-                        <span className="text-[#5A5550] truncate pr-2">
-                          <span className="font-medium text-[#1F1D1B]">
-                            {f.fabCode}
-                          </span>{" "}
-                          <span className="text-xs text-[#9CA3AF]">
-                            {Math.round(f.meters).toLocaleString()} m
-                          </span>
-                        </span>
-                        <span className="font-semibold text-[#1F1D1B] tabular-nums">
-                          {rm(f.costSen)}
-                        </span>
-                      </div>
-                    ))}
                   </div>
                   <div className="border-t border-[#E2DDD8] pt-2">
                     <p className="text-[11px] font-semibold text-[#5A5550] mb-1">

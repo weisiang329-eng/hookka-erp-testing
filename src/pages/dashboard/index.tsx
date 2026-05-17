@@ -1362,8 +1362,8 @@ export default function DashboardPage() {
                     meters: m.meters,
                   }));
             const monthMax = Math.max(1, ...trend.map((t) => t.meters));
-            // Sofa carries more colourways — show 10; bedframe 8.
-            const fabLimit = cat === "SOFA" ? 10 : 8;
+            // Show 10 colourways for both Bedframe and Sofa.
+            const fabLimit = 10;
             const fabRows =
               fabMode === "next"
                 ? (blk?.list ?? [])

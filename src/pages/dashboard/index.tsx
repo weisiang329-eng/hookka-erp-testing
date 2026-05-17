@@ -112,7 +112,7 @@ type Overview = {
   };
   fabric?: {
     BEDFRAME: {
-      top: {
+      list: {
         fabCode: string;
         fabName: string;
         meters: number;
@@ -126,7 +126,7 @@ type Overview = {
       monthly: { month: string; meters: number }[];
     };
     SOFA: {
-      top: {
+      list: {
         fabCode: string;
         fabName: string;
         meters: number;
@@ -524,6 +524,9 @@ export default function DashboardPage() {
   } | null>(null);
   // Fabric trend granularity toggle (Monthly ↔ Quarterly).
   const [fabGran, setFabGran] = useState<"month" | "quarter">("month");
+  // Fabric table mode: Previous (rank by past usage) / Next (rank by
+  // next-30 forecast — surfaces upcoming fabrics not used historically).
+  const [fabMode, setFabMode] = useState<"prev" | "next">("prev");
 
   const monthLabel = new Date().toLocaleDateString("en-MY", {
     month: "long",
@@ -1282,20 +1285,37 @@ export default function DashboardPage() {
           <h2 className="text-xs font-bold text-[#5A5550] uppercase tracking-wider">
             Fabric Usage — Bedframe vs Sofa
           </h2>
-          <div className="flex items-center gap-1 text-xs">
-            {(["month", "quarter"] as const).map((g) => (
-              <button
-                key={g}
-                onClick={() => setFabGran(g)}
-                className={`px-2.5 py-1 rounded-md font-medium ${
-                  fabGran === g
-                    ? "bg-[#6B5C32] text-white"
-                    : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
-                }`}
-              >
-                {g === "month" ? "Monthly" : "Quarterly"}
-              </button>
-            ))}
+          <div className="flex items-center gap-3 text-xs">
+            <div className="flex items-center gap-1">
+              {(["prev", "next"] as const).map((mderef) => (
+                <button
+                  key={mderef}
+                  onClick={() => setFabMode(mderef)}
+                  className={`px-2.5 py-1 rounded-md font-medium ${
+                    fabMode === mderef
+                      ? "bg-[#6B5C32] text-white"
+                      : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
+                  }`}
+                >
+                  {mderef === "prev" ? "Previous" : "Next"}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1">
+              {(["month", "quarter"] as const).map((g) => (
+                <button
+                  key={g}
+                  onClick={() => setFabGran(g)}
+                  className={`px-2.5 py-1 rounded-md font-medium ${
+                    fabGran === g
+                      ? "bg-[#6B5C32] text-white"
+                      : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
+                  }`}
+                >
+                  {g === "month" ? "Monthly" : "Quarterly"}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] mb-4">
@@ -1337,6 +1357,16 @@ export default function DashboardPage() {
                     meters: m.meters,
                   }));
             const monthMax = Math.max(1, ...trend.map((t) => t.meters));
+            const fabRows =
+              fabMode === "next"
+                ? (blk?.list ?? [])
+                    .filter((f) => f.next30Meters > 0)
+                    .sort((a, b) => b.next30Meters - a.next30Meters)
+                    .slice(0, 8)
+                : (blk?.list ?? [])
+                    .filter((f) => f.meters > 0)
+                    .sort((a, b) => b.meters - a.meters)
+                    .slice(0, 8);
             return (
               <Card
                 key={cat}
@@ -1351,11 +1381,15 @@ export default function DashboardPage() {
                 <CardContent className="space-y-3">
                   <div>
                     <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
-                      Top fabrics — used &amp; purchase price /m
+                      {fabMode === "next"
+                        ? "Forecast — fabric needed next 30 days"
+                        : "Top fabrics — used (history) & purchase price /m"}
                     </p>
-                    {(blk?.top ?? []).length === 0 ? (
+                    {fabRows.length === 0 ? (
                       <p className="text-xs text-[#9CA3AF]">
-                        No fabric issued.
+                        {fabMode === "next"
+                          ? "No upcoming fabric demand."
+                          : "No fabric issued."}
                       </p>
                     ) : (
                       <table className="w-full text-xs">
@@ -1363,7 +1397,10 @@ export default function DashboardPage() {
                           <tr className="text-left text-[10px] text-[#9CA3AF]">
                             <th className="font-medium pb-1">Fabric</th>
                             <th className="font-medium pb-1 text-right">
-                              Used
+                              {fabMode === "next" ? "Next 30d" : "Used"}
+                            </th>
+                            <th className="font-medium pb-1 text-right">
+                              {fabMode === "next" ? "Past 30d" : "Past 30d"}
                             </th>
                             <th className="font-medium pb-1 text-right">
                               Avg buy
@@ -1374,15 +1411,24 @@ export default function DashboardPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {(blk?.top ?? []).map((f) => (
+                          {fabRows.map((f) => (
                             <tr key={f.fabCode}>
                               <td className="py-0.5 font-medium text-[#1F1D1B]">
                                 {f.fabCode}
                               </td>
-                              <td className="py-0.5 text-right tabular-nums text-[#5A5550]">
-                                {Math.round(f.meters).toLocaleString()} m
+                              <td
+                                className={`py-0.5 text-right tabular-nums font-semibold ${fabMode === "next" ? "text-[#6B5C32]" : "text-[#1F1D1B]"}`}
+                              >
+                                {fabMode === "next"
+                                  ? `${f.next30Meters.toLocaleString()} m`
+                                  : `${Math.round(f.meters).toLocaleString()} m`}
                               </td>
-                              <td className="py-0.5 text-right tabular-nums font-semibold text-[#1F1D1B]">
+                              <td className="py-0.5 text-right tabular-nums text-[#5A5550]">
+                                {fabMode === "next"
+                                  ? `${f.past30Meters.toLocaleString()} m`
+                                  : `${f.past30Meters.toLocaleString()} m`}
+                              </td>
+                              <td className="py-0.5 text-right tabular-nums text-[#1F1D1B]">
                                 {f.buyAvgSen ? rm(f.buyAvgSen) : "—"}
                               </td>
                               <td className="py-0.5 text-right tabular-nums text-[#9CA3AF]">
@@ -1395,46 +1441,10 @@ export default function DashboardPage() {
                         </tbody>
                       </table>
                     )}
-                  </div>
-                  <div className="border-t border-[#E2DDD8] pt-2">
-                    <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
-                      Past 30 days → Next 30 days (forecast)
-                    </p>
-                    {(blk?.top ?? []).length === 0 ? (
-                      <p className="text-xs text-[#9CA3AF]">No data.</p>
-                    ) : (
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="text-left text-[10px] text-[#9CA3AF]">
-                            <th className="font-medium pb-1">Fabric</th>
-                            <th className="font-medium pb-1 text-right">
-                              Past 30d
-                            </th>
-                            <th className="font-medium pb-1 text-right">
-                              Next 30d
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(blk?.top ?? []).map((f) => (
-                            <tr key={f.fabCode}>
-                              <td className="py-0.5 text-[#1F1D1B] font-medium">
-                                {f.fabCode}
-                              </td>
-                              <td className="py-0.5 text-right tabular-nums text-[#5A5550]">
-                                {f.past30Meters.toLocaleString()} m
-                              </td>
-                              <td className="py-0.5 text-right tabular-nums font-semibold text-[#6B5C32]">
-                                {f.next30Meters.toLocaleString()} m
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
                     <p className="text-[10px] text-[#9CA3AF] mt-1">
-                      Past = actual issued. Next = forecast from Fabric
-                      Cutting jobs due ≤ 30 days (BOM).
+                      {fabMode === "next"
+                        ? "Forecast from Fabric Cutting jobs due ≤ 30 days (BOM). Ranked by next-30 demand."
+                        : "Used = actual issued (history). Ranked by usage. Buy = purchase price /m."}
                     </p>
                   </div>
                   <div className="border-t border-[#E2DDD8] pt-2">

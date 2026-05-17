@@ -44,7 +44,7 @@ app.get("/", async (c) => {
   const periodRaw = c.req.query("period") ?? "all";
   const period = /^\d{4}-\d{2}$/.test(periodRaw) ? periodRaw : "all";
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v14:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v15:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -102,6 +102,7 @@ app.get("/", async (c) => {
       compYestRes,
       compLast7Res,
       fabRecvRes,
+      fabPoCatRes,
       backlogJcRes,
       headRes,
     ] = await Promise.all([
@@ -521,6 +522,20 @@ app.get("/", async (c) => {
           minUnitSen: number | null;
           maxUnitSen: number | null;
         }>(),
+      // Fabric → category map (a fabric's bedframe/sofa side) so the
+      // "Next" forecast view can surface upcoming fabrics even if they
+      // have no historical consumption in that category yet.
+      db
+        .prepare(
+          `SELECT DISTINCT po.fabricCode AS "fabCode",
+                  po.itemCategory AS "cat"
+             FROM production_orders po
+            WHERE po.orgId = ? AND po.fabricCode IS NOT NULL
+              AND po.fabricCode <> ''
+              AND po.itemCategory IN ('BEDFRAME','SOFA')`,
+        )
+        .bind(orgId)
+        .all<{ fabCode: string; cat: string }>(),
       // Per-JC rows for the Backlog-by-department drill-down — exact
       // mirror of the Planning page's capacityData: needs the JC's dept
       // + its production order's category & status.
@@ -1104,17 +1119,61 @@ app.get("/", async (c) => {
         maxSen: Math.round(Number(r.maxUnitSen) || 0),
       });
     }
-    const fabTopByCat = (cat: string) =>
-      (fabTopRes.results ?? [])
-        .filter((r) => (r.cat ?? "").toUpperCase() === cat)
-        .map((r) => {
-          const fm = fabMetrics.get(r.fabCode ?? "");
-          const fp = fabPrice.get(r.fabCode ?? "");
+    // Which category(ies) each fabric belongs to (from the POs that
+    // use it) — lets the "Next" forecast surface fabrics with no
+    // historical consumption in that category yet.
+    const fabCatMap = new Map<string, Set<string>>();
+    for (const r of fabPoCatRes.results ?? []) {
+      const code = r.fabCode ?? "";
+      const cat = (r.cat ?? "").toUpperCase();
+      if (!code || (cat !== "BEDFRAME" && cat !== "SOFA")) continue;
+      let s = fabCatMap.get(code);
+      if (!s) {
+        s = new Set();
+        fabCatMap.set(code, s);
+      }
+      s.add(cat);
+    }
+    // Historical used (categorised) per fabric, keyed by category.
+    const fabUsedByCat = new Map<
+      string,
+      Map<string, { fabName: string; meters: number; costSen: number }>
+    >();
+    for (const r of fabTopRes.results ?? []) {
+      const cat = (r.cat ?? "").toUpperCase();
+      if (cat !== "BEDFRAME" && cat !== "SOFA") continue;
+      let m = fabUsedByCat.get(cat);
+      if (!m) {
+        m = new Map();
+        fabUsedByCat.set(cat, m);
+      }
+      m.set(r.fabCode ?? "", {
+        fabName: r.fabName ?? "",
+        meters: Number(r.meters) || 0,
+        costSen: Number(r.costSen) || 0,
+      });
+    }
+    // Combined per-category list: every fabric with history OR upcoming
+    // demand in that category. The client toggles the ranking
+    // (Previous = by Used, Next = by Next-30 forecast).
+    const fabListByCat = (cat: string) => {
+      const used = fabUsedByCat.get(cat) ?? new Map();
+      const codes = new Set<string>(used.keys());
+      for (const [code, cats] of fabCatMap.entries()) {
+        if (!cats.has(cat)) continue;
+        const fm = fabMetrics.get(code);
+        if ((fm?.oneMonthUsage ?? 0) > 0) codes.add(code);
+      }
+      return [...codes]
+        .map((code) => {
+          const u = used.get(code);
+          const fm = fabMetrics.get(code);
+          const fp = fabPrice.get(code);
           return {
-            fabCode: r.fabCode ?? "—",
-            fabName: r.fabName ?? "",
-            meters: Number(r.meters) || 0,
-            costSen: Number(r.costSen) || 0,
+            fabCode: code || "—",
+            fabName: u?.fabName ?? "",
+            meters: u?.meters ?? 0,
+            costSen: u?.costSen ?? 0,
             past30Meters: Math.round(fm?.lastMonthUsage ?? 0),
             next30Meters: Math.round(fm?.oneMonthUsage ?? 0),
             buyAvgSen: fp?.avgSen ?? 0,
@@ -1122,9 +1181,13 @@ app.get("/", async (c) => {
             buyMaxSen: fp?.maxSen ?? 0,
           };
         })
-        .filter((f) => f.meters > 0)
-        .sort((a, b) => b.meters - a.meters)
-        .slice(0, 8);
+        .filter((f) => f.meters > 0 || f.next30Meters > 0)
+        .sort(
+          (a, b) =>
+            b.meters - a.meters || b.next30Meters - a.next30Meters,
+        )
+        .slice(0, 20);
+    };
     const fabMonthByCat = (cat: string) =>
       (fabMonthRes.results ?? [])
         .filter((r) => r.ym && (r.cat ?? "").toUpperCase() === cat)
@@ -1135,8 +1198,14 @@ app.get("/", async (c) => {
         .sort((a, b) => a.month.localeCompare(b.month))
         .slice(-12);
     const fabric = {
-      BEDFRAME: { top: fabTopByCat("BEDFRAME"), monthly: fabMonthByCat("BEDFRAME") },
-      SOFA: { top: fabTopByCat("SOFA"), monthly: fabMonthByCat("SOFA") },
+      BEDFRAME: {
+        list: fabListByCat("BEDFRAME"),
+        monthly: fabMonthByCat("BEDFRAME"),
+      },
+      SOFA: {
+        list: fabListByCat("SOFA"),
+        monthly: fabMonthByCat("SOFA"),
+      },
     };
 
     const headByDept = (headRes.results ?? []).map((r) => ({

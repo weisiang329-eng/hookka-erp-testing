@@ -1302,8 +1302,8 @@ export default function DashboardBPage() {
       <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
         <CardContent className="p-5">
           <SectionTitle
-            title="Revenue by Customer"
-            sub="customer concentration · share & cumulative % · click a customer for monthly AOV"
+            title="Sales by Customer & Month"
+            sub="avg order value — bedframe (per unit) vs sofa (per set) · click a customer for the monthly breakdown"
             right={
               <span className="text-[11px] text-[#9CA3AF]">
                 Total customer revenue{" "}
@@ -1313,37 +1313,6 @@ export default function DashboardBPage() {
               </span>
             }
           />
-          {ov.aovCompany && (
-            <div className="mb-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-px rounded-lg overflow-hidden border border-[#F0ECE6] bg-[#F0ECE6]">
-              {(
-                [
-                  ["Bedframe AOV", rm(ov.aovCompany.bedframeAvgSen), "per unit · all customers"],
-                  [
-                    "Bedframe Units",
-                    ov.aovCompany.bedframeUnits.toLocaleString(),
-                    "all customers",
-                  ],
-                  ["Sofa AOV", rm(ov.aovCompany.sofaAvgSen), "per set · all customers"],
-                  [
-                    "Sofa Sets",
-                    ov.aovCompany.sofaSets.toLocaleString(),
-                    "all customers",
-                  ],
-                  ["Total Revenue", rm(ov.aovCompany.totalSen), "company-wide"],
-                ] as const
-              ).map(([l, v, s]) => (
-                <div key={l} className="bg-white px-3 py-2.5">
-                  <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
-                    {l}
-                  </p>
-                  <p className="text-sm font-bold text-[#1F1D1B] tabular-nums mt-0.5">
-                    {v}
-                  </p>
-                  <p className="text-[10px] text-[#C2BBAE] mt-0.5">{s}</p>
-                </div>
-              ))}
-            </div>
-          )}
           {pieData.length === 0 ? (
             <p className="text-xs text-[#9CA3AF] py-6 text-center">
               No customer revenue.
@@ -1417,104 +1386,144 @@ export default function DashboardBPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-[11px] text-[#9CA3AF] border-b border-[#E2DDD8]">
-                        <th className="py-1.5 font-medium">#</th>
                         <th className="py-1.5 font-medium">Customer</th>
                         <th className="py-1.5 font-medium text-right">
-                          Revenue
+                          Bedframe AOV
                         </th>
                         <th className="py-1.5 font-medium text-right">
-                          Share
+                          Units
                         </th>
                         <th className="py-1.5 font-medium text-right">
-                          Cumul.
+                          Sofa AOV
+                        </th>
+                        <th className="py-1.5 font-medium text-right">
+                          Sets
+                        </th>
+                        <th className="py-1.5 font-medium text-right">
+                          Total
                         </th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(() => {
-                        let cum = 0;
-                        return aovAll.slice(0, 10).map((a, i) => {
-                          const share =
-                            (a.totalSen / Math.max(1, totalCustRev)) * 100;
-                          cum += share;
-                          const monthly = aovMonthly[a.customerName];
-                          const hasMonthly = !!(
-                            monthly && monthly.length > 0
-                          );
-                          const drillRows =
-                            hasMonthly && monthly
-                              ? monthly.map((m) => [
-                                  m.month,
-                                  m.bedframeUnits
-                                    ? rm(m.bedframeAvgSen)
+                      {ov.aovCompany && (
+                        <tr className="border-b-2 border-[#E2DDD8] bg-[#FAF8F4]">
+                          <td className="py-1.5 font-bold text-[#1F1D1B]">
+                            All customers
+                          </td>
+                          <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
+                            {ov.aovCompany.bedframeUnits
+                              ? rm(ov.aovCompany.bedframeAvgSen)
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                            {ov.aovCompany.bedframeUnits
+                              ? ov.aovCompany.bedframeUnits.toLocaleString()
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
+                            {ov.aovCompany.sofaSets
+                              ? rm(ov.aovCompany.sofaAvgSen)
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                            {ov.aovCompany.sofaSets
+                              ? ov.aovCompany.sofaSets.toLocaleString()
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 text-right font-bold text-[#1F1D1B] tabular-nums">
+                            {rm(ov.aovCompany.totalSen)}
+                          </td>
+                        </tr>
+                      )}
+                      {aovAll.slice(0, 10).map((a, i) => {
+                        const monthly = aovMonthly[a.customerName];
+                        const hasMonthly = !!(
+                          monthly && monthly.length > 0
+                        );
+                        const drillRows =
+                          hasMonthly && monthly
+                            ? monthly.map((m) => [
+                                m.month,
+                                m.bedframeUnits
+                                  ? rm(m.bedframeAvgSen)
+                                  : "—",
+                                m.bedframeUnits || "—",
+                                m.sofaSets ? rm(m.sofaAvgSen) : "—",
+                                m.sofaSets || "—",
+                              ])
+                            : [
+                                [
+                                  "All-time",
+                                  a.bedframeUnits
+                                    ? rm(a.bedframeAvgSen)
                                     : "—",
-                                  m.bedframeUnits || "—",
-                                  m.sofaSets ? rm(m.sofaAvgSen) : "—",
-                                  m.sofaSets || "—",
-                                ])
-                              : [
-                                  [
-                                    "All-time",
-                                    a.bedframeUnits
-                                      ? rm(a.bedframeAvgSen)
-                                      : "—",
-                                    a.bedframeUnits || "—",
-                                    a.sofaSets ? rm(a.sofaAvgSen) : "—",
-                                    a.sofaSets || "—",
-                                  ],
-                                ];
-                          return (
-                            <tr
-                              key={a.customerName}
-                              onClick={() =>
-                                setDrill({
-                                  title: `${a.customerName} — monthly AOV`,
-                                  subtitle: hasMonthly
-                                    ? "Average per month, by SO date. Bedframe per unit · Sofa per set."
-                                    : "No monthly split — all-time average. Bedframe per unit · Sofa per set.",
-                                  node: (
-                                    <MiniTable
-                                      cols={[
-                                        "Month",
-                                        "Bedframe AOV",
-                                        "Units",
-                                        "Sofa AOV",
-                                        "Sets",
-                                      ]}
-                                      rows={drillRows}
-                                    />
-                                  ),
-                                })
-                              }
-                              className="border-b border-[#F0ECE6] cursor-pointer hover:bg-[#FAF8F4]"
-                            >
-                              <td className="py-1.5 text-[#9CA3AF] tabular-nums">
-                                {i + 1}
-                              </td>
-                              <td className="py-1.5 text-[#1F1D1B]">
-                                <span
-                                  className="inline-block h-2 w-2 rounded-sm mr-2 align-middle"
-                                  style={{
-                                    background:
-                                      PIE_COLORS[i % PIE_COLORS.length],
-                                  }}
-                                />
-                                {a.customerName}
-                                <span className="text-[#C2BBAE]"> ›</span>
-                              </td>
-                              <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
-                                {rm(a.totalSen)}
-                              </td>
-                              <td className="py-1.5 text-right text-[#5A5550] tabular-nums">
-                                {share.toFixed(1)}%
-                              </td>
-                              <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
-                                {cum.toFixed(1)}%
-                              </td>
-                            </tr>
-                          );
-                        });
-                      })()}
+                                  a.bedframeUnits || "—",
+                                  a.sofaSets ? rm(a.sofaAvgSen) : "—",
+                                  a.sofaSets || "—",
+                                ],
+                              ];
+                        return (
+                          <tr
+                            key={a.customerName}
+                            onClick={() =>
+                              setDrill({
+                                title: `${a.customerName} — monthly AOV`,
+                                subtitle: hasMonthly
+                                  ? "Average per month, by SO date. Bedframe per unit · Sofa per set."
+                                  : "No monthly split — all-time average. Bedframe per unit · Sofa per set.",
+                                node: (
+                                  <MiniTable
+                                    cols={[
+                                      "Month",
+                                      "Bedframe AOV",
+                                      "Units",
+                                      "Sofa AOV",
+                                      "Sets",
+                                    ]}
+                                    rows={drillRows}
+                                  />
+                                ),
+                              })
+                            }
+                            className="border-b border-[#F0ECE6] cursor-pointer hover:bg-[#FAF8F4]"
+                          >
+                            <td className="py-1.5 text-[#1F1D1B]">
+                              <span
+                                className="inline-block h-2 w-2 rounded-sm mr-2 align-middle"
+                                style={{
+                                  background:
+                                    PIE_COLORS[i % PIE_COLORS.length],
+                                }}
+                              />
+                              {a.customerName}
+                              <span className="text-[10px] text-[#9CA3AF]">
+                                {" "}
+                                · monthly
+                              </span>
+                              <span className="text-[#C2BBAE]"> ›</span>
+                            </td>
+                            <td className="py-1.5 text-right text-[#1F1D1B] tabular-nums">
+                              {a.bedframeUnits ? rm(a.bedframeAvgSen) : "—"}
+                            </td>
+                            <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                              {a.bedframeUnits
+                                ? a.bedframeUnits.toLocaleString()
+                                : "—"}
+                            </td>
+                            <td className="py-1.5 text-right text-[#1F1D1B] tabular-nums">
+                              {a.sofaSets ? rm(a.sofaAvgSen) : "—"}
+                            </td>
+                            <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                              {a.sofaSets
+                                ? a.sofaSets.toLocaleString()
+                                : "—"}
+                            </td>
+                            <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
+                              {rm(a.totalSen)}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

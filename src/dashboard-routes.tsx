@@ -16,6 +16,7 @@ import RequireRole from './components/auth/RequireRole'
 
 // Dashboard
 const Dashboard = lazy(() => import('./pages/dashboard'))
+const DashboardB = lazy(() => import('./pages/dashboard-b'))
 
 // Sales
 const Sales = lazy(() => import('./pages/sales'))
@@ -159,6 +160,7 @@ function S({ children }: { children: React.ReactNode }) {
 export const DASHBOARD_ROUTES: RouteObject[] = [
   // Dashboard
   { path: '/dashboard', element: <S><Dashboard /></S> },
+  { path: '/dashboard-b', element: <S><DashboardB /></S> },
 
   // Sales
   { path: '/sales', element: <S><Sales /></S> },

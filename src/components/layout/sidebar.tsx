@@ -67,6 +67,7 @@ const navigationGroups: NavGroup[] = [
     label: "OVERVIEW",
     items: [
       { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+      { name: "Dashboard B", href: "/dashboard-b", icon: Activity },
       { name: "Notifications", href: "/notifications", icon: Bell },
       { name: "Forecasting", href: "/analytics/forecast", icon: TrendingUp },
     ],

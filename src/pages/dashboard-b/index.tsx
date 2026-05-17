@@ -133,6 +133,7 @@ type Overview = {
     string,
     { customer: string; bedframeUnits: number; sofaSets: number }[]
   >;
+  monthlySales?: { month: string; bedframeUnits: number; sofaSets: number }[];
   fabric?: {
     BEDFRAME: {
       list: {
@@ -242,15 +243,17 @@ const hm = (min: number | undefined) => {
 };
 const CUR_YM = new Date().toISOString().slice(0, 7);
 
-// Customer-mix donut palette — warm, on-brand graded tones + grey tail.
+// Customer-mix donut palette — professional financial-report scheme
+// (deep navy → teal → steel, grey tail for "Others"). The blue/teal
+// family is the convention in audit decks, fintech & SaaS finance UIs.
 const PIE_COLORS = [
-  "#6B5C32",
-  "#9C7C3D",
-  "#C9A24B",
-  "#B08D57",
-  "#8A8F93",
-  "#C2BBAE",
-  "#D8CFBE",
+  "#16425B", // deep navy
+  "#1F6E8C", // teal-navy
+  "#2E8FA3", // teal
+  "#4FA8B8", // light teal
+  "#7FB9C6", // steel
+  "#A9C7D0", // pale steel
+  "#C6CDD3", // neutral grey — Others
 ];
 
 // Brand-consistent chart palette (warm, matches the app — no neon).
@@ -614,6 +617,14 @@ export default function DashboardBPage() {
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
   const toggleSeries = (k: string) =>
     setHiddenSeries((prev) => {
+      const n = new Set(prev);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+  const [hiddenDept, setHiddenDept] = useState<Set<string>>(new Set());
+  const toggleDept = (k: string) =>
+    setHiddenDept((prev) => {
       const n = new Set(prev);
       if (n.has(k)) n.delete(k);
       else n.add(k);
@@ -1394,47 +1405,55 @@ export default function DashboardBPage() {
                             (a.totalSen / Math.max(1, totalCustRev)) * 100;
                           cum += share;
                           const monthly = aovMonthly[a.customerName];
-                          const clickable = monthly && monthly.length > 0;
+                          const hasMonthly = !!(
+                            monthly && monthly.length > 0
+                          );
+                          const drillRows =
+                            hasMonthly && monthly
+                              ? monthly.map((m) => [
+                                  m.month,
+                                  m.bedframeUnits
+                                    ? rm(m.bedframeAvgSen)
+                                    : "—",
+                                  m.bedframeUnits || "—",
+                                  m.sofaSets ? rm(m.sofaAvgSen) : "—",
+                                  m.sofaSets || "—",
+                                ])
+                              : [
+                                  [
+                                    "All-time",
+                                    a.bedframeUnits
+                                      ? rm(a.bedframeAvgSen)
+                                      : "—",
+                                    a.bedframeUnits || "—",
+                                    a.sofaSets ? rm(a.sofaAvgSen) : "—",
+                                    a.sofaSets || "—",
+                                  ],
+                                ];
                           return (
                             <tr
                               key={a.customerName}
-                              onClick={
-                                clickable
-                                  ? () =>
-                                      setDrill({
-                                        title: `${a.customerName} — monthly AOV`,
-                                        subtitle:
-                                          "Average per month, by SO date. Bedframe per unit · Sofa per set.",
-                                        node: (
-                                          <MiniTable
-                                            cols={[
-                                              "Month",
-                                              "Bedframe AOV",
-                                              "Units",
-                                              "Sofa AOV",
-                                              "Sets",
-                                            ]}
-                                            rows={monthly.map((m) => [
-                                              m.month,
-                                              m.bedframeUnits
-                                                ? rm(m.bedframeAvgSen)
-                                                : "—",
-                                              m.bedframeUnits || "—",
-                                              m.sofaSets
-                                                ? rm(m.sofaAvgSen)
-                                                : "—",
-                                              m.sofaSets || "—",
-                                            ])}
-                                          />
-                                        ),
-                                      })
-                                  : undefined
+                              onClick={() =>
+                                setDrill({
+                                  title: `${a.customerName} — monthly AOV`,
+                                  subtitle: hasMonthly
+                                    ? "Average per month, by SO date. Bedframe per unit · Sofa per set."
+                                    : "No monthly split — all-time average. Bedframe per unit · Sofa per set.",
+                                  node: (
+                                    <MiniTable
+                                      cols={[
+                                        "Month",
+                                        "Bedframe AOV",
+                                        "Units",
+                                        "Sofa AOV",
+                                        "Sets",
+                                      ]}
+                                      rows={drillRows}
+                                    />
+                                  ),
+                                })
                               }
-                              className={`border-b border-[#F0ECE6] ${
-                                clickable
-                                  ? "cursor-pointer hover:bg-[#FAF8F4]"
-                                  : ""
-                              }`}
+                              className="border-b border-[#F0ECE6] cursor-pointer hover:bg-[#FAF8F4]"
                             >
                               <td className="py-1.5 text-[#9CA3AF] tabular-nums">
                                 {i + 1}
@@ -1448,9 +1467,7 @@ export default function DashboardBPage() {
                                   }}
                                 />
                                 {a.customerName}
-                                {clickable && (
-                                  <span className="text-[#C2BBAE]"> ›</span>
-                                )}
+                                <span className="text-[#C2BBAE]"> ›</span>
                               </td>
                               <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
                                 {rm(a.totalSen)}
@@ -1469,6 +1486,77 @@ export default function DashboardBPage() {
                   </table>
                 </div>
               </div>
+              {(ov.monthlySales ?? []).length > 0 && (
+                <div className="mt-5 border-t border-[#F0ECE6] pt-4">
+                  <p className="text-[11px] font-semibold text-[#5A5550] uppercase tracking-wider mb-2">
+                    Monthly — Bedframe Units &amp; Sofa Sets
+                    <span className="ml-2 font-normal normal-case tracking-normal text-[#9CA3AF]">
+                      click a month for the customer breakdown
+                    </span>
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                    {(ov.monthlySales ?? []).map((m) => {
+                      const who =
+                        ov.monthlySalesByCustomer?.[m.month] ?? [];
+                      return (
+                        <button
+                          key={m.month}
+                          type="button"
+                          disabled={who.length === 0}
+                          onClick={() =>
+                            who.length &&
+                            setDrill({
+                              title: `${m.month} — by customer`,
+                              subtitle:
+                                "Who contributed this month's bedframe units / sofa sets",
+                              node: (
+                                <MiniTable
+                                  cols={[
+                                    "Customer",
+                                    "Bedframe units",
+                                    "Sofa sets",
+                                  ]}
+                                  rows={who.map((c) => [
+                                    c.customer,
+                                    c.bedframeUnits
+                                      ? c.bedframeUnits.toLocaleString()
+                                      : "—",
+                                    c.sofaSets
+                                      ? c.sofaSets.toLocaleString()
+                                      : "—",
+                                  ])}
+                                />
+                              ),
+                            })
+                          }
+                          className={`rounded-lg border border-[#F0ECE6] bg-[#FAF8F4] px-3 py-2 text-left transition-colors ${
+                            who.length
+                              ? "cursor-pointer hover:bg-[#F0ECE6]"
+                              : "opacity-60"
+                          }`}
+                        >
+                          <p className="text-[11px] text-[#5A5550] tabular-nums">
+                            {m.month}
+                            {who.length > 0 && (
+                              <span className="text-[#C2BBAE]"> · who ›</span>
+                            )}
+                          </p>
+                          <p className="text-sm font-bold text-[#1F1D1B] tabular-nums mt-0.5">
+                            {m.bedframeUnits.toLocaleString()}{" "}
+                            <span className="text-[10px] font-normal text-[#9CA3AF]">
+                              bf
+                            </span>{" "}
+                            {m.sofaSets.toLocaleString()}{" "}
+                            <span className="text-[10px] font-normal text-[#9CA3AF]">
+                              sofa
+                            </span>
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <p className="mt-3 text-[11px] text-[#9CA3AF]">
                 Concentration:{" "}
                 <span className="font-semibold text-[#1F1D1B]">
@@ -1713,44 +1801,74 @@ export default function DashboardBPage() {
           <CardContent className="p-5">
             <SectionTitle
               title="Department Backlog"
-              sub="active work vs daily capacity — bottleneck first"
+              sub="active work vs daily capacity — bottleneck first · click a legend to toggle"
               right={
-                <div className="flex gap-3 text-xs text-[#9CA3AF]">
-                  <span style={{ color: C_INV }}>● Sofa</span>
-                  <span style={{ color: C_SO }}>● Bedframe</span>
+                <div className="flex gap-3 text-xs">
+                  {(
+                    [
+                      ["Sofa", C_INV],
+                      ["Bedframe", C_SO],
+                    ] as const
+                  ).map(([k, c]) => {
+                    const off = hiddenDept.has(k);
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => toggleDept(k)}
+                        className="inline-flex items-center gap-1 transition-opacity"
+                        style={{
+                          color: off ? "#C2BBAE" : c,
+                          opacity: off ? 0.55 : 1,
+                          textDecoration: off ? "line-through" : "none",
+                        }}
+                      >
+                        ● {k}
+                      </button>
+                    );
+                  })}
                 </div>
               }
             />
-            {(prod?.backlogByDept ?? []).map((d) => {
+            {(() => {
+              const sofaOn = !hiddenDept.has("Sofa");
+              const bedOn = !hiddenDept.has("Bedframe");
               const mx = Math.max(
                 1,
-                ...(prod?.backlogByDept ?? []).map((x) => x.totalMin),
+                ...(prod?.backlogByDept ?? []).map(
+                  (x) =>
+                    (sofaOn ? x.sofaMin : 0) + (bedOn ? x.bedframeMin : 0),
+                ),
               );
-              return (
+              return (prod?.backlogByDept ?? []).map((d) => (
                 <div key={d.dept} className="flex items-center gap-3 py-1">
                   <span className="w-28 text-xs text-[#1F1D1B]">{d.dept}</span>
                   <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden flex">
-                    <div
-                      className="h-full"
-                      style={{
-                        width: `${(d.sofaMin / mx) * 100}%`,
-                        background: C_INV,
-                      }}
-                    />
-                    <div
-                      className="h-full"
-                      style={{
-                        width: `${(d.bedframeMin / mx) * 100}%`,
-                        background: C_SO,
-                      }}
-                    />
+                    {sofaOn && (
+                      <div
+                        className="h-full"
+                        style={{
+                          width: `${(d.sofaMin / mx) * 100}%`,
+                          background: C_INV,
+                        }}
+                      />
+                    )}
+                    {bedOn && (
+                      <div
+                        className="h-full"
+                        style={{
+                          width: `${(d.bedframeMin / mx) * 100}%`,
+                          background: C_SO,
+                        }}
+                      />
+                    )}
                   </div>
                   <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
                     {d.backlogDays.toLocaleString()}d
                   </span>
                 </div>
-              );
-            })}
+              ));
+            })()}
           </CardContent>
         </Card>
 

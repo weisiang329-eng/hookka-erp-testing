@@ -1,15 +1,22 @@
 // ===========================================================================
-// Dashboard B — an experimental premium "command-center" view.
+// Dashboard B — experimental "Command" reporting view.
 //
-// Parallel to /dashboard. Same data (/api/dashboard/overview + sales stats),
-// presented as a dark, elevated fintech/observability-style board: bento
-// grid, gradient area chart, SVG radial gauges, ranked tracks, scoped
-// typography + texture. Self-contained & disposable — delete this folder,
-// its route, and the sidebar entry to remove it. No shared code touched.
+// Same data + same numbers as /dashboard (reuses the identical fetches +
+// pending-delivery + efficiency computations) and the SAME visual language
+// as the rest of the app (light theme, brand brown, app font, white rounded
+// cards). The upgrade vs /dashboard is the layout + a real revenue chart,
+// not a different skin. Self-contained & disposable: delete this folder,
+// the /dashboard-b route line, and the sidebar line to remove it.
 // ===========================================================================
 import { useMemo, useState } from "react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson } from "@/lib/cached-fetch";
+import {
+  buildLinkedPOIds,
+  poReadyForDelivery,
+  type PipelinePO,
+} from "@/lib/delivery-pipeline";
 import {
   AreaChart,
   Area,
@@ -18,13 +25,31 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import {
+  DollarSign,
+  Truck,
+  Clock,
+  Package,
+  Factory,
+  CheckCircle2,
+} from "lucide-react";
 
-// ---------- types (subset of /api/dashboard/overview) ----------
+// ---------- API response types (mirror /dashboard) ----------
+type SoStats = {
+  success?: boolean;
+  total?: number;
+  csRevenueSen?: number;
+  deliveredItemsSen?: number;
+  outstandingItemsSen?: number;
+};
 type JobsBreakdown = {
   bedframeUnits: number;
   sofaSets: number;
+  byCustomer: { customer: string; bedframeUnits: number; sofaSets: number }[];
 };
 type Overview = {
+  success?: boolean;
+  salesMonths?: string[];
   salesThisMonthSen?: number;
   deliveredThisMonthSen?: number;
   production?: {
@@ -42,11 +67,14 @@ type Overview = {
       dailyCapMin: number;
       backlogDays: number;
     }[];
+    backlogGrandMin: number;
   };
   purchasing?: {
     openPOCount: number;
     spendThisMonthSen: number;
     outstandingPOValueSen: number;
+    itemsPendingReceipt: number;
+    grnsPendingQC: number;
     topSuppliers: { name: string; spendSen: number }[];
   };
   fabricCostPerMeterSen?: {
@@ -54,13 +82,6 @@ type Overview = {
     exclBedframeSofa: number;
     bedframe: number;
     sofa: number;
-  };
-  aovCompany?: {
-    bedframeAvgSen: number;
-    bedframeUnits: number;
-    sofaAvgSen: number;
-    sofaSets: number;
-    totalSen: number;
   };
   aovByCustomer?: {
     customerName: string;
@@ -70,9 +91,42 @@ type Overview = {
     sofaSets: number;
     totalSen: number;
   }[];
+  aovCompany?: {
+    bedframeAvgSen: number;
+    bedframeUnits: number;
+    sofaAvgSen: number;
+    sofaSets: number;
+    totalSen: number;
+  };
   topSellers?: {
     BEDFRAME: { productCode: string; qtySold: number; valueSen: number }[];
     SOFA: { model: string; setsSold: number; valueSen: number }[];
+  };
+  fabric?: {
+    BEDFRAME: {
+      list: {
+        fabCode: string;
+        meters: number;
+        past30Meters: number;
+        next30Meters: number;
+        buyAvgSen: number;
+        buyMinSen: number;
+        buyMaxSen: number;
+      }[];
+      monthly: { month: string; meters: number }[];
+    };
+    SOFA: {
+      list: {
+        fabCode: string;
+        meters: number;
+        past30Meters: number;
+        next30Meters: number;
+        buyAvgSen: number;
+        buyMinSen: number;
+        buyMaxSen: number;
+      }[];
+      monthly: { month: string; meters: number }[];
+    };
   };
   monthlyRevenue?: {
     month: string;
@@ -80,132 +134,253 @@ type Overview = {
     invoiceSen: number;
     productionSen: number;
   }[];
-  employee?: { activeHeadcount: number; byDept: { dept: string; count: number }[] };
+  employee?: { activeHeadcount: number };
 };
-type SoStats = {
-  csRevenueSen?: number;
-  deliveredItemsSen?: number;
-  outstandingItemsSen?: number;
-  total?: number;
+type PODeliveryShape = PipelinePO & {
+  salesOrderId?: string;
+  productCode?: string;
+  quantity?: number;
+};
+type POResp = { success?: boolean; data?: PODeliveryShape[] };
+type DOResp = {
+  success?: boolean;
+  data?: { id: string; status: string; items?: { productionOrderId?: string | null }[] }[];
+};
+type POValuesResp = { success?: boolean; values?: Record<string, number> };
+type SOItemsResp = {
+  success?: boolean;
+  data?: { id: string; items?: { productCode?: string; unitPriceSen?: number }[] }[];
+};
+type JcSummaryResp = {
+  data?: { workerId: string; productionMinutes: number; jcCount: number }[];
+};
+type WheSummaryResp = {
+  data?: {
+    workerId: string;
+    totalHours: number;
+    byDept: Record<string, number>;
+    daysWithEntries: number;
+  }[];
+};
+type WorkersResp = {
+  data?: { id: string; name: string; departmentCode?: string; status?: string }[];
 };
 
-// ---------- helpers ----------
-const rm = (sen: number | undefined) => formatCurrency(sen ?? 0);
-const rmK = (sen: number | undefined) => {
-  const v = (sen ?? 0) / 100;
-  if (Math.abs(v) >= 1_000_000) return `RM ${(v / 1_000_000).toFixed(2)}M`;
-  if (Math.abs(v) >= 1_000) return `RM ${(v / 1_000).toFixed(1)}k`;
-  return `RM ${v.toFixed(0)}`;
+const PROD_DEPTS = new Set([
+  "FAB_CUT",
+  "FAB_SEW",
+  "WOOD_CUT",
+  "FOAM",
+  "FRAMING",
+  "WEBBING",
+  "UPHOLSTERY",
+  "PACKING",
+]);
+const DEPT_LABEL: Record<string, string> = {
+  FAB_CUT: "Fabric Cutting",
+  FAB_SEW: "Fabric Sewing",
+  WOOD_CUT: "Wood Cutting",
+  FOAM: "Foam Bonding",
+  FRAMING: "Framing",
+  WEBBING: "Webbing",
+  UPHOLSTERY: "Upholstery",
+  PACKING: "Packing",
 };
+function last7WorkingDays(): { from: string; to: string } {
+  const iso = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const days: string[] = [];
+  const cur = new Date();
+  cur.setHours(0, 0, 0, 0);
+  cur.setDate(cur.getDate() - 1);
+  while (days.length < 7) {
+    if (cur.getDay() !== 0) days.push(iso(cur));
+    cur.setDate(cur.getDate() - 1);
+  }
+  days.sort((a, b) => a.localeCompare(b));
+  return { from: days[0], to: days[days.length - 1] };
+}
+
+// ---------- helpers (same tokens as /dashboard) ----------
+const rm = (sen: number | undefined) => formatCurrency(sen ?? 0);
 const hrs = (min: number | undefined) =>
   `${Math.round((min ?? 0) / 60).toLocaleString()}h`;
+const CUR_YM = new Date().toISOString().slice(0, 7);
 
-// Tiny SVG sparkline (bespoke, not a chart-lib default).
+// Brand-consistent chart palette (warm, matches the app — no neon).
+const C_SO = "#6B5C32"; // brand brown
+const C_PROD = "#C9A24B"; // muted gold
+const C_INV = "#A8A29A"; // warm grey
+const C_GREEN = "#15803D";
+const C_RED = "#DC2626";
+
 function Spark({ data, stroke }: { data: number[]; stroke: string }) {
-  if (!data.length) return null;
-  const w = 96;
-  const h = 30;
+  if (data.length < 2) return null;
+  const w = 84;
+  const h = 26;
   const max = Math.max(1, ...data);
   const min = Math.min(0, ...data);
   const span = max - min || 1;
   const pts = data.map((v, i) => {
-    const x = (i / Math.max(1, data.length - 1)) * w;
+    const x = (i / (data.length - 1)) * w;
     const y = h - ((v - min) / span) * h;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
   return (
-    <svg width={w} height={h} className="db-spark" aria-hidden>
+    <svg width={w} height={h} aria-hidden>
       <polyline
         points={pts.join(" ")}
         fill="none"
         stroke={stroke}
-        strokeWidth="1.75"
+        strokeWidth="1.6"
         strokeLinecap="round"
         strokeLinejoin="round"
-      />
-      <circle
-        cx={pts[pts.length - 1].split(",")[0]}
-        cy={pts[pts.length - 1].split(",")[1]}
-        r="2.4"
-        fill={stroke}
+        opacity="0.85"
       />
     </svg>
   );
 }
 
-// Radial gauge — SVG arc, 0..1 fill.
-function Gauge({
-  value,
+function KTile({
   label,
-  caption,
-  tone = "gold",
+  value,
+  sub,
+  icon: Icon,
+  accent = C_SO,
+  spark,
 }: {
-  value: number;
   label: string;
-  caption: string;
-  tone?: "gold" | "green" | "red";
+  value: string;
+  sub: string;
+  icon: React.ElementType;
+  accent?: string;
+  spark?: number[];
 }) {
-  const pct = Math.max(0, Math.min(1, value));
-  const r = 52;
-  const c = 2 * Math.PI * r;
-  const arc = c * 0.75; // 270° dial
-  const col =
-    tone === "green"
-      ? "var(--db-green)"
-      : tone === "red"
-        ? "var(--db-red)"
-        : "var(--db-gold)";
   return (
-    <div className="db-gauge">
-      <svg width="148" height="148" viewBox="0 0 148 148">
-        <circle
-          cx="74"
-          cy="74"
-          r={r}
-          fill="none"
-          stroke="rgba(255,255,255,0.06)"
-          strokeWidth="9"
-          strokeDasharray={`${arc} ${c}`}
-          strokeLinecap="round"
-          transform="rotate(135 74 74)"
-        />
-        <circle
-          cx="74"
-          cy="74"
-          r={r}
-          fill="none"
-          stroke={col}
-          strokeWidth="9"
-          strokeDasharray={`${arc * pct} ${c}`}
-          strokeLinecap="round"
-          transform="rotate(135 74 74)"
-          style={{ filter: `drop-shadow(0 0 6px ${col})` }}
-        />
-      </svg>
-      <div className="db-gauge-c">
-        <span className="db-gauge-v">{label}</span>
-        <span className="db-gauge-cap">{caption}</span>
+    <Card className="relative bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] overflow-hidden">
+      <CardContent className="p-5">
+        <div className="flex items-start justify-between">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">
+            {label}
+          </p>
+          <div className="rounded-lg bg-[#F5F2ED] p-2">
+            <Icon className="h-4 w-4 text-[#6B5C32]" />
+          </div>
+        </div>
+        <p className="mt-3 text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B] tabular-nums">
+          {value}
+        </p>
+        <div className="mt-1 flex items-end justify-between">
+          <p className="text-xs text-[#9CA3AF]">{sub}</p>
+          {spark && spark.length > 1 && (
+            <Spark data={spark} stroke={accent} />
+          )}
+        </div>
+      </CardContent>
+      <span
+        className="absolute inset-x-0 bottom-0 h-[3px]"
+        style={{ background: accent, opacity: 0.65 }}
+      />
+    </Card>
+  );
+}
+
+function SectionTitle({
+  title,
+  sub,
+  right,
+}: {
+  title: string;
+  sub?: string;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-end justify-between mb-3">
+      <div>
+        <h3 className="text-sm font-bold text-[#1F1D1B] tracking-[-0.2px]">
+          {title}
+        </h3>
+        {sub && <p className="text-xs text-[#9CA3AF] mt-0.5">{sub}</p>}
       </div>
+      {right}
     </div>
   );
 }
 
-type RevTipProps = {
+function RevTooltip(props: {
   active?: boolean;
   label?: string | number;
   payload?: { name?: string; value?: number | string; color?: string }[];
-};
-function RevTooltip({ active, payload, label }: RevTipProps) {
-  if (!active || !payload?.length) return null;
+}) {
+  if (!props.active || !props.payload?.length) return null;
   return (
-    <div className="db-tip">
-      <div className="db-tip-h">{label}</div>
-      {payload.map((p) => (
-        <div key={p.name} className="db-tip-row">
+    <div className="rounded-lg border border-[#E2DDD8] bg-white px-3 py-2 shadow-md text-xs">
+      <div className="font-semibold text-[#5A5550] mb-1">{props.label}</div>
+      {props.payload.map((p) => (
+        <div
+          key={p.name}
+          className="flex items-center justify-between gap-5 py-0.5"
+        >
           <span style={{ color: p.color }}>● {p.name}</span>
-          <span>{rmK(Number(p.value))}</span>
+          <span className="font-semibold text-[#1F1D1B] tabular-nums">
+            {rm(Number(p.value) * 100)}
+          </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+// Light radial gauge — track in brand cream, arc in accent.
+function Gauge({
+  value,
+  big,
+  cap,
+  accent,
+}: {
+  value: number;
+  big: string;
+  cap: string;
+  accent: string;
+}) {
+  const pct = Math.max(0, Math.min(1, value));
+  const r = 50;
+  const c = 2 * Math.PI * r;
+  const arc = c * 0.75;
+  return (
+    <div className="relative flex items-center justify-center">
+      <svg width="150" height="150" viewBox="0 0 150 150">
+        <circle
+          cx="75"
+          cy="75"
+          r={r}
+          fill="none"
+          stroke="#F0ECE6"
+          strokeWidth="10"
+          strokeDasharray={`${arc} ${c}`}
+          strokeLinecap="round"
+          transform="rotate(135 75 75)"
+        />
+        <circle
+          cx="75"
+          cy="75"
+          r={r}
+          fill="none"
+          stroke={accent}
+          strokeWidth="10"
+          strokeDasharray={`${arc * pct} ${c}`}
+          strokeLinecap="round"
+          transform="rotate(135 75 75)"
+        />
+      </svg>
+      <div className="absolute flex flex-col items-center">
+        <span className="text-2xl font-[800] text-[#1F1D1B] tabular-nums">
+          {big}
+        </span>
+        <span className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+          {cap}
+        </span>
+      </div>
     </div>
   );
 }
@@ -213,623 +388,733 @@ function RevTooltip({ active, payload, label }: RevTipProps) {
 // ---------- page ----------
 export default function DashboardBPage() {
   const [period, setPeriod] = useState("all");
+  const { data: soRaw, loading: soL } =
+    useCachedJson<SoStats>("/api/sales-orders/stats");
   const { data: ovRaw, loading: ovL } = useCachedJson<Overview>(
     `/api/dashboard/overview?period=${period}`,
   );
-  const { data: soRaw, loading: soL } =
-    useCachedJson<SoStats>("/api/sales-orders/stats");
-  const ov = ovRaw ?? {};
+  const { data: poRaw, loading: poL } = useCachedJson<POResp>(
+    "/api/production-orders?fields=minimal&include=jobCards",
+  );
+  const { data: doRaw, loading: doL } = useCachedJson<DOResp>(
+    "/api/delivery-orders?page=1&limit=200",
+  );
+  const { data: poValRaw, loading: poValL } = useCachedJson<POValuesResp>(
+    "/api/delivery-orders/po-values",
+  );
+  const { data: soItemsRaw, loading: soItemsL } =
+    useCachedJson<SOItemsResp>("/api/sales-orders");
+  const effWin = useMemo(() => last7WorkingDays(), []);
+  const { data: jcSumRaw, loading: jcSumL } = useCachedJson<JcSummaryResp>(
+    `/api/job-cards/summary?from=${effWin.from}&to=${effWin.to}`,
+  );
+  const { data: wheSumRaw, loading: wheSumL } = useCachedJson<WheSummaryResp>(
+    `/api/working-hour-entries/summary?from=${effWin.from}&to=${effWin.to}`,
+  );
+  const { data: workersRaw, loading: workersL } =
+    useCachedJson<WorkersResp>("/api/workers");
+
+  const loading =
+    soL || ovL || poL || doL || poValL || soItemsL || jcSumL || wheSumL ||
+    workersL;
+
+  // Pending Delivery — identical computation to /dashboard.
+  const pendingDeliveryValueSen = useMemo(() => {
+    const pos = poRaw?.success ? poRaw.data ?? [] : [];
+    const dos = doRaw?.success ? doRaw.data ?? [] : [];
+    const linkedPOIds = buildLinkedPOIds(dos);
+    const poValMap = new Map<string, number>();
+    for (const [k, v] of Object.entries(poValRaw?.values ?? {}))
+      poValMap.set(k, Number(v) || 0);
+    const soPriceByProduct = new Map<string, Map<string, number>>();
+    const sos = soItemsRaw?.success ? soItemsRaw.data ?? [] : [];
+    for (const s of sos) {
+      const m = new Map<string, number>();
+      for (const it of s.items ?? [])
+        if (it.productCode) m.set(it.productCode, Number(it.unitPriceSen) || 0);
+      soPriceByProduct.set(s.id, m);
+    }
+    let total = 0;
+    for (const po of pos) {
+      if (!poReadyForDelivery(po, linkedPOIds)) continue;
+      total +=
+        poValMap.get(po.id) ??
+        (soPriceByProduct.get(po.salesOrderId || "")?.get(
+          po.productCode || "",
+        ) ?? 0) * (po.quantity || 0);
+    }
+    return total;
+  }, [poRaw, doRaw, poValRaw, soItemsRaw]);
+
+  // Worker efficiency — identical computation to /dashboard.
+  const efficiency = useMemo(() => {
+    const prodMin = new Map<string, number>();
+    for (const r of jcSumRaw?.data ?? [])
+      prodMin.set(r.workerId, Number(r.productionMinutes) || 0);
+    const name = new Map<string, string>();
+    const dept = new Map<string, string>();
+    for (const w of workersRaw?.data ?? []) {
+      name.set(w.id, w.name || w.id);
+      dept.set(w.id, DEPT_LABEL[w.departmentCode || ""] ?? w.departmentCode ?? "");
+    }
+    const rows: { name: string; dept: string; pct: number }[] = [];
+    for (const e of wheSumRaw?.data ?? []) {
+      if ((e.daysWithEntries ?? 0) === 0) continue;
+      let prodHours = 0;
+      for (const [d, h] of Object.entries(e.byDept ?? {}))
+        if (PROD_DEPTS.has(d)) prodHours += Number(h) || 0;
+      if (prodHours <= 0) continue;
+      rows.push({
+        name: name.get(e.workerId) ?? e.workerId,
+        dept: dept.get(e.workerId) ?? "",
+        pct: ((prodMin.get(e.workerId) ?? 0) / (prodHours * 60)) * 100,
+      });
+    }
+    rows.sort((a, b) => b.pct - a.pct);
+    return { top: rows.slice(0, 5), bottom: rows.slice(-5).reverse() };
+  }, [jcSumRaw, wheSumRaw, workersRaw]);
+
   const so = soRaw ?? {};
+  const ov = ovRaw ?? {};
   const prod = ov.production;
-  const loading = ovL || soL;
+  const pur = ov.purchasing;
+  const fc = ov.fabricCostPerMeterSen;
+  const months = ov.salesMonths ?? [];
 
   const rev = useMemo(() => ov.monthlyRevenue ?? [], [ov.monthlyRevenue]);
   const revChart = useMemo(
     () =>
       rev.map((r) => ({
         m: r.month.slice(2),
-        SO: Math.round(r.salesOrderSen / 100),
-        Invoice: Math.round(r.invoiceSen / 100),
+        "Sales Orders": Math.round(r.salesOrderSen / 100),
+        Invoices: Math.round(r.invoiceSen / 100),
         Production: Math.round(r.productionSen / 100),
       })),
     [rev],
   );
   const soSpark = useMemo(() => rev.map((r) => r.salesOrderSen), [rev]);
-  const prodSpark = useMemo(() => rev.map((r) => r.productionSen), [rev]);
+  const delSpark = useMemo(() => rev.map((r) => r.productionSen), [rev]);
 
-  // Pipeline funnel (item-level reconciled figures from sales stats).
   const delivered = so.deliveredItemsSen ?? 0;
   const outstanding = so.outstandingItemsSen ?? 0;
   const confirmed = so.csRevenueSen ?? delivered + outstanding;
   const pipeMax = Math.max(1, confirmed, delivered, outstanding);
-
-  // Capacity utilisation = how hard the backlog presses one day's capacity.
-  const dailyCap = prod?.dailyCapacityMin ?? 0;
   const backlogDays = prod?.backlogDays ?? 0;
-  const utilisation = Math.min(1, backlogDays / 14); // 14d queue = "full"
+  const util = Math.min(1, backlogDays / 14);
+  const gaugeAccent = backlogDays > 12 ? C_RED : backlogDays > 7 ? C_PROD : C_GREEN;
 
+  const aov = (ov.aovByCustomer ?? []).slice(0, 8);
+  const aovMax = Math.max(1, ...aov.map((a) => a.totalSen));
   const topBed = ov.topSellers?.BEDFRAME ?? [];
   const topSofa = ov.topSellers?.SOFA ?? [];
-  const aov = (ov.aovByCustomer ?? []).slice(0, 6);
-  const aovMax = Math.max(1, ...aov.map((a) => a.totalSen));
 
   if (loading) {
     return (
-      <div className="db-root db-loading">
-        <div className="db-orbit" />
-        <p>Synthesising telemetry…</p>
-        <style>{DB_CSS}</style>
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <p className="text-xs text-[#6B7280]">Loading Dashboard B…</p>
       </div>
     );
   }
 
-  const fc = ov.fabricCostPerMeterSen;
-  const monthsAvail = (
-    (ovRaw as { salesMonths?: string[] } | null)?.salesMonths ?? []
-  ) as string[];
-
   return (
-    <div className="db-root">
-      <style>{DB_CSS}</style>
-
-      {/* ── Masthead ─────────────────────────────────────────── */}
-      <header className="db-mast db-rise" style={{ animationDelay: "0ms" }}>
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="flex items-end justify-between">
         <div>
-          <div className="db-eyebrow">HOOKKA · OPERATIONS INTELLIGENCE</div>
-          <h1 className="db-title">Command Center</h1>
+          <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#6B5C32]">
+            Operations Intelligence
+          </p>
+          <h1 className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B] mt-1">
+            Command Center
+          </h1>
         </div>
-        <div className="db-mast-right">
-          <select
-            className="db-period"
-            value={period}
-            onChange={(e) => setPeriod(e.target.value)}
-          >
-            <option value="all">All-time</option>
-            {monthsAvail.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-          <div className="db-live">
-            <span className="db-dot" /> LIVE
-          </div>
-        </div>
-      </header>
+        <select
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+          className="text-xs rounded-md border border-[#E2DDD8] bg-[#F5F2ED] px-2.5 py-1.5 font-medium text-[#5A5550] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+        >
+          <option value="all">All-time</option>
+          {months.map((m) => (
+            <option key={m} value={m}>
+              {m === CUR_YM ? `This month (${m})` : m}
+            </option>
+          ))}
+        </select>
+      </div>
 
-      {/* ── KPI rail ─────────────────────────────────────────── */}
-      <section className="db-rail">
-        {[
-          {
-            k: "This-Month Sales",
-            v: rmK(ov.salesThisMonthSen),
-            sub: "confirmed SO · current month",
-            spark: soSpark,
-            tone: "var(--db-gold)",
-            d: 40,
-          },
-          {
-            k: "This-Month Delivered",
-            v: rmK(ov.deliveredThisMonthSen),
-            sub: "item-level shipped value",
-            spark: prodSpark,
-            tone: "var(--db-blue)",
-            d: 90,
-          },
-          {
-            k: "Outstanding",
-            v: rmK(outstanding),
-            sub: "confirmed · not yet delivered",
-            spark: [],
-            tone: "var(--db-amber)",
-            d: 140,
-          },
-          {
-            k: "Active Jobs",
-            v: `${(prod?.activeJobs?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.activeJobs?.sofaSets ?? 0).toLocaleString()}`,
-            sub: "bedframe units · sofa sets",
-            spark: [],
-            tone: "var(--db-green)",
-            d: 190,
-          },
-          {
-            k: "Backlog",
-            v: `${backlogDays.toLocaleString()}d`,
-            sub: `${hrs(prod?.backlogMin)} queued`,
-            spark: [],
-            tone: "var(--db-red)",
-            d: 240,
-          },
-        ].map((t) => (
-          <article
-            key={t.k}
-            className="db-kpi db-rise"
-            style={{ animationDelay: `${t.d}ms` }}
-          >
-            <div className="db-kpi-top">
-              <span className="db-kpi-k">{t.k}</span>
-              {t.spark.length > 1 && (
-                <Spark data={t.spark} stroke={t.tone} />
+      {/* KPI rail */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+        <KTile
+          label="This-Month Sales"
+          value={rm(ov.salesThisMonthSen)}
+          sub="confirmed SO · current month"
+          icon={DollarSign}
+          accent={C_SO}
+          spark={soSpark}
+        />
+        <KTile
+          label="This-Month Delivered"
+          value={rm(ov.deliveredThisMonthSen)}
+          sub="item-level shipped value"
+          icon={Truck}
+          accent={C_PROD}
+          spark={delSpark}
+        />
+        <KTile
+          label="Outstanding"
+          value={rm(outstanding)}
+          sub="confirmed · not yet delivered"
+          icon={Clock}
+          accent={C_INV}
+        />
+        <KTile
+          label="Pending Delivery"
+          value={rm(pendingDeliveryValueSen)}
+          sub="made, not yet on a DO"
+          icon={Package}
+          accent={C_GREEN}
+        />
+        <KTile
+          label="Daily Capacity"
+          value={hrs(prod?.dailyCapacityMin)}
+          sub="7-working-day actual avg"
+          icon={Factory}
+          accent={C_SO}
+        />
+        <KTile
+          label="Backlog"
+          value={`${backlogDays.toLocaleString()} days`}
+          sub={`${hrs(prod?.backlogMin)} queued`}
+          icon={Clock}
+          accent={C_RED}
+        />
+        <KTile
+          label="Active Jobs"
+          value={`${(prod?.activeJobs?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.activeJobs?.sofaSets ?? 0).toLocaleString()}`}
+          sub="pending bedframe / sofa sets"
+          icon={Package}
+          accent={C_PROD}
+        />
+        <KTile
+          label="Completed Yesterday"
+          value={`${(prod?.completedYesterday?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.completedYesterday?.sofaSets ?? 0).toLocaleString()}`}
+          sub="bedframe / sofa finished"
+          icon={CheckCircle2}
+          accent={C_GREEN}
+        />
+      </div>
+
+      {/* Revenue + Plant load */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle
+              title="Revenue — last 12 months"
+              sub="Sales Orders · Invoices · Production"
+              right={
+                <div className="flex gap-3 text-xs text-[#9CA3AF]">
+                  <span style={{ color: C_SO }}>● Sales Orders</span>
+                  <span style={{ color: C_PROD }}>● Production</span>
+                  <span style={{ color: C_INV }}>● Invoices</span>
+                </div>
+              }
+            />
+            <div style={{ width: "100%", height: 260 }}>
+              {revChart.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-xs text-[#9CA3AF]">
+                  No revenue data.
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={revChart}
+                    margin={{ top: 6, right: 6, bottom: 0, left: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="bSO" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={C_SO} stopOpacity={0.22} />
+                        <stop offset="100%" stopColor={C_SO} stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="bPR" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={C_PROD} stopOpacity={0.2} />
+                        <stop offset="100%" stopColor={C_PROD} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis
+                      dataKey="m"
+                      tick={{ fill: "#9CA3AF", fontSize: 11 }}
+                      axisLine={{ stroke: "#F0ECE6" }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      tickFormatter={(v) => `${Math.round(v / 1000)}k`}
+                      tick={{ fill: "#9CA3AF", fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={38}
+                    />
+                    <Tooltip
+                      content={<RevTooltip />}
+                      cursor={{ stroke: "#E2DDD8" }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="Sales Orders"
+                      stroke={C_SO}
+                      strokeWidth={2}
+                      fill="url(#bSO)"
+                      isAnimationActive={false}
+                      dot={false}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="Production"
+                      stroke={C_PROD}
+                      strokeWidth={2}
+                      fill="url(#bPR)"
+                      isAnimationActive={false}
+                      dot={false}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="Invoices"
+                      stroke={C_INV}
+                      strokeWidth={1.75}
+                      fill="none"
+                      strokeDasharray="4 3"
+                      isAnimationActive={false}
+                      dot={false}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
               )}
             </div>
-            <div
-              className="db-kpi-v"
-              style={{ ["--g" as string]: t.tone }}
-            >
-              {t.v}
-            </div>
-            <div className="db-kpi-sub">{t.sub}</div>
-            <span className="db-kpi-bar" style={{ background: t.tone }} />
-          </article>
-        ))}
-      </section>
+          </CardContent>
+        </Card>
 
-      {/* ── Bento grid ───────────────────────────────────────── */}
-      <section className="db-bento">
-        {/* Revenue hero */}
-        <div
-          className="db-card db-rise db-col-7 db-row-2"
-          style={{ animationDelay: "300ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Revenue Telemetry</h3>
-              <p>Sales Orders · Invoices · Production — last 12 mo</p>
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5 flex flex-col items-center">
+            <SectionTitle title="Plant Load" sub="backlog vs daily capacity" />
+            <Gauge
+              value={util}
+              big={`${backlogDays.toLocaleString()}d`}
+              cap="queue"
+              accent={gaugeAccent}
+            />
+            <div className="mt-3 flex gap-8 text-center">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Daily cap
+                </p>
+                <p className="text-base font-bold text-[#1F1D1B]">
+                  {hrs(prod?.dailyCapacityMin)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Workforce
+                </p>
+                <p className="text-base font-bold text-[#1F1D1B]">
+                  {ov.employee?.activeHeadcount ?? 0}
+                </p>
+              </div>
             </div>
-            <div className="db-legend">
-              <span style={{ color: "var(--db-gold)" }}>● SO</span>
-              <span style={{ color: "var(--db-blue)" }}>● Invoice</span>
-              <span style={{ color: "var(--db-green)" }}>● Production</span>
-            </div>
-          </div>
-          <div className="db-chart">
-            {revChart.length === 0 ? (
-              <div className="db-empty">No revenue series.</div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
-                  data={revChart}
-                  margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
-                >
-                  <defs>
-                    <linearGradient id="gSO" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#D8B25A" stopOpacity={0.5} />
-                      <stop offset="100%" stopColor="#D8B25A" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="gPr" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#4ADE80" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="#4ADE80" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <XAxis
-                    dataKey="m"
-                    tick={{ fill: "#7C8186", fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tickFormatter={(v) => `${Math.round(v / 1000)}k`}
-                    tick={{ fill: "#7C8186", fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={38}
-                  />
-                  <Tooltip
-                    content={<RevTooltip />}
-                    cursor={{ stroke: "rgba(255,255,255,0.12)" }}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="SO"
-                    stroke="#D8B25A"
-                    strokeWidth={2}
-                    fill="url(#gSO)"
-                    isAnimationActive={false}
-                    dot={false}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="Production"
-                    stroke="#4ADE80"
-                    strokeWidth={2}
-                    fill="url(#gPr)"
-                    isAnimationActive={false}
-                    dot={false}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="Invoice"
-                    stroke="#5EB0EF"
-                    strokeWidth={2}
-                    fill="none"
-                    strokeDasharray="4 3"
-                    isAnimationActive={false}
-                    dot={false}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        </div>
+          </CardContent>
+        </Card>
+      </div>
 
-        {/* Capacity gauge */}
-        <div
-          className="db-card db-rise db-col-5 db-center"
-          style={{ animationDelay: "350ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Plant Load</h3>
-              <p>backlog pressure vs daily capacity</p>
-            </div>
-          </div>
-          <Gauge
-            value={utilisation}
-            label={`${backlogDays.toLocaleString()}d`}
-            caption="queue"
-            tone={
-              backlogDays > 12 ? "red" : backlogDays > 7 ? "gold" : "green"
-            }
-          />
-          <div className="db-gauge-foot">
-            <div>
-              <span className="db-mini-k">Daily capacity</span>
-              <span className="db-mini-v">{hrs(dailyCap)}</span>
-            </div>
-            <div>
-              <span className="db-mini-k">Completed (yest.)</span>
-              <span className="db-mini-v">
-                {(prod?.completedYesterday?.bedframeUnits ?? 0) +
-                  (prod?.completedYesterday?.sofaSets ?? 0)}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Pipeline funnel */}
-        <div
-          className="db-card db-rise db-col-5"
-          style={{ animationDelay: "400ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Order Pipeline</h3>
-              <p>confirmed → outstanding → delivered</p>
-            </div>
-          </div>
-          <div className="db-funnel">
+      {/* Pipeline + Worker efficiency */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle
+              title="Order Pipeline"
+              sub="confirmed → outstanding → delivered"
+            />
             {[
-              { k: "Confirmed", v: confirmed, c: "var(--db-gold)" },
-              { k: "Outstanding", v: outstanding, c: "var(--db-amber)" },
-              { k: "Delivered", v: delivered, c: "var(--db-green)" },
+              { k: "Confirmed", v: confirmed, c: C_SO },
+              { k: "Outstanding", v: outstanding, c: C_PROD },
+              { k: "Delivered", v: delivered, c: C_GREEN },
             ].map((s) => (
-              <div key={s.k} className="db-frow">
-                <span className="db-fk">{s.k}</span>
-                <div className="db-ftrack">
+              <div key={s.k} className="flex items-center gap-3 py-1.5">
+                <span className="w-24 text-xs text-[#5A5550]">{s.k}</span>
+                <div className="flex-1 h-3 rounded-full bg-[#F5F2ED] overflow-hidden">
                   <div
-                    className="db-ffill"
+                    className="h-full rounded-full"
                     style={{
                       width: `${Math.max(3, (s.v / pipeMax) * 100)}%`,
                       background: s.c,
                     }}
                   />
                 </div>
-                <span className="db-fv">{rmK(s.v)}</span>
+                <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                  {rm(s.v)}
+                </span>
               </div>
             ))}
-          </div>
-        </div>
+          </CardContent>
+        </Card>
 
-        {/* Top sellers — bedframe */}
-        <div
-          className="db-card db-rise db-col-7"
-          style={{ animationDelay: "450ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Top Sellers</h3>
-              <p>bedframe by units · sofa by sets</p>
-            </div>
-          </div>
-          <div className="db-split">
-            <div>
-              <div className="db-split-k">BEDFRAME</div>
-              {topBed.slice(0, 5).map((p) => {
-                const mx = Math.max(1, ...topBed.map((x) => x.qtySold));
-                return (
-                  <div key={p.productCode} className="db-lrow">
-                    <span className="db-lcode">{p.productCode}</span>
-                    <div className="db-ltrack">
-                      <div
-                        className="db-lfill"
-                        style={{
-                          width: `${(p.qtySold / mx) * 100}%`,
-                          background: "var(--db-gold)",
-                        }}
-                      />
-                    </div>
-                    <span className="db-lqty">×{p.qtySold}</span>
-                  </div>
-                );
-              })}
-            </div>
-            <div>
-              <div className="db-split-k">SOFA</div>
-              {topSofa.slice(0, 5).map((p) => {
-                const mx = Math.max(1, ...topSofa.map((x) => x.setsSold));
-                return (
-                  <div key={p.model} className="db-lrow">
-                    <span className="db-lcode">{p.model}</span>
-                    <div className="db-ltrack">
-                      <div
-                        className="db-lfill"
-                        style={{
-                          width: `${(p.setsSold / mx) * 100}%`,
-                          background: "var(--db-blue)",
-                        }}
-                      />
-                    </div>
-                    <span className="db-lqty">×{p.setsSold}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* AOV leaderboard */}
-        <div
-          className="db-card db-rise db-col-7"
-          style={{ animationDelay: "500ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Customer Value</h3>
-              <p>total value · bedframe &amp; sofa AOV</p>
-            </div>
-            {ov.aovCompany && (
-              <div className="db-legend">
-                <span>BF {rm(ov.aovCompany.bedframeAvgSen)}/u</span>
-                <span>SF {rm(ov.aovCompany.sofaAvgSen)}/set</span>
-              </div>
-            )}
-          </div>
-          <div className="db-aov">
-            {aov.map((a, i) => (
-              <div key={a.customerName} className="db-arow">
-                <span className="db-arank">{String(i + 1).padStart(2, "0")}</span>
-                <span className="db-aname">{a.customerName}</span>
-                <div className="db-atrack">
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle
+              title="Worker Efficiency"
+              sub="production mins ÷ clocked hours · last 7 working days"
+            />
+            <div className="grid grid-cols-2 gap-5">
+              <div>
+                <p className="text-[11px] font-semibold text-[#15803D] mb-1.5">
+                  Top 5
+                </p>
+                {efficiency.top.map((r) => (
                   <div
-                    className="db-afill"
-                    style={{ width: `${(a.totalSen / aovMax) * 100}%` }}
+                    key={`t-${r.name}`}
+                    className="flex items-center justify-between text-sm py-0.5"
+                  >
+                    <span className="truncate pr-2">
+                      <span className="text-[#5A5550]">{r.name}</span>
+                      {r.dept && (
+                        <span className="text-[10px] text-[#9CA3AF]">
+                          {" "}
+                          · {r.dept}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-semibold text-[#15803D] tabular-nums">
+                      {Math.round(r.pct)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="border-l border-[#F0ECE6] pl-5">
+                <p className="text-[11px] font-semibold text-[#DC2626] mb-1.5">
+                  Lowest 5
+                </p>
+                {efficiency.bottom.map((r) => (
+                  <div
+                    key={`b-${r.name}`}
+                    className="flex items-center justify-between text-sm py-0.5"
+                  >
+                    <span className="truncate pr-2">
+                      <span className="text-[#5A5550]">{r.name}</span>
+                      {r.dept && (
+                        <span className="text-[10px] text-[#9CA3AF]">
+                          {" "}
+                          · {r.dept}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-semibold text-[#DC2626] tabular-nums">
+                      {Math.round(r.pct)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* AOV + Top sellers */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle
+              title="Customer Value"
+              sub="total value · bedframe & sofa AOV"
+              right={
+                ov.aovCompany ? (
+                  <div className="text-right text-[11px] text-[#9CA3AF]">
+                    <div>
+                      All BF{" "}
+                      <span className="font-semibold text-[#1F1D1B]">
+                        {rm(ov.aovCompany.bedframeAvgSen)}
+                      </span>
+                      /u
+                    </div>
+                    <div>
+                      All Sofa{" "}
+                      <span className="font-semibold text-[#1F1D1B]">
+                        {rm(ov.aovCompany.sofaAvgSen)}
+                      </span>
+                      /set
+                    </div>
+                  </div>
+                ) : undefined
+              }
+            />
+            {aov.map((a, i) => (
+              <div
+                key={a.customerName}
+                className="flex items-center gap-3 py-1"
+              >
+                <span className="w-5 text-xs font-semibold text-[#6B5C32] tabular-nums">
+                  {i + 1}
+                </span>
+                <span className="w-28 text-xs text-[#1F1D1B] truncate">
+                  {a.customerName}
+                </span>
+                <div className="flex-1 h-2 rounded-full bg-[#F5F2ED] overflow-hidden">
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${(a.totalSen / aovMax) * 100}%`,
+                      background: C_SO,
+                    }}
                   />
                 </div>
-                <span className="db-aval">{rmK(a.totalSen)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Fabric cost */}
-        <div
-          className="db-card db-rise db-col-5"
-          style={{ animationDelay: "550ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Fabric Economics</h3>
-              <p>weighted cost / meter</p>
-            </div>
-          </div>
-          <div className="db-fab">
-            {[
-              { k: "Bedframe", v: fc?.bedframe, c: "var(--db-gold)" },
-              { k: "Sofa", v: fc?.sofa, c: "var(--db-blue)" },
-              { k: "Overall", v: fc?.total, c: "var(--db-green)" },
-            ].map((f) => (
-              <div key={f.k} className="db-fabcell">
-                <span className="db-fabk">{f.k}</span>
-                <span className="db-fabv" style={{ color: f.c }}>
-                  {rm(f.v)}
+                <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                  {rm(a.totalSen)}
                 </span>
-                <span className="db-fabu">/ meter</span>
               </div>
             ))}
-          </div>
-        </div>
+          </CardContent>
+        </Card>
 
-        {/* Backlog by department */}
-        <div
-          className="db-card db-rise db-col-12"
-          style={{ animationDelay: "600ms" }}
-        >
-          <div className="db-card-h">
-            <div>
-              <h3>Department Backlog</h3>
-              <p>active work vs daily capacity — bottleneck first</p>
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle
+              title="Top Sellers"
+              sub="bedframe by units · sofa by sets"
+            />
+            <div className="grid grid-cols-2 gap-5">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550] mb-1.5">
+                  Bedframe
+                </p>
+                {topBed.slice(0, 6).map((p) => (
+                  <div
+                    key={p.productCode}
+                    className="flex items-center justify-between text-sm py-0.5"
+                  >
+                    <span className="text-[#5A5550] truncate pr-2">
+                      <span className="font-medium text-[#1F1D1B]">
+                        {p.productCode}
+                      </span>{" "}
+                      <span className="text-xs text-[#9CA3AF]">
+                        ×{p.qtySold}
+                      </span>
+                    </span>
+                    <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(p.valueSen)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="border-l border-[#F0ECE6] pl-5">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550] mb-1.5">
+                  Sofa
+                </p>
+                {topSofa.slice(0, 6).map((p) => (
+                  <div
+                    key={p.model}
+                    className="flex items-center justify-between text-sm py-0.5"
+                  >
+                    <span className="text-[#5A5550] truncate pr-2">
+                      <span className="font-medium text-[#1F1D1B]">
+                        {p.model}
+                      </span>{" "}
+                      <span className="text-xs text-[#9CA3AF]">
+                        ×{p.setsSold} sets
+                      </span>
+                    </span>
+                    <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(p.valueSen)}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-          <div className="db-dept">
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Fabric */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {(["BEDFRAME", "SOFA"] as const).map((cat) => {
+          const blk = ov.fabric?.[cat];
+          const rows = (blk?.list ?? [])
+            .filter((f) => f.meters > 0 || f.next30Meters > 0)
+            .sort((a, b) => b.meters - a.meters)
+            .slice(0, 10);
+          const mMax = Math.max(
+            1,
+            ...(blk?.monthly ?? []).map((m) => m.meters),
+          );
+          return (
+            <Card
+              key={cat}
+              className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+            >
+              <CardContent className="p-5">
+                <SectionTitle
+                  title={`${cat === "BEDFRAME" ? "Bedframe" : "Sofa"} Fabric`}
+                  sub="used · purchase price /m · forecast"
+                  right={
+                    <div className="text-right">
+                      <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                        Avg cost /m
+                      </p>
+                      <p className="text-sm font-bold text-[#1F1D1B]">
+                        {rm(cat === "BEDFRAME" ? fc?.bedframe : fc?.sofa)}
+                      </p>
+                    </div>
+                  }
+                />
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] text-[#9CA3AF] border-b border-[#F0ECE6]">
+                      <th className="font-medium pb-1.5">Fabric</th>
+                      <th className="font-medium pb-1.5 text-right">Used</th>
+                      <th className="font-medium pb-1.5 text-right">Next 30d</th>
+                      <th className="font-medium pb-1.5 text-right">Avg buy</th>
+                      <th className="font-medium pb-1.5 text-right">Min–Max</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((f) => (
+                      <tr key={f.fabCode} className="border-b border-[#F7F4EF]">
+                        <td className="py-1 font-medium text-[#1F1D1B]">
+                          {f.fabCode}
+                        </td>
+                        <td className="py-1 text-right tabular-nums text-[#5A5550]">
+                          {Math.round(f.meters).toLocaleString()} m
+                        </td>
+                        <td className="py-1 text-right tabular-nums font-semibold text-[#6B5C32]">
+                          {f.next30Meters.toLocaleString()} m
+                        </td>
+                        <td className="py-1 text-right tabular-nums text-[#1F1D1B]">
+                          {f.buyAvgSen ? rm(f.buyAvgSen) : "—"}
+                        </td>
+                        <td className="py-1 text-right tabular-nums text-[#9CA3AF]">
+                          {f.buyMinSen || f.buyMaxSen
+                            ? `${rm(f.buyMinSen)}–${rm(f.buyMaxSen)}`
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="mt-3 border-t border-[#F0ECE6] pt-2 space-y-1">
+                  <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
+                    Monthly meters
+                  </p>
+                  {(blk?.monthly ?? []).map((m) => (
+                    <div key={m.month} className="flex items-center gap-2">
+                      <span className="w-14 shrink-0 text-[11px] text-[#9CA3AF] tabular-nums">
+                        {m.month}
+                      </span>
+                      <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden">
+                        <div
+                          className="h-full rounded"
+                          style={{
+                            width: `${Math.max(2, (m.meters / mMax) * 100)}%`,
+                            background: C_SO,
+                            opacity: 0.7,
+                          }}
+                        />
+                      </div>
+                      <span className="w-16 text-right text-[11px] font-semibold text-[#1F1D1B] tabular-nums">
+                        {Math.round(m.meters).toLocaleString()} m
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+
+      {/* Department backlog + Purchasing */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle
+              title="Department Backlog"
+              sub="active work vs daily capacity — bottleneck first"
+              right={
+                <div className="flex gap-3 text-xs text-[#9CA3AF]">
+                  <span style={{ color: C_INV }}>● Sofa</span>
+                  <span style={{ color: C_SO }}>● Bedframe</span>
+                </div>
+              }
+            />
             {(prod?.backlogByDept ?? []).map((d) => {
               const mx = Math.max(
                 1,
                 ...(prod?.backlogByDept ?? []).map((x) => x.totalMin),
               );
-              const sofaPct = (d.sofaMin / mx) * 100;
-              const bfPct = (d.bedframeMin / mx) * 100;
               return (
-                <div key={d.dept} className="db-drow">
-                  <span className="db-dname">{d.dept}</span>
-                  <div className="db-dtrack">
+                <div key={d.dept} className="flex items-center gap-3 py-1">
+                  <span className="w-28 text-xs text-[#1F1D1B]">{d.dept}</span>
+                  <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden flex">
                     <div
-                      className="db-dseg"
+                      className="h-full"
                       style={{
-                        width: `${sofaPct}%`,
-                        background: "var(--db-blue)",
+                        width: `${(d.sofaMin / mx) * 100}%`,
+                        background: C_INV,
                       }}
                     />
                     <div
-                      className="db-dseg"
+                      className="h-full"
                       style={{
-                        width: `${bfPct}%`,
-                        background: "var(--db-gold)",
+                        width: `${(d.bedframeMin / mx) * 100}%`,
+                        background: C_SO,
                       }}
                     />
                   </div>
-                  <span className="db-ddays">
+                  <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
                     {d.backlogDays.toLocaleString()}d
                   </span>
                 </div>
               );
             })}
-          </div>
-          <div className="db-legend db-dept-legend">
-            <span style={{ color: "var(--db-blue)" }}>● Sofa</span>
-            <span style={{ color: "var(--db-gold)" }}>● Bedframe</span>
-          </div>
-        </div>
-      </section>
+          </CardContent>
+        </Card>
 
-      <footer className="db-foot">
-        Dashboard B · experimental view · data parity with /dashboard
-      </footer>
+        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+          <CardContent className="p-5">
+            <SectionTitle title="Purchasing" sub="open POs · spend" />
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Open POs
+                </p>
+                <p className="text-lg font-bold text-[#1F1D1B]">
+                  {pur?.openPOCount ?? 0}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                  Spend / month
+                </p>
+                <p className="text-lg font-bold text-[#1F1D1B]">
+                  {rm(pur?.spendThisMonthSen)}
+                </p>
+              </div>
+            </div>
+            <p className="text-[11px] font-semibold text-[#5A5550] mb-1">
+              Top suppliers
+            </p>
+            {(pur?.topSuppliers ?? []).slice(0, 5).map((s) => (
+              <div
+                key={s.name}
+                className="flex items-center justify-between text-xs py-0.5"
+              >
+                <span className="text-[#5A5550] truncate pr-2">{s.name}</span>
+                <span className="font-semibold text-[#1F1D1B] tabular-nums">
+                  {rm(s.spendSen)}
+                </span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <p className="text-center text-[11px] text-[#9CA3AF] pt-2">
+        Dashboard B · experimental view · full data parity with Dashboard
+      </p>
     </div>
   );
 }
-
-// ---------- scoped styles (everything under .db-root) ----------
-const DB_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-.db-root{
-  --db-bg:#090B0C; --db-panel:#111417; --db-panel2:#161A1E;
-  --db-line:rgba(255,255,255,0.07); --db-text:#EAE8E3; --db-dim:#878C90;
-  --db-gold:#D8B25A; --db-amber:#E8964A; --db-green:#56D98A;
-  --db-red:#F2706B; --db-blue:#63ABEE;
-  position:relative; min-height:100vh; margin:-1.5rem; padding:2rem 2.25rem 3rem;
-  background:
-    radial-gradient(900px 500px at 78% -8%, rgba(216,178,90,0.10), transparent 60%),
-    radial-gradient(800px 600px at 0% 100%, rgba(99,171,238,0.07), transparent 55%),
-    var(--db-bg);
-  color:var(--db-text);
-  font-family:'Hanken Grotesk',ui-sans-serif,system-ui,sans-serif;
-  overflow:hidden;
-}
-.db-root::before{
-  content:""; position:absolute; inset:0; pointer-events:none; opacity:.5;
-  background-image:linear-gradient(rgba(255,255,255,0.025) 1px,transparent 1px),
-    linear-gradient(90deg,rgba(255,255,255,0.025) 1px,transparent 1px);
-  background-size:46px 46px;
-  -webkit-mask-image:radial-gradient(circle at 50% 30%,#000 0%,transparent 75%);
-  mask-image:radial-gradient(circle at 50% 30%,#000 0%,transparent 75%);
-}
-.db-root>*{position:relative;z-index:1}
-.db-root *{box-sizing:border-box}
-
-@keyframes dbRise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-.db-rise{opacity:0;animation:dbRise .6s cubic-bezier(.2,.7,.2,1) forwards}
-@keyframes dbOrbit{to{transform:rotate(360deg)}}
-@keyframes dbPulse{0%,100%{opacity:1}50%{opacity:.35}}
-
-.db-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;font-family:'IBM Plex Mono',monospace;color:var(--db-dim);letter-spacing:.08em;font-size:.8rem}
-.db-orbit{width:46px;height:46px;border-radius:50%;border:2px solid rgba(255,255,255,0.08);border-top-color:var(--db-gold);animation:dbOrbit 1s linear infinite}
-
-.db-mast{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:1.75rem}
-.db-eyebrow{font-family:'IBM Plex Mono',monospace;font-size:.66rem;letter-spacing:.32em;color:var(--db-gold);margin-bottom:.5rem}
-.db-title{font-size:2.1rem;font-weight:800;letter-spacing:-.02em;line-height:1;margin:0;
-  background:linear-gradient(180deg,#fff,#B9BDC0);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.db-mast-right{display:flex;align-items:center;gap:1rem}
-.db-period{background:var(--db-panel);border:1px solid var(--db-line);color:var(--db-text);
-  font-family:'IBM Plex Mono',monospace;font-size:.74rem;padding:.45rem .7rem;border-radius:9px;outline:none}
-.db-live{display:flex;align-items:center;gap:.45rem;font-family:'IBM Plex Mono',monospace;
-  font-size:.66rem;letter-spacing:.2em;color:var(--db-green)}
-.db-dot{width:7px;height:7px;border-radius:50%;background:var(--db-green);
-  box-shadow:0 0 8px var(--db-green);animation:dbPulse 1.8s ease-in-out infinite}
-
-.db-rail{display:grid;grid-template-columns:repeat(5,1fr);gap:1rem;margin-bottom:1rem}
-@media(max-width:1100px){.db-rail{grid-template-columns:repeat(2,1fr)}}
-.db-kpi{position:relative;background:linear-gradient(180deg,var(--db-panel2),var(--db-panel));
-  border:1px solid var(--db-line);border-radius:16px;padding:1.05rem 1.15rem 1.2rem;overflow:hidden;
-  transition:transform .25s,border-color .25s}
-.db-kpi:hover{transform:translateY(-3px);border-color:rgba(216,178,90,0.35)}
-.db-kpi-top{display:flex;justify-content:space-between;align-items:flex-start;min-height:30px}
-.db-kpi-k{font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--db-dim)}
-.db-spark{opacity:.9}
-.db-kpi-v{font-family:'IBM Plex Mono',monospace;font-size:1.7rem;font-weight:600;margin:.55rem 0 .2rem;
-  letter-spacing:-.01em;color:var(--db-text);text-shadow:0 0 18px color-mix(in srgb,var(--g) 35%,transparent)}
-.db-kpi-sub{font-size:.7rem;color:var(--db-dim)}
-.db-kpi-bar{position:absolute;left:0;bottom:0;height:2px;width:100%;opacity:.55}
-
-.db-bento{display:grid;grid-template-columns:repeat(12,1fr);grid-auto-rows:minmax(132px,auto);gap:1rem}
-@media(max-width:1100px){.db-bento{grid-template-columns:repeat(6,1fr)}}
-.db-card{background:linear-gradient(180deg,var(--db-panel2),var(--db-panel));
-  border:1px solid var(--db-line);border-radius:18px;padding:1.15rem 1.25rem;
-  display:flex;flex-direction:column;transition:border-color .25s}
-.db-card:hover{border-color:rgba(255,255,255,0.13)}
-.db-col-12{grid-column:span 12}.db-col-7{grid-column:span 7}.db-col-5{grid-column:span 5}
-.db-row-2{grid-row:span 2}
-@media(max-width:1100px){.db-col-12,.db-col-7,.db-col-5{grid-column:span 6}}
-.db-center{align-items:center}
-.db-card-h{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1rem;width:100%}
-.db-card-h h3{font-size:.92rem;font-weight:700;margin:0;letter-spacing:-.01em}
-.db-card-h p{font-size:.7rem;color:var(--db-dim);margin:.25rem 0 0}
-.db-legend{display:flex;gap:.85rem;font-family:'IBM Plex Mono',monospace;font-size:.66rem;color:var(--db-dim)}
-.db-chart{height:280px;width:100%}
-.db-empty{display:flex;align-items:center;justify-content:center;height:100%;color:var(--db-dim);font-size:.8rem}
-
-.db-tip{background:rgba(12,15,17,0.96);border:1px solid var(--db-line);border-radius:10px;
-  padding:.6rem .75rem;font-size:.72rem;backdrop-filter:blur(6px)}
-.db-tip-h{font-family:'IBM Plex Mono',monospace;color:var(--db-dim);margin-bottom:.4rem}
-.db-tip-row{display:flex;justify-content:space-between;gap:1.4rem;padding:.1rem 0}
-.db-tip-row span:last-child{font-family:'IBM Plex Mono',monospace}
-
-.db-gauge{position:relative;display:flex;align-items:center;justify-content:center;margin:.4rem 0}
-.db-gauge-c{position:absolute;display:flex;flex-direction:column;align-items:center}
-.db-gauge-v{font-family:'IBM Plex Mono',monospace;font-size:1.7rem;font-weight:600}
-.db-gauge-cap{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;color:var(--db-dim)}
-.db-gauge-foot{display:flex;gap:2.2rem;margin-top:.5rem}
-.db-gauge-foot>div{display:flex;flex-direction:column;align-items:center}
-.db-mini-k{font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--db-dim)}
-.db-mini-v{font-family:'IBM Plex Mono',monospace;font-size:1.05rem;font-weight:600;margin-top:.2rem}
-
-.db-funnel{display:flex;flex-direction:column;gap:.85rem;flex:1;justify-content:center}
-.db-frow{display:flex;align-items:center;gap:.8rem}
-.db-fk{width:84px;font-size:.74rem;color:var(--db-dim)}
-.db-ftrack{flex:1;height:12px;background:rgba(255,255,255,0.05);border-radius:6px;overflow:hidden}
-.db-ffill{height:100%;border-radius:6px;transition:width .8s cubic-bezier(.2,.7,.2,1)}
-.db-fv{width:84px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:.78rem}
-
-.db-split{display:grid;grid-template-columns:1fr 1fr;gap:1.6rem;flex:1}
-.db-split-k{font-family:'IBM Plex Mono',monospace;font-size:.64rem;letter-spacing:.16em;color:var(--db-dim);margin-bottom:.6rem}
-.db-lrow{display:flex;align-items:center;gap:.6rem;padding:.22rem 0}
-.db-lcode{width:96px;font-size:.74rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.db-ltrack{flex:1;height:7px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden}
-.db-lfill{height:100%;border-radius:4px}
-.db-lqty{width:48px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--db-dim)}
-
-.db-aov{display:flex;flex-direction:column;gap:.5rem;flex:1;justify-content:center}
-.db-arow{display:flex;align-items:center;gap:.7rem}
-.db-arank{font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--db-gold);width:22px}
-.db-aname{width:120px;font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.db-atrack{flex:1;height:8px;background:rgba(255,255,255,0.05);border-radius:5px;overflow:hidden}
-.db-afill{height:100%;border-radius:5px;background:linear-gradient(90deg,#9A7A2E,var(--db-gold))}
-.db-aval{width:78px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:.76rem}
-
-.db-fab{display:flex;gap:.8rem;flex:1;align-items:center}
-.db-fabcell{flex:1;background:rgba(255,255,255,0.025);border:1px solid var(--db-line);
-  border-radius:13px;padding:.95rem .7rem;display:flex;flex-direction:column;align-items:center;gap:.25rem}
-.db-fabk{font-size:.66rem;letter-spacing:.12em;text-transform:uppercase;color:var(--db-dim)}
-.db-fabv{font-family:'IBM Plex Mono',monospace;font-size:1.32rem;font-weight:600}
-.db-fabu{font-size:.62rem;color:var(--db-dim)}
-
-.db-dept{display:flex;flex-direction:column;gap:.5rem}
-.db-drow{display:flex;align-items:center;gap:.8rem}
-.db-dname{width:120px;font-size:.76rem;color:var(--db-text)}
-.db-dtrack{flex:1;height:9px;display:flex;background:rgba(255,255,255,0.04);border-radius:5px;overflow:hidden}
-.db-dseg{height:100%}
-.db-ddays{width:48px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--db-red)}
-.db-dept-legend{margin-top:.8rem;justify-content:flex-end}
-
-.db-foot{margin-top:2rem;text-align:center;font-family:'IBM Plex Mono',monospace;
-  font-size:.64rem;letter-spacing:.18em;color:rgba(255,255,255,0.22)}
-`;

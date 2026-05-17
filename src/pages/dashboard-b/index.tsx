@@ -24,6 +24,9 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 import {
   DollarSign,
@@ -32,6 +35,9 @@ import {
   Package,
   Factory,
   CheckCircle2,
+  X,
+  ArrowUpRight,
+  ArrowDownRight,
 } from "lucide-react";
 
 // ---------- API response types (mirror /dashboard) ----------
@@ -59,6 +65,7 @@ type Overview = {
     activeJobs: JobsBreakdown;
     completedYesterday: JobsBreakdown;
     completedLast7: { date: string; bedframeUnits: number; sofaSets: number }[];
+    capacityDays: { date: string; minutes: number }[];
     backlogByDept: {
       dept: string;
       sofaMin: number;
@@ -98,10 +105,34 @@ type Overview = {
     sofaSets: number;
     totalSen: number;
   };
+  aovMonthlyByCustomer?: Record<
+    string,
+    {
+      month: string;
+      bedframeAvgSen: number;
+      bedframeUnits: number;
+      sofaAvgSen: number;
+      sofaSets: number;
+    }[]
+  >;
   topSellers?: {
     BEDFRAME: { productCode: string; qtySold: number; valueSen: number }[];
     SOFA: { model: string; setsSold: number; valueSen: number }[];
   };
+  topSellersByCustomer?: {
+    BEDFRAME: Record<
+      string,
+      { customer: string; qty: number; valueSen: number }[]
+    >;
+    SOFA: Record<
+      string,
+      { customer: string; sets: number; valueSen: number }[]
+    >;
+  };
+  monthlySalesByCustomer?: Record<
+    string,
+    { customer: string; bedframeUnits: number; sofaSets: number }[]
+  >;
   fabric?: {
     BEDFRAME: {
       list: {
@@ -205,7 +236,22 @@ function last7WorkingDays(): { from: string; to: string } {
 const rm = (sen: number | undefined) => formatCurrency(sen ?? 0);
 const hrs = (min: number | undefined) =>
   `${Math.round((min ?? 0) / 60).toLocaleString()}h`;
+const hm = (min: number | undefined) => {
+  const m = Math.max(0, Math.round(min ?? 0));
+  return `${Math.floor(m / 60).toLocaleString()}h ${m % 60}m`;
+};
 const CUR_YM = new Date().toISOString().slice(0, 7);
+
+// Customer-mix donut palette — warm, on-brand graded tones + grey tail.
+const PIE_COLORS = [
+  "#6B5C32",
+  "#9C7C3D",
+  "#C9A24B",
+  "#B08D57",
+  "#8A8F93",
+  "#C2BBAE",
+  "#D8CFBE",
+];
 
 // Brand-consistent chart palette (warm, matches the app — no neon).
 const C_SO = "#6B5C32"; // brand brown
@@ -241,6 +287,24 @@ function Spark({ data, stroke }: { data: number[]; stroke: string }) {
   );
 }
 
+function DeltaChip({ pct }: { pct: number | null }) {
+  if (pct === null || !isFinite(pct)) return null;
+  const up = pct >= 0;
+  const Icon = up ? ArrowUpRight : ArrowDownRight;
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+      style={{
+        color: up ? "#15803D" : "#DC2626",
+        background: up ? "rgba(21,128,61,0.08)" : "rgba(220,38,38,0.08)",
+      }}
+    >
+      <Icon className="h-3 w-3" />
+      {Math.abs(pct).toFixed(0)}%
+    </span>
+  );
+}
+
 function KTile({
   label,
   value,
@@ -248,6 +312,8 @@ function KTile({
   icon: Icon,
   accent = C_SO,
   spark,
+  delta = null,
+  onClick,
 }: {
   label: string;
   value: string;
@@ -255,22 +321,37 @@ function KTile({
   icon: React.ElementType;
   accent?: string;
   spark?: number[];
+  delta?: number | null;
+  onClick?: () => void;
 }) {
   return (
-    <Card className="relative bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] overflow-hidden">
+    <Card
+      onClick={onClick}
+      className={`relative bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] overflow-hidden ${
+        onClick
+          ? "cursor-pointer transition-shadow hover:shadow-[0_4px_14px_rgba(0,0,0,0.10)]"
+          : ""
+      }`}
+    >
       <CardContent className="p-5">
         <div className="flex items-start justify-between">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">
             {label}
+            {onClick && (
+              <span className="ml-1 text-[#C2BBAE] font-normal">›</span>
+            )}
           </p>
           <div className="rounded-lg bg-[#F5F2ED] p-2">
             <Icon className="h-4 w-4 text-[#6B5C32]" />
           </div>
         </div>
-        <p className="mt-3 text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B] tabular-nums">
-          {value}
-        </p>
-        <div className="mt-1 flex items-end justify-between">
+        <div className="mt-3 flex items-end gap-2">
+          <p className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B] tabular-nums leading-none">
+            {value}
+          </p>
+          <DeltaChip pct={delta} />
+        </div>
+        <div className="mt-2 flex items-end justify-between">
           <p className="text-xs text-[#9CA3AF]">{sub}</p>
           {spark && spark.length > 1 && (
             <Spark data={spark} stroke={accent} />
@@ -282,6 +363,94 @@ function KTile({
         style={{ background: accent, opacity: 0.65 }}
       />
     </Card>
+  );
+}
+
+// Centred modal for the drill-throughs (same UX as /dashboard).
+function Modal({
+  title,
+  subtitle,
+  onClose,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-8 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl w-full max-w-3xl my-8"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between border-b border-[#E2DDD8] px-6 py-4">
+          <div>
+            <h3 className="text-base font-bold text-[#1F1D1B]">{title}</h3>
+            {subtitle && (
+              <p className="text-xs text-[#9CA3AF] mt-0.5">{subtitle}</p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 hover:bg-[#F5F2ED] text-[#5A5550]"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="px-6 py-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Simple two/three-column table used inside several drill-throughs.
+function MiniTable({
+  cols,
+  rows,
+}: {
+  cols: string[];
+  rows: (string | number)[][];
+}) {
+  if (rows.length === 0)
+    return <p className="text-xs text-[#9CA3AF]">Nothing here.</p>;
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-xs text-[#9CA3AF] border-b border-[#E2DDD8]">
+          {cols.map((c, i) => (
+            <th
+              key={c}
+              className={`py-1.5 font-medium ${i === 0 ? "" : "text-right"}`}
+            >
+              {c}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, ri) => (
+          <tr key={ri} className="border-b border-[#F0ECE6]">
+            {r.map((cell, ci) => (
+              <td
+                key={ci}
+                className={`py-1.5 tabular-nums ${
+                  ci === 0
+                    ? "text-[#1F1D1B]"
+                    : "text-right font-semibold text-[#1F1D1B]"
+                }`}
+              >
+                {cell}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -388,6 +557,11 @@ function Gauge({
 // ---------- page ----------
 export default function DashboardBPage() {
   const [period, setPeriod] = useState("all");
+  const [drill, setDrill] = useState<{
+    title: string;
+    subtitle?: string;
+    node: React.ReactNode;
+  } | null>(null);
   const { data: soRaw, loading: soL } =
     useCachedJson<SoStats>("/api/sales-orders/stats");
   const { data: ovRaw, loading: ovL } = useCachedJson<Overview>(
@@ -503,10 +677,46 @@ export default function DashboardBPage() {
   const util = Math.min(1, backlogDays / 14);
   const gaugeAccent = backlogDays > 12 ? C_RED : backlogDays > 7 ? C_PROD : C_GREEN;
 
-  const aov = (ov.aovByCustomer ?? []).slice(0, 8);
+  const aovAll = ov.aovByCustomer ?? [];
+  const aov = aovAll.slice(0, 8);
   const aovMax = Math.max(1, ...aov.map((a) => a.totalSen));
   const topBed = ov.topSellers?.BEDFRAME ?? [];
   const topSofa = ov.topSellers?.SOFA ?? [];
+
+  // Period-over-period deltas (last vs previous month in the series).
+  const pctDelta = (cur: number, prev: number): number | null =>
+    prev > 0 ? ((cur - prev) / prev) * 100 : null;
+  const lastR = rev[rev.length - 1];
+  const prevR = rev[rev.length - 2];
+  const salesDelta = lastR
+    ? pctDelta(lastR.salesOrderSen, prevR?.salesOrderSen ?? 0)
+    : null;
+  const prodDelta = lastR
+    ? pctDelta(lastR.productionSen, prevR?.productionSen ?? 0)
+    : null;
+
+  // Customer revenue concentration — top 6 + "Others" (financial-
+  // report style: who is our revenue actually coming from?).
+  const totalCustRev = aovAll.reduce((s, a) => s + a.totalSen, 0);
+  const pieTop = aovAll.slice(0, 6).map((a) => ({
+    name: a.customerName,
+    value: a.totalSen,
+  }));
+  const othersRev = aovAll
+    .slice(6)
+    .reduce((s, a) => s + a.totalSen, 0);
+  const pieData =
+    othersRev > 0
+      ? [...pieTop, { name: "Others", value: othersRev }]
+      : pieTop;
+
+  // Pipeline conversion rates.
+  const deliveredRate =
+    confirmed > 0 ? (delivered / confirmed) * 100 : 0;
+
+  // Per-customer monthly AOV (drill-through for Customer Value rows).
+  const aovMonthly = ov.aovMonthlyByCustomer ?? {};
+  const tsByCust = ov.topSellersByCustomer;
 
   if (loading) {
     return (
@@ -551,6 +761,7 @@ export default function DashboardBPage() {
           icon={DollarSign}
           accent={C_SO}
           spark={soSpark}
+          delta={salesDelta}
         />
         <KTile
           label="This-Month Delivered"
@@ -559,6 +770,7 @@ export default function DashboardBPage() {
           icon={Truck}
           accent={C_PROD}
           spark={delSpark}
+          delta={prodDelta}
         />
         <KTile
           label="Outstanding"
@@ -577,30 +789,123 @@ export default function DashboardBPage() {
         <KTile
           label="Daily Capacity"
           value={hrs(prod?.dailyCapacityMin)}
-          sub="7-working-day actual avg"
+          sub="7-working-day actual avg · view"
           icon={Factory}
           accent={C_SO}
+          onClick={
+            prod?.capacityDays
+              ? () =>
+                  setDrill({
+                    title: "Daily Capacity — Past 7 Working Days",
+                    subtitle: `Average ${hm(prod.dailyCapacityMin)}/day across all production depts`,
+                    node: (
+                      <MiniTable
+                        cols={["Date", "Production time", "vs Avg"]}
+                        rows={[...prod.capacityDays]
+                          .sort((a, b) => a.date.localeCompare(b.date))
+                          .map((d) => {
+                            const diff = d.minutes - prod.dailyCapacityMin;
+                            return [
+                              d.date,
+                              hm(d.minutes),
+                              `${diff >= 0 ? "+" : "−"}${hm(Math.abs(diff))}`,
+                            ];
+                          })}
+                      />
+                    ),
+                  })
+              : undefined
+          }
         />
         <KTile
           label="Backlog"
           value={`${backlogDays.toLocaleString()} days`}
-          sub={`${hrs(prod?.backlogMin)} queued`}
+          sub={`${hrs(prod?.backlogMin)} queued · view`}
           icon={Clock}
           accent={C_RED}
+          onClick={
+            prod?.backlogByDept
+              ? () =>
+                  setDrill({
+                    title: "Total Backlog — per Department",
+                    subtitle: `${hm(prod.backlogGrandMin)} of active work across ${prod.backlogByDept.length} dept${prod.backlogByDept.length === 1 ? "" : "s"}`,
+                    node: (
+                      <MiniTable
+                        cols={[
+                          "Department",
+                          "Sofa",
+                          "Bedframe",
+                          "Total",
+                          "Daily cap",
+                          "Backlog",
+                        ]}
+                        rows={prod.backlogByDept.map((d) => [
+                          d.dept,
+                          hm(d.sofaMin),
+                          hm(d.bedframeMin),
+                          hm(d.totalMin),
+                          `${hm(d.dailyCapMin)}/d`,
+                          `${d.backlogDays.toLocaleString()}d`,
+                        ])}
+                      />
+                    ),
+                  })
+              : undefined
+          }
         />
         <KTile
           label="Active Jobs"
           value={`${(prod?.activeJobs?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.activeJobs?.sofaSets ?? 0).toLocaleString()}`}
-          sub="pending bedframe / sofa sets"
+          sub="pending bedframe / sofa sets · view"
           icon={Package}
           accent={C_PROD}
+          onClick={
+            prod?.activeJobs
+              ? () =>
+                  setDrill({
+                    title: "Active Jobs — pending by customer",
+                    subtitle:
+                      "Bedframe = pieces in production · Sofa = sets (1 SO = 1 set)",
+                    node: (
+                      <MiniTable
+                        cols={["Customer", "Bedframe units", "Sofa sets"]}
+                        rows={prod.activeJobs.byCustomer.map((c) => [
+                          c.customer,
+                          c.bedframeUnits ? c.bedframeUnits.toLocaleString() : "—",
+                          c.sofaSets ? c.sofaSets.toLocaleString() : "—",
+                        ])}
+                      />
+                    ),
+                  })
+              : undefined
+          }
         />
         <KTile
           label="Completed Yesterday"
           value={`${(prod?.completedYesterday?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.completedYesterday?.sofaSets ?? 0).toLocaleString()}`}
-          sub="bedframe / sofa finished"
+          sub="bedframe / sofa finished · view 7d"
           icon={CheckCircle2}
           accent={C_GREEN}
+          onClick={
+            prod?.completedLast7
+              ? () =>
+                  setDrill({
+                    title: "Completed — last 7 days",
+                    subtitle:
+                      "Production finished per day (last upholstery completed)",
+                    node: (
+                      <MiniTable
+                        cols={["Date", "Bedframe units", "Sofa sets"]}
+                        rows={prod.completedLast7.map((d) => [
+                          d.date,
+                          d.bedframeUnits.toLocaleString(),
+                          d.sofaSets.toLocaleString(),
+                        ])}
+                      />
+                    ),
+                  })
+              : undefined
+          }
         />
       </div>
 
@@ -730,28 +1035,54 @@ export default function DashboardBPage() {
             <SectionTitle
               title="Order Pipeline"
               sub="confirmed → outstanding → delivered"
+              right={
+                <div className="text-right">
+                  <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                    Delivered rate
+                  </p>
+                  <p className="text-base font-bold text-[#15803D]">
+                    {deliveredRate.toFixed(1)}%
+                  </p>
+                </div>
+              }
             />
             {[
-              { k: "Confirmed", v: confirmed, c: C_SO },
-              { k: "Outstanding", v: outstanding, c: C_PROD },
-              { k: "Delivered", v: delivered, c: C_GREEN },
+              { k: "Confirmed", v: confirmed, c: C_SO, pct: 100 },
+              {
+                k: "Outstanding",
+                v: outstanding,
+                c: C_PROD,
+                pct: confirmed > 0 ? (outstanding / confirmed) * 100 : 0,
+              },
+              {
+                k: "Delivered",
+                v: delivered,
+                c: C_GREEN,
+                pct: deliveredRate,
+              },
             ].map((s) => (
               <div key={s.k} className="flex items-center gap-3 py-1.5">
                 <span className="w-24 text-xs text-[#5A5550]">{s.k}</span>
                 <div className="flex-1 h-3 rounded-full bg-[#F5F2ED] overflow-hidden">
                   <div
-                    className="h-full rounded-full"
+                    className="h-full rounded-full transition-all"
                     style={{
                       width: `${Math.max(3, (s.v / pipeMax) * 100)}%`,
                       background: s.c,
                     }}
                   />
                 </div>
+                <span className="w-12 text-right text-[11px] text-[#9CA3AF] tabular-nums">
+                  {s.pct.toFixed(0)}%
+                </span>
                 <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
                   {rm(s.v)}
                 </span>
               </div>
             ))}
+            <p className="mt-2 text-[11px] text-[#9CA3AF]">
+              {rm(outstanding)} still to ship of {rm(confirmed)} confirmed.
+            </p>
           </CardContent>
         </Card>
 
@@ -815,13 +1146,107 @@ export default function DashboardBPage() {
         </Card>
       </div>
 
+      {/* Revenue concentration — who our revenue comes from */}
+      <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+        <CardContent className="p-5">
+          <SectionTitle
+            title="Revenue Concentration"
+            sub="share of total customer value — customer mix"
+            right={
+              <span className="text-[11px] text-[#9CA3AF]">
+                Total{" "}
+                <span className="font-semibold text-[#1F1D1B]">
+                  {rm(totalCustRev)}
+                </span>
+              </span>
+            }
+          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
+            <div style={{ width: "100%", height: 240 }}>
+              {pieData.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-xs text-[#9CA3AF]">
+                  No customer revenue.
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={pieData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={58}
+                      outerRadius={92}
+                      paddingAngle={2}
+                      stroke="#fff"
+                      strokeWidth={2}
+                      isAnimationActive={false}
+                    >
+                      {pieData.map((_, i) => (
+                        <Cell
+                          key={i}
+                          fill={PIE_COLORS[i % PIE_COLORS.length]}
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(val, name) => {
+                        const v = Number(val) || 0;
+                        return [
+                          `${rm(v)} · ${((v / Math.max(1, totalCustRev)) * 100).toFixed(1)}%`,
+                          String(name),
+                        ];
+                      }}
+                      contentStyle={{
+                        borderRadius: 8,
+                        border: "1px solid #E2DDD8",
+                        fontSize: 12,
+                      }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              {pieData.map((p, i) => {
+                const pct =
+                  (p.value / Math.max(1, totalCustRev)) * 100;
+                return (
+                  <div
+                    key={p.name}
+                    className="flex items-center gap-2 text-sm"
+                  >
+                    <span
+                      className="h-2.5 w-2.5 rounded-sm shrink-0"
+                      style={{
+                        background: PIE_COLORS[i % PIE_COLORS.length],
+                      }}
+                    />
+                    <span className="flex-1 truncate text-[#1F1D1B]">
+                      {p.name}
+                    </span>
+                    <span className="text-xs text-[#9CA3AF] tabular-nums w-12 text-right">
+                      {pct.toFixed(1)}%
+                    </span>
+                    <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums w-24 text-right">
+                      {rm(p.value)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* AOV + Top sellers */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">
             <SectionTitle
               title="Customer Value"
-              sub="total value · bedframe & sofa AOV"
+              sub="total value · click a customer for monthly AOV"
               right={
                 ov.aovCompany ? (
                   <div className="text-right text-[11px] text-[#9CA3AF]">
@@ -843,31 +1268,70 @@ export default function DashboardBPage() {
                 ) : undefined
               }
             />
-            {aov.map((a, i) => (
-              <div
-                key={a.customerName}
-                className="flex items-center gap-3 py-1"
-              >
-                <span className="w-5 text-xs font-semibold text-[#6B5C32] tabular-nums">
-                  {i + 1}
-                </span>
-                <span className="w-28 text-xs text-[#1F1D1B] truncate">
-                  {a.customerName}
-                </span>
-                <div className="flex-1 h-2 rounded-full bg-[#F5F2ED] overflow-hidden">
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${(a.totalSen / aovMax) * 100}%`,
-                      background: C_SO,
-                    }}
-                  />
+            {aov.map((a, i) => {
+              const monthly = aovMonthly[a.customerName];
+              const clickable = monthly && monthly.length > 0;
+              return (
+                <div
+                  key={a.customerName}
+                  onClick={
+                    clickable
+                      ? () =>
+                          setDrill({
+                            title: `${a.customerName} — monthly AOV`,
+                            subtitle:
+                              "Average per month, by SO date. Bedframe per unit · Sofa per set.",
+                            node: (
+                              <MiniTable
+                                cols={[
+                                  "Month",
+                                  "Bedframe AOV",
+                                  "Units",
+                                  "Sofa AOV",
+                                  "Sets",
+                                ]}
+                                rows={monthly.map((m) => [
+                                  m.month,
+                                  m.bedframeUnits ? rm(m.bedframeAvgSen) : "—",
+                                  m.bedframeUnits || "—",
+                                  m.sofaSets ? rm(m.sofaAvgSen) : "—",
+                                  m.sofaSets || "—",
+                                ])}
+                              />
+                            ),
+                          })
+                      : undefined
+                  }
+                  className={`flex items-center gap-3 py-1 rounded ${
+                    clickable
+                      ? "cursor-pointer hover:bg-[#FAF8F4] -mx-1 px-1"
+                      : ""
+                  }`}
+                >
+                  <span className="w-5 text-xs font-semibold text-[#6B5C32] tabular-nums">
+                    {i + 1}
+                  </span>
+                  <span className="w-28 text-xs text-[#1F1D1B] truncate">
+                    {a.customerName}
+                    {clickable && (
+                      <span className="text-[#C2BBAE]"> ›</span>
+                    )}
+                  </span>
+                  <div className="flex-1 h-2 rounded-full bg-[#F5F2ED] overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${(a.totalSen / aovMax) * 100}%`,
+                        background: C_SO,
+                      }}
+                    />
+                  </div>
+                  <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                    {rm(a.totalSen)}
+                  </span>
                 </div>
-                <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
-                  {rm(a.totalSen)}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </CardContent>
         </Card>
 
@@ -882,47 +1346,99 @@ export default function DashboardBPage() {
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550] mb-1.5">
                   Bedframe
                 </p>
-                {topBed.slice(0, 6).map((p) => (
-                  <div
-                    key={p.productCode}
-                    className="flex items-center justify-between text-sm py-0.5"
-                  >
-                    <span className="text-[#5A5550] truncate pr-2">
-                      <span className="font-medium text-[#1F1D1B]">
-                        {p.productCode}
-                      </span>{" "}
-                      <span className="text-xs text-[#9CA3AF]">
-                        ×{p.qtySold}
+                {topBed.slice(0, 6).map((p) => {
+                  const cr = tsByCust?.BEDFRAME?.[p.productCode] ?? [];
+                  return (
+                    <div
+                      key={p.productCode}
+                      onClick={
+                        cr.length
+                          ? () =>
+                              setDrill({
+                                title: `${p.productCode} — by customer`,
+                                subtitle: `${p.qtySold.toLocaleString()} units · ${rm(p.valueSen)}`,
+                                node: (
+                                  <MiniTable
+                                    cols={["Customer", "Units", "Value"]}
+                                    rows={cr.map((c) => [
+                                      c.customer,
+                                      c.qty.toLocaleString(),
+                                      rm(c.valueSen),
+                                    ])}
+                                  />
+                                ),
+                              })
+                          : undefined
+                      }
+                      className={`flex items-center justify-between text-sm py-0.5 rounded ${
+                        cr.length
+                          ? "cursor-pointer hover:bg-[#FAF8F4] -mx-1 px-1"
+                          : ""
+                      }`}
+                    >
+                      <span className="text-[#5A5550] truncate pr-2">
+                        <span className="font-medium text-[#1F1D1B]">
+                          {p.productCode}
+                        </span>{" "}
+                        <span className="text-xs text-[#9CA3AF]">
+                          ×{p.qtySold}
+                        </span>
                       </span>
-                    </span>
-                    <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums">
-                      {rm(p.valueSen)}
-                    </span>
-                  </div>
-                ))}
+                      <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                        {rm(p.valueSen)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
               <div className="border-l border-[#F0ECE6] pl-5">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550] mb-1.5">
                   Sofa
                 </p>
-                {topSofa.slice(0, 6).map((p) => (
-                  <div
-                    key={p.model}
-                    className="flex items-center justify-between text-sm py-0.5"
-                  >
-                    <span className="text-[#5A5550] truncate pr-2">
-                      <span className="font-medium text-[#1F1D1B]">
-                        {p.model}
-                      </span>{" "}
-                      <span className="text-xs text-[#9CA3AF]">
-                        ×{p.setsSold} sets
+                {topSofa.slice(0, 6).map((p) => {
+                  const cr = tsByCust?.SOFA?.[p.model] ?? [];
+                  return (
+                    <div
+                      key={p.model}
+                      onClick={
+                        cr.length
+                          ? () =>
+                              setDrill({
+                                title: `Sofa ${p.model} — by customer`,
+                                subtitle: `${p.setsSold.toLocaleString()} sets · ${rm(p.valueSen)}`,
+                                node: (
+                                  <MiniTable
+                                    cols={["Customer", "Sets", "Value"]}
+                                    rows={cr.map((c) => [
+                                      c.customer,
+                                      c.sets.toLocaleString(),
+                                      rm(c.valueSen),
+                                    ])}
+                                  />
+                                ),
+                              })
+                          : undefined
+                      }
+                      className={`flex items-center justify-between text-sm py-0.5 rounded ${
+                        cr.length
+                          ? "cursor-pointer hover:bg-[#FAF8F4] -mx-1 px-1"
+                          : ""
+                      }`}
+                    >
+                      <span className="text-[#5A5550] truncate pr-2">
+                        <span className="font-medium text-[#1F1D1B]">
+                          {p.model}
+                        </span>{" "}
+                        <span className="text-xs text-[#9CA3AF]">
+                          ×{p.setsSold} sets
+                        </span>
                       </span>
-                    </span>
-                    <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums">
-                      {rm(p.valueSen)}
-                    </span>
-                  </div>
-                ))}
+                      <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                        {rm(p.valueSen)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </CardContent>
@@ -1115,6 +1631,16 @@ export default function DashboardBPage() {
       <p className="text-center text-[11px] text-[#9CA3AF] pt-2">
         Dashboard B · experimental view · full data parity with Dashboard
       </p>
+
+      {drill && (
+        <Modal
+          title={drill.title}
+          subtitle={drill.subtitle}
+          onClose={() => setDrill(null)}
+        >
+          {drill.node}
+        </Modal>
+      )}
     </div>
   );
 }

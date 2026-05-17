@@ -44,7 +44,7 @@ app.get("/", async (c) => {
   const periodRaw = c.req.query("period") ?? "all";
   const period = /^\d{4}-\d{2}$/.test(periodRaw) ? periodRaw : "all";
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v16:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v17:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1164,6 +1164,20 @@ app.get("/", async (c) => {
         costSen: Number(r.costSen) || 0,
       });
     }
+    // Per-category weighted avg fabric cost / meter (all issued to
+    // that category): Σ cost ÷ Σ meters. A shared fabric contributes
+    // only the portion actually issued to that category.
+    const catAvgCostSen = (cat: string) => {
+      let cost = 0;
+      let mtr = 0;
+      for (const v of (fabUsedByCat.get(cat) ?? new Map()).values()) {
+        cost += v.costSen;
+        mtr += v.meters;
+      }
+      return mtr > 0 ? Math.round(cost / mtr) : 0;
+    };
+    const bedframeAvgCostSen = catAvgCostSen("BEDFRAME");
+    const sofaAvgCostSen = catAvgCostSen("SOFA");
     // Combined per-category list: every fabric with history OR upcoming
     // demand IN THAT CATEGORY. Past-30 / Next-30 are category-specific
     // (not SKU totals). Client toggles the ranking.
@@ -1251,6 +1265,8 @@ app.get("/", async (c) => {
       fabricCostPerMeterSen: {
         total: avgPerMeter(fabTotRes),
         exclBedframeSofa: avgPerMeter(fabExclRes),
+        bedframe: bedframeAvgCostSen,
+        sofa: sofaAvgCostSen,
       },
       aovByCustomer,
       aovCompany,

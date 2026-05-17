@@ -70,7 +70,12 @@ type Overview = {
     grnsPendingQC: number;
     topSuppliers: { name: string; spendSen: number }[];
   };
-  fabricCostPerMeterSen?: { total: number; exclBedframeSofa: number };
+  fabricCostPerMeterSen?: {
+    total: number;
+    exclBedframeSofa: number;
+    bedframe: number;
+    sofa: number;
+  };
   aovByCustomer?: {
     customerName: string;
     bedframeAvgSen: number;
@@ -1375,10 +1380,24 @@ export default function DashboardPage() {
                 className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
               >
                 <CardHeader className="pb-2">
-                  <CardTitle className="flex items-center gap-2 text-sm">
-                    <Scissors className="h-4 w-4 text-[#6B5C32]" />{" "}
-                    {cat === "BEDFRAME" ? "Bedframe" : "Sofa"} Fabric
-                  </CardTitle>
+                  <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="flex items-center gap-2 text-sm">
+                      <Scissors className="h-4 w-4 text-[#6B5C32]" />{" "}
+                      {cat === "BEDFRAME" ? "Bedframe" : "Sofa"} Fabric
+                    </CardTitle>
+                    <div className="text-right">
+                      <p className="text-[10px] text-[#9CA3AF] uppercase tracking-wider">
+                        Avg cost /m
+                      </p>
+                      <p className="text-sm font-bold text-[#1F1D1B] tabular-nums">
+                        {rm(
+                          cat === "BEDFRAME"
+                            ? fab?.bedframe
+                            : fab?.sofa,
+                        )}
+                      </p>
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div>

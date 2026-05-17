@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-17-001 — Fabric Past-30 / Next-30 showed SKU totals under both Bedframe & Sofa (bedframe fabric counted as sofa demand)
+
+**Status:** 🟢 Fixed (2026-05-17)
+**Category:** dashboard
+
+**Symptom:** Wei Siang spotted PC151-01 (a bedframe fabric) showing
+**784 m Next-30 / 2,896 m Past-30 under the Sofa card** — identical
+to its Bedframe figures.
+
+**Root cause:** The Fabric module split *historical used* by the
+consuming PO's category, but Past-30 / Next-30 came from
+`computeFabricMetrics` which is **SKU-level (all categories summed)**.
+The same SKU total was then displayed under whichever category card
+the fabric appeared in → a bedframe fabric's full demand showed under
+Sofa too. The "include if upcoming" gate also used the SKU total +
+a fabricCode→category guess, surfacing fabrics in the wrong card.
+
+**Fix:** Made both metrics category-specific:
+- New `computeFabricNext30ByCategory()` in `src/api/lib/fabric-usage.ts`
+  — same active-FAB_CUT-JC + BOM engine as `computeFabricMetrics`
+  (reuses `fetchBomWipComponentsByCode`, `fetchSofaSiblingsByGroupKey`,
+  `computeFcFabricUsageMeters`) but buckets by the JC's PO
+  `itemCategory` as well as fabric code (due ≤ 30 days).
+- Past-30 actual: new `cost_ledger` RM_ISSUE query date-filtered to
+  the last 30 days, grouped by `(itemCategory, fabricCode)`.
+- `dashboard-overview.ts` per-category list now only includes fabrics
+  with real history OR real upcoming demand **in that category**;
+  dropped the SKU-total `computeFabricMetrics` call + the
+  fabricCode→category guess. Overview cache v15→v16. (Also: sofa list
+  shows 10 colourways vs bedframe 8 per Wei Siang.)
+
+**Verify on prod (read-only):** confirm PC151-01 no longer appears
+under Sofa Next/Past (or shows only its true sofa-line meters), and
+each card's Past-30/Next-30 sums to that category only. `tsc` clean;
+`npm test` 185/185.
+
+---
+
 ## BUG-2026-05-16-013 — Dashboard "Monthly Revenue" empty (revenue MV 500) → rebuilt from SO + Invoices + Production; Accessory dropped; AOV Total column
 
 **Status:** 🟢 Fixed (2026-05-16)

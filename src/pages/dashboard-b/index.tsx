@@ -678,8 +678,6 @@ export default function DashboardBPage() {
   const gaugeAccent = backlogDays > 12 ? C_RED : backlogDays > 7 ? C_PROD : C_GREEN;
 
   const aovAll = ov.aovByCustomer ?? [];
-  const aov = aovAll.slice(0, 8);
-  const aovMax = Math.max(1, ...aov.map((a) => a.totalSen));
   const topBed = ov.topSellers?.BEDFRAME ?? [];
   const topSofa = ov.topSellers?.SOFA ?? [];
 
@@ -853,60 +851,6 @@ export default function DashboardBPage() {
               : undefined
           }
         />
-        <KTile
-          label="Active Jobs"
-          value={`${(prod?.activeJobs?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.activeJobs?.sofaSets ?? 0).toLocaleString()}`}
-          sub="pending bedframe / sofa sets · view"
-          icon={Package}
-          accent={C_PROD}
-          onClick={
-            prod?.activeJobs
-              ? () =>
-                  setDrill({
-                    title: "Active Jobs — pending by customer",
-                    subtitle:
-                      "Bedframe = pieces in production · Sofa = sets (1 SO = 1 set)",
-                    node: (
-                      <MiniTable
-                        cols={["Customer", "Bedframe units", "Sofa sets"]}
-                        rows={prod.activeJobs.byCustomer.map((c) => [
-                          c.customer,
-                          c.bedframeUnits ? c.bedframeUnits.toLocaleString() : "—",
-                          c.sofaSets ? c.sofaSets.toLocaleString() : "—",
-                        ])}
-                      />
-                    ),
-                  })
-              : undefined
-          }
-        />
-        <KTile
-          label="Completed Yesterday"
-          value={`${(prod?.completedYesterday?.bedframeUnits ?? 0).toLocaleString()} / ${(prod?.completedYesterday?.sofaSets ?? 0).toLocaleString()}`}
-          sub="bedframe / sofa finished · view 7d"
-          icon={CheckCircle2}
-          accent={C_GREEN}
-          onClick={
-            prod?.completedLast7
-              ? () =>
-                  setDrill({
-                    title: "Completed — last 7 days",
-                    subtitle:
-                      "Production finished per day (last upholstery completed)",
-                    node: (
-                      <MiniTable
-                        cols={["Date", "Bedframe units", "Sofa sets"]}
-                        rows={prod.completedLast7.map((d) => [
-                          d.date,
-                          d.bedframeUnits.toLocaleString(),
-                          d.sofaSets.toLocaleString(),
-                        ])}
-                      />
-                    ),
-                  })
-              : undefined
-          }
-        />
       </div>
 
       {/* Revenue + Plant load */}
@@ -1023,6 +967,79 @@ export default function DashboardBPage() {
                   {ov.employee?.activeHeadcount ?? 0}
                 </p>
               </div>
+            </div>
+            <div className="mt-4 w-full border-t border-[#F0ECE6] pt-3 space-y-2">
+              <button
+                type="button"
+                disabled={!prod?.activeJobs}
+                onClick={() =>
+                  prod?.activeJobs &&
+                  setDrill({
+                    title: "Active Jobs — pending by customer",
+                    subtitle:
+                      "Bedframe = pieces in production · Sofa = sets (1 SO = 1 set)",
+                    node: (
+                      <MiniTable
+                        cols={["Customer", "Bedframe units", "Sofa sets"]}
+                        rows={prod.activeJobs.byCustomer.map((c) => [
+                          c.customer,
+                          c.bedframeUnits ? c.bedframeUnits.toLocaleString() : "—",
+                          c.sofaSets ? c.sofaSets.toLocaleString() : "—",
+                        ])}
+                      />
+                    ),
+                  })
+                }
+                className="w-full flex items-center justify-between rounded-lg bg-[#F7F4EF] hover:bg-[#F0ECE6] px-3 py-2 text-left transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <Package className="h-4 w-4 text-[#6B5C32]" />
+                  <span className="text-xs text-[#5A5550]">
+                    Active Jobs{" "}
+                    <span className="text-[#C2BBAE]">· pending</span>
+                  </span>
+                </span>
+                <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
+                  {(prod?.activeJobs?.bedframeUnits ?? 0).toLocaleString()} /{" "}
+                  {(prod?.activeJobs?.sofaSets ?? 0).toLocaleString()}
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={!prod?.completedLast7}
+                onClick={() =>
+                  prod?.completedLast7 &&
+                  setDrill({
+                    title: "Completed — last 7 days",
+                    subtitle:
+                      "Production finished per day (last upholstery completed)",
+                    node: (
+                      <MiniTable
+                        cols={["Date", "Bedframe units", "Sofa sets"]}
+                        rows={prod.completedLast7.map((d) => [
+                          d.date,
+                          d.bedframeUnits.toLocaleString(),
+                          d.sofaSets.toLocaleString(),
+                        ])}
+                      />
+                    ),
+                  })
+                }
+                className="w-full flex items-center justify-between rounded-lg bg-[#F7F4EF] hover:bg-[#F0ECE6] px-3 py-2 text-left transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-[#15803D]" />
+                  <span className="text-xs text-[#5A5550]">
+                    Completed yest.{" "}
+                    <span className="text-[#C2BBAE]">· view 7d</span>
+                  </span>
+                </span>
+                <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
+                  {(prod?.completedYesterday?.bedframeUnits ?? 0).toLocaleString()}{" "}
+                  /{" "}
+                  {(prod?.completedYesterday?.sofaSets ?? 0).toLocaleString()}
+                </span>
+              </button>
             </div>
           </CardContent>
         </Card>
@@ -1146,194 +1163,235 @@ export default function DashboardBPage() {
         </Card>
       </div>
 
-      {/* Revenue concentration — who our revenue comes from */}
+      {/* Revenue by Customer — financial-report concentration exhibit */}
       <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
         <CardContent className="p-5">
           <SectionTitle
-            title="Revenue Concentration"
-            sub="share of total customer value — customer mix"
+            title="Revenue by Customer"
+            sub="customer concentration · share & cumulative % · click a customer for monthly AOV"
             right={
-              <span className="text-[11px] text-[#9CA3AF]">
-                Total{" "}
-                <span className="font-semibold text-[#1F1D1B]">
-                  {rm(totalCustRev)}
-                </span>
-              </span>
-            }
-          />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
-            <div style={{ width: "100%", height: 240 }}>
-              {pieData.length === 0 ? (
-                <div className="flex items-center justify-center h-full text-xs text-[#9CA3AF]">
-                  No customer revenue.
+              ov.aovCompany ? (
+                <div className="text-right text-[11px] text-[#9CA3AF]">
+                  <div>
+                    Co. BF{" "}
+                    <span className="font-semibold text-[#1F1D1B]">
+                      {rm(ov.aovCompany.bedframeAvgSen)}
+                    </span>
+                    /u
+                  </div>
+                  <div>
+                    Co. Sofa{" "}
+                    <span className="font-semibold text-[#1F1D1B]">
+                      {rm(ov.aovCompany.sofaAvgSen)}
+                    </span>
+                    /set
+                  </div>
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={pieData}
-                      dataKey="value"
-                      nameKey="name"
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={58}
-                      outerRadius={92}
-                      paddingAngle={2}
-                      stroke="#fff"
-                      strokeWidth={2}
-                      isAnimationActive={false}
-                    >
-                      {pieData.map((_, i) => (
-                        <Cell
-                          key={i}
-                          fill={PIE_COLORS[i % PIE_COLORS.length]}
-                        />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      formatter={(val, name) => {
-                        const v = Number(val) || 0;
-                        return [
-                          `${rm(v)} · ${((v / Math.max(1, totalCustRev)) * 100).toFixed(1)}%`,
-                          String(name),
-                        ];
-                      }}
-                      contentStyle={{
-                        borderRadius: 8,
-                        border: "1px solid #E2DDD8",
-                        fontSize: 12,
-                      }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              {pieData.map((p, i) => {
-                const pct =
-                  (p.value / Math.max(1, totalCustRev)) * 100;
-                return (
-                  <div
-                    key={p.name}
-                    className="flex items-center gap-2 text-sm"
-                  >
-                    <span
-                      className="h-2.5 w-2.5 rounded-sm shrink-0"
-                      style={{
-                        background: PIE_COLORS[i % PIE_COLORS.length],
-                      }}
-                    />
-                    <span className="flex-1 truncate text-[#1F1D1B]">
-                      {p.name}
+                <span className="text-[11px] text-[#9CA3AF]">
+                  Total{" "}
+                  <span className="font-semibold text-[#1F1D1B]">
+                    {rm(totalCustRev)}
+                  </span>
+                </span>
+              )
+            }
+          />
+          {pieData.length === 0 ? (
+            <p className="text-xs text-[#9CA3AF] py-6 text-center">
+              No customer revenue.
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 items-center">
+                <div
+                  className="lg:col-span-2 relative"
+                  style={{ width: "100%", height: 248 }}
+                >
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={pieData}
+                        dataKey="value"
+                        nameKey="name"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={62}
+                        outerRadius={96}
+                        paddingAngle={2}
+                        stroke="#fff"
+                        strokeWidth={2}
+                        isAnimationActive={false}
+                      >
+                        {pieData.map((_, i) => (
+                          <Cell
+                            key={i}
+                            fill={PIE_COLORS[i % PIE_COLORS.length]}
+                          />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        formatter={(val, name) => {
+                          const v = Number(val) || 0;
+                          return [
+                            `${rm(v)} · ${((v / Math.max(1, totalCustRev)) * 100).toFixed(1)}%`,
+                            String(name),
+                          ];
+                        }}
+                        contentStyle={{
+                          borderRadius: 8,
+                          border: "1px solid #E2DDD8",
+                          fontSize: 12,
+                        }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    <span className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
+                      Top 3
                     </span>
-                    <span className="text-xs text-[#9CA3AF] tabular-nums w-12 text-right">
-                      {pct.toFixed(1)}%
-                    </span>
-                    <span className="text-xs font-semibold text-[#1F1D1B] tabular-nums w-24 text-right">
-                      {rm(p.value)}
+                    <span className="text-xl font-[800] text-[#1F1D1B]">
+                      {(
+                        (aovAll
+                          .slice(0, 3)
+                          .reduce((s, a) => s + a.totalSen, 0) /
+                          Math.max(1, totalCustRev)) *
+                        100
+                      ).toFixed(0)}
+                      %
                     </span>
                   </div>
-                );
-              })}
-            </div>
-          </div>
+                </div>
+                <div className="lg:col-span-3">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] text-[#9CA3AF] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">#</th>
+                        <th className="py-1.5 font-medium">Customer</th>
+                        <th className="py-1.5 font-medium text-right">
+                          Revenue
+                        </th>
+                        <th className="py-1.5 font-medium text-right">
+                          Share
+                        </th>
+                        <th className="py-1.5 font-medium text-right">
+                          Cumul.
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        let cum = 0;
+                        return aovAll.slice(0, 10).map((a, i) => {
+                          const share =
+                            (a.totalSen / Math.max(1, totalCustRev)) * 100;
+                          cum += share;
+                          const monthly = aovMonthly[a.customerName];
+                          const clickable = monthly && monthly.length > 0;
+                          return (
+                            <tr
+                              key={a.customerName}
+                              onClick={
+                                clickable
+                                  ? () =>
+                                      setDrill({
+                                        title: `${a.customerName} — monthly AOV`,
+                                        subtitle:
+                                          "Average per month, by SO date. Bedframe per unit · Sofa per set.",
+                                        node: (
+                                          <MiniTable
+                                            cols={[
+                                              "Month",
+                                              "Bedframe AOV",
+                                              "Units",
+                                              "Sofa AOV",
+                                              "Sets",
+                                            ]}
+                                            rows={monthly.map((m) => [
+                                              m.month,
+                                              m.bedframeUnits
+                                                ? rm(m.bedframeAvgSen)
+                                                : "—",
+                                              m.bedframeUnits || "—",
+                                              m.sofaSets
+                                                ? rm(m.sofaAvgSen)
+                                                : "—",
+                                              m.sofaSets || "—",
+                                            ])}
+                                          />
+                                        ),
+                                      })
+                                  : undefined
+                              }
+                              className={`border-b border-[#F0ECE6] ${
+                                clickable
+                                  ? "cursor-pointer hover:bg-[#FAF8F4]"
+                                  : ""
+                              }`}
+                            >
+                              <td className="py-1.5 text-[#9CA3AF] tabular-nums">
+                                {i + 1}
+                              </td>
+                              <td className="py-1.5 text-[#1F1D1B]">
+                                <span
+                                  className="inline-block h-2 w-2 rounded-sm mr-2 align-middle"
+                                  style={{
+                                    background:
+                                      PIE_COLORS[i % PIE_COLORS.length],
+                                  }}
+                                />
+                                {a.customerName}
+                                {clickable && (
+                                  <span className="text-[#C2BBAE]"> ›</span>
+                                )}
+                              </td>
+                              <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
+                                {rm(a.totalSen)}
+                              </td>
+                              <td className="py-1.5 text-right text-[#5A5550] tabular-nums">
+                                {share.toFixed(1)}%
+                              </td>
+                              <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                                {cum.toFixed(1)}%
+                              </td>
+                            </tr>
+                          );
+                        });
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <p className="mt-3 text-[11px] text-[#9CA3AF]">
+                Concentration:{" "}
+                <span className="font-semibold text-[#1F1D1B]">
+                  Top 3 ={" "}
+                  {(
+                    (aovAll.slice(0, 3).reduce((s, a) => s + a.totalSen, 0) /
+                      Math.max(1, totalCustRev)) *
+                    100
+                  ).toFixed(0)}
+                  %
+                </span>{" "}
+                ·{" "}
+                <span className="font-semibold text-[#1F1D1B]">
+                  Top 5 ={" "}
+                  {(
+                    (aovAll.slice(0, 5).reduce((s, a) => s + a.totalSen, 0) /
+                      Math.max(1, totalCustRev)) *
+                    100
+                  ).toFixed(0)}
+                  %
+                </span>{" "}
+                of total customer revenue ({rm(totalCustRev)}).
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 
-      {/* AOV + Top sellers */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
-          <CardContent className="p-5">
-            <SectionTitle
-              title="Customer Value"
-              sub="total value · click a customer for monthly AOV"
-              right={
-                ov.aovCompany ? (
-                  <div className="text-right text-[11px] text-[#9CA3AF]">
-                    <div>
-                      All BF{" "}
-                      <span className="font-semibold text-[#1F1D1B]">
-                        {rm(ov.aovCompany.bedframeAvgSen)}
-                      </span>
-                      /u
-                    </div>
-                    <div>
-                      All Sofa{" "}
-                      <span className="font-semibold text-[#1F1D1B]">
-                        {rm(ov.aovCompany.sofaAvgSen)}
-                      </span>
-                      /set
-                    </div>
-                  </div>
-                ) : undefined
-              }
-            />
-            {aov.map((a, i) => {
-              const monthly = aovMonthly[a.customerName];
-              const clickable = monthly && monthly.length > 0;
-              return (
-                <div
-                  key={a.customerName}
-                  onClick={
-                    clickable
-                      ? () =>
-                          setDrill({
-                            title: `${a.customerName} — monthly AOV`,
-                            subtitle:
-                              "Average per month, by SO date. Bedframe per unit · Sofa per set.",
-                            node: (
-                              <MiniTable
-                                cols={[
-                                  "Month",
-                                  "Bedframe AOV",
-                                  "Units",
-                                  "Sofa AOV",
-                                  "Sets",
-                                ]}
-                                rows={monthly.map((m) => [
-                                  m.month,
-                                  m.bedframeUnits ? rm(m.bedframeAvgSen) : "—",
-                                  m.bedframeUnits || "—",
-                                  m.sofaSets ? rm(m.sofaAvgSen) : "—",
-                                  m.sofaSets || "—",
-                                ])}
-                              />
-                            ),
-                          })
-                      : undefined
-                  }
-                  className={`flex items-center gap-3 py-1 rounded ${
-                    clickable
-                      ? "cursor-pointer hover:bg-[#FAF8F4] -mx-1 px-1"
-                      : ""
-                  }`}
-                >
-                  <span className="w-5 text-xs font-semibold text-[#6B5C32] tabular-nums">
-                    {i + 1}
-                  </span>
-                  <span className="w-28 text-xs text-[#1F1D1B] truncate">
-                    {a.customerName}
-                    {clickable && (
-                      <span className="text-[#C2BBAE]"> ›</span>
-                    )}
-                  </span>
-                  <div className="flex-1 h-2 rounded-full bg-[#F5F2ED] overflow-hidden">
-                    <div
-                      className="h-full rounded-full"
-                      style={{
-                        width: `${(a.totalSen / aovMax) * 100}%`,
-                        background: C_SO,
-                      }}
-                    />
-                  </div>
-                  <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
-                    {rm(a.totalSen)}
-                  </span>
-                </div>
-              );
-            })}
-          </CardContent>
-        </Card>
+      {/* Top sellers */}
+      <div>
 
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">

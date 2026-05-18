@@ -36,9 +36,13 @@ Entries themselves stay newest-first.
 
 ## BUG-2026-05-18-004 — Invoices systematically under-billed (~RM 165k net) — narrow per-DO price index priced unmatched items at zero
 
-**Status:** 🟡 Fix in progress (2026-05-18) — pricing-logic fix committed on
-`claude/invoice-pricing-fix`; reconciliation report + void/re-issue of the
-84 affected invoices pending Wei Siang sign-off. NOT on prod yet.
+**Status:** 🟢 Fixed (2026-05-18) — pricing fix (both creation paths) +
+void/re-issue migration shipped to prod and executed. 40 single-invoice
+DOs + DO-2604-001 (2-invoice merged) voided & re-issued at the correct
+value; books reconcile to RM 0 gap (live invoices RM 328,356 == delivered
+RM 328,356); customer A/R netted by the exact delta; a DO→INVOICED
+side-effect that crashed the Delivered total was caught and self-healed
+(all DOs back to DELIVERED). Verified live.
 **Category:** sales-orders
 
 **Symptom:** Wei Siang: "invoice amount 跟 delivered amount 对不上". The

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -128,6 +128,8 @@ export default function AccountingPage() {
         ))}
       </div>
 
+      <GstRateCard />
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="text-[#6B7280]">Loading accounting data...</div>
@@ -152,6 +154,79 @@ export default function AccountingPage() {
 }
 
 // =============== TAB 1: OVERVIEW ===============
+
+// Operator-configurable GST/SST rate (kv_config key `gst_rate_pct`).
+// Applied automatically when a sales invoice is posted (Phase 4).
+function GstRateCard() {
+  const { toast } = useToast();
+  const [pct, setPct] = useState<number>(0);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    fetch("/api/kv-config/gst_rate_pct")
+      .then((r) => r.json())
+      .then((j) => {
+        const v = (j?.data as { pct?: number } | null)?.pct;
+        if (typeof v === "number" && isFinite(v)) setPct(v);
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+  const save = async () => {
+    if (!(pct >= 0 && pct <= 100)) {
+      toast.error("GST rate must be between 0 and 100");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/kv-config/gst_rate_pct", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pct }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success(`GST rate saved: ${pct}%`);
+      else toast.error(j?.error || "Failed to save GST rate");
+    } catch {
+      toast.error("Failed to save GST rate");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4 flex flex-wrap items-end gap-4">
+        <div>
+          <label className="text-xs font-medium text-[#6B7280] mb-1 block">
+            GST / SST Rate (%)
+          </label>
+          <input
+            type="number"
+            step="0.01"
+            min={0}
+            max={100}
+            value={pct}
+            disabled={!loaded}
+            onChange={(e) => setPct(Number(e.target.value))}
+            className="w-32 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+          />
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={save}
+          disabled={saving || !loaded}
+        >
+          {saving ? "Saving…" : "Save"}
+        </Button>
+        <p className="text-[11px] text-[#9CA3AF] max-w-sm">
+          Applied automatically when a sales invoice is posted: tax =
+          subtotal × this rate, credited to GST 350-0000. 0 = no GST.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
 
 function OverviewTab({
   accounts,

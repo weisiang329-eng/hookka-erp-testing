@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-18-002 — Production CI deploy silently broken since the chart-of-accounts merge (build:strict typecheck gate)
+
+**Status:** 🟢 Fixed (2026-05-18) — code shipped + verified
+**Category:** infrastructure
+
+**Symptom:** No push to `main` reached production after the
+chart-of-accounts merge (`024d9fa`). The "Deploy to Cloudflare Pages"
+GitHub Action ran but the actual Pages-deploy step was skipped on every
+commit; prod kept serving `5028e31`. Surfaced when the Fab Cut
+"Customer SO" change (`b7ae31f`) was pushed straight to prod at Wei
+Siang's request and its deploy job failed — investigation showed
+`024d9fa`'s deploy had already failed at the identical step.
+
+**Root cause:** `src/pages/accounting/index.tsx` (lines 170 and 244,
+introduced by the chart-of-accounts merge) had two
+`fetch(...).then((r) => r.json()).then((j) => …)` chains that read
+`j.data` without typing the JSON. `tsc` inferred the response as `{}`
+→ TS2339 "Property 'data' does not exist on type '{}'". The deploy
+workflow gates on `npm run build:strict` (= `typecheck:app && build`),
+so the type error aborted the build and the conditional deploy step
+was skipped. Plain `npm run build` (rolldown transpile, no typecheck)
+still succeeded, so the breakage was invisible to anyone running a
+local build instead of `build:strict`.
+
+**Fix:** `src/pages/accounting/index.tsx:168` and `:242` — cast the
+`.json()` promise (`r.json() as Promise<{ data?: { pct?: number } | null }>`
+and `Promise<{ data?: unknown }>`), mirroring the existing
+`(await res.json()) as { … }` convention already used for the PUT
+calls in the same file. Typing-only; no runtime/behaviour change.
+
+**Verified:** `npm run build:strict` passes locally — `typecheck:app`
+reports zero errors and the production build completes. Deploy workflow
+re-run on the follow-up commit proceeds past `build:strict` to the
+Deploy-to-Cloudflare-Pages step. Chart-of-accounts feature behaviour
+unchanged (the two fetches still parse the same payloads).
+
+---
+
 ## BUG-2026-05-18-001 — Fab Cut production sheet "Fab Sew" (and other next/prev-dept) date columns blank on every row
 
 **Status:** 🟡 Fix in progress (2026-05-18) — code committed on `claude/fix-fabcut-sibling-jcs`, awaiting deploy + live verify

@@ -165,7 +165,7 @@ function GstRateCard() {
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     fetch("/api/kv-config/gst_rate_pct")
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ data?: { pct?: number } | null }>)
       .then((j) => {
         const v = (j?.data as { pct?: number } | null)?.pct;
         if (typeof v === "number" && isFinite(v)) setPct(v);
@@ -239,7 +239,7 @@ function StockMapCard() {
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     fetch("/api/kv-config/coa_stock_map")
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ data?: unknown }>)
       .then((j) => {
         if (j?.data) setText(JSON.stringify(j.data, null, 2));
       })

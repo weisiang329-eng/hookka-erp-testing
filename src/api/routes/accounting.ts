@@ -28,6 +28,8 @@ type CoaRow = {
   parentCode: string | null;
   balanceSen: number;
   isActive: number;
+  cashFlowCategory: string | null;
+  specialAccountType: string | null;
   created_at: string;
 };
 
@@ -105,6 +107,8 @@ function rowToCoa(r: CoaRow) {
     parentCode: r.parentCode ?? undefined,
     balance: r.balanceSen,
     isActive: r.isActive === 1,
+    cashFlowCategory: r.cashFlowCategory ?? undefined,
+    specialAccountType: r.specialAccountType ?? undefined,
   };
 }
 
@@ -296,7 +300,8 @@ app.post("/coa", async (c) => {
   if (denied) return denied;
   try {
     const body = await c.req.json();
-    const { code, name, type, parentCode } = body;
+    const { code, name, type, parentCode, cashFlowCategory, specialAccountType } =
+      body;
     if (!code || !name || !type) {
       return c.json(
         { success: false, error: "code, name, and type are required" },
@@ -307,6 +312,20 @@ app.post("/coa", async (c) => {
     if (!validTypes.includes(type)) {
       return c.json({ success: false, error: "Invalid account type" }, 400);
     }
+    const cfCat =
+      cashFlowCategory == null || cashFlowCategory === ""
+        ? null
+        : String(cashFlowCategory).toUpperCase();
+    if (cfCat && !["O", "I", "F"].includes(cfCat)) {
+      return c.json(
+        { success: false, error: "cashFlowCategory must be O, I, or F" },
+        400,
+      );
+    }
+    const satType =
+      specialAccountType == null || specialAccountType === ""
+        ? null
+        : String(specialAccountType).trim();
     const dup = await c.var.DB.prepare(
       "SELECT code FROM chart_of_accounts WHERE code = ?",
     )
@@ -317,10 +336,10 @@ app.post("/coa", async (c) => {
     }
 
     await c.var.DB.prepare(
-      `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive)
-       VALUES (?, ?, ?, ?, 0, 1)`,
+      `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive, cashFlowCategory, specialAccountType)
+       VALUES (?, ?, ?, ?, 0, 1, ?, ?)`,
     )
-      .bind(code, name, type, parentCode ?? null)
+      .bind(code, name, type, parentCode ?? null, cfCat, satType)
       .run();
 
     const created = await c.var.DB.prepare(
@@ -361,11 +380,39 @@ app.put("/coa", async (c) => {
           : body.isActive
             ? 1
             : 0,
+      cashFlowCategory:
+        body.cashFlowCategory === undefined
+          ? existing.cashFlowCategory
+          : body.cashFlowCategory == null || body.cashFlowCategory === ""
+            ? null
+            : String(body.cashFlowCategory).toUpperCase(),
+      specialAccountType:
+        body.specialAccountType === undefined
+          ? existing.specialAccountType
+          : body.specialAccountType == null || body.specialAccountType === ""
+            ? null
+            : String(body.specialAccountType).trim(),
     };
+    if (
+      merged.cashFlowCategory &&
+      !["O", "I", "F"].includes(merged.cashFlowCategory)
+    ) {
+      return c.json(
+        { success: false, error: "cashFlowCategory must be O, I, or F" },
+        400,
+      );
+    }
     await c.var.DB.prepare(
-      `UPDATE chart_of_accounts SET name = ?, parentCode = ?, isActive = ? WHERE code = ?`,
+      `UPDATE chart_of_accounts SET name = ?, parentCode = ?, isActive = ?, cashFlowCategory = ?, specialAccountType = ? WHERE code = ?`,
     )
-      .bind(merged.name, merged.parentCode, merged.isActive, code)
+      .bind(
+        merged.name,
+        merged.parentCode,
+        merged.isActive,
+        merged.cashFlowCategory,
+        merged.specialAccountType,
+        code,
+      )
       .run();
     const updated = await c.var.DB.prepare(
       "SELECT * FROM chart_of_accounts WHERE code = ?",

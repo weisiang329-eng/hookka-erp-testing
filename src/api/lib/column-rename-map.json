@@ -44,6 +44,8 @@
   "balanceQty": "balance_qty",
   "balanceSen": "balance_sen",
   "bankAccount": "bank_account",
+  "cashFlowCategory": "cash_flow_category",
+  "specialAccountType": "special_account_type",
   "bankAccountId": "bank_account_id",
   "bankName": "bank_name",
   "baseModel": "base_model",

@@ -373,7 +373,14 @@ function AgingCard({
 function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
   const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
-  const [formData, setFormData] = useState({ code: "", name: "", type: "ASSET" as ChartOfAccount["type"], parentCode: "" });
+  const [formData, setFormData] = useState({
+    code: "",
+    name: "",
+    type: "ASSET" as ChartOfAccount["type"],
+    parentCode: "",
+    cashFlowCategory: "" as "" | "O" | "I" | "F",
+    specialAccountType: "",
+  });
   const [editCode, setEditCode] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
@@ -412,7 +419,14 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     const data = asMutationResponse(await res.json());
     if (data?.success) {
       setShowForm(false);
-      setFormData({ code: "", name: "", type: "ASSET", parentCode: "" });
+      setFormData({
+        code: "",
+        name: "",
+        type: "ASSET",
+        parentCode: "",
+        cashFlowCategory: "",
+        specialAccountType: "",
+      });
       onRefresh();
     } else {
       toast.error(data?.error || "Failed to create account");
@@ -454,7 +468,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       {showForm && (
         <Card>
           <CardContent className="p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Code</label>
                 <input
@@ -503,6 +517,36 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                       </option>
                     ))}
                 </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Cash Flow</label>
+                <select
+                  value={formData.cashFlowCategory}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      cashFlowCategory: e.target.value as "" | "O" | "I" | "F",
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                >
+                  <option value="">(None)</option>
+                  <option value="O">Operating</option>
+                  <option value="I">Investing</option>
+                  <option value="F">Financing</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Special Type</label>
+                <input
+                  type="text"
+                  placeholder="e.g. SDC, SBK (optional)"
+                  value={formData.specialAccountType}
+                  onChange={(e) =>
+                    setFormData({ ...formData, specialAccountType: e.target.value })
+                  }
+                  className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                />
               </div>
               <div className="flex gap-2">
                 <Button variant="primary" size="sm" onClick={handleAdd}>

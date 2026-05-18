@@ -6,12 +6,50 @@
 // joined from the delivery_hubs table (matches the in-memory Customer type).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { parseDebtorCode } from "../../lib/debtor";
 
 const app = new Hono<Env>();
+
+// Debtor-code gate shared by POST + PUT. Returns the canonical (trimmed)
+// code on success, or an error string. Enforces: valid format (shared
+// `parseDebtorCode`), the derived control account exists & is a debtor
+// control (SDC), and the code is unique within the org (`selfId` excludes
+// the row being edited). Mirrors the frontend Save check so the operator
+// sees the same reject inline instead of a delayed 422.
+async function validateDebtorCode(
+  c: Context<Env>,
+  codeRaw: unknown,
+  selfId: string | null,
+): Promise<{ ok: true; code: string } | { ok: false; error: string }> {
+  const code = String(codeRaw ?? "").trim();
+  const parsed = parseDebtorCode(code);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  const ctrl = await c.var.DB.prepare(
+    "SELECT code FROM chart_of_accounts WHERE code = ? AND specialAccountType = 'SDC'",
+  )
+    .bind(parsed.controlCode)
+    .first<{ code: string }>();
+  if (!ctrl) {
+    return {
+      ok: false,
+      error: `No debtor control account ${parsed.controlCode} (SDC) in the Chart of Accounts — create it there first.`,
+    };
+  }
+  const dup = await c.var.DB.prepare(
+    "SELECT id FROM customers WHERE code = ? AND orgId = ? AND id <> ? LIMIT 1",
+  )
+    .bind(code, getOrgId(c), selfId ?? "")
+    .first<{ id: string }>();
+  if (dup) {
+    return { ok: false, error: `Customer code ${code} already exists.` };
+  }
+  return { ok: true, code };
+}
 
 type CustomerRow = {
   id: string;
@@ -105,6 +143,8 @@ app.post("/", async (c) => {
         400,
       );
     }
+    const dv = await validateDebtorCode(c, body.code, null);
+    if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
     const id = genId();
     const isActive = body.isActive === false ? 0 : 1;
 
@@ -115,7 +155,7 @@ app.post("/", async (c) => {
     )
       .bind(
         id,
-        body.code,
+        dv.code,
         body.name,
         body.ssmNo ?? "",
         body.companyAddress ?? "",
@@ -179,8 +219,20 @@ app.put("/:id", async (c) => {
     }
     const body = await c.req.json();
 
+    // Only re-validate the debtor code when it's actually changing — don't
+    // block edits to other fields on a customer whose code predates this
+    // rule.
+    if (
+      body.code !== undefined &&
+      String(body.code).trim() !== existing.code
+    ) {
+      const dv = await validateDebtorCode(c, body.code, id);
+      if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
+    }
+
     const merged = {
-      code: body.code ?? existing.code,
+      code:
+        body.code !== undefined ? String(body.code).trim() : existing.code,
       name: body.name ?? existing.name,
       ssmNo: body.ssmNo ?? existing.ssmNo ?? "",
       companyAddress: body.companyAddress ?? existing.companyAddress ?? "",

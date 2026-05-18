@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { useToast } from "@/components/ui/toast";
 import { formatCurrency, formatRM } from "@/lib/utils";
+import { parseDebtorCode } from "@/lib/debtor";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Customer } from "@/types";
 // generateCustomerQuotationPdf is dynamic-imported at the click handler so
@@ -3087,6 +3088,11 @@ export default function CustomersPage() {
 
   // ---------- Add ----------
   const handleAdd = async () => {
+    const dv = parseDebtorCode(addForm.code);
+    if (!dv.ok) {
+      toast.error(dv.error);
+      return;
+    }
     setAddSaving(true);
     try {
       const res = await fetch("/api/customers", {
@@ -3189,6 +3195,13 @@ export default function CustomersPage() {
 
   const saveEditCustomer = async () => {
     if (!editCustomer || savingEdit) return;
+    if (editCustForm.code !== editCustomer.code) {
+      const dv = parseDebtorCode(editCustForm.code);
+      if (!dv.ok) {
+        toast.error(dv.error);
+        return;
+      }
+    }
     setSavingEdit(true);
     try {
       const updated = { ...editCustomer, ...editCustForm };

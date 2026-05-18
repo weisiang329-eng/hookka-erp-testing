@@ -1728,31 +1728,67 @@ export default function DeliveryPage() {
   };
 
   // ---------- Print helpers ----------
-  const triggerPrint = (row: DeliveryOrderRow, mode: PrintMode) => {
+  const triggerPrint = async (row: DeliveryOrderRow, mode: PrintMode) => {
+    // Best-effort print enrichment: customerSO / customerRef / bedframe
+    // dims come from the read-only /print-extras endpoint. Never block the
+    // printout if it fails — the fields just render "-".
+    type Extras = {
+      customerSO?: string;
+      customerRef?: string;
+      items?: Record<
+        string,
+        {
+          gapInches: number | null;
+          divanHeightInches: number | null;
+          legHeightInches: number | null;
+          totalHeightInches: number | null;
+        }
+      >;
+    };
+    let extras: Extras = {};
+    try {
+      const r = await fetch(
+        `/api/delivery-orders/${encodeURIComponent(row.id)}/print-extras`,
+      );
+      const j = (await r.json()) as { success?: boolean; data?: Extras };
+      if (j?.success && j.data) extras = j.data;
+    } catch {
+      /* graceful — print without the extra fields */
+    }
+    const exItems = extras.items ?? {};
     const data: PrintDOData = {
       doNo: row.doNo,
       companySO: row.companySO,
+      customerSO: extras.customerSO ?? "",
       customerPOId: row.customerPOId,
+      customerRef: extras.customerRef ?? "",
       customerName: row.customerName,
-      hubBranch: row.hubBranch,
+      deliveryBranch: row.hubState || row.hubBranch || "",
       deliveryAddress: row.deliveryAddress,
       contactPerson: row.contactPerson,
       contactPhone: row.contactPhone,
       driverName: row.driverName,
       vehicleNo: row.vehicleNo,
       dispatchDate: row.dispatchDate,
-      items: row.items.map((i) => ({
-        id: i.id,
-        salesOrderNo: i.salesOrderNo,
-        poNo: i.poNo,
-        productCode: i.productCode,
-        productName: i.productName,
-        sizeLabel: i.sizeLabel,
-        fabricCode: i.fabricCode,
-        quantity: i.quantity,
-        itemM3: i.itemM3,
-        rackingNumber: i.rackingNumber,
-      })),
+      items: row.items.map((i) => {
+        const ex = exItems[i.id];
+        return {
+          id: i.id,
+          salesOrderNo: i.salesOrderNo,
+          poNo: i.poNo,
+          productCode: i.productCode,
+          productName: i.productName,
+          sizeLabel: i.sizeLabel,
+          fabricCode: i.fabricCode,
+          quantity: i.quantity,
+          itemM3: i.itemM3,
+          rackingNumber: i.rackingNumber,
+          gapInches: ex?.gapInches ?? null,
+          divanHeightInches: ex?.divanHeightInches ?? null,
+          legHeightInches: ex?.legHeightInches ?? null,
+          totalHeightInches: ex?.totalHeightInches ?? null,
+        };
+      }),
       totalM3: row.totalM3,
       remarks: row.remarks,
     };

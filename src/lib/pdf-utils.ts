@@ -4,6 +4,7 @@
 
 import type jsPDF from "jspdf";
 import logoDataUrl from "@/assets/hookka-logo.png?inline";
+import { COMPANY, type CompanyCode } from "@/lib/constants";
 
 const LOGO_ASPECT = 2038 / 907;
 
@@ -15,6 +16,174 @@ export function addHookkaLetterhead(
 ): void {
   const width = height * LOGO_ASPECT;
   doc.addImage(logoDataUrl, "PNG", x, y, width, height);
+}
+
+// ===========================================================================
+// Shared premium document design system. EVERY generate-*-pdf.ts should
+// build its header/footer/table off these so all company documents are
+// visually identical and formal. Tune the look HERE → every doc updates.
+// ===========================================================================
+
+export const PDF = {
+  margin: 14, // mm
+  ink: [31, 29, 27] as [number, number, number], // primary text
+  muted: [110, 110, 110] as [number, number, number], // secondary text
+  faint: [150, 150, 150] as [number, number, number], // footer / fine print
+  accent: [107, 92, 50] as [number, number, number], // #6B5C32 brand bronze
+  rule: [210, 205, 198] as [number, number, number], // hairline grid
+};
+
+/**
+ * Premium, formal letterhead shared by every document. Logo top-left, the
+ * full registered company block beside it (single source of truth =
+ * COMPANY constant), the document title + number block on the right, and a
+ * fine rule finished with a thin bronze accent bar. Returns the Y (mm) the
+ * caller should continue body content from.
+ */
+export function drawLetterhead(
+  doc: jsPDF,
+  opts: {
+    docTitle: string;
+    docNo: string;
+    docDate?: string;
+    statusText?: string;
+    company?: CompanyCode;
+  },
+): number {
+  const co = COMPANY[opts.company ?? "HOOKKA"];
+  const m = PDF.margin;
+  const pageW = doc.internal.pageSize.getWidth();
+
+  // Logo
+  const logoH = 13;
+  doc.addImage(logoDataUrl, "PNG", m, 12, logoH * LOGO_ASPECT, logoH);
+
+  // Company block (beside logo)
+  const tx = m + logoH * LOGO_ASPECT + 5;
+  doc.setTextColor(...PDF.ink);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12.5);
+  doc.text(co.name, tx, 16);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7);
+  doc.setTextColor(...PDF.muted);
+  doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 21);
+  doc.text(co.address, tx, 25);
+  doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 29);
+
+  // Document title block (right)
+  doc.setTextColor(...PDF.accent);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text(opts.docTitle.toUpperCase(), pageW - m, 17, { align: "right" });
+  doc.setTextColor(...PDF.ink);
+  doc.setFontSize(11);
+  doc.text(opts.docNo, pageW - m, 24, { align: "right" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(...PDF.muted);
+  const meta: string[] = [];
+  if (opts.docDate) meta.push(opts.docDate);
+  if (opts.statusText) meta.push(opts.statusText);
+  if (meta.length) doc.text(meta.join("   |   "), pageW - m, 29, { align: "right" });
+
+  // Hairline + bronze accent bar
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.3);
+  doc.line(m, 34, pageW - m, 34);
+  doc.setFillColor(...PDF.accent);
+  doc.rect(m, 34.6, pageW - m * 2, 0.8, "F");
+
+  return 41;
+}
+
+/** Thin section label with an underline rule. Returns next Y. */
+export function drawSectionLabel(
+  doc: jsPDF,
+  label: string,
+  y: number,
+): number {
+  const m = PDF.margin;
+  const pageW = doc.internal.pageSize.getWidth();
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(...PDF.accent);
+  doc.text(label.toUpperCase(), m, y);
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.3);
+  doc.line(m, y + 1.6, pageW - m, y + 1.6);
+  return y + 6;
+}
+
+/** Shared jspdf-autotable theme — solid bronze header, hairline grid. */
+export function tableTheme(): {
+  styles: Record<string, unknown>;
+  headStyles: Record<string, unknown>;
+  footStyles: Record<string, unknown>;
+  alternateRowStyles: Record<string, unknown>;
+} {
+  return {
+    styles: {
+      font: "helvetica",
+      fontSize: 7.5,
+      cellPadding: 2.2,
+      textColor: PDF.ink,
+      lineColor: PDF.rule,
+      lineWidth: 0.2,
+      valign: "middle",
+    },
+    headStyles: {
+      fillColor: PDF.accent,
+      textColor: [255, 255, 255],
+      fontSize: 7.5,
+      fontStyle: "bold",
+      lineColor: PDF.accent,
+      lineWidth: 0.2,
+      halign: "left",
+    },
+    footStyles: {
+      fillColor: [245, 243, 239],
+      textColor: PDF.ink,
+      fontStyle: "bold",
+      fontSize: 8,
+      lineColor: PDF.rule,
+      lineWidth: 0.2,
+    },
+    alternateRowStyles: { fillColor: [250, 249, 247] },
+  };
+}
+
+/** Consistent footer on every document. */
+export function drawDocFooter(
+  doc: jsPDF,
+  company?: CompanyCode,
+): void {
+  const co = COMPANY[company ?? "HOOKKA"];
+  const m = PDF.margin;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const fy = pageH - 12;
+  doc.setDrawColor(...PDF.rule);
+  doc.setLineWidth(0.3);
+  doc.line(m, fy - 4, pageW - m, fy - 4);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6.8);
+  doc.setTextColor(...PDF.faint);
+  doc.text(
+    `${co.name} · ${co.regNo} · This is a computer-generated document; no signature required for system records.`,
+    m,
+    fy,
+  );
+  doc.text(
+    `Generated ${new Date().toLocaleDateString("en-MY", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    })}`,
+    pageW - m,
+    fy,
+    { align: "right" },
+  );
 }
 
 /**

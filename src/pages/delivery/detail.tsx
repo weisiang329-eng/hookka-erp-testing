@@ -298,7 +298,27 @@ export default function DeliveryDetailPage() {
               size="sm"
               onClick={async () => {
                 const { generateDOPdf } = await import("@/lib/generate-do-pdf");
-                generateDOPdf(order as unknown as import("@/types").DeliveryOrder);
+                // Best-effort print enrichment (customerSO / customerRef /
+                // bedframe build params). Never block the download.
+                let extras: import("@/lib/generate-do-pdf").DOPrintExtras = {};
+                try {
+                  const r = await fetch(
+                    `/api/delivery-orders/${encodeURIComponent(
+                      (order as { id: string }).id,
+                    )}/print-extras`,
+                  );
+                  const j = (await r.json()) as {
+                    success?: boolean;
+                    data?: import("@/lib/generate-do-pdf").DOPrintExtras;
+                  };
+                  if (j?.success && j.data) extras = j.data;
+                } catch {
+                  /* graceful — PDF still renders without extras */
+                }
+                generateDOPdf(
+                  order as unknown as import("@/types").DeliveryOrder,
+                  extras,
+                );
               }}
             >
               <Download className="h-4 w-4" /> Download DO PDF

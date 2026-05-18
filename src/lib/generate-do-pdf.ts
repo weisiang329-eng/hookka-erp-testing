@@ -1,239 +1,241 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
-import { COMPANY } from "@/lib/constants";
-import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+import {
+  fmtDate,
+  drawLetterhead,
+  drawSectionLabel,
+  drawDocFooter,
+  tableTheme,
+  PDF,
+} from "@/lib/pdf-utils";
+
+// Read-only print-extras (customerSO / customerRef / per-item bedframe
+// build params) fetched by the caller from
+// GET /api/delivery-orders/:id/print-extras. All optional — the PDF still
+// renders cleanly (cells show "-") if not supplied.
+export type DOPrintExtras = {
+  customerSO?: string;
+  customerRef?: string;
+  items?: Record<
+    string,
+    {
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+      totalHeightInches: number | null;
+    }
+  >;
+};
+
+// Fixed origin warehouse — Hookka is single-warehouse; the "from" branch
+// isn't modelled in the schema (option 1A), so it's a static label.
+const WAREHOUSE = "Hookka HQ, Sungai Buloh, Selangor";
+
+const dimTxt = (v?: number | null) =>
+  v == null || v === 0 ? "" : `${v}"`;
 
 // ---------------------------------------------------------------------------
-// Delivery Order PDF
+// Delivery Order PDF — the reference template for the unified, formal
+// company document system. Every other generate-*-pdf.ts mirrors this
+// (shared letterhead / table theme / footer from pdf-utils.ts).
 // ---------------------------------------------------------------------------
-
-export function generateDOPdf(order: DeliveryOrder) {
+export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
-  const margin = 15;
-  let y = margin;
+  const m = PDF.margin;
+  const o = order as DeliveryOrder & {
+    customerPOId?: string;
+    hubName?: string;
+    hubState?: string;
+    customerState?: string;
+  };
 
-  const co = COMPANY.HOOKKA;
+  // ---- Premium shared letterhead ----
+  let y = drawLetterhead(doc, {
+    docTitle: "Delivery Order",
+    docNo: order.doNo,
+    docDate: fmtDate(order.deliveryDate),
+    statusText: order.status ? order.status.replace(/_/g, " ") : undefined,
+  });
 
-  // --- Header ---
-  addHookkaLetterhead(doc, margin, 5, 10);
-  const textX = margin + 26;
+  // ---- Parties / references — two ruled columns ----
+  const colGap = 8;
+  const colW = (pageW - m * 2 - colGap) / 2;
+  const xL = m;
+  const xR = m + colW + colGap;
+  const topY = y;
 
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(12);
-  doc.setFont("helvetica", "bold");
-  doc.text(co.name, textX, 14);
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text("Manufacturer of Premium Upholstered Furniture", textX, 20);
-  doc.text(`Tel: ${co.phone}  |  Email: ${co.email}`, textX, 25);
+  const label = (t: string, x: number, yy: number) => {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...PDF.muted);
+    doc.text(t, x, yy);
+  };
+  const value = (t: string, x: number, yy: number, bold = false) => {
+    doc.setFont("helvetica", bold ? "bold" : "normal");
+    doc.setFontSize(8.5);
+    doc.setTextColor(...PDF.ink);
+    doc.text(t || "-", x + 30, yy);
+  };
 
-  // DO Number on right
-  doc.setFontSize(14);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("DELIVERY ORDER", pageW - margin, 14, { align: "right" });
-  doc.setFontSize(11);
-  doc.text(order.doNo, pageW - margin, 22, { align: "right" });
-
-  // Status as plain text
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(80, 80, 80);
-  const statusText = order.status.replace(/_/g, " ");
-  doc.text(`Status: ${statusText}`, pageW - margin, 28, { align: "right" });
-
-  // Divider line
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 32, pageW - margin, 32);
-
-  y = 38;
-  doc.setTextColor(31, 29, 27);
-
-  // --- Customer & Delivery Info (two columns) ---
-  const colLeft = margin;
-  const colRight = pageW / 2 + 5;
-
-  // Left column - Customer
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("CUSTOMER DETAILS", colLeft + 3, y + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(colLeft, y + 7, colLeft + pageW / 2 - 10, y + 7);
-  y += 10;
-
-  const customerFields = [
-    ["Customer", order.customerName],
-    ["State", order.customerState],
+  y = drawSectionLabel(doc, "Deliver To", y);
+  const leftRows: Array<[string, string, boolean?]> = [
+    ["Customer", order.customerName, true],
+    ["Branch / State", o.hubName || o.hubState || o.customerState || "-"],
+    ["Address", order.deliveryAddress || "-"],
     ["Contact", order.contactPerson || "-"],
     ["Phone", order.contactPhone || "-"],
-    ["Address", order.deliveryAddress || "-"],
+    ["From", WAREHOUSE],
   ];
-
-  doc.setFontSize(8);
-  for (const [label, value] of customerFields) {
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label, colLeft + 3, y);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    // Wrap address text if needed
-    if (label === "Address") {
-      const lines = doc.splitTextToSize(String(value), pageW / 2 - 50);
-      doc.text(lines, colLeft + 35, y);
-      y += (lines.length - 1) * 4;
+  let yl = y;
+  for (const [k, v, b] of leftRows) {
+    label(k, xL, yl);
+    if (k === "Address") {
+      const lines = doc.splitTextToSize(String(v || "-"), colW - 32);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      doc.setTextColor(...PDF.ink);
+      doc.text(lines, xL + 30, yl);
+      yl += Math.max(1, lines.length) * 4 + 1.5;
     } else {
-      doc.text(String(value), colLeft + 35, y);
+      value(String(v), xL, yl, b);
+      yl += 5.5;
     }
-    y += 5;
   }
 
-  // Right column - Delivery Info
-  let yRight = 38;
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("DELIVERY DETAILS", colRight + 3, yRight + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(colRight, yRight + 7, colRight + pageW / 2 - 10, yRight + 7);
-  yRight += 10;
-
-  const deliveryFields = [
-    ["SO No.", order.companySOId || "-"],
+  let yr = drawSectionLabel(doc, "References", topY);
+  const rightRows: Array<[string, string, boolean?]> = [
+    ["DO No.", order.doNo, true],
+    ["Our SO", order.companySOId || "-"],
+    ["Customer SO", extras?.customerSO || "-"],
+    ["Customer PO", o.customerPOId || "-"],
+    ["Customer Ref", extras?.customerRef || "-"],
     ["DO Date", fmtDate(order.deliveryDate)],
-    ["Expected DD", order.hookkaExpectedDD ? fmtDate(order.hookkaExpectedDD) : "-"],
     ["Driver", order.driverName || "-"],
-    ["Vehicle No.", order.vehicleNo || "-"],
-    ["Total M\u00B3", order.totalM3.toFixed(2)],
+    ["Vehicle", order.vehicleNo || "-"],
   ];
-
-  doc.setFontSize(8);
-  for (const [label, value] of deliveryFields) {
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label, colRight + 3, yRight);
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(31, 29, 27);
-    doc.text(String(value), colRight + 35, yRight);
-    yRight += 5;
+  for (const [k, v, b] of rightRows) {
+    label(k, xR, yr);
+    value(String(v), xR, yr, b);
+    yr += 5.5;
   }
 
-  y = Math.max(y, yRight) + 8;
+  y = Math.max(yl, yr) + 4;
 
-  // --- Line Items Table ---
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
+  // ---- Items ----
+  y = drawSectionLabel(doc, "Items Delivered", y);
+  const isPacking = false; // DO mode; packing list adds a Rack column
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
-  doc.text(`ITEMS (${order.items.length} lines, ${totalQty} qty)`, margin + 3, y + 5);
-  doc.setDrawColor(180, 180, 180);
-  doc.line(margin, y + 7, pageW - margin, y + 7);
-  y += 10;
 
-  const tableBody = order.items.map((item, idx) => [
-    String(idx + 1),
-    item.productCode,
-    item.productName,
-    item.sizeLabel,
-    item.fabricCode,
-    String(item.quantity),
-    item.rackingNumber || "-",
-  ]);
+  const body = order.items.map((it, idx) => {
+    const itx = it as DeliveryOrder["items"][number] & {
+      salesOrderNo?: string;
+    };
+    const ex = extras?.items?.[it.id];
+    const build = ex
+      ? [
+          ex.totalHeightInches
+            ? `TH ${dimTxt(ex.totalHeightInches)}`
+            : "",
+          ex.divanHeightInches ? `D1 ${dimTxt(ex.divanHeightInches)}` : "",
+          ex.gapInches ? `Gap ${dimTxt(ex.gapInches)}` : "",
+        ]
+          .filter(Boolean)
+          .join("  ")
+      : "";
+    return [
+      String(idx + 1),
+      itx.salesOrderNo || "-",
+      // Description sits UNDER the product code in the same cell.
+      `${it.productCode}\n${it.productName}`,
+      it.sizeLabel || "-",
+      it.fabricCode || "-",
+      build || "-",
+      String(it.quantity),
+      (Number((it as { itemM3?: number }).itemM3) || 0 ? "" : "") +
+        ((Number((it as { itemM3?: number }).itemM3) || 0) *
+          it.quantity).toFixed(2),
+    ];
+  });
 
   autoTable(doc, {
     startY: y,
-    margin: { left: margin, right: margin },
-    head: [["#", "Product Code", "Product Name", "Size", "Fabric", "Qty", "Rack Location"]],
-    body: tableBody,
-    styles: {
-      fontSize: 7.5,
-      cellPadding: 2.5,
-      textColor: [31, 29, 27],
-      lineColor: [226, 221, 216],
-      lineWidth: 0.3,
-    },
-    headStyles: {
-      fillColor: [255, 255, 255],
-      textColor: [0, 0, 0],
-      fontSize: 7.5,
-      fontStyle: "bold",
-      lineColor: [0, 0, 0],
-      lineWidth: 0.3,
-    },
-    alternateRowStyles: {
-      fillColor: [255, 255, 255],
-    },
+    margin: { left: m, right: m },
+    head: [
+      [
+        "#",
+        "SO No.",
+        "Product Code / Description",
+        "Size",
+        "Fabric",
+        "Build (TH / D1 / Gap)",
+        "Qty",
+        "M³",
+      ],
+    ],
+    body,
+    foot: [["", "", "", "", "", "Total", String(totalQty), order.totalM3.toFixed(2)]],
+    ...tableTheme(),
     columnStyles: {
-      0: { cellWidth: 10, halign: "center" },
-      1: { cellWidth: 28, font: "helvetica", fontStyle: "bold" },
-      2: { cellWidth: 40 },
-      3: { cellWidth: 22 },
-      4: { cellWidth: 22 },
-      5: { cellWidth: 14, halign: "right" },
-      6: { cellWidth: 28, fontStyle: "bold" },
+      0: { cellWidth: 7, halign: "center" },
+      1: { cellWidth: 22, overflow: "ellipsize", fontStyle: "bold" },
+      2: { cellWidth: "auto", fontStyle: "bold" },
+      3: { cellWidth: 16 },
+      4: { cellWidth: 22, overflow: "ellipsize" },
+      5: { cellWidth: 26, fontSize: 6.8 },
+      6: { cellWidth: 11, halign: "right" },
+      7: { cellWidth: 14, halign: "right" },
     },
-    foot: [["", "", "", "", "Total", String(totalQty), ""]],
-    footStyles: {
-      fillColor: [255, 255, 255],
-      textColor: [0, 0, 0],
-      fontStyle: "bold",
-      fontSize: 8,
-      lineColor: [0, 0, 0],
-      lineWidth: 0.3,
+    // Description line (2nd line of the Product cell) renders lighter.
+    didParseCell: (data) => {
+      if (
+        data.section === "body" &&
+        data.column.index === 2 &&
+        typeof data.cell.raw === "string"
+      ) {
+        data.cell.styles.fontSize = 7.3;
+      }
     },
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 8;
+  y = (doc as any).lastAutoTable.finalY + 7;
+  void isPacking;
 
-  // --- Remarks ---
+  // ---- Remarks ----
   if (order.remarks) {
-    doc.setDrawColor(200, 200, 200);
-    doc.rect(margin, y, pageW - margin * 2, 15, "S");
-    doc.setFontSize(7);
+    doc.setDrawColor(...PDF.rule);
+    doc.setLineWidth(0.3);
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(0, 0, 0);
-    doc.text("REMARKS", margin + 3, y + 4);
+    doc.setFontSize(7.5);
+    doc.setTextColor(...PDF.accent);
+    doc.text("REMARKS", m, y);
     doc.setFont("helvetica", "normal");
-    doc.setTextColor(80, 80, 80);
-    doc.text(order.remarks, margin + 3, y + 9, { maxWidth: pageW - margin * 2 - 6 });
-    y += 18;
+    doc.setFontSize(7.5);
+    doc.setTextColor(...PDF.muted);
+    const rl = doc.splitTextToSize(order.remarks, pageW - m * 2);
+    doc.text(rl, m, y + 4.5);
+    y += 6 + rl.length * 4;
   }
 
-  // --- Signature Lines ---
-  y += 5;
-  const sigWidth = (pageW - margin * 2 - 20) / 3;
-
-  const signatures = ["Prepared By", "Received By", "Date"];
-  signatures.forEach((label, idx) => {
-    const x = margin + idx * (sigWidth + 10);
-    doc.setDrawColor(31, 29, 27);
-    doc.line(x, y + 15, x + sigWidth, y + 15);
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(107, 114, 128);
-    doc.text(label + ": ___", x, y + 20);
-  });
-
-  // --- Footer ---
-  const footerY = doc.internal.pageSize.getHeight() - 15;
-  doc.setDrawColor(226, 221, 216);
-  doc.line(margin, footerY - 3, pageW - margin, footerY - 3);
-  doc.setFontSize(7);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(156, 163, 175);
-  doc.text(`${co.name}  |  This is a computer-generated document.`, margin, footerY);
-  doc.text(
-    `Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`,
-    pageW - margin,
-    footerY,
-    { align: "right" }
+  // ---- Signatures ----
+  y = Math.max(y, doc.internal.pageSize.getHeight() - 45) + 6;
+  const sigW = (pageW - m * 2 - 16) / 3;
+  ["Prepared By", "Delivered By (Driver)", "Received By"].forEach(
+    (lab, i) => {
+      const x = m + i * (sigW + 8);
+      doc.setDrawColor(...PDF.ink);
+      doc.setLineWidth(0.3);
+      doc.line(x, y + 14, x + sigW, y + 14);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.setTextColor(...PDF.muted);
+      doc.text(lab, x, y + 18.5);
+      doc.text("Name / Date / Company Stamp", x, y + 22, {});
+    },
   );
 
-  // Save
+  drawDocFooter(doc);
   doc.save(`DO-${order.doNo}.pdf`);
 }

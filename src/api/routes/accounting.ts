@@ -702,6 +702,105 @@ function periodEndYm(period?: string): string | null {
   if (period.length === 4) return `${period}-12`;
   return period;
 }
+// First YYYY-MM of the period (null = since the beginning of time).
+function periodStartYm(period?: string): string | null {
+  if (!period || period === "all") return null;
+  if (period.includes("Q")) {
+    const [year, q] = period.split("-Q");
+    const start = (parseInt(q, 10) - 1) * 3 + 1;
+    return `${year}-${start.toString().padStart(2, "0")}`;
+  }
+  if (period.length === 4) return `${period}-01`;
+  return period;
+}
+// The YYYY-MM immediately before the given one (for opening-stock cutoff).
+function prevYm(ym: string | null): string | null {
+  if (!ym) return null;
+  const [y, m] = ym.split("-").map((n) => parseInt(n, 10));
+  if (m <= 1) return `${y - 1}-12`;
+  return `${y}-${(m - 1).toString().padStart(2, "0")}`;
+}
+
+// Default item_group → {stock, opening, closing} mapping. Operator-editable
+// via kv_config `coa_stock_map`. Unmapped groups fall to the generic
+// raw-material stock account; WIP & FG have fixed homes.
+type StockMapEntry = { stock: string; opening: string; closing: string };
+const DEFAULT_STOCK_MAP: {
+  rmDefault: StockMapEntry;
+  rm: Record<string, StockMapEntry>;
+  wip: StockMapEntry;
+  fg: StockMapEntry;
+} = {
+  rmDefault: { stock: "330-3001", opening: "704-0001", closing: "704-9991" },
+  rm: {
+    FABRIC: { stock: "330-0001", opening: "701-0001", closing: "701-9991" },
+    FABRIC_SEWING: { stock: "330-0002", opening: "701-0002", closing: "701-9992" },
+    PLYWOOD: { stock: "330-1001", opening: "702-0001", closing: "702-9991" },
+    WOOD: { stock: "330-1001", opening: "702-0001", closing: "702-9991" },
+    WD_STRIP: { stock: "330-1002", opening: "702-0002", closing: "702-9992" },
+    FOAM: { stock: "330-2001", opening: "703-0001", closing: "703-9999" },
+    WEBBING: { stock: "330-3005", opening: "704-0005", closing: "704-9995" },
+    PACKING: { stock: "330-4000", opening: "705-0001", closing: "705-9999" },
+  },
+  wip: { stock: "330-8000", opening: "700-9005", closing: "700-9010" },
+  fg: { stock: "330-9000", opening: "600-0000", closing: "620-0000" },
+};
+
+// Live inventory value from the real-time cost ledger, as of `cutoffYm`
+// (null = now / all time). RM is netted on-hand (receipts − issues) per
+// item_group; WIP = issued + labour − completed; FG = completed −
+// delivered. No double-count — RM=on-hand, WIP=in-production, FG=unshipped.
+async function liveInventory(
+  db: Env["Variables"]["DB"],
+  cutoffYm: string | null,
+): Promise<{
+  rmByGroup: Record<string, number>;
+  wip: number;
+  fg: number;
+  total: number;
+}> {
+  const [clRes, rmRes] = await Promise.all([
+    db
+      .prepare(
+        "SELECT type, itemType, itemId, direction, totalCostSen, date FROM cost_ledger",
+      )
+      .all<{
+        type: string;
+        itemType: string;
+        itemId: string;
+        direction: string;
+        totalCostSen: number;
+        date: string;
+      }>(),
+    db
+      .prepare("SELECT id, itemGroup FROM raw_materials")
+      .all<{ id: string; itemGroup: string }>(),
+  ]);
+  const grp = new Map<string, string>();
+  for (const r of rmRes.results ?? []) grp.set(r.id, r.itemGroup || "OTHER");
+  const rmByGroup: Record<string, number> = {};
+  let wip = 0;
+  let fg = 0;
+  for (const l of clRes.results ?? []) {
+    const ym = String(l.date ?? "").slice(0, 7);
+    if (cutoffYm && ym > cutoffYm) continue;
+    const v = Number(l.totalCostSen) || 0;
+    if (l.itemType === "RM") {
+      const g = grp.get(l.itemId) || "OTHER";
+      rmByGroup[g] =
+        (rmByGroup[g] ?? 0) + (l.direction === "IN" ? v : -v);
+    }
+    if (l.type === "RM_ISSUE" || l.type === "LABOR_POSTED") wip += v;
+    else if (l.type === "FG_COMPLETED") {
+      wip -= v;
+      fg += v;
+    } else if (l.type === "FG_DELIVERED") fg -= v;
+  }
+  const total =
+    Object.values(rmByGroup).reduce((s, n) => s + n, 0) + wip + fg;
+  return { rmByGroup, wip, fg, total };
+}
+
 function bsCategory(
   type: string,
   code: string,
@@ -859,6 +958,65 @@ app.get("/pl", async (c) => {
   const netProfit = grossProfit - totalOpex;
   const netProfitPct = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0;
 
+  // --- real-time stock into the Manufacturing Account (read, not post) ---
+  // Opening = inventory value as of the month BEFORE the period start;
+  // closing = inventory value as of the period end (or now). Sourced live
+  // from the cost ledger so opening the report always reflects current
+  // stock — no period-close JE, no double-count.
+  const [openInv, closeInv, stockMapRow] = await Promise.all([
+    liveInventory(c.var.DB, prevYm(periodStartYm(period))),
+    liveInventory(c.var.DB, periodEndYm(period)),
+    c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("coa_stock_map")
+      .first<{ value: string }>(),
+  ]);
+  let stockMap = DEFAULT_STOCK_MAP;
+  try {
+    const parsed = JSON.parse(stockMapRow?.value ?? "null");
+    if (parsed && typeof parsed === "object")
+      stockMap = { ...DEFAULT_STOCK_MAP, ...parsed };
+  } catch {
+    stockMap = DEFAULT_STOCK_MAP;
+  }
+  // Override the GL SOS/SCS lines (which are 0 until a period-close JE
+  // exists) with the live valuation, and recompute cost of production.
+  mfg.openingStock = openInv.total;
+  mfg.closingStock = -closeInv.total;
+  const costOfProduction =
+    mfg.openingStock +
+    mfg.purchases +
+    mfg.directLabour +
+    mfg.factoryOverhead +
+    mfg.otherMfg +
+    mfg.closingStock;
+  // Per-bucket closing-stock breakdown for the detailed mapping display.
+  const inventoryBreakdown = [
+    ...Object.entries(closeInv.rmByGroup).map(([g, val]) => {
+      const m = stockMap.rm[g] ?? stockMap.rmDefault;
+      return {
+        bucket: `RM · ${g}`,
+        value: val,
+        stockAcct: m.stock,
+        openingAcct: m.opening,
+        closingAcct: m.closing,
+      };
+    }),
+    {
+      bucket: "Work in Progress",
+      value: closeInv.wip,
+      stockAcct: stockMap.wip.stock,
+      openingAcct: stockMap.wip.opening,
+      closingAcct: stockMap.wip.closing,
+    },
+    {
+      bucket: "Finished Goods",
+      value: closeInv.fg,
+      stockAcct: stockMap.fg.stock,
+      openingAcct: stockMap.fg.opening,
+      closingAcct: stockMap.fg.closing,
+    },
+  ];
+
   // --- operational revenue cuts from invoices (NOT the GL) ---
   const [invRes, itemRes, prodRes] = await Promise.all([
     c.var.DB.prepare(
@@ -978,16 +1136,13 @@ app.get("/pl", async (c) => {
       balanceSheet,
       manufacturing: {
         ...mfg,
-        // opening + purchases + labour + overhead + other − closing.
-        // closingStock is already negative (period-end credit), so the
-        // straight sum yields cost of production = totalCOGS.
-        costOfProduction:
-          mfg.openingStock +
-          mfg.purchases +
-          mfg.directLabour +
-          mfg.factoryOverhead +
-          mfg.otherMfg +
-          mfg.closingStock,
+        // Opening/closing stock are LIVE from the cost ledger (read at
+        // report time, not posted). Cost of production = opening +
+        // purchases + labour + overhead + other − closing.
+        costOfProduction,
+        inventoryBreakdown,
+        stockNote:
+          "Opening/closing stock are real-time from the cost ledger when this report is opened (no period-close entry, no double-count). Purchases/labour/overhead come from the GL and grow as the purchase-invoice & payroll posting nodes are wired.",
       },
       cashFlow: {
         ...cashFlow,

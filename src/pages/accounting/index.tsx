@@ -129,6 +129,7 @@ export default function AccountingPage() {
       </div>
 
       <GstRateCard />
+      <StockMapCard />
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
@@ -223,6 +224,82 @@ function GstRateCard() {
           Applied automatically when a sales invoice is posted: tax =
           subtotal × this rate, credited to GST 350-0000. 0 = no GST.
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Operator-editable inventory → stock/opening/closing account mapping
+// (kv_config key `coa_stock_map`). Drives the detailed closing-stock
+// breakdown in the Manufacturing Account. Empty = built-in default.
+function StockMapCard() {
+  const { toast } = useToast();
+  const [text, setText] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    fetch("/api/kv-config/coa_stock_map")
+      .then((r) => r.json())
+      .then((j) => {
+        if (j?.data) setText(JSON.stringify(j.data, null, 2));
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+  const save = async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      toast.error("Mapping must be valid JSON");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/kv-config/coa_stock_map", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success("Stock account mapping saved");
+      else toast.error(j?.error || "Failed to save mapping");
+    } catch {
+      toast.error("Failed to save mapping");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-sm font-medium text-[#1F1D1B]">
+            Inventory → Stock Account Mapping
+          </p>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={save}
+            disabled={saving || !loaded}
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+        <p className="text-[11px] text-[#9CA3AF] mb-2">
+          Maps each raw-material item_group (+ WIP, FG) to its stock /
+          opening / closing accounts for the detailed Manufacturing-account
+          breakdown. Leave blank to use the built-in default. Shape:{" "}
+          <code>{`{ "rmDefault": {...}, "rm": { "FABRIC": {"stock":"330-0001","opening":"701-0001","closing":"701-9991"} }, "wip": {...}, "fg": {...} }`}</code>
+        </p>
+        <textarea
+          value={text}
+          disabled={!loaded}
+          onChange={(e) => setText(e.target.value)}
+          rows={6}
+          placeholder="(empty — built-in default mapping in effect)"
+          className="w-full font-mono text-xs rounded-md border border-[#E2DDD8] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+        />
       </CardContent>
     </Card>
   );
@@ -1450,6 +1527,14 @@ type PLData = {
     otherMfg: number;
     closingStock: number;
     costOfProduction: number;
+    inventoryBreakdown?: {
+      bucket: string;
+      value: number;
+      stockAcct: string;
+      openingAcct: string;
+      closingAcct: string;
+    }[];
+    stockNote?: string;
   };
   cashFlow?: {
     operating: number;
@@ -1871,10 +1956,37 @@ function PLReportTab() {
                   </tr>
                 </tbody>
               </table>
+              {plData.manufacturing.inventoryBreakdown &&
+                plData.manufacturing.inventoryBreakdown.length > 0 && (
+                  <div className="mt-3 border-t border-[#F0ECE9] pt-2">
+                    <p className="text-[11px] font-semibold text-[#6B7280] mb-1">
+                      Closing stock — live from cost ledger
+                    </p>
+                    <table className="w-full text-xs">
+                      <tbody>
+                        {plData.manufacturing.inventoryBreakdown.map((b) => (
+                          <tr
+                            key={b.bucket}
+                            className="border-b border-[#F7F4EF]"
+                          >
+                            <td className="px-2 py-1 text-[#4B5563]">
+                              {b.bucket}
+                            </td>
+                            <td className="px-2 py-1 text-[#9CA3AF] tabular-nums">
+                              {b.closingAcct}
+                            </td>
+                            <td className="px-2 py-1 text-right tabular-nums text-[#1F1D1B]">
+                              {formatCurrency(b.value)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               <p className="text-[11px] text-[#9CA3AF] mt-2">
-                Opening + Purchases + Labour + Overhead + Other − Closing.
-                Closing stock auto-valued from real-time costing at the
-                period-close (operation → finance bridge).
+                {plData.manufacturing.stockNote ??
+                  "Opening + Purchases + Labour + Overhead + Other − Closing."}
               </p>
             </CardContent>
           </Card>

@@ -1237,7 +1237,6 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
   let paidN = 0,
     paidDiffSen = 0; // money received — never touched
   let draftN = 0; // belongs to the other backfill
-  let multiN = 0;
   let noInvN = 0;
   let noComputeN = 0;
   const rows: Array<{
@@ -1290,36 +1289,44 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
         noComputeN++;
         continue;
       }
-      if (invs.length > 1) {
-        multiN++;
-        continue;
-      }
-      const inv = invs[0];
-      const oldTotal = Number(inv.totalSen) || 0;
+      const oldTotal = invs.reduce(
+        (s, v) => s + (Number(v.totalSen) || 0),
+        0,
+      );
       if (computedTotal === oldTotal) {
         exactN++;
         continue;
       }
-      if (inv.status === "DRAFT") {
+      if (invs.some((v) => v.status === "DRAFT")) {
         draftN++; // /backfill-fix-underbilled-invoices owns DRAFT
         continue;
       }
       if (
-        (Number(inv.paidAmount) || 0) > 0 ||
-        inv.status === "PAID" ||
-        inv.status === "PARTIAL_PAID"
+        invs.some(
+          (v) =>
+            (Number(v.paidAmount) || 0) > 0 ||
+            v.status === "PAID" ||
+            v.status === "PARTIAL_PAID",
+        )
       ) {
         paidN++;
         paidDiffSen += computedTotal - oldTotal;
         continue;
       }
-      // SENT / OVERDUE, unpaid, single, mis-billed → void + re-issue.
+      // Every non-cancelled invoice on this DO is SENT/OVERDUE & unpaid →
+      // void ALL of them + re-issue ONE correct invoice. One safe path for
+      // both the single-invoice case (the 40) and the merged multi-invoice
+      // case (e.g. DO-2604-001's two RM 616 invoices).
       const deltaSen = computedTotal - oldTotal;
+      const oldNos = invs.map((v) => v.invoiceNo).join(", ");
       rows.push({
         doNo: doRow.doNo,
         customer: doRow.customerName ?? "",
-        oldInvoiceNo: inv.invoiceNo,
-        oldStatus: inv.status,
+        oldInvoiceNo: oldNos,
+        oldStatus:
+          invs.length > 1
+            ? `${invs.length}x${invs[0].status}`
+            : invs[0].status,
         oldTotalSen: oldTotal,
         correctTotalSen: computedTotal,
         deltaSen,
@@ -1334,42 +1341,49 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
 
       // ---- batch 1: reverse old GL + cancel old + create new + A/R + DO ----
       const b1: D1PreparedStatement[] = [];
-      const posted = await ledgerHasSource(
-        c.var.DB,
-        orgId,
-        "invoice",
-        inv.id,
-      );
-      const reversed = await ledgerHasSource(
-        c.var.DB,
-        orgId,
-        "invoice_void",
-        inv.id,
-      );
-      if (posted && !reversed) {
-        const { legs } = await buildInvoiceLedgerLegs(
+      for (const oldInv of invs) {
+        const posted = await ledgerHasSource(
           c.var.DB,
           orgId,
-          {
-            id: inv.id,
-            invoiceNo: inv.invoiceNo,
-            customerId: doRow.customerId,
-            subtotalSen: Number(inv.subtotalSen) || oldTotal,
-          },
-          actorUserId,
-          true,
+          "invoice",
+          oldInv.id,
         );
-        const { statements } = await buildJournalEntryStatements(
+        const reversed = await ledgerHasSource(
           c.var.DB,
           orgId,
-          legs,
+          "invoice_void",
+          oldInv.id,
         );
-        b1.push(...statements);
+        if (posted && !reversed) {
+          const { legs } = await buildInvoiceLedgerLegs(
+            c.var.DB,
+            orgId,
+            {
+              id: oldInv.id,
+              invoiceNo: oldInv.invoiceNo,
+              customerId: doRow.customerId,
+              subtotalSen:
+                Number(oldInv.subtotalSen) ||
+                Number(oldInv.totalSen) ||
+                0,
+            },
+            actorUserId,
+            true,
+          );
+          const { statements } = await buildJournalEntryStatements(
+            c.var.DB,
+            orgId,
+            legs,
+          );
+          b1.push(...statements);
+        }
+        b1.push(
+          c.var.DB.prepare(
+            "UPDATE invoices SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+          ).bind(now, oldInv.id),
+        );
       }
       b1.push(
-        c.var.DB.prepare(
-          "UPDATE invoices SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
-        ).bind(now, inv.id),
         c.var.DB.prepare(
           `INSERT INTO invoices (
              id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
@@ -1397,7 +1411,7 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
           0,
           null,
           "",
-          `Reissue of ${inv.invoiceNo} — under-billed fix (BUG-2026-05-18-004)`,
+          `Reissue of ${oldNos} — under-billed fix (BUG-2026-05-18-004)`,
           now,
           now,
         ),
@@ -1475,7 +1489,6 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
     exactN +
     paidN +
     draftN +
-    multiN +
     noInvN +
     noComputeN +
     errors.length;
@@ -1490,7 +1503,6 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
     needsManual: {
       paidOrPartPaid: { n: paidN, diffSen: paidDiffSen },
       draftUseOtherBackfill: { n: draftN },
-      multipleInvoices: { n: multiN },
       noInvoice: { n: noInvN },
       computeReturnedZero: { n: noComputeN },
     },

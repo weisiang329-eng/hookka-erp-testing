@@ -47,7 +47,7 @@ const SALES_ACCT: Record<string, string> = {
   SOFA: "500-0020",
   ACCESSORY: "500-0030",
 };
-type InvLedgerLeg = {
+export type InvLedgerLeg = {
   id: string;
   sourceType: string;
   sourceId: string;
@@ -67,7 +67,7 @@ type InvLedgerLeg = {
 // Credits are reconciled to EXACTLY subtotalSen so debits == credits even
 // when invoice_items don't sum cleanly. `reverse` swaps DR/CR and tags the
 // source 'invoice_void' for an idempotent, auditable reversal.
-async function buildInvoiceLedgerLegs(
+export async function buildInvoiceLedgerLegs(
   db: Env["Variables"]["DB"],
   orgId: string,
   inv: {

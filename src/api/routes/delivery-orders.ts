@@ -25,7 +25,11 @@ import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
-import { nextInvoiceNo } from "./invoices";
+import { nextInvoiceNo, buildInvoiceLedgerLegs } from "./invoices";
+import {
+  ledgerHasSource,
+  buildJournalEntryStatements,
+} from "../lib/journal-hash";
 
 const app = new Hono<Env>();
 
@@ -1165,6 +1169,332 @@ app.post("/backfill-fix-underbilled-invoices", async (c) => {
       totalInvoicedBeforeSen: totalInvoicedNowSen,
       gapBeforeSen: totalGoodsSen - totalInvoicedNowSen,
     },
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-void-reissue-underbilled
+//
+// One-shot finance repair (Wei Siang 2026-05-18, BUG-2026-05-18-004).
+// Sibling of /backfill-fix-underbilled-invoices, but for the invoices that
+// one CANNOT safely touch: a single non-cancelled SENT/OVERDUE invoice that
+// is already posted to the ledger and is mis-billed vs the delivered goods
+// value (the pricing bug billed unmatched items at 0). Those can't be
+// rewritten in place — the ledger model only supports post + reverse, not
+// in-place adjust. So per qualifying DO we VOID + RE-ISSUE:
+//
+//   batch 1 (atomic): reverse the old invoice's ledger posting (idempotent
+//     invoice_void legs, exact mirror — old items left intact), set the old
+//     invoice CANCELLED, INSERT a new SENT invoice + items at the CORRECT
+//     value, net the customer's A/R by EXACTLY (correct - old) [the void
+//     path itself never touches A/R — this is the one explicit gap we close
+//     here], flip the DO to INVOICED.
+//   batch 2: post the new invoice's ledger (reads the now-committed new
+//     items for the category split, same as the live DRAFT->SENT path).
+//
+// SAFETY: only DOs whose single non-cancelled invoice is SENT/OVERDUE with
+// paidAmount = 0 are auto-fixed. PAID / partially-paid (money received),
+// DRAFT (use the other backfill), >1 invoice, no invoice, or computed value
+// 0 are NEVER touched — each is tallied with its exact discrepancy so the
+// manual backlog is quantified. Idempotent: a re-run sees the old invoice
+// CANCELLED (excluded) and the new one already correct (exact) -> no-op;
+// ledgerHasSource guards prevent double reverse / double post.
+//
+//   ?dry=1 → preview only, no writes; returns the full per-invoice table
+//            (old no, old total, correct total, delta) — this IS the
+//            reconciliation/audit artifact.
+// Temporary migration endpoint; delete once the book is corrected.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-void-reissue-underbilled", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const now = new Date().toISOString();
+  const invoiceDate = now.split("T")[0];
+  const due = new Date();
+  due.setDate(due.getDate() + 30);
+  const dueDate = due.toISOString().split("T")[0];
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get(
+      "userId",
+    ) ?? null;
+
+  const dosRes = await c.var.DB.prepare(
+    "SELECT * FROM delivery_orders WHERE orgId = ? AND status IN ('DELIVERED','INVOICED') ORDER BY created_at ASC",
+  )
+    .bind(orgId)
+    .all<DeliveryOrderRow>();
+  const dos = dosRes.results ?? [];
+
+  let scanned = 0;
+  let fixedN = 0,
+    fixedDeltaSen = 0; // net signed A/R change applied
+  let exactN = 0;
+  let paidN = 0,
+    paidDiffSen = 0; // money received — never touched
+  let draftN = 0; // belongs to the other backfill
+  let multiN = 0;
+  let noInvN = 0;
+  let noComputeN = 0;
+  const rows: Array<{
+    doNo: string;
+    customer: string;
+    oldInvoiceNo: string;
+    oldStatus: string;
+    oldTotalSen: number;
+    correctTotalSen: number;
+    deltaSen: number;
+    action: string;
+  }> = [];
+  const errors: { doId: string; doNo: string; error: string }[] = [];
+
+  for (const doRow of dos) {
+    scanned++;
+    try {
+      const invs =
+        (
+          await c.var.DB.prepare(
+            "SELECT id, invoiceNo, status, subtotalSen, totalSen, paidAmount FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED'",
+          )
+            .bind(doRow.id)
+            .all<{
+              id: string;
+              invoiceNo: string;
+              status: string;
+              subtotalSen: number;
+              totalSen: number;
+              paidAmount: number;
+            }>()
+        ).results ?? [];
+
+      const soIds = await resolveDoSalesOrderIds(
+        c.var.DB,
+        doRow.id,
+        doRow.salesOrderId,
+      );
+      const { invItems, computedTotal } = await computeDoInvoiceLines(
+        c.var.DB,
+        doRow.id,
+        soIds,
+      );
+
+      if (invs.length === 0) {
+        noInvN++;
+        continue;
+      }
+      if (computedTotal === 0) {
+        noComputeN++;
+        continue;
+      }
+      if (invs.length > 1) {
+        multiN++;
+        continue;
+      }
+      const inv = invs[0];
+      const oldTotal = Number(inv.totalSen) || 0;
+      if (computedTotal === oldTotal) {
+        exactN++;
+        continue;
+      }
+      if (inv.status === "DRAFT") {
+        draftN++; // /backfill-fix-underbilled-invoices owns DRAFT
+        continue;
+      }
+      if (
+        (Number(inv.paidAmount) || 0) > 0 ||
+        inv.status === "PAID" ||
+        inv.status === "PARTIAL_PAID"
+      ) {
+        paidN++;
+        paidDiffSen += computedTotal - oldTotal;
+        continue;
+      }
+      // SENT / OVERDUE, unpaid, single, mis-billed → void + re-issue.
+      const deltaSen = computedTotal - oldTotal;
+      rows.push({
+        doNo: doRow.doNo,
+        customer: doRow.customerName ?? "",
+        oldInvoiceNo: inv.invoiceNo,
+        oldStatus: inv.status,
+        oldTotalSen: oldTotal,
+        correctTotalSen: computedTotal,
+        deltaSen,
+        action: dry ? "would-void-reissue" : "voided-reissued",
+      });
+      fixedN++;
+      fixedDeltaSen += deltaSen;
+      if (dry) continue;
+
+      const newId = genInvoiceId();
+      const newNo = await nextInvoiceNo(c.var.DB);
+
+      // ---- batch 1: reverse old GL + cancel old + create new + A/R + DO ----
+      const b1: D1PreparedStatement[] = [];
+      const posted = await ledgerHasSource(
+        c.var.DB,
+        orgId,
+        "invoice",
+        inv.id,
+      );
+      const reversed = await ledgerHasSource(
+        c.var.DB,
+        orgId,
+        "invoice_void",
+        inv.id,
+      );
+      if (posted && !reversed) {
+        const { legs } = await buildInvoiceLedgerLegs(
+          c.var.DB,
+          orgId,
+          {
+            id: inv.id,
+            invoiceNo: inv.invoiceNo,
+            customerId: doRow.customerId,
+            subtotalSen: Number(inv.subtotalSen) || oldTotal,
+          },
+          actorUserId,
+          true,
+        );
+        const { statements } = await buildJournalEntryStatements(
+          c.var.DB,
+          orgId,
+          legs,
+        );
+        b1.push(...statements);
+      }
+      b1.push(
+        c.var.DB.prepare(
+          "UPDATE invoices SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+        ).bind(now, inv.id),
+        c.var.DB.prepare(
+          `INSERT INTO invoices (
+             id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
+             customerId, customerName, customerState, hubId, hubName,
+             subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+             paymentDate, paymentMethod, notes, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          newId,
+          newNo,
+          doRow.id,
+          doRow.doNo,
+          doRow.salesOrderId || soIds[0] || null,
+          doRow.companySOId ?? "",
+          doRow.customerId,
+          doRow.customerName,
+          doRow.customerState,
+          doRow.hubId,
+          doRow.hubName,
+          computedTotal,
+          computedTotal,
+          "SENT",
+          invoiceDate,
+          dueDate,
+          0,
+          null,
+          "",
+          `Reissue of ${inv.invoiceNo} — under-billed fix (BUG-2026-05-18-004)`,
+          now,
+          now,
+        ),
+      );
+      for (const it of invItems) {
+        b1.push(
+          c.var.DB.prepare(
+            `INSERT INTO invoice_items (
+               id, invoiceId, productCode, productName, sizeLabel, fabricCode,
+               quantity, unitPriceSen, totalSen
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            it.id,
+            newId,
+            it.productCode,
+            it.productName,
+            it.sizeLabel,
+            it.fabricCode,
+            it.quantity,
+            it.unitPriceSen,
+            it.totalSen,
+          ),
+        );
+      }
+      // Net A/R by EXACTLY the delta: original creation added +old; the
+      // void path never subtracts; the new INSERT above doesn't touch A/R.
+      // So the single correct adjustment is (correct - old).
+      b1.push(
+        c.var.DB.prepare(
+          "UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?",
+        ).bind(deltaSen, doRow.customerId),
+        c.var.DB.prepare(
+          "UPDATE delivery_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
+        ).bind(now, doRow.id),
+      );
+      await c.var.DB.batch(b1);
+
+      // ---- batch 2: post the NEW invoice's ledger (items now committed) --
+      if (!(await ledgerHasSource(c.var.DB, orgId, "invoice", newId))) {
+        const { legs, taxSen } = await buildInvoiceLedgerLegs(
+          c.var.DB,
+          orgId,
+          {
+            id: newId,
+            invoiceNo: newNo,
+            customerId: doRow.customerId,
+            subtotalSen: computedTotal,
+          },
+          actorUserId,
+          false,
+        );
+        const { statements } = await buildJournalEntryStatements(
+          c.var.DB,
+          orgId,
+          legs,
+        );
+        await c.var.DB.batch([
+          ...statements,
+          c.var.DB.prepare(
+            "UPDATE invoices SET taxSen = ? WHERE id = ?",
+          ).bind(taxSen, newId),
+        ]);
+      }
+    } catch (e) {
+      errors.push({
+        doId: doRow.id,
+        doNo: doRow.doNo,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  const bucketSum =
+    fixedN +
+    exactN +
+    paidN +
+    draftN +
+    multiN +
+    noInvN +
+    noComputeN +
+    errors.length;
+
+  return c.json({
+    success: true,
+    mode: dry ? "dry-run" : "executed",
+    deliveredDosScanned: scanned,
+    bucketsReconcile: bucketSum === scanned,
+    voidReissued: { n: fixedN, netARChangeSen: fixedDeltaSen },
+    exactAlready: { n: exactN },
+    needsManual: {
+      paidOrPartPaid: { n: paidN, diffSen: paidDiffSen },
+      draftUseOtherBackfill: { n: draftN },
+      multipleInvoices: { n: multiN },
+      noInvoice: { n: noInvN },
+      computeReturnedZero: { n: noComputeN },
+    },
+    rows,
     errors,
   });
 });

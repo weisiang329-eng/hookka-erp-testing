@@ -132,19 +132,116 @@ async function nextJeNo(db: D1Database): Promise<string> {
 // ---------------------------------------------------------------------------
 // AGING
 // ---------------------------------------------------------------------------
+// Whole days between an ISO date (YYYY-MM-DD…) and today. >0 = overdue.
+function daysOverdue(due: string | null | undefined): number {
+  if (!due) return 0;
+  const d = new Date(String(due).slice(0, 10));
+  if (Number.isNaN(d.getTime())) return 0;
+  const today = new Date(new Date().toISOString().slice(0, 10));
+  return Math.round((today.getTime() - d.getTime()) / 86_400_000);
+}
+function addToBucket(
+  b: {
+    currentSen: number;
+    days30Sen: number;
+    days60Sen: number;
+    days90Sen: number;
+    over90Sen: number;
+  },
+  od: number,
+  amt: number,
+) {
+  if (od <= 0) b.currentSen += amt;
+  else if (od <= 30) b.days30Sen += amt;
+  else if (od <= 60) b.days60Sen += amt;
+  else if (od <= 90) b.days90Sen += amt;
+  else b.over90Sen += amt;
+}
+
+// Live debtor (AR) & creditor (AP) aging, computed on open from unpaid
+// invoices / purchase invoices bucketed by days past due. Replaces the
+// dead manual ar_aging/ap_aging snapshot tables (response shape kept so
+// the AR/AP/Overview tabs are unchanged).
 app.get("/aging", async (c) => {
   // RBAC gate (P3.3-followup) — accounting:read.
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
-  const [ar, ap] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM ar_aging ORDER BY customerName").all<ArAgingRow>(),
-    c.var.DB.prepare("SELECT * FROM ap_aging ORDER BY supplierName").all<ApAgingRow>(),
+  const [invRes, piRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate FROM invoices",
+    ).all<{
+      customerId: string;
+      customerName: string;
+      totalSen: number;
+      paidAmount: number;
+      status: string;
+      dueDate: string | null;
+      invoiceDate: string | null;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT supplierId, supplierName, amountSen, status, dueDate, invoiceDate FROM purchase_invoices",
+    ).all<{
+      supplierId: string;
+      supplierName: string;
+      amountSen: number;
+      status: string;
+      dueDate: string | null;
+      invoiceDate: string | null;
+    }>(),
   ]);
+
+  const arMap = new Map<string, ArAgingRow>();
+  for (const i of invRes.results ?? []) {
+    if (["DRAFT", "CANCELLED", "PAID"].includes(i.status)) continue;
+    const outstanding =
+      (Number(i.totalSen) || 0) - (Number(i.paidAmount) || 0);
+    if (outstanding <= 0) continue;
+    let row = arMap.get(i.customerId);
+    if (!row) {
+      row = {
+        customerId: i.customerId,
+        customerName: i.customerName || "Unknown",
+        currentSen: 0,
+        days30Sen: 0,
+        days60Sen: 0,
+        days90Sen: 0,
+        over90Sen: 0,
+      };
+      arMap.set(i.customerId, row);
+    }
+    addToBucket(row, daysOverdue(i.dueDate ?? i.invoiceDate), outstanding);
+  }
+
+  const apMap = new Map<string, ApAgingRow>();
+  for (const p of piRes.results ?? []) {
+    if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
+    const outstanding = Number(p.amountSen) || 0;
+    if (outstanding <= 0) continue;
+    let row = apMap.get(p.supplierId);
+    if (!row) {
+      row = {
+        supplierId: p.supplierId,
+        supplierName: p.supplierName || "Unknown",
+        currentSen: 0,
+        days30Sen: 0,
+        days60Sen: 0,
+        days90Sen: 0,
+        over90Sen: 0,
+      };
+      apMap.set(p.supplierId, row);
+    }
+    addToBucket(row, daysOverdue(p.dueDate ?? p.invoiceDate), outstanding);
+  }
+
   return c.json({
     success: true,
     data: {
-      ar: ar.results ?? [],
-      ap: ap.results ?? [],
+      ar: [...arMap.values()].sort((a, b) =>
+        a.customerName.localeCompare(b.customerName),
+      ),
+      ap: [...apMap.values()].sort((a, b) =>
+        a.supplierName.localeCompare(b.supplierName),
+      ),
     },
   });
 });

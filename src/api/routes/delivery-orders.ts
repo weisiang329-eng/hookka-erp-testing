@@ -18,8 +18,8 @@ import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import {
   loadDoValueMap,
   loadPoValueMap,
+  loadSoLinePriceIndex,
   priceForItem,
-  type SoLinePriceIndex,
 } from "../lib/do-value";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -400,95 +400,49 @@ async function computeDoInvoiceLines(
   soIds: string[],
 ): Promise<{ invItems: InvItem[]; computedTotal: number }> {
   if (soIds.length === 0) return { invItems: [], computedTotal: 0 };
-  const soPh = soIds.map(() => "?").join(",");
-  const doItemsRes = await db
-    .prepare(
-      `SELECT productionOrderId, productCode, productName, sizeLabel, fabricCode, quantity
-         FROM delivery_order_items WHERE deliveryOrderId = ?`,
-    )
-    .bind(doId)
-    .all<{
-      productionOrderId: string | null;
-      productCode: string | null;
-      productName: string | null;
-      sizeLabel: string | null;
-      fabricCode: string | null;
-      quantity: number;
-    }>();
-  const doItems = doItemsRes.results ?? [];
 
-  // Per-DO exact price index: the POs behind this DO's items + the SO
-  // lines of every linked SO. Same resolver (priceForItem) the whole-org
-  // map uses, so an invoice equals the displayed Amount to the cent.
-  const poIds = doItems
-    .map((i) => i.productionOrderId)
-    .filter((s): s is string => !!s);
-  const poPh = poIds.length ? poIds.map(() => "?").join(",") : "";
-  const [poRes, soItemsRes] = await Promise.all([
-    poIds.length
-      ? db
-          .prepare(
-            `SELECT id, salesOrderId, productCode, sizeCode, fabricCode
-               FROM production_orders WHERE id IN (${poPh})`,
-          )
-          .bind(...poIds)
-          .all<{
-            id: string;
-            salesOrderId: string | null;
-            productCode: string | null;
-            sizeCode: string | null;
-            fabricCode: string | null;
-          }>()
-      : Promise.resolve({ results: [] as never[] }),
+  // BUG-2026-05-18-004 fix. Price every delivered item with the EXACT same
+  // resolver the DO "value" uses — the whole-org price index + the DO's own
+  // salesOrderId as fallback (see loadDoValueMap in ../lib/do-value). The
+  // old code built a NARROW per-DO index (only this DO's POs + the linked
+  // SOs' lines); any item whose code didn't match one of those lines was
+  // silently priced at 0, and the "bill the whole SO" fallback only fired
+  // when the WHOLE total was 0 — so a partial match left the invoice far
+  // below the delivered value (net ≈ RM 165k under-billed across 84). Using
+  // the shared whole-org resolver makes the invoice reconcile to the DO
+  // value to the cent, which is do-value.ts's stated single-source intent.
+  const meta = await db
+    .prepare("SELECT orgId, salesOrderId FROM delivery_orders WHERE id = ?")
+    .bind(doId)
+    .first<{ orgId: string | null; salesOrderId: string | null }>();
+  const orgId = meta?.orgId ?? "hookka";
+  const doSoId = meta?.salesOrderId ?? soIds[0] ?? "";
+
+  const [idx, doItemsRes] = await Promise.all([
+    loadSoLinePriceIndex(db, orgId),
     db
       .prepare(
-        `SELECT salesOrderId, productCode, productName, sizeLabel, sizeCode, fabricCode, quantity, unitPriceSen, lineTotalSen
-           FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
+        `SELECT productionOrderId, productCode, productName, sizeLabel, fabricCode, quantity
+           FROM delivery_order_items WHERE deliveryOrderId = ?`,
       )
-      .bind(...soIds)
+      .bind(doId)
       .all<{
-        salesOrderId: string | null;
+        productionOrderId: string | null;
         productCode: string | null;
         productName: string | null;
         sizeLabel: string | null;
-        sizeCode: string | null;
         fabricCode: string | null;
         quantity: number;
-        unitPriceSen: number;
-        lineTotalSen: number;
       }>(),
   ]);
-
-  const idx: SoLinePriceIndex = {
-    poById: new Map(),
-    byFull: new Map(),
-    byCode: new Map(),
-    byAnyCode: new Map(),
-  };
-  for (const p of poRes.results ?? []) {
-    idx.poById.set(p.id, {
-      salesOrderId: p.salesOrderId ?? "",
-      productCode: p.productCode ?? "",
-      sizeCode: p.sizeCode ?? "",
-      fabricCode: p.fabricCode ?? "",
-    });
-  }
-  for (const si of soItemsRes.results ?? []) {
-    const so = si.salesOrderId ?? "";
-    const code = si.productCode ?? "";
-    const up = si.unitPriceSen || 0;
-    const fk = `${so}|${code}|${si.sizeCode ?? ""}|${si.fabricCode ?? ""}`;
-    if (!idx.byFull.has(fk)) idx.byFull.set(fk, up);
-    const ck = `${so}|${code}`;
-    if (!idx.byCode.has(ck)) idx.byCode.set(ck, up);
-    if (code && !idx.byAnyCode.has(code)) idx.byAnyCode.set(code, up);
-  }
+  const doItems = doItemsRes.results ?? [];
 
   let invItems: InvItem[] = doItems.map((di) => {
+    // Identical call to loadDoValueMap → invoice total == DO value.
     const unitPriceSen = priceForItem(
       idx,
       di.productionOrderId,
-      soIds[0] ?? "",
+      doSoId,
       di.productCode,
     );
     return {
@@ -504,23 +458,43 @@ async function computeDoInvoiceLines(
   });
   let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
 
-  // Fallback 1: DO had no priced lines → bill the SO lines themselves.
-  if (computedTotal === 0 && (soItemsRes.results ?? []).length > 0) {
-    invItems = (soItemsRes.results ?? []).map((si) => ({
-      id: genInvoiceItemId(),
-      productCode: si.productCode ?? "",
-      productName: si.productName ?? "",
-      sizeLabel: si.sizeLabel ?? "",
-      fabricCode: si.fabricCode ?? "",
-      quantity: si.quantity,
-      unitPriceSen: si.unitPriceSen,
-      totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
-    }));
-    computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+  // Fallback 1: nothing priced at all → bill the linked SO lines directly.
+  if (computedTotal === 0) {
+    const soPh = soIds.map(() => "?").join(",");
+    const soItemsRes = await db
+      .prepare(
+        `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
+           FROM sales_order_items WHERE salesOrderId IN (${soPh})`,
+      )
+      .bind(...soIds)
+      .all<{
+        productCode: string | null;
+        productName: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        quantity: number;
+        unitPriceSen: number;
+        lineTotalSen: number;
+      }>();
+    const sis = soItemsRes.results ?? [];
+    if (sis.length > 0) {
+      invItems = sis.map((si) => ({
+        id: genInvoiceItemId(),
+        productCode: si.productCode ?? "",
+        productName: si.productName ?? "",
+        sizeLabel: si.sizeLabel ?? "",
+        fabricCode: si.fabricCode ?? "",
+        quantity: si.quantity,
+        unitPriceSen: si.unitPriceSen,
+        totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
+      }));
+      computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+    }
   }
 
   // Fallback 2: still 0 → sum of every linked SO's header total.
   if (computedTotal === 0) {
+    const soPh = soIds.map(() => "?").join(",");
     const soTotal = await db
       .prepare(
         `SELECT COALESCE(SUM(totalSen), 0) AS t

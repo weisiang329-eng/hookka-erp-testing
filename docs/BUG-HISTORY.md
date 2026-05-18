@@ -34,6 +34,56 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-18-004 — Invoices systematically under-billed (~RM 165k net) — narrow per-DO price index priced unmatched items at zero
+
+**Status:** 🟡 Fix in progress (2026-05-18) — pricing-logic fix committed on
+`claude/invoice-pricing-fix`; reconciliation report + void/re-issue of the
+84 affected invoices pending Wei Siang sign-off. NOT on prod yet.
+**Category:** sales-orders
+
+**Symptom:** Wei Siang: "invoice amount 跟 delivered amount 对不上". The
+84 issued invoices summed RM 167,361.26 while the matching delivered DOs
+summed RM 333,065.00 — **net RM 165,703.74 under-billed** (38 invoices
+under, 4 over, 42 ok). Worst: DO-2604-014 (24 furniture items, RM 16,808
+delivered) invoiced at **RM 2,200**.
+
+**Root cause:** `src/api/routes/delivery-orders.ts` `computeDoInvoiceLines`.
+The DO "value" (the correct figure, shown on the Delivery page + /stats)
+is computed by `loadDoValueMap` in `src/api/lib/do-value.ts`, which prices
+each item with `priceForItem` against a **whole-org** `loadSoLinePriceIndex`
+(every PO + every sales_order_items line in the org) using the DO's own
+salesOrderId as fallback. `computeDoInvoiceLines` instead built its **own
+NARROW index** — only this DO's POs + only the `resolveDoSalesOrderIds`
+SOs' lines. So `priceForItem`'s last-resort `byAnyCode` map was missing
+most product codes; any delivered item whose code didn't exactly match a
+line in those few SOs (common for SOFA variant codes like `5530-2A(LHF)`
+and consolidated multi-SO deliveries) resolved to **unitPrice 0** and was
+billed at zero. The two "bill the SO directly / SO header total" fallbacks
+only fired when the WHOLE computed total was exactly 0, so a single matched
+item left the under-billed total locked in. do-value.ts's own header
+states it is the single source so "an invoice equals the displayed Amount
+to the cent" — the invoice path had silently drifted from that.
+
+**Fix:** `computeDoInvoiceLines` now derives orgId + the DO's salesOrderId
+from the `delivery_orders` row and prices every item via the shared
+whole-org `loadSoLinePriceIndex` + the identical `priceForItem(idx,
+productionOrderId, doSalesOrderId, productCode)` call `loadDoValueMap`
+uses → the invoice total equals the DO value to the cent by construction.
+Fallbacks retained (lazy-fetched) for the genuine no-price case. No caller
+signature changed (orgId resolved internally). `SoLinePriceIndex` import
+dropped (narrow index removed); `loadSoLinePriceIndex` imported.
+
+**Verified:** `npm run build:strict` passes (typecheck + build). A
+reconciliation script (84 rows: invoice → DO → old vs corrected vs diff)
+will be run on the isolated branch for Wei Siang sign-off BEFORE any data
+change. The 84 already-issued+posted wrong invoices will be **voided and
+re-issued** (Wei Siang's call, 2026-05-18) — reverse their ledger entries,
+re-create at the correct amount, re-post — as a separate audited phase
+after sign-off. Forward-only behaviour change is safe; existing-data
+correction is gated.
+
+---
+
 ## BUG-2026-05-18-003 — Newly-added DataGrid columns never appear for users who already have a saved column layout
 
 **Status:** 🟢 Fixed (2026-05-18) — code shipped + verified

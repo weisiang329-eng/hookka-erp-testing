@@ -524,6 +524,8 @@
   "packingMinutes": "packing_minutes",
   "packingStatus": "packing_status",
   "paidAmount": "paid_amount",
+  "paymentNo": "payment_no",
+  "purchaseInvoiceId": "purchase_invoice_id",
   "parentCode": "parent_code",
   "parentId": "parent_id",
   "passportNumber": "passport_number",

@@ -12,6 +12,35 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
+import { getOrgId } from "../lib/tenant";
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+} from "../lib/journal-hash";
+
+const AP_CONTROL = "400-0000"; // Trade Creditors
+const DEFAULT_PURCHASE_ACCT = "704-0010";
+// Fallback raw-material item_group → purchase account. The owner's
+// editable kv_config `coa_stock_map` (rm[<group>].purchase /
+// rmDefault.purchase) overrides this — purchase account is decided by
+// the material bought, per the owner.
+const DEFAULT_PURCHASE_MAP: Record<string, string> = {
+  FABRIC: "701-0010",
+  FABRIC_SEWING: "701-0020",
+  PLYWOOD: "702-0010",
+  WOOD: "702-0010",
+  WD_STRIP: "702-0030",
+  FOAM: "703-0010",
+  WEBBING: "704-0050",
+  MECHANISM: "704-0040",
+  ACCESSORY: "704-0020",
+  PACKING: "705-0020",
+};
+function apBankAcct(method: string | null | undefined): string {
+  return String(method ?? "").toUpperCase() === "CASH"
+    ? "320-0000"
+    : "310-0010";
+}
 
 const app = new Hono<Env>();
 
@@ -560,6 +589,182 @@ app.put("/:id", async (c) => {
             null,
           ),
       );
+    }
+  }
+
+  // ---- GL posting on status transitions (Phase 7b APPROVED / 7c PAID) ----
+  if (body.status && body.status !== existing.status) {
+    try {
+      const orgId = getOrgId(c);
+      const actorUserId =
+        (c as unknown as { get: (k: string) => string | undefined }).get(
+          "userId",
+        ) ?? null;
+      const piNo = (existing as unknown as { piNo?: string }).piNo ?? id;
+
+      if (
+        merged.status === "APPROVED" &&
+        !(await ledgerHasSource(db, orgId, "purchase_invoice", id))
+      ) {
+        const lines = normalizedItems?.ok
+          ? normalizedItems.rows.map((r) => ({
+              mc: r.materialCode,
+              amt: r.lineTotalSen,
+            }))
+          : (
+              (
+                await db
+                  .prepare(
+                    "SELECT * FROM purchase_invoice_items WHERE pi_id = ?",
+                  )
+                  .bind(id)
+                  .all<Record<string, unknown>>()
+              ).results ?? []
+            ).map((r) => ({
+              mc: (r.material_code ?? r.materialCode ?? null) as
+                | string
+                | null,
+              amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
+            }));
+        const rmRes = await db
+          .prepare("SELECT * FROM raw_materials")
+          .all<Record<string, unknown>>();
+        const grpByCode = new Map<string, string>();
+        for (const r of rmRes.results ?? []) {
+          const code = String(r.item_code ?? r.itemCode ?? "");
+          const grp = String(r.item_group ?? r.itemGroup ?? "");
+          if (code) grpByCode.set(code, grp);
+        }
+        let pmap: Record<string, string> = {};
+        let pdefault = DEFAULT_PURCHASE_ACCT;
+        try {
+          const row = await db
+            .prepare("SELECT value FROM kv_config WHERE key = ?")
+            .bind("coa_stock_map")
+            .first<{ value: string }>();
+          const m = JSON.parse(row?.value ?? "null") as {
+            rm?: Record<string, { purchase?: string }>;
+            rmDefault?: { purchase?: string };
+          } | null;
+          if (m?.rmDefault?.purchase) pdefault = m.rmDefault.purchase;
+          if (m?.rm)
+            for (const [g, v] of Object.entries(m.rm))
+              if (v?.purchase) pmap[g] = v.purchase;
+        } catch {
+          pmap = {};
+        }
+        const bucket: Record<string, number> = {};
+        for (const ln of lines) {
+          const grp = ln.mc ? grpByCode.get(ln.mc) ?? "" : "";
+          const acct =
+            (grp && (pmap[grp] ?? DEFAULT_PURCHASE_MAP[grp])) || pdefault;
+          bucket[acct] = (bucket[acct] ?? 0) + (Number(ln.amt) || 0);
+        }
+        const apTotal = Math.round(Number(merged.amountSen) || 0);
+        const sumLines = Object.values(bucket).reduce((s, v) => s + v, 0);
+        if (sumLines !== apTotal)
+          bucket[pdefault] = (bucket[pdefault] ?? 0) + (apTotal - sumLines);
+        const legs: Parameters<typeof buildJournalEntryStatements>[2] = [];
+        let legNo = 1;
+        for (const [acct, amt] of Object.entries(bucket)) {
+          if (amt === 0) continue;
+          legs.push({
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "purchase_invoice",
+            sourceId: id,
+            legNo: legNo++,
+            accountCode: acct,
+            debitSen: amt,
+            creditSen: 0,
+            description: `Purchase · PI ${piNo}`,
+            actorUserId,
+            orgId,
+          });
+        }
+        legs.push({
+          id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+          sourceType: "purchase_invoice",
+          sourceId: id,
+          legNo: legNo++,
+          accountCode: AP_CONTROL,
+          debitSen: 0,
+          creditSen: apTotal,
+          description: `AP · PI ${piNo} · ${existing.supplierName ?? ""}`,
+          actorUserId,
+          orgId,
+        });
+        const { statements: ls } = await buildJournalEntryStatements(
+          db,
+          orgId,
+          legs,
+        );
+        statements.push(...ls);
+      } else if (
+        merged.status === "PAID" &&
+        !(await ledgerHasSource(db, orgId, "supplier_payment", id))
+      ) {
+        const amtSen = Math.round(Number(merged.amountSen) || 0);
+        const spId = `sp-${crypto.randomUUID().slice(0, 8)}`;
+        const payNo = `SP-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+        const today = new Date().toISOString().slice(0, 10);
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO supplier_payments (
+                 id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+                 date, amountSen, method, reference, notes, orgId
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              spId,
+              payNo,
+              existing.supplierId,
+              existing.supplierName ?? "",
+              id,
+              today,
+              amtSen,
+              "BANK_TRANSFER",
+              piNo,
+              `Auto on PI ${piNo} PAID`,
+              orgId,
+            ),
+        );
+        if (amtSen > 0) {
+          const { statements: ls } = await buildJournalEntryStatements(
+            db,
+            orgId,
+            [
+              {
+                id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+                sourceType: "supplier_payment",
+                sourceId: id,
+                legNo: 1,
+                accountCode: AP_CONTROL,
+                debitSen: amtSen,
+                creditSen: 0,
+                description: `AP settle · PI ${piNo}`,
+                actorUserId,
+                orgId,
+              },
+              {
+                id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+                sourceType: "supplier_payment",
+                sourceId: id,
+                legNo: 2,
+                accountCode: apBankAcct("BANK_TRANSFER"),
+                debitSen: 0,
+                creditSen: amtSen,
+                description: `AP settle · PI ${piNo}`,
+                actorUserId,
+                orgId,
+              },
+            ],
+          );
+          statements.push(...ls);
+        }
+      }
+    } catch (e) {
+      console.warn(`[ledger] failed to BUILD PI ${id} posting:`, e);
     }
   }
 

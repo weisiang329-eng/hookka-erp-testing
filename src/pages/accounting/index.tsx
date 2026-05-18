@@ -289,8 +289,10 @@ function StockMapCard() {
         <p className="text-[11px] text-[#9CA3AF] mb-2">
           Maps each raw-material item_group (+ WIP, FG) to its stock /
           opening / closing accounts for the detailed Manufacturing-account
-          breakdown. Leave blank to use the built-in default. Shape:{" "}
-          <code>{`{ "rmDefault": {...}, "rm": { "FABRIC": {"stock":"330-0001","opening":"701-0001","closing":"701-9991"} }, "wip": {...}, "fg": {...} }`}</code>
+          breakdown AND the purchase account a purchase-invoice line posts
+          to (per material item_group). Leave blank for the built-in
+          default. Shape:{" "}
+          <code>{`{ "rmDefault": {...}, "rm": { "FABRIC": {"stock":"330-0001","opening":"701-0001","closing":"701-9991","purchase":"701-0010"} }, "wip": {...}, "fg": {...} }`}</code>
         </p>
         <textarea
           value={text}

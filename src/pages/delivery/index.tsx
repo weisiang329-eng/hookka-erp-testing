@@ -185,14 +185,16 @@ const STATUS_LABEL: Record<DOStatus, string> = {
   INVOICED: "Invoiced",
 };
 
-// All 6 delivery workflow tabs
+// Delivery workflow tabs. The old "Invoice" tab was removed (2026-05-18):
+// it only ever showed DOs whose status = INVOICED and was always empty/
+// confusing — auto-created invoices stay DRAFT and the DO stays DELIVERED,
+// so the bucket read 0 forever. Invoices are tracked on the Invoices page.
 const ALL_TABS = [
   { key: "planning", label: "Planning" },
   { key: "pending_delivery", label: "Pending Delivery" },
   { key: "pending_dispatch", label: "Pending Dispatch" },
   { key: "dispatched", label: "Dispatched" },
   { key: "delivered", label: "Delivered" },
-  { key: "invoiced", label: "Invoice" },
 ] as const;
 
 // Which DO statuses map to which tab (only for DO-based tabs).
@@ -205,7 +207,6 @@ const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
   pending_dispatch: ["DRAFT"],
   dispatched: ["LOADED", "IN_TRANSIT"],
   delivered: ["DELIVERED"],
-  invoiced: ["INVOICED"],
 };
 
 // PO-based tabs (show production orders, not delivery orders)
@@ -1165,7 +1166,6 @@ export default function DeliveryPage() {
       dispatched: byStatus.LOADED ?? 0,
       inTransit: byStatus.IN_TRANSIT ?? 0,
       delivered: byStatus.DELIVERED ?? 0,
-      invoiced: byStatus.INVOICED ?? 0,
     };
   }, [doStatsRaw]);
   // Wei Siang 2026-05-16: RM value per DO-status bucket so the tab
@@ -1177,7 +1177,6 @@ export default function DeliveryPage() {
       dispatched: v.LOADED ?? 0,
       inTransit: v.IN_TRANSIT ?? 0,
       delivered: v.DELIVERED ?? 0,
-      invoiced: v.INVOICED ?? 0,
     };
   }, [doStatsRaw]);
   const pendingDispatchCount = uniqueDOsByStatus.draft;
@@ -2390,7 +2389,6 @@ export default function DeliveryPage() {
     pending_dispatch: pendingDispatchCount,
     dispatched: dispatchedCount,
     delivered: uniqueDOsByStatus.delivered,
-    invoiced: uniqueDOsByStatus.invoiced,
   };
 
   // ---------- Tab RM value (Sales Figure in every bucket) ----------
@@ -2406,7 +2404,6 @@ export default function DeliveryPage() {
     pending_dispatch: valueDOsByStatus.draft,
     dispatched: valueDOsByStatus.dispatched + valueDOsByStatus.inTransit,
     delivered: valueDOsByStatus.delivered,
-    invoiced: valueDOsByStatus.invoiced,
   };
 
   return (

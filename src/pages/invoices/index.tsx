@@ -97,6 +97,14 @@ export default function InvoicesPage() {
   const [paymentMethod, setPaymentMethod] = useState("BANK_TRANSFER");
   const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
+  // Batch "Send to Customer" — confirm many DRAFT invoices in one go.
+  const [selectedInvoices, setSelectedInvoices] = useState<Invoice[]>([]);
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchResult, setBatchResult] = useState<
+    { ok: number; fail: number; errors: string[] } | null
+  >(null);
+
   const openCreate = () => {
     refreshDOs();
     setShowCreateModal(true);
@@ -147,6 +155,51 @@ export default function InvoicesPage() {
     } catch {
       // ignore
     }
+  };
+
+  // Only DRAFT invoices can be advanced to SENT (mirrors the per-row
+  // "Send to Customer" guard). Non-draft rows in the selection are ignored.
+  const selectedDrafts = useMemo(
+    () => selectedInvoices.filter((i) => i.status === "DRAFT"),
+    [selectedInvoices]
+  );
+  const selectedDraftTotalSen = useMemo(
+    () => selectedDrafts.reduce((s, i) => s + (i.totalSen || 0), 0),
+    [selectedDrafts]
+  );
+
+  // Sequential on purpose: posting an invoice writes immutable journal
+  // entries + cascades the linked SO. One-at-a-time keeps a failure
+  // isolated (reported, not fatal) and avoids hammering the ledger writer.
+  const batchSendToCustomer = async () => {
+    if (selectedDrafts.length === 0) return;
+    setBatchRunning(true);
+    let ok = 0;
+    const errors: string[] = [];
+    for (const inv of selectedDrafts) {
+      try {
+        const data = await fetchJson(
+          `/api/invoices/${inv.id}`,
+          InvoiceMutationSchema,
+          { method: "PUT", body: { status: "SENT" } }
+        );
+        if (data.success) ok++;
+        else errors.push(`${inv.invoiceNo}: failed`);
+      } catch (e) {
+        errors.push(
+          `${inv.invoiceNo}: ${e instanceof Error ? e.message : "failed"}`
+        );
+      }
+    }
+    invalidateCachePrefix("/api/invoices");
+    invalidateCachePrefix("/api/delivery-orders");
+    invalidateCachePrefix("/api/sales-orders");
+    refreshInvoices();
+    refreshInvStats();
+    setBatchRunning(false);
+    setBatchConfirmOpen(false);
+    setSelectedInvoices([]);
+    setBatchResult({ ok, fail: errors.length, errors });
   };
 
   const recordPayment = async (inv: Invoice) => {
@@ -505,10 +558,39 @@ export default function InvoicesPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {selectedInvoices.length > 0 && (
+                <div className="flex items-center justify-between bg-[#F7F4F0] border border-[#E2DDD8] rounded-md px-4 py-2 mb-3">
+                  <span className="text-sm text-[#4B5563]">
+                    {selectedInvoices.length} selected
+                    {selectedDrafts.length !== selectedInvoices.length
+                      ? ` · ${selectedDrafts.length} draft can be sent`
+                      : ""}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSelectedInvoices([])}
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      disabled={selectedDrafts.length === 0}
+                      onClick={() => setBatchConfirmOpen(true)}
+                    >
+                      Send to Customer ({selectedDrafts.length})
+                    </Button>
+                  </div>
+                </div>
+              )}
               <DataGrid<Invoice>
                 columns={invoiceGridColumns}
                 data={filteredInvoices}
                 keyField="id"
+                selectable
+                onSelectionChange={(rows: Invoice[]) => setSelectedInvoices(rows)}
                 onDoubleClick={(row) => navigate(`/invoices/${row.id}`)}
                 contextMenuItems={invoiceGridContextMenu}
                 maxHeight="calc(100vh - 300px)"
@@ -808,6 +890,97 @@ export default function InvoicesPage() {
                 disabled={!selectedDOId || creating}
               >
                 {creating ? "Creating..." : "Create Invoice"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Send-to-Customer confirm */}
+      {batchConfirmOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-bold text-[#1F1D1B] mb-2">
+              Send invoices to customer?
+            </h2>
+            <p className="text-sm text-[#4B5563] mb-4">
+              You are about to send{" "}
+              <span className="font-semibold">{selectedDrafts.length}</span>{" "}
+              draft invoice{selectedDrafts.length === 1 ? "" : "s"} totalling{" "}
+              <span className="font-semibold">
+                {formatCurrency(selectedDraftTotalSen)}
+              </span>
+              . This finalises them — accounting entries are created and this
+              cannot be undone.
+            </p>
+            {batchRunning && (
+              <p className="text-sm text-[#9C6F1E] mb-4">
+                Sending… please don't close this window.
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setBatchConfirmOpen(false)}
+                disabled={batchRunning}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={batchSendToCustomer}
+                disabled={batchRunning || selectedDrafts.length === 0}
+              >
+                {batchRunning
+                  ? "Sending…"
+                  : `Send ${selectedDrafts.length} invoice${selectedDrafts.length === 1 ? "" : "s"}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch result summary */}
+      {batchResult && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-bold text-[#1F1D1B] mb-3">
+              Batch send complete
+            </h2>
+            <p className="text-sm text-[#1F1D1B] mb-2">
+              <span className="font-semibold text-[#4F7C3A]">
+                {batchResult.ok}
+              </span>{" "}
+              sent successfully
+              {batchResult.fail > 0 ? (
+                <>
+                  ,{" "}
+                  <span className="font-semibold text-[#B91C1C]">
+                    {batchResult.fail}
+                  </span>{" "}
+                  failed
+                </>
+              ) : (
+                "."
+              )}
+            </p>
+            {batchResult.errors.length > 0 && (
+              <div className="max-h-48 overflow-y-auto rounded-md border border-[#E2DDD8] bg-[#FBF7F2] p-3 text-xs text-[#6B5C32] mb-4">
+                {batchResult.errors.slice(0, 20).map((e, i) => (
+                  <div key={i} className="font-mono">
+                    {e}
+                  </div>
+                ))}
+                {batchResult.errors.length > 20 && (
+                  <div className="mt-1 italic">
+                    …and {batchResult.errors.length - 20} more
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="flex justify-end">
+              <Button variant="primary" onClick={() => setBatchResult(null)}>
+                Close
               </Button>
             </div>
           </div>

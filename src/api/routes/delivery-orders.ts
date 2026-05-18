@@ -2285,6 +2285,89 @@ app.post("/", async (c) => {
   }
 });
 
+// GET /api/delivery-orders/:id/print-extras
+//
+// Read-only print enrichment. Returns the few fields the redesigned DO /
+// Invoice printout needs that are NOT denormalised onto the DO payload,
+// fetched via joins ONLY for this one DO so the (recently stabilised)
+// core DO/invoice APIs are untouched:
+//   - customerSO   : sales_orders.customerSO  (via delivery_orders.salesOrderId)
+//   - customerRef   : first non-empty production_orders.customerReference
+//                     across the DO's items
+//   - per item      : gap / divan / leg inches + computed total height,
+//                     from production_orders (via di.productionOrderId)
+// Registered BEFORE /:id (Hono matches routes in order).
+app.get("/:id/print-extras", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const doRow = await c.var.DB.prepare(
+    "SELECT id, salesOrderId FROM delivery_orders WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; salesOrderId: string | null }>();
+  if (!doRow) {
+    return c.json({ success: false, error: "Delivery order not found" }, 404);
+  }
+  let customerSO = "";
+  if (doRow.salesOrderId) {
+    const so = await c.var.DB.prepare(
+      "SELECT customerSO FROM sales_orders WHERE id = ?",
+    )
+      .bind(doRow.salesOrderId)
+      .first<{ customerSO: string | null }>();
+    customerSO = so?.customerSO ?? "";
+  }
+  const itRes = await c.var.DB.prepare(
+    `SELECT di.id AS doiId,
+            po.customerReference AS customerReference,
+            po.gapInches AS gapInches,
+            po.divanHeightInches AS divanHeightInches,
+            po.legHeightInches AS legHeightInches
+       FROM delivery_order_items di
+       LEFT JOIN production_orders po ON po.id = di.productionOrderId
+      WHERE di.deliveryOrderId = ?`,
+  )
+    .bind(id)
+    .all<{
+      doiId: string;
+      customerReference: string | null;
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+    }>();
+  let customerRef = "";
+  const items: Record<
+    string,
+    {
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+      totalHeightInches: number | null;
+    }
+  > = {};
+  for (const r of itRes.results ?? []) {
+    if (!customerRef && r.customerReference) customerRef = r.customerReference;
+    const g = r.gapInches;
+    const d = r.divanHeightInches;
+    const l = r.legHeightInches;
+    const total =
+      g == null && d == null && l == null
+        ? null
+        : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
+    items[r.doiId] = {
+      gapInches: g,
+      divanHeightInches: d,
+      legHeightInches: l,
+      totalHeightInches: total,
+    };
+  }
+  return c.json({
+    success: true,
+    data: { customerSO, customerRef, items },
+  });
+});
+
 // GET /api/delivery-orders/:id — single
 app.get("/:id", async (c) => {
   // RBAC gate — single-record reads also require delivery-orders:read.

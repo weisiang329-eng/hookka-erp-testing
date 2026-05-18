@@ -388,15 +388,17 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     "LIABILITY": true,
     "EQUITY": true,
     "REVENUE": true,
+    "COST": true,
     "EXPENSE": true,
   });
 
-  const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"];
+  const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "COST", "EXPENSE"];
   const typeLabels: Record<string, string> = {
     ASSET: "Assets",
     LIABILITY: "Liabilities",
     EQUITY: "Equity",
     REVENUE: "Revenue",
+    COST: "Cost of Production",
     EXPENSE: "Expenses",
   };
   // Use the canonical COA type palette from design-tokens.
@@ -407,6 +409,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     LIABILITY: `${COA_TYPE_COLOR.LIABILITY.bg} ${COA_TYPE_COLOR.LIABILITY.text} ${COA_TYPE_COLOR.LIABILITY.border}`,
     EQUITY:    `${COA_TYPE_COLOR.EQUITY.bg} ${COA_TYPE_COLOR.EQUITY.text} ${COA_TYPE_COLOR.EQUITY.border}`,
     REVENUE:   `${COA_TYPE_COLOR.REVENUE.bg} ${COA_TYPE_COLOR.REVENUE.text} ${COA_TYPE_COLOR.REVENUE.border}`,
+    COST:      `${COA_TYPE_COLOR.COST.bg} ${COA_TYPE_COLOR.COST.text} ${COA_TYPE_COLOR.COST.border}`,
     EXPENSE:   `${COA_TYPE_COLOR.EXPENSE.bg} ${COA_TYPE_COLOR.EXPENSE.text} ${COA_TYPE_COLOR.EXPENSE.border}`,
   };
 

@@ -607,7 +607,7 @@ export type QCInspection = {
 export type ChartOfAccount = {
   code: string;
   name: string;
-  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE";
+  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST";
   parentCode?: string;
   balance: number;
   isActive: boolean;

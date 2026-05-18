@@ -152,7 +152,7 @@ export const ACCENT_PLUM: SemanticStyle = {
  *   - Expense = warning (consumption, amber)
  */
 export const COA_TYPE_COLOR: Record<
-  "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE",
+  "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST",
   SemanticStyle
 > = {
   ASSET:     INFO,
@@ -160,6 +160,7 @@ export const COA_TYPE_COLOR: Record<
   EQUITY:    ACCENT_PLUM,
   REVENUE:   SUCCESS,
   EXPENSE:   WARNING,
+  COST:      NEUTRAL,
 };
 
 /**
@@ -378,7 +379,7 @@ export function getItemCategoryStyle(
  * Resolve a Chart-of-Accounts type to its style.
  */
 export function getCoaTypeStyle(
-  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE",
+  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST",
 ): SemanticStyle {
   return COA_TYPE_COLOR[type];
 }

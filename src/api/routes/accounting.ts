@@ -24,7 +24,7 @@ const app = new Hono<Env>();
 type CoaRow = {
   code: string;
   name: string;
-  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE";
+  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST";
   parentCode: string | null;
   balanceSen: number;
   isActive: number;
@@ -308,7 +308,7 @@ app.post("/coa", async (c) => {
         400,
       );
     }
-    const validTypes = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"];
+    const validTypes = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE", "COST"];
     if (!validTypes.includes(type)) {
       return c.json({ success: false, error: "Invalid account type" }, 400);
     }
@@ -585,7 +585,9 @@ app.put("/journals/:id", async (c) => {
           .first<CoaRow>();
         if (!acct) continue;
         const delta =
-          acct.type === "ASSET" || acct.type === "EXPENSE"
+          acct.type === "ASSET" ||
+          acct.type === "EXPENSE" ||
+          acct.type === "COST"
             ? l.debitSen - l.creditSen
             : l.creditSen - l.debitSen;
         await c.var.DB.prepare(
@@ -613,7 +615,9 @@ app.put("/journals/:id", async (c) => {
           .first<CoaRow>();
         if (!acct) continue;
         const delta =
-          acct.type === "ASSET" || acct.type === "EXPENSE"
+          acct.type === "ASSET" ||
+          acct.type === "EXPENSE" ||
+          acct.type === "COST"
             ? -(l.debitSen - l.creditSen)
             : -(l.creditSen - l.debitSen);
         await c.var.DB.prepare(

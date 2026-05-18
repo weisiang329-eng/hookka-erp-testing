@@ -4033,7 +4033,7 @@ export const qcInspections: QCInspection[] = [];
 export type ChartOfAccount = {
   code: string;
   name: string;
-  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE";
+  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST";
   parentCode?: string;
   balance: number; // in sen
   isActive: boolean;

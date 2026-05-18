@@ -337,17 +337,17 @@ function OverviewTab({
   // Aggregate aging buckets
   const arBuckets = [
     { period: "Current", amountSen: arData.reduce((s, a) => s + a.currentSen, 0) },
-    { period: "1-30 days", amountSen: arData.reduce((s, a) => s + a.days30Sen, 0) },
-    { period: "31-60 days", amountSen: arData.reduce((s, a) => s + a.days60Sen, 0) },
-    { period: "61-90 days", amountSen: arData.reduce((s, a) => s + a.days90Sen, 0) },
-    { period: "90+ days", amountSen: arData.reduce((s, a) => s + a.over90Sen, 0) },
+    { period: "1 month", amountSen: arData.reduce((s, a) => s + a.days30Sen, 0) },
+    { period: "2 months", amountSen: arData.reduce((s, a) => s + a.days60Sen, 0) },
+    { period: "3 months", amountSen: arData.reduce((s, a) => s + a.days90Sen, 0) },
+    { period: "3+ months", amountSen: arData.reduce((s, a) => s + a.over90Sen, 0) },
   ];
   const apBuckets = [
     { period: "Current", amountSen: apData.reduce((s, a) => s + a.currentSen, 0) },
-    { period: "1-30 days", amountSen: apData.reduce((s, a) => s + a.days30Sen, 0) },
-    { period: "31-60 days", amountSen: apData.reduce((s, a) => s + a.days60Sen, 0) },
-    { period: "61-90 days", amountSen: apData.reduce((s, a) => s + a.days90Sen, 0) },
-    { period: "90+ days", amountSen: apData.reduce((s, a) => s + a.over90Sen, 0) },
+    { period: "1 month", amountSen: apData.reduce((s, a) => s + a.days30Sen, 0) },
+    { period: "2 months", amountSen: apData.reduce((s, a) => s + a.days60Sen, 0) },
+    { period: "3 months", amountSen: apData.reduce((s, a) => s + a.days90Sen, 0) },
+    { period: "3+ months", amountSen: apData.reduce((s, a) => s + a.over90Sen, 0) },
   ];
 
   const recentJournals = journals.slice(0, 5);
@@ -1248,10 +1248,10 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]/50">
                   <th className="py-3 px-4 text-left text-[#6B7280] font-medium">Customer</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Current</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1-30</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">31-60</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">61-90</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">90+</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">2 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3+ mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Total</th>
                   <th className="py-3 px-4 text-center text-[#6B7280] font-medium">Action</th>
                 </tr>
@@ -1399,10 +1399,10 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]/50">
                   <th className="py-3 px-4 text-left text-[#6B7280] font-medium">Supplier</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Current</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1-30</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">31-60</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">61-90</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">90+</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">2 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3+ mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Total</th>
                   <th className="py-3 px-4 text-center text-[#6B7280] font-medium">Action</th>
                 </tr>

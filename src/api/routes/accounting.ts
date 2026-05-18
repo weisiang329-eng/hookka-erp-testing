@@ -15,6 +15,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { monthsOverdue } from "../../lib/terms";
 
 const app = new Hono<Env>();
 
@@ -132,14 +133,9 @@ async function nextJeNo(db: D1Database): Promise<string> {
 // ---------------------------------------------------------------------------
 // AGING
 // ---------------------------------------------------------------------------
-// Whole days between an ISO date (YYYY-MM-DD…) and today. >0 = overdue.
-function daysOverdue(due: string | null | undefined): number {
-  if (!due) return 0;
-  const d = new Date(String(due).slice(0, 10));
-  if (Number.isNaN(d.getTime())) return 0;
-  const today = new Date(new Date().toISOString().slice(0, 10));
-  return Math.round((today.getTime() - d.getTime()) / 86_400_000);
-}
+// Aging is by the owner's 1-month month-based term (see src/lib/terms.ts):
+// bucket by MONTHS overdue, not days. The 5 columns keep their names for
+// response/UI compatibility but now mean: current / 1 / 2 / 3 / 3+ months.
 function addToBucket(
   b: {
     currentSen: number;
@@ -148,13 +144,13 @@ function addToBucket(
     days90Sen: number;
     over90Sen: number;
   },
-  od: number,
+  mo: number,
   amt: number,
 ) {
-  if (od <= 0) b.currentSen += amt;
-  else if (od <= 30) b.days30Sen += amt;
-  else if (od <= 60) b.days60Sen += amt;
-  else if (od <= 90) b.days90Sen += amt;
+  if (mo <= 0) b.currentSen += amt;
+  else if (mo === 1) b.days30Sen += amt;
+  else if (mo === 2) b.days60Sen += amt;
+  else if (mo === 3) b.days90Sen += amt;
   else b.over90Sen += amt;
 }
 
@@ -209,7 +205,7 @@ app.get("/aging", async (c) => {
       };
       arMap.set(i.customerId, row);
     }
-    addToBucket(row, daysOverdue(i.dueDate ?? i.invoiceDate), outstanding);
+    addToBucket(row, monthsOverdue(i.invoiceDate ?? i.dueDate), outstanding);
   }
 
   const apMap = new Map<string, ApAgingRow>();
@@ -230,7 +226,7 @@ app.get("/aging", async (c) => {
       };
       apMap.set(p.supplierId, row);
     }
-    addToBucket(row, daysOverdue(p.dueDate ?? p.invoiceDate), outstanding);
+    addToBucket(row, monthsOverdue(p.invoiceDate ?? p.dueDate), outstanding);
   }
 
   return c.json({

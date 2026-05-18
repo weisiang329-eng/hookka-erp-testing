@@ -17,6 +17,7 @@ import {
   buildJournalEntryStatements,
   ledgerHasSource,
 } from "../lib/journal-hash";
+import { nextMonthDueDate } from "../../lib/terms";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
 const DEFAULT_PURCHASE_ACCT = "704-0010";
@@ -388,6 +389,10 @@ app.post("/", async (c) => {
   const piNo = await generatePiNo(db);
   const id = `pi-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
+  // Owner term: fixed 1 month, by calendar month — due = end of next
+  // month (src/lib/terms.ts). Enforced server-side.
+  const piInvoiceDate = body.invoiceDate ?? now.split("T")[0];
+  const piDueDate = nextMonthDueDate(piInvoiceDate);
 
   // When items[] is provided, the PI's amountSen is the sum of line totals
   // (overrides any explicit body.amountSen). When omitted, fall back to
@@ -412,8 +417,8 @@ app.post("/", async (c) => {
         poRef,
         body.supplierId,
         body.supplierName,
-        body.invoiceDate ?? null,
-        body.dueDate ?? null,
+        piInvoiceDate,
+        piDueDate,
         amountSen,
         status,
         body.remarks ?? null,

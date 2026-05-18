@@ -36,6 +36,7 @@ import { getOrgId } from "../lib/tenant";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { parseDebtorCode } from "../../lib/debtor";
+import { nextMonthDueDate } from "../../lib/terms";
 
 const app = new Hono<Env>();
 
@@ -717,9 +718,9 @@ app.post("/", async (c) => {
     const totalSen = subtotalSen;
     const now = new Date().toISOString();
     const invoiceDate = now.split("T")[0];
-    const due = new Date();
-    due.setDate(due.getDate() + 30);
-    const dueDate = due.toISOString().split("T")[0];
+    // Owner term: fixed 1 month, by calendar month — due = end of next
+    // month (src/lib/terms.ts). Enforced server-side, not client-supplied.
+    const dueDate = nextMonthDueDate(invoiceDate);
     const id = genInvoiceId();
     const invoiceNo = body.invoiceNo || (await nextInvoiceNo(c.var.DB));
 

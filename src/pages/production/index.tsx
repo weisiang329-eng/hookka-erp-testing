@@ -5466,6 +5466,9 @@ export default function ProductionPage({
               },
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
+            // Roll out the newly-added Customer SO column to existing users
+            // whose saved column layout predates it (one-time per user/grid).
+            ensureColumns={["customerSO"]}
             onFilteredDataChange={setGridFilteredDeptRows}
             // Batch-action multi-select. Adds the checkbox column on the
             // left + populates `selectedDeptRows` for the toolbar below.

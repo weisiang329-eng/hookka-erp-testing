@@ -130,6 +130,13 @@ export type DataGridProps<T> = {
   // silently blank the grid (Sales Orders "Delivered" showed 0 of 66).
   // Omit on grids without an external filter to keep current behaviour.
   valueFilterKey?: string;
+  // New-default-column roll-out. Keys listed here are force-shown ONCE per
+  // user per gridId — even for users who already have a saved column
+  // layout that predates the column. Used when a column is added to the
+  // code and should appear for everyone without them hunting in the
+  // Columns menu. Idempotent: once applied (tracked per user), the user's
+  // later choice to hide it is respected and never re-forced.
+  ensureColumns?: string[];
 };
 
 type SavedView = {
@@ -922,6 +929,7 @@ export function DataGrid<T extends Record<string, any>>({
   virtualize = false,
   defaultExcludedValues,
   valueFilterKey,
+  ensureColumns,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
   // Two-tier persistence per gridId:
@@ -955,6 +963,41 @@ export function DataGrid<T extends Record<string, any>>({
       } catch { /* ignore */ }
     }
     return columns.map(c => c.key);
+  });
+  // Per-user ledger of every column key this grid has ever surfaced to the
+  // user. A column is "genuinely new" (added in code after the user last
+  // used the grid) iff its key is absent here — that is what the
+  // reconciliation effect below auto-shows. Critically this must NOT
+  // resurrect a column the user deliberately hid, so the seed is the FULL
+  // column universe the user last knew: the persisted column ORDER (which
+  // lists hidden columns too) when present, else the current columns
+  // (identical safety to the legacy behaviour — nothing resurfaces; the
+  // ledger is then persisted so FUTURE additions are detectable even for
+  // users who never reorder).
+  const [seenKeys, setSeenKeys] = useState<Set<string>>(() => {
+    if (gridId && typeof window !== "undefined") {
+      try {
+        const ledger = localStorage.getItem(`datagrid-seen-${gridId}-${userKey()}`);
+        if (ledger) return new Set(JSON.parse(ledger) as string[]);
+        const personalOrder = localStorage.getItem(`datagrid-colorder-${gridId}-${userKey()}`);
+        if (personalOrder) return new Set(JSON.parse(personalOrder) as string[]);
+        const orgOrder = localStorage.getItem(`datagrid-colorder-${gridId}-org-default`);
+        if (orgOrder) return new Set(JSON.parse(orgOrder) as string[]);
+      } catch { /* ignore */ }
+    }
+    return new Set(columns.map(c => c.key));
+  });
+  // Per-user record of which ensureColumns keys have already been
+  // force-applied for this gridId, so the one-time roll-out never fights a
+  // user who later hides the column.
+  const [ensuredKeys, setEnsuredKeys] = useState<Set<string>>(() => {
+    if (gridId && typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem(`datagrid-ensured-${gridId}-${userKey()}`);
+        if (raw) return new Set(JSON.parse(raw) as string[]);
+      } catch { /* ignore */ }
+    }
+    return new Set();
   });
   const [showCustomizer, setShowCustomizer] = useState(false);
 
@@ -1005,6 +1048,8 @@ export function DataGrid<T extends Record<string, any>>({
     try {
       localStorage.removeItem(`datagrid-cols-${gridId}-${userKey()}`);
       localStorage.removeItem(`datagrid-colorder-${gridId}-${userKey()}`);
+      localStorage.removeItem(`datagrid-seen-${gridId}-${userKey()}`);
+      localStorage.removeItem(`datagrid-ensured-${gridId}-${userKey()}`);
 
       const orgCols = localStorage.getItem(`datagrid-cols-${gridId}-org-default`);
       const orgOrder = localStorage.getItem(`datagrid-colorder-${gridId}-org-default`);
@@ -1018,6 +1063,16 @@ export function DataGrid<T extends Record<string, any>>({
           ? (JSON.parse(orgOrder) as string[])
           : columns.map(c => c.key),
       );
+      // Re-seed the seen ledger to the post-reset universe so the
+      // reconciliation effect doesn't immediately re-surface columns the
+      // org default intentionally hides. Clear ensured flags so a genuine
+      // new-default column can roll out again after an explicit reset.
+      setSeenKeys(
+        orgOrder
+          ? new Set(JSON.parse(orgOrder) as string[])
+          : new Set(columns.map(c => c.key)),
+      );
+      setEnsuredKeys(new Set());
       return true;
     } catch {
       return false;
@@ -1025,31 +1080,61 @@ export function DataGrid<T extends Record<string, any>>({
   }, [gridId, columns]);
 
   // When the parent passes a new `columns` array (e.g., the production page
-  // changes activeTab and rebuilds dept-pill columns, or BOM-driven upstream
-  // adds a sibling column), sync local state:
-  //   - Append new column keys to columnOrder (so they don't sort to 999/end)
-  //   - For NEW visible-by-default keys not yet known, add to visibleKeys so
-  //     the column renders.  Don't override user-toggled visibility.
-  // The "first time we see this key" check is via columnOrder (a key exists
-  // there as soon as the grid has acknowledged its existence).
+  // changes activeTab and rebuilds dept-pill columns, or a column is added
+  // in code), sync local state:
+  //   - A column is "genuinely new" iff its key is absent from the per-user
+  //     `seenKeys` ledger. (The legacy check used columnOrder, but that is
+  //     seeded from the current columns when the user has no saved order,
+  //     so brand-new columns were silently never detected for those users —
+  //     they stayed hidden forever. The seen-ledger fixes that without ever
+  //     resurrecting a column the user deliberately hid.)
+  //   - Append genuinely-new keys to columnOrder only if not already present
+  //     (so they don't sort to 999/end and aren't duplicated).
+  //   - Force visible-by-default new keys into visibleKeys (don't override
+  //     user-toggled visibility of already-seen columns).
+  //   - Grow + persist the seen ledger so subsequent code-added columns are
+  //     detectable even for users who never reorder.
   useEffect(() => {
-    const known = new Set(columnOrder);
+    const allKeys = columns.map((c) => c.key);
     const fresh: string[] = [];
     const newlyVisible: string[] = [];
     for (const c of columns) {
-      if (!known.has(c.key)) {
+      if (!seenKeys.has(c.key)) {
         fresh.push(c.key);
         if (!c.hidden && !c.defaultHidden) newlyVisible.push(c.key);
       }
     }
+    // Establish/extend the seen ledger. Persisting it even when nothing is
+    // fresh is what makes future column adds detectable for never-reorder
+    // users (their seed is the current columns, so without this write the
+    // ledger would never exist and a later column would re-seed as "seen").
+    if (gridId && typeof window !== "undefined") {
+      const ledgerKey = `datagrid-seen-${gridId}-${userKey()}`;
+      try {
+        if (fresh.length > 0 || localStorage.getItem(ledgerKey) === null) {
+          localStorage.setItem(
+            ledgerKey,
+            JSON.stringify([...new Set([...seenKeys, ...allKeys])]),
+          );
+        }
+      } catch { /* ignore */ }
+    }
     if (fresh.length === 0) return;
-    setColumnOrder((prev) => {
-      const next = [...prev, ...fresh];
-      if (gridId) {
-        try { localStorage.setItem(`datagrid-colorder-${gridId}-${userKey()}`, JSON.stringify(next)); } catch { /* ignore */ }
-      }
+    setSeenKeys((prev) => {
+      const next = new Set(prev);
+      for (const k of allKeys) next.add(k);
       return next;
     });
+    const orderAdds = fresh.filter((k) => !columnOrder.includes(k));
+    if (orderAdds.length > 0) {
+      setColumnOrder((prev) => {
+        const next = [...prev, ...orderAdds];
+        if (gridId) {
+          try { localStorage.setItem(`datagrid-colorder-${gridId}-${userKey()}`, JSON.stringify(next)); } catch { /* ignore */ }
+        }
+        return next;
+      });
+    }
     if (newlyVisible.length > 0) {
       setVisibleKeys((prev) => {
         const next = new Set(prev);
@@ -1060,7 +1145,39 @@ export function DataGrid<T extends Record<string, any>>({
         return next;
       });
     }
-  }, [columns, columnOrder, gridId]);
+  }, [columns, columnOrder, seenKeys, gridId]);
+
+  // One-time new-default-column roll-out. For each key in `ensureColumns`
+  // not yet applied for this user+grid, force it visible once and record
+  // that we did so. This surfaces a freshly-added column even for users
+  // whose seen-ledger was seeded from current columns (never-reorder users,
+  // for whom the reconciliation effect above can't tell it's new). The
+  // ensured-flag means a user who later hides the column is respected.
+  useEffect(() => {
+    if (!ensureColumns || ensureColumns.length === 0) return;
+    const colKeys = new Set(columns.map((c) => c.key));
+    const toApply = ensureColumns.filter(
+      (k) => colKeys.has(k) && !ensuredKeys.has(k),
+    );
+    if (toApply.length === 0) return;
+    setEnsuredKeys((prev) => {
+      const next = new Set(prev);
+      for (const k of toApply) next.add(k);
+      if (gridId) {
+        try { localStorage.setItem(`datagrid-ensured-${gridId}-${userKey()}`, JSON.stringify([...next])); } catch { /* ignore */ }
+      }
+      return next;
+    });
+    setVisibleKeys((prev) => {
+      if (toApply.every((k) => prev.has(k))) return prev;
+      const next = new Set(prev);
+      for (const k of toApply) next.add(k);
+      if (gridId) {
+        try { localStorage.setItem(`datagrid-cols-${gridId}-${userKey()}`, JSON.stringify([...next])); } catch { /* ignore */ }
+      }
+      return next;
+    });
+  }, [ensureColumns, columns, ensuredKeys, gridId]);
 
   const visibleColumns = useMemo(() => {
     const orderMap = new Map(columnOrder.map((k, i) => [k, i]));

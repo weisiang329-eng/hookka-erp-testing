@@ -34,6 +34,52 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-18-003 — Newly-added DataGrid columns never appear for users who already have a saved column layout
+
+**Status:** 🟢 Fixed (2026-05-18) — code shipped + verified
+**Category:** ui-frontend
+
+**Symptom:** The new "Customer SO" column shipped and deployed, but on
+Production → Fab Cut it did not appear for Wei Siang. The renamed
+"Customer PO" column DID show. The column was present (toggleable) in
+the Columns menu but defaulted off.
+
+**Root cause:** `src/components/ui/data-grid.tsx`. The reconciliation
+effect that auto-shows code-added columns decided "is this column new?"
+by testing membership in `columnOrder`. But `columnOrder` initialises
+(no-persisted-order branch) to `columns.map(c => c.key)` — the *current*
+columns, which already include any just-added key. So for any user with
+a saved visibility set but no saved column order (the common case;
+toggling a column writes `datagrid-cols` but not `datagrid-colorder`),
+every genuinely-new column was treated as already-known and never added
+to `visibleKeys`, leaving it hidden until manually enabled. Verified
+against live localStorage: `datagrid-cols-production-dept-fab_cut-<email>`
+listed 26 keys incl. `customerPOId` but not `customerSO`, and no
+`datagrid-colorder-*` key existed. Affected every grid in the app for
+every future column addition, not just this one.
+
+**Fix:** `src/components/ui/data-grid.tsx` — added a per-user persisted
+"seen columns" ledger (`datagrid-seen-${gridId}-${userKey()}`). A column
+is new iff its key is absent from that ledger; the ledger seeds from the
+persisted column ORDER (the full universe incl. user-hidden columns) when
+present, else from the current columns (legacy-safe — never resurrects a
+deliberately-hidden column; the ledger is then persisted so subsequent
+additions are detectable even for never-reorder users). Plus an
+`ensureColumns?: string[]` prop for one-time roll-out of a new
+default-visible column to existing users (idempotent per user/grid via
+`datagrid-ensured-*`, so a later hide is respected); the production dept
+sheet passes `ensureColumns={["customerSO"]}`. `resetToOrgDefault` clears
+both new ledgers. Six scenarios traced (never-reordered, reordered,
+brand-new user, deliberately-hid-a-column, org-default, future column) —
+zero regression; the hidden-column case is explicitly protected.
+
+**Verified:** `npm run build:strict` passes (typecheck + build). Live
+re-check on prod after deploy confirms Customer SO renders for Wei Siang
+in its defined position (right after Customer PO) without manual toggle,
+and an intentionally-hidden column is not resurrected.
+
+---
+
 ## BUG-2026-05-18-002 — Production CI deploy silently broken since the chart-of-accounts merge (build:strict typecheck gate)
 
 **Status:** 🟢 Fixed (2026-05-18) — code shipped + verified

@@ -18,6 +18,18 @@ import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { previewCascadeSOClosed } from "./invoices";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+} from "../lib/journal-hash";
+import { parseDebtorCode } from "../../lib/debtor";
+
+// Cash/bank account by payment method (CASH → cash-in-hand, else bank).
+function bankAcct(method: string | null | undefined): string {
+  return String(method ?? "").toUpperCase() === "CASH"
+    ? "320-0000"
+    : "310-0010";
+}
 
 const app = new Hono<Env>();
 
@@ -165,10 +177,10 @@ app.post("/", async (c) => {
     }
 
     const customer = await c.var.DB.prepare(
-      "SELECT id, name FROM customers WHERE id = ?",
+      "SELECT id, name, code FROM customers WHERE id = ?",
     )
       .bind(customerId)
-      .first<{ id: string; name: string }>();
+      .first<{ id: string; name: string; code: string }>();
     if (!customer) {
       return c.json({ success: false, error: "Customer not found" }, 404);
     }
@@ -382,6 +394,55 @@ app.post("/", async (c) => {
       statements.push(...closeStmts);
     }
 
+    // AR receipt → GL: DR bank/cash · CR debtor control. Idempotent via
+    // the ledger unique key + HTTP idempotency wrapper; never blocks the
+    // payment.
+    try {
+      const orgId = getOrgId(c);
+      const actorUserId =
+        (c as unknown as { get: (k: string) => string | undefined }).get(
+          "userId",
+        ) ?? null;
+      const ctl = parseDebtorCode(customer.code);
+      const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
+      const amtSen = Math.round(Number(amount) || 0);
+      if (amtSen > 0) {
+        const { statements: ledgerStmts } = await buildJournalEntryStatements(
+          c.var.DB,
+          orgId,
+          [
+            {
+              id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+              sourceType: "payment",
+              sourceId: id,
+              legNo: 1,
+              accountCode: bankAcct(method),
+              debitSen: amtSen,
+              creditSen: 0,
+              description: `Receipt ${receiptNumber} · ${customer.name}`,
+              actorUserId,
+              orgId,
+            },
+            {
+              id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+              sourceType: "payment",
+              sourceId: id,
+              legNo: 2,
+              accountCode: controlCode,
+              debitSen: 0,
+              creditSen: amtSen,
+              description: `Receipt ${receiptNumber} · ${customer.name}`,
+              actorUserId,
+              orgId,
+            },
+          ],
+        );
+        statements.push(...ledgerStmts);
+      }
+    } catch (e) {
+      console.warn(`[ledger] failed to BUILD payment ${id} post:`, e);
+    }
+
     await c.var.DB.batch(statements);
 
     const created = await c.var.DB.prepare(
@@ -525,6 +586,65 @@ app.put("/:id", async (c) => {
             `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
           ).bind(totalRolledBack, existing.customerId),
         );
+      }
+      // GL reversal of the original receipt: DR debtor control · CR bank.
+      // Idempotent — only if the receipt posted and not already reversed.
+      try {
+        const orgId = getOrgId(c);
+        const actorUserId =
+          (c as unknown as { get: (k: string) => string | undefined }).get(
+            "userId",
+          ) ?? null;
+        const posted = await ledgerHasSource(c.var.DB, orgId, "payment", id);
+        const reversed = await ledgerHasSource(
+          c.var.DB,
+          orgId,
+          "payment_bounce",
+          id,
+        );
+        const amtSen = Math.round(Number(existing.amount) || 0);
+        if (posted && !reversed && amtSen > 0) {
+          const cust = await c.var.DB.prepare(
+            "SELECT code FROM customers WHERE id = ?",
+          )
+            .bind(existing.customerId)
+            .first<{ code: string }>();
+          const ctl = parseDebtorCode(cust?.code);
+          const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
+          const { statements: revStmts } = await buildJournalEntryStatements(
+            c.var.DB,
+            orgId,
+            [
+              {
+                id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+                sourceType: "payment_bounce",
+                sourceId: id,
+                legNo: 1,
+                accountCode: controlCode,
+                debitSen: amtSen,
+                creditSen: 0,
+                description: `REVERSAL · bounced receipt ${existing.receiptNumber}`,
+                actorUserId,
+                orgId,
+              },
+              {
+                id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+                sourceType: "payment_bounce",
+                sourceId: id,
+                legNo: 2,
+                accountCode: bankAcct(existing.method),
+                debitSen: 0,
+                creditSen: amtSen,
+                description: `REVERSAL · bounced receipt ${existing.receiptNumber}`,
+                actorUserId,
+                orgId,
+              },
+            ],
+          );
+          statements.push(...revStmts);
+        }
+      } catch (e) {
+        console.warn(`[ledger] failed to BUILD payment ${id} bounce:`, e);
       }
     }
 

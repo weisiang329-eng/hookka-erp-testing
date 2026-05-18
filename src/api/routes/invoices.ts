@@ -28,12 +28,172 @@ import {
   buildAuditStatement,
   recordAuditCreatedMetric,
 } from "../lib/audit";
-import { buildJournalEntryStatements } from "../lib/journal-hash";
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+} from "../lib/journal-hash";
 import { getOrgId } from "../lib/tenant";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
+import { parseDebtorCode } from "../../lib/debtor";
+import { nextMonthDueDate } from "../../lib/terms";
 
 const app = new Hono<Env>();
+
+// Product-category → sales account (Phase 4). Bedframe & "everything else"
+// fall to the generic SALES account; sofa & accessory have their own.
+const SALES_ACCT: Record<string, string> = {
+  BEDFRAME: "500-0000",
+  SOFA: "500-0020",
+  ACCESSORY: "500-0030",
+};
+type InvLedgerLeg = {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  legNo: number;
+  accountCode: string;
+  debitSen: number;
+  creditSen: number;
+  description: string;
+  actorUserId: string | null;
+  orgId: string;
+};
+
+// Build the double-entry legs for a sales-invoice post (or its reversal):
+//   DR  <debtor control>          subtotal + tax
+//   CR  500-0000/0020/0030        subtotal (split by product category)
+//   CR  350-0000 GST output       tax        (only if > 0)
+// Credits are reconciled to EXACTLY subtotalSen so debits == credits even
+// when invoice_items don't sum cleanly. `reverse` swaps DR/CR and tags the
+// source 'invoice_void' for an idempotent, auditable reversal.
+async function buildInvoiceLedgerLegs(
+  db: Env["Variables"]["DB"],
+  orgId: string,
+  inv: {
+    id: string;
+    invoiceNo: string;
+    customerId: string;
+    subtotalSen: number;
+  },
+  actorUserId: string | null,
+  reverse: boolean,
+): Promise<{ legs: InvLedgerLeg[]; taxSen: number }> {
+  const subtotal = Math.max(0, Math.round(inv.subtotalSen) || 0);
+
+  // 1. Debtor control account from the customer's debtor code.
+  const cust = await db
+    .prepare("SELECT code FROM customers WHERE id = ?")
+    .bind(inv.customerId)
+    .first<{ code: string }>();
+  const parsed = parseDebtorCode(cust?.code);
+  const controlCode = parsed.ok ? parsed.controlCode : "300-0000";
+
+  // 2. Split subtotal by product category (from invoice_items ⨝ products),
+  //    allocated proportionally and reconciled to subtotal exactly.
+  const [itemsRes, prodRes] = await Promise.all([
+    db
+      .prepare(
+        "SELECT productCode, totalSen FROM invoice_items WHERE invoiceId = ?",
+      )
+      .bind(inv.id)
+      .all<{ productCode: string; totalSen: number }>(),
+    db.prepare("SELECT code, category FROM products").all<{
+      code: string;
+      category: string;
+    }>(),
+  ]);
+  const cat = new Map<string, string>();
+  for (const p of prodRes.results ?? []) cat.set(p.code, p.category);
+  const bucket: Record<string, number> = {};
+  for (const it of itemsRes.results ?? []) {
+    const acct =
+      SALES_ACCT[cat.get(it.productCode) ?? ""] ?? SALES_ACCT.BEDFRAME;
+    bucket[acct] = (bucket[acct] ?? 0) + (Number(it.totalSen) || 0);
+  }
+  const itemsTotal = Object.values(bucket).reduce((s, v) => s + v, 0);
+  const salesLegs: { acct: string; amt: number }[] = [];
+  if (itemsTotal <= 0 || Object.keys(bucket).length === 0) {
+    salesLegs.push({ acct: SALES_ACCT.BEDFRAME, amt: subtotal });
+  } else {
+    const codes = Object.keys(bucket);
+    let allocated = 0;
+    codes.forEach((code, i) => {
+      const amt =
+        i === codes.length - 1
+          ? subtotal - allocated // last bucket absorbs rounding
+          : Math.round((bucket[code] / itemsTotal) * subtotal);
+      allocated += amt;
+      salesLegs.push({ acct: code, amt });
+    });
+  }
+
+  // 3. GST from the operator-configured rate.
+  const gstRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("gst_rate_pct")
+    .first<{ value: string }>();
+  let pct = 0;
+  try {
+    const v = JSON.parse(gstRow?.value ?? "null") as { pct?: number } | null;
+    if (v && typeof v.pct === "number" && isFinite(v.pct)) pct = v.pct;
+  } catch {
+    pct = 0;
+  }
+  const taxSen = Math.max(0, Math.round((subtotal * pct) / 100));
+
+  const sourceType = reverse ? "invoice_void" : "invoice";
+  const tag = reverse ? "REVERSAL · " : "";
+  const dr = (n: number) => (reverse ? 0 : n);
+  const cr = (n: number) => (reverse ? n : 0);
+  // On reversal the debtor leg flips to a credit, sales/GST to debits.
+  const rdr = (n: number) => (reverse ? n : 0);
+  const rcr = (n: number) => (reverse ? 0 : n);
+  const legs: InvLedgerLeg[] = [];
+  let legNo = 1;
+  legs.push({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType,
+    sourceId: inv.id,
+    legNo: legNo++,
+    accountCode: controlCode,
+    debitSen: dr(subtotal + taxSen),
+    creditSen: cr(subtotal + taxSen),
+    description: `${tag}AR · invoice ${inv.invoiceNo}`,
+    actorUserId,
+    orgId,
+  });
+  for (const s of salesLegs) {
+    if (s.amt === 0) continue;
+    legs.push({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType,
+      sourceId: inv.id,
+      legNo: legNo++,
+      accountCode: s.acct,
+      debitSen: rdr(s.amt),
+      creditSen: rcr(s.amt),
+      description: `${tag}Sales · invoice ${inv.invoiceNo}`,
+      actorUserId,
+      orgId,
+    });
+  }
+  if (taxSen > 0) {
+    legs.push({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType,
+      sourceId: inv.id,
+      legNo: legNo++,
+      accountCode: "350-0000",
+      debitSen: rdr(taxSen),
+      creditSen: rcr(taxSen),
+      description: `${tag}GST output · invoice ${inv.invoiceNo}`,
+      actorUserId,
+      orgId,
+    });
+  }
+  return { legs, taxSen };
+}
 
 type InvoiceRow = {
   id: string;
@@ -558,9 +718,9 @@ app.post("/", async (c) => {
     const totalSen = subtotalSen;
     const now = new Date().toISOString();
     const invoiceDate = now.split("T")[0];
-    const due = new Date();
-    due.setDate(due.getDate() + 30);
-    const dueDate = due.toISOString().split("T")[0];
+    // Owner term: fixed 1 month, by calendar month — due = end of next
+    // month (src/lib/terms.ts). Enforced server-side, not client-supplied.
+    const dueDate = nextMonthDueDate(invoiceDate);
     const id = genInvoiceId();
     const invoiceNo = body.invoiceNo || (await nextInvoiceNo(c.var.DB));
 
@@ -893,14 +1053,12 @@ app.put("/:id", async (c) => {
       });
       if (auditStmt) statements.push(auditStmt);
 
-      // Phase C #2 — immutable-ledger dual-write, NOW inside the batch.
-      // Standard 2-leg invoice posting per the roadmap (chart in 0010):
-      //   DR 1100 Accounts Receivable     totalSen
-      //   CR 4000 Sales Revenue           subtotalSen
-      //   CR 2400 GST Output              taxSen   (only if non-zero)
-      // taxSen = max(0, totalSen - subtotalSen). The current invoice
-      // schema doesn't carry an explicit tax column; the GST leg fires
-      // only when a future migration starts populating it.
+      // Phase 4 — post against the real 0115 COA, idempotently:
+      //   DR <debtor control 300-x>   subtotal + GST
+      //   CR 500-0000/0020/0030       subtotal (split by product category)
+      //   CR 350-0000 GST output      tax (operator-configured rate)
+      // A re-flip DRAFT→SENT / retry is a no-op (Phase 3a guard). Ledger
+      // failure is logged, never blocks the invoice mutation.
       try {
         const orgId =
           (existing as unknown as { orgId?: string | null }).orgId ??
@@ -909,59 +1067,36 @@ app.put("/:id", async (c) => {
           (
             c as unknown as { get: (k: string) => string | undefined }
           ).get("userId") ?? null;
-        const taxSen = Math.max(0, existing.totalSen - existing.subtotalSen);
-        const legs = [
-          {
-            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-            sourceType: "invoice",
-            sourceId: id,
-            legNo: 1,
-            accountCode: "1100",
-            debitSen: existing.totalSen,
-            creditSen: 0,
-            description: `AR · invoice ${existing.invoiceNo}`,
-            actorUserId,
+        if (await ledgerHasSource(c.var.DB, orgId, "invoice", id)) {
+          console.warn(
+            `[ledger] invoice ${id} already posted — skipping (idempotent)`,
+          );
+        } else {
+          const { legs, taxSen } = await buildInvoiceLedgerLegs(
+            c.var.DB,
             orgId,
-          },
-          {
-            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-            sourceType: "invoice",
-            sourceId: id,
-            legNo: 2,
-            accountCode: "4000",
-            debitSen: 0,
-            creditSen: existing.subtotalSen,
-            description: `Sales · invoice ${existing.invoiceNo}`,
+            {
+              id,
+              invoiceNo: existing.invoiceNo,
+              customerId:
+                (existing as unknown as { customerId?: string })
+                  .customerId ?? "",
+              subtotalSen: existing.subtotalSen,
+            },
             actorUserId,
-            orgId,
-          },
-        ];
-        if (taxSen > 0) {
-          legs.push({
-            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-            sourceType: "invoice",
-            sourceId: id,
-            legNo: 3,
-            accountCode: "2400",
-            debitSen: 0,
-            creditSen: taxSen,
-            description: `GST output · invoice ${existing.invoiceNo}`,
-            actorUserId,
-            orgId,
-          });
+            false,
+          );
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+          // Persist computed tax so the GST leg is re-derivable/auditable.
+          statements.push(
+            c.var.DB.prepare(
+              "UPDATE invoices SET taxSen = ? WHERE id = ?",
+            ).bind(taxSen, id),
+          );
         }
-        const { statements: ledgerStmts } = await buildJournalEntryStatements(
-          c.var.DB,
-          orgId,
-          legs,
-        );
-        statements.push(...ledgerStmts);
       } catch (e) {
-        // Hash computation / chain-head read failed BEFORE the batch.
-        // The ledger write is critical for audit-trail integrity but the
-        // surrounding refactor preserves the original "never block the
-        // mutation" contract — log loudly and proceed without the dual-
-        // write. The chain-walker job will flag the missing legs.
         console.warn(
           `[ledger] failed to BUILD statements for invoice ${id} post:`,
           e,
@@ -976,6 +1111,51 @@ app.put("/:id", async (c) => {
         after: afterSnapshot,
       });
       if (auditStmt) statements.push(auditStmt);
+
+      // Reverse the original posting (idempotent): only when it was
+      // posted and not already reversed. Recomputed from the current
+      // invoice subtotal + GST rate — accurate because a SENT invoice's
+      // items are locked from edits, so post and void mirror exactly.
+      try {
+        const orgId =
+          (existing as unknown as { orgId?: string | null }).orgId ??
+          "hookka";
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        const posted = await ledgerHasSource(c.var.DB, orgId, "invoice", id);
+        const reversed = await ledgerHasSource(
+          c.var.DB,
+          orgId,
+          "invoice_void",
+          id,
+        );
+        if (posted && !reversed) {
+          const { legs } = await buildInvoiceLedgerLegs(
+            c.var.DB,
+            orgId,
+            {
+              id,
+              invoiceNo: existing.invoiceNo,
+              customerId:
+                (existing as unknown as { customerId?: string })
+                  .customerId ?? "",
+              subtotalSen: existing.subtotalSen,
+            },
+            actorUserId,
+            true,
+          );
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+        }
+      } catch (e) {
+        console.warn(
+          `[ledger] failed to BUILD reversal for invoice ${id} void:`,
+          e,
+        );
+      }
     }
 
     await c.var.DB.batch(statements);

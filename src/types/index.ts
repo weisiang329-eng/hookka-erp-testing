@@ -607,10 +607,14 @@ export type QCInspection = {
 export type ChartOfAccount = {
   code: string;
   name: string;
-  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE";
+  type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" | "COST";
   parentCode?: string;
   balance: number;
   isActive: boolean;
+  /** Cash-flow statement bucket: O=Operating, I=Investing, F=Financing. */
+  cashFlowCategory?: "O" | "I" | "F";
+  /** AutoCount-style special-account marker (SDC, SCC, SBK, SBS, …). */
+  specialAccountType?: string;
 };
 
 export type JournalLine = {

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -128,6 +128,9 @@ export default function AccountingPage() {
         ))}
       </div>
 
+      <GstRateCard />
+      <StockMapCard />
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="text-[#6B7280]">Loading accounting data...</div>
@@ -152,6 +155,157 @@ export default function AccountingPage() {
 }
 
 // =============== TAB 1: OVERVIEW ===============
+
+// Operator-configurable GST/SST rate (kv_config key `gst_rate_pct`).
+// Applied automatically when a sales invoice is posted (Phase 4).
+function GstRateCard() {
+  const { toast } = useToast();
+  const [pct, setPct] = useState<number>(0);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    fetch("/api/kv-config/gst_rate_pct")
+      .then((r) => r.json())
+      .then((j) => {
+        const v = (j?.data as { pct?: number } | null)?.pct;
+        if (typeof v === "number" && isFinite(v)) setPct(v);
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+  const save = async () => {
+    if (!(pct >= 0 && pct <= 100)) {
+      toast.error("GST rate must be between 0 and 100");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/kv-config/gst_rate_pct", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pct }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success(`GST rate saved: ${pct}%`);
+      else toast.error(j?.error || "Failed to save GST rate");
+    } catch {
+      toast.error("Failed to save GST rate");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4 flex flex-wrap items-end gap-4">
+        <div>
+          <label className="text-xs font-medium text-[#6B7280] mb-1 block">
+            GST / SST Rate (%)
+          </label>
+          <input
+            type="number"
+            step="0.01"
+            min={0}
+            max={100}
+            value={pct}
+            disabled={!loaded}
+            onChange={(e) => setPct(Number(e.target.value))}
+            className="w-32 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+          />
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={save}
+          disabled={saving || !loaded}
+        >
+          {saving ? "Saving…" : "Save"}
+        </Button>
+        <p className="text-[11px] text-[#9CA3AF] max-w-sm">
+          Applied automatically when a sales invoice is posted: tax =
+          subtotal × this rate, credited to GST 350-0000. 0 = no GST.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Operator-editable inventory → stock/opening/closing account mapping
+// (kv_config key `coa_stock_map`). Drives the detailed closing-stock
+// breakdown in the Manufacturing Account. Empty = built-in default.
+function StockMapCard() {
+  const { toast } = useToast();
+  const [text, setText] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    fetch("/api/kv-config/coa_stock_map")
+      .then((r) => r.json())
+      .then((j) => {
+        if (j?.data) setText(JSON.stringify(j.data, null, 2));
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+  const save = async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      toast.error("Mapping must be valid JSON");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/kv-config/coa_stock_map", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success("Stock account mapping saved");
+      else toast.error(j?.error || "Failed to save mapping");
+    } catch {
+      toast.error("Failed to save mapping");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-sm font-medium text-[#1F1D1B]">
+            Inventory → Stock Account Mapping
+          </p>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={save}
+            disabled={saving || !loaded}
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+        <p className="text-[11px] text-[#9CA3AF] mb-2">
+          Maps each raw-material item_group (+ WIP, FG) to its stock /
+          opening / closing accounts for the detailed Manufacturing-account
+          breakdown AND the purchase account a purchase-invoice line posts
+          to (per material item_group). Leave blank for the built-in
+          default. Shape:{" "}
+          <code>{`{ "rmDefault": {...}, "rm": { "FABRIC": {"stock":"330-0001","opening":"701-0001","closing":"701-9991","purchase":"701-0010"} }, "wip": {...}, "fg": {...} }`}</code>
+        </p>
+        <textarea
+          value={text}
+          disabled={!loaded}
+          onChange={(e) => setText(e.target.value)}
+          rows={6}
+          placeholder="(empty — built-in default mapping in effect)"
+          className="w-full font-mono text-xs rounded-md border border-[#E2DDD8] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+        />
+      </CardContent>
+    </Card>
+  );
+}
 
 function OverviewTab({
   accounts,
@@ -183,17 +337,17 @@ function OverviewTab({
   // Aggregate aging buckets
   const arBuckets = [
     { period: "Current", amountSen: arData.reduce((s, a) => s + a.currentSen, 0) },
-    { period: "1-30 days", amountSen: arData.reduce((s, a) => s + a.days30Sen, 0) },
-    { period: "31-60 days", amountSen: arData.reduce((s, a) => s + a.days60Sen, 0) },
-    { period: "61-90 days", amountSen: arData.reduce((s, a) => s + a.days90Sen, 0) },
-    { period: "90+ days", amountSen: arData.reduce((s, a) => s + a.over90Sen, 0) },
+    { period: "1 month", amountSen: arData.reduce((s, a) => s + a.days30Sen, 0) },
+    { period: "2 months", amountSen: arData.reduce((s, a) => s + a.days60Sen, 0) },
+    { period: "3 months", amountSen: arData.reduce((s, a) => s + a.days90Sen, 0) },
+    { period: "3+ months", amountSen: arData.reduce((s, a) => s + a.over90Sen, 0) },
   ];
   const apBuckets = [
     { period: "Current", amountSen: apData.reduce((s, a) => s + a.currentSen, 0) },
-    { period: "1-30 days", amountSen: apData.reduce((s, a) => s + a.days30Sen, 0) },
-    { period: "31-60 days", amountSen: apData.reduce((s, a) => s + a.days60Sen, 0) },
-    { period: "61-90 days", amountSen: apData.reduce((s, a) => s + a.days90Sen, 0) },
-    { period: "90+ days", amountSen: apData.reduce((s, a) => s + a.over90Sen, 0) },
+    { period: "1 month", amountSen: apData.reduce((s, a) => s + a.days30Sen, 0) },
+    { period: "2 months", amountSen: apData.reduce((s, a) => s + a.days60Sen, 0) },
+    { period: "3 months", amountSen: apData.reduce((s, a) => s + a.days90Sen, 0) },
+    { period: "3+ months", amountSen: apData.reduce((s, a) => s + a.over90Sen, 0) },
   ];
 
   const recentJournals = journals.slice(0, 5);
@@ -373,7 +527,14 @@ function AgingCard({
 function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
   const { toast } = useToast();
   const [showForm, setShowForm] = useState(false);
-  const [formData, setFormData] = useState({ code: "", name: "", type: "ASSET" as ChartOfAccount["type"], parentCode: "" });
+  const [formData, setFormData] = useState({
+    code: "",
+    name: "",
+    type: "ASSET" as ChartOfAccount["type"],
+    parentCode: "",
+    cashFlowCategory: "" as "" | "O" | "I" | "F",
+    specialAccountType: "",
+  });
   const [editCode, setEditCode] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
@@ -381,15 +542,17 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     "LIABILITY": true,
     "EQUITY": true,
     "REVENUE": true,
+    "COST": true,
     "EXPENSE": true,
   });
 
-  const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "EXPENSE"];
+  const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "COST", "EXPENSE"];
   const typeLabels: Record<string, string> = {
     ASSET: "Assets",
     LIABILITY: "Liabilities",
     EQUITY: "Equity",
     REVENUE: "Revenue",
+    COST: "Cost of Production",
     EXPENSE: "Expenses",
   };
   // Use the canonical COA type palette from design-tokens.
@@ -400,6 +563,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     LIABILITY: `${COA_TYPE_COLOR.LIABILITY.bg} ${COA_TYPE_COLOR.LIABILITY.text} ${COA_TYPE_COLOR.LIABILITY.border}`,
     EQUITY:    `${COA_TYPE_COLOR.EQUITY.bg} ${COA_TYPE_COLOR.EQUITY.text} ${COA_TYPE_COLOR.EQUITY.border}`,
     REVENUE:   `${COA_TYPE_COLOR.REVENUE.bg} ${COA_TYPE_COLOR.REVENUE.text} ${COA_TYPE_COLOR.REVENUE.border}`,
+    COST:      `${COA_TYPE_COLOR.COST.bg} ${COA_TYPE_COLOR.COST.text} ${COA_TYPE_COLOR.COST.border}`,
     EXPENSE:   `${COA_TYPE_COLOR.EXPENSE.bg} ${COA_TYPE_COLOR.EXPENSE.text} ${COA_TYPE_COLOR.EXPENSE.border}`,
   };
 
@@ -412,7 +576,14 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     const data = asMutationResponse(await res.json());
     if (data?.success) {
       setShowForm(false);
-      setFormData({ code: "", name: "", type: "ASSET", parentCode: "" });
+      setFormData({
+        code: "",
+        name: "",
+        type: "ASSET",
+        parentCode: "",
+        cashFlowCategory: "",
+        specialAccountType: "",
+      });
       onRefresh();
     } else {
       toast.error(data?.error || "Failed to create account");
@@ -454,7 +625,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       {showForm && (
         <Card>
           <CardContent className="p-4">
-            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Code</label>
                 <input
@@ -503,6 +674,36 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                       </option>
                     ))}
                 </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Cash Flow</label>
+                <select
+                  value={formData.cashFlowCategory}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      cashFlowCategory: e.target.value as "" | "O" | "I" | "F",
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                >
+                  <option value="">(None)</option>
+                  <option value="O">Operating</option>
+                  <option value="I">Investing</option>
+                  <option value="F">Financing</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Special Type</label>
+                <input
+                  type="text"
+                  placeholder="e.g. SDC, SBK (optional)"
+                  value={formData.specialAccountType}
+                  onChange={(e) =>
+                    setFormData({ ...formData, specialAccountType: e.target.value })
+                  }
+                  className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                />
               </div>
               <div className="flex gap-2">
                 <Button variant="primary" size="sm" onClick={handleAdd}>
@@ -1047,10 +1248,10 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]/50">
                   <th className="py-3 px-4 text-left text-[#6B7280] font-medium">Customer</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Current</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1-30</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">31-60</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">61-90</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">90+</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">2 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3+ mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Total</th>
                   <th className="py-3 px-4 text-center text-[#6B7280] font-medium">Action</th>
                 </tr>
@@ -1198,10 +1399,10 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]/50">
                   <th className="py-3 px-4 text-left text-[#6B7280] font-medium">Supplier</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Current</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1-30</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">31-60</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">61-90</th>
-                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">90+</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">1 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">2 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3 mth</th>
+                  <th className="py-3 px-4 text-right text-[#6B7280] font-medium">3+ mth</th>
                   <th className="py-3 px-4 text-right text-[#6B7280] font-medium">Total</th>
                   <th className="py-3 px-4 text-center text-[#6B7280] font-medium">Action</th>
                 </tr>
@@ -1320,6 +1521,30 @@ type PLData = {
   revenueByCustomer: Record<string, number>;
   cogsByAccount: Record<string, number>;
   opexByAccount: Record<string, number>;
+  manufacturing?: {
+    openingStock: number;
+    purchases: number;
+    directLabour: number;
+    factoryOverhead: number;
+    otherMfg: number;
+    closingStock: number;
+    costOfProduction: number;
+    inventoryBreakdown?: {
+      bucket: string;
+      value: number;
+      stockAcct: string;
+      openingAcct: string;
+      closingAcct: string;
+    }[];
+    stockNote?: string;
+  };
+  cashFlow?: {
+    operating: number;
+    investing: number;
+    financing: number;
+    netChange: number;
+    note: string;
+  };
 };
 
 function PLReportTab() {
@@ -1690,6 +1915,124 @@ function PLReportTab() {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Manufacturing Account + Cash Flow (O/I/F) */}
+      <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
+        {plData.manufacturing && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Manufacturing Account</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <tbody>
+                  {[
+                    ["Opening Stock", plData.manufacturing.openingStock],
+                    ["Add: Purchases", plData.manufacturing.purchases],
+                    ["Add: Direct Labour", plData.manufacturing.directLabour],
+                    [
+                      "Add: Factory Overhead",
+                      plData.manufacturing.factoryOverhead,
+                    ],
+                    ["Add: Other Mfg Cost", plData.manufacturing.otherMfg],
+                    [
+                      "Less: Closing Stock",
+                      -plData.manufacturing.closingStock,
+                    ],
+                  ].map(([label, val]) => (
+                    <tr key={label as string} className="border-b border-[#F0ECE9]">
+                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums text-[#1F1D1B]">
+                        {formatCurrency(Math.abs(val as number))}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="font-semibold">
+                    <td className="px-2 py-2 text-[#1F1D1B]">
+                      Cost of Production
+                    </td>
+                    <td className="px-2 py-2 text-right tabular-nums text-[#1F1D1B]">
+                      {formatCurrency(plData.manufacturing.costOfProduction)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              {plData.manufacturing.inventoryBreakdown &&
+                plData.manufacturing.inventoryBreakdown.length > 0 && (
+                  <div className="mt-3 border-t border-[#F0ECE9] pt-2">
+                    <p className="text-[11px] font-semibold text-[#6B7280] mb-1">
+                      Closing stock — live from cost ledger
+                    </p>
+                    <table className="w-full text-xs">
+                      <tbody>
+                        {plData.manufacturing.inventoryBreakdown.map((b) => (
+                          <tr
+                            key={b.bucket}
+                            className="border-b border-[#F7F4EF]"
+                          >
+                            <td className="px-2 py-1 text-[#4B5563]">
+                              {b.bucket}
+                            </td>
+                            <td className="px-2 py-1 text-[#9CA3AF] tabular-nums">
+                              {b.closingAcct}
+                            </td>
+                            <td className="px-2 py-1 text-right tabular-nums text-[#1F1D1B]">
+                              {formatCurrency(b.value)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              <p className="text-[11px] text-[#9CA3AF] mt-2">
+                {plData.manufacturing.stockNote ??
+                  "Opening + Purchases + Labour + Overhead + Other − Closing."}
+              </p>
+            </CardContent>
+          </Card>
+        )}
+        {plData.cashFlow && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">
+                Cash Flow — Operating / Investing / Financing
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <tbody>
+                  {[
+                    ["Operating", plData.cashFlow.operating],
+                    ["Investing", plData.cashFlow.investing],
+                    ["Financing", plData.cashFlow.financing],
+                  ].map(([label, val]) => (
+                    <tr key={label as string} className="border-b border-[#F0ECE9]">
+                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
+                      <td
+                        className={`px-2 py-1.5 text-right tabular-nums ${(val as number) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}
+                      >
+                        {formatCurrency(val as number)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="font-semibold">
+                    <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
+                    <td
+                      className={`px-2 py-2 text-right tabular-nums ${plData.cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}
+                    >
+                      {formatCurrency(plData.cashFlow.netChange)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="text-[11px] text-[#9CA3AF] mt-2">
+                {plData.cashFlow.note}
+              </p>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
     </div>

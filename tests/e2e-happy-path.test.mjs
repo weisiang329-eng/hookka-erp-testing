@@ -216,11 +216,14 @@ test("Invoice PUT handler triggers journal-hash on the post transition (DRAFT->S
     /\b(appendJournalEntries|buildJournalEntryStatements)\s*\(/,
     "Invoice route must call appendJournalEntries or buildJournalEntryStatements on the post transition",
   );
-  // sourceType: "invoice" — confirms the journal entries are tagged for this
-  // domain (so chain-walk verification can scope per source).
+  // sourceType "invoice" — confirms the journal entries are tagged for this
+  // domain (so chain-walk verification can scope per source). Phase 4
+  // builds legs in a shared post/void helper, so sourceType is derived
+  // (`sourceType = reverse ? "invoice_void" : "invoice"`) rather than an
+  // inline `sourceType: "invoice"` literal — accept either form.
   assert.match(
     src,
-    /sourceType:\s*["']invoice["']/,
+    /sourceType\s*[:=]\s*[^;\n]*["']invoice["']/,
     "Invoice journal legs must be tagged sourceType='invoice'",
   );
   // The "post" action must be permission-gated separately from "update".

@@ -727,11 +727,30 @@ app.get("/pl", async (c) => {
 
   // --- chart of accounts lookup ---
   const coaRes = await c.var.DB.prepare(
-    "SELECT code, name, type FROM chart_of_accounts",
-  ).all<{ code: string; name: string; type: CoaRow["type"] }>();
-  const coa = new Map<string, { name: string; type: CoaRow["type"] }>();
+    "SELECT code, name, type, specialAccountType, cashFlowCategory FROM chart_of_accounts",
+  ).all<{
+    code: string;
+    name: string;
+    type: CoaRow["type"];
+    specialAccountType: string | null;
+    cashFlowCategory: string | null;
+  }>();
+  const coa = new Map<
+    string,
+    {
+      name: string;
+      type: CoaRow["type"];
+      sat: string | null;
+      cf: string | null;
+    }
+  >();
   for (const a of coaRes.results ?? [])
-    coa.set(a.code, { name: a.name, type: a.type });
+    coa.set(a.code, {
+      name: a.name,
+      type: a.type,
+      sat: a.specialAccountType ?? null,
+      cf: a.cashFlowCategory ?? null,
+    });
 
   // --- ledger legs ---
   const legRes = await c.var.DB.prepare(
@@ -777,6 +796,27 @@ app.get("/pl", async (c) => {
   let totalRevenue = 0;
   let totalCOGS = 0;
   let totalOpex = 0;
+  // Manufacturing-account breakdown (Malaysian format): cost of production
+  // = opening stock + purchases + direct labour + factory overhead + other
+  // − closing stock. Classified from COST accounts by special-account type
+  // (SOS=opening, SCS=closing) then account-number band.
+  const mfg = {
+    openingStock: 0,
+    purchases: 0,
+    directLabour: 0,
+    factoryOverhead: 0,
+    otherMfg: 0,
+    closingStock: 0,
+  };
+  // Cash-flow buckets by the account's cash_flow_category (O/I/F). This is
+  // a categorised P&L-result view (income +, cost/expense −), NOT a full
+  // IAS7 statement with working-capital movements — see cashFlowNote.
+  const cashFlow = { operating: 0, investing: 0, financing: 0 };
+  const bumpCf = (cf: string | null, impact: number) => {
+    if (cf === "O") cashFlow.operating += impact;
+    else if (cf === "I") cashFlow.investing += impact;
+    else if (cf === "F") cashFlow.financing += impact;
+  };
   const codes = new Set([...plDr.keys(), ...plCr.keys()]);
   for (const code of codes) {
     const acct = coa.get(code);
@@ -787,17 +827,29 @@ app.get("/pl", async (c) => {
       const amt = cr - dr;
       if (amt === 0) continue;
       totalRevenue += amt;
+      bumpCf(acct.cf, amt);
       plEntries.push({ id: code, period: period ?? "all", accountCode: code, accountName: acct.name, category: "REVENUE", amount: amt });
     } else if (acct.type === "COST") {
       const amt = dr - cr;
       if (amt === 0) continue;
       totalCOGS += amt;
       cogsByAccount[acct.name] = (cogsByAccount[acct.name] ?? 0) + amt;
+      bumpCf(acct.cf, -amt);
+      if (acct.sat === "SOS") mfg.openingStock += amt;
+      else if (acct.sat === "SCS") mfg.closingStock += amt;
+      else {
+        const p = parseInt(code.split("-")[0], 10) || 0;
+        if (p >= 701 && p <= 705) mfg.purchases += amt;
+        else if (p === 750) mfg.directLabour += amt;
+        else if (p === 780) mfg.factoryOverhead += amt;
+        else mfg.otherMfg += amt;
+      }
       plEntries.push({ id: code, period: period ?? "all", accountCode: code, accountName: acct.name, category: "COGS", amount: amt });
     } else if (acct.type === "EXPENSE") {
       const amt = dr - cr;
       if (amt === 0) continue;
       totalOpex += amt;
+      bumpCf(acct.cf, -amt);
       opexByAccount[acct.name] = (opexByAccount[acct.name] ?? 0) + amt;
       plEntries.push({ id: code, period: period ?? "all", accountCode: code, accountName: acct.name, category: "OPERATING_EXPENSE", amount: amt });
     }
@@ -924,6 +976,25 @@ app.get("/pl", async (c) => {
       cogsByAccount,
       opexByAccount,
       balanceSheet,
+      manufacturing: {
+        ...mfg,
+        // opening + purchases + labour + overhead + other − closing.
+        // closingStock is already negative (period-end credit), so the
+        // straight sum yields cost of production = totalCOGS.
+        costOfProduction:
+          mfg.openingStock +
+          mfg.purchases +
+          mfg.directLabour +
+          mfg.factoryOverhead +
+          mfg.otherMfg +
+          mfg.closingStock,
+      },
+      cashFlow: {
+        ...cashFlow,
+        netChange:
+          cashFlow.operating + cashFlow.investing + cashFlow.financing,
+        note: "Categorised by each account's cash-flow tag (O/I/F) on a P&L-result basis (income +, cost/expense −). Not a full IAS7 statement — working-capital movements are not included.",
+      },
     },
   });
 });

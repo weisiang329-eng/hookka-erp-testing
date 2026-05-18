@@ -1442,6 +1442,22 @@ type PLData = {
   revenueByCustomer: Record<string, number>;
   cogsByAccount: Record<string, number>;
   opexByAccount: Record<string, number>;
+  manufacturing?: {
+    openingStock: number;
+    purchases: number;
+    directLabour: number;
+    factoryOverhead: number;
+    otherMfg: number;
+    closingStock: number;
+    costOfProduction: number;
+  };
+  cashFlow?: {
+    operating: number;
+    investing: number;
+    financing: number;
+    netChange: number;
+    note: string;
+  };
 };
 
 function PLReportTab() {
@@ -1812,6 +1828,97 @@ function PLReportTab() {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Manufacturing Account + Cash Flow (O/I/F) */}
+      <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
+        {plData.manufacturing && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Manufacturing Account</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <tbody>
+                  {[
+                    ["Opening Stock", plData.manufacturing.openingStock],
+                    ["Add: Purchases", plData.manufacturing.purchases],
+                    ["Add: Direct Labour", plData.manufacturing.directLabour],
+                    [
+                      "Add: Factory Overhead",
+                      plData.manufacturing.factoryOverhead,
+                    ],
+                    ["Add: Other Mfg Cost", plData.manufacturing.otherMfg],
+                    [
+                      "Less: Closing Stock",
+                      -plData.manufacturing.closingStock,
+                    ],
+                  ].map(([label, val]) => (
+                    <tr key={label as string} className="border-b border-[#F0ECE9]">
+                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums text-[#1F1D1B]">
+                        {formatCurrency(Math.abs(val as number))}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="font-semibold">
+                    <td className="px-2 py-2 text-[#1F1D1B]">
+                      Cost of Production
+                    </td>
+                    <td className="px-2 py-2 text-right tabular-nums text-[#1F1D1B]">
+                      {formatCurrency(plData.manufacturing.costOfProduction)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="text-[11px] text-[#9CA3AF] mt-2">
+                Opening + Purchases + Labour + Overhead + Other − Closing.
+                Closing stock auto-valued from real-time costing at the
+                period-close (operation → finance bridge).
+              </p>
+            </CardContent>
+          </Card>
+        )}
+        {plData.cashFlow && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">
+                Cash Flow — Operating / Investing / Financing
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <tbody>
+                  {[
+                    ["Operating", plData.cashFlow.operating],
+                    ["Investing", plData.cashFlow.investing],
+                    ["Financing", plData.cashFlow.financing],
+                  ].map(([label, val]) => (
+                    <tr key={label as string} className="border-b border-[#F0ECE9]">
+                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
+                      <td
+                        className={`px-2 py-1.5 text-right tabular-nums ${(val as number) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}
+                      >
+                        {formatCurrency(val as number)}
+                      </td>
+                    </tr>
+                  ))}
+                  <tr className="font-semibold">
+                    <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
+                    <td
+                      className={`px-2 py-2 text-right tabular-nums ${plData.cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}
+                    >
+                      {formatCurrency(plData.cashFlow.netChange)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="text-[11px] text-[#9CA3AF] mt-2">
+                {plData.cashFlow.note}
+              </p>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
     </div>

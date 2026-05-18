@@ -105,6 +105,32 @@ export async function getLastJournalHash(
   return row?.rowHash ?? "";
 }
 
+/**
+ * True if any ledger leg already exists for this business event
+ * (org-scoped). Lets a poster make a re-post a NO-OP — re-flipping an
+ * invoice DRAFT→SENT, a backfill replay, or a retry — instead of
+ * appending a duplicate double-entry pair. The DB-level
+ * UNIQUE(orgId, sourceType, sourceId, legNo) (migration 0117) is the
+ * hard guarantee; this is the friendly pre-check so callers skip
+ * cleanly rather than hitting a constraint error.
+ */
+export async function ledgerHasSource(
+  db: DbLike,
+  orgId: string,
+  sourceType: string,
+  sourceId: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM ledger_journal_entries
+        WHERE orgId = ? AND sourceType = ? AND sourceId = ?
+        LIMIT 1`,
+    )
+    .bind(orgId, sourceType, sourceId)
+    .first<{ id: string }>();
+  return !!row;
+}
+
 // --- statement builders ----------------------------------------------------
 
 /**

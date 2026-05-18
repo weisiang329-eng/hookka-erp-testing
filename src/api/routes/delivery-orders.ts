@@ -1254,6 +1254,20 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
   for (const doRow of dos) {
     scanned++;
     try {
+      // Self-heal: an earlier build of this migration wrongly flipped
+      // fixed DOs to INVOICED, which crashed the Delivered total and hid
+      // them (the Invoice tab was removed). Nothing was INVOICED before
+      // this migration and the system keeps auto-invoiced DOs at
+      // DELIVERED — so normalise any INVOICED DO back to DELIVERED.
+      // Idempotent; runs regardless of which bucket the DO lands in.
+      if (!dry && doRow.status === "INVOICED") {
+        await c.var.DB.prepare(
+          "UPDATE delivery_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+        )
+          .bind(now, doRow.id)
+          .run();
+        doRow.status = "DELIVERED";
+      }
       const invs =
         (
           await c.var.DB.prepare(
@@ -1439,13 +1453,15 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
       // Net A/R by EXACTLY the delta: original creation added +old; the
       // void path never subtracts; the new INSERT above doesn't touch A/R.
       // So the single correct adjustment is (correct - old).
+      // Deliberately do NOT flip the DO to INVOICED — the system keeps
+      // auto-invoiced DOs at DELIVERED (the Invoice tab was removed for
+      // that reason). Flipping only these crashed the Delivered total and
+      // hid them. Invoice/ledger/A/R correctness is independent of
+      // DO.status; the loop-top self-heal restores any stragglers.
       b1.push(
         c.var.DB.prepare(
           "UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?",
         ).bind(deltaSen, doRow.customerId),
-        c.var.DB.prepare(
-          "UPDATE delivery_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
-        ).bind(now, doRow.id),
       );
       await c.var.DB.batch(b1);
 

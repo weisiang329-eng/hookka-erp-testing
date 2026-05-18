@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-18-001 — Fab Cut production sheet "Fab Sew" (and other next/prev-dept) date columns blank on every row
+
+**Status:** 🟡 Fix in progress (2026-05-18) — code committed on `claude/fix-fabcut-sibling-jcs`, awaiting deploy + live verify
+**Category:** production-orders
+
+**Symptom:** On Production → Fab Cut, the "Fab Sew" date column shows
+"—" for every row. Worked a few days earlier. Reported by Wei Siang.
+
+**Root cause:** Commit `d8ec903` (2026-05-12, "restore slim
+non-active-dept JC shape + wipKey narrow") added a row-level narrow to
+`jcWhereDept` in `fetchFilteredPOs` (`src/api/routes/production-orders.ts`):
+a sibling-dept JC is only returned when its `wipKey` matches an
+active-dept JC's `wipKey` on the same PO. On the Fab Cut page the
+active-dept JC is the Option-C **merged** FAB_CUT JC, whose wipKey
+schema (`{poId|companySOId}::baseModel::fabric::FAB_CUT`) never matches
+the per-piece downstream wipKeys. So every FAB_SEW / FOAM / … JC was
+filtered out of the payload and the frontend picker had nothing to
+populate the prev/next-dept date pills → "—". Pre-d8ec903 the dept
+filter narrowed only the PO set and returned all departments' JCs, so
+the column populated. Sibling path `fetchPaginatedPOs` was already
+correct (no row-level narrow) and the dept sheet isn't paginated, so
+the bug was isolated to `fetchFilteredPOs`.
+
+**Fix:** `src/api/routes/production-orders.ts` (~L1126-1178) — when
+`deptFilter === 'FAB_CUT'` (`skipRowNarrow`), emit only the PO-set
+membership filter and drop the row-level wipKey narrow, returning all
+departments' JCs for the FC-related PO set (pre-d8ec903 behaviour for
+THIS page only). Other dept pages keep the slim narrow + payload win.
+Introduced `jcWhereBinds` (8 binds for FAB_CUT, 11 otherwise) as the
+single source of truth for the positional binds, consumed at both
+`fetchFilteredPOs` call sites via spread so SQL/placeholders can't drift.
+
+**Verify:** `tsc -p tsconfig.app.json` clean. Could not live-repro
+(no DB/app creds in workspace). Needs deploy → confirm Fab Cut sheet
+"Fab Sew" dates render again and other dept pages unchanged.
+
+---
+
 ## BUG-2026-05-17-001 — Fabric Past-30 / Next-30 showed SKU totals under both Bedframe & Sofa (bedframe fabric counted as sofa demand)
 
 **Status:** 🟢 Fixed (2026-05-17)

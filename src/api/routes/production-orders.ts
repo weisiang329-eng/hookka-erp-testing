@@ -1123,6 +1123,18 @@ async function fetchFilteredPOs(
   // Result: ~8 MB → ~1.5 MB for wide ranges; daily-slice payloads
   // unchanged. The `jc` alias on the outer table enables the EXISTS
   // correlations that filter at row level rather than table level.
+  // FAB_CUT page exception (fix 2026-05-18 — regression from d8ec903
+  // "restore slim non-active-dept JC shape + wipKey narrow", 2026-05-12):
+  // the Option-C merged FAB_CUT JC has a wipKey schema
+  // (`{poId|companySOId}::baseModel::fabric::FAB_CUT`) that NEVER matches
+  // the per-piece downstream wipKeys. The row-level wipKey narrow below
+  // therefore strips every FAB_SEW / FOAM / … JC from the Fab Cut sheet
+  // payload, so the sheet's "Fab Sew" (and other prev/next-dept) date
+  // columns render "—" on every row. On the Fab Cut page we keep ONLY the
+  // PO-set membership filter and return all departments' JCs for the
+  // FC-related PO set — restores the pre-d8ec903 behaviour for THIS page
+  // only; every other dept page keeps the slim wipKey narrow + payload win.
+  const skipRowNarrow = deptFilter === "FAB_CUT";
   const jcWhereDept = deptFilter
     ? ` jc WHERE jc.orgId = ? AND jc.productionOrderId IN (
           SELECT po.id FROM production_orders po
@@ -1136,7 +1148,10 @@ async function fetchFilteredPOs(
                       SELECT po3.companyCOId FROM production_orders po3
                       JOIN ${jcSource} jc3 ON jc3.productionOrderId = po3.id
                       WHERE jc3.orgId = ? AND jc3.departmentCode = ? AND po3.companyCOId IS NOT NULL)))
-        )
+        )` +
+      (skipRowNarrow
+        ? ""
+        : `
         AND (
           jc.departmentCode = ?
           OR jc.departmentCode = 'FAB_CUT'
@@ -1150,8 +1165,17 @@ async function fetchFilteredPOs(
                 WHERE jcfg.productionOrderId = jc.productionOrderId
                   AND jcfg.departmentCode = ?
                   AND jcfg.wipKey = 'FG')
-        )`
+        )`)
     : "";
+  // Positional binds for jcWhereDept, kept in lockstep with the SQL above
+  // so the two call sites below can't drift. 8 binds for the PO-set
+  // membership filter; +3 deptFilter binds for the row-level wipKey narrow
+  // when it's present (every dept except FAB_CUT).
+  const jcWhereBinds: string[] = deptFilter
+    ? skipRowNarrow
+      ? [orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter]
+      : [orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter, deptFilter, deptFilter, deptFilter]
+    : [];
 
   // Pre-load BOM templates ONCE for this request so the per-FAB_CUT-JC
   // fabric usage computation (in rowToMinimalJobCard via rowToMinimalPO)
@@ -1194,13 +1218,12 @@ async function fetchFilteredPOs(
   // by the JC set we already loaded, not the full piece_pics table.
   if (minimal) {
     if (deptFilter) {
-      // Bind slots: 11 = orgId (jc.orgId) + orgId (po.orgId) + orgId+deptFilter
-      // (inner jc PO-set) + orgId+deptFilter (jc2 SO sibling) + orgId+deptFilter
-      // (jc3 CO sibling) + deptFilter (jc.departmentCode active) + deptFilter
-      // (jcm.departmentCode EXISTS same-wipKey) + deptFilter (jcfg EXISTS FG).
+      // Binds come from jcWhereBinds (8 for FAB_CUT, 11 for every other
+      // dept) so the SQL and its placeholders can't drift — see the
+      // jcWhereDept / jcWhereBinds construction above.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter, deptFilter, deptFilter, deptFilter);
+        .bind(...jcWhereBinds);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -1261,10 +1284,11 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
-    // Bind slots: 11 — see jcWhereDept comment above for the layout.
+    // Binds from jcWhereBinds (8 for FAB_CUT, 11 otherwise) — see the
+    // jcWhereDept / jcWhereBinds construction above.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter, deptFilter, deptFilter, deptFilter);
+      .bind(...jcWhereBinds);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),

@@ -74,28 +74,6 @@ type ApAgingRow = {
   over90Sen: number;
 };
 
-type PlRow = {
-  id: string;
-  period: string;
-  accountCode: string;
-  accountName: string;
-  category: "REVENUE" | "COGS" | "OPERATING_EXPENSE" | "OTHER_INCOME" | "OTHER_EXPENSE";
-  amountSen: number;
-  productCategory: string | null;
-  customerId: string | null;
-  customerName: string | null;
-  state: string | null;
-};
-
-type BalanceSheetRow = {
-  id: string;
-  accountCode: string;
-  accountName: string;
-  category: "CURRENT_ASSET" | "FIXED_ASSET" | "CURRENT_LIABILITY" | "LONG_TERM_LIABILITY" | "EQUITY";
-  balanceSen: number;
-  asOfDate: string;
-};
-
 // ---------------------------------------------------------------------------
 // Row mappers — match the legacy mock-data shapes
 // ---------------------------------------------------------------------------
@@ -131,32 +109,6 @@ function rowToJournal(e: JournalEntryRow, lines: JournalLineRow[]) {
         creditSen: l.creditSen,
         description: l.description,
       })),
-  };
-}
-
-function rowToPl(r: PlRow) {
-  return {
-    id: r.id,
-    period: r.period,
-    accountCode: r.accountCode,
-    accountName: r.accountName,
-    category: r.category,
-    amount: r.amountSen,
-    productCategory: r.productCategory ?? undefined,
-    customerId: r.customerId ?? undefined,
-    customerName: r.customerName ?? undefined,
-    state: r.state ?? undefined,
-  };
-}
-
-function rowToBalanceSheet(r: BalanceSheetRow) {
-  return {
-    id: r.id,
-    accountCode: r.accountCode,
-    accountName: r.accountName,
-    category: r.category,
-    balance: r.balanceSen,
-    asOfDate: r.asOfDate,
   };
 }
 
@@ -724,6 +676,47 @@ app.delete("/journals/:id", async (c) => {
 // ---------------------------------------------------------------------------
 // P&L
 // ---------------------------------------------------------------------------
+// Is a YYYY-MM string inside the requested period? period forms:
+//   "2026-Q1" (quarter) · "2026" (year) · "2026-05" (month) · "" / "all".
+function ymInPeriod(ym: string, period?: string): boolean {
+  if (!period || period === "all") return true;
+  if (period.includes("Q")) {
+    const [year, q] = period.split("-Q");
+    const start = (parseInt(q, 10) - 1) * 3 + 1;
+    const months = [start, start + 1, start + 2].map(
+      (m) => `${year}-${m.toString().padStart(2, "0")}`,
+    );
+    return months.includes(ym);
+  }
+  if (period.length === 4) return ym.startsWith(period);
+  return ym === period;
+}
+// Last YYYY-MM covered by the period (for as-of balance-sheet cutoff).
+function periodEndYm(period?: string): string | null {
+  if (!period || period === "all") return null;
+  if (period.includes("Q")) {
+    const [year, q] = period.split("-Q");
+    const end = (parseInt(q, 10) - 1) * 3 + 3;
+    return `${year}-${end.toString().padStart(2, "0")}`;
+  }
+  if (period.length === 4) return `${period}-12`;
+  return period;
+}
+function bsCategory(
+  type: string,
+  code: string,
+): "CURRENT_ASSET" | "FIXED_ASSET" | "CURRENT_LIABILITY" | "LONG_TERM_LIABILITY" | "EQUITY" {
+  const p = parseInt(code.split("-")[0], 10) || 0;
+  if (type === "ASSET") return p < 300 ? "FIXED_ASSET" : "CURRENT_ASSET";
+  if (type === "LIABILITY") return "CURRENT_LIABILITY";
+  return "EQUITY";
+}
+
+// GL-truth P&L + Balance Sheet, computed from the immutable
+// ledger_journal_entries ⨝ chart_of_accounts (Phase 3, Option C). The
+// product/customer revenue cuts stay operational (sourced from invoices),
+// per the owner's choice — the GL has no such dimensions. Response shape
+// is unchanged so the PL/BS UI tabs render as-is.
 app.get("/pl", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
@@ -732,87 +725,191 @@ app.get("/pl", async (c) => {
   const customerId = c.req.query("customerId");
   const state = c.req.query("state");
 
-  const res = await c.var.DB.prepare("SELECT * FROM pl_entries").all<PlRow>();
-  let entries = (res.results ?? []).slice();
+  // --- chart of accounts lookup ---
+  const coaRes = await c.var.DB.prepare(
+    "SELECT code, name, type FROM chart_of_accounts",
+  ).all<{ code: string; name: string; type: CoaRow["type"] }>();
+  const coa = new Map<string, { name: string; type: CoaRow["type"] }>();
+  for (const a of coaRes.results ?? [])
+    coa.set(a.code, { name: a.name, type: a.type });
 
-  if (period) {
-    if (period.includes("Q")) {
-      const [year, q] = period.split("-Q");
-      const qNum = parseInt(q, 10);
-      const startMonth = (qNum - 1) * 3 + 1;
-      const months = [startMonth, startMonth + 1, startMonth + 2].map(
-        (m) => `${year}-${m.toString().padStart(2, "0")}`,
-      );
-      entries = entries.filter((e) => months.includes(e.period));
-    } else if (period.length === 4) {
-      entries = entries.filter((e) => e.period.startsWith(period));
-    } else {
-      entries = entries.filter((e) => e.period === period);
+  // --- ledger legs ---
+  const legRes = await c.var.DB.prepare(
+    "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+  ).all<{
+    accountCode: string;
+    debitSen: number;
+    creditSen: number;
+    postedAt: string;
+  }>();
+  const endYm = periodEndYm(period);
+  // Per-account net for the P&L period and cumulative-as-of for the BS.
+  const plDr = new Map<string, number>();
+  const plCr = new Map<string, number>();
+  const bsDr = new Map<string, number>();
+  const bsCr = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    const ym = String(l.postedAt ?? "").slice(0, 7);
+    const d = Number(l.debitSen) || 0;
+    const cr = Number(l.creditSen) || 0;
+    if (ymInPeriod(ym, period)) {
+      plDr.set(l.accountCode, (plDr.get(l.accountCode) ?? 0) + d);
+      plCr.set(l.accountCode, (plCr.get(l.accountCode) ?? 0) + cr);
+    }
+    if (!endYm || ym <= endYm) {
+      bsDr.set(l.accountCode, (bsDr.get(l.accountCode) ?? 0) + d);
+      bsCr.set(l.accountCode, (bsCr.get(l.accountCode) ?? 0) + cr);
     }
   }
-  if (productCategory)
-    entries = entries.filter(
-      (e) => e.category !== "REVENUE" || e.productCategory === productCategory,
-    );
-  if (customerId)
-    entries = entries.filter(
-      (e) => e.category !== "REVENUE" || e.customerId === customerId,
-    );
-  if (state)
-    entries = entries.filter(
-      (e) => e.category !== "REVENUE" || e.state === state,
-    );
 
-  const mapped = entries.map(rowToPl);
-
-  const totalRevenue = mapped
-    .filter((e) => e.category === "REVENUE")
-    .reduce((s, e) => s + e.amount, 0);
-  const totalCOGS = mapped
-    .filter((e) => e.category === "COGS")
-    .reduce((s, e) => s + e.amount, 0);
-  const totalOpex = mapped
-    .filter((e) => e.category === "OPERATING_EXPENSE")
-    .reduce((s, e) => s + e.amount, 0);
+  // --- P&L by account (REVENUE credit-normal; COST/EXPENSE debit-normal) ---
+  type PLLine = {
+    id: string;
+    period: string;
+    accountCode: string;
+    accountName: string;
+    category: "REVENUE" | "COGS" | "OPERATING_EXPENSE";
+    amount: number;
+  };
+  const plEntries: PLLine[] = [];
+  const cogsByAccount: Record<string, number> = {};
+  const opexByAccount: Record<string, number> = {};
+  let totalRevenue = 0;
+  let totalCOGS = 0;
+  let totalOpex = 0;
+  const codes = new Set([...plDr.keys(), ...plCr.keys()]);
+  for (const code of codes) {
+    const acct = coa.get(code);
+    if (!acct) continue;
+    const dr = plDr.get(code) ?? 0;
+    const cr = plCr.get(code) ?? 0;
+    if (acct.type === "REVENUE") {
+      const amt = cr - dr;
+      if (amt === 0) continue;
+      totalRevenue += amt;
+      plEntries.push({ id: code, period: period ?? "all", accountCode: code, accountName: acct.name, category: "REVENUE", amount: amt });
+    } else if (acct.type === "COST") {
+      const amt = dr - cr;
+      if (amt === 0) continue;
+      totalCOGS += amt;
+      cogsByAccount[acct.name] = (cogsByAccount[acct.name] ?? 0) + amt;
+      plEntries.push({ id: code, period: period ?? "all", accountCode: code, accountName: acct.name, category: "COGS", amount: amt });
+    } else if (acct.type === "EXPENSE") {
+      const amt = dr - cr;
+      if (amt === 0) continue;
+      totalOpex += amt;
+      opexByAccount[acct.name] = (opexByAccount[acct.name] ?? 0) + amt;
+      plEntries.push({ id: code, period: period ?? "all", accountCode: code, accountName: acct.name, category: "OPERATING_EXPENSE", amount: amt });
+    }
+  }
   const grossProfit = totalRevenue - totalCOGS;
   const grossProfitPct = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0;
   const netProfit = grossProfit - totalOpex;
   const netProfitPct = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0;
 
-  const revenueByProduct: Record<string, number> = {};
-  mapped
-    .filter((e) => e.category === "REVENUE")
-    .forEach((e) => {
-      const key = e.productCategory || "OTHER";
-      revenueByProduct[key] = (revenueByProduct[key] || 0) + e.amount;
+  // --- operational revenue cuts from invoices (NOT the GL) ---
+  const [invRes, itemRes, prodRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT id, customerName, totalSen, invoiceDate, customerId, customerState, status FROM invoices",
+    ).all<{
+      id: string;
+      customerName: string;
+      totalSen: number;
+      invoiceDate: string;
+      customerId: string;
+      customerState: string | null;
+      status: string;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT invoiceId, productCode, totalSen FROM invoice_items",
+    ).all<{ invoiceId: string; productCode: string; totalSen: number }>(),
+    c.var.DB.prepare("SELECT code, category FROM products").all<{
+      code: string;
+      category: string;
+    }>(),
+  ]);
+  const prodCat = new Map<string, string>();
+  for (const p of prodRes.results ?? []) prodCat.set(p.code, p.category);
+  const invById = new Map<
+    string,
+    { cust: string; cid: string; st: string | null; ym: string; status: string }
+  >();
+  for (const i of invRes.results ?? [])
+    invById.set(i.id, {
+      cust: i.customerName || "Unknown",
+      cid: i.customerId,
+      st: i.customerState,
+      ym: String(i.invoiceDate ?? "").slice(0, 7),
+      status: i.status,
     });
   const revenueByCustomer: Record<string, number> = {};
-  mapped
-    .filter((e) => e.category === "REVENUE")
-    .forEach((e) => {
-      const key = e.customerName || "Unknown";
-      revenueByCustomer[key] = (revenueByCustomer[key] || 0) + e.amount;
-    });
-  const cogsByAccount: Record<string, number> = {};
-  mapped
-    .filter((e) => e.category === "COGS")
-    .forEach((e) => {
-      cogsByAccount[e.accountName] = (cogsByAccount[e.accountName] || 0) + e.amount;
-    });
-  const opexByAccount: Record<string, number> = {};
-  mapped
-    .filter((e) => e.category === "OPERATING_EXPENSE")
-    .forEach((e) => {
-      opexByAccount[e.accountName] = (opexByAccount[e.accountName] || 0) + e.amount;
-    });
+  for (const i of invRes.results ?? []) {
+    if (i.status === "CANCELLED" || i.status === "DRAFT") continue;
+    const ym = String(i.invoiceDate ?? "").slice(0, 7);
+    if (!ymInPeriod(ym, period)) continue;
+    if (customerId && i.customerId !== customerId) continue;
+    if (state && i.customerState !== state) continue;
+    revenueByCustomer[i.customerName || "Unknown"] =
+      (revenueByCustomer[i.customerName || "Unknown"] ?? 0) + (Number(i.totalSen) || 0);
+  }
+  const revenueByProduct: Record<string, number> = {};
+  for (const it of itemRes.results ?? []) {
+    const inv = invById.get(it.invoiceId);
+    if (!inv) continue;
+    if (inv.status === "CANCELLED" || inv.status === "DRAFT") continue;
+    if (!ymInPeriod(inv.ym, period)) continue;
+    if (customerId && inv.cid !== customerId) continue;
+    if (state && inv.st !== state) continue;
+    const cat = prodCat.get(it.productCode) || "OTHER";
+    if (productCategory && cat !== productCategory) continue;
+    revenueByProduct[cat] = (revenueByProduct[cat] ?? 0) + (Number(it.totalSen) || 0);
+  }
 
-  const bsRes = await c.var.DB.prepare("SELECT * FROM balance_sheet_entries").all<BalanceSheetRow>();
-  const balanceSheet = (bsRes.results ?? []).map(rowToBalanceSheet);
+  // --- Balance sheet from the ledger (ASSET/LIABILITY/EQUITY) ---
+  const balanceSheet: {
+    id: string;
+    accountCode: string;
+    accountName: string;
+    category: ReturnType<typeof bsCategory>;
+    balance: number;
+    asOfDate: string;
+  }[] = [];
+  const asOf = endYm ? `${endYm}-28` : new Date().toISOString().slice(0, 10);
+  const bsCodes = new Set([...bsDr.keys(), ...bsCr.keys()]);
+  for (const code of bsCodes) {
+    const acct = coa.get(code);
+    if (!acct) continue;
+    if (acct.type !== "ASSET" && acct.type !== "LIABILITY" && acct.type !== "EQUITY")
+      continue;
+    const dr = bsDr.get(code) ?? 0;
+    const cr = bsCr.get(code) ?? 0;
+    const bal = acct.type === "ASSET" ? dr - cr : cr - dr;
+    if (bal === 0) continue;
+    balanceSheet.push({
+      id: code,
+      accountCode: code,
+      accountName: acct.name,
+      category: bsCategory(acct.type, code),
+      balance: bal,
+      asOfDate: asOf,
+    });
+  }
+  // Net result not yet closed to an equity account — surface it so the
+  // sheet balances (Assets = Liabilities + Equity + current-year earnings).
+  if (netProfit !== 0)
+    balanceSheet.push({
+      id: "NP-CURRENT",
+      accountCode: "NP-CURRENT",
+      accountName: "Current Year Earnings",
+      category: "EQUITY",
+      balance: netProfit,
+      asOfDate: asOf,
+    });
 
   return c.json({
     success: true,
     data: {
-      entries: mapped,
+      entries: plEntries,
       totals: {
         revenue: totalRevenue,
         cogs: totalCOGS,

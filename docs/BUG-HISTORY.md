@@ -73,6 +73,16 @@ Fallbacks retained (lazy-fetched) for the genuine no-price case. No caller
 signature changed (orgId resolved internally). `SoLinePriceIndex` import
 dropped (narrow index removed); `loadSoLinePriceIndex` imported.
 
+**2nd instance (same bug, different path):** `POST /api/invoices`
+(manual "Create Invoice from DO") had its OWN inline pricing —
+`sales_order_items WHERE salesOrderId = doRow.salesOrderId` (single SO)
+keyed by productCode only — the identical under-billing flaw. Fixed by
+routing it through the shared `computeDoInvoiceLines` /
+`resolveDoSalesOrderIds` (both now `export`ed; imported in invoices.ts
+via a call-time `import()` to avoid the delivery-orders↔invoices static
+cycle). All three creation paths now price off the one whole-org
+resolver.
+
 **Verified:** `npm run build:strict` passes (typecheck + build). A
 reconciliation script (84 rows: invoice → DO → old vs corrected vs diff)
 will be run on the isolated branch for Wei Siang sign-off BEFORE any data

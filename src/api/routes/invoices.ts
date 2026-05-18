@@ -670,51 +670,28 @@ app.post("/", async (c) => {
       );
     }
 
-    // Pull the DO items + the SO items to get unit prices (mirrors the old impl).
-    const [doItemsRes, soItemsRes] = await Promise.all([
-      c.var.DB.prepare(
-        `SELECT productCode, productName, sizeLabel, fabricCode, quantity
-           FROM delivery_order_items WHERE deliveryOrderId = ?`,
-      )
-        .bind(doRow.id)
-        .all<{
-          productCode: string | null;
-          productName: string | null;
-          sizeLabel: string | null;
-          fabricCode: string | null;
-          quantity: number;
-        }>(),
-      doRow.salesOrderId
-        ? c.var.DB.prepare(
-            "SELECT productCode, unitPriceSen FROM sales_order_items WHERE salesOrderId = ?",
-          )
-            .bind(doRow.salesOrderId)
-            .all<{ productCode: string | null; unitPriceSen: number }>()
-        : Promise.resolve({ results: [] as { productCode: string | null; unitPriceSen: number }[] }),
-    ]);
-
-    const priceByCode = new Map<string, number>();
-    for (const si of soItemsRes.results ?? []) {
-      if (si.productCode) priceByCode.set(si.productCode, si.unitPriceSen);
-    }
-
-    const items = (doItemsRes.results ?? []).map((doItem) => {
-      const unitPriceSen = doItem.productCode
-        ? priceByCode.get(doItem.productCode) ?? 0
-        : 0;
-      return {
-        id: genInvoiceItemId(),
-        productCode: doItem.productCode ?? "",
-        productName: doItem.productName ?? "",
-        sizeLabel: doItem.sizeLabel ?? "",
-        fabricCode: doItem.fabricCode ?? "",
-        quantity: doItem.quantity,
-        unitPriceSen,
-        totalSen: unitPriceSen * doItem.quantity,
-      };
-    });
-
-    const subtotalSen = items.reduce((s, i) => s + i.totalSen, 0);
+    // Price every delivered item through the SHARED whole-org resolver
+    // (computeDoInvoiceLines in ./delivery-orders) — the SAME basis the DO
+    // "value" and the auto-on-delivered invoice use, so a manually-created
+    // invoice can't under-bill the way the old narrow single-SO lookup did
+    // (BUG-2026-05-18-004, 2nd instance). Call-time import avoids the
+    // route<->route static import cycle (delivery-orders already imports
+    // nextInvoiceNo from here).
+    const { resolveDoSalesOrderIds, computeDoInvoiceLines } = await import(
+      "./delivery-orders"
+    );
+    const soIdsForInvoice = await resolveDoSalesOrderIds(
+      c.var.DB,
+      doRow.id,
+      doRow.salesOrderId,
+    );
+    const { invItems, computedTotal } = await computeDoInvoiceLines(
+      c.var.DB,
+      doRow.id,
+      soIdsForInvoice,
+    );
+    const items = invItems;
+    const subtotalSen = computedTotal;
     const totalSen = subtotalSen;
     const now = new Date().toISOString();
     const invoiceDate = now.split("T")[0];

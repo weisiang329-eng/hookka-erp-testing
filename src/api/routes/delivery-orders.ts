@@ -305,7 +305,7 @@ function genInvoiceId(): string {
 // Multi-SO DOs were therefore never cascading SO status at all. Walk
 // delivery_order_items → production_orders.salesOrderId to catch the
 // multi-SO case, union with the legacy single-SO FK, dedupe.
-async function resolveDoSalesOrderIds(
+export async function resolveDoSalesOrderIds(
   db: D1Database,
   doId: string,
   existingSalesOrderId: string | null,
@@ -394,7 +394,7 @@ type InvItem = {
 // directly, then to the SOs' header totals. Shared by live invoice
 // creation AND the under-billed-invoice repair so the two can't drift —
 // "every delivered item has an amount" must mean the same thing in both.
-async function computeDoInvoiceLines(
+export async function computeDoInvoiceLines(
   db: D1Database,
   doId: string,
   soIds: string[],

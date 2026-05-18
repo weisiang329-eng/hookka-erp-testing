@@ -490,6 +490,11 @@ type MinimalPOOut = {
   companyCOId: string;
   customerPOId: string;
   customerReference: string;
+  // Customer's own SO number (sales_orders.customerSO), or the customer's
+  // CO number (consignment_orders.customerCO) for CO-origin POs. NOT a
+  // production_orders column — batch-joined onto the payload by
+  // attachCustomerSO() at the route boundary. "" until then.
+  customerSO: string;
   customerName: string;
   customerState: string;
   productId: string;
@@ -750,6 +755,7 @@ function rowToMinimalPO(
     companyCOId: row.companyCOId ?? "",
     customerPOId: row.customerPOId ?? "",
     customerReference: row.customerReference ?? "",
+    customerSO: "",
     customerName: row.customerName ?? "",
     customerState: row.customerState ?? "",
     productId: row.productId ?? "",
@@ -796,6 +802,7 @@ function rowToPO(
     lineNo: row.lineNo,
     customerPOId: row.customerPOId ?? "",
     customerReference: row.customerReference ?? "",
+    customerSO: "",
     customerName: row.customerName ?? "",
     customerState: row.customerState ?? "",
     companySOId: row.companySOId ?? "",
@@ -968,6 +975,56 @@ async function fetchAllPOs(
 //   SQL layer.
 // - includeJobCards: when false, skip the job_cards + piece_pics fetches and
 //   return POs with `jobCards: []`. Defaults to true for backward compat.
+// The customer's own SO number lives on sales_orders.customerSO (and the
+// customer's CO number on consignment_orders.customerCO for CO-origin
+// POs) — NOT on production_orders. The Production dept sheet's
+// "Customer SO" column needs it, so we batch-join it onto the PO payload
+// at the route boundary. Doing it here (one spot) keeps the many
+// rowToPO / rowToMinimalPO call sites untouched. CO POs fall back to the
+// consignment customer-CO number per Wei Siang's spec.
+async function attachCustomerSO(
+  db: D1Database,
+  pos: Array<{
+    salesOrderId: string;
+    consignmentOrderId: string;
+    customerSO: string;
+  }>,
+): Promise<void> {
+  if (pos.length === 0) return;
+  const soIds = Array.from(
+    new Set(pos.map((p) => p.salesOrderId).filter(Boolean)),
+  );
+  const coIds = Array.from(
+    new Set(pos.map((p) => p.consignmentOrderId).filter(Boolean)),
+  );
+  const soMap = new Map<string, string>();
+  const coMap = new Map<string, string>();
+  // Chunk well under SQLite's 999-bound-variable ceiling.
+  const CHUNK = 200;
+  for (let i = 0; i < soIds.length; i += CHUNK) {
+    const slice = soIds.slice(i, i + CHUNK);
+    const placeholders = slice.map(() => "?").join(",");
+    const res = await db
+      .prepare(`SELECT id, customerSO FROM sales_orders WHERE id IN (${placeholders})`)
+      .bind(...slice)
+      .all<{ id: string; customerSO: string | null }>();
+    for (const r of res.results ?? []) soMap.set(r.id, r.customerSO || "");
+  }
+  for (let i = 0; i < coIds.length; i += CHUNK) {
+    const slice = coIds.slice(i, i + CHUNK);
+    const placeholders = slice.map(() => "?").join(",");
+    const res = await db
+      .prepare(`SELECT id, customerCO FROM consignment_orders WHERE id IN (${placeholders})`)
+      .bind(...slice)
+      .all<{ id: string; customerCO: string | null }>();
+    for (const r of res.results ?? []) coMap.set(r.id, r.customerCO || "");
+  }
+  for (const p of pos) {
+    p.customerSO =
+      soMap.get(p.salesOrderId) || coMap.get(p.consignmentOrderId) || "";
+  }
+}
+
 async function fetchFilteredPOs(
   db: D1Database,
   orgId: string,
@@ -4168,6 +4225,14 @@ app.get("/", async (c) => {
       dueFrom,
       dueTo,
     );
+    await attachCustomerSO(
+      c.var.DB,
+      data as Array<{
+        salesOrderId: string;
+        consignmentOrderId: string;
+        customerSO: string;
+      }>,
+    );
     const body = JSON.stringify({ success: true, data, total: data.length });
     if (cacheKeyForWrite && kvCache) {
       const writePromise = kvCache
@@ -4197,6 +4262,14 @@ app.get("/", async (c) => {
     deptFilter,
     dueFrom,
     dueTo,
+  );
+  await attachCustomerSO(
+    c.var.DB,
+    data as Array<{
+      salesOrderId: string;
+      consignmentOrderId: string;
+      customerSO: string;
+    }>,
   );
   const body = JSON.stringify({ success: true, data, page, limit, total });
   if (cacheKeyForWrite && kvCache) {

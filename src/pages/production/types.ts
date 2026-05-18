@@ -44,6 +44,11 @@ export type ProductionOrder = {
   id: string; poNo: string;
   salesOrderId: string; salesOrderNo: string; lineNo: number;
   customerPOId: string; customerReference: string; customerName: string; customerState: string;
+  // Customer's own SO number (sales_orders.customerSO), or the customer's
+  // CO number for CO-origin POs. Server batch-joins it onto the payload
+  // (attachCustomerSO). Optional: payloads cached before this shipped
+  // (≤60s TTL) won't carry it — readers default to "".
+  customerSO?: string;
   companySOId: string;
   // CO-origin POs (migration 0064): mutex with SO. When the parent doc is a
   // Consignment Order, salesOrderId / companySOId are empty and these two

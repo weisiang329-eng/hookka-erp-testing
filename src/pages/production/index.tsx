@@ -2173,6 +2173,7 @@ export default function ProductionPage({
     consignmentOrderId: string;  // CO primary key — used to route to /consignment/:id when SO id is empty
     customerPOId: string;
     customerRef: string;
+    customerSO: string;   // customer's own SO no. (CO no. for CO-origin rows)
     customerName: string;
     customerState: string;
     model: string;
@@ -2566,6 +2567,7 @@ export default function ProductionPage({
           consignmentOrderId: o.consignmentOrderId || "",
           customerPOId: o.customerPOId || "",
           customerRef: o.customerReference || "",
+          customerSO: o.customerSO || "",
           customerName: o.customerName || "",
           customerState: o.customerState || "",
           // Model column display rule: sofa drops the variant suffix
@@ -3153,7 +3155,12 @@ export default function ProductionPage({
         );
       },
     },
-    { key: "customerPOId",  label: "Customer PO ID", type: "docno",  width: "130px", sortable: true },
+    // Customer PO + Customer SO sit together right after the sticky SO ID
+    // so operators can read both customer-side reference numbers without
+    // scrolling. customerSO is the customer's own SO number (CO number for
+    // CO-origin rows), batch-joined onto the payload server-side.
+    { key: "customerPOId",  label: "Customer PO",    type: "docno",  width: "130px", sortable: true },
+    { key: "customerSO",    label: "Customer SO",    type: "docno",  width: "130px", sortable: true },
     // Low-priority on tablet — operator can re-enable via Columns picker.
     // The on-screen Production matrix has 13+ cols at full width (~2050px).
     // On iPad Mini landscape (~1180px content), customerRef / state / divan /

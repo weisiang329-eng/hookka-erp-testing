@@ -778,6 +778,98 @@ app.post("/", async (c) => {
   });
 });
 
+// GET /api/invoices/:id/print-extras
+//
+// Read-only print enrichment for the redesigned A4 invoice. Option 2A:
+// the price build-up (base / divan / leg / special) is NOT stored on
+// invoice_items — it lives on sales_order_items. We read it back at
+// print time by salesOrderId + productCode (best-effort first match),
+// plus customerSO / customerRef. Scoped to ONE invoice; zero impact on
+// the core invoice API. Registered BEFORE /:id (Hono order).
+app.get("/:id/print-extras", async (c) => {
+  const denied = await requirePermission(c, "invoices", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const inv = await c.var.DB.prepare(
+    "SELECT id, salesOrderId, deliveryOrderId FROM invoices WHERE id = ?",
+  )
+    .bind(id)
+    .first<{
+      id: string;
+      salesOrderId: string | null;
+      deliveryOrderId: string | null;
+    }>();
+  if (!inv) {
+    return c.json({ success: false, error: "Invoice not found" }, 404);
+  }
+  let customerSO = "";
+  if (inv.salesOrderId) {
+    const so = await c.var.DB.prepare(
+      "SELECT customerSO FROM sales_orders WHERE id = ?",
+    )
+      .bind(inv.salesOrderId)
+      .first<{ customerSO: string | null }>();
+    customerSO = so?.customerSO ?? "";
+  }
+  let customerRef = "";
+  if (inv.deliveryOrderId) {
+    const refRow = await c.var.DB.prepare(
+      `SELECT po.customerReference AS r
+         FROM delivery_order_items di
+         JOIN production_orders po ON po.id = di.productionOrderId
+        WHERE di.deliveryOrderId = ?
+          AND po.customerReference IS NOT NULL
+          AND po.customerReference != ''
+        LIMIT 1`,
+    )
+      .bind(inv.deliveryOrderId)
+      .first<{ r: string | null }>();
+    customerRef = refRow?.r ?? "";
+  }
+  // Price build-up by productCode (first SO line wins — option 2A).
+  const priceByCode: Record<
+    string,
+    {
+      baseSen: number;
+      divanSen: number;
+      legSen: number;
+      specialSen: number;
+      unitSen: number;
+    }
+  > = {};
+  if (inv.salesOrderId) {
+    const siRes = await c.var.DB.prepare(
+      `SELECT productCode, basePriceSen, divanPriceSen, legPriceSen,
+              specialOrderPriceSen, unitPriceSen
+         FROM sales_order_items WHERE salesOrderId = ?`,
+    )
+      .bind(inv.salesOrderId)
+      .all<{
+        productCode: string | null;
+        basePriceSen: number;
+        divanPriceSen: number;
+        legPriceSen: number;
+        specialOrderPriceSen: number;
+        unitPriceSen: number;
+      }>();
+    for (const r of siRes.results ?? []) {
+      const code = r.productCode ?? "";
+      if (!code || priceByCode[code]) continue;
+      priceByCode[code] = {
+        baseSen: Number(r.basePriceSen) || 0,
+        divanSen: Number(r.divanPriceSen) || 0,
+        legSen: Number(r.legPriceSen) || 0,
+        specialSen: Number(r.specialOrderPriceSen) || 0,
+        unitSen: Number(r.unitPriceSen) || 0,
+      };
+    }
+  }
+  return c.json({
+    success: true,
+    data: { customerSO, customerRef, priceByCode },
+  });
+});
+
 // GET /api/invoices/:id — single
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");

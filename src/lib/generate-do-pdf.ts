@@ -24,7 +24,7 @@ export type DOPrintExtras = {
       customerSO?: string | null; // customer's own SO no. for this line
       customerRef?: string | null; // customer's ERP reference for this line
       salesOrderNo?: string | null; // our SO no. for this line
-      specialOrder?: string | null; // e.g. "Headboard Only"
+      specialOrder?: string | null; // e.g. "Headboard Only" / "DIVAN CURVE"
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -38,25 +38,14 @@ type ItemExtra = NonNullable<DOPrintExtras["items"]>[string];
 // Greyscale only — colour ink is expensive on the floor printer, so the
 // whole document is black + greys (Wei Siang).
 const INK: [number, number, number] = [17, 17, 17];
-const GRID: [number, number, number] = [120, 120, 120];
+const RULE: [number, number, number] = [0, 0, 0];
+const HAIR: [number, number, number] = [120, 120, 120];
 const BAND: [number, number, number] = [232, 232, 232];
-const HEADBG: [number, number, number] = [38, 38, 38];
 const FAINT: [number, number, number] = [110, 110, 110];
 
-const dash = (s?: string | null) => (s && String(s).trim() ? String(s) : "-");
-const dimStr = (v?: number | null) =>
-  v == null || Number(v) === 0 ? "-" : `${v}"`;
+const num = (v?: number | null) =>
+  v == null || Number(v) === 0 ? null : `${v}"`;
 
-// Variant = the bit of the product code after the first "-" (mirrors the
-// in-app items table, e.g. "1005-(Q)" -> "(Q)").
-const variantOf = (code?: string) => {
-  const c = code || "";
-  const i = c.indexOf("-");
-  return i >= 0 ? c.slice(i + 1) : "-";
-};
-
-// Category print order: bedframes first, then sofa, then accessory
-// (accessories always travel with the sofas). Stable within a group.
 const catRank = (cat?: string | null): number => {
   const c = (cat || "").toUpperCase();
   if (c === "BEDFRAME") return 0;
@@ -69,22 +58,71 @@ const catLabel = (cat?: string | null): string => {
   if (c === "BEDFRAME") return "BEDFRAME";
   if (c === "SOFA") return "SOFA";
   if (c === "ACCESSORY") return "ACCESSORY / ADD-ON";
-  return "OTHER";
+  return "ITEMS";
 };
+const uomOf = (cat?: string | null) =>
+  (cat || "").toUpperCase() === "ACCESSORY" ? "UNIT" : "SET";
+
+// Stacked Description cell — the standard furniture DO line shape:
+//   line 1  product code              e.g. 2008(A)-(K)
+//   line 2  product name (w/ size)    e.g. TRION(A) (HB STRAIGHT) BEDFRAME (6FT) (183X190CM)
+//   line 3  build spec               BF : PC151-02 / DIVAN 12" + 2" LEG / 14"
+//                                     SOFA: BO315-21 / 35
+//   line 4  (CUSTOMER-PO)            e.g. (PO-008515)
+function describe(
+  it: {
+    productCode: string;
+    productName: string;
+    fabricCode: string;
+    sizeLabel: string;
+  },
+  ex: ItemExtra | undefined,
+): string {
+  const lines: string[] = [];
+  if (it.productCode) lines.push(it.productCode);
+  if (it.productName) lines.push(it.productName);
+
+  const cat = (ex?.itemCategory || "").toUpperCase();
+  const spec: string[] = [];
+  if (it.fabricCode) spec.push(it.fabricCode);
+
+  if (cat === "BEDFRAME") {
+    const dv = num(ex?.divanHeightInches);
+    const lg = num(ex?.legHeightInches);
+    if (dv) spec.push(`DIVAN ${dv}${lg ? ` + ${lg} LEG` : " + NO LEG"}`);
+    else if (lg) spec.push(`${lg} LEG`);
+    const gp = num(ex?.gapInches);
+    if (gp) spec.push(`GAP ${gp}`);
+    const th = num(ex?.totalHeightInches);
+    if (th) spec.push(th);
+  } else {
+    // sofa / accessory — seat size, then any leg / total height it has
+    if (it.sizeLabel) spec.push(it.sizeLabel);
+    const lg = num(ex?.legHeightInches);
+    if (lg) spec.push(`${lg} LEG`);
+    const th = num(ex?.totalHeightInches);
+    if (th) spec.push(`TH ${th}`);
+  }
+  if (ex?.specialOrder && String(ex.specialOrder).trim())
+    spec.push(String(ex.specialOrder).trim());
+  if (spec.length) lines.push(spec.join(" / "));
+
+  if (ex?.customerPOId && String(ex.customerPOId).trim())
+    lines.push(`(${String(ex.customerPOId).trim()})`);
+  return lines.join("\n");
+}
 
 // ---------------------------------------------------------------------------
-// Delivery Order PDF — black & white, A4 LANDSCAPE, one wide row per item
-// (no stacked cells / no 2-line wrap). Columns mirror the on-screen items
-// table the operator approved, plus the bedframe build spec:
-//   No | SO ID | Customer PO | Customer SO | Customer Ref | Product Code |
-//   Variant | Product Name | Size | Colour/Fabric | Divan | Gap | Total H |
-//   Special Order | Qty | M3
+// Delivery Order PDF — A4 PORTRAIT, black & white. The standard furniture
+// DO line shape: Item | Description (stacked code / name / spec / (PO)) |
+// UOM | Qty. Bedframes / sofas / accessories print as labelled sections.
 // Letterhead + reference block + column header repeat on every page.
 // ---------------------------------------------------------------------------
 export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
-  const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
-  const m = 12;
+  const pageH = doc.internal.pageSize.getHeight();
+  const m = 14;
   const co = COMPANY.HOOKKA;
   const o = order as DeliveryOrder & {
     customerPOId?: string;
@@ -111,47 +149,45 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
           ),
         ).join(", ")
       : "";
-  const headerCustomerPO =
-    o.customerPOId || distinct((x) => x.customerPOId) || "-";
   const headerOurSO = distinct((x) => x.salesOrderNo) || order.companySO || "-";
   const headerCustomerSO =
     extras?.customerSO || distinct((x) => x.customerSO) || "-";
   const headerCustomerRef =
     extras?.customerRef || distinct((x) => x.customerRef) || "-";
 
-  const HEADER_BOTTOM = 64;
+  const HEADER_BOTTOM = 80;
   const drawHeader = () => {
     // --- B/W letterhead: logo left, company block beside, title right ---
-    addHookkaLetterhead(doc, m, 10, 12);
+    addHookkaLetterhead(doc, m, 12, 12);
     const tx = m + 12 * (2038 / 907) + 5;
     doc.setTextColor(...INK);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(13);
-    doc.text(co.name, tx, 14);
+    doc.text(co.name, tx, 16);
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(7);
+    doc.setFontSize(6.8);
     doc.setTextColor(...FAINT);
-    doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 18.5);
-    doc.text(co.address, tx, 22.5);
-    doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 26.5);
+    doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
+    doc.text(co.address, tx, 24);
+    doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 27.5);
 
     doc.setTextColor(...INK);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(20);
-    doc.text("DELIVERY ORDER", pageW - m, 16, { align: "right" });
-    doc.setFontSize(11);
+    doc.setFontSize(17);
+    doc.text("DELIVERY ORDER", pageW - m, 17, { align: "right" });
+    doc.setFontSize(10.5);
     doc.text(`No. ${order.doNo}`, pageW - m, 23, { align: "right" });
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
+    doc.setFontSize(7.5);
     doc.setTextColor(...FAINT);
-    doc.text(`${docDate}   |   C.O.D.`, pageW - m, 28, { align: "right" });
+    doc.text(`${docDate}   |   C.O.D.`, pageW - m, 27.5, { align: "right" });
 
-    doc.setDrawColor(...INK);
+    doc.setDrawColor(...RULE);
     doc.setLineWidth(0.5);
     doc.line(m, 31, pageW - m, 31);
 
-    // --- Reference block: parties (left) + numbers (right) ---
-    const labelW = 24;
+    // --- Reference block ---
+    const labelW = 23;
     const lblVal = (
       x: number,
       y: number,
@@ -167,12 +203,12 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       doc.setTextColor(...INK);
       const lines = doc.splitTextToSize(v || "-", maxW);
       doc.text(lines, x + labelW, y);
-      return y + Math.max(1, lines.length) * 4.2 + 0.6;
+      return y + Math.max(1, lines.length) * 4.3 + 0.8;
     };
 
     const leftX = m;
-    const leftMaxW = pageW * 0.42 - labelW;
-    let ly = 37;
+    const leftMaxW = (pageW - m * 2) * 0.55 - labelW;
+    let ly = 38;
     ly = lblVal(leftX, ly, "Customer", order.customerName || "-", leftMaxW);
     ly = lblVal(leftX, ly, "Deliver To", deliverTo || "-", leftMaxW);
     ly = lblVal(leftX, ly, "Address", deliveryAddress || "-", leftMaxW);
@@ -184,12 +220,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       leftMaxW,
     );
 
-    const rightX = pageW * 0.56;
+    const rightX = pageW / 2 + 12;
     const rightMaxW = pageW - m - rightX - labelW;
-    let ry = 37;
+    let ry = 38;
     ry = lblVal(rightX, ry, "DO No.", order.doNo, rightMaxW);
     ry = lblVal(rightX, ry, "Our SO", headerOurSO, rightMaxW);
-    ry = lblVal(rightX, ry, "Customer PO", headerCustomerPO, rightMaxW);
     ry = lblVal(rightX, ry, "Customer SO", headerCustomerSO, rightMaxW);
     ry = lblVal(rightX, ry, "Customer Ref", headerCustomerRef, rightMaxW);
     lblVal(
@@ -202,16 +237,12 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       rightMaxW,
     );
 
-    doc.setDrawColor(...GRID);
-    doc.setLineWidth(0.3);
+    doc.setDrawColor(...RULE);
+    doc.setLineWidth(0.5);
     doc.line(m, HEADER_BOTTOM - 3, pageW - m, HEADER_BOTTOM - 3);
   };
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
-  const totalM3 = order.items.reduce(
-    (s, i) => s + (i.itemM3 || 0) * i.quantity,
-    0,
-  );
 
   const ordered = order.items
     .map((it, i) => ({ it, i }))
@@ -228,15 +259,14 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   for (const it of ordered) {
     const ex = extras?.items?.[it.id];
     const cat = (ex?.itemCategory || "").toUpperCase();
-    const isBF = cat === "BEDFRAME";
     if (cat !== lastCat && extras?.items) {
       body.push([
         {
           content: catLabel(cat),
-          colSpan: 16,
+          colSpan: 4,
           styles: {
             fontStyle: "bold",
-            fontSize: 7.6,
+            fontSize: 8,
             fillColor: BAND,
             textColor: INK,
             halign: "left",
@@ -248,101 +278,72 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     runningNo += 1;
     body.push([
       String(runningNo),
-      dash(ex?.salesOrderNo || it.salesOrderNo || order.companySO),
-      dash(ex?.customerPOId),
-      dash(ex?.customerSO || extras?.customerSO),
-      dash(ex?.customerRef || extras?.customerRef),
-      dash(it.productCode),
-      variantOf(it.productCode),
-      dash(it.productName),
-      dash(it.sizeLabel),
-      dash(it.fabricCode),
-      isBF ? dimStr(ex?.divanHeightInches) : "-",
-      isBF ? dimStr(ex?.gapInches) : "-",
-      dimStr(ex?.totalHeightInches),
-      dash(ex?.specialOrder),
+      describe(
+        {
+          productCode: it.productCode || "",
+          productName: it.productName || "",
+          fabricCode: it.fabricCode || "",
+          sizeLabel: it.sizeLabel || "",
+        },
+        ex,
+      ),
+      uomOf(ex?.itemCategory),
       String(it.quantity),
-      ((it.itemM3 || 0) * it.quantity).toFixed(2),
     ]);
   }
 
   drawHeader();
 
   autoTable(doc, {
-    head: [
-      [
-        "No",
-        "SO ID",
-        "Customer PO",
-        "Customer SO",
-        "Customer Ref",
-        "Product Code",
-        "Variant",
-        "Product Name",
-        "Size",
-        "Colour / Fabric",
-        "Divan",
-        "Gap",
-        "Total H",
-        "Special Order",
-        "Qty",
-        "M³",
-      ],
-    ],
+    head: [["Item", "Description", "UOM", "Qty"]],
     body,
     foot: [
       [
-        { content: "Total", colSpan: 14, styles: { halign: "right" } },
+        { content: "Total", colSpan: 2, styles: { halign: "right" } },
+        "",
         String(totalQty),
-        totalM3.toFixed(2),
       ],
     ],
-    margin: { top: HEADER_BOTTOM, left: m, right: m, bottom: 14 },
+    margin: { top: HEADER_BOTTOM, left: m, right: m, bottom: 16 },
     showHead: "everyPage",
     showFoot: "lastPage",
-    theme: "grid",
+    theme: "plain",
     styles: {
       font: "helvetica",
-      fontSize: 6.8,
-      cellPadding: { top: 1.3, bottom: 1.3, left: 1.4, right: 1.4 },
+      fontSize: 8.5,
+      cellPadding: { top: 1.4, bottom: 2, left: 2, right: 2 },
       textColor: INK,
-      lineColor: GRID,
-      lineWidth: 0.15,
+      lineColor: HAIR,
+      lineWidth: 0,
       valign: "top",
-      overflow: "linebreak",
     },
     headStyles: {
-      fillColor: HEADBG,
-      textColor: [255, 255, 255],
       fontStyle: "bold",
-      fontSize: 6.6,
-      halign: "center",
-      lineColor: HEADBG,
+      fontSize: 8.5,
+      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
+      lineColor: RULE,
     },
     footStyles: {
-      fillColor: [240, 240, 240],
-      textColor: INK,
       fontStyle: "bold",
-      fontSize: 7.2,
-      halign: "right",
+      fontSize: 9,
+      lineWidth: { top: 0.5, bottom: 0, left: 0, right: 0 },
+      lineColor: RULE,
     },
     columnStyles: {
-      0: { cellWidth: 8, halign: "center" },
-      1: { cellWidth: 22 },
-      2: { cellWidth: 22 },
-      3: { cellWidth: 22 },
-      4: { cellWidth: 20 },
-      5: { cellWidth: 22 },
-      6: { cellWidth: 14, halign: "center" },
-      7: { cellWidth: "auto" },
-      8: { cellWidth: 13, halign: "center" },
-      9: { cellWidth: 22 },
-      10: { cellWidth: 13, halign: "center" },
-      11: { cellWidth: 12, halign: "center" },
-      12: { cellWidth: 14, halign: "center" },
-      13: { cellWidth: 24 },
-      14: { cellWidth: 12, halign: "right" },
-      15: { cellWidth: 16, halign: "right" },
+      0: { cellWidth: 14, halign: "center" },
+      1: { cellWidth: "auto" },
+      2: { cellWidth: 22, halign: "center" },
+      3: { cellWidth: 18, halign: "right" },
+    },
+    didParseCell: (data) => {
+      // First line (product code) of the Description reads a touch heavier.
+      if (
+        data.section === "body" &&
+        data.column.index === 1 &&
+        typeof data.cell.raw === "string"
+      ) {
+        data.cell.styles.fontSize = 8.3;
+      }
     },
     didDrawPage: () => {
       drawHeader();
@@ -362,34 +363,33 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   const lastY =
     (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable
       ?.finalY ?? HEADER_BOTTOM;
-  const pageH = doc.internal.pageSize.getHeight();
-  let sy = lastY + 14;
-  if (sy > pageH - 30) {
+  let sy = lastY + 16;
+  if (sy > pageH - 34) {
     doc.addPage();
-    sy = 30;
+    sy = 36;
   }
-  const halfW = (pageW - m * 2 - 16) / 2;
-  doc.setDrawColor(...INK);
+  const halfW = (pageW - m * 2 - 14) / 2;
+  doc.setDrawColor(...RULE);
   doc.setLineWidth(0.3);
-  doc.line(m, sy + 13, m + halfW, sy + 13);
-  doc.line(pageW - m - halfW, sy + 13, pageW - m, sy + 13);
+  doc.line(m, sy + 14, m + halfW, sy + 14);
+  doc.line(pageW - m - halfW, sy + 14, pageW - m, sy + 14);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(8);
   doc.setTextColor(...INK);
-  doc.text("Prepared By", m, sy + 18);
-  doc.text("Received in Good Order", pageW - m - halfW, sy + 18);
+  doc.text("Prepared By", m, sy + 19);
+  doc.text("Received in Good Order", pageW - m - halfW, sy + 19);
   doc.setFont("helvetica", "normal");
   doc.setFontSize(7);
   doc.setTextColor(...FAINT);
-  doc.text("Name / Date / Stamp", m, sy + 22.5);
-  doc.text("Name / Date / Stamp", pageW - m - halfW, sy + 22.5);
+  doc.text("Name / Date / Stamp", m, sy + 23.5);
+  doc.text("Name / Date / Stamp", pageW - m - halfW, sy + 23.5);
 
   // Footer note on every page.
   const pages = doc.getNumberOfPages();
   for (let p = 1; p <= pages; p++) {
     doc.setPage(p);
-    const fy = pageH - 8;
-    doc.setDrawColor(...GRID);
+    const fy = pageH - 9;
+    doc.setDrawColor(...HAIR);
     doc.setLineWidth(0.3);
     doc.line(m, fy - 4, pageW - m, fy - 4);
     doc.setFont("helvetica", "normal");

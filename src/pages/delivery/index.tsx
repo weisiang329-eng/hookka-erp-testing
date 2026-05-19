@@ -2636,7 +2636,9 @@ export default function DeliveryPage() {
       {
         label: "Print DO",
         icon: <Printer className="h-3.5 w-3.5" />,
-        action: () => triggerPrint(row, "do"),
+        // Unified: every "Print DO" entry point produces the SAME
+        // canonical DO PDF (was previously the old HTML print here).
+        action: () => void printDOPdf(row),
       },
       {
         label: "Print Packing List",
@@ -3511,7 +3513,7 @@ export default function DeliveryPage() {
                 {!editMode && (
                   <>
                     <button
-                      onClick={() => triggerPrint(detailDO, "do")}
+                      onClick={() => void printDOPdf(detailDO)}
                       className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
                       title="Print DO"
                     >
@@ -3968,18 +3970,18 @@ export default function DeliveryPage() {
                         return (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">
                           <td className="px-2.5 py-1 text-[#9CA3AF] text-xs whitespace-nowrap">{idx + 1}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{refs.salesOrderNo || item.poNo || "—"}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerPOId || "—"}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerSO || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{refs.salesOrderNo || item.poNo || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerPOId || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerSO || "—"}</td>
                           <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{refs.customerRef || "—"}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
                           <td className="px-2.5 py-1 whitespace-nowrap">{item.productName}</td>
                           <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.sizeLabel}</td>
                           <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.fabricCode}</td>
                           <td className="px-2.5 py-1 text-right tabular-nums">{item.quantity}</td>
                           <td className="px-2.5 py-1 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280]">{item.rackingNumber || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280]">{item.rackingNumber || "—"}</td>
                           {editMode && (
                             <td className="px-2.5 py-1 text-center">
                               <button

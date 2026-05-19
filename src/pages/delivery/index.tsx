@@ -79,6 +79,13 @@ type DeliveryOrderRow = {
   doNo: string;
   companySO: string;
   customerPOId: string;
+  // Customer-side reference numbers, joined client-side from the already-
+  // loaded /api/sales-orders list via salesOrderId (NOT on the DO payload).
+  // customerRef = sales_orders.reference (the customer's own ref string);
+  // customerSO  = sales_orders.customerSO (the customer's own SO number).
+  // Empty string when the linked SO has none / the SO isn't in the list.
+  customerRef: string;
+  customerSO: string;
   salesOrderId: string;
   customerId: string;
   customerName: string;
@@ -114,7 +121,13 @@ type DeliveryOrderRow = {
 // Map real DeliveryOrder from API to one row per DO
 // ---------------------------------------------------------------------------
 
-function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
+function mapDOToRow(
+  d: DeliveryOrder,
+  // SO id -> { customerSO, reference }. Built once from the already-loaded
+  // /api/sales-orders list (see useEffect below) so the grid can show the
+  // customer's own SO + reference per DO without any new backend route.
+  soRefMap?: Map<string, { customerSO: string; reference: string }>,
+): DeliveryOrderRow {
   // Status passes through unchanged. The previous code aliased backend
   // "LOADED" → frontend "DISPATCHED" which decoupled the type from
   // VALID_TRANSITIONS and made it impossible to wire the LOADED →
@@ -142,6 +155,8 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     doNo: d.doNo,
     companySO: d.companySO || "",
     customerPOId: d.customerPOId || "",
+    customerRef: soRefMap?.get(d.salesOrderId || "")?.reference || "",
+    customerSO: soRefMap?.get(d.salesOrderId || "")?.customerSO || "",
     salesOrderId: d.salesOrderId || "",
     customerId: d.customerId || "",
     customerName: d.customerName || "",
@@ -224,6 +239,14 @@ type ReadyPORow = {
   poNo: string;
   salesOrderId: string;
   salesOrderNo: string;
+  // Customer-side reference numbers (all already returned by
+  // /api/production-orders — see ProductionOrderApiShape note).
+  // customerPOId = production_orders.customerPOId (customer's PO no.);
+  // customerReference = production_orders.customerReference (customer ref);
+  // customerSO = sales_orders.customerSO joined server-side.
+  customerPOId: string;
+  customerReference: string;
+  customerSO: string;
   customerId: string;
   customerName: string;
   customerState: string;
@@ -277,6 +300,14 @@ type ProductionOrderApiShape = {
   // to the CN flow rather than the DO flow.
   consignmentOrderId?: string;
   companyCOId?: string;
+  // Customer-side reference numbers. /api/production-orders already returns
+  // all three: customerPOId + customerReference come straight off
+  // production_orders; customerSO is batch-joined from sales_orders.customerSO
+  // by attachCustomerSO() at the route boundary (CO POs fall back to the
+  // consignment customer-CO no.). No backend change needed to surface them.
+  customerPOId?: string;
+  customerReference?: string;
+  customerSO?: string;
   customerId?: string;
   customerName?: string;
   customerState?: string;
@@ -520,7 +551,7 @@ export default function DeliveryPage() {
   // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
   // the response from 2-6 MB to 200-600 KB.
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
-  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
+  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; reference?: string }[] }>("/api/sales-orders");
   // Exact per-PO Sales Figure from the server (same resolver the DO /
   // invoice path uses) so Planning / Pending Delivery reconcile to the
   // cent instead of the page guessing price by product code.
@@ -586,10 +617,28 @@ export default function DeliveryPage() {
         if (custRes.success && Array.isArray(custRes.data)) {
           setCustomersData(custRes.data as Customer[]);
         }
+        // SO id -> customer's own SO no. + reference, from the already-
+        // loaded /api/sales-orders list. Lets the DO grids show "Customer
+        // SO" / "Customer Ref" per row without a new backend route (the DO
+        // payload doesn't carry these; only /print-extras did, one DO at a
+        // time). Reused below for the PO-based Pending Delivery rows too.
+        const soRefMap = new Map<string, { customerSO: string; reference: string }>();
+        if (soRes.success && Array.isArray(soRes.data)) {
+          for (const so of soRes.data as {
+            id: string;
+            customerSO?: string;
+            reference?: string;
+          }[]) {
+            soRefMap.set(so.id, {
+              customerSO: so.customerSO || "",
+              reference: so.reference || "",
+            });
+          }
+        }
         if (dRes.success && dRes.data) {
           const realRows = (dRes.data as DeliveryOrder[])
             .filter((d) => !d.id.startsWith("virt-"))
-            .map(mapDOToRow);
+            .map((d) => mapDOToRow(d, soRefMap));
           setDeliveryOrders(realRows);
         }
 
@@ -683,6 +732,16 @@ export default function DeliveryPage() {
               poNo: po.poNo,
               salesOrderId: po.salesOrderId || "",
               salesOrderNo: po.companySOId || soInfo?.companySOId || po.salesOrderNo || "",
+              // customerPOId + customerReference come straight off the PO.
+              // customerSO is the server-joined value; fall back to the
+              // SO-ref map (same /api/sales-orders list the DO grids use)
+              // if the route-boundary join returned empty for this PO.
+              customerPOId: po.customerPOId || "",
+              customerReference: po.customerReference || "",
+              customerSO:
+                po.customerSO ||
+                soRefMap.get(po.salesOrderId || "")?.customerSO ||
+                "",
               customerId: po.customerId || soInfo?.customerId || "",
               customerName: po.customerName || "",
               customerState: po.customerState || "",
@@ -1970,6 +2029,42 @@ export default function DeliveryPage() {
       { key: "fabricCode", label: "Fabric", type: "text", width: "80px", sortable: true },
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
+      // Customer-side reference numbers (operator request 2026-05-19) \u2014 the
+      // customer's own PO / ref / SO so the warehouse can match against the
+      // customer's paperwork while preparing the delivery. Sourced per-PO
+      // from /api/production-orders (customerPOId + customerReference) and
+      // sales_orders.customerSO (server-joined). "\u2014" when the customer
+      // didn't supply that number.
+      {
+        key: "customerPOId",
+        label: "Customer PO",
+        type: "docno",
+        width: "130px",
+        sortable: true,
+        render: (_v, row) => row.customerPOId
+          ? <span className="doc-number">{row.customerPOId}</span>
+          : <span className="text-[#9CA3AF]">\u2014</span>,
+      },
+      {
+        key: "customerReference",
+        label: "Customer Ref",
+        type: "text",
+        width: "130px",
+        sortable: true,
+        render: (_v, row) => row.customerReference
+          ? <span className="text-[#1F1D1B]">{row.customerReference}</span>
+          : <span className="text-[#9CA3AF]">\u2014</span>,
+      },
+      {
+        key: "customerSO",
+        label: "Customer SO",
+        type: "docno",
+        width: "130px",
+        sortable: true,
+        render: (_v, row) => row.customerSO
+          ? <span className="doc-number">{row.customerSO}</span>
+          : <span className="text-[#9CA3AF]">\u2014</span>,
+      },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
       {
         // Sales Figure \u2014 this PO's SO line value (SO unit price \u00d7 qty),
@@ -2220,6 +2315,44 @@ export default function DeliveryPage() {
           }
           return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
         },
+      },
+      // Customer-side reference numbers (operator request 2026-05-19) — the
+      // customer's own PO / ref / SO so the warehouse can match against the
+      // customer's paperwork while preparing / dispatching the delivery.
+      // customerPOId is on the DO payload; customerRef / customerSO are
+      // joined client-side from the already-loaded /api/sales-orders list
+      // via the DO's salesOrderId (sales_orders.reference / .customerSO).
+      // "—" when the customer didn't supply that number, or the linked SO
+      // isn't in the loaded list.
+      {
+        key: "customerPOId",
+        label: "Customer PO",
+        type: "docno",
+        width: "130px",
+        sortable: true,
+        render: (_value, row) => row.customerPOId
+          ? <span className="doc-number">{row.customerPOId}</span>
+          : <span className="text-[#9CA3AF]">—</span>,
+      },
+      {
+        key: "customerRef",
+        label: "Customer Ref",
+        type: "text",
+        width: "130px",
+        sortable: true,
+        render: (_value, row) => row.customerRef
+          ? <span className="text-[#1F1D1B]">{row.customerRef}</span>
+          : <span className="text-[#9CA3AF]">—</span>,
+      },
+      {
+        key: "customerSO",
+        label: "Customer SO",
+        type: "docno",
+        width: "130px",
+        sortable: true,
+        render: (_value, row) => row.customerSO
+          ? <span className="doc-number">{row.customerSO}</span>
+          : <span className="text-[#9CA3AF]">—</span>,
       },
       {
         // Wei Siang 2026-05-16: per-row Sales Figure — the DO's linked

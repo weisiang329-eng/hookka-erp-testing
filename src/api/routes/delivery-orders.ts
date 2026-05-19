@@ -2387,6 +2387,9 @@ app.get("/:id/print-extras", async (c) => {
             po.divanHeightInches AS divanHeightInches,
             po.legHeightInches AS legHeightInches,
             poso.customerSO AS lineCustomerSO,
+            poso.customerPO AS posoCustomerPO,
+            poso.customerPOId AS posoCustomerPOId,
+            poso.reference AS posoReference,
             so2.id AS soId2,
             so2.customerPO AS soCustomerPO,
             so2.customerPOId AS soCustomerPOId,
@@ -2395,7 +2398,9 @@ app.get("/:id/print-extras", async (c) => {
        FROM delivery_order_items di
        LEFT JOIN production_orders po ON po.id = di.productionOrderId
        LEFT JOIN sales_orders poso ON poso.id = po.salesOrderId
-       LEFT JOIN sales_orders so2 ON so2.companySOId = di.salesOrderNo
+       LEFT JOIN sales_orders so2
+              ON so2.companySOId = di.salesOrderNo
+              OR so2.companySO = di.salesOrderNo
       WHERE di.deliveryOrderId = ?`,
   )
     .bind(id)
@@ -2416,6 +2421,9 @@ app.get("/:id/print-extras", async (c) => {
       divanHeightInches: number | null;
       legHeightInches: number | null;
       lineCustomerSO: string | null;
+      posoCustomerPO: string | null;
+      posoCustomerPOId: string | null;
+      posoReference: string | null;
       soId2: string | null;
       soCustomerPO: string | null;
       soCustomerPOId: string | null;
@@ -2533,9 +2541,15 @@ app.get("/:id/print-extras", async (c) => {
     const itemCategory = r.itemCategory ?? fb?.itemCategory ?? null;
     const specialOrder = r.specialOrder ?? fb?.specialOrder ?? null;
     const customerPOId =
-      r.customerPOId || r.soCustomerPO || r.soCustomerPOId || null;
+      r.customerPOId ||
+      r.posoCustomerPO ||
+      r.posoCustomerPOId ||
+      r.soCustomerPO ||
+      r.soCustomerPOId ||
+      null;
     const customerSO = r.lineCustomerSO || r.soCustomerSO || null;
-    const customerRefLine = r.customerReference || r.soReference || null;
+    const customerRefLine =
+      r.customerReference || r.posoReference || r.soReference || null;
     if (!customerRef && customerRefLine) customerRef = customerRefLine;
     const total =
       g == null && d == null && l == null

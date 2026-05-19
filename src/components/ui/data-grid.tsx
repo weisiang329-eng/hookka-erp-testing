@@ -299,7 +299,7 @@ function ContextMenu({
 
 function ColumnFilterDropdown<T>({
   columnKey,
-  columnType: _columnType,
+  columnType,
   filterAccessor,
   allData,
   activeValues,
@@ -430,6 +430,111 @@ function ColumnFilterDropdown<T>({
     });
   };
 
+  // ----- Date column: Year ▸ Month ▸ Day tree + period presets -----
+  // Reuses the SAME checked/checkedRef/apply machinery as the value
+  // filter — it just renders a tree of the column's distinct dates and
+  // toggles whole years/months/days at once. Zero change to the
+  // row-filtering engine: OK still applies a Set<rawValue>.
+  const isDateCol = columnType === "date";
+  const MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const parsedDates = useMemo(() => {
+    if (!isDateCol) return [] as { raw: string; count: number; ymd: [number, number, number] | null }[];
+    return uniqueValues.map(([raw, count]) => {
+      const t = raw ? Date.parse(raw) : NaN;
+      if (Number.isNaN(t)) return { raw, count, ymd: null };
+      const d = new Date(t);
+      return { raw, count, ymd: [d.getFullYear(), d.getMonth(), d.getDate()] as [number, number, number] };
+    });
+  }, [isDateCol, uniqueValues]);
+  const dateTree = useMemo(() => {
+    type Day = { day: number; raws: string[]; count: number };
+    type Mon = { mon: number; days: Map<number, Day>; raws: string[]; count: number };
+    type Yr = { yr: number; mons: Map<number, Mon>; raws: string[]; count: number };
+    const years = new Map<number, Yr>();
+    const noDate: string[] = [];
+    let noDateCount = 0;
+    for (const p of parsedDates) {
+      if (!p.ymd) { noDate.push(p.raw); noDateCount += p.count; continue; }
+      const [y, m, dd] = p.ymd;
+      let yr = years.get(y);
+      if (!yr) { yr = { yr: y, mons: new Map(), raws: [], count: 0 }; years.set(y, yr); }
+      yr.raws.push(p.raw); yr.count += p.count;
+      let mn = yr.mons.get(m);
+      if (!mn) { mn = { mon: m, days: new Map(), raws: [], count: 0 }; yr.mons.set(m, mn); }
+      mn.raws.push(p.raw); mn.count += p.count;
+      let dy = mn.days.get(dd);
+      if (!dy) { dy = { day: dd, raws: [], count: 0 }; mn.days.set(dd, dy); }
+      dy.raws.push(p.raw); dy.count += p.count;
+    }
+    return {
+      years: Array.from(years.values()).sort((a, b) => b.yr - a.yr),
+      noDate,
+      noDateCount,
+    };
+  }, [parsedDates]);
+  const [expY, setExpY] = useState<Set<number>>(new Set());
+  const [expM, setExpM] = useState<Set<string>>(new Set());
+  const setRaws = (raws: string[], on: boolean) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      for (const r of raws) {
+        if (on) next.add(r);
+        else next.delete(r);
+      }
+      checkedRef.current = next;
+      return next;
+    });
+  };
+  const allRawsOn = (raws: string[]) =>
+    raws.length > 0 && raws.every((r) => checked.has(r));
+  const someRawsOn = (raws: string[]) => raws.some((r) => checked.has(r));
+  const matchSearch = (label: string) =>
+    !search || label.toLowerCase().includes(search.toLowerCase());
+  // Apply a [from,to] inclusive day range (period presets).
+  const applyDateRange = (from: Date, to: Date) => {
+    const f = new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime();
+    const t = new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime();
+    const matched = parsedDates
+      .filter((p) => {
+        if (!p.ymd) return false;
+        const x = new Date(p.ymd[0], p.ymd[1], p.ymd[2]).getTime();
+        return x >= f && x <= t;
+      })
+      .map((p) => p.raw);
+    onApplyValues(new Set(matched));
+    onClose();
+  };
+  const today0 = () => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  };
+  const addDays = (d: Date, n: number) => {
+    const x = new Date(d);
+    x.setDate(x.getDate() + n);
+    return x;
+  };
+  const weekStart = (d: Date) => addDays(d, -((d.getDay() + 6) % 7)); // Monday
+  const datePresets: { label: string; range: () => [Date, Date] }[] = [
+    { label: "Yesterday", range: () => { const y = addDays(today0(), -1); return [y, y]; } },
+    { label: "Today", range: () => { const t = today0(); return [t, t]; } },
+    { label: "Tomorrow", range: () => { const t = addDays(today0(), 1); return [t, t]; } },
+    { label: "Last Week", range: () => { const s = addDays(weekStart(today0()), -7); return [s, addDays(s, 6)]; } },
+    { label: "This Week", range: () => { const s = weekStart(today0()); return [s, addDays(s, 6)]; } },
+    { label: "Next Week", range: () => { const s = addDays(weekStart(today0()), 7); return [s, addDays(s, 6)]; } },
+    { label: "Last Month", range: () => { const n = today0(); return [new Date(n.getFullYear(), n.getMonth() - 1, 1), new Date(n.getFullYear(), n.getMonth(), 0)]; } },
+    { label: "This Month", range: () => { const n = today0(); return [new Date(n.getFullYear(), n.getMonth(), 1), new Date(n.getFullYear(), n.getMonth() + 1, 0)]; } },
+    { label: "Next Month", range: () => { const n = today0(); return [new Date(n.getFullYear(), n.getMonth() + 1, 1), new Date(n.getFullYear(), n.getMonth() + 2, 0)]; } },
+    { label: "Last Year", range: () => { const y = today0().getFullYear() - 1; return [new Date(y, 0, 1), new Date(y, 11, 31)]; } },
+    { label: "This Year", range: () => { const y = today0().getFullYear(); return [new Date(y, 0, 1), new Date(y, 11, 31)]; } },
+    { label: "Next Year", range: () => { const y = today0().getFullYear() + 1; return [new Date(y, 0, 1), new Date(y, 11, 31)]; } },
+  ];
+  const [rngFrom, setRngFrom] = useState("");
+  const [rngTo, setRngTo] = useState("");
+
   // Close on outside click / escape
   useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -482,7 +587,7 @@ function ColumnFilterDropdown<T>({
           )}
           onClick={() => setTab("text")}
         >
-          Text Filters
+          {isDateCol ? "Date Filters" : "Text Filters"}
         </button>
       </div>
 
@@ -508,11 +613,8 @@ function ColumnFilterDropdown<T>({
             <input type="checkbox" checked={allChecked} onChange={toggleAll} className="h-3.5 w-3.5 accent-[#6B5C32]" />
             <span className="font-medium">(All)</span>
           </label>
-          {/* Quick-filter chips — render only when there are matches in
-              uniqueValues for that prefix. One-click apply + close so the
-              operator doesn't have to tick e.g. 14 "Overdue …" rows
-              individually (operator request 2026-05-13). */}
-          {quickFilterChips.length > 0 && (
+          {/* Quick-filter chips — non-date columns only. */}
+          {!isDateCol && quickFilterChips.length > 0 && (
             <div className="flex flex-wrap gap-1 px-2 py-1.5 border-t border-[#F0F0F0] bg-[#FAF8F4]">
               {quickFilterChips.map(({ prefix, matchValues, rowCount }) => (
                 <button
@@ -530,16 +632,168 @@ function ColumnFilterDropdown<T>({
               ))}
             </div>
           )}
-          {/* Values list */}
-          <div className="max-h-[200px] overflow-y-auto border-t border-[#F0F0F0]">
-            {filteredValues.map(([val, count]) => (
-              <label key={val} className="flex items-center gap-2 px-3 py-0.5 text-[11px] text-[#333] cursor-pointer hover:bg-[#F0ECE9]">
-                <input type="checkbox" checked={checked.has(val)} onChange={() => toggleValue(val)} className="h-3.5 w-3.5 accent-[#6B5C32]" />
-                <span className="truncate flex-1">{val || "(blank)"}</span>
-                <span className="text-[9px] text-[#AAA]">{count}</span>
-              </label>
-            ))}
-          </div>
+          {isDateCol ? (
+            /* Year ▸ Month ▸ Day tree */
+            <div className="max-h-[220px] overflow-y-auto border-t border-[#F0F0F0] py-0.5">
+              {dateTree.years.length === 0 && dateTree.noDate.length === 0 && (
+                <div className="px-3 py-2 text-[11px] text-[#999]">No dates</div>
+              )}
+              {dateTree.years.map((yr) => {
+                const yKey = String(yr.yr);
+                const yOpen = expY.has(yr.yr);
+                const yShown =
+                  matchSearch(yKey) ||
+                  Array.from(yr.mons.values()).some(
+                    (mn) =>
+                      matchSearch(`${MONTHS[mn.mon]} ${yKey}`) ||
+                      Array.from(mn.days.values()).some((dy) =>
+                        matchSearch(`${dy.day} ${MONTHS[mn.mon]} ${yKey}`),
+                      ),
+                  );
+                if (!yShown) return null;
+                return (
+                  <div key={yr.yr}>
+                    <div className="flex items-center gap-1 px-2 py-0.5 text-[11px] hover:bg-[#F0ECE9]">
+                      <button
+                        type="button"
+                        className="w-3 text-[#888]"
+                        onClick={() =>
+                          setExpY((p) => {
+                            const n = new Set(p);
+                            if (n.has(yr.yr)) n.delete(yr.yr);
+                            else n.add(yr.yr);
+                            return n;
+                          })
+                        }
+                      >
+                        {yOpen ? "−" : "+"}
+                      </button>
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-[#6B5C32]"
+                        checked={allRawsOn(yr.raws)}
+                        ref={(el) => {
+                          if (el)
+                            el.indeterminate =
+                              !allRawsOn(yr.raws) && someRawsOn(yr.raws);
+                        }}
+                        onChange={(e) => setRaws(yr.raws, e.target.checked)}
+                      />
+                      <span className="font-medium flex-1">{yr.yr}</span>
+                      <span className="text-[9px] text-[#AAA]">{yr.count}</span>
+                    </div>
+                    {yOpen &&
+                      Array.from(yr.mons.values())
+                        .sort((a, b) => a.mon - b.mon)
+                        .map((mn) => {
+                          const mKey = `${yr.yr}-${mn.mon}`;
+                          const mOpen = expM.has(mKey);
+                          const mLabel = `${MONTHS[mn.mon]} ${yr.yr}`;
+                          const mShown =
+                            matchSearch(mLabel) ||
+                            Array.from(mn.days.values()).some((dy) =>
+                              matchSearch(`${dy.day} ${mLabel}`),
+                            );
+                          if (!mShown) return null;
+                          return (
+                            <div key={mKey}>
+                              <div className="flex items-center gap-1 pl-5 pr-2 py-0.5 text-[11px] hover:bg-[#F0ECE9]">
+                                <button
+                                  type="button"
+                                  className="w-3 text-[#888]"
+                                  onClick={() =>
+                                    setExpM((p) => {
+                                      const n = new Set(p);
+                                      if (n.has(mKey)) n.delete(mKey);
+                                      else n.add(mKey);
+                                      return n;
+                                    })
+                                  }
+                                >
+                                  {mOpen ? "−" : "+"}
+                                </button>
+                                <input
+                                  type="checkbox"
+                                  className="h-3.5 w-3.5 accent-[#6B5C32]"
+                                  checked={allRawsOn(mn.raws)}
+                                  ref={(el) => {
+                                    if (el)
+                                      el.indeterminate =
+                                        !allRawsOn(mn.raws) &&
+                                        someRawsOn(mn.raws);
+                                  }}
+                                  onChange={(e) =>
+                                    setRaws(mn.raws, e.target.checked)
+                                  }
+                                />
+                                <span className="flex-1">
+                                  {MONTHS[mn.mon]}
+                                </span>
+                                <span className="text-[9px] text-[#AAA]">
+                                  {mn.count}
+                                </span>
+                              </div>
+                              {mOpen &&
+                                Array.from(mn.days.values())
+                                  .sort((a, b) => a.day - b.day)
+                                  .filter((dy) =>
+                                    matchSearch(`${dy.day} ${mLabel}`),
+                                  )
+                                  .map((dy) => (
+                                    <label
+                                      key={dy.day}
+                                      className="flex items-center gap-1 pl-12 pr-2 py-0.5 text-[11px] cursor-pointer hover:bg-[#F0ECE9]"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        className="h-3.5 w-3.5 accent-[#6B5C32]"
+                                        checked={allRawsOn(dy.raws)}
+                                        onChange={(e) =>
+                                          setRaws(dy.raws, e.target.checked)
+                                        }
+                                      />
+                                      <span className="flex-1">
+                                        {String(dy.day).padStart(2, "0")}
+                                      </span>
+                                      <span className="text-[9px] text-[#AAA]">
+                                        {dy.count}
+                                      </span>
+                                    </label>
+                                  ))}
+                            </div>
+                          );
+                        })}
+                  </div>
+                );
+              })}
+              {dateTree.noDate.length > 0 && matchSearch("no date") && (
+                <label className="flex items-center gap-1 px-2 py-0.5 text-[11px] cursor-pointer hover:bg-[#F0ECE9]">
+                  <span className="w-3" />
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5 accent-[#6B5C32]"
+                    checked={allRawsOn(dateTree.noDate)}
+                    onChange={(e) => setRaws(dateTree.noDate, e.target.checked)}
+                  />
+                  <span className="flex-1 italic text-[#888]">(No date)</span>
+                  <span className="text-[9px] text-[#AAA]">
+                    {dateTree.noDateCount}
+                  </span>
+                </label>
+              )}
+            </div>
+          ) : (
+            /* Values list (non-date) */
+            <div className="max-h-[200px] overflow-y-auto border-t border-[#F0F0F0]">
+              {filteredValues.map(([val, count]) => (
+                <label key={val} className="flex items-center gap-2 px-3 py-0.5 text-[11px] text-[#333] cursor-pointer hover:bg-[#F0ECE9]">
+                  <input type="checkbox" checked={checked.has(val)} onChange={() => toggleValue(val)} className="h-3.5 w-3.5 accent-[#6B5C32]" />
+                  <span className="truncate flex-1">{val || "(blank)"}</span>
+                  <span className="text-[9px] text-[#AAA]">{count}</span>
+                </label>
+              ))}
+            </div>
+          )}
           {/* Actions — `type="button"` everywhere to short-circuit any
               accidental form-submit behaviour, and OK reads from
               checkedRef so it's never staler than the latest checkbox
@@ -574,6 +828,66 @@ function ColumnFilterDropdown<T>({
                 onClick={onClose}
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : isDateCol ? (
+        <div className="p-2 space-y-2">
+          {/* Quick period presets — one click applies + closes. */}
+          <div className="grid grid-cols-3 gap-1">
+            {datePresets.map((p) => (
+              <button
+                key={p.label}
+                type="button"
+                className="rounded border border-[#D0D0D0] bg-white px-1.5 py-1 text-[10px] text-[#333] hover:bg-[#6B5C32] hover:text-white hover:border-[#6B5C32] transition-colors"
+                onClick={() => {
+                  const [f, t] = p.range();
+                  applyDateRange(f, t);
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          {/* Custom date range */}
+          <div className="border-t border-[#F0F0F0] pt-2 space-y-1">
+            <div className="text-[10px] font-medium text-[#666]">
+              Custom range
+            </div>
+            <div className="flex items-center gap-1">
+              <input
+                type="date"
+                value={rngFrom}
+                onChange={(e) => setRngFrom(e.target.value)}
+                className="flex-1 rounded border border-[#D0D0D0] bg-white py-1 px-1 text-[10px] text-[#333] focus:border-[#6B5C32] focus:outline-none"
+              />
+              <span className="text-[10px] text-[#888]">to</span>
+              <input
+                type="date"
+                value={rngTo}
+                onChange={(e) => setRngTo(e.target.value)}
+                className="flex-1 rounded border border-[#D0D0D0] bg-white py-1 px-1 text-[10px] text-[#333] focus:border-[#6B5C32] focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center justify-between pt-1">
+              <button
+                type="button"
+                className="rounded border border-[#D0D0D0] px-3 py-1 text-[11px] text-[#555] hover:bg-[#F0ECE9]"
+                onClick={() => { onClear(); onClose(); }}
+              >
+                Clear Filter
+              </button>
+              <button
+                type="button"
+                className="rounded border border-[#6B5C32] bg-[#6B5C32] px-3 py-1 text-[11px] text-white hover:bg-[#4D4224] disabled:opacity-40"
+                disabled={!rngFrom || !rngTo}
+                onClick={() => {
+                  if (!rngFrom || !rngTo) return;
+                  applyDateRange(new Date(rngFrom), new Date(rngTo));
+                }}
+              >
+                Apply
               </button>
             </div>
           </div>

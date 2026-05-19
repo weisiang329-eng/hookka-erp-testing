@@ -28,13 +28,6 @@ export type DOPrintExtras = {
   >;
 };
 
-// Fixed origin warehouse — Hookka is single-warehouse; the "from" branch
-// isn't modelled in the schema (option 1A), so it's a static label.
-const WAREHOUSE = "Hookka HQ, Sungai Buloh, Selangor";
-
-const dimTxt = (v?: number | null) =>
-  v == null || v === 0 ? "" : `${v}"`;
-
 // ---------------------------------------------------------------------------
 // Delivery Order PDF — the reference template for the unified, formal
 // company document system. Every other generate-*-pdf.ts mirrors this
@@ -82,11 +75,10 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   y = drawSectionLabel(doc, "Deliver To", y);
   const leftRows: Array<[string, string, boolean?]> = [
     ["Customer", order.customerName, true],
-    ["Branch / State", o.hubName || o.hubState || o.customerState || "-"],
+    ["Deliver To", o.hubName || o.hubState || o.customerState || "-"],
     ["Address", order.deliveryAddress || "-"],
     ["Contact", order.contactPerson || "-"],
     ["Phone", order.contactPhone || "-"],
-    ["From", WAREHOUSE],
   ];
   let yl = y;
   for (const [k, v, b] of leftRows) {
@@ -132,30 +124,20 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     const itx = it as DeliveryOrder["items"][number] & {
       salesOrderNo?: string;
     };
-    const ex = extras?.items?.[it.id];
-    const build = ex
-      ? [
-          ex.totalHeightInches
-            ? `TH ${dimTxt(ex.totalHeightInches)}`
-            : "",
-          ex.divanHeightInches ? `D1 ${dimTxt(ex.divanHeightInches)}` : "",
-          ex.gapInches ? `Gap ${dimTxt(ex.gapInches)}` : "",
-        ]
-          .filter(Boolean)
-          .join("  ")
-      : "";
+    const m3 =
+      (Number((it as { itemM3?: number }).itemM3) || 0) * it.quantity;
     return [
       String(idx + 1),
       itx.salesOrderNo || "-",
-      // Description sits UNDER the product code in the same cell.
+      // Description sits UNDER the product code in the same cell. The code
+      // already carries the sofa variant (e.g. 5537-1A(LHF)) so no
+      // separate variant column is needed — works for sofa + bedframe in
+      // one DO.
       `${it.productCode}\n${it.productName}`,
       it.sizeLabel || "-",
       it.fabricCode || "-",
-      build || "-",
       String(it.quantity),
-      (Number((it as { itemM3?: number }).itemM3) || 0 ? "" : "") +
-        ((Number((it as { itemM3?: number }).itemM3) || 0) *
-          it.quantity).toFixed(2),
+      m3.toFixed(2),
     ];
   });
 
@@ -163,29 +145,19 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     startY: y,
     margin: { left: m, right: m },
     head: [
-      [
-        "#",
-        "SO No.",
-        "Product Code / Description",
-        "Size",
-        "Fabric",
-        "Build (TH / D1 / Gap)",
-        "Qty",
-        "M³",
-      ],
+      ["#", "SO No.", "Product Code / Description", "Size", "Colour / Fabric", "Qty", "M³"],
     ],
     body,
-    foot: [["", "", "", "", "", "Total", String(totalQty), order.totalM3.toFixed(2)]],
+    foot: [["", "", "", "", "Total", String(totalQty), order.totalM3.toFixed(2)]],
     ...tableTheme(),
     columnStyles: {
-      0: { cellWidth: 7, halign: "center" },
-      1: { cellWidth: 22, overflow: "ellipsize", fontStyle: "bold" },
+      0: { cellWidth: 8, halign: "center" },
+      1: { cellWidth: 26, overflow: "ellipsize", fontStyle: "bold" },
       2: { cellWidth: "auto", fontStyle: "bold" },
-      3: { cellWidth: 16 },
-      4: { cellWidth: 22, overflow: "ellipsize" },
-      5: { cellWidth: 26, fontSize: 6.8 },
-      6: { cellWidth: 11, halign: "right" },
-      7: { cellWidth: 14, halign: "right" },
+      3: { cellWidth: 22 },
+      4: { cellWidth: 30, overflow: "ellipsize" },
+      5: { cellWidth: 14, halign: "right" },
+      6: { cellWidth: 18, halign: "right" },
     },
     // Description line (2nd line of the Product cell) renders lighter.
     didParseCell: (data) => {

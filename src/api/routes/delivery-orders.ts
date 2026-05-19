@@ -2627,6 +2627,16 @@ app.get("/:id/print-extras", async (c) => {
     };
     let wips = breakBomIntoWips(wipComponents, code, variants);
     if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
+    // What actually ships = what reaches PACKING. Count only the WIPs
+    // that have a PACKING process so the figure matches the loaded
+    // pieces ("packing 有多少东西就是多少东西"). Keep all if the BOM
+    // never marks packing (don't zero the line out).
+    const packed = wips.filter((w) =>
+      (w.processes || []).some(
+        (p) => String(p.deptCode || "").toUpperCase() === "PACKING",
+      ),
+    );
+    if (packed.length) wips = packed;
     if (cu.startsWith("DIVAN")) {
       wips = wips.filter((w) => w.wipType.toUpperCase() === "DIVAN");
     } else if (C === "BEDFRAME" && isHeadboardOnlySpecial(special)) {

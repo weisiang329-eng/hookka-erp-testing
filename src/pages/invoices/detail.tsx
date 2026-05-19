@@ -73,6 +73,27 @@ export default function InvoiceDetailPage() {
   // Auto-dismiss toast — `null` disables the timer when no toast is showing.
   useTimeout(() => setToast(null), toast ? 3000 : null);
 
+  // Pull the read-only price build-up / customer refs, then render the
+  // A4 invoice. "download" saves the file; "view" opens it on screen.
+  const printInvoicePdf = async (mode: "download" | "view" = "download") => {
+    if (!invoice) return;
+    let extras: import("@/lib/generate-invoice-pdf").InvoicePrintExtras = {};
+    try {
+      const r = await fetch(
+        `/api/invoices/${encodeURIComponent(String(id))}/print-extras`,
+      );
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: import("@/lib/generate-invoice-pdf").InvoicePrintExtras;
+      };
+      if (j?.success && j.data) extras = j.data;
+    } catch {
+      /* graceful — PDF still renders without extras */
+    }
+    const { generateInvoicePdf } = await import("@/lib/generate-invoice-pdf");
+    generateInvoicePdf(invoice, extras, mode);
+  };
+
   const sendInvoice = async () => {
     if (!invoice) return;
     setUpdating(true);
@@ -212,11 +233,14 @@ export default function InvoiceDetailPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={async () => {
-              if (!invoice) return;
-              const { generateInvoicePdf } = await import("@/lib/generate-invoice-pdf");
-              generateInvoicePdf(invoice);
-            }}
+            onClick={() => void printInvoicePdf("view")}
+          >
+            <FileText className="h-4 w-4" /> View Documentation
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void printInvoicePdf("download")}
           >
             <Download className="h-4 w-4" /> PDF
           </Button>

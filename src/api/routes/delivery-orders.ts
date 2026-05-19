@@ -2580,6 +2580,66 @@ app.get("/:id/print-extras", async (c) => {
         baseModel: v.baseModel,
       });
   }
+  // Reliable customer PO / SO / Ref via the SALES ORDER — the same path
+  // the on-screen items table uses. The arbitrary multi-join aliases
+  // (poso.customerSO / so2.customerSO …) don't round-trip the Postgres
+  // compat layer, so customerSO came back blank even when it exists.
+  // Resolve from a clean sales_orders query keyed by SO no. / id.
+  const diSoById = new Map<string, string>();
+  {
+    const diRes = await c.var.DB.prepare(
+      "SELECT id, salesOrderNo FROM delivery_order_items WHERE deliveryOrderId = ?",
+    )
+      .bind(id)
+      .all<{ id: string; salesOrderNo: string | null }>();
+    for (const dr of diRes.results ?? [])
+      if (dr.id) diSoById.set(dr.id, dr.salesOrderNo || "");
+  }
+  const soKeys = Array.from(
+    new Set(
+      (itRes.results ?? [])
+        .flatMap((r) => [
+          r.salesOrderNo || "",
+          r.companySOId || "",
+          r.salesOrderId || "",
+          diSoById.get(r.id) || "",
+        ])
+        .filter(Boolean),
+    ),
+  );
+  type SoRef = {
+    customerPO: string | null;
+    customerSO: string | null;
+    reference: string | null;
+  };
+  const soRef = new Map<string, SoRef>();
+  if (soKeys.length > 0) {
+    const ph = soKeys.map(() => "?").join(",");
+    const soRes = await c.var.DB.prepare(
+      `SELECT id, companySO, companySOId, customerPO, customerSO, reference
+         FROM sales_orders
+        WHERE companySOId IN (${ph}) OR companySO IN (${ph}) OR id IN (${ph})`,
+    )
+      .bind(...soKeys, ...soKeys, ...soKeys)
+      .all<{
+        id: string | null;
+        companySO: string | null;
+        companySOId: string | null;
+        customerPO: string | null;
+        customerSO: string | null;
+        reference: string | null;
+      }>();
+    for (const s of soRes.results ?? []) {
+      const v: SoRef = {
+        customerPO: s.customerPO ?? null,
+        customerSO: s.customerSO ?? null,
+        reference: s.reference ?? null,
+      };
+      for (const k of [s.companySOId, s.companySO, s.id])
+        if (k) soRef.set(k, v);
+    }
+  }
+
   // Per-line set composition string, e.g. "1 HB + 2 DIVAN" (bedframe)
   // or "1 1A + 1 2A + 1 STOOL" (sofa set). Mirrors production-builder's
   // headboard-only / divan-only filters. null when there's no real BOM.
@@ -2694,16 +2754,15 @@ app.get("/:id/print-extras", async (c) => {
     const l = r.legHeightInches ?? fb?.legHeightInches ?? null;
     const itemCategory = r.itemCategory ?? fb?.itemCategory ?? null;
     const specialOrder = r.specialOrder ?? fb?.specialOrder ?? null;
-    const customerPOId =
-      r.customerPOId ||
-      r.posoCustomerPO ||
-      r.posoCustomerPOId ||
-      r.soCustomerPO ||
-      r.soCustomerPOId ||
-      null;
-    const customerSO = r.lineCustomerSO || r.soCustomerSO || null;
+    const soNo = r.salesOrderNo || r.companySOId || diSoById.get(r.id) || "";
+    const sr =
+      soRef.get(soNo) ||
+      soRef.get(r.salesOrderId || "") ||
+      soRef.get(r.companySOId || "");
+    const customerPOId = r.customerPOId || sr?.customerPO || null;
+    const customerSO = sr?.customerSO || null;
     const customerRefLine =
-      r.customerReference || r.posoReference || r.soReference || null;
+      r.customerReference || sr?.reference || null;
     if (!customerRef && customerRefLine) customerRef = customerRefLine;
     const total =
       g == null && d == null && l == null
@@ -2730,8 +2789,7 @@ app.get("/:id/print-extras", async (c) => {
       customerPOId,
       customerSO,
       customerRef: customerRefLine,
-      salesOrderNo:
-        r.salesOrderNo || r.companySOId || r.diSalesOrderNo || null,
+      salesOrderNo: soNo || null,
       specialOrder,
       pieces,
       gapInches: g,

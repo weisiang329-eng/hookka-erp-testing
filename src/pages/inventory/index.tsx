@@ -1589,7 +1589,8 @@ export default function InventoryPage() {
 
   // Edit RM dialog state
   const [editRM, setEditRM] = useState<RawMaterial | null>(null);
-  const [editRMForm, setEditRMForm] = useState({ description: "", baseUOM: "", itemGroup: "", balanceQty: 0 });
+  const [editRMForm, setEditRMForm] = useState({ itemCode: "", description: "", baseUOM: "", itemGroup: "", balanceQty: 0 });
+  const [savingRM, setSavingRM] = useState(false);
   // Delete-in-flight flag so the dialog footer can disable both buttons while
   // DELETE /api/raw-materials/:id is in transit. Mirrors the rmSaving / busy
   // pattern used elsewhere (employees.tsx Manage Departments, Add RM dialog).
@@ -1615,6 +1616,7 @@ export default function InventoryPage() {
   const handleDoubleClickRM = async (row: RawMaterial) => {
     setEditRM(row);
     setEditRMForm({
+      itemCode: row.itemCode,
       description: row.description,
       baseUOM: row.baseUOM,
       itemGroup: row.itemGroup,
@@ -2665,7 +2667,11 @@ export default function InventoryPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Item Code</label>
-                  <div className="h-[34px] flex items-center px-3 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm font-medium">{editRM.itemCode}</div>
+                  <Input
+                    value={editRMForm.itemCode}
+                    onChange={(e) => setEditRMForm(f => ({ ...f, itemCode: e.target.value }))}
+                    placeholder="e.g. CLM-18MM 4' X 8'"
+                  />
                 </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Category</label>
@@ -2750,7 +2756,7 @@ export default function InventoryPage() {
               <Button
                 variant="outline"
                 size="sm"
-                disabled={deletingRM}
+                disabled={deletingRM || savingRM}
                 onClick={async () => {
                   if (!confirm(`Delete raw material "${editRM.itemCode}" (${editRM.description})?\n\nThis cannot be undone.`)) return;
                   setDeletingRM(true);
@@ -2788,11 +2794,86 @@ export default function InventoryPage() {
                 <Trash2 className="h-3.5 w-3.5" /> {deletingRM ? "Deleting..." : "Delete"}
               </Button>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => setEditRM(null)} disabled={deletingRM}>Cancel</Button>
-                <Button variant="primary" size="sm" disabled={deletingRM} onClick={() => {
-                  toast.success("Saved: " + editRM.itemCode);
-                  setEditRM(null);
-                }}>Save</Button>
+                <Button variant="outline" size="sm" onClick={() => setEditRM(null)} disabled={deletingRM || savingRM}>Cancel</Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={
+                    deletingRM ||
+                    savingRM ||
+                    !editRMForm.itemCode.trim() ||
+                    !editRMForm.description.trim()
+                  }
+                  onClick={async () => {
+                    const targetId = editRM.id;
+                    const newCode = editRMForm.itemCode.trim();
+                    const renamed = newCode !== editRM.itemCode;
+                    setSavingRM(true);
+                    try {
+                      const res = await fetch(
+                        `/api/raw-materials/${encodeURIComponent(targetId)}`,
+                        {
+                          method: "PUT",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            itemCode: newCode,
+                            description: editRMForm.description.trim(),
+                            baseUOM: editRMForm.baseUOM,
+                            itemGroup: editRMForm.itemGroup.trim(),
+                            balanceQty: editRMForm.balanceQty,
+                          }),
+                        },
+                      );
+                      const j = (await res.json().catch(() => null)) as
+                        | { success?: boolean; error?: string }
+                        | null;
+                      if (!res.ok || !j?.success) {
+                        // Surface the backend message verbatim (e.g. the
+                        // duplicate-code guard) so ops know why it bounced.
+                        toast.error(
+                          j?.error || `Save failed (HTTP ${res.status})`,
+                        );
+                        return;
+                      }
+                      toast.success(
+                        renamed
+                          ? `Renamed ${editRM.itemCode} -> ${newCode}`
+                          : `Saved ${newCode}`,
+                      );
+                      // Patch the row in place (id is stable across a
+                      // rename) + invalidate the caches every dependent
+                      // page reads so BOM / Fabrics / Stock Value pick up
+                      // the new code on next mount.
+                      setLiveRawMaterials((prev) =>
+                        prev.map((r) =>
+                          r.id === targetId
+                            ? {
+                                ...r,
+                                itemCode: newCode,
+                                description: editRMForm.description.trim(),
+                                baseUOM: editRMForm.baseUOM,
+                                itemGroup: editRMForm.itemGroup.trim(),
+                                balanceQty: editRMForm.balanceQty,
+                              }
+                            : r,
+                        ),
+                      );
+                      invalidateCachePrefix("/api/raw-materials");
+                      invalidateCachePrefix("/api/inventory");
+                      invalidateCachePrefix("/api/fabric-tracking");
+                      invalidateCachePrefix("/api/fabrics");
+                      setEditRM(null);
+                    } catch (err) {
+                      toast.error(
+                        err instanceof Error ? err.message : "Save failed",
+                      );
+                    } finally {
+                      setSavingRM(false);
+                    }
+                  }}
+                >
+                  {savingRM ? "Saving..." : "Save"}
+                </Button>
               </div>
             </div>
           </div>

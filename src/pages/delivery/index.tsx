@@ -126,7 +126,10 @@ function mapDOToRow(
   // SO id -> { customerSO, reference }. Built once from the already-loaded
   // /api/sales-orders list (see useEffect below) so the grid can show the
   // customer's own SO + reference per DO without any new backend route.
-  soRefMap?: Map<string, { customerSO: string; reference: string }>,
+  soRefMap?: Map<
+    string,
+    { customerSO: string; reference: string; customerPO: string }
+  >,
 ): DeliveryOrderRow {
   // Status passes through unchanged. The previous code aliased backend
   // "LOADED" → frontend "DISPATCHED" which decoupled the type from
@@ -150,13 +153,38 @@ function mapDOToRow(
     rackingNumber: i.rackingNumber || "",
   }));
 
+  // A DO can span several SOs (one truck consolidating multiple orders).
+  // Resolve customer PO / SO / Ref across EVERY SO the DO touches —
+  // exactly the distinct set the "Sales Orders" column lists — deduped
+  // and comma-joined, instead of only the single header salesOrderId
+  // (which is blank on multi-SO DOs, leaving the columns empty).
+  const _soNos = Array.from(
+    new Set(items.map((i) => i.salesOrderNo).filter(Boolean)),
+  );
+  const _aggr = (
+    pick: (v: { customerSO: string; reference: string; customerPO: string }) => string,
+  ): string => {
+    const vals = Array.from(
+      new Set(
+        _soNos
+          .map((n) => soRefMap?.get(n))
+          .filter((v): v is NonNullable<typeof v> => Boolean(v))
+          .map(pick)
+          .filter(Boolean),
+      ),
+    );
+    if (vals.length) return vals.join(", ");
+    const single = soRefMap?.get(d.salesOrderId || "");
+    return single ? pick(single) : "";
+  };
+
   return {
     id: d.id,
     doNo: d.doNo,
     companySO: d.companySO || "",
-    customerPOId: d.customerPOId || "",
-    customerRef: soRefMap?.get(d.salesOrderId || "")?.reference || "",
-    customerSO: soRefMap?.get(d.salesOrderId || "")?.customerSO || "",
+    customerPOId: _aggr((v) => v.customerPO) || d.customerPOId || "",
+    customerRef: _aggr((v) => v.reference),
+    customerSO: _aggr((v) => v.customerSO),
     salesOrderId: d.salesOrderId || "",
     customerId: d.customerId || "",
     customerName: d.customerName || "",
@@ -551,7 +579,7 @@ export default function DeliveryPage() {
   // needs uph JC statuses to compute Planning vs Pending Delivery). Cuts
   // the response from 2-6 MB to 200-600 KB.
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
-  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; reference?: string }[] }>("/api/sales-orders");
+  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string; customerSO?: string; customerPO?: string; reference?: string }[] }>("/api/sales-orders");
   // Exact per-PO Sales Figure from the server (same resolver the DO /
   // invoice path uses) so Planning / Pending Delivery reconcile to the
   // cent instead of the page guessing price by product code.
@@ -622,17 +650,29 @@ export default function DeliveryPage() {
         // SO" / "Customer Ref" per row without a new backend route (the DO
         // payload doesn't carry these; only /print-extras did, one DO at a
         // time). Reused below for the PO-based Pending Delivery rows too.
-        const soRefMap = new Map<string, { customerSO: string; reference: string }>();
+        // Keyed by BOTH the SO primary id AND the company SO number
+        // (companySOId, e.g. "SO-2604-323") so a DO that spans several
+        // SOs can resolve each one from its items' salesOrderNo — the
+        // same set the "Sales Orders" column lists.
+        const soRefMap = new Map<
+          string,
+          { customerSO: string; reference: string; customerPO: string }
+        >();
         if (soRes.success && Array.isArray(soRes.data)) {
           for (const so of soRes.data as {
             id: string;
+            companySOId?: string;
             customerSO?: string;
+            customerPO?: string;
             reference?: string;
           }[]) {
-            soRefMap.set(so.id, {
+            const v = {
               customerSO: so.customerSO || "",
               reference: so.reference || "",
-            });
+              customerPO: so.customerPO || "",
+            };
+            if (so.id) soRefMap.set(so.id, v);
+            if (so.companySOId) soRefMap.set(so.companySOId, v);
           }
         }
         if (dRes.success && dRes.data) {
@@ -2327,11 +2367,11 @@ export default function DeliveryPage() {
       {
         key: "customerPOId",
         label: "Customer PO",
-        type: "docno",
-        width: "130px",
+        type: "text",
+        width: "150px",
         sortable: true,
         render: (_value, row) => row.customerPOId
-          ? <span className="doc-number">{row.customerPOId}</span>
+          ? <span className="text-[#1F1D1B]">{row.customerPOId}</span>
           : <span className="text-[#9CA3AF]">—</span>,
       },
       {
@@ -2347,11 +2387,11 @@ export default function DeliveryPage() {
       {
         key: "customerSO",
         label: "Customer SO",
-        type: "docno",
-        width: "130px",
+        type: "text",
+        width: "150px",
         sortable: true,
         render: (_value, row) => row.customerSO
-          ? <span className="doc-number">{row.customerSO}</span>
+          ? <span className="text-[#1F1D1B]">{row.customerSO}</span>
           : <span className="text-[#9CA3AF]">—</span>,
       },
       {

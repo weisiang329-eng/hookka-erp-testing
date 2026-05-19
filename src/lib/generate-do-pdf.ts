@@ -237,44 +237,23 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
 
-  // Total by UOM ("7 SET", or "5 SET · 2 UNIT") + a headboard / divan
-  // breakdown across the bedframe lines. A normal bedframe ships as
-  // HB + Divan; a DIVAN-only SKU is divan-only; a "Headboard Only"
-  // special is HB-only.
+  // Total by UOM ("7 SET", or "5 SET · 2 UNIT" when mixed).
   const uomCount: Record<string, number> = {};
-  let hbPcs = 0;
-  let divanPcs = 0;
   for (const it of order.items) {
-    const ex = extras?.items?.[it.id];
-    const u = uomOf(ex?.itemCategory);
+    const u = uomOf(extras?.items?.[it.id]?.itemCategory);
     uomCount[u] = (uomCount[u] || 0) + it.quantity;
-    const cat = (ex?.itemCategory || "").toUpperCase();
-    const code = (it.productCode || "").toUpperCase();
-    const name = (it.productName || "").toUpperCase();
-    const sp = (ex?.specialOrder || "").toLowerCase();
-    const isBed =
-      cat === "BEDFRAME" ||
-      name.includes("BEDFRAME") ||
-      code.startsWith("DIVAN") ||
-      name.startsWith("DIVAN");
-    if (!isBed) continue;
-    const divanOnly = code.startsWith("DIVAN") || name.startsWith("DIVAN");
-    const hbOnly = sp.includes("headboard only") || sp.includes("hb only");
-    if (divanOnly) divanPcs += it.quantity;
-    else if (hbOnly) hbPcs += it.quantity;
-    else {
-      hbPcs += it.quantity;
-      divanPcs += it.quantity;
-    }
   }
   const uomSummary =
     Object.entries(uomCount)
       .map(([u, n]) => `${n} ${u}`)
       .join("  ·  ") || `${totalQty}`;
-  const pieceSummary =
-    hbPcs || divanPcs
-      ? `Bedframe pieces:  ${hbPcs} HB  +  ${divanPcs} DIVAN`
-      : "";
+  // NOTE: the per-piece HB / Divan / sofa-set breakdown is intentionally
+  // NOT derived here from a size guess — the authoritative split lives in
+  // job_cards.wipType / wipQty (materialised from each product's BOM by
+  // breakBomIntoWips). To be wired through /print-extras; printing a
+  // guessed count on a delivery doc the lorry crew counts against is
+  // worse than omitting it.
+  const pieceSummary = "";
 
   const ordered = order.items
     .map((it, i) => ({ it, i }))

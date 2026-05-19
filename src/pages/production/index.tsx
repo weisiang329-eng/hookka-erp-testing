@@ -69,7 +69,7 @@ type OverdueSORow = {
 
 // ----- Overview sort / filter shared types (used by header sub-components) -----
 type OverviewSortKey =
-  | "soId" | "product" | "customer" | "specialOrder"
+  | "soId" | "product" | "customer" | "customerPO" | "specialOrder"
   | "qty" | "due"
   | "FAB_CUT" | "FAB_SEW" | "FOAM" | "WOOD_CUT"
   | "FRAMING" | "WEBBING" | "UPHOLSTERY" | "PACKING";
@@ -864,6 +864,7 @@ export default function ProductionPage({
     soId: string;
     product: string;
     customers: string[]; // multi-select; empty = all
+    customerPO: string;
     specialOrder: string;
     qtyMin: string; // string so empty box stays empty
     qtyMax: string;
@@ -876,7 +877,7 @@ export default function ProductionPage({
     deptDates: Partial<Record<string, { from: string; to: string }>>;
   };
   const emptyOverviewFilters: OverviewFilters = {
-    soId: "", product: "", customers: [], specialOrder: "",
+    soId: "", product: "", customers: [], customerPO: "", specialOrder: "",
     qtyMin: "", qtyMax: "", dueFrom: "", dueTo: "",
     deptStatuses: {},
     deptDates: {},
@@ -942,6 +943,7 @@ export default function ProductionPage({
       case "soId": return !!f.soId;
       case "product": return !!f.product;
       case "customer": return f.customers.length > 0;
+      case "customerPO": return !!f.customerPO;
       case "specialOrder": return !!f.specialOrder;
       case "qty": return !!f.qtyMin || !!f.qtyMax;
       case "due": return !!f.dueFrom || !!f.dueTo;
@@ -956,7 +958,7 @@ export default function ProductionPage({
   }, [overviewFilters]);
   const anyOverviewFilterActive = useMemo(() => {
     const f = overviewFilters;
-    if (f.soId || f.product || f.specialOrder || f.qtyMin || f.qtyMax || f.dueFrom || f.dueTo) return true;
+    if (f.soId || f.product || f.customerPO || f.specialOrder || f.qtyMin || f.qtyMax || f.dueFrom || f.dueTo) return true;
     if (f.customers.length > 0) return true;
     for (const k of Object.keys(f.deptStatuses)) {
       if ((f.deptStatuses[k] || []).length > 0) return true;
@@ -2015,6 +2017,7 @@ export default function ProductionPage({
         if (f.soId && !o.poNo.toLowerCase().includes(f.soId.toLowerCase())) return false;
         if (f.product && !(o.productCode || "").toLowerCase().includes(f.product.toLowerCase())) return false;
         if (f.customers.length > 0 && !f.customers.includes(o.customerName)) return false;
+        if (f.customerPO && !((o.customerPOId || "").toLowerCase().includes(f.customerPO.toLowerCase()))) return false;
         if (f.specialOrder && !((o.specialOrder || "").toLowerCase().includes(f.specialOrder.toLowerCase()))) return false;
         if (f.qtyMin && Number(o.quantity) < Number(f.qtyMin)) return false;
         if (f.qtyMax && Number(o.quantity) > Number(f.qtyMax)) return false;
@@ -2065,6 +2068,7 @@ export default function ProductionPage({
           if (key === "soId") return cmpStr(a.poNo || "", b.poNo || "");
           if (key === "product") return cmpStr(a.productCode || "", b.productCode || "");
           if (key === "customer") return cmpStr(a.customerName || "", b.customerName || "");
+          if (key === "customerPO") return cmpStr(a.customerPOId || "", b.customerPOId || "");
           if (key === "specialOrder") return cmpStr(a.specialOrder || "", b.specialOrder || "");
           if (key === "qty") return cmpNum(Number(a.quantity || 0), Number(b.quantity || 0));
           if (key === "due") return cmpStr(a.targetEndDate || "", b.targetEndDate || "");
@@ -5809,7 +5813,7 @@ export default function ProductionPage({
         {/* Header row */}
         <div
           className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9] relative z-20"
-          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
+          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
         >
           <OverviewHeader
             label="SO ID"
@@ -5859,6 +5863,23 @@ export default function ProductionPage({
                 options={Array.from(new Set(visibleOrders.concat(orders).map((o) => o.customerName).filter(Boolean))).sort()}
                 selected={overviewFilters.customers}
                 onChange={(next) => setOverviewFilters((p) => ({ ...p, customers: next }))}
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Customer PO"
+            sortKey="customerPO"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="customerPO"
+            filterActive={isFilterActive("customerPO")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <TextContainsFilter
+                value={overviewFilters.customerPO}
+                onChange={(v) => setOverviewFilters((p) => ({ ...p, customerPO: v }))}
+                placeholder="Contains…"
               />
             )}
           />
@@ -6004,7 +6025,7 @@ export default function ProductionPage({
               data-index={virtualRow.index}
               className={`grid items-stretch border-b border-[#F0EBE3] cursor-pointer ${rowCls}`}
               style={{
-                gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))",
+                gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(0,1fr))",
                 position: "absolute",
                 top: 0,
                 left: 0,
@@ -6030,6 +6051,12 @@ export default function ProductionPage({
                 <ProductDetailLine order={order} />
               </div>
               <div className="px-3 py-1.5 text-xs text-[#6B7280] truncate flex items-center">{order.customerName}</div>
+              <div
+                className="px-3 py-1.5 text-xs text-[#1F1D1B] doc-number truncate flex items-center"
+                title={order.customerPOId || ""}
+              >
+                {order.customerPOId || "—"}
+              </div>
               <div
                 className={`px-3 py-1.5 text-xs truncate flex items-center ${
                   order.specialOrder ? "text-[#9A3A2D] font-semibold" : "text-[#D1CCC4]"

@@ -3737,7 +3737,12 @@ export default function DeliveryPage() {
                     return (
                       <div className="text-sm">
                         <p className="text-[#9CA3AF] text-xs mb-0.5">Sales Orders</p>
-                        <p className="font-medium doc-number">{sos.join(", ")}</p>
+                        {/* tabular-nums (NOT doc-number) so a long
+                            multi-SO list wraps onto further lines instead
+                            of running off the modal. */}
+                        <p className="font-medium tabular-nums break-words leading-relaxed">
+                          {sos.join(", ")}
+                        </p>
                       </div>
                     );
                   })()}

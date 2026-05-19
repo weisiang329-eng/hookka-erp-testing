@@ -275,7 +275,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       for (const part of String(pcs).split(" + ")) {
         const mm = part.trim().match(/^(\d+)\s+(.+)$/);
         if (!mm) continue;
-        const lab = mm[2].trim();
+        const raw = mm[2].trim().toUpperCase();
+        // Grand total stays short: keep HB / DIVAN broken out, but
+        // collapse every sofa variant (1A(LHF), 2S, STOOL, …) into a
+        // single "SOFA" tally so the footer never balloons.
+        const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
         grand.set(lab, (grand.get(lab) || 0) + Number(mm[1]));
       }
     }

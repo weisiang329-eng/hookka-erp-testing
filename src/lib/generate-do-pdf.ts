@@ -47,6 +47,30 @@ const FAINT: [number, number, number] = [110, 110, 110];
 const num = (v?: number | null) =>
   v == null || Number(v) === 0 ? null : `${v}"`;
 
+// "2 DIVAN + 1 HB" -> { text: "1 HB  +  2 DIVAN", total: 3 } (HB first).
+function fmtPieces(pieces?: string | null): { text: string; total: number } {
+  const parts = String(pieces || "")
+    .split(" + ")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let total = 0;
+  const parsed = parts.map((p) => {
+    const mm = p.match(/^(\d+)\s+(.+)$/);
+    const n = mm ? Number(mm[1]) : 0;
+    total += n;
+    return { n, lab: mm ? mm[2] : p };
+  });
+  const rank = (lab: string) => {
+    const u = lab.toUpperCase();
+    return u === "HB" ? 0 : u === "DIVAN" ? 1 : 2;
+  };
+  parsed.sort((a, b) => rank(a.lab) - rank(b.lab));
+  return {
+    text: parsed.map((x) => `${x.n} ${x.lab}`).join("  +  "),
+    total,
+  };
+}
+
 // Print order: bedframes first, then the sofa block, then accessories
 // (always travel WITH the sofas), then service items grouped at the end.
 const catRank = (cat?: string | null): number => {
@@ -114,10 +138,7 @@ function describe(
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());
   if (spec.length) lines.push(spec.join(" / "));
-  // Set composition straight from the product BOM (e.g. "1 HB + 2 DIVAN"
-  // for a bedframe, or the sofa's set pieces).
-  if (ex?.pieces && String(ex.pieces).trim())
-    lines.push(`Pcs: ${String(ex.pieces).trim()}`);
+  // Piece composition is its own Quantity column now (not in here).
   return lines.join("\n");
 }
 
@@ -240,18 +261,14 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     doc.line(m, HEADER_BOTTOM - 3, pageW - m, HEADER_BOTTOM - 3);
   };
 
-  const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
-
-  // Total by UOM ("7 SET", or "5 SET · 2 UNIT" when mixed).
-  const uomCount: Record<string, number> = {};
+  // Grand totals for the footer: total sets + total physical pieces.
+  let totalSets = 0;
+  let totalPcsAll = 0;
   for (const it of order.items) {
-    const u = uomOf(extras?.items?.[it.id]?.itemCategory);
-    uomCount[u] = (uomCount[u] || 0) + it.quantity;
+    totalSets += it.quantity;
+    const fp = fmtPieces(extras?.items?.[it.id]?.pieces);
+    totalPcsAll += fp.total || it.quantity;
   }
-  const uomSummary =
-    Object.entries(uomCount)
-      .map(([u, n]) => `${n} ${u}`)
-      .join("  ·  ") || `${totalQty}`;
   // NOTE: the per-piece HB / Divan / sofa-set breakdown is intentionally
   // Per-category roll-up for the bottom Set / Quantity / Total Qty
   // table. Piece counts come from each line's BOM-derived `pieces`
@@ -322,9 +339,10 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       ]);
       lastCat = cat;
     }
-    const itx = it as typeof it & { salesOrderNo?: string };
+    const fp = fmtPieces(ex?.pieces);
+    const qtyTxt = fp.text || uomOf(ex?.itemCategory);
+    const totQty = fp.total || it.quantity;
     body.push([
-      ex?.salesOrderNo || itx.salesOrderNo || order.companySO || "-",
       describe(
         {
           productCode: it.productCode || "",
@@ -345,8 +363,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         (extras?.customerRef && String(extras.customerRef).trim()) ||
         "-"
       ),
-      uomOf(ex?.itemCategory),
       String(it.quantity),
+      qtyTxt,
+      String(totQty),
     ]);
   }
 
@@ -355,24 +374,22 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   autoTable(doc, {
     head: [
       [
-        "CS Order No.",
         "Description",
         "Cust PO",
         "Cust SO",
         "Cust Ref",
-        "UOM",
-        "Qty",
+        "Set",
+        "Quantity",
+        "Total Qty",
       ],
     ],
     body,
     foot: [
       [
-        { content: "Total", colSpan: 5, styles: { halign: "right" } },
-        {
-          content: uomSummary,
-          colSpan: 2,
-          styles: { halign: "right" },
-        },
+        { content: "Total", colSpan: 4, styles: { halign: "right" } },
+        { content: `${totalSets}`, styles: { halign: "center" } },
+        "",
+        { content: `${totalPcsAll}`, styles: { halign: "right" } },
       ],
     ],
     margin: { top: HEADER_BOTTOM, left: m, right: m, bottom: 16 },
@@ -401,23 +418,19 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       lineColor: RULE,
     },
     columnStyles: {
-      // CS Order No. — our SO/CS number per line. Wide enough + no wrap
-      // so "SO-2604-264" never breaks onto a 2nd line.
-      0: { cellWidth: 30, fontStyle: "bold", overflow: "visible" },
-      // Description nudged right a touch (extra left padding) so it
-      // doesn't sit flush against the order number.
-      1: { cellWidth: "auto", cellPadding: { top: 1.3, bottom: 1.8, left: 4, right: 1.8 } },
-      2: { cellWidth: 24, overflow: "visible" }, // Cust PO
-      3: { cellWidth: 24, overflow: "visible" }, // Cust SO
-      4: { cellWidth: 22, overflow: "visible" }, // Cust Ref
-      5: { cellWidth: 13, halign: "center" }, // UOM
-      6: { cellWidth: 11, halign: "right" }, // Qty
+      0: { cellWidth: "auto" }, // Description (stacked code / name / spec)
+      1: { cellWidth: 24, overflow: "visible" }, // Cust PO
+      2: { cellWidth: 22, overflow: "visible" }, // Cust SO
+      3: { cellWidth: 24, overflow: "visible" }, // Cust Ref
+      4: { cellWidth: 11, halign: "center" }, // Set (no. of sets)
+      5: { cellWidth: 34 }, // Quantity (piece breakdown)
+      6: { cellWidth: 16, halign: "right" }, // Total Qty (pcs)
     },
     didParseCell: (data) => {
-      // First line (product code) of the Description reads a touch heavier.
+      // Description is column 0 now.
       if (
         data.section === "body" &&
-        data.column.index === 1 &&
+        data.column.index === 0 &&
         typeof data.cell.raw === "string"
       ) {
         data.cell.styles.fontSize = 7.6;

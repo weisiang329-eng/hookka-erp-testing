@@ -455,7 +455,7 @@ export default function InvoiceDetailPage() {
           {/* Invoice Dates & References */}
           <Card>
             <CardContent className="p-6">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 <div>
                   <div className="flex items-center gap-1.5 mb-1">
                     <Calendar className="h-3.5 w-3.5 text-[#9CA3AF]" />
@@ -479,30 +479,6 @@ export default function InvoiceDetailPage() {
                     }`}
                   >
                     {formatDate(invoice.dueDate)}
-                  </p>
-                </div>
-                <div>
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <FileText className="h-3.5 w-3.5 text-[#9CA3AF]" />
-                    <p className="text-xs text-[#9CA3AF] uppercase">Company SO</p>
-                  </div>
-                  <p className="font-medium text-[#1F1D1B] doc-number truncate">
-                    {(() => {
-                      const distinct = Array.from(
-                        new Set(
-                          Object.values(lineExtras)
-                            .map((e) => (e.companySO || "").trim())
-                            .filter(Boolean),
-                        ),
-                      );
-                      // Keep this cell compact — the authoritative
-                      // per-line SO is its own column in the items
-                      // table. A consolidated invoice just says how many.
-                      if (distinct.length === 1) return distinct[0];
-                      if (distinct.length > 1)
-                        return `${distinct.length} SOs — see items`;
-                      return invoice.companySOId || "—";
-                    })()}
                   </p>
                 </div>
                 <div>

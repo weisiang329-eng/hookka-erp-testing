@@ -903,7 +903,10 @@ app.get("/:id/print-extras", async (c) => {
     for (const s of soRes.results ?? []) {
       if (s.id) realSoIds.add(s.id);
       const v: SoRef = {
-        companySO: s.companySO ?? s.companySOId ?? null,
+        // companySOId holds the canonical code (SO-2605-215); companySO
+        // is a legacy free-text label ("Sales Order 215") on ~half the
+        // rows. Always prefer the proper code.
+        companySO: s.companySOId ?? s.companySO ?? null,
         customerPO: s.customerPO ?? null,
         customerSO: s.customerSO ?? null,
         reference: s.reference ?? null,

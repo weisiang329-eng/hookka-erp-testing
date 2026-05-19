@@ -72,6 +72,12 @@ type DOItem = {
   quantity: number;
   itemM3: number;
   rackingNumber: string;
+  // Per-row customer references — each item resolves to its OWN sales order
+  // (a DO can consolidate several SOs on one truck), so every line carries
+  // its own customer PO / SO / Ref instead of one DO-level summary.
+  customerPOId: string;
+  customerSO: string;
+  customerRef: string;
 };
 
 type DeliveryOrderRow = {
@@ -139,19 +145,30 @@ function mapDOToRow(
   // label differs (see STATUS_LABEL.LOADED = "Dispatched").
   const status = d.status as DOStatus;
 
-  const items: DOItem[] = (d.items || []).map((i) => ({
-    id: i.id,
-    productionOrderId: i.productionOrderId || "",
-    salesOrderNo: (i as Record<string, unknown>).salesOrderNo as string || d.companySO || "",
-    poNo: i.poNo || "",
-    productCode: i.productCode || "",
-    productName: i.productName || "",
-    sizeLabel: i.sizeLabel || "",
-    fabricCode: i.fabricCode || "",
-    quantity: i.quantity || 0,
-    itemM3: i.itemM3 || 0,
-    rackingNumber: i.rackingNumber || "",
-  }));
+  const items: DOItem[] = (d.items || []).map((i) => {
+    const soNo =
+      ((i as Record<string, unknown>).salesOrderNo as string) ||
+      d.companySO ||
+      "";
+    // Resolve THIS line's own customer PO / SO / Ref from its sales order.
+    const ref = soRefMap?.get(soNo);
+    return {
+      id: i.id,
+      productionOrderId: i.productionOrderId || "",
+      salesOrderNo: soNo,
+      poNo: i.poNo || "",
+      productCode: i.productCode || "",
+      productName: i.productName || "",
+      sizeLabel: i.sizeLabel || "",
+      fabricCode: i.fabricCode || "",
+      quantity: i.quantity || 0,
+      itemM3: i.itemM3 || 0,
+      rackingNumber: i.rackingNumber || "",
+      customerPOId: ref?.customerPO || "",
+      customerSO: ref?.customerSO || "",
+      customerRef: ref?.reference || "",
+    };
+  });
 
   // A DO can span several SOs (one truck consolidating multiple orders).
   // Resolve customer PO / SO / Ref across EVERY SO the DO touches —
@@ -1746,6 +1763,9 @@ export default function DeliveryPage() {
       // Pending Delivery (user report 2026-04-27).
       itemM3: productM3Map.get(po.productCode) ?? 0,
       rackingNumber: "",
+      customerPOId: po.customerPOId || "",
+      customerSO: po.customerSO || "",
+      customerRef: po.customerReference || "",
     };
     setEditItems((prev) => [...prev, newItem]);
   };
@@ -3821,27 +3841,9 @@ export default function DeliveryPage() {
                   )}
                 </div>
 
-                {/* DO-level customer references (shown once, not per row) */}
-                <div className="flex flex-wrap gap-x-6 gap-y-1 mb-3 text-xs text-[#6B7280]">
-                  <span>
-                    Customer PO:{" "}
-                    <span className="font-medium text-[#1F1D1B]">
-                      {detailDO.customerPOId || "—"}
-                    </span>
-                  </span>
-                  <span>
-                    Customer SO:{" "}
-                    <span className="font-medium text-[#1F1D1B]">
-                      {detailDO.customerSO || "—"}
-                    </span>
-                  </span>
-                  <span>
-                    Customer Ref:{" "}
-                    <span className="font-medium text-[#1F1D1B]">
-                      {detailDO.customerRef || "—"}
-                    </span>
-                  </span>
-                </div>
+                {/* Customer PO / SO / Ref now live per row in the table
+                    below — a DO can consolidate several sales orders, so a
+                    single DO-level summary was misleading. */}
 
                 {/* Add Item Panel (edit mode only) */}
                 {editMode && showAddItemPanel && (
@@ -3890,34 +3892,40 @@ export default function DeliveryPage() {
                   <table className="w-full text-sm">
                     <thead className="bg-[#FAF9F7] text-[#6B7280]">
                       <tr>
-                        <th className="text-left px-3 py-2 font-medium text-xs">#</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">SO ID</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">Product Code</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">Variant</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">Product Name</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Size</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Fabric</th>
-                        <th className="text-right px-3 py-2 font-medium text-xs">Qty</th>
-                        <th className="text-right px-3 py-2 font-medium text-xs">M³</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Rack</th>
-                        {editMode && <th className="text-center px-3 py-2 font-medium text-xs w-[40px]"></th>}
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">#</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">SO ID</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer PO</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer SO</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer Ref</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Product Code</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Variant</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Product Name</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Size</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Fabric</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium text-xs">Qty</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium text-xs">M³</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Rack</th>
+                        {editMode && <th className="text-center px-2.5 py-1.5 font-medium text-xs w-[40px]"></th>}
                       </tr>
                     </thead>
                     <tbody>
                       {(editMode ? editItems : detailDO.items).map((item, idx) => (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">
-                          <td className="px-3 py-1.5 text-[#9CA3AF] text-xs whitespace-nowrap">{idx + 1}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280] whitespace-nowrap">{item.poNo || "-"}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "-"; })()}</td>
-                          <td className="px-3 py-1.5 whitespace-nowrap">{item.productName}</td>
-                          <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{item.sizeLabel}</td>
-                          <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{item.fabricCode}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{item.quantity}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.rackingNumber || "-"}</td>
+                          <td className="px-2.5 py-1 text-[#9CA3AF] text-xs whitespace-nowrap">{idx + 1}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{item.poNo || "—"}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{item.customerPOId || "—"}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{item.customerSO || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{item.customerRef || "—"}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
+                          <td className="px-2.5 py-1 whitespace-nowrap">{item.productName}</td>
+                          <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.sizeLabel}</td>
+                          <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.fabricCode}</td>
+                          <td className="px-2.5 py-1 text-right tabular-nums">{item.quantity}</td>
+                          <td className="px-2.5 py-1 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280]">{item.rackingNumber || "—"}</td>
                           {editMode && (
-                            <td className="px-3 py-1.5 text-center">
+                            <td className="px-2.5 py-1 text-center">
                               <button
                                 onClick={() => removeEditItem(item.id)}
                                 className="p-1 rounded hover:bg-[#F9E1DA] text-[#9CA3AF] hover:text-[#7A2E24] transition-colors"
@@ -3932,11 +3940,11 @@ export default function DeliveryPage() {
                     </tbody>
                     <tfoot className="bg-[#FAF9F7]">
                       <tr className="border-t border-[#E2DDD8] font-medium">
-                        <td colSpan={7} className="px-3 py-1.5 text-right text-xs text-[#6B7280]">Total</td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">
+                        <td colSpan={10} className="px-2.5 py-1 text-right text-xs text-[#6B7280]">Total</td>
+                        <td className="px-2.5 py-1 text-right tabular-nums">
                           {(editMode ? editItems : detailDO.items).reduce((s, i) => s + i.quantity, 0)}
                         </td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">
+                        <td className="px-2.5 py-1 text-right tabular-nums">
                           {(editMode ? editItems : detailDO.items).reduce((s, i) => s + i.itemM3 * i.quantity, 0).toFixed(2)}
                         </td>
                         <td></td>

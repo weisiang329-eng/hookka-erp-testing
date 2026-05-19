@@ -63,6 +63,14 @@ body {
   white-space: nowrap;
 }
 
+/* Code / ID cells (document numbers, SO IDs, product codes, customer PO).
+   Force a slashed zero + tabular figures so "0" can never be misread as
+   "O" on a delivery order or invoice. tnum is repeated here because
+   font-feature-settings otherwise cancels font-variant-numeric. */
+.font-mono {
+  font-feature-settings: "zero" 1, "tnum" 1;
+}
+
 /* Amount right-aligned */
 .amount {
   text-align: right;

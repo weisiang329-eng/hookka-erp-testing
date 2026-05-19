@@ -826,26 +826,99 @@ app.get("/:id/print-extras", async (c) => {
       .first<{ r: string | null }>();
     customerRef = refRow?.r ?? "";
   }
-  // Price build-up by productCode (first SO line wins — option 2A).
+  // ---------------------------------------------------------------------
+  // Per-line spec + price build-up.
+  //
+  // An invoice billed off a CONSOLIDATED delivery order spans MANY sales
+  // orders, so reading only invoice.salesOrderId left every line but the
+  // first with no spec and no price breakdown (operator report: invoice
+  // description ≠ DO description; leg / special prices never showed).
+  // Resolve the full set of sales orders behind the invoice — directly
+  // (invoice.salesOrderId) AND through the delivery order's lines — then
+  // match each invoice line to its sales-order line by
+  // productCode|fabricCode|sizeLabel (tight) so duplicate product codes
+  // with different fabric / price land on the right figures.
+  // ---------------------------------------------------------------------
+  const soIdSeeds = new Set<string>();
+  if (inv.salesOrderId) soIdSeeds.add(inv.salesOrderId);
+  if (inv.deliveryOrderId) {
+    const doLines = await c.var.DB.prepare(
+      `SELECT po.salesOrderId, po.companySOId, di.salesOrderNo
+         FROM delivery_order_items di
+         LEFT JOIN production_orders po ON po.id = di.productionOrderId
+        WHERE di.deliveryOrderId = ?`,
+    )
+      .bind(inv.deliveryOrderId)
+      .all<{
+        salesOrderId: string | null;
+        companySOId: string | null;
+        salesOrderNo: string | null;
+      }>();
+    for (const d of doLines.results ?? []) {
+      if (d.salesOrderId) soIdSeeds.add(d.salesOrderId);
+      if (d.companySOId) soIdSeeds.add(d.companySOId);
+      if (d.salesOrderNo) soIdSeeds.add(d.salesOrderNo);
+    }
+  }
+  // Normalise every seed (real id / companySOId / companySO) to the
+  // sales_orders primary key.
+  const realSoIds = new Set<string>();
+  if (soIdSeeds.size > 0) {
+    const seeds = Array.from(soIdSeeds);
+    const ph = seeds.map(() => "?").join(",");
+    const soRes = await c.var.DB.prepare(
+      `SELECT id, companySO, companySOId FROM sales_orders
+        WHERE id IN (${ph}) OR companySOId IN (${ph}) OR companySO IN (${ph})`,
+    )
+      .bind(...seeds, ...seeds, ...seeds)
+      .all<{
+        id: string | null;
+        companySO: string | null;
+        companySOId: string | null;
+      }>();
+    for (const s of soRes.results ?? []) if (s.id) realSoIds.add(s.id);
+  }
+
+  type LineVal = {
+    itemCategory: string | null;
+    gapInches: number | null;
+    divanHeightInches: number | null;
+    legHeightInches: number | null;
+    totalHeightInches: number | null;
+    specialOrder: string | null;
+    baseSen: number;
+    divanSen: number;
+    legSen: number;
+    specialSen: number;
+    unitSen: number;
+  };
+  const tight = new Map<string, LineVal>();
+  const loose = new Map<string, LineVal>();
+  const byCode = new Map<string, LineVal>();
   const priceByCode: Record<
     string,
-    {
-      baseSen: number;
-      divanSen: number;
-      legSen: number;
-      specialSen: number;
-      unitSen: number;
-    }
+    { baseSen: number; divanSen: number; legSen: number; specialSen: number; unitSen: number }
   > = {};
-  if (inv.salesOrderId) {
+  if (realSoIds.size > 0) {
+    const ids = Array.from(realSoIds);
+    const ph = ids.map(() => "?").join(",");
     const siRes = await c.var.DB.prepare(
-      `SELECT productCode, basePriceSen, divanPriceSen, legPriceSen,
+      `SELECT productCode, fabricCode, sizeLabel, itemCategory,
+              gapInches, divanHeightInches, legHeightInches, specialOrder,
+              basePriceSen, divanPriceSen, legPriceSen,
               specialOrderPriceSen, unitPriceSen
-         FROM sales_order_items WHERE salesOrderId = ?`,
+         FROM sales_order_items WHERE salesOrderId IN (${ph})`,
     )
-      .bind(inv.salesOrderId)
+      .bind(...ids)
       .all<{
         productCode: string | null;
+        fabricCode: string | null;
+        sizeLabel: string | null;
+        itemCategory: string | null;
+        gapInches: number | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        specialOrder: string | null;
         basePriceSen: number;
         divanPriceSen: number;
         legPriceSen: number;
@@ -853,20 +926,72 @@ app.get("/:id/print-extras", async (c) => {
         unitPriceSen: number;
       }>();
     for (const r of siRes.results ?? []) {
-      const code = r.productCode ?? "";
-      if (!code || priceByCode[code]) continue;
-      priceByCode[code] = {
+      const code = (r.productCode ?? "").trim();
+      const fab = (r.fabricCode ?? "").trim();
+      const size = (r.sizeLabel ?? "").trim();
+      const g = r.gapInches ?? null;
+      const d = r.divanHeightInches ?? null;
+      const l = r.legHeightInches ?? null;
+      const v: LineVal = {
+        itemCategory: r.itemCategory ?? null,
+        gapInches: g,
+        divanHeightInches: d,
+        legHeightInches: l,
+        totalHeightInches:
+          g == null && d == null && l == null
+            ? null
+            : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0),
+        specialOrder: r.specialOrder ?? null,
         baseSen: Number(r.basePriceSen) || 0,
         divanSen: Number(r.divanPriceSen) || 0,
         legSen: Number(r.legPriceSen) || 0,
         specialSen: Number(r.specialOrderPriceSen) || 0,
         unitSen: Number(r.unitPriceSen) || 0,
       };
+      if (code) {
+        const tk = `${code}|${fab}|${size}`;
+        const lk = `${code}|${fab}`;
+        if (!tight.has(tk)) tight.set(tk, v);
+        if (!loose.has(lk)) loose.set(lk, v);
+        if (!byCode.has(code)) byCode.set(code, v);
+        if (!priceByCode[code])
+          priceByCode[code] = {
+            baseSen: v.baseSen,
+            divanSen: v.divanSen,
+            legSen: v.legSen,
+            specialSen: v.specialSen,
+            unitSen: v.unitSen,
+          };
+      }
     }
   }
+
+  // Emit per invoice line (keyed by invoice_items.id).
+  const items: Record<string, LineVal> = {};
+  const invItemsRes = await c.var.DB.prepare(
+    "SELECT id, productCode, fabricCode, sizeLabel FROM invoice_items WHERE invoiceId = ?",
+  )
+    .bind(id)
+    .all<{
+      id: string;
+      productCode: string | null;
+      fabricCode: string | null;
+      sizeLabel: string | null;
+    }>();
+  for (const r of invItemsRes.results ?? []) {
+    const code = (r.productCode ?? "").trim();
+    const fab = (r.fabricCode ?? "").trim();
+    const size = (r.sizeLabel ?? "").trim();
+    const v =
+      tight.get(`${code}|${fab}|${size}`) ||
+      loose.get(`${code}|${fab}`) ||
+      byCode.get(code);
+    if (r.id && v) items[r.id] = v;
+  }
+
   return c.json({
     success: true,
-    data: { customerSO, customerRef, priceByCode },
+    data: { customerSO, customerRef, priceByCode, items },
   });
 });
 

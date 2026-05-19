@@ -11,11 +11,24 @@ import {
 
 // Read-only print enrichment from GET /api/invoices/:id/print-extras.
 // All optional — the PDF still renders if not supplied.
+export type InvoiceLineExtra = {
+  itemCategory?: string | null; // BEDFRAME / SOFA / ACCESSORY / SERVICE
+  gapInches?: number | null;
+  divanHeightInches?: number | null;
+  legHeightInches?: number | null;
+  totalHeightInches?: number | null;
+  specialOrder?: string | null;
+  baseSen: number;
+  divanSen: number;
+  legSen: number;
+  specialSen: number;
+  unitSen: number;
+};
+
 export type InvoicePrintExtras = {
   customerSO?: string;
   customerRef?: string;
-  // Price build-up by productCode (base / divan / leg / special order).
-  // It lives on sales_order_items, read back at print time.
+  // Price build-up by productCode (kept for backward-safety).
   priceByCode?: Record<
     string,
     {
@@ -26,7 +39,14 @@ export type InvoicePrintExtras = {
       unitSen: number;
     }
   >;
+  // Per invoice line (keyed by invoice_items.id): the same spec + price
+  // build-up the Delivery Order resolves, so the invoice description and
+  // price match the DO line for line.
+  items?: Record<string, InvoiceLineExtra>;
 };
+
+const num = (v?: number | null) =>
+  v == null || Number(v) === 0 ? null : `${v}"`;
 
 // Greyscale only — colour ink is expensive on the floor printer, so the
 // whole document is black + greys (matches the Delivery Order model).
@@ -71,45 +91,75 @@ function guessCat(productName: string, productCode: string): string {
   return "";
 }
 
-// Stacked Description cell — the standard furniture line shape:
+// Stacked Description cell — IDENTICAL shape to the Delivery Order:
 //   line 1  product code              e.g. 2008(A)-(K)
 //   line 2  product name              e.g. TRION(A) BEDFRAME (6FT)
-//   line 3  build spec               Fabric / Size: 28
+//   line 3  build spec               PC151-01 / DIVAN 8" + 4" LEG /
+//                                     GAP 12" / T.Heights 24" / <special>
 // (PO / SO / Reference are their own leading column, not in here.)
-function describe(it: {
-  productCode: string;
-  productName: string;
-  fabricCode: string;
-  sizeLabel: string;
-}): string {
+function describe(
+  it: {
+    productCode: string;
+    productName: string;
+    fabricCode: string;
+    sizeLabel: string;
+  },
+  ex: InvoiceLineExtra | undefined,
+): string {
   const lines: string[] = [];
   if (it.productCode) lines.push(it.productCode);
   if (it.productName) lines.push(it.productName);
+
+  const cat = (ex?.itemCategory || "").toUpperCase();
+  const dv = num(ex?.divanHeightInches);
+  const lg = num(ex?.legHeightInches);
+  const gp = num(ex?.gapInches);
+  const th = num(ex?.totalHeightInches);
   const spec: string[] = [];
   if (it.fabricCode) spec.push(it.fabricCode);
-  if (it.sizeLabel) spec.push(`Size: ${it.sizeLabel}`);
+
+  // Bedframe-style spec whenever it's tagged BEDFRAME OR carries a
+  // divan / leg / gap / total-height value — so the build spec prints
+  // even when itemCategory was never stamped (same rule as the DO).
+  const hasBfSpec = !!(dv || lg || gp || th);
+  if (
+    cat === "BEDFRAME" ||
+    (cat !== "SOFA" && cat !== "ACCESSORY" && hasBfSpec)
+  ) {
+    if (dv) spec.push(`DIVAN ${dv}${lg ? ` + ${lg} LEG` : " + NO LEG"}`);
+    else if (lg) spec.push(`${lg} LEG`);
+    if (gp) spec.push(`GAP ${gp}`);
+    if (th) spec.push(`T.Heights ${th}`);
+  } else {
+    if (it.sizeLabel) spec.push(`Size: ${it.sizeLabel}`);
+    if (lg) spec.push(`${lg} LEG`);
+    if (th) spec.push(`T.Heights ${th}`);
+  }
+  if (ex?.specialOrder && String(ex.specialOrder).trim())
+    spec.push(String(ex.specialOrder).trim());
   if (spec.length) lines.push(spec.join(" / "));
   return lines.join("\n");
 }
 
-// Build the stacked Price cell from the price build-up — Base, then any
-// non-zero Divan / Leg / Special order add-ons on their own rows. Falls
-// back to the single unit price when no build-up is available.
+// Build the stacked Price cell — every component on its own row so the
+// customer can see exactly how the price is built up and what is being
+// charged for: Base, then Divan / Leg / Special order whenever each is
+// separately priced. Falls back to the single unit price when no
+// build-up is available.
 function priceLines(
-  code: string,
   unitPriceSen: number,
-  extras?: InvoicePrintExtras,
+  ex: InvoiceLineExtra | undefined,
 ): string {
-  const p = extras?.priceByCode?.[code];
-  if (!p) return fmtCurrency(unitPriceSen || 0);
-  const rows: string[] = [];
-  rows.push(`Base ${fmtCurrency(p.baseSen || 0)}`);
-  if (p.divanSen) rows.push(`+ Divan ${fmtCurrency(p.divanSen)}`);
-  if (p.legSen) rows.push(`+ Leg ${fmtCurrency(p.legSen)}`);
-  if (p.specialSen) rows.push(`+ Special ${fmtCurrency(p.specialSen)}`);
-  if (rows.length === 1 && (p.unitSen || unitPriceSen)) {
-    // Nothing but a base — show the effective unit price plainly.
-    return fmtCurrency(p.unitSen || unitPriceSen || 0);
+  if (!ex) return fmtCurrency(unitPriceSen || 0);
+  const rows: string[] = [`Base ${fmtCurrency(ex.baseSen || 0)}`];
+  if (ex.divanSen) rows.push(`+ Divan ${fmtCurrency(ex.divanSen)}`);
+  if (ex.legSen) rows.push(`+ Leg ${fmtCurrency(ex.legSen)}`);
+  if (ex.specialSen) rows.push(`+ Special ${fmtCurrency(ex.specialSen)}`);
+  if (rows.length === 1) {
+    // No separately-priced add-ons — the divan / leg are built into the
+    // base (their inches still print in the Description). Show the one
+    // effective unit price.
+    return fmtCurrency(ex.unitSen || ex.baseSen || unitPriceSen || 0);
   }
   return rows.join("\n");
 }
@@ -261,19 +311,24 @@ export function generateInvoicePdf(
   for (const it of items) totalSets += Number(it.quantity) || 0;
 
   const ordered = items
-    .map((it, i) => ({
-      it,
-      i,
-      cat: guessCat(
-        String(it.productName || it.description || ""),
-        String(it.productCode || ""),
-      ),
-    }))
+    .map((it, i) => {
+      const ex = extras?.items?.[String(it.id || "")];
+      // Prefer the real category resolved from the sales order line
+      // (same source as the DO); fall back to a keyword guess only when
+      // the line couldn't be matched.
+      const cat =
+        (ex?.itemCategory && String(ex.itemCategory).toUpperCase()) ||
+        guessCat(
+          String(it.productName || it.description || ""),
+          String(it.productCode || ""),
+        );
+      return { it, i, ex, cat };
+    })
     .sort((a, b) => catRank(a.cat) - catRank(b.cat) || a.i - b.i);
 
   const body: RowInput[] = [];
   let lastCat: string | null = null;
-  for (const { it, cat } of ordered) {
+  for (const { it, ex, cat } of ordered) {
     if (cat !== lastCat) {
       body.push([
         {
@@ -291,17 +346,20 @@ export function generateInvoicePdf(
       lastCat = cat;
     }
     const code = String(it.productCode || "");
-    const desc = describe({
-      productCode: code,
-      productName: String(it.productName || it.description || ""),
-      fabricCode: String(it.fabricCode || ""),
-      sizeLabel: String(it.sizeLabel || ""),
-    });
+    const desc = describe(
+      {
+        productCode: code,
+        productName: String(it.productName || it.description || ""),
+        fabricCode: String(it.fabricCode || ""),
+        sizeLabel: String(it.sizeLabel || ""),
+      },
+      ex,
+    );
     body.push([
       refLines,
       desc,
       String(it.quantity ?? ""),
-      priceLines(code, Number(it.unitPriceSen) || 0, extras),
+      priceLines(Number(it.unitPriceSen) || 0, ex),
       fmtCurrency(Number(it.totalSen) || 0),
     ]);
   }

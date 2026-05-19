@@ -149,7 +149,13 @@ function describe(
 // UOM | Qty. Bedframes / sofas / accessories print as labelled sections.
 // Letterhead + reference block + column header repeat on every page.
 // ---------------------------------------------------------------------------
-export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
+export function generateDOPdf(
+  order: DeliveryOrder,
+  extras?: DOPrintExtras,
+  // "download" = save the file (default); "view" = open the document
+  // in the browser to read on screen (no download).
+  mode: "download" | "view" = "download",
+) {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -435,6 +441,18 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         data.cell.styles.fontSize = 7.6;
       }
     },
+    didDrawCell: (data) => {
+      // Thin dashed separator under every item row (drawn once per row,
+      // on the last column) so rows are easy to read across.
+      if (data.section === "body" && data.column.index === 4) {
+        const y = data.cell.y + data.cell.height;
+        doc.setDrawColor(...HAIR);
+        doc.setLineWidth(0.1);
+        doc.setLineDashPattern([0.7, 0.7], 0);
+        doc.line(m, y, pageW - m, y);
+        doc.setLineDashPattern([], 0);
+      }
+    },
     didDrawPage: () => {
       drawHeader();
     },
@@ -496,5 +514,17 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     doc.text(`Page ${p} of ${pages}`, pageW - m, fy, { align: "right" });
   }
 
+  if (mode === "view") {
+    // Open the document to read on screen — no download. Fall back to
+    // save() if the browser blocks the blob window (popup blocker).
+    try {
+      const url = doc.output("bloburl");
+      const w = window.open(String(url), "_blank");
+      if (!w) doc.save(`DO-${order.doNo}.pdf`);
+    } catch {
+      doc.save(`DO-${order.doNo}.pdf`);
+    }
+    return;
+  }
   doc.save(`DO-${order.doNo}.pdf`);
 }

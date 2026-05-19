@@ -1979,7 +1979,10 @@ export default function DeliveryPage() {
   // Per-row "Print DO" — generates the formal DO PDF straight from the
   // list (no need to open the detail). Pulls the read-only print-extras
   // (customerSO/ref + per-item PO/dims), best-effort.
-  const printDOPdf = async (row: DeliveryOrderRow) => {
+  const printDOPdf = async (
+    row: DeliveryOrderRow,
+    mode: "download" | "view" = "download",
+  ) => {
     let extras: import("@/lib/generate-do-pdf").DOPrintExtras = {};
     try {
       const r = await fetch(
@@ -1997,6 +2000,7 @@ export default function DeliveryPage() {
     generateDOPdf(
       row as unknown as import("@/types").DeliveryOrder,
       extras,
+      mode,
     );
   };
 
@@ -3520,9 +3524,9 @@ export default function DeliveryPage() {
                       <Printer className="h-4 w-4" />
                     </button>
                     <button
-                      onClick={() => triggerPrint(detailDO, "packing-list")}
+                      onClick={() => void printDOPdf(detailDO, "view")}
                       className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
-                      title="Print Packing List"
+                      title="View Documentation (opens on screen)"
                     >
                       <FileText className="h-4 w-4" />
                     </button>

@@ -2302,10 +2302,20 @@ app.get("/:id/print-extras", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   const doRow = await c.var.DB.prepare(
-    "SELECT id, salesOrderId FROM delivery_orders WHERE id = ?",
+    `SELECT id, salesOrderId, hubId, deliveryAddress, customerState,
+            contactPerson, contactPhone
+       FROM delivery_orders WHERE id = ?`,
   )
     .bind(id)
-    .first<{ id: string; salesOrderId: string | null }>();
+    .first<{
+      id: string;
+      salesOrderId: string | null;
+      hubId: string | null;
+      deliveryAddress: string | null;
+      customerState: string | null;
+      contactPerson: string | null;
+      contactPhone: string | null;
+    }>();
   if (!doRow) {
     return c.json({ success: false, error: "Delivery order not found" }, 404);
   }
@@ -2318,11 +2328,49 @@ app.get("/:id/print-extras", async (c) => {
       .first<{ customerSO: string | null }>();
     customerSO = so?.customerSO ?? "";
   }
+
+  // Deliver-To address MUST follow the hub the DO is assigned to — a
+  // customer can have several hubs (KL, Penang, ...) each with its own
+  // address. delivery_orders.deliveryAddress is a create-time snapshot
+  // that can disagree with the chosen hub (operator report: DO tagged
+  // "KL" but printed the Penang address). Resolve the authoritative
+  // address from delivery_hubs by hubId; fall back to the stored value
+  // only when the DO has no hub.
+  let deliverTo = "";
+  let deliveryAddress = doRow.deliveryAddress ?? "";
+  let hubState = doRow.customerState ?? "";
+  let hubContactName = doRow.contactPerson ?? "";
+  let hubContactPhone = doRow.contactPhone ?? "";
+  if (doRow.hubId) {
+    const hub = await c.var.DB.prepare(
+      `SELECT shortName, address, state, contactName, phone
+         FROM delivery_hubs WHERE id = ?`,
+    )
+      .bind(doRow.hubId)
+      .first<{
+        shortName: string | null;
+        address: string | null;
+        state: string | null;
+        contactName: string | null;
+        phone: string | null;
+      }>();
+    if (hub) {
+      deliverTo = hub.shortName ?? "";
+      if (hub.address) deliveryAddress = hub.address;
+      if (hub.state) hubState = hub.state;
+      if (hub.contactName) hubContactName = hub.contactName;
+      if (hub.phone) hubContactPhone = hub.phone;
+    }
+  }
+
   const itRes = await c.var.DB.prepare(
     `SELECT di.id AS doiId,
             po.customerReference AS customerReference,
             po.customerPOId AS customerPOId,
             po.itemCategory AS itemCategory,
+            po.salesOrderNo AS salesOrderNo,
+            po.companySOId AS companySOId,
+            po.specialOrder AS specialOrder,
             po.gapInches AS gapInches,
             po.divanHeightInches AS divanHeightInches,
             po.legHeightInches AS legHeightInches
@@ -2336,6 +2384,9 @@ app.get("/:id/print-extras", async (c) => {
       customerReference: string | null;
       customerPOId: string | null;
       itemCategory: string | null;
+      salesOrderNo: string | null;
+      companySOId: string | null;
+      specialOrder: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -2346,6 +2397,8 @@ app.get("/:id/print-extras", async (c) => {
     {
       itemCategory: string | null;
       customerPOId: string | null;
+      salesOrderNo: string | null;
+      specialOrder: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -2364,6 +2417,8 @@ app.get("/:id/print-extras", async (c) => {
     items[r.doiId] = {
       itemCategory: r.itemCategory ?? null,
       customerPOId: r.customerPOId ?? null,
+      salesOrderNo: r.salesOrderNo || r.companySOId || null,
+      specialOrder: r.specialOrder ?? null,
       gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,
@@ -2372,7 +2427,16 @@ app.get("/:id/print-extras", async (c) => {
   }
   return c.json({
     success: true,
-    data: { customerSO, customerRef, items },
+    data: {
+      customerSO,
+      customerRef,
+      deliverTo,
+      deliveryAddress,
+      hubState,
+      hubContactName,
+      hubContactPhone,
+      items,
+    },
   });
 });
 

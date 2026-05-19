@@ -276,8 +276,16 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         ex,
       ),
       (ex?.customerPOId && String(ex.customerPOId).trim()) || "-",
-      (ex?.customerSO && String(ex.customerSO).trim()) || "-",
-      (ex?.customerRef && String(ex.customerRef).trim()) || "-",
+      (
+        (ex?.customerSO && String(ex.customerSO).trim()) ||
+        (extras?.customerSO && String(extras.customerSO).trim()) ||
+        "-"
+      ),
+      (
+        (ex?.customerRef && String(ex.customerRef).trim()) ||
+        (extras?.customerRef && String(extras.customerRef).trim()) ||
+        "-"
+      ),
       uomOf(ex?.itemCategory),
       String(it.quantity),
     ]);

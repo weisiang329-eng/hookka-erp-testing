@@ -2371,7 +2371,7 @@ app.get("/:id/print-extras", async (c) => {
   //   (b) sales order       — via di.salesOrderNo = sales_orders.companySOId
   //       (the same path the on-screen items table uses, always present).
   const itRes = await c.var.DB.prepare(
-    `SELECT di.id AS doiId,
+    `SELECT di.id,
             di.salesOrderNo AS diSalesOrderNo,
             di.productCode AS diProductCode,
             di.fabricCode AS diFabricCode,
@@ -2405,7 +2405,7 @@ app.get("/:id/print-extras", async (c) => {
   )
     .bind(id)
     .all<{
-      doiId: string;
+      id: string;
       diSalesOrderNo: string | null;
       diProductCode: string | null;
       diFabricCode: string | null;
@@ -2555,7 +2555,7 @@ app.get("/:id/print-extras", async (c) => {
       g == null && d == null && l == null
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
-    items[r.doiId] = {
+    items[r.id] = {
       itemCategory,
       customerPOId,
       customerSO,

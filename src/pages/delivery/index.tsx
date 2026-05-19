@@ -1943,6 +1943,39 @@ export default function DeliveryPage() {
       { key: "fabricCode", label: "Fabric", type: "text", width: "80px", sortable: true },
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
+      // Customer-side reference numbers (operator request 2026-05-19) — same
+      // data the Pending Delivery grid uses (ReadyPORow, mapPO). "—" when
+      // the customer didn't supply that number.
+      {
+        key: "customerPOId",
+        label: "Customer PO",
+        type: "text",
+        width: "130px",
+        sortable: true,
+        render: (_v, row) => row.customerPOId
+          ? <span className="text-[#1F1D1B]">{row.customerPOId}</span>
+          : <span className="text-[#9CA3AF]">{"—"}</span>,
+      },
+      {
+        key: "customerReference",
+        label: "Customer Ref",
+        type: "text",
+        width: "130px",
+        sortable: true,
+        render: (_v, row) => row.customerReference
+          ? <span className="text-[#1F1D1B]">{row.customerReference}</span>
+          : <span className="text-[#9CA3AF]">{"—"}</span>,
+      },
+      {
+        key: "customerSO",
+        label: "Customer SO",
+        type: "text",
+        width: "130px",
+        sortable: true,
+        render: (_v, row) => row.customerSO
+          ? <span className="text-[#1F1D1B]">{row.customerSO}</span>
+          : <span className="text-[#9CA3AF]">{"—"}</span>,
+      },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
       {
         // Sales Figure \u2014 this PO's SO line value (SO unit price \u00D7 qty),

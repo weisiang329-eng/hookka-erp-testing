@@ -327,7 +327,7 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       body.push([
         {
           content: catLabel(cat),
-          colSpan: 4,
+          colSpan: 5,
           styles: {
             fontStyle: "bold",
             fontSize: 8,
@@ -342,9 +342,8 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     const fp = fmtPieces(ex?.pieces);
     const qtyTxt = fp.text || uomOf(ex?.itemCategory);
     const totQty = fp.total || it.quantity;
-    // SO / PO / REF are NOT their own columns — they stack at the top of
-    // the Description and only appear when they have a value, so empty
-    // ones don't waste a fixed column (the layout stays flexible).
+    // Customer order refs go in their OWN leading "Order" column,
+    // stacked PO / REF / SO, only the lines that have a value.
     const custSO =
       (ex?.customerSO && String(ex.customerSO).trim()) ||
       (extras?.customerSO && String(extras.customerSO).trim()) ||
@@ -355,9 +354,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       (extras?.customerRef && String(extras.customerRef).trim()) ||
       "";
     const refLines: string[] = [];
-    if (custSO) refLines.push(`SO: ${custSO}`);
     if (custPO) refLines.push(`PO: ${custPO}`);
     if (custRef) refLines.push(`REF: ${custRef}`);
+    if (custSO) refLines.push(`SO: ${custSO}`);
     const desc = describe(
       {
         productCode: it.productCode || "",
@@ -368,7 +367,8 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       ex,
     );
     body.push([
-      refLines.length ? `${refLines.join("\n")}\n${desc}` : desc,
+      refLines.length ? refLines.join("\n") : "-",
+      desc,
       String(it.quantity),
       qtyTxt,
       String(totQty),
@@ -378,11 +378,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   drawHeader();
 
   autoTable(doc, {
-    head: [["Description", "Set", "Quantity", "Total Qty"]],
+    head: [["Order", "Description", "Set", "Quantity", "Total Qty"]],
     body,
     foot: [
       [
-        { content: "Total", styles: { halign: "right" } },
+        { content: "Total", colSpan: 2, styles: { halign: "right" } },
         { content: `${totalSets}`, styles: { halign: "center" } },
         "",
         { content: `${totalPcsAll}`, styles: { halign: "right" } },
@@ -414,17 +414,17 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       lineColor: RULE,
     },
     columnStyles: {
-      // Description carries SO/PO/REF stacked on top + code/name/spec.
-      0: { cellWidth: "auto" },
-      1: { cellWidth: 14, halign: "center" }, // Set (no. of sets)
-      2: { cellWidth: 40 }, // Quantity (piece breakdown)
-      3: { cellWidth: 18, halign: "right" }, // Total Qty (pcs)
+      0: { cellWidth: 34 }, // Order — stacked PO / REF / SO
+      1: { cellWidth: "auto" }, // Description (code / name / spec)
+      2: { cellWidth: 14, halign: "center" }, // Set (no. of sets)
+      3: { cellWidth: 40 }, // Quantity (piece breakdown)
+      4: { cellWidth: 18, halign: "right" }, // Total Qty (pcs)
     },
     didParseCell: (data) => {
-      // Description is column 0 now.
+      // Description is column 1 now.
       if (
         data.section === "body" &&
-        data.column.index === 0 &&
+        data.column.index === 1 &&
         typeof data.cell.raw === "string"
       ) {
         data.cell.styles.fontSize = 7.6;

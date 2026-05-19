@@ -253,12 +253,44 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       .map(([u, n]) => `${n} ${u}`)
       .join("  ·  ") || `${totalQty}`;
   // NOTE: the per-piece HB / Divan / sofa-set breakdown is intentionally
-  // NOT derived here from a size guess — the authoritative split lives in
-  // job_cards.wipType / wipQty (materialised from each product's BOM by
-  // breakBomIntoWips). To be wired through /print-extras; printing a
-  // guessed count on a delivery doc the lorry crew counts against is
-  // worse than omitting it.
-  const pieceSummary = "";
+  // Per-category roll-up for the bottom Set / Quantity / Total Qty
+  // table. Piece counts come from each line's BOM-derived `pieces`
+  // string (format we control: "N LABEL + N LABEL", already x line qty).
+  const summary = new Map<
+    string,
+    { sets: number; pcs: Map<string, number>; order: string[] }
+  >();
+  for (const it of order.items) {
+    const ex = extras?.items?.[it.id];
+    const cat = catLabel(ex?.itemCategory);
+    let rec = summary.get(cat);
+    if (!rec) {
+      rec = { sets: 0, pcs: new Map(), order: [] };
+      summary.set(cat, rec);
+    }
+    rec.sets += it.quantity;
+    if (ex?.pieces) {
+      for (const part of String(ex.pieces).split(" + ")) {
+        const mm = part.trim().match(/^(\d+)\s+(.+)$/);
+        if (!mm) continue;
+        const lab = mm[2].trim();
+        if (!rec.pcs.has(lab)) rec.order.push(lab);
+        rec.pcs.set(lab, (rec.pcs.get(lab) || 0) + Number(mm[1]));
+      }
+    }
+  }
+  const summaryRows: string[][] = [];
+  for (const [cat, rec] of summary) {
+    const breakdown = rec.order
+      .map((lab) => `${rec.pcs.get(lab)} ${lab}`)
+      .join(" + ");
+    const totalPcs = Array.from(rec.pcs.values()).reduce((s, n) => s + n, 0);
+    summaryRows.push([
+      `${cat} — ${rec.sets} SET`,
+      breakdown || "-",
+      totalPcs ? `${totalPcs} PCS` : "-",
+    ]);
+  }
 
   const ordered = order.items
     .map((it, i) => ({ it, i }))
@@ -308,8 +340,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         (extras?.customerSO && String(extras.customerSO).trim()) ||
         "-"
       ),
-      // Company SO — Hookka's own SO number for this line.
-      ex?.salesOrderNo || itx.salesOrderNo || order.companySO || "-",
+      (
+        (ex?.customerRef && String(ex.customerRef).trim()) ||
+        (extras?.customerRef && String(extras.customerRef).trim()) ||
+        "-"
+      ),
       uomOf(ex?.itemCategory),
       String(it.quantity),
     ]);
@@ -322,9 +357,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       [
         "CS Order No.",
         "Description",
-        "PO",
-        "Supplier SO",
-        "Company SO",
+        "Cust PO",
+        "Cust SO",
+        "Cust Ref",
         "UOM",
         "Qty",
       ],
@@ -346,8 +381,8 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     theme: "plain",
     styles: {
       font: "helvetica",
-      fontSize: 8.5,
-      cellPadding: { top: 1.4, bottom: 2, left: 2, right: 2 },
+      fontSize: 7.6,
+      cellPadding: { top: 1.3, bottom: 1.8, left: 1.8, right: 1.8 },
       textColor: INK,
       lineColor: HAIR,
       lineWidth: 0,
@@ -355,27 +390,28 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     },
     headStyles: {
       fontStyle: "bold",
-      fontSize: 8.5,
+      fontSize: 7.4,
       lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
       lineColor: RULE,
     },
     footStyles: {
       fontStyle: "bold",
-      fontSize: 9,
+      fontSize: 8,
       lineWidth: { top: 0.5, bottom: 0, left: 0, right: 0 },
       lineColor: RULE,
     },
     columnStyles: {
-      // CS Order No. — our SO/CS number per line (replaces the old #).
-      0: { cellWidth: 26, fontStyle: "bold" },
+      // CS Order No. — our SO/CS number per line. Wide enough + no wrap
+      // so "SO-2604-264" never breaks onto a 2nd line.
+      0: { cellWidth: 30, fontStyle: "bold", overflow: "visible" },
       // Description nudged right a touch (extra left padding) so it
       // doesn't sit flush against the order number.
-      1: { cellWidth: "auto", cellPadding: { top: 1.4, bottom: 2, left: 4, right: 2 } },
-      2: { cellWidth: 22 }, // PO
-      3: { cellWidth: 22 }, // SO
-      4: { cellWidth: 20 }, // Reference
-      5: { cellWidth: 14, halign: "center" }, // UOM
-      6: { cellWidth: 12, halign: "right" }, // Qty
+      1: { cellWidth: "auto", cellPadding: { top: 1.3, bottom: 1.8, left: 4, right: 1.8 } },
+      2: { cellWidth: 24, overflow: "visible" }, // Cust PO
+      3: { cellWidth: 24, overflow: "visible" }, // Cust SO
+      4: { cellWidth: 22, overflow: "visible" }, // Cust Ref
+      5: { cellWidth: 13, halign: "center" }, // UOM
+      6: { cellWidth: 11, halign: "right" }, // Qty
     },
     didParseCell: (data) => {
       // First line (product code) of the Description reads a touch heavier.
@@ -384,7 +420,7 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         data.column.index === 1 &&
         typeof data.cell.raw === "string"
       ) {
-        data.cell.styles.fontSize = 8.3;
+        data.cell.styles.fontSize = 7.6;
       }
     },
     didDrawPage: () => {
@@ -401,22 +437,45 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     );
   }
 
-  // Headboard / divan piece breakdown for bedframes.
+  // Piece roll-up: Set | Quantity (piece breakdown) | Total Qty —
+  // one row per category (bedframe, sofa, accessory …).
   const lastY0 =
     (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable
       ?.finalY ?? HEADER_BOTTOM;
   let afterY = lastY0;
-  if (pieceSummary) {
-    let py = lastY0 + 6;
-    if (py > pageH - 40) {
-      doc.addPage();
-      py = 30;
-    }
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8.5);
-    doc.setTextColor(...INK);
-    doc.text(pieceSummary, m, py);
-    afterY = py;
+  if (summaryRows.length > 0) {
+    autoTable(doc, {
+      startY: lastY0 + 7,
+      head: [["Set", "Quantity (pieces)", "Total Qty"]],
+      body: summaryRows,
+      margin: { left: m, right: m, bottom: 14 },
+      theme: "grid",
+      styles: {
+        font: "helvetica",
+        fontSize: 7.6,
+        cellPadding: { top: 1.6, bottom: 1.6, left: 2, right: 2 },
+        textColor: INK,
+        lineColor: HAIR,
+        lineWidth: 0.15,
+        valign: "middle",
+      },
+      headStyles: {
+        fontStyle: "bold",
+        fontSize: 7.4,
+        fillColor: BAND,
+        textColor: INK,
+        lineColor: HAIR,
+        lineWidth: 0.15,
+      },
+      columnStyles: {
+        0: { cellWidth: 48, fontStyle: "bold" },
+        1: { cellWidth: "auto" },
+        2: { cellWidth: 26, halign: "right", fontStyle: "bold" },
+      },
+    });
+    afterY =
+      (doc as unknown as { lastAutoTable?: { finalY?: number } })
+        .lastAutoTable?.finalY ?? lastY0 + 7;
   }
 
   // Signature strip on the last page.

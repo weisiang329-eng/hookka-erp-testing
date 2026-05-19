@@ -261,53 +261,34 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     doc.line(m, HEADER_BOTTOM - 3, pageW - m, HEADER_BOTTOM - 3);
   };
 
-  // Grand totals for the footer: total sets + total physical pieces.
+  // Grand totals for the footer row: total sets, the combined piece
+  // breakdown across the whole DO (HB first), and total pieces.
   let totalSets = 0;
   let totalPcsAll = 0;
+  const grand = new Map<string, number>();
   for (const it of order.items) {
     totalSets += it.quantity;
-    const fp = fmtPieces(extras?.items?.[it.id]?.pieces);
+    const pcs = extras?.items?.[it.id]?.pieces;
+    const fp = fmtPieces(pcs);
     totalPcsAll += fp.total || it.quantity;
-  }
-  // NOTE: the per-piece HB / Divan / sofa-set breakdown is intentionally
-  // Per-category roll-up for the bottom Set / Quantity / Total Qty
-  // table. Piece counts come from each line's BOM-derived `pieces`
-  // string (format we control: "N LABEL + N LABEL", already x line qty).
-  const summary = new Map<
-    string,
-    { sets: number; pcs: Map<string, number>; order: string[] }
-  >();
-  for (const it of order.items) {
-    const ex = extras?.items?.[it.id];
-    const cat = catLabel(ex?.itemCategory);
-    let rec = summary.get(cat);
-    if (!rec) {
-      rec = { sets: 0, pcs: new Map(), order: [] };
-      summary.set(cat, rec);
-    }
-    rec.sets += it.quantity;
-    if (ex?.pieces) {
-      for (const part of String(ex.pieces).split(" + ")) {
+    if (pcs) {
+      for (const part of String(pcs).split(" + ")) {
         const mm = part.trim().match(/^(\d+)\s+(.+)$/);
         if (!mm) continue;
         const lab = mm[2].trim();
-        if (!rec.pcs.has(lab)) rec.order.push(lab);
-        rec.pcs.set(lab, (rec.pcs.get(lab) || 0) + Number(mm[1]));
+        grand.set(lab, (grand.get(lab) || 0) + Number(mm[1]));
       }
     }
   }
-  const summaryRows: string[][] = [];
-  for (const [cat, rec] of summary) {
-    const breakdown = rec.order
-      .map((lab) => `${rec.pcs.get(lab)} ${lab}`)
-      .join(" + ");
-    const totalPcs = Array.from(rec.pcs.values()).reduce((s, n) => s + n, 0);
-    summaryRows.push([
-      `${cat} — ${rec.sets} SET`,
-      breakdown || "-",
-      totalPcs ? `${totalPcs} PCS` : "-",
-    ]);
-  }
+  const rankL = (lab: string) => {
+    const u = lab.toUpperCase();
+    return u === "HB" ? 0 : u === "DIVAN" ? 1 : 2;
+  };
+  const grandBreakdown =
+    Array.from(grand.entries())
+      .sort((a, b) => rankL(a[0]) - rankL(b[0]))
+      .map(([lab, n]) => `${n} ${lab}`)
+      .join("  +  ") || "-";
 
   const ordered = order.items
     .map((it, i) => ({ it, i }))
@@ -384,7 +365,7 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       [
         { content: "Total", colSpan: 2, styles: { halign: "right" } },
         { content: `${totalSets}`, styles: { halign: "center" } },
-        "",
+        { content: grandBreakdown },
         { content: `${totalPcsAll}`, styles: { halign: "right" } },
       ],
     ],
@@ -444,46 +425,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     );
   }
 
-  // Piece roll-up: Set | Quantity (piece breakdown) | Total Qty —
-  // one row per category (bedframe, sofa, accessory …).
-  const lastY0 =
+  // The grand totals (sets / breakdown / pieces) live in the table's
+  // own footer row now — no separate roll-up table.
+  const afterY =
     (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable
       ?.finalY ?? HEADER_BOTTOM;
-  let afterY = lastY0;
-  if (summaryRows.length > 0) {
-    autoTable(doc, {
-      startY: lastY0 + 7,
-      head: [["Set", "Quantity (pieces)", "Total Qty"]],
-      body: summaryRows,
-      margin: { left: m, right: m, bottom: 14 },
-      theme: "grid",
-      styles: {
-        font: "helvetica",
-        fontSize: 7.6,
-        cellPadding: { top: 1.6, bottom: 1.6, left: 2, right: 2 },
-        textColor: INK,
-        lineColor: HAIR,
-        lineWidth: 0.15,
-        valign: "middle",
-      },
-      headStyles: {
-        fontStyle: "bold",
-        fontSize: 7.4,
-        fillColor: BAND,
-        textColor: INK,
-        lineColor: HAIR,
-        lineWidth: 0.15,
-      },
-      columnStyles: {
-        0: { cellWidth: 48, fontStyle: "bold" },
-        1: { cellWidth: "auto" },
-        2: { cellWidth: 26, halign: "right", fontStyle: "bold" },
-      },
-    });
-    afterY =
-      (doc as unknown as { lastAutoTable?: { finalY?: number } })
-        .lastAutoTable?.finalY ?? lastY0 + 7;
-  }
 
   // Signature strip on the last page.
   let sy = afterY + 16;

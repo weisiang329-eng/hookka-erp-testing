@@ -23,6 +23,12 @@ export type InvoiceLineExtra = {
   legSen: number;
   specialSen: number;
   unitSen: number;
+  // Per-line customer references (a consolidated invoice carries a
+  // different PO / customer SO / our company SO on every line).
+  customerPOId?: string | null;
+  customerSOLine?: string | null;
+  customerRefLine?: string | null;
+  companySO?: string | null;
 };
 
 export type InvoicePrintExtras = {
@@ -191,25 +197,29 @@ export function generateInvoicePdf(
   const attention = invoice.attention || "";
   const custPhone = invoice.customerPhone || "";
 
-  // Customer order refs for the leading Order column. Invoices are
-  // per-SO, so the same refs apply to every line.
-  const custPO =
+  // Order column refs are PER LINE — a consolidated invoice carries a
+  // different customer PO / customer SO / our company SO on every line,
+  // exactly like the DO printout. Fall back to the invoice-level values
+  // only when a line couldn't be resolved.
+  const invCustPO =
     (invoice.customerPO && String(invoice.customerPO).trim()) || "";
-  const custSO =
-    (extras?.customerSO && String(extras.customerSO).trim()) ||
-    (invoice.soRef && String(invoice.soRef).trim()) ||
+  const invCustSO =
+    (extras?.customerSO && String(extras.customerSO).trim()) || "";
+  const invCustRef =
+    (extras?.customerRef && String(extras.customerRef).trim()) || "";
+  const invCompanySO =
     (invoice.companySOId && String(invoice.companySOId).trim()) ||
+    (invoice.soRef && String(invoice.soRef).trim()) ||
     "";
-  const custRef =
-    (extras?.customerRef && String(extras.customerRef).trim()) ||
-    (invoice.doRef && String(invoice.doRef).trim()) ||
-    (invoice.doNo && String(invoice.doNo).trim()) ||
-    "";
-  const refLines = [
-    `PO: ${custPO || "-"}`,
-    `SO: ${custSO || "-"}`,
-    `REF: ${custRef || "-"}`,
-  ].join("\n");
+  const pick = (v?: string | null, fb?: string) =>
+    (v && String(v).trim()) || fb || "";
+  const orderRefs = (ex: InvoiceLineExtra | undefined): string =>
+    [
+      `PO: ${pick(ex?.customerPOId, invCustPO) || "-"}`,
+      `SO: ${pick(ex?.customerSOLine, invCustSO) || "-"}`,
+      `REF: ${pick(ex?.customerRefLine, invCustRef) || "-"}`,
+      `CO SO: ${pick(ex?.companySO, invCompanySO) || "-"}`,
+    ].join("\n");
 
   const terms = invoice.terms || "NET 30";
 
@@ -356,7 +366,7 @@ export function generateInvoicePdf(
       ex,
     );
     body.push([
-      refLines,
+      orderRefs(ex),
       desc,
       String(it.quantity ?? ""),
       priceLines(Number(it.unitPriceSen) || 0, ex),

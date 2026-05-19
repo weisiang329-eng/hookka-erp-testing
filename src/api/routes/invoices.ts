@@ -863,11 +863,19 @@ app.get("/:id/print-extras", async (c) => {
   // Normalise every seed (real id / companySOId / companySO) to the
   // sales_orders primary key.
   const realSoIds = new Set<string>();
+  type SoRef = {
+    companySO: string | null;
+    customerPO: string | null;
+    customerSO: string | null;
+    reference: string | null;
+  };
+  const soRefByKey = new Map<string, SoRef>();
   if (soIdSeeds.size > 0) {
     const seeds = Array.from(soIdSeeds);
     const ph = seeds.map(() => "?").join(",");
     const soRes = await c.var.DB.prepare(
-      `SELECT id, companySO, companySOId FROM sales_orders
+      `SELECT id, companySO, companySOId, customerPO, customerSO, reference
+         FROM sales_orders
         WHERE id IN (${ph}) OR companySOId IN (${ph}) OR companySO IN (${ph})`,
     )
       .bind(...seeds, ...seeds, ...seeds)
@@ -875,8 +883,21 @@ app.get("/:id/print-extras", async (c) => {
         id: string | null;
         companySO: string | null;
         companySOId: string | null;
+        customerPO: string | null;
+        customerSO: string | null;
+        reference: string | null;
       }>();
-    for (const s of soRes.results ?? []) if (s.id) realSoIds.add(s.id);
+    for (const s of soRes.results ?? []) {
+      if (s.id) realSoIds.add(s.id);
+      const v: SoRef = {
+        companySO: s.companySO ?? s.companySOId ?? null,
+        customerPO: s.customerPO ?? null,
+        customerSO: s.customerSO ?? null,
+        reference: s.reference ?? null,
+      };
+      for (const k of [s.id, s.companySOId, s.companySO])
+        if (k) soRefByKey.set(k, v);
+    }
   }
 
   type LineVal = {
@@ -891,6 +912,14 @@ app.get("/:id/print-extras", async (c) => {
     legSen: number;
     specialSen: number;
     unitSen: number;
+    // Per-line customer references — a consolidated DO/invoice carries a
+    // DIFFERENT customer PO / SO / our company SO on every line, exactly
+    // like the DO printout. Resolved (not flattened) so the invoice
+    // Order column matches the DO line for line.
+    customerPOId?: string | null;
+    customerSOLine?: string | null;
+    customerRefLine?: string | null;
+    companySO?: string | null;
   };
   const tight = new Map<string, LineVal>();
   const loose = new Map<string, LineVal>();
@@ -966,6 +995,63 @@ app.get("/:id/print-extras", async (c) => {
     }
   }
 
+  // Per-line customer PO / customer SO / customer Ref / our company SO,
+  // resolved through the delivery order's lines exactly like the DO
+  // printout (a consolidated DO carries a different one on every line).
+  type RefVal = {
+    customerPOId: string | null;
+    customerSOLine: string | null;
+    customerRefLine: string | null;
+    companySO: string | null;
+  };
+  const refTight = new Map<string, RefVal>();
+  const refLoose = new Map<string, RefVal>();
+  const refByCode = new Map<string, RefVal>();
+  if (inv.deliveryOrderId) {
+    const dRefRes = await c.var.DB.prepare(
+      `SELECT di.productCode, di.fabricCode, di.sizeLabel, di.salesOrderNo,
+              po.customerPOId, po.customerReference,
+              po.salesOrderId, po.companySOId
+         FROM delivery_order_items di
+         LEFT JOIN production_orders po ON po.id = di.productionOrderId
+        WHERE di.deliveryOrderId = ?`,
+    )
+      .bind(inv.deliveryOrderId)
+      .all<{
+        productCode: string | null;
+        fabricCode: string | null;
+        sizeLabel: string | null;
+        salesOrderNo: string | null;
+        customerPOId: string | null;
+        customerReference: string | null;
+        salesOrderId: string | null;
+        companySOId: string | null;
+      }>();
+    for (const d of dRefRes.results ?? []) {
+      const so =
+        soRefByKey.get(d.salesOrderId || "") ||
+        soRefByKey.get(d.companySOId || "") ||
+        soRefByKey.get(d.salesOrderNo || "");
+      const rv: RefVal = {
+        customerPOId: d.customerPOId || so?.customerPO || null,
+        customerSOLine: so?.customerSO || null,
+        customerRefLine: d.customerReference || so?.reference || null,
+        companySO:
+          so?.companySO || d.companySOId || d.salesOrderNo || null,
+      };
+      const code = (d.productCode ?? "").trim();
+      const fab = (d.fabricCode ?? "").trim();
+      const size = (d.sizeLabel ?? "").trim();
+      if (code) {
+        const tk = `${code}|${fab}|${size}`;
+        const lk = `${code}|${fab}`;
+        if (!refTight.has(tk)) refTight.set(tk, rv);
+        if (!refLoose.has(lk)) refLoose.set(lk, rv);
+        if (!refByCode.has(code)) refByCode.set(code, rv);
+      }
+    }
+  }
+
   // Emit per invoice line (keyed by invoice_items.id).
   const items: Record<string, LineVal> = {};
   const invItemsRes = await c.var.DB.prepare(
@@ -986,7 +1072,30 @@ app.get("/:id/print-extras", async (c) => {
       tight.get(`${code}|${fab}|${size}`) ||
       loose.get(`${code}|${fab}`) ||
       byCode.get(code);
-    if (r.id && v) items[r.id] = v;
+    const rf =
+      refTight.get(`${code}|${fab}|${size}`) ||
+      refLoose.get(`${code}|${fab}`) ||
+      refByCode.get(code);
+    if (!r.id) continue;
+    if (v || rf) {
+      items[r.id] = {
+        itemCategory: v?.itemCategory ?? null,
+        gapInches: v?.gapInches ?? null,
+        divanHeightInches: v?.divanHeightInches ?? null,
+        legHeightInches: v?.legHeightInches ?? null,
+        totalHeightInches: v?.totalHeightInches ?? null,
+        specialOrder: v?.specialOrder ?? null,
+        baseSen: v?.baseSen ?? 0,
+        divanSen: v?.divanSen ?? 0,
+        legSen: v?.legSen ?? 0,
+        specialSen: v?.specialSen ?? 0,
+        unitSen: v?.unitSen ?? 0,
+        customerPOId: rf?.customerPOId ?? null,
+        customerSOLine: rf?.customerSOLine ?? null,
+        customerRefLine: rf?.customerRefLine ?? null,
+        companySO: rf?.companySO ?? null,
+      };
+    }
   }
 
   return c.json({

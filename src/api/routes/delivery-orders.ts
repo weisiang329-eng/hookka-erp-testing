@@ -2321,6 +2321,7 @@ app.get("/:id/print-extras", async (c) => {
   const itRes = await c.var.DB.prepare(
     `SELECT di.id AS doiId,
             po.customerReference AS customerReference,
+            po.itemCategory AS itemCategory,
             po.gapInches AS gapInches,
             po.divanHeightInches AS divanHeightInches,
             po.legHeightInches AS legHeightInches
@@ -2332,6 +2333,7 @@ app.get("/:id/print-extras", async (c) => {
     .all<{
       doiId: string;
       customerReference: string | null;
+      itemCategory: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -2340,6 +2342,7 @@ app.get("/:id/print-extras", async (c) => {
   const items: Record<
     string,
     {
+      itemCategory: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -2356,6 +2359,7 @@ app.get("/:id/print-extras", async (c) => {
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
     items[r.doiId] = {
+      itemCategory: r.itemCategory ?? null,
       gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,

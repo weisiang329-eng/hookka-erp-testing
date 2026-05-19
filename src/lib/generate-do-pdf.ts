@@ -20,6 +20,7 @@ export type DOPrintExtras = {
   items?: Record<
     string,
     {
+      itemCategory?: string | null; // SOFA / BEDFRAME / ACCESSORY
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -115,65 +116,116 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
 
   y = Math.max(yl, yr) + 4;
 
-  // ---- Items ----
+  // ---- Items, grouped by category ----
+  // Wei Siang: when a DO mixes types, split into ordered sections —
+  // BEDFRAME first, then SOFA, then the rest — each its own sub-table
+  // numbered from 1 with its own subtotal, then one grand total. The
+  // product code already carries the sofa variant, so a single
+  // code+description+size+colour column set reads fine for both; any
+  // bedframe-specific spec columns to be refined next round.
   y = drawSectionLabel(doc, "Items Delivered", y);
-  const isPacking = false; // DO mode; packing list adds a Rack column
-  const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
 
-  const body = order.items.map((it, idx) => {
-    const itx = it as DeliveryOrder["items"][number] & {
-      salesOrderNo?: string;
-    };
-    const m3 =
-      (Number((it as { itemM3?: number }).itemM3) || 0) * it.quantity;
-    return [
-      String(idx + 1),
-      itx.salesOrderNo || "-",
-      // Description sits UNDER the product code in the same cell. The code
-      // already carries the sofa variant (e.g. 5537-1A(LHF)) so no
-      // separate variant column is needed — works for sofa + bedframe in
-      // one DO.
-      `${it.productCode}\n${it.productName}`,
-      it.sizeLabel || "-",
-      it.fabricCode || "-",
-      String(it.quantity),
-      m3.toFixed(2),
-    ];
-  });
+  type Row = DeliveryOrder["items"][number] & { salesOrderNo?: string };
+  const catOf = (it: { id: string }): string => {
+    const c = (extras?.items?.[it.id]?.itemCategory || "").toUpperCase();
+    return c === "BEDFRAME" || c === "SOFA" || c === "ACCESSORY"
+      ? c
+      : "OTHER";
+  };
+  const CAT_ORDER = ["BEDFRAME", "SOFA", "ACCESSORY", "OTHER"] as const;
+  const CAT_LABEL: Record<string, string> = {
+    BEDFRAME: "Bedframe",
+    SOFA: "Sofa",
+    ACCESSORY: "Accessory",
+    OTHER: "Other",
+  };
+  const groups = CAT_ORDER.map((cat) => ({
+    cat,
+    rows: order.items.filter((it) => catOf(it) === cat),
+  })).filter((g) => g.rows.length > 0);
 
-  autoTable(doc, {
-    startY: y,
-    margin: { left: m, right: m },
-    head: [
-      ["#", "SO No.", "Product Code / Description", "Size", "Colour / Fabric", "Qty", "M³"],
-    ],
-    body,
-    foot: [["", "", "", "", "Total", String(totalQty), order.totalM3.toFixed(2)]],
-    ...tableTheme(),
-    columnStyles: {
-      0: { cellWidth: 8, halign: "center" },
-      1: { cellWidth: 26, overflow: "ellipsize", fontStyle: "bold" },
-      2: { cellWidth: "auto", fontStyle: "bold" },
-      3: { cellWidth: 22 },
-      4: { cellWidth: 30, overflow: "ellipsize" },
-      5: { cellWidth: 14, halign: "right" },
-      6: { cellWidth: 18, halign: "right" },
-    },
-    // Description line (2nd line of the Product cell) renders lighter.
-    didParseCell: (data) => {
-      if (
-        data.section === "body" &&
-        data.column.index === 2 &&
-        typeof data.cell.raw === "string"
-      ) {
-        data.cell.styles.fontSize = 7.3;
-      }
-    },
-  });
+  const colStyles = {
+    0: { cellWidth: 8, halign: "center" as const },
+    1: { cellWidth: 26, overflow: "ellipsize" as const, fontStyle: "bold" as const },
+    2: { cellWidth: "auto" as const, fontStyle: "bold" as const },
+    3: { cellWidth: 22 },
+    4: { cellWidth: 30, overflow: "ellipsize" as const },
+    5: { cellWidth: 14, halign: "right" as const },
+    6: { cellWidth: 18, halign: "right" as const },
+  };
+  let grandQty = 0;
+  let grandM3 = 0;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 7;
-  void isPacking;
+  for (const g of groups) {
+    if (groups.length > 1) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      doc.setTextColor(...PDF.accent);
+      doc.text(CAT_LABEL[g.cat].toUpperCase(), m, y + 0.5);
+      y += 3;
+    }
+    let gQty = 0;
+    let gM3 = 0;
+    const body = g.rows.map((it, idx) => {
+      const itx = it as Row;
+      const m3 =
+        (Number((it as { itemM3?: number }).itemM3) || 0) * it.quantity;
+      gQty += it.quantity;
+      gM3 += m3;
+      return [
+        String(idx + 1),
+        itx.salesOrderNo || "-",
+        `${it.productCode}\n${it.productName}`,
+        it.sizeLabel || "-",
+        it.fabricCode || "-",
+        String(it.quantity),
+        m3.toFixed(2),
+      ];
+    });
+    grandQty += gQty;
+    grandM3 += gM3;
+    autoTable(doc, {
+      startY: y,
+      margin: { left: m, right: m },
+      head: [
+        ["#", "SO No.", "Product Code / Description", "Size", "Colour / Fabric", "Qty", "M³"],
+      ],
+      body,
+      foot: [
+        groups.length > 1
+          ? ["", "", "", "", `${CAT_LABEL[g.cat]} Subtotal`, String(gQty), gM3.toFixed(2)]
+          : ["", "", "", "", "Total", String(gQty), gM3.toFixed(2)],
+      ],
+      ...tableTheme(),
+      columnStyles: colStyles,
+      didParseCell: (data) => {
+        if (
+          data.section === "body" &&
+          data.column.index === 2 &&
+          typeof data.cell.raw === "string"
+        ) {
+          data.cell.styles.fontSize = 7.3;
+        }
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    y = (doc as any).lastAutoTable.finalY + (groups.length > 1 ? 5 : 7);
+  }
+
+  if (groups.length > 1) {
+    doc.setDrawColor(...PDF.rule);
+    doc.setLineWidth(0.3);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.setTextColor(...PDF.ink);
+    doc.text(
+      `GRAND TOTAL   ·   Qty ${grandQty}   ·   M³ ${grandM3.toFixed(2)}`,
+      pageW - m,
+      y,
+      { align: "right" },
+    );
+    y += 6;
+  }
 
   // ---- Remarks ----
   if (order.remarks) {

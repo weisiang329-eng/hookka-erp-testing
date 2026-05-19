@@ -530,6 +530,9 @@ export default function InvoiceDetailPage() {
                         #
                       </th>
                       <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
+                        SO
+                      </th>
+                      <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
                         Product
                       </th>
                       <th className="text-left py-2 px-3 text-xs font-bold text-[#4B5563]">
@@ -558,12 +561,17 @@ export default function InvoiceDetailPage() {
                         editingPrices && d
                           ? sen(d.base) + sen(d.divan) + sen(d.leg) + sen(d.special)
                           : Number(item.unitPriceSen) || 0;
+                      // Our company SO is its own column (left of Product);
+                      // the customer's PO / SO / REF stay as a sub-line.
+                      const companySO =
+                        (ex?.companySO || "").trim() ||
+                        (invoice.companySOId || "").trim() ||
+                        "-";
                       const refBits = ex
                         ? [
                             `PO: ${ex.customerPOId || "-"}`,
-                            `SO: ${ex.customerSOLine || "-"}`,
+                            `Cust SO: ${ex.customerSOLine || "-"}`,
                             `REF: ${ex.customerRefLine || "-"}`,
-                            `CO SO: ${ex.companySO || "-"}`,
                           ].join("  ·  ")
                         : "";
                       const specBits = ex
@@ -621,6 +629,9 @@ export default function InvoiceDetailPage() {
                         >
                           <td className="py-2.5 px-3 text-[#9CA3AF] align-top">
                             {idx + 1}
+                          </td>
+                          <td className="py-2.5 px-3 align-top doc-number font-medium text-[#1F1D1B] whitespace-nowrap">
+                            {companySO}
                           </td>
                           <td className="py-2.5 px-3 align-top">
                             <p className="font-medium text-[#1F1D1B]">
@@ -708,7 +719,7 @@ export default function InvoiceDetailPage() {
                         <>
                           <tr className="border-t-2 border-[#E2DDD8]">
                             <td
-                              colSpan={6}
+                              colSpan={7}
                               className="py-2.5 px-3 text-right font-medium text-[#6B7280]"
                             >
                               Subtotal
@@ -719,7 +730,7 @@ export default function InvoiceDetailPage() {
                           </tr>
                           <tr className="bg-[#F0ECE9]">
                             <td
-                              colSpan={6}
+                              colSpan={7}
                               className="py-3 px-3 text-right font-bold text-[#6B5C32]"
                             >
                               TOTAL

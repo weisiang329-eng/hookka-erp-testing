@@ -235,6 +235,15 @@ export function generateInvoicePdf(
     const rightMaxW = pageW - m - rightX - labelW;
     let ry = 38;
     ry = lblVal(rightX, ry, "Invoice No.", invoice.invoiceNo || "-", rightMaxW);
+    // DO No. — the invoice is billed against a delivery order; the
+    // operator needs it on the page to reconcile invoice ↔ DO.
+    ry = lblVal(
+      rightX,
+      ry,
+      "DO No.",
+      invoice.doNo || invoice.doRef || "-",
+      rightMaxW,
+    );
     ry = lblVal(rightX, ry, "Date", docDate, rightMaxW);
     ry = lblVal(rightX, ry, "Terms", terms, rightMaxW);
     lblVal(rightX, ry, "Due Date", fmtDate(invoice.dueDate), rightMaxW);
@@ -318,7 +327,9 @@ export function generateInvoicePdf(
         { content: `${totalSets} SETS`, styles: { halign: "center" } },
         { content: "Subtotal", styles: { halign: "right" } },
         {
-          content: fmtCurrency(Number(invoice.subtotalSen) || 0),
+          content: fmtCurrency(
+            Number(invoice.subtotalSen) || Number(invoice.totalSen) || 0,
+          ),
           styles: { halign: "right" },
         },
       ],
@@ -405,27 +416,37 @@ export function generateInvoicePdf(
     doc.addPage();
     y = 36;
   }
-  const sumX = pageW - m - 78;
+  // Label + amount sit as a tight right-aligned pair (label ends just
+  // left of the amount) so nothing drifts apart across the page.
+  const valX = pageW - m;
+  const lblX = pageW - m - 42;
   const sumLine = (label: string, value: string, bold: boolean, big = false) => {
     doc.setFont("helvetica", bold ? "bold" : "normal");
     doc.setFontSize(big ? 11 : 8.5);
     doc.setTextColor(...(bold ? INK : FAINT));
-    doc.text(label, sumX, y);
+    doc.text(label, lblX, y, { align: "right" });
     doc.setFont("helvetica", "bold");
     doc.setTextColor(...INK);
-    doc.text(value, pageW - m, y, { align: "right" });
+    doc.text(value, valX, y, { align: "right" });
     y += big ? 8 : 6;
   };
-  sumLine("Subtotal", fmtRM(Number(invoice.subtotalSen) || 0), false);
-  if (Number(invoice.taxSen)) {
-    sumLine("Tax", fmtRM(Number(invoice.taxSen)), false);
-  }
-  if (Number(invoice.discountSen)) {
-    sumLine("Discount", `- ${fmtRM(Number(invoice.discountSen))}`, false);
+  // Subtotal already prints in the table footer (column-aligned under
+  // Total Price). Only repeat it here when there's tax / discount to
+  // chain into the TOTAL — otherwise it's just noise.
+  const hasAdj =
+    !!Number(invoice.taxSen) || !!Number(invoice.discountSen);
+  if (hasAdj) {
+    sumLine("Subtotal", fmtRM(Number(invoice.subtotalSen) || 0), false);
+    if (Number(invoice.taxSen)) {
+      sumLine("Tax", fmtRM(Number(invoice.taxSen)), false);
+    }
+    if (Number(invoice.discountSen)) {
+      sumLine("Discount", `- ${fmtRM(Number(invoice.discountSen))}`, false);
+    }
   }
   doc.setDrawColor(...RULE);
   doc.setLineWidth(0.4);
-  doc.line(sumX, y - 3, pageW - m, y - 3);
+  doc.line(lblX - 2, y - 3, valX, y - 3);
   sumLine("TOTAL", fmtRM(Number(invoice.totalSen) || 0), true, true);
 
   // Amount in words.

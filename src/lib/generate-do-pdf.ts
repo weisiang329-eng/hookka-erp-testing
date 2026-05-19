@@ -25,40 +25,55 @@ export type DOPrintExtras = {
 const INK: [number, number, number] = [20, 20, 20];
 const RULE: [number, number, number] = [0, 0, 0];
 
+type ItemExtra = {
+  itemCategory?: string | null;
+  customerPOId?: string | null;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  totalHeightInches: number | null;
+};
+
 // Build the stacked Description cell for one line, legacy DO style:
 //   line 1  product code (variant is in the code)
 //   line 2  product name
-//   line 3  fabric  /  build spec (bedframe: divan+leg+total; sofa: seat)
+//   line 3  build spec — differs by category:
+//             BEDFRAME : fabric / DIVAN x" + y" LEG / z"
+//             SOFA     : seat size / colour / y" LEG / TH z"
+//             ACCESSORY: size / colour (whatever it has)
 //   line 4  (CUSTOMER-PO)
 function describe(
   it: { productCode: string; productName: string; fabricCode: string; sizeLabel: string },
-  ex:
-    | {
-        itemCategory?: string | null;
-        customerPOId?: string | null;
-        gapInches: number | null;
-        divanHeightInches: number | null;
-        legHeightInches: number | null;
-        totalHeightInches: number | null;
-      }
-    | undefined,
+  ex: ItemExtra | undefined,
 ): string {
   const lines: string[] = [];
   if (it.productCode) lines.push(it.productCode);
   if (it.productName) lines.push(it.productName);
   const cat = (ex?.itemCategory || "").toUpperCase();
-  const dim = (v?: number | null) => (v == null || v === 0 ? null : `${v}"`);
+  const dim = (v?: number | null) =>
+    v == null || Number(v) === 0 ? null : `${v}"`;
   const spec: string[] = [];
-  if (it.fabricCode) spec.push(it.fabricCode);
   if (cat === "BEDFRAME") {
+    // Bedframe: fabric first, then the divan/leg build, then total height.
+    if (it.fabricCode) spec.push(it.fabricCode);
     const dl: string[] = [];
-    if (dim(ex?.divanHeightInches)) dl.push(`DIVAN ${dim(ex?.divanHeightInches)}`);
-    if (dim(ex?.legHeightInches)) dl.push(`${dim(ex?.legHeightInches)} LEG`);
+    const dv = dim(ex?.divanHeightInches);
+    const lg = dim(ex?.legHeightInches);
+    if (dv) dl.push(`DIVAN ${dv}`);
+    if (lg) dl.push(`${lg} LEG`);
     if (dl.length) spec.push(dl.join(" + "));
-    if (dim(ex?.totalHeightInches)) spec.push(`${dim(ex?.totalHeightInches)}`);
-  } else if (it.sizeLabel) {
-    // sofa / accessory — seat size / colour-fabric is the variant info
-    spec.push(it.sizeLabel);
+    const th = dim(ex?.totalHeightInches);
+    if (th) spec.push(th);
+  } else {
+    // Sofa (and sofa accessories): show the full variant the customer
+    // ordered — seat size, colour/fabric, leg height and total height —
+    // NOT the bedframe divan/gap fields.
+    if (it.sizeLabel) spec.push(it.sizeLabel);
+    if (it.fabricCode) spec.push(it.fabricCode);
+    const lg = dim(ex?.legHeightInches);
+    if (lg) spec.push(`${lg} LEG`);
+    const th = dim(ex?.totalHeightInches);
+    if (th) spec.push(`TH ${th}`);
   }
   if (spec.length) lines.push(spec.join(" / "));
   if (ex?.customerPOId) lines.push(`(${ex.customerPOId})`);
@@ -67,6 +82,17 @@ function describe(
 
 const uomOf = (cat?: string | null) =>
   (cat || "").toUpperCase() === "ACCESSORY" ? "UNIT" : "SET";
+
+// Category print order: bedframes first (1..N), then the sofa block, then
+// accessories (which always travel with the sofas). Original order is
+// preserved within each group so a DO that's all one type is unchanged.
+const catRank = (cat?: string | null): number => {
+  const c = (cat || "").toUpperCase();
+  if (c === "BEDFRAME") return 0;
+  if (c === "SOFA") return 1;
+  if (c === "ACCESSORY") return 2;
+  return 3;
+};
 
 // ---------------------------------------------------------------------------
 // Delivery Order PDF — formal "standard" layout. Item | Description | UOM |
@@ -181,7 +207,17 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   };
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
-  const body = order.items.map((it, idx) => {
+  // Sort by category so a mixed DO prints all bedframes first, then the
+  // sofa block, then accessories — stable within each group.
+  const sortedItems = order.items
+    .map((it, i) => ({ it, i }))
+    .sort(
+      (a, b) =>
+        catRank(extras?.items?.[a.it.id]?.itemCategory) -
+          catRank(extras?.items?.[b.it.id]?.itemCategory) || a.i - b.i,
+    )
+    .map((x) => x.it);
+  const body = sortedItems.map((it, idx) => {
     const ex = extras?.items?.[it.id];
     return [
       String(idx + 1),

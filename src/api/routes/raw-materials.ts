@@ -35,6 +35,29 @@ import {
 
 const app = new Hono<Env>();
 
+// Duplicate item codes are intentionally allowed during the item-code
+// consolidation (Wei Siang). Migration 0008's UNIQUE index is a hard DB
+// lock that a code deploy does NOT touch, so rather than make the
+// operator click a button / run a CLI migration, every raw-material
+// write idempotently drops it first. `DROP INDEX IF EXISTS` is a cheap
+// no-op once it's gone; the in-memory flag keeps it to ~once per worker
+// instance. RE-TIGHTEN with POST /_relock-duplicate-codes once the
+// manual merge is done (it refuses while duplicates still exist).
+let dupUnlockEnsured = false;
+async function ensureDupCodesUnlocked(
+  DB: { prepare: (sql: string) => { run: () => Promise<unknown> } },
+): Promise<void> {
+  if (dupUnlockEnsured) return;
+  for (const idx of ["idx_rm_item_code_unique", "idx_rm_itemCode_unique"]) {
+    try {
+      await DB.prepare(`DROP INDEX IF EXISTS ${idx}`).run();
+    } catch {
+      /* absent / engine mismatch — IF EXISTS intent, ignore */
+    }
+  }
+  dupUnlockEnsured = true;
+}
+
 type RawMaterialRow = {
   id: string;
   itemCode: string;
@@ -153,6 +176,7 @@ app.get("/:id", async (c) => {
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "raw-materials", "create");
   if (denied) return denied;
+  await ensureDupCodesUnlocked(c.var.DB);
   let body: RawMaterialBody;
   try {
     body = (await c.req.json()) as RawMaterialBody;
@@ -253,6 +277,7 @@ app.post("/", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "raw-materials", "update");
   if (denied) return denied;
+  await ensureDupCodesUnlocked(c.var.DB);
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
@@ -458,6 +483,7 @@ app.delete("/:id", async (c) => {
 app.post("/bulk-import", async (c) => {
   const denied = await requirePermission(c, "raw-materials", "create");
   if (denied) return denied;
+  await ensureDupCodesUnlocked(c.var.DB);
   let body: { rows?: RawMaterialBody[] };
   try {
     body = (await c.req.json()) as typeof body;

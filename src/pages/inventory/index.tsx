@@ -2226,49 +2226,10 @@ export default function InventoryPage() {
                 <option key={g} value={g}>{g}</option>
               ))}
             </select>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={async () => {
-                if (
-                  !confirm(
-                    "Allow DUPLICATE raw-material item codes?\n\n" +
-                      "This removes the database's unique lock so you can " +
-                      "park several rows under the same code while you " +
-                      "consolidate, then merge them by hand.\n\n" +
-                      "While duplicates exist, code-based matching (fabric " +
-                      "mirror / GRN / MRP / costing) can attach to the " +
-                      "wrong row — keep the window short and avoid GRN/MRP " +
-                      "on duplicated codes until you've merged.\n\n" +
-                      "Proceed?",
-                  )
-                )
-                  return;
-                try {
-                  const res = await fetch(
-                    "/api/raw-materials/_unlock-duplicate-codes",
-                    { method: "POST" },
-                  );
-                  const j = (await res.json().catch(() => null)) as
-                    | { success?: boolean; message?: string; error?: string }
-                    | null;
-                  if (!res.ok || !j?.success) {
-                    toast.error(j?.error || `Failed (HTTP ${res.status})`);
-                    return;
-                  }
-                  toast.success(
-                    j.message || "Duplicate item codes are now allowed.",
-                  );
-                } catch (err) {
-                  toast.error(
-                    err instanceof Error ? err.message : "Request failed",
-                  );
-                }
-              }}
-              title="One-time: remove the DB unique lock so duplicate item codes can be saved during consolidation"
-            >
-              Allow Dup Codes
-            </Button>
+            {/* Duplicate item codes are now allowed automatically (the
+                API drops the DB unique lock on the next raw-material
+                write — see ensureDupCodesUnlocked) so no manual
+                "unlock" button is needed during the consolidation. */}
             <Button variant="outline" size="sm" onClick={() => setShowBatchEditRM(true)}>
               <Pencil className="h-4 w-4" /> Batch Edit
             </Button>

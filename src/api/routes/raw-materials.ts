@@ -586,4 +586,74 @@ app.post("/bulk-import", async (c) => {
   return c.json({ success: true, data: { created, updated } });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/raw-materials/_unlock-duplicate-codes  (one-shot, idempotent)
+//
+// Migration 0008 put a hard UNIQUE index on raw_materials.item_code. The
+// item-code consolidation needs duplicates parked on purpose first, then
+// merged by hand. The local `npm run db:migrate:supabase` path needs a
+// prod connection string that isn't available in this environment, so
+// this endpoint drops the index through the Worker's live DB binding
+// instead — same one-shot-migration pattern as the /backfill-* routes.
+// `IF EXISTS` makes it safe to call repeatedly. RE-TIGHTEN with
+// /_relock-duplicate-codes once the merge is done.
+// ---------------------------------------------------------------------------
+app.post("/_unlock-duplicate-codes", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "update");
+  if (denied) return denied;
+  const dropped: string[] = [];
+  // Postgres (prod) index name is idx_rm_item_code_unique; the SQLite
+  // mirror is idx_rm_itemCode_unique. Try both; IF EXISTS = no-op when
+  // absent so this is safe on either engine and on repeat calls.
+  for (const idx of ["idx_rm_item_code_unique", "idx_rm_itemCode_unique"]) {
+    try {
+      await c.var.DB.prepare(`DROP INDEX IF EXISTS ${idx}`).run();
+      dropped.push(idx);
+    } catch {
+      /* index absent / engine mismatch — ignore, IF EXISTS intent */
+    }
+  }
+  return c.json({
+    success: true,
+    message:
+      "Duplicate raw-material item codes are now allowed. Re-tighten with /_relock-duplicate-codes after the merge.",
+    dropped,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/raw-materials/_relock-duplicate-codes  (one-shot)
+//
+// The "收紧" step: rebuild the UNIQUE index after the manual merge.
+// Fails loudly (success:false, the offending codes) if duplicates still
+// exist so the operator knows the merge isn't finished — it does NOT
+// silently pick a winner.
+// ---------------------------------------------------------------------------
+app.post("/_relock-duplicate-codes", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "update");
+  if (denied) return denied;
+  const dupRes = await c.var.DB.prepare(
+    `SELECT itemCode, COUNT(*) AS n FROM raw_materials
+      GROUP BY itemCode HAVING COUNT(*) > 1 ORDER BY n DESC`,
+  ).all<{ itemCode: string; n: number }>();
+  const dups = dupRes.results ?? [];
+  if (dups.length > 0) {
+    return c.json(
+      {
+        success: false,
+        error: `Cannot re-lock — ${dups.length} item code(s) still duplicated. Merge them first.`,
+        duplicates: dups.slice(0, 25),
+      },
+      409,
+    );
+  }
+  await c.var.DB.prepare(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_rm_item_code_unique ON raw_materials(item_code)`,
+  ).run();
+  return c.json({
+    success: true,
+    message: "Re-locked — raw-material item codes are unique again.",
+  });
+});
+
 export default app;

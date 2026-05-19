@@ -2384,21 +2384,21 @@ export default function DeliveryPage() {
         ),
       },
       {
-        key: "_print",
+        key: "_view",
         label: "",
         width: "46px",
         align: "center",
         render: (_value, row) => (
           <button
             type="button"
-            title="Print / download this DO (PDF)"
+            title="View this DO (Print is inside)"
             onClick={(e) => {
               e.stopPropagation();
-              void printDOPdf(row);
+              setDetailDO(row);
             }}
             className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B5C32] cursor-pointer"
           >
-            <Printer className="h-4 w-4" />
+            <Eye className="h-4 w-4" />
           </button>
         ),
       },

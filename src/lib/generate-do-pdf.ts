@@ -368,9 +368,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     foot: [
       [
         { content: "Total", colSpan: 2, styles: { halign: "right" } },
-        { content: `${totalSets}`, styles: { halign: "center" } },
-        { content: grandBreakdown },
-        { content: `${totalPcsAll}`, styles: { halign: "right" } },
+        { content: `${totalSets} SETS`, styles: { halign: "center" } },
+        { content: grandBreakdown, styles: { halign: "right" } },
+        { content: `${totalPcsAll} ITEMS`, styles: { halign: "right" } },
       ],
     ],
     margin: { top: HEADER_BOTTOM, left: m, right: m, bottom: 16 },
@@ -402,7 +402,7 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       0: { cellWidth: 34 }, // Order — stacked PO / REF / SO
       1: { cellWidth: "auto" }, // Description (code / name / spec)
       2: { cellWidth: 14, halign: "center" }, // Set (no. of sets)
-      3: { cellWidth: 40 }, // Quantity (piece breakdown)
+      3: { cellWidth: 40, halign: "right" }, // Quantity (piece breakdown)
       4: { cellWidth: 18, halign: "right" }, // Total Qty (pcs)
     },
     didParseCell: (data) => {

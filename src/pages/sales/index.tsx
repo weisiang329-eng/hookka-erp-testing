@@ -137,6 +137,12 @@ export default function SalesPage() {
   // URL-synced so refresh / share-link land back on the same page.
   const [page, setPage] = useUrlStateNumber("page", 1);
 
+  // Mirror of the DataGrid's global search box. When the operator is
+  // searching we must widen the fetch to the WHOLE dataset (same as a
+  // dropdown filter) — otherwise the search only sees the current
+  // 200-row server page and misses matches on other pages.
+  const [gridSearch, setGridSearch] = useState("");
+
   // Filter state read up front so we can adjust the fetch URL when any
   // filter is active (filters were silently scoped to the current 200-row
   // page before — "This Year" missed the second page of orders).
@@ -149,7 +155,7 @@ export default function SalesPage() {
   const _flDDTo = useUrlState<string>("ddTo", "");
   const _filtersActive = !!(
     _flStatus[0] || _flCustomer[0] || _flFrom[0] || _flTo[0] ||
-    _flCat[0] || _flDDFrom[0] || _flDDTo[0]
+    _flCat[0] || _flDDFrom[0] || _flDDTo[0] || gridSearch.trim()
   );
 
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
@@ -969,6 +975,7 @@ export default function SalesPage() {
             contextMenuItems={getContextMenuItems}
             selectable
             onSelectionChange={setSelectedRows}
+            onSearchChange={setGridSearch}
             gridId="sales-orders-list"
             // Give each Status-dropdown selection its own filter session
             // so a sticky column-filter from a previous selection can't

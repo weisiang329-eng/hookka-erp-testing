@@ -105,6 +105,11 @@ export type DataGridProps<T> = {
   // parent mirror the grid's internal filter state — e.g. to scope a
   // "Print" action or a QR-sticker row to exactly what the user sees.
   onFilteredDataChange?: (rows: T[]) => void;
+  // Fires whenever the global search text changes. Lets the parent react
+  // to "user is searching" — e.g. switch a server-paginated fetch to a
+  // whole-dataset fetch so the search covers every record, not just the
+  // currently loaded page.
+  onSearchChange?: (query: string) => void;
   // Opt-in row virtualization (windowed rendering via @tanstack/react-virtual).
   // Off by default to keep the table-layout-driven column widths working for
   // small grids; turn on for large data sets (~500+ rows) where the DOM
@@ -926,6 +931,7 @@ export function DataGrid<T extends Record<string, any>>({
   groupBy,
   viewStorageKey,
   onFilteredDataChange,
+  onSearchChange,
   virtualize = false,
   defaultExcludedValues,
   valueFilterKey,
@@ -1639,6 +1645,16 @@ export function DataGrid<T extends Record<string, any>>({
     onFilteredDataChange(sortedData);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortedData]);
+
+  // Notify the parent of global-search changes so it can widen a
+  // server-paginated fetch to the whole dataset while a search is
+  // active. Scoped to searchText only (callback identity excluded) so a
+  // non-memoised handler can't loop.
+  useEffect(() => {
+    if (!onSearchChange) return;
+    onSearchChange(searchText);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchText]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, row: T) => {
     if (!contextMenuItems) return;

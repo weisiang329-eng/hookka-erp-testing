@@ -99,12 +99,12 @@ function describe(
     if (dv) spec.push(`DIVAN ${dv}${lg ? ` + ${lg} LEG` : " + NO LEG"}`);
     else if (lg) spec.push(`${lg} LEG`);
     if (gp) spec.push(`GAP ${gp}`);
-    if (th) spec.push(`TH ${th}`);
+    if (th) spec.push(`T.Heights ${th}`);
   } else {
     // sofa / accessory — seat size, then any leg / total height it has
     if (it.sizeLabel) spec.push(it.sizeLabel);
     if (lg) spec.push(`${lg} LEG`);
-    if (th) spec.push(`TH ${th}`);
+    if (th) spec.push(`T.Heights ${th}`);
   }
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());
@@ -281,11 +281,8 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         (extras?.customerSO && String(extras.customerSO).trim()) ||
         "-"
       ),
-      (
-        (ex?.customerRef && String(ex.customerRef).trim()) ||
-        (extras?.customerRef && String(extras.customerRef).trim()) ||
-        "-"
-      ),
+      // Company SO — Hookka's own SO number for this line.
+      ex?.salesOrderNo || itx.salesOrderNo || order.companySO || "-",
       uomOf(ex?.itemCategory),
       String(it.quantity),
     ]);
@@ -299,8 +296,8 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         "CS Order No.",
         "Description",
         "PO",
-        "SO",
-        "Reference",
+        "Supplier SO",
+        "Company SO",
         "UOM",
         "Qty",
       ],

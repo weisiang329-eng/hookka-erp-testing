@@ -2370,12 +2370,18 @@ app.get("/:id/print-extras", async (c) => {
             po.itemCategory AS itemCategory,
             po.salesOrderNo AS salesOrderNo,
             po.companySOId AS companySOId,
+            po.salesOrderId AS salesOrderId,
+            po.productCode AS productCode,
+            po.sizeCode AS sizeCode,
+            po.fabricCode AS fabricCode,
             po.specialOrder AS specialOrder,
             po.gapInches AS gapInches,
             po.divanHeightInches AS divanHeightInches,
-            po.legHeightInches AS legHeightInches
+            po.legHeightInches AS legHeightInches,
+            so.customerSO AS lineCustomerSO
        FROM delivery_order_items di
        LEFT JOIN production_orders po ON po.id = di.productionOrderId
+       LEFT JOIN sales_orders so ON so.id = po.salesOrderId
       WHERE di.deliveryOrderId = ?`,
   )
     .bind(id)
@@ -2386,17 +2392,93 @@ app.get("/:id/print-extras", async (c) => {
       itemCategory: string | null;
       salesOrderNo: string | null;
       companySOId: string | null;
+      salesOrderId: string | null;
+      productCode: string | null;
+      sizeCode: string | null;
+      fabricCode: string | null;
       specialOrder: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
+      lineCustomerSO: string | null;
     }>();
+
+  // Spec fallback: many production_orders rows (older cascades / imports)
+  // never got itemCategory + divan/leg/gap/special copied from the SO
+  // line, so they read null and the DO printed a blank "OTHER" block.
+  // The customer-facing source of truth is sales_order_items. Pull the
+  // SO-line spec and prefer it ONLY where the production order is null —
+  // keyed by (salesOrderId, productCode, sizeCode, fabricCode): an
+  // identical SKU config always carries the same build spec, so this is
+  // safe even when it isn't the exact same line.
+  const soIds = Array.from(
+    new Set(
+      (itRes.results ?? [])
+        .map((r) => r.salesOrderId || "")
+        .filter(Boolean),
+    ),
+  );
+  const soiSpec = new Map<
+    string,
+    {
+      itemCategory: string | null;
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+      specialOrder: string | null;
+    }
+  >();
+  if (soIds.length > 0) {
+    const ph = soIds.map(() => "?").join(",");
+    const soiRes = await c.var.DB.prepare(
+      `SELECT salesOrderId, productCode, sizeCode, fabricCode,
+              itemCategory, gapInches, divanHeightInches,
+              legHeightInches, specialOrder
+         FROM sales_order_items
+        WHERE salesOrderId IN (${ph})`,
+    )
+      .bind(...soIds)
+      .all<{
+        salesOrderId: string | null;
+        productCode: string | null;
+        sizeCode: string | null;
+        fabricCode: string | null;
+        itemCategory: string | null;
+        gapInches: number | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        specialOrder: string | null;
+      }>();
+    const keyOf = (
+      so: string | null,
+      pc: string | null,
+      sz: string | null,
+      fc: string | null,
+    ) => `${so || ""}|${pc || ""}|${sz || ""}|${fc || ""}`;
+    for (const s of soiRes.results ?? []) {
+      const k = keyOf(s.salesOrderId, s.productCode, s.sizeCode, s.fabricCode);
+      const prev = soiSpec.get(k);
+      // First non-null wins per field so a blank duplicate line can't
+      // wipe a good one.
+      soiSpec.set(k, {
+        itemCategory: prev?.itemCategory ?? s.itemCategory ?? null,
+        gapInches: prev?.gapInches ?? s.gapInches ?? null,
+        divanHeightInches:
+          prev?.divanHeightInches ?? s.divanHeightInches ?? null,
+        legHeightInches: prev?.legHeightInches ?? s.legHeightInches ?? null,
+        specialOrder: prev?.specialOrder ?? s.specialOrder ?? null,
+      });
+    }
+  }
+
   let customerRef = "";
   const items: Record<
     string,
     {
       itemCategory: string | null;
       customerPOId: string | null;
+      customerSO: string | null;
+      customerRef: string | null;
       salesOrderNo: string | null;
       specialOrder: string | null;
       gapInches: number | null;
@@ -2407,18 +2489,26 @@ app.get("/:id/print-extras", async (c) => {
   > = {};
   for (const r of itRes.results ?? []) {
     if (!customerRef && r.customerReference) customerRef = r.customerReference;
-    const g = r.gapInches;
-    const d = r.divanHeightInches;
-    const l = r.legHeightInches;
+    const fb = soiSpec.get(
+      `${r.salesOrderId || ""}|${r.productCode || ""}|${r.sizeCode || ""}|${r.fabricCode || ""}`,
+    );
+    // production order first; SO-line spec only fills the blanks.
+    const g = r.gapInches ?? fb?.gapInches ?? null;
+    const d = r.divanHeightInches ?? fb?.divanHeightInches ?? null;
+    const l = r.legHeightInches ?? fb?.legHeightInches ?? null;
+    const itemCategory = r.itemCategory ?? fb?.itemCategory ?? null;
+    const specialOrder = r.specialOrder ?? fb?.specialOrder ?? null;
     const total =
       g == null && d == null && l == null
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
     items[r.doiId] = {
-      itemCategory: r.itemCategory ?? null,
+      itemCategory,
       customerPOId: r.customerPOId ?? null,
+      customerSO: r.lineCustomerSO ?? null,
+      customerRef: r.customerReference ?? null,
       salesOrderNo: r.salesOrderNo || r.companySOId || null,
-      specialOrder: r.specialOrder ?? null,
+      specialOrder,
       gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,

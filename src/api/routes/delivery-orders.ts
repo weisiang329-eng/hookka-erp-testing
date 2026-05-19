@@ -2596,6 +2596,21 @@ app.get("/:id/print-extras", async (c) => {
     l: number | null,
     qty: number,
   ): string | null => {
+    const C = (cat || "").toUpperCase();
+    const cu = code.toUpperCase();
+    const isBedframe = C === "BEDFRAME" || cu.startsWith("DIVAN");
+    // A sofa "1A" / a stool / an accessory IS one finished set — it is
+    // NOT broken into Base / Cushion / Arm WIP pieces on a delivery
+    // order. Count it as its own FG unit, labelled by its variant so
+    // the roll-up can list "2 1A(LHF) + 1 STOOL".
+    if (!isBedframe) {
+      const dash = code.indexOf("-");
+      const variant =
+        (sizeLabel && sizeLabel.trim()) ||
+        (dash >= 0 ? code.slice(dash + 1) : code) ||
+        "SET";
+      return `${qty || 1} ${variant}`;
+    }
     if (!wipComponents) return null;
     const variants: BomVariantContext = {
       productCode: code,
@@ -2609,13 +2624,9 @@ app.get("/:id/print-extras", async (c) => {
     };
     let wips = breakBomIntoWips(wipComponents, code, variants);
     if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
-    const cu = code.toUpperCase();
     if (cu.startsWith("DIVAN")) {
       wips = wips.filter((w) => w.wipType.toUpperCase() === "DIVAN");
-    } else if (
-      (cat || "").toUpperCase() === "BEDFRAME" &&
-      isHeadboardOnlySpecial(special)
-    ) {
+    } else if (C === "BEDFRAME" && isHeadboardOnlySpecial(special)) {
       wips = wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN");
     }
     if (wips.length === 0) return null;

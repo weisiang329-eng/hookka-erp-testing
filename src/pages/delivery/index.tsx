@@ -1902,6 +1902,30 @@ export default function DeliveryPage() {
     }, 300);
   };
 
+  // Per-row "Print DO" — generates the formal DO PDF straight from the
+  // list (no need to open the detail). Pulls the read-only print-extras
+  // (customerSO/ref + per-item PO/dims), best-effort.
+  const printDOPdf = async (row: DeliveryOrderRow) => {
+    let extras: import("@/lib/generate-do-pdf").DOPrintExtras = {};
+    try {
+      const r = await fetch(
+        `/api/delivery-orders/${encodeURIComponent(row.id)}/print-extras`,
+      );
+      const j = (await r.json()) as {
+        success?: boolean;
+        data?: import("@/lib/generate-do-pdf").DOPrintExtras;
+      };
+      if (j?.success && j.data) extras = j.data;
+    } catch {
+      /* graceful — PDF still renders without extras */
+    }
+    const { generateDOPdf } = await import("@/lib/generate-do-pdf");
+    generateDOPdf(
+      row as unknown as import("@/types").DeliveryOrder,
+      extras,
+    );
+  };
+
   // ---------- Expected DD inline update ----------
   const updateExpectedDD = useCallback(async (salesOrderId: string, newDate: string, rowId: string) => {
     if (!salesOrderId) return;
@@ -2283,6 +2307,25 @@ export default function DeliveryPage() {
             }}
             className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
           />
+        ),
+      },
+      {
+        key: "_print",
+        label: "",
+        width: "46px",
+        align: "center",
+        render: (_value, row) => (
+          <button
+            type="button"
+            title="Print / download this DO (PDF)"
+            onClick={(e) => {
+              e.stopPropagation();
+              void printDOPdf(row);
+            }}
+            className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B5C32] cursor-pointer"
+          >
+            <Printer className="h-4 w-4" />
+          </button>
         ),
       },
       // Order matches the layout the operator asked for: Dispatch Date first
@@ -3344,7 +3387,7 @@ export default function DeliveryPage() {
             onClick={() => { if (!editMode) { setDetailDO(null); } }}
           />
           {/* Panel */}
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-5xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
             {/* Header */}
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl z-10">
               <div>

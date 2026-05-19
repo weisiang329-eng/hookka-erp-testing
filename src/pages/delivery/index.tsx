@@ -3705,6 +3705,28 @@ export default function DeliveryPage() {
                   )}
                 </div>
 
+                {/* DO-level customer references (shown once, not per row) */}
+                <div className="flex flex-wrap gap-x-6 gap-y-1 mb-3 text-xs text-[#6B7280]">
+                  <span>
+                    Customer PO:{" "}
+                    <span className="font-medium text-[#1F1D1B]">
+                      {detailDO.customerPOId || "—"}
+                    </span>
+                  </span>
+                  <span>
+                    Customer SO:{" "}
+                    <span className="font-medium text-[#1F1D1B]">
+                      {detailDO.customerSO || "—"}
+                    </span>
+                  </span>
+                  <span>
+                    Customer Ref:{" "}
+                    <span className="font-medium text-[#1F1D1B]">
+                      {detailDO.customerRef || "—"}
+                    </span>
+                  </span>
+                </div>
+
                 {/* Add Item Panel (edit mode only) */}
                 {editMode && showAddItemPanel && (
                   <div className="mb-3 border border-[#A8CAD2] rounded-lg bg-[#E0EDF0]/50 p-3">
@@ -3753,10 +3775,10 @@ export default function DeliveryPage() {
                     <thead className="bg-[#FAF9F7] text-[#6B7280]">
                       <tr>
                         <th className="text-left px-3 py-2 font-medium text-xs">#</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">SO No.</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">SO ID</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Product Code</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Product Name</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">SO ID</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">Product Code</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">Variant</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs whitespace-nowrap">Product Name</th>
                         <th className="text-left px-3 py-2 font-medium text-xs">Size</th>
                         <th className="text-left px-3 py-2 font-medium text-xs">Fabric</th>
                         <th className="text-right px-3 py-2 font-medium text-xs">Qty</th>
@@ -3768,13 +3790,13 @@ export default function DeliveryPage() {
                     <tbody>
                       {(editMode ? editItems : detailDO.items).map((item, idx) => (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">
-                          <td className="px-3 py-1.5 text-[#9CA3AF] text-xs">{idx + 1}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32]">{item.salesOrderNo || "-"}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.poNo || "-"}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32]">{item.productCode}</td>
-                          <td className="px-3 py-1.5">{item.productName}</td>
-                          <td className="px-3 py-1.5 text-[#6B7280]">{item.sizeLabel}</td>
-                          <td className="px-3 py-1.5 text-[#6B7280]">{item.fabricCode}</td>
+                          <td className="px-3 py-1.5 text-[#9CA3AF] text-xs whitespace-nowrap">{idx + 1}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280] whitespace-nowrap">{item.poNo || "-"}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "-"; })()}</td>
+                          <td className="px-3 py-1.5 whitespace-nowrap">{item.productName}</td>
+                          <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{item.sizeLabel}</td>
+                          <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{item.fabricCode}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{item.quantity}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
                           <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.rackingNumber || "-"}</td>

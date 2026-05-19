@@ -46,18 +46,22 @@ const FAINT: [number, number, number] = [110, 110, 110];
 const num = (v?: number | null) =>
   v == null || Number(v) === 0 ? null : `${v}"`;
 
+// Print order: bedframes first, then the sofa block, then accessories
+// (always travel WITH the sofas), then service items grouped at the end.
 const catRank = (cat?: string | null): number => {
   const c = (cat || "").toUpperCase();
   if (c === "BEDFRAME") return 0;
   if (c === "SOFA") return 1;
   if (c === "ACCESSORY") return 2;
-  return 3;
+  if (c === "SERVICE") return 3;
+  return 4;
 };
 const catLabel = (cat?: string | null): string => {
   const c = (cat || "").toUpperCase();
   if (c === "BEDFRAME") return "BEDFRAME";
   if (c === "SOFA") return "SOFA";
   if (c === "ACCESSORY") return "ACCESSORY / ADD-ON";
+  if (c === "SERVICE") return "SERVICE";
   return "ITEMS";
 };
 const uomOf = (cat?: string | null) =>
@@ -233,6 +237,45 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
 
+  // Total by UOM ("7 SET", or "5 SET · 2 UNIT") + a headboard / divan
+  // breakdown across the bedframe lines. A normal bedframe ships as
+  // HB + Divan; a DIVAN-only SKU is divan-only; a "Headboard Only"
+  // special is HB-only.
+  const uomCount: Record<string, number> = {};
+  let hbPcs = 0;
+  let divanPcs = 0;
+  for (const it of order.items) {
+    const ex = extras?.items?.[it.id];
+    const u = uomOf(ex?.itemCategory);
+    uomCount[u] = (uomCount[u] || 0) + it.quantity;
+    const cat = (ex?.itemCategory || "").toUpperCase();
+    const code = (it.productCode || "").toUpperCase();
+    const name = (it.productName || "").toUpperCase();
+    const sp = (ex?.specialOrder || "").toLowerCase();
+    const isBed =
+      cat === "BEDFRAME" ||
+      name.includes("BEDFRAME") ||
+      code.startsWith("DIVAN") ||
+      name.startsWith("DIVAN");
+    if (!isBed) continue;
+    const divanOnly = code.startsWith("DIVAN") || name.startsWith("DIVAN");
+    const hbOnly = sp.includes("headboard only") || sp.includes("hb only");
+    if (divanOnly) divanPcs += it.quantity;
+    else if (hbOnly) hbPcs += it.quantity;
+    else {
+      hbPcs += it.quantity;
+      divanPcs += it.quantity;
+    }
+  }
+  const uomSummary =
+    Object.entries(uomCount)
+      .map(([u, n]) => `${n} ${u}`)
+      .join("  ·  ") || `${totalQty}`;
+  const pieceSummary =
+    hbPcs || divanPcs
+      ? `Bedframe pieces:  ${hbPcs} HB  +  ${divanPcs} DIVAN`
+      : "";
+
   const ordered = order.items
     .map((it, i) => ({ it, i }))
     .sort(
@@ -305,8 +348,12 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     body,
     foot: [
       [
-        { content: "Total", colSpan: 6, styles: { halign: "right" } },
-        String(totalQty),
+        { content: "Total", colSpan: 5, styles: { halign: "right" } },
+        {
+          content: uomSummary,
+          colSpan: 2,
+          styles: { halign: "right" },
+        },
       ],
     ],
     margin: { top: HEADER_BOTTOM, left: m, right: m, bottom: 16 },
@@ -370,11 +417,26 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     );
   }
 
-  // Signature strip on the last page.
-  const lastY =
+  // Headboard / divan piece breakdown for bedframes.
+  const lastY0 =
     (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable
       ?.finalY ?? HEADER_BOTTOM;
-  let sy = lastY + 16;
+  let afterY = lastY0;
+  if (pieceSummary) {
+    let py = lastY0 + 6;
+    if (py > pageH - 40) {
+      doc.addPage();
+      py = 30;
+    }
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.setTextColor(...INK);
+    doc.text(pieceSummary, m, py);
+    afterY = py;
+  }
+
+  // Signature strip on the last page.
+  let sy = afterY + 16;
   if (sy > pageH - 34) {
     doc.addPage();
     sy = 36;

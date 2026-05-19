@@ -66,9 +66,9 @@ const uomOf = (cat?: string | null) =>
 // Stacked Description cell — the standard furniture DO line shape:
 //   line 1  product code              e.g. 2008(A)-(K)
 //   line 2  product name (w/ size)    e.g. TRION(A) (HB STRAIGHT) BEDFRAME (6FT) (183X190CM)
-//   line 3  build spec               BF : PC151-02 / DIVAN 12" + 2" LEG / 14"
+//   line 3  build spec               BF : PC151-02 / DIVAN 12" + 2" LEG / TH 14"
 //                                     SOFA: BO315-21 / 35
-//   line 4  (CUSTOMER-PO)            e.g. (PO-008515)
+// (PO / SO / Reference are their own columns now, not in the description.)
 function describe(
   it: {
     productCode: string;
@@ -83,32 +83,32 @@ function describe(
   if (it.productName) lines.push(it.productName);
 
   const cat = (ex?.itemCategory || "").toUpperCase();
+  const dv = num(ex?.divanHeightInches);
+  const lg = num(ex?.legHeightInches);
+  const gp = num(ex?.gapInches);
+  const th = num(ex?.totalHeightInches);
   const spec: string[] = [];
   if (it.fabricCode) spec.push(it.fabricCode);
 
-  if (cat === "BEDFRAME") {
-    const dv = num(ex?.divanHeightInches);
-    const lg = num(ex?.legHeightInches);
+  // Treat it as a bedframe-style spec whenever it's tagged BEDFRAME OR it
+  // carries a divan / leg / gap / total-height value — so the build spec
+  // (D1 / Total H / Mattress Gap) still prints even when itemCategory was
+  // never stamped on the order.
+  const hasBfSpec = !!(dv || lg || gp || th);
+  if (cat === "BEDFRAME" || (cat !== "SOFA" && cat !== "ACCESSORY" && hasBfSpec)) {
     if (dv) spec.push(`DIVAN ${dv}${lg ? ` + ${lg} LEG` : " + NO LEG"}`);
     else if (lg) spec.push(`${lg} LEG`);
-    const gp = num(ex?.gapInches);
     if (gp) spec.push(`GAP ${gp}`);
-    const th = num(ex?.totalHeightInches);
-    if (th) spec.push(th);
+    if (th) spec.push(`TH ${th}`);
   } else {
     // sofa / accessory — seat size, then any leg / total height it has
     if (it.sizeLabel) spec.push(it.sizeLabel);
-    const lg = num(ex?.legHeightInches);
     if (lg) spec.push(`${lg} LEG`);
-    const th = num(ex?.totalHeightInches);
     if (th) spec.push(`TH ${th}`);
   }
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());
   if (spec.length) lines.push(spec.join(" / "));
-
-  if (ex?.customerPOId && String(ex.customerPOId).trim())
-    lines.push(`(${String(ex.customerPOId).trim()})`);
   return lines.join("\n");
 }
 
@@ -129,6 +129,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     hubName?: string;
     hubState?: string;
     customerState?: string;
+    driverPhone?: string;
+    vehicleType?: string;
+    lorryName?: string;
   };
 
   const docDate = fmtDate(order.deliveryDate);
@@ -139,23 +142,18 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   const contactPerson = extras?.hubContactName || order.contactPerson || "";
   const contactPhone = extras?.hubContactPhone || order.contactPhone || "";
 
-  const distinct = (pick: (x: ItemExtra) => string | null | undefined) =>
-    extras?.items
-      ? Array.from(
-          new Set(
-            Object.values(extras.items)
-              .map((x) => (pick(x) || "").trim())
-              .filter(Boolean),
-          ),
-        ).join(", ")
-      : "";
-  const headerOurSO = distinct((x) => x.salesOrderNo) || order.companySO || "-";
-  const headerCustomerSO =
-    extras?.customerSO || distinct((x) => x.customerSO) || "-";
-  const headerCustomerRef =
-    extras?.customerRef || distinct((x) => x.customerRef) || "-";
+  // Driver + lorry dispatch info for the header (operator wants the
+  // lorry plate visible, not just the driver name).
+  const driverLine = `${order.driverName || "-"}${
+    o.driverPhone ? ` (${o.driverPhone})` : ""
+  }`;
+  const lorryLine =
+    [order.vehicleNo, o.vehicleType, o.lorryName]
+      .map((s) => (s || "").trim())
+      .filter(Boolean)
+      .join(" · ") || "-";
 
-  const HEADER_BOTTOM = 80;
+  const HEADER_BOTTOM = 72;
   const drawHeader = () => {
     // --- B/W letterhead: logo left, company block beside, title right ---
     addHookkaLetterhead(doc, m, 12, 12);
@@ -224,18 +222,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     const rightMaxW = pageW - m - rightX - labelW;
     let ry = 38;
     ry = lblVal(rightX, ry, "DO No.", order.doNo, rightMaxW);
-    ry = lblVal(rightX, ry, "Our SO", headerOurSO, rightMaxW);
-    ry = lblVal(rightX, ry, "Customer SO", headerCustomerSO, rightMaxW);
-    ry = lblVal(rightX, ry, "Customer Ref", headerCustomerRef, rightMaxW);
-    lblVal(
-      rightX,
-      ry,
-      "Driver",
-      `${order.driverName || "-"}${
-        order.vehicleNo ? `  ·  ${order.vehicleNo}` : ""
-      }`,
-      rightMaxW,
-    );
+    ry = lblVal(rightX, ry, "Date", docDate, rightMaxW);
+    ry = lblVal(rightX, ry, "Driver", driverLine, rightMaxW);
+    lblVal(rightX, ry, "Lorry Plate", lorryLine, rightMaxW);
 
     doc.setDrawColor(...RULE);
     doc.setLineWidth(0.5);
@@ -254,7 +243,6 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     .map((x) => x.it);
 
   const body: RowInput[] = [];
-  let runningNo = 0;
   let lastCat: string | null = null;
   for (const it of ordered) {
     const ex = extras?.items?.[it.id];
@@ -263,7 +251,7 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       body.push([
         {
           content: catLabel(cat),
-          colSpan: 4,
+          colSpan: 7,
           styles: {
             fontStyle: "bold",
             fontSize: 8,
@@ -275,9 +263,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       ]);
       lastCat = cat;
     }
-    runningNo += 1;
+    const itx = it as typeof it & { salesOrderNo?: string };
     body.push([
-      String(runningNo),
+      ex?.salesOrderNo || itx.salesOrderNo || order.companySO || "-",
       describe(
         {
           productCode: it.productCode || "",
@@ -287,6 +275,9 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
         },
         ex,
       ),
+      (ex?.customerPOId && String(ex.customerPOId).trim()) || "-",
+      (ex?.customerSO && String(ex.customerSO).trim()) || "-",
+      (ex?.customerRef && String(ex.customerRef).trim()) || "-",
       uomOf(ex?.itemCategory),
       String(it.quantity),
     ]);
@@ -295,12 +286,21 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   drawHeader();
 
   autoTable(doc, {
-    head: [["Item", "Description", "UOM", "Qty"]],
+    head: [
+      [
+        "CS Order No.",
+        "Description",
+        "PO",
+        "SO",
+        "Reference",
+        "UOM",
+        "Qty",
+      ],
+    ],
     body,
     foot: [
       [
-        { content: "Total", colSpan: 2, styles: { halign: "right" } },
-        "",
+        { content: "Total", colSpan: 6, styles: { halign: "right" } },
         String(totalQty),
       ],
     ],
@@ -330,10 +330,16 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       lineColor: RULE,
     },
     columnStyles: {
-      0: { cellWidth: 14, halign: "center" },
-      1: { cellWidth: "auto" },
-      2: { cellWidth: 22, halign: "center" },
-      3: { cellWidth: 18, halign: "right" },
+      // CS Order No. — our SO/CS number per line (replaces the old #).
+      0: { cellWidth: 26, fontStyle: "bold" },
+      // Description nudged right a touch (extra left padding) so it
+      // doesn't sit flush against the order number.
+      1: { cellWidth: "auto", cellPadding: { top: 1.4, bottom: 2, left: 4, right: 2 } },
+      2: { cellWidth: 22 }, // PO
+      3: { cellWidth: 22 }, // SO
+      4: { cellWidth: 20 }, // Reference
+      5: { cellWidth: 14, halign: "center" }, // UOM
+      6: { cellWidth: 12, halign: "right" }, // Qty
     },
     didParseCell: (data) => {
       // First line (product code) of the Description reads a touch heavier.

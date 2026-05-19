@@ -502,9 +502,13 @@ export function generateInvoicePdf(
       sumLine("Discount", `- ${fmtRM(Number(invoice.discountSen))}`, false);
     }
   }
+  // Rule sits clearly ABOVE the TOTAL line (the 11pt text rises ~2.8mm
+  // over its baseline, so a y-3 rule struck through it). Add leading,
+  // then draw the separator well clear of the cap height.
+  y += 3;
   doc.setDrawColor(...RULE);
   doc.setLineWidth(0.4);
-  doc.line(lblX - 2, y - 3, valX, y - 3);
+  doc.line(lblX - 2, y - 5.5, valX, y - 5.5);
   sumLine("TOTAL", fmtRM(Number(invoice.totalSen) || 0), true, true);
 
   // Amount in words.

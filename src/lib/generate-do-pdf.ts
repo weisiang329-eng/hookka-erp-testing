@@ -130,8 +130,9 @@ function describe(
     if (gp) spec.push(`GAP ${gp}`);
     if (th) spec.push(`T.Heights ${th}`);
   } else {
-    // sofa / accessory — seat size, then any leg / total height it has
-    if (it.sizeLabel) spec.push(it.sizeLabel);
+    // sofa / accessory — label the seat size so a bare "28" reads as
+    // the sofa size, then any leg / total height it has.
+    if (it.sizeLabel) spec.push(`Size: ${it.sizeLabel}`);
     if (lg) spec.push(`${lg} LEG`);
     if (th) spec.push(`T.Heights ${th}`);
   }
@@ -338,10 +339,14 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       (ex?.customerRef && String(ex.customerRef).trim()) ||
       (extras?.customerRef && String(extras.customerRef).trim()) ||
       "";
-    const refLines: string[] = [];
-    if (custPO) refLines.push(`PO: ${custPO}`);
-    if (custRef) refLines.push(`REF: ${custRef}`);
-    if (custSO) refLines.push(`SO: ${custSO}`);
+    // Always show all three customer refs (PO / SO / REF) so the
+    // customer's sales order is never silently missing — "-" when the
+    // order didn't carry one.
+    const refLines: string[] = [
+      `PO: ${custPO || "-"}`,
+      `SO: ${custSO || "-"}`,
+      `REF: ${custRef || "-"}`,
+    ];
     const desc = describe(
       {
         productCode: it.productCode || "",
@@ -363,7 +368,17 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   drawHeader();
 
   autoTable(doc, {
-    head: [["Order", "Description", "Set", "Quantity", "Total Qty"]],
+    // Header halign per column matches the body so nothing looks
+    // crooked (Set centred, Quantity / Total Qty right).
+    head: [
+      [
+        { content: "Order" },
+        { content: "Description" },
+        { content: "Set", styles: { halign: "center" } },
+        { content: "Quantity", styles: { halign: "right" } },
+        { content: "Total Qty", styles: { halign: "right" } },
+      ],
+    ],
     body,
     foot: [
       [
@@ -377,9 +392,13 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     showHead: "everyPage",
     showFoot: "lastPage",
     theme: "plain",
+    // Never split one item's stacked cell across a page break — the
+    // whole row moves to the next page instead (no orphaned "Front
+    // Drawer" tail).
+    rowPageBreak: "avoid",
     styles: {
       font: "helvetica",
-      fontSize: 7.6,
+      fontSize: 7.2,
       cellPadding: { top: 1.3, bottom: 1.8, left: 1.8, right: 1.8 },
       textColor: INK,
       lineColor: HAIR,
@@ -388,22 +407,23 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     },
     headStyles: {
       fontStyle: "bold",
-      fontSize: 7.4,
+      fontSize: 7,
       lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
       lineColor: RULE,
     },
     footStyles: {
       fontStyle: "bold",
-      fontSize: 8,
+      fontSize: 6.6,
+      overflow: "visible",
       lineWidth: { top: 0.5, bottom: 0, left: 0, right: 0 },
       lineColor: RULE,
     },
     columnStyles: {
-      0: { cellWidth: 34 }, // Order — stacked PO / REF / SO
+      0: { cellWidth: 32 }, // Order — stacked PO / SO / REF
       1: { cellWidth: "auto" }, // Description (code / name / spec)
-      2: { cellWidth: 14, halign: "center" }, // Set (no. of sets)
-      3: { cellWidth: 40, halign: "right" }, // Quantity (piece breakdown)
-      4: { cellWidth: 18, halign: "right" }, // Total Qty (pcs)
+      2: { cellWidth: 20, halign: "center" }, // Set (no. of sets)
+      3: { cellWidth: 42, halign: "right" }, // Quantity (piece breakdown)
+      4: { cellWidth: 20, halign: "right" }, // Total Qty (pcs)
     },
     didParseCell: (data) => {
       // Description is column 1 now.

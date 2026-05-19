@@ -126,17 +126,18 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   y = drawSectionLabel(doc, "Items Delivered", y);
 
   type Row = DeliveryOrder["items"][number] & { salesOrderNo?: string };
+  // Wei Siang: sofa accessories ALWAYS travel with the sofa — so
+  // ACCESSORY folds into the SOFA group (never its own section).
   const catOf = (it: { id: string }): string => {
     const c = (extras?.items?.[it.id]?.itemCategory || "").toUpperCase();
-    return c === "BEDFRAME" || c === "SOFA" || c === "ACCESSORY"
-      ? c
-      : "OTHER";
+    if (c === "BEDFRAME") return "BEDFRAME";
+    if (c === "SOFA" || c === "ACCESSORY") return "SOFA";
+    return "OTHER";
   };
-  const CAT_ORDER = ["BEDFRAME", "SOFA", "ACCESSORY", "OTHER"] as const;
+  const CAT_ORDER = ["BEDFRAME", "SOFA", "OTHER"] as const;
   const CAT_LABEL: Record<string, string> = {
     BEDFRAME: "Bedframe",
     SOFA: "Sofa",
-    ACCESSORY: "Accessory",
     OTHER: "Other",
   };
   const groups = CAT_ORDER.map((cat) => ({

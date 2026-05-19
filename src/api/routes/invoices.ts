@@ -230,6 +230,14 @@ type InvoiceItemRow = {
   quantity: number;
   unitPriceSen: number;
   totalSen: number;
+  // Per-line price build-up (migration 0121). Editable on the invoice;
+  // priceEdited=1 means the invoice's own figures are authoritative and
+  // override the sales-order-derived fallback at print time.
+  basePriceSen: number | null;
+  divanPriceSen: number | null;
+  legPriceSen: number | null;
+  specialOrderPriceSen: number | null;
+  priceEdited: number | null;
 };
 
 type InvoicePaymentRow = {
@@ -260,6 +268,11 @@ function rowToItem(row: InvoiceItemRow) {
     quantity: row.quantity,
     unitPriceSen: row.unitPriceSen,
     totalSen: row.totalSen,
+    basePriceSen: Number(row.basePriceSen) || 0,
+    divanPriceSen: Number(row.divanPriceSen) || 0,
+    legPriceSen: Number(row.legPriceSen) || 0,
+    specialOrderPriceSen: Number(row.specialOrderPriceSen) || 0,
+    priceEdited: Number(row.priceEdited) || 0,
   };
 }
 
@@ -1055,7 +1068,10 @@ app.get("/:id/print-extras", async (c) => {
   // Emit per invoice line (keyed by invoice_items.id).
   const items: Record<string, LineVal> = {};
   const invItemsRes = await c.var.DB.prepare(
-    "SELECT id, productCode, fabricCode, sizeLabel FROM invoice_items WHERE invoiceId = ?",
+    `SELECT id, productCode, fabricCode, sizeLabel,
+            basePriceSen, divanPriceSen, legPriceSen,
+            specialOrderPriceSen, priceEdited
+       FROM invoice_items WHERE invoiceId = ?`,
   )
     .bind(id)
     .all<{
@@ -1063,6 +1079,11 @@ app.get("/:id/print-extras", async (c) => {
       productCode: string | null;
       fabricCode: string | null;
       sizeLabel: string | null;
+      basePriceSen: number | null;
+      divanPriceSen: number | null;
+      legPriceSen: number | null;
+      specialOrderPriceSen: number | null;
+      priceEdited: number | null;
     }>();
   for (const r of invItemsRes.results ?? []) {
     const code = (r.productCode ?? "").trim();
@@ -1077,7 +1098,16 @@ app.get("/:id/print-extras", async (c) => {
       refLoose.get(`${code}|${fab}`) ||
       refByCode.get(code);
     if (!r.id) continue;
-    if (v || rf) {
+    // INVOICE IS SOURCE OF TRUTH: once the operator has edited this
+    // line's prices, the invoice's own build-up wins over the
+    // sales-order-derived figures. Spec heights still come from the SO
+    // (display only — not editable).
+    const edited = Number(r.priceEdited) === 1;
+    const invBase = Number(r.basePriceSen) || 0;
+    const invDivan = Number(r.divanPriceSen) || 0;
+    const invLeg = Number(r.legPriceSen) || 0;
+    const invSpecial = Number(r.specialOrderPriceSen) || 0;
+    if (v || rf || edited) {
       items[r.id] = {
         itemCategory: v?.itemCategory ?? null,
         gapInches: v?.gapInches ?? null,
@@ -1085,11 +1115,13 @@ app.get("/:id/print-extras", async (c) => {
         legHeightInches: v?.legHeightInches ?? null,
         totalHeightInches: v?.totalHeightInches ?? null,
         specialOrder: v?.specialOrder ?? null,
-        baseSen: v?.baseSen ?? 0,
-        divanSen: v?.divanSen ?? 0,
-        legSen: v?.legSen ?? 0,
-        specialSen: v?.specialSen ?? 0,
-        unitSen: v?.unitSen ?? 0,
+        baseSen: edited ? invBase : (v?.baseSen ?? 0),
+        divanSen: edited ? invDivan : (v?.divanSen ?? 0),
+        legSen: edited ? invLeg : (v?.legSen ?? 0),
+        specialSen: edited ? invSpecial : (v?.specialSen ?? 0),
+        unitSen: edited
+          ? invBase + invDivan + invLeg + invSpecial
+          : (v?.unitSen ?? 0),
         customerPOId: rf?.customerPOId ?? null,
         customerSOLine: rf?.customerSOLine ?? null,
         customerRefLine: rf?.customerRefLine ?? null,
@@ -1294,6 +1326,170 @@ app.put("/:id", async (c) => {
           "UPDATE invoices SET subtotalSen = ?, totalSen = ? WHERE id = ?",
         ).bind(computedSubtotal, computedSubtotal, id),
       );
+    }
+
+    // ------------------------------------------------------------------
+    // Per-line price edit (the Edit button — Base / Divan / Leg /
+    // Special order). The INVOICE becomes the source of truth: edited
+    // lines stamp priceEdited=1 so the printout reads back the invoice's
+    // own build-up instead of the sales-order figures.
+    //
+    // Allowed only on DRAFT or unpaid SENT. lockMsg already 403s any
+    // invoice with a recorded payment (above); the status guard keeps
+    // it to the two states the operator approved.
+    // ------------------------------------------------------------------
+    if (Array.isArray(body.priceEdits) && body.priceEdits.length > 0) {
+      if (existing.status !== "DRAFT" && existing.status !== "SENT") {
+        return c.json(
+          {
+            success: false,
+            error: `Prices can only be edited on a DRAFT or unpaid SENT invoice (this one is ${existing.status}).`,
+          },
+          400,
+        );
+      }
+      const editById = new Map<
+        string,
+        { base: number; divan: number; leg: number; special: number }
+      >();
+      for (const e of body.priceEdits as Array<Record<string, unknown>>) {
+        const lid = String(e.id || "");
+        if (!lid) continue;
+        editById.set(lid, {
+          base: Math.max(0, Math.round(Number(e.baseSen) || 0)),
+          divan: Math.max(0, Math.round(Number(e.divanSen) || 0)),
+          leg: Math.max(0, Math.round(Number(e.legSen) || 0)),
+          special: Math.max(0, Math.round(Number(e.specialSen) || 0)),
+        });
+      }
+      const allRes = await c.var.DB.prepare(
+        "SELECT id, quantity, unitPriceSen FROM invoice_items WHERE invoiceId = ?",
+      )
+        .bind(id)
+        .all<{ id: string; quantity: number; unitPriceSen: number }>();
+      let newSubtotal = 0;
+      let touched = 0;
+      for (const r of allRes.results ?? []) {
+        const q = Number(r.quantity) || 0;
+        const ed = editById.get(r.id);
+        if (ed) {
+          touched++;
+          const unit = ed.base + ed.divan + ed.leg + ed.special;
+          const lineTotal = unit * q;
+          newSubtotal += lineTotal;
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE invoice_items SET
+                 basePriceSen = ?, divanPriceSen = ?, legPriceSen = ?,
+                 specialOrderPriceSen = ?, unitPriceSen = ?, totalSen = ?,
+                 priceEdited = 1
+               WHERE id = ?`,
+            ).bind(
+              ed.base,
+              ed.divan,
+              ed.leg,
+              ed.special,
+              unit,
+              lineTotal,
+              r.id,
+            ),
+          );
+        } else {
+          newSubtotal += (Number(r.unitPriceSen) || 0) * q;
+        }
+      }
+      if (touched > 0) {
+        statements.push(
+          c.var.DB.prepare(
+            "UPDATE invoices SET subtotalSen = ?, totalSen = ? WHERE id = ?",
+          ).bind(newSubtotal, newSubtotal, id),
+        );
+
+        // SENT (unpaid) was already GL-posted at the OLD subtotal.
+        // Reverse that posting and re-post the NEW one in the SAME
+        // batch so the ledger stays balanced and the hash chain
+        // linear. A later void recomputes from the CURRENT subtotal,
+        // so original + reversal cancel and the void still nets zero.
+        if (existing.status === "SENT") {
+          try {
+            const orgId =
+              (existing as unknown as { orgId?: string | null }).orgId ??
+              "hookka";
+            const actorUserId =
+              (
+                c as unknown as { get: (k: string) => string | undefined }
+              ).get("userId") ?? null;
+            if (await ledgerHasSource(c.var.DB, orgId, "invoice", id)) {
+              const stamp = now;
+              const custId =
+                (existing as unknown as { customerId?: string })
+                  .customerId ?? "";
+              const { legs: revLegs } = await buildInvoiceLedgerLegs(
+                c.var.DB,
+                orgId,
+                {
+                  id,
+                  invoiceNo: existing.invoiceNo,
+                  customerId: custId,
+                  subtotalSen: existing.subtotalSen,
+                },
+                actorUserId,
+                true,
+              );
+              const { legs: postLegs, taxSen } =
+                await buildInvoiceLedgerLegs(
+                  c.var.DB,
+                  orgId,
+                  {
+                    id,
+                    invoiceNo: existing.invoiceNo,
+                    customerId: custId,
+                    subtotalSen: newSubtotal,
+                  },
+                  actorUserId,
+                  false,
+                );
+              for (const l of revLegs)
+                l.sourceType = `invoice_restate_rev:${stamp}`;
+              for (const l of postLegs)
+                l.sourceType = `invoice_restate_post:${stamp}`;
+              // ONE call so rev + post chain sequentially off the same
+              // head — two calls would each read the same chain head
+              // and FORK the journal.
+              const { statements: jeStmts } =
+                await buildJournalEntryStatements(c.var.DB, orgId, [
+                  ...revLegs,
+                  ...postLegs,
+                ]);
+              statements.push(...jeStmts);
+              statements.push(
+                c.var.DB.prepare(
+                  "UPDATE invoices SET taxSen = ? WHERE id = ?",
+                ).bind(taxSen, id),
+              );
+              const auditStmt = await buildAuditStatement(c, {
+                resource: "invoices",
+                resourceId: id,
+                action: "update",
+                before: existing,
+                after: {
+                  ...existing,
+                  subtotalSen: newSubtotal,
+                  totalSen: newSubtotal,
+                  taxSen,
+                  updatedAt: now,
+                },
+              });
+              if (auditStmt) statements.push(auditStmt);
+            }
+          } catch (e) {
+            console.warn(
+              `[ledger] failed to BUILD restatement for invoice ${id} price edit:`,
+              e,
+            );
+          }
+        }
+      }
     }
 
     // Cascade: if this PUT flipped the invoice to PAID, close the linked

@@ -574,6 +574,7 @@
   "preventionStatus": "prevention_status",
   "price1Sen": "price1_sen",
   "price2Sen": "price2_sen",
+  "priceEdited": "price_edited",
   "priceSen": "price_sen",
   "priceTier": "price_tier",
   "priceValidFrom": "price_valid_from",

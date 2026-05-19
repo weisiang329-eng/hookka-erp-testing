@@ -58,6 +58,100 @@ export default function InvoiceDetailPage() {
   const loading = invLoading;
   const [updating, setUpdating] = useState(false);
 
+  // Per-line print enrichment (customer PO / SO / our company SO + the
+  // resolved price build-up) — same source the PDF uses. Drives the
+  // read-only refs line AND pre-fills the price editor.
+  type LineExtra = import("@/lib/generate-invoice-pdf").InvoiceLineExtra;
+  const { data: exResp, refresh: refreshExtras } = useCachedJson<{
+    success?: boolean;
+    data?: import("@/lib/generate-invoice-pdf").InvoicePrintExtras;
+  }>(id ? `/api/invoices/${id}/print-extras` : null);
+  const lineExtras: Record<string, LineExtra> = useMemo(
+    () => (exResp?.success && exResp.data?.items ? exResp.data.items : {}),
+    [exResp],
+  );
+
+  // Price editor state. `priceDraft` holds RM strings per line+component.
+  const [editingPrices, setEditingPrices] = useState(false);
+  const [savingPrices, setSavingPrices] = useState(false);
+  const [priceDraft, setPriceDraft] = useState<
+    Record<string, { base: string; divan: string; leg: string; special: string }>
+  >({});
+  const rm = (sen: number) => (Math.round(Number(sen) || 0) / 100).toFixed(2);
+  const sen = (s: string) => Math.max(0, Math.round((Number(s) || 0) * 100));
+  // Edit allowed only on DRAFT or unpaid SENT (no payment recorded).
+  const canEditPrices =
+    !!invoice &&
+    (invoice.status === "DRAFT" || invoice.status === "SENT") &&
+    Number(invoice.paidAmount || 0) === 0;
+
+  const beginEditPrices = () => {
+    if (!invoice) return;
+    const d: Record<
+      string,
+      { base: string; divan: string; leg: string; special: string }
+    > = {};
+    for (const it of invoice.items) {
+      const ex = lineExtras[it.id];
+      // Pre-fill from the resolved build-up (invoice's own if already
+      // edited, else the sales-order figures). Fall back to unit price
+      // as Base when nothing resolved.
+      const base = ex ? ex.baseSen : Number(it.unitPriceSen) || 0;
+      d[it.id] = {
+        base: rm(base),
+        divan: rm(ex?.divanSen || 0),
+        leg: rm(ex?.legSen || 0),
+        special: rm(ex?.specialSen || 0),
+      };
+    }
+    setPriceDraft(d);
+    setEditingPrices(true);
+  };
+
+  const saveEditPrices = async () => {
+    if (!invoice) return;
+    setSavingPrices(true);
+    try {
+      const priceEdits = invoice.items.map((it) => {
+        const d = priceDraft[it.id] || {
+          base: "0",
+          divan: "0",
+          leg: "0",
+          special: "0",
+        };
+        return {
+          id: it.id,
+          baseSen: sen(d.base),
+          divanSen: sen(d.divan),
+          legSen: sen(d.leg),
+          specialSen: sen(d.special),
+        };
+      });
+      const data = await fetchJson(
+        `/api/invoices/${id}`,
+        InvoiceMutationSchema,
+        { method: "PUT", body: { priceEdits } },
+      );
+      if (data.success) {
+        if (id) invalidateCache(`/api/invoices/${id}`);
+        invalidateCache(`/api/invoices/${id}/print-extras`);
+        setEditingPrices(false);
+        refreshInvoice();
+        refreshExtras();
+        setToast("Invoice prices updated");
+      } else {
+        setToast(
+          (data as unknown as { error?: string }).error ||
+            "Could not update prices",
+        );
+      }
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : "Could not update prices");
+    } finally {
+      setSavingPrices(false);
+    }
+  };
+
   // Payment form state
   const [showPayment, setShowPayment] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -244,6 +338,36 @@ export default function InvoiceDetailPage() {
           >
             <Download className="h-4 w-4" /> PDF
           </Button>
+          {canEditPrices && !editingPrices && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={beginEditPrices}
+            >
+              <DollarSign className="h-4 w-4" /> Edit Prices
+            </Button>
+          )}
+          {editingPrices && (
+            <>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void saveEditPrices()}
+                disabled={savingPrices}
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                {savingPrices ? "Saving..." : "Save Prices"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setEditingPrices(false)}
+                disabled={savingPrices}
+              >
+                Cancel
+              </Button>
+            </>
+          )}
           {invoice.status === "DRAFT" && (
             <>
               <Button
@@ -360,10 +484,20 @@ export default function InvoiceDetailPage() {
                 <div>
                   <div className="flex items-center gap-1.5 mb-1">
                     <FileText className="h-3.5 w-3.5 text-[#9CA3AF]" />
-                    <p className="text-xs text-[#9CA3AF] uppercase">SO Ref</p>
+                    <p className="text-xs text-[#9CA3AF] uppercase">Company SO</p>
                   </div>
-                  <p className="font-medium text-[#1F1D1B] doc-number">
-                    {invoice.companySOId}
+                  <p className="font-medium text-[#1F1D1B] doc-number break-words">
+                    {(() => {
+                      const distinct = Array.from(
+                        new Set(
+                          Object.values(lineExtras)
+                            .map((e) => (e.companySO || "").trim())
+                            .filter(Boolean),
+                        ),
+                      );
+                      if (distinct.length) return distinct.join(", ");
+                      return invoice.companySOId || "—";
+                    })()}
                   </p>
                 </div>
                 <div>
@@ -416,53 +550,187 @@ export default function InvoiceDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {invoice.items.map((item, idx) => (
-                      <tr
-                        key={item.id}
-                        className="border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50"
-                      >
-                        <td className="py-2.5 px-3 text-[#9CA3AF]">{idx + 1}</td>
-                        <td className="py-2.5 px-3">
-                          <p className="font-medium text-[#1F1D1B]">
-                            {item.productName}
-                          </p>
-                          <p className="text-xs text-[#9CA3AF]">{item.productCode}</p>
-                        </td>
-                        <td className="py-2.5 px-3 text-[#4B5563]">
-                          {item.sizeLabel}
-                        </td>
-                        <td className="py-2.5 px-3 text-[#4B5563]">
-                          {item.fabricCode}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B]">
-                          {item.quantity}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-[#4B5563]">
-                          {formatCurrency(item.unitPriceSen)}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B]">
-                          {formatCurrency(item.totalSen)}
-                        </td>
-                      </tr>
-                    ))}
+                    {invoice.items.map((item, idx) => {
+                      const ex = lineExtras[item.id];
+                      const d = priceDraft[item.id];
+                      const qty = Number(item.quantity) || 0;
+                      const liveUnit =
+                        editingPrices && d
+                          ? sen(d.base) + sen(d.divan) + sen(d.leg) + sen(d.special)
+                          : Number(item.unitPriceSen) || 0;
+                      const refBits = ex
+                        ? [
+                            `PO: ${ex.customerPOId || "-"}`,
+                            `SO: ${ex.customerSOLine || "-"}`,
+                            `REF: ${ex.customerRefLine || "-"}`,
+                            `CO SO: ${ex.companySO || "-"}`,
+                          ].join("  ·  ")
+                        : "";
+                      const specBits = ex
+                        ? [
+                            ex.divanHeightInches
+                              ? `DIVAN ${ex.divanHeightInches}"${ex.legHeightInches ? ` + ${ex.legHeightInches}" LEG` : ""}`
+                              : "",
+                            ex.gapInches ? `GAP ${ex.gapInches}"` : "",
+                            ex.totalHeightInches
+                              ? `T.Heights ${ex.totalHeightInches}"`
+                              : "",
+                            (ex.specialOrder || "").trim(),
+                          ]
+                            .filter(Boolean)
+                            .join(" / ")
+                        : "";
+                      const setDraft = (
+                        k: "base" | "divan" | "leg" | "special",
+                        v: string,
+                      ) =>
+                        setPriceDraft((p) => ({
+                          ...p,
+                          [item.id]: {
+                            ...(p[item.id] || {
+                              base: "0",
+                              divan: "0",
+                              leg: "0",
+                              special: "0",
+                            }),
+                            [k]: v,
+                          },
+                        }));
+                      const priceInput = (
+                        label: string,
+                        k: "base" | "divan" | "leg" | "special",
+                      ) => (
+                        <div className="flex items-center justify-end gap-1.5">
+                          <span className="text-[10px] text-[#9CA3AF] w-12 text-right">
+                            {label}
+                          </span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={d ? d[k] : "0"}
+                            onChange={(e) => setDraft(k, e.target.value)}
+                            className="w-24 rounded border border-[#D8D2CC] px-2 py-1 text-right text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                          />
+                        </div>
+                      );
+                      return (
+                        <tr
+                          key={item.id}
+                          className="border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50"
+                        >
+                          <td className="py-2.5 px-3 text-[#9CA3AF] align-top">
+                            {idx + 1}
+                          </td>
+                          <td className="py-2.5 px-3 align-top">
+                            <p className="font-medium text-[#1F1D1B]">
+                              {item.productName}
+                            </p>
+                            <p className="text-xs text-[#9CA3AF]">
+                              {item.productCode}
+                            </p>
+                            {refBits && (
+                              <p className="text-[11px] text-[#6B7280] mt-0.5 tabular-nums">
+                                {refBits}
+                              </p>
+                            )}
+                            {specBits && (
+                              <p className="text-[11px] text-[#9CA3AF]">
+                                {specBits}
+                              </p>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-[#4B5563] align-top">
+                            {item.sizeLabel}
+                          </td>
+                          <td className="py-2.5 px-3 text-[#4B5563] align-top">
+                            {item.fabricCode}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B] align-top">
+                            {item.quantity}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-[#4B5563] align-top">
+                            {editingPrices ? (
+                              <div className="space-y-1">
+                                {priceInput("Base", "base")}
+                                {priceInput("Divan", "divan")}
+                                {priceInput("Leg", "leg")}
+                                {priceInput("Special", "special")}
+                                <p className="text-[11px] text-[#6B5C32] font-medium pt-0.5">
+                                  Unit {formatCurrency(liveUnit)}
+                                </p>
+                              </div>
+                            ) : ex &&
+                              (ex.divanSen || ex.legSen || ex.specialSen) ? (
+                              <div className="text-xs leading-relaxed">
+                                <div>Base {formatCurrency(ex.baseSen)}</div>
+                                {!!ex.divanSen && (
+                                  <div>+ Divan {formatCurrency(ex.divanSen)}</div>
+                                )}
+                                {!!ex.legSen && (
+                                  <div>+ Leg {formatCurrency(ex.legSen)}</div>
+                                )}
+                                {!!ex.specialSen && (
+                                  <div>
+                                    + Special {formatCurrency(ex.specialSen)}
+                                  </div>
+                                )}
+                                <div className="font-medium text-[#1F1D1B]">
+                                  = {formatCurrency(liveUnit)}
+                                </div>
+                              </div>
+                            ) : (
+                              formatCurrency(liveUnit)
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B] align-top">
+                            {formatCurrency(liveUnit * qty)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                   <tfoot>
-                    <tr className="border-t-2 border-[#E2DDD8]">
-                      <td colSpan={6} className="py-2.5 px-3 text-right font-medium text-[#6B7280]">
-                        Subtotal
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B]">
-                        {formatCurrency(invoice.subtotalSen)}
-                      </td>
-                    </tr>
-                    <tr className="bg-[#F0ECE9]">
-                      <td colSpan={6} className="py-3 px-3 text-right font-bold text-[#6B5C32]">
-                        TOTAL
-                      </td>
-                      <td className="py-3 px-3 text-right font-bold text-[#6B5C32] text-lg">
-                        {formatCurrency(invoice.totalSen)}
-                      </td>
-                    </tr>
+                    {(() => {
+                      const liveSubtotal = editingPrices
+                        ? invoice.items.reduce((s, it) => {
+                            const dd = priceDraft[it.id];
+                            const u = dd
+                              ? sen(dd.base) +
+                                sen(dd.divan) +
+                                sen(dd.leg) +
+                                sen(dd.special)
+                              : Number(it.unitPriceSen) || 0;
+                            return s + u * (Number(it.quantity) || 0);
+                          }, 0)
+                        : Number(invoice.subtotalSen) || 0;
+                      return (
+                        <>
+                          <tr className="border-t-2 border-[#E2DDD8]">
+                            <td
+                              colSpan={6}
+                              className="py-2.5 px-3 text-right font-medium text-[#6B7280]"
+                            >
+                              Subtotal
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B]">
+                              {formatCurrency(liveSubtotal)}
+                            </td>
+                          </tr>
+                          <tr className="bg-[#F0ECE9]">
+                            <td
+                              colSpan={6}
+                              className="py-3 px-3 text-right font-bold text-[#6B5C32]"
+                            >
+                              TOTAL
+                            </td>
+                            <td className="py-3 px-3 text-right font-bold text-[#6B5C32] text-lg">
+                              {formatCurrency(liveSubtotal)}
+                            </td>
+                          </tr>
+                        </>
+                      );
+                    })()}
                   </tfoot>
                 </table>
               </div>

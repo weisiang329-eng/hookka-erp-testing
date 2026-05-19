@@ -15,6 +15,12 @@ export const InvoiceItemSchema = z
     quantity: z.number().optional(),
     unitPriceSen: z.number().optional(),
     totalSen: z.number().optional(),
+    // Per-line price build-up (migration 0121) — editable on the invoice.
+    basePriceSen: z.number().optional(),
+    divanPriceSen: z.number().optional(),
+    legPriceSen: z.number().optional(),
+    specialOrderPriceSen: z.number().optional(),
+    priceEdited: z.number().optional(),
   })
   .passthrough();
 

@@ -2604,10 +2604,13 @@ app.get("/:id/print-extras", async (c) => {
     // order. Count it as its own FG unit, labelled by its variant so
     // the roll-up can list "2 1A(LHF) + 1 STOOL".
     if (!isBedframe) {
+      // Label by the sofa TYPE (product-code variant, e.g. "1A(LHF)",
+      // "STOOL") — that's what "一套沙发" means — not the seat size.
       const dash = code.indexOf("-");
       const variant =
+        (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
         (sizeLabel && sizeLabel.trim()) ||
-        (dash >= 0 ? code.slice(dash + 1) : code) ||
+        code ||
         "SET";
       return `${qty || 1} ${variant}`;
     }

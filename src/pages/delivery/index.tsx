@@ -400,6 +400,14 @@ export default function DeliveryPage() {
   const [activeTab, setActiveTab] = useUrlState<string>("tab", "planning");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailDO, setDetailDO] = useState<DeliveryOrderRow | null>(null);
+  // Per-line customer PO / SO no. for the open DO. The /api/sales-orders
+  // list only carries the SO-header customerPO/customerSO (blank on most
+  // orders); the authoritative per-line value lives on the production
+  // order and is surfaced by /print-extras. Fetched when the modal opens.
+  const [detailExtras, setDetailExtras] = useState<{
+    forId: string;
+    data: import("@/lib/generate-do-pdf").DOPrintExtras;
+  } | null>(null);
   // "manual" sentinel = Pending Dispatch's blank-DO entry point (Path A);
   // ReadyPORow[] = converting selected Pending Delivery POs (Path B). One
   // state keeps the dialog body unified so both paths share the same 3PL /
@@ -1920,6 +1928,52 @@ export default function DeliveryPage() {
       window.print();
       setPrintData(null);
     }, 300);
+  };
+
+  // When the detail/edit modal opens, pull the read-only print-extras so
+  // each item row can show its OWN customer PO / SO no. (production-order
+  // sourced — the values the printed DO uses). Cleared on close.
+  useEffect(() => {
+    const id = detailDO?.id;
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(
+          `/api/delivery-orders/${encodeURIComponent(id)}/print-extras`,
+        );
+        const j = (await r.json()) as {
+          success?: boolean;
+          data?: import("@/lib/generate-do-pdf").DOPrintExtras;
+        };
+        if (!cancelled && j?.success && j.data)
+          setDetailExtras({ forId: id, data: j.data });
+      } catch {
+        /* graceful — table falls back to the SO-list values */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [detailDO?.id]);
+
+  // Resolve a line's customer PO / SO / Ref, preferring the per-line
+  // production-order values from /print-extras over the (often blank)
+  // SO-header values carried on the row. Gated by forId so a previous
+  // DO's extras never bleed into the next one while its fetch is in
+  // flight.
+  const lineRefs = (item: DOItem) => {
+    const ext =
+      detailExtras && detailExtras.forId === detailDO?.id
+        ? detailExtras.data
+        : undefined;
+    const ex = ext?.items?.[item.id];
+    return {
+      customerPOId: ex?.customerPOId || item.customerPOId || "",
+      salesOrderNo: ex?.salesOrderNo || item.salesOrderNo || "",
+      customerSO: item.customerSO || ext?.customerSO || "",
+      customerRef: item.customerRef || ext?.customerRef || "",
+    };
   };
 
   // Per-row "Print DO" — generates the formal DO PDF straight from the
@@ -3909,13 +3963,15 @@ export default function DeliveryPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(editMode ? editItems : detailDO.items).map((item, idx) => (
+                      {(editMode ? editItems : detailDO.items).map((item, idx) => {
+                        const refs = lineRefs(item);
+                        return (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">
                           <td className="px-2.5 py-1 text-[#9CA3AF] text-xs whitespace-nowrap">{idx + 1}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{item.poNo || "—"}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{item.customerPOId || "—"}</td>
-                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{item.customerSO || "—"}</td>
-                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{item.customerRef || "—"}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{refs.salesOrderNo || item.poNo || "—"}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerPOId || "—"}</td>
+                          <td className="px-2.5 py-1 font-mono text-xs text-[#1F1D1B] whitespace-nowrap">{refs.customerSO || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{refs.customerRef || "—"}</td>
                           <td className="px-2.5 py-1 font-mono text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
                           <td className="px-2.5 py-1 font-mono text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
                           <td className="px-2.5 py-1 whitespace-nowrap">{item.productName}</td>
@@ -3936,7 +3992,8 @@ export default function DeliveryPage() {
                             </td>
                           )}
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                     <tfoot className="bg-[#FAF9F7]">
                       <tr className="border-t border-[#E2DDD8] font-medium">

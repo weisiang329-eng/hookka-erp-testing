@@ -30,6 +30,11 @@ import {
   ledgerHasSource,
   buildJournalEntryStatements,
 } from "../lib/journal-hash";
+import {
+  breakBomIntoWips,
+  type BomVariantContext,
+} from "../lib/bom-wip-breakdown";
+import { isHeadboardOnlySpecial } from "./fg-units";
 
 const app = new Hono<Env>();
 
@@ -2373,9 +2378,10 @@ app.get("/:id/print-extras", async (c) => {
   const itRes = await c.var.DB.prepare(
     `SELECT di.id,
             di.salesOrderNo AS diSalesOrderNo,
-            di.productCode AS diProductCode,
-            di.fabricCode AS diFabricCode,
-            di.sizeLabel AS diSizeLabel,
+            di.productCode,
+            di.fabricCode,
+            di.sizeLabel,
+            di.quantity,
             po.customerReference AS customerReference,
             po.customerPOId AS customerPOId,
             po.itemCategory AS itemCategory,
@@ -2407,9 +2413,10 @@ app.get("/:id/print-extras", async (c) => {
     .all<{
       id: string;
       diSalesOrderNo: string | null;
-      diProductCode: string | null;
-      diFabricCode: string | null;
-      diSizeLabel: string | null;
+      productCode: string | null;
+      fabricCode: string | null;
+      sizeLabel: string | null;
+      quantity: number | null;
       customerReference: string | null;
       customerPOId: string | null;
       itemCategory: string | null;
@@ -2510,6 +2517,128 @@ app.get("/:id/print-extras", async (c) => {
     }
   }
 
+  // Piece breakdown straight from the product BOM (the same source
+  // production uses): bom_templates.wipComponents -> breakBomIntoWips.
+  // So a Queen/King DIVAN node already carries its real qty and a sofa
+  // is its set of WIP pieces — no size guessing.
+  const codes = Array.from(
+    new Set(
+      (itRes.results ?? [])
+        .map((r) => (r.productCode || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const bomByCode = new Map<
+    string,
+    { wipComponents: string | null; baseModel: string | null }
+  >();
+  if (codes.length > 0) {
+    const ph = codes.map(() => "?").join(",");
+    const bomRes = await c.var.DB.prepare(
+      `SELECT productCode, baseModel, wipComponents, versionStatus, effectiveFrom
+         FROM bom_templates WHERE productCode IN (${ph})`,
+    )
+      .bind(...codes)
+      .all<{
+        productCode: string | null;
+        baseModel: string | null;
+        wipComponents: string | null;
+        versionStatus: string | null;
+        effectiveFrom: string | null;
+      }>();
+    const best = new Map<
+      string,
+      {
+        wipComponents: string | null;
+        baseModel: string | null;
+        active: boolean;
+        eff: string;
+      }
+    >();
+    for (const b of bomRes.results ?? []) {
+      const pc = (b.productCode || "").trim();
+      if (!pc) continue;
+      const active = (b.versionStatus || "").toUpperCase() === "ACTIVE";
+      const eff = b.effectiveFrom || "";
+      const prev = best.get(pc);
+      // Prefer ACTIVE, then the latest effectiveFrom.
+      const better =
+        !prev ||
+        (active && !prev.active) ||
+        (active === prev.active && eff > prev.eff);
+      if (better)
+        best.set(pc, {
+          wipComponents: b.wipComponents,
+          baseModel: b.baseModel,
+          active,
+          eff,
+        });
+    }
+    for (const [pc, v] of best)
+      bomByCode.set(pc, {
+        wipComponents: v.wipComponents,
+        baseModel: v.baseModel,
+      });
+  }
+  // Per-line set composition string, e.g. "1 HB + 2 DIVAN" (bedframe)
+  // or "1 1A + 1 2A + 1 STOOL" (sofa set). Mirrors production-builder's
+  // headboard-only / divan-only filters. null when there's no real BOM.
+  const piecesFor = (
+    code: string,
+    baseModel: string | null,
+    wipComponents: string | null,
+    cat: string | null,
+    special: string | null,
+    sizeLabel: string,
+    fabricCode: string,
+    g: number | null,
+    d: number | null,
+    l: number | null,
+    qty: number,
+  ): string | null => {
+    if (!wipComponents) return null;
+    const variants: BomVariantContext = {
+      productCode: code,
+      model: baseModel || code,
+      sizeLabel,
+      sizeCode: "",
+      fabricCode,
+      divanHeightInches: d,
+      legHeightInches: l,
+      gapInches: g,
+    };
+    let wips = breakBomIntoWips(wipComponents, code, variants);
+    if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
+    const cu = code.toUpperCase();
+    if (cu.startsWith("DIVAN")) {
+      wips = wips.filter((w) => w.wipType.toUpperCase() === "DIVAN");
+    } else if (
+      (cat || "").toUpperCase() === "BEDFRAME" &&
+      isHeadboardOnlySpecial(special)
+    ) {
+      wips = wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN");
+    }
+    if (wips.length === 0) return null;
+    const agg = new Map<string, number>();
+    const order: string[] = [];
+    for (const w of wips) {
+      const t = w.wipType.toUpperCase();
+      const label =
+        t === "HEADBOARD"
+          ? "HB"
+          : t === "DIVAN"
+            ? "DIVAN"
+            : (w.wipLabel || w.wipType || "PC").trim();
+      if (!agg.has(label)) order.push(label);
+      agg.set(
+        label,
+        (agg.get(label) || 0) +
+          (Number(w.quantityMultiplier) || 1) * (qty || 1),
+      );
+    }
+    return order.map((lab) => `${agg.get(lab)} ${lab}`).join(" + ");
+  };
+
   let customerRef = "";
   const items: Record<
     string,
@@ -2520,6 +2649,7 @@ app.get("/:id/print-extras", async (c) => {
       customerRef: string | null;
       salesOrderNo: string | null;
       specialOrder: string | null;
+      pieces: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -2528,9 +2658,9 @@ app.get("/:id/print-extras", async (c) => {
   > = {};
   for (const r of itRes.results ?? []) {
     const soId = r.salesOrderId || r.soId2 || "";
-    const pc = r.diProductCode || "";
-    const fc = r.diFabricCode || "";
-    const sl = r.diSizeLabel || "";
+    const pc = r.productCode || "";
+    const fc = r.fabricCode || "";
+    const sl = r.sizeLabel || "";
     const fb =
       soiTight.get(`${soId}|${pc}|${fc}|${sl}`) ||
       soiLoose.get(`${soId}|${pc}`);
@@ -2555,6 +2685,22 @@ app.get("/:id/print-extras", async (c) => {
       g == null && d == null && l == null
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
+    const bom = bomByCode.get((r.productCode || "").trim());
+    const pieces = bom
+      ? piecesFor(
+          r.productCode || "",
+          bom.baseModel,
+          bom.wipComponents,
+          itemCategory,
+          specialOrder,
+          r.sizeLabel || "",
+          r.fabricCode || "",
+          g,
+          d,
+          l,
+          Number(r.quantity) || 1,
+        )
+      : null;
     items[r.id] = {
       itemCategory,
       customerPOId,
@@ -2563,6 +2709,7 @@ app.get("/:id/print-extras", async (c) => {
       salesOrderNo:
         r.salesOrderNo || r.companySOId || r.diSalesOrderNo || null,
       specialOrder,
+      pieces,
       gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,

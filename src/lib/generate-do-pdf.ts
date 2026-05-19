@@ -25,6 +25,7 @@ export type DOPrintExtras = {
       customerRef?: string | null; // customer's ERP reference for this line
       salesOrderNo?: string | null; // our SO no. for this line
       specialOrder?: string | null; // e.g. "Headboard Only" / "DIVAN CURVE"
+      pieces?: string | null; // BOM set composition, e.g. "1 HB + 2 DIVAN"
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
@@ -113,6 +114,10 @@ function describe(
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());
   if (spec.length) lines.push(spec.join(" / "));
+  // Set composition straight from the product BOM (e.g. "1 HB + 2 DIVAN"
+  // for a bedframe, or the sofa's set pieces).
+  if (ex?.pieces && String(ex.pieces).trim())
+    lines.push(`Pcs: ${String(ex.pieces).trim()}`);
   return lines.join("\n");
 }
 

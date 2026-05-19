@@ -327,7 +327,7 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       body.push([
         {
           content: catLabel(cat),
-          colSpan: 7,
+          colSpan: 4,
           styles: {
             fontStyle: "bold",
             fontSize: 8,
@@ -342,27 +342,33 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
     const fp = fmtPieces(ex?.pieces);
     const qtyTxt = fp.text || uomOf(ex?.itemCategory);
     const totQty = fp.total || it.quantity;
+    // SO / PO / REF are NOT their own columns — they stack at the top of
+    // the Description and only appear when they have a value, so empty
+    // ones don't waste a fixed column (the layout stays flexible).
+    const custSO =
+      (ex?.customerSO && String(ex.customerSO).trim()) ||
+      (extras?.customerSO && String(extras.customerSO).trim()) ||
+      "";
+    const custPO = (ex?.customerPOId && String(ex.customerPOId).trim()) || "";
+    const custRef =
+      (ex?.customerRef && String(ex.customerRef).trim()) ||
+      (extras?.customerRef && String(extras.customerRef).trim()) ||
+      "";
+    const refLines: string[] = [];
+    if (custSO) refLines.push(`SO: ${custSO}`);
+    if (custPO) refLines.push(`PO: ${custPO}`);
+    if (custRef) refLines.push(`REF: ${custRef}`);
+    const desc = describe(
+      {
+        productCode: it.productCode || "",
+        productName: it.productName || "",
+        fabricCode: it.fabricCode || "",
+        sizeLabel: it.sizeLabel || "",
+      },
+      ex,
+    );
     body.push([
-      describe(
-        {
-          productCode: it.productCode || "",
-          productName: it.productName || "",
-          fabricCode: it.fabricCode || "",
-          sizeLabel: it.sizeLabel || "",
-        },
-        ex,
-      ),
-      (ex?.customerPOId && String(ex.customerPOId).trim()) || "-",
-      (
-        (ex?.customerSO && String(ex.customerSO).trim()) ||
-        (extras?.customerSO && String(extras.customerSO).trim()) ||
-        "-"
-      ),
-      (
-        (ex?.customerRef && String(ex.customerRef).trim()) ||
-        (extras?.customerRef && String(extras.customerRef).trim()) ||
-        "-"
-      ),
+      refLines.length ? `${refLines.join("\n")}\n${desc}` : desc,
       String(it.quantity),
       qtyTxt,
       String(totQty),
@@ -372,21 +378,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
   drawHeader();
 
   autoTable(doc, {
-    head: [
-      [
-        "Description",
-        "Cust PO",
-        "Cust SO",
-        "Cust Ref",
-        "Set",
-        "Quantity",
-        "Total Qty",
-      ],
-    ],
+    head: [["Description", "Set", "Quantity", "Total Qty"]],
     body,
     foot: [
       [
-        { content: "Total", colSpan: 4, styles: { halign: "right" } },
+        { content: "Total", styles: { halign: "right" } },
         { content: `${totalSets}`, styles: { halign: "center" } },
         "",
         { content: `${totalPcsAll}`, styles: { halign: "right" } },
@@ -418,13 +414,11 @@ export function generateDOPdf(order: DeliveryOrder, extras?: DOPrintExtras) {
       lineColor: RULE,
     },
     columnStyles: {
-      0: { cellWidth: "auto" }, // Description (stacked code / name / spec)
-      1: { cellWidth: 24, overflow: "visible" }, // Cust PO
-      2: { cellWidth: 22, overflow: "visible" }, // Cust SO
-      3: { cellWidth: 24, overflow: "visible" }, // Cust Ref
-      4: { cellWidth: 11, halign: "center" }, // Set (no. of sets)
-      5: { cellWidth: 34 }, // Quantity (piece breakdown)
-      6: { cellWidth: 16, halign: "right" }, // Total Qty (pcs)
+      // Description carries SO/PO/REF stacked on top + code/name/spec.
+      0: { cellWidth: "auto" },
+      1: { cellWidth: 14, halign: "center" }, // Set (no. of sets)
+      2: { cellWidth: 40 }, // Quantity (piece breakdown)
+      3: { cellWidth: 18, halign: "right" }, // Total Qty (pcs)
     },
     didParseCell: (data) => {
       // Description is column 0 now.

@@ -2083,7 +2083,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_v, row) => row.customerPOId
           ? <span className="doc-number">{row.customerPOId}</span>
-          : <span className="text-[#9CA3AF]">\u2014</span>,
+          : <span className="text-[#9CA3AF]">{"\u2014"}</span>,
       },
       {
         key: "customerReference",
@@ -2093,7 +2093,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_v, row) => row.customerReference
           ? <span className="text-[#1F1D1B]">{row.customerReference}</span>
-          : <span className="text-[#9CA3AF]">\u2014</span>,
+          : <span className="text-[#9CA3AF]">{"\u2014"}</span>,
       },
       {
         key: "customerSO",
@@ -2103,7 +2103,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_v, row) => row.customerSO
           ? <span className="doc-number">{row.customerSO}</span>
-          : <span className="text-[#9CA3AF]">\u2014</span>,
+          : <span className="text-[#9CA3AF]">{"\u2014"}</span>,
       },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
       {
@@ -2372,7 +2372,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_value, row) => row.customerPOId
           ? <span className="text-[#1F1D1B]">{row.customerPOId}</span>
-          : <span className="text-[#9CA3AF]">—</span>,
+          : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
         key: "customerRef",
@@ -2382,7 +2382,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_value, row) => row.customerRef
           ? <span className="text-[#1F1D1B]">{row.customerRef}</span>
-          : <span className="text-[#9CA3AF]">—</span>,
+          : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
         key: "customerSO",
@@ -2392,7 +2392,7 @@ export default function DeliveryPage() {
         sortable: true,
         render: (_value, row) => row.customerSO
           ? <span className="text-[#1F1D1B]">{row.customerSO}</span>
-          : <span className="text-[#9CA3AF]">—</span>,
+          : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
         // Wei Siang 2026-05-16: per-row Sales Figure — the DO's linked

@@ -478,6 +478,38 @@ export function generateInvoicePdf(
   );
   y += 34;
 
+  // --- Terms & Conditions ---
+  // An invoice must still carry its terms — payment window, title of
+  // goods, late-payment and dispute clauses (Wei Siang).
+  const termsList = [
+    `1. Payment is due within the stated terms (${terms}) from the invoice date.`,
+    "2. Goods sold remain the property of Hookka Industries Sdn Bhd until paid in full.",
+    "3. Goods delivered in good order are not returnable unless agreed in writing.",
+    "4. Any discrepancy must be reported in writing within 7 days of delivery.",
+    "5. Late payment may incur a 1.5% monthly charge on the overdue balance.",
+    "6. All prices are in Ringgit Malaysia (RM). This invoice is subject to the standard terms of Hookka Industries Sdn Bhd.",
+  ];
+  const tcLineH = 3.6;
+  const tcBlockH = 6 + termsList.length * tcLineH;
+  if (y + tcBlockH > pageH - 38) {
+    doc.addPage();
+    y = 36;
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(7.5);
+  doc.setTextColor(...INK);
+  doc.text("TERMS & CONDITIONS", m, y);
+  y += 5;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6.6);
+  doc.setTextColor(...FAINT);
+  for (const t of termsList) {
+    const ln = doc.splitTextToSize(t, pageW - m * 2);
+    doc.text(ln, m, y);
+    y += ln.length * tcLineH;
+  }
+  y += 6;
+
   // --- Signature strip ---
   if (y > pageH - 34) {
     doc.addPage();

@@ -168,17 +168,11 @@ app.post("/", async (c) => {
     );
   }
 
-  const existing = await c.var.DB.prepare(
-    "SELECT id FROM raw_materials WHERE itemCode = ? LIMIT 1",
-  )
-    .bind(itemCode)
-    .first<{ id: string }>();
-  if (existing) {
-    return c.json(
-      { success: false, error: `Raw material ${itemCode} already exists` },
-      400,
-    );
-  }
+  // Duplicate itemCode is intentionally ALLOWED (Wei Siang, item-code
+  // consolidation in progress — duplicates are created on purpose, then
+  // merged by hand afterwards). The old "already exists" guard was
+  // removed here AND the DB UNIQUE index is dropped by migration
+  // 0120 / 0076; re-add both together once the merge is done.
 
   const id = genId();
   const baseUOM = pickUnit(body);
@@ -275,20 +269,10 @@ app.put("/:id", async (c) => {
     return c.json({ success: false, error: "Invalid JSON" }, 400);
   }
 
-  // Reject itemCode collisions on rename.
-  if (body.itemCode && body.itemCode !== existing.itemCode) {
-    const dupe = await c.var.DB.prepare(
-      "SELECT id FROM raw_materials WHERE itemCode = ? AND id != ? LIMIT 1",
-    )
-      .bind(body.itemCode, id)
-      .first<{ id: string }>();
-    if (dupe) {
-      return c.json(
-        { success: false, error: `Raw material ${body.itemCode} already exists` },
-        400,
-      );
-    }
-  }
+  // Duplicate itemCode on rename is intentionally ALLOWED — see the POST
+  // handler note: item-code consolidation is in progress, duplicates are
+  // created on purpose and merged by hand afterwards. (DB UNIQUE index
+  // dropped by migration 0120 / 0076.)
 
   const merged = {
     itemCode: body.itemCode ?? existing.itemCode,

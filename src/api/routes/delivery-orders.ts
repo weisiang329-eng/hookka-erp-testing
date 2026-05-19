@@ -2363,44 +2363,64 @@ app.get("/:id/print-extras", async (c) => {
     }
   }
 
+  // Resolve per line from TWO independent paths and prefer whichever
+  // has data:
+  //   (a) production order  — via di.productionOrderId (can be NULL on
+  //       consolidated multi-SO DOs, which is why the old single-path
+  //       query printed everything blank).
+  //   (b) sales order       — via di.salesOrderNo = sales_orders.companySOId
+  //       (the same path the on-screen items table uses, always present).
   const itRes = await c.var.DB.prepare(
     `SELECT di.id AS doiId,
+            di.salesOrderNo AS diSalesOrderNo,
+            di.productCode AS diProductCode,
+            di.fabricCode AS diFabricCode,
+            di.sizeLabel AS diSizeLabel,
             po.customerReference AS customerReference,
             po.customerPOId AS customerPOId,
             po.itemCategory AS itemCategory,
             po.salesOrderNo AS salesOrderNo,
             po.companySOId AS companySOId,
             po.salesOrderId AS salesOrderId,
-            po.productCode AS productCode,
-            po.sizeCode AS sizeCode,
-            po.fabricCode AS fabricCode,
             po.specialOrder AS specialOrder,
             po.gapInches AS gapInches,
             po.divanHeightInches AS divanHeightInches,
             po.legHeightInches AS legHeightInches,
-            so.customerSO AS lineCustomerSO
+            poso.customerSO AS lineCustomerSO,
+            so2.id AS soId2,
+            so2.customerPO AS soCustomerPO,
+            so2.customerPOId AS soCustomerPOId,
+            so2.customerSO AS soCustomerSO,
+            so2.reference AS soReference
        FROM delivery_order_items di
        LEFT JOIN production_orders po ON po.id = di.productionOrderId
-       LEFT JOIN sales_orders so ON so.id = po.salesOrderId
+       LEFT JOIN sales_orders poso ON poso.id = po.salesOrderId
+       LEFT JOIN sales_orders so2 ON so2.companySOId = di.salesOrderNo
       WHERE di.deliveryOrderId = ?`,
   )
     .bind(id)
     .all<{
       doiId: string;
+      diSalesOrderNo: string | null;
+      diProductCode: string | null;
+      diFabricCode: string | null;
+      diSizeLabel: string | null;
       customerReference: string | null;
       customerPOId: string | null;
       itemCategory: string | null;
       salesOrderNo: string | null;
       companySOId: string | null;
       salesOrderId: string | null;
-      productCode: string | null;
-      sizeCode: string | null;
-      fabricCode: string | null;
       specialOrder: string | null;
       gapInches: number | null;
       divanHeightInches: number | null;
       legHeightInches: number | null;
       lineCustomerSO: string | null;
+      soId2: string | null;
+      soCustomerPO: string | null;
+      soCustomerPOId: string | null;
+      soCustomerSO: string | null;
+      soReference: string | null;
     }>();
 
   // Spec fallback: many production_orders rows (older cascades / imports)
@@ -2414,24 +2434,36 @@ app.get("/:id/print-extras", async (c) => {
   const soIds = Array.from(
     new Set(
       (itRes.results ?? [])
-        .map((r) => r.salesOrderId || "")
+        .flatMap((r) => [r.salesOrderId || "", r.soId2 || ""])
         .filter(Boolean),
     ),
   );
-  const soiSpec = new Map<
-    string,
-    {
-      itemCategory: string | null;
-      gapInches: number | null;
-      divanHeightInches: number | null;
-      legHeightInches: number | null;
-      specialOrder: string | null;
-    }
-  >();
+  type SpecVal = {
+    itemCategory: string | null;
+    gapInches: number | null;
+    divanHeightInches: number | null;
+    legHeightInches: number | null;
+    specialOrder: string | null;
+  };
+  // Two granularities so a tiny size/fabric-label mismatch between the
+  // DO line and the SO line still recovers the spec: exact first, then
+  // a looser SO+productCode bucket.
+  const soiTight = new Map<string, SpecVal>();
+  const soiLoose = new Map<string, SpecVal>();
+  const mergeInto = (map: Map<string, SpecVal>, k: string, s: SpecVal) => {
+    const prev = map.get(k);
+    map.set(k, {
+      itemCategory: prev?.itemCategory ?? s.itemCategory ?? null,
+      gapInches: prev?.gapInches ?? s.gapInches ?? null,
+      divanHeightInches: prev?.divanHeightInches ?? s.divanHeightInches ?? null,
+      legHeightInches: prev?.legHeightInches ?? s.legHeightInches ?? null,
+      specialOrder: prev?.specialOrder ?? s.specialOrder ?? null,
+    });
+  };
   if (soIds.length > 0) {
     const ph = soIds.map(() => "?").join(",");
     const soiRes = await c.var.DB.prepare(
-      `SELECT salesOrderId, productCode, sizeCode, fabricCode,
+      `SELECT salesOrderId, productCode, fabricCode, sizeLabel,
               itemCategory, gapInches, divanHeightInches,
               legHeightInches, specialOrder
          FROM sales_order_items
@@ -2441,33 +2473,32 @@ app.get("/:id/print-extras", async (c) => {
       .all<{
         salesOrderId: string | null;
         productCode: string | null;
-        sizeCode: string | null;
         fabricCode: string | null;
+        sizeLabel: string | null;
         itemCategory: string | null;
         gapInches: number | null;
         divanHeightInches: number | null;
         legHeightInches: number | null;
         specialOrder: string | null;
       }>();
-    const keyOf = (
-      so: string | null,
-      pc: string | null,
-      sz: string | null,
-      fc: string | null,
-    ) => `${so || ""}|${pc || ""}|${sz || ""}|${fc || ""}`;
     for (const s of soiRes.results ?? []) {
-      const k = keyOf(s.salesOrderId, s.productCode, s.sizeCode, s.fabricCode);
-      const prev = soiSpec.get(k);
-      // First non-null wins per field so a blank duplicate line can't
-      // wipe a good one.
-      soiSpec.set(k, {
-        itemCategory: prev?.itemCategory ?? s.itemCategory ?? null,
-        gapInches: prev?.gapInches ?? s.gapInches ?? null,
-        divanHeightInches:
-          prev?.divanHeightInches ?? s.divanHeightInches ?? null,
-        legHeightInches: prev?.legHeightInches ?? s.legHeightInches ?? null,
-        specialOrder: prev?.specialOrder ?? s.specialOrder ?? null,
-      });
+      const sv: SpecVal = {
+        itemCategory: s.itemCategory ?? null,
+        gapInches: s.gapInches ?? null,
+        divanHeightInches: s.divanHeightInches ?? null,
+        legHeightInches: s.legHeightInches ?? null,
+        specialOrder: s.specialOrder ?? null,
+      };
+      mergeInto(
+        soiTight,
+        `${s.salesOrderId || ""}|${s.productCode || ""}|${s.fabricCode || ""}|${s.sizeLabel || ""}`,
+        sv,
+      );
+      mergeInto(
+        soiLoose,
+        `${s.salesOrderId || ""}|${s.productCode || ""}`,
+        sv,
+      );
     }
   }
 
@@ -2488,26 +2519,35 @@ app.get("/:id/print-extras", async (c) => {
     }
   > = {};
   for (const r of itRes.results ?? []) {
-    if (!customerRef && r.customerReference) customerRef = r.customerReference;
-    const fb = soiSpec.get(
-      `${r.salesOrderId || ""}|${r.productCode || ""}|${r.sizeCode || ""}|${r.fabricCode || ""}`,
-    );
-    // production order first; SO-line spec only fills the blanks.
+    const soId = r.salesOrderId || r.soId2 || "";
+    const pc = r.diProductCode || "";
+    const fc = r.diFabricCode || "";
+    const sl = r.diSizeLabel || "";
+    const fb =
+      soiTight.get(`${soId}|${pc}|${fc}|${sl}`) ||
+      soiLoose.get(`${soId}|${pc}`);
+    // production order first; sales-order line fills every blank.
     const g = r.gapInches ?? fb?.gapInches ?? null;
     const d = r.divanHeightInches ?? fb?.divanHeightInches ?? null;
     const l = r.legHeightInches ?? fb?.legHeightInches ?? null;
     const itemCategory = r.itemCategory ?? fb?.itemCategory ?? null;
     const specialOrder = r.specialOrder ?? fb?.specialOrder ?? null;
+    const customerPOId =
+      r.customerPOId || r.soCustomerPO || r.soCustomerPOId || null;
+    const customerSO = r.lineCustomerSO || r.soCustomerSO || null;
+    const customerRefLine = r.customerReference || r.soReference || null;
+    if (!customerRef && customerRefLine) customerRef = customerRefLine;
     const total =
       g == null && d == null && l == null
         ? null
         : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
     items[r.doiId] = {
       itemCategory,
-      customerPOId: r.customerPOId ?? null,
-      customerSO: r.lineCustomerSO ?? null,
-      customerRef: r.customerReference ?? null,
-      salesOrderNo: r.salesOrderNo || r.companySOId || null,
+      customerPOId,
+      customerSO,
+      customerRef: customerRefLine,
+      salesOrderNo:
+        r.salesOrderNo || r.companySOId || r.diSalesOrderNo || null,
       specialOrder,
       gapInches: g,
       divanHeightInches: d,

@@ -2954,6 +2954,8 @@ export default function InventoryPage() {
 const RM_UOM_OPTIONS = ["PCS", "MTR", "ROLL", "BOX", "CTN", "SET", "KG", "PAIR"];
 
 type RMEdit = {
+  itemCode?: string;
+  description?: string;
   itemGroup?: string;
   baseUOM?: string;
   isActive?: boolean;
@@ -3011,9 +3013,17 @@ function BatchEditRMDialog({
     });
   }, [rawMaterials, search, groupFilter, activeFilter]);
 
-  function getEffective(r: RawMaterial): { itemGroup: string; baseUOM: string; isActive: boolean } {
+  function getEffective(r: RawMaterial): {
+    itemCode: string;
+    description: string;
+    itemGroup: string;
+    baseUOM: string;
+    isActive: boolean;
+  } {
     const p = pendingByRm.get(r.id);
     return {
+      itemCode: p?.itemCode ?? r.itemCode,
+      description: p?.description ?? r.description,
       itemGroup: p?.itemGroup ?? r.itemGroup,
       baseUOM: p?.baseUOM ?? r.baseUOM,
       isActive: p?.isActive ?? r.isActive,
@@ -3029,6 +3039,8 @@ function BatchEditRMDialog({
       // If the new value matches the row's current value, drop the
       // override; that way the dirty count stays honest.
       const original =
+        field === "itemCode" ? r.itemCode :
+        field === "description" ? r.description :
         field === "itemGroup" ? r.itemGroup :
         field === "baseUOM" ? r.baseUOM :
         r.isActive;
@@ -3119,8 +3131,8 @@ function BatchEditRMDialog({
         const r = rawMaterials.find((rm) => rm.id === id);
         if (!r) continue;
         const body = {
-          itemCode: r.itemCode,
-          description: r.description,
+          itemCode: (edit.itemCode ?? r.itemCode).trim(),
+          description: (edit.description ?? r.description).trim(),
           baseUOM: edit.baseUOM ?? r.baseUOM,
           itemGroup: edit.itemGroup ?? r.itemGroup,
           balanceQty: r.balanceQty,
@@ -3341,8 +3353,26 @@ function BatchEditRMDialog({
                             className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
                           />
                         </td>
-                        <td className="px-3 py-2 font-medium text-[#111827]">{r.itemCode}</td>
-                        <td className="px-3 py-2 text-gray-600">{r.description}</td>
+                        <td className="px-3 py-2">
+                          <input
+                            type="text"
+                            value={eff.itemCode}
+                            onChange={(e) => setField(r.id, "itemCode", e.target.value)}
+                            className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#6B5C32] bg-white font-medium ${
+                              pendingByRm.get(r.id)?.itemCode !== undefined ? "border-[#4F7C3A] font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] text-[#111827]"
+                            }`}
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <input
+                            type="text"
+                            value={eff.description}
+                            onChange={(e) => setField(r.id, "description", e.target.value)}
+                            className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#6B5C32] bg-white ${
+                              pendingByRm.get(r.id)?.description !== undefined ? "border-[#4F7C3A] font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] text-gray-600"
+                            }`}
+                          />
+                        </td>
                         <td className="px-3 py-2">
                           <select
                             value={eff.itemGroup}

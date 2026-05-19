@@ -486,7 +486,7 @@ export default function InvoiceDetailPage() {
                     <FileText className="h-3.5 w-3.5 text-[#9CA3AF]" />
                     <p className="text-xs text-[#9CA3AF] uppercase">Company SO</p>
                   </div>
-                  <p className="font-medium text-[#1F1D1B] doc-number break-words">
+                  <p className="font-medium text-[#1F1D1B] doc-number truncate">
                     {(() => {
                       const distinct = Array.from(
                         new Set(
@@ -495,7 +495,12 @@ export default function InvoiceDetailPage() {
                             .filter(Boolean),
                         ),
                       );
-                      if (distinct.length) return distinct.join(", ");
+                      // Keep this cell compact — the authoritative
+                      // per-line SO is its own column in the items
+                      // table. A consolidated invoice just says how many.
+                      if (distinct.length === 1) return distinct[0];
+                      if (distinct.length > 1)
+                        return `${distinct.length} SOs — see items`;
                       return invoice.companySOId || "—";
                     })()}
                   </p>

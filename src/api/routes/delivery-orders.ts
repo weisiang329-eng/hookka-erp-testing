@@ -821,6 +821,21 @@ app.get("/stats", async (c) => {
   if (denied) return denied;
 
   const orgId = getOrgId(c);
+
+  // PR 3 (2026-05-20) — cache-aside snapshot. See lib/delivery-snapshot.ts
+  // for the architecture. Mirror of the pattern in routes/dashboard-overview.ts.
+  {
+    const { readDeliveryStatsSnapshot, getDeliveryStatsMaxUpdatedAt, isSnapshotFresh } =
+      await import("../lib/delivery-snapshot");
+    const [snap, currentMax] = await Promise.all([
+      readDeliveryStatsSnapshot(c.var.DB, orgId),
+      getDeliveryStatsMaxUpdatedAt(c.var.DB),
+    ]);
+    if (isSnapshotFresh(snap, currentMax) && snap) {
+      return c.json({ success: true, ...snap.data });
+    }
+  }
+
   // Per-status count + RM value. Value = exact goods value (the SAME
   // per-DO resolver loadDoValueMap feeds the per-row Amount column), so
   // the column sums to the tab total to the cent and "Delivered"
@@ -844,7 +859,24 @@ app.get("/stats", async (c) => {
       (valueByStatus[row.status] ?? 0) + (valueMap.get(row.id) ?? 0);
     total += 1;
   }
-  return c.json({ success: true, byStatus, valueByStatus, total });
+  const payload = { byStatus, valueByStatus, total };
+
+  // PR 3 write-back. Errors swallowed — cache is perf, not load-bearing.
+  try {
+    const { writeDeliveryStatsSnapshot, getDeliveryStatsMaxUpdatedAt } =
+      await import("../lib/delivery-snapshot");
+    const currentMax = await getDeliveryStatsMaxUpdatedAt(c.var.DB);
+    await writeDeliveryStatsSnapshot(
+      c.var.DB,
+      orgId,
+      payload as Record<string, unknown>,
+      currentMax ?? new Date().toISOString(),
+    );
+  } catch (e) {
+    console.warn("[delivery-stats-snapshot] write-back failed:", e);
+  }
+
+  return c.json({ success: true, ...payload });
 });
 
 // ---------------------------------------------------------------------------
@@ -858,8 +890,42 @@ app.get("/po-values", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
+
+  // PR 3 (2026-05-20) — cache-aside snapshot. /po-values is the heaviest
+  // delivery endpoint (per-PO resolver runs through every SO line of every
+  // active PO), so this is the highest-value snapshot in PR 3. Layer 2
+  // watches delivery_orders + delivery_order_items + sales_orders +
+  // sales_order_items — a price edit on any line correctly invalidates.
+  {
+    const { readDeliveryPoValuesSnapshot, getDeliveryPoValuesMaxUpdatedAt, isSnapshotFresh } =
+      await import("../lib/delivery-snapshot");
+    const [snap, currentMax] = await Promise.all([
+      readDeliveryPoValuesSnapshot(c.var.DB, orgId),
+      getDeliveryPoValuesMaxUpdatedAt(c.var.DB),
+    ]);
+    if (isSnapshotFresh(snap, currentMax) && snap) {
+      return c.json({ success: true, ...snap.data });
+    }
+  }
+
   const map = await loadPoValueMap(c.var.DB, orgId);
-  return c.json({ success: true, values: Object.fromEntries(map) });
+  const payload = { values: Object.fromEntries(map) };
+
+  try {
+    const { writeDeliveryPoValuesSnapshot, getDeliveryPoValuesMaxUpdatedAt } =
+      await import("../lib/delivery-snapshot");
+    const currentMax = await getDeliveryPoValuesMaxUpdatedAt(c.var.DB);
+    await writeDeliveryPoValuesSnapshot(
+      c.var.DB,
+      orgId,
+      payload as Record<string, unknown>,
+      currentMax ?? new Date().toISOString(),
+    );
+  } catch (e) {
+    console.warn("[delivery-po-values-snapshot] write-back failed:", e);
+  }
+
+  return c.json({ success: true, ...payload });
 });
 
 // ---------------------------------------------------------------------------

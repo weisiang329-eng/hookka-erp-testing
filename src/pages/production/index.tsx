@@ -5459,6 +5459,13 @@ export default function ProductionPage({
               },
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
+            // Render-only cap so the initial paint on Fab Sew (~1.2k rows)
+            // and similar large depts stays snappy. Filter / Search / Sort /
+            // Print / QR / Total strip all act on the full filtered set via
+            // gridFilteredDeptRows — capping is purely how many rows get
+            // painted into the DOM at once. Operator can click "Show all N"
+            // in the grid footer to lift the cap for that session.
+            defaultRowCap={500}
             onFilteredDataChange={setGridFilteredDeptRows}
             // Batch-action multi-select. Adds the checkbox column on the
             // left + populates `selectedDeptRows` for the toolbar below.

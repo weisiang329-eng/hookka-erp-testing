@@ -130,6 +130,13 @@ export type DataGridProps<T> = {
   // silently blank the grid (Sales Orders "Delivered" showed 0 of 66).
   // Omit on grids without an external filter to keep current behaviour.
   valueFilterKey?: string;
+  // Render-only row cap. When set, the grid renders at most this many rows
+  // (post-filter, post-sort) on first paint, and shows a "Showing X of Y · Show
+  // all Y" footer button to lift the cap. Filter / sort / search / select-all
+  // / onFilteredDataChange continue to operate on the FULL filtered set — the
+  // cap is purely a rendering optimisation to keep DOM node count bounded on
+  // grids with thousands of rows. Omit to disable (no cap, render everything).
+  defaultRowCap?: number;
 };
 
 type SavedView = {
@@ -922,6 +929,7 @@ export function DataGrid<T extends Record<string, any>>({
   virtualize = false,
   defaultExcludedValues,
   valueFilterKey,
+  defaultRowCap,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
   // Two-tier persistence per gridId:
@@ -1455,6 +1463,21 @@ export function DataGrid<T extends Record<string, any>>({
     return result;
   }, [filteredData, sortKey, sortDir, groupBy, groupEnabled, groupFilter, columns]);
 
+  // ── Row cap (render-only) ──
+  // Caps the DOM row count to `defaultRowCap` on first paint when the
+  // post-filter set exceeds it, then reveals all rows when the user clicks
+  // "Show all". Filter / sort / search / select-all / onFilteredDataChange
+  // continue to operate on the full `sortedData` — capping is purely a render
+  // optimisation. Tab/grid remount (parent supplies `key`) resets showAll, so
+  // every dept tab re-opens fast.
+  const [showAll, setShowAll] = useState(false);
+  const rowCapActive =
+    !!defaultRowCap && !showAll && sortedData.length > defaultRowCap;
+  const displayedData = useMemo(() => {
+    if (!rowCapActive) return sortedData;
+    return sortedData.slice(0, defaultRowCap!);
+  }, [sortedData, rowCapActive, defaultRowCap]);
+
   // ── Virtualization ──
   // Only enable when explicitly opted-in AND no group headers are interleaved
   // (collapsing groups would require a separate flat-index → row-or-header
@@ -1471,7 +1494,7 @@ export function DataGrid<T extends Record<string, any>>({
   // `style={{ height: "26px" }}` on each row's <td>.
   const ROW_HEIGHT_PX = 26;
   const rowVirtualizer = useVirtualizer({
-    count: virtualizationActive ? sortedData.length : 0,
+    count: virtualizationActive ? displayedData.length : 0,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT_PX,
     overscan: 8,
@@ -1492,7 +1515,7 @@ export function DataGrid<T extends Record<string, any>>({
         const start = Math.min(lastClickedIndex.current, index);
         const end = Math.max(lastClickedIndex.current, index);
         for (let i = start; i <= end; i++) {
-          next.add(String(getNestedValue(sortedData[i], keyField)));
+          next.add(String(getNestedValue(displayedData[i], keyField)));
         }
       } else if (e.ctrlKey || e.metaKey) {
         if (next.has(key)) next.delete(key);
@@ -2098,7 +2121,7 @@ export function DataGrid<T extends Record<string, any>>({
                 // race surfaces — one-line revert.
                 const VIRTUALIZE_MIN_ROWS = 30;
                 const useVirtualizedBody =
-                  virtualizationActive && sortedData.length >= VIRTUALIZE_MIN_ROWS;
+                  virtualizationActive && displayedData.length >= VIRTUALIZE_MIN_ROWS;
                 if (useVirtualizedBody) {
                   // Clip virtualItems to the current sortedData length. The
                   // tanstack-virtual instance can transiently emit indices
@@ -2117,7 +2140,7 @@ export function DataGrid<T extends Record<string, any>>({
                   // the same source of truth.
                   const rawVirtualItems = rowVirtualizer.getVirtualItems();
                   const virtualItems = rawVirtualItems.filter(
-                    (v) => v.index < sortedData.length,
+                    (v) => v.index < displayedData.length,
                   );
                   // Compute totalSize from sortedData.length × ROW_HEIGHT_PX
                   // instead of rowVirtualizer.getTotalSize(). The virtualizer's
@@ -2137,7 +2160,7 @@ export function DataGrid<T extends Record<string, any>>({
                   // totalSize from sortedData.length directly means body and
                   // footer are derived from the same source of truth in the
                   // SAME render pass, eliminating the drift.
-                  const totalSize = sortedData.length * ROW_HEIGHT_PX;
+                  const totalSize = displayedData.length * ROW_HEIGHT_PX;
                   const colSpan = visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0);
                   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
                   const paddingBottom =
@@ -2153,7 +2176,7 @@ export function DataGrid<T extends Record<string, any>>({
                     );
                   }
                   for (const v of virtualItems) {
-                    const row = sortedData[v.index];
+                    const row = displayedData[v.index];
                     if (row) out.push(renderDataRow(row, v.index));
                   }
                   if (paddingBottom > 0) {
@@ -2178,7 +2201,7 @@ export function DataGrid<T extends Record<string, any>>({
                   }
                 }
 
-                sortedData.forEach((row, index) => {
+                displayedData.forEach((row, index) => {
                   // Group header
                   if (groupBy && groupEnabled) {
                     const gv = String(getNestedValue(row, groupBy) ?? "—");
@@ -2216,8 +2239,34 @@ export function DataGrid<T extends Record<string, any>>({
 
       {/* Status bar */}
       <div className="flex items-center justify-between border border-t-0 border-[#E2DDD8] bg-[#F0ECE9] px-3 py-1 rounded-b text-[10px] text-[#777]">
-        <span>
-          {selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `Record 1 of ${sortedData.length}`}
+        <span className="flex items-center gap-2">
+          <span>
+            {selectedKeys.size > 0
+              ? `${selectedKeys.size} selected`
+              : `Record 1 of ${sortedData.length.toLocaleString()}`}
+          </span>
+          {/* Row cap pill — filter / sort / search still act on the full
+              sortedData; this only toggles how many rows are painted. */}
+          {rowCapActive && (
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="rounded bg-white border border-[#D8D2CB] px-2 py-0.5 font-medium text-[#1F1D1B] hover:bg-[#FAF8F4]"
+              title={`Painting first ${defaultRowCap!.toLocaleString()} rows for speed. Filter and Search still scan all ${sortedData.length.toLocaleString()} rows — click to render every match.`}
+            >
+              Showing {displayedData.length.toLocaleString()} of {sortedData.length.toLocaleString()} rows · Show all {sortedData.length.toLocaleString()}
+            </button>
+          )}
+          {showAll && !!defaultRowCap && sortedData.length > defaultRowCap && (
+            <button
+              type="button"
+              onClick={() => setShowAll(false)}
+              className="rounded border border-[#D8D2CB] px-2 py-0.5 text-[#6B5C32] hover:bg-white"
+              title={`Re-cap to ${defaultRowCap.toLocaleString()} rows for a faster scroll.`}
+            >
+              Cap at {defaultRowCap.toLocaleString()}
+            </button>
+          )}
         </span>
         <span>
           {data.length} total records

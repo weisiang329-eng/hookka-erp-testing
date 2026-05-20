@@ -33,18 +33,49 @@
 // tenants.
 // ---------------------------------------------------------------------------
 
-// The 5 source tables whose MAX(updated_at) feeds the Layer 2 freshness
-// check. Picked because every dashboard KPI ultimately derives from one
-// of them (or from a child table whose parent's updated_at is also
-// bumped by the same route). Adding more tables here is safe (the check
-// becomes stricter); removing one risks letting a write slip past
-// Layer 2.
+// Source tables whose MAX(updated_at) feeds the Layer 2 freshness check.
+//
+// Tier C C1 fix 2026-05-21 — expanded from 5 to 17 tables to close
+// the correctness gap surfaced in the 2026-05-20 audit. Previously only
+// tracked sales_orders / delivery_orders / invoices / job_cards /
+// payment_records. But the Dashboard payload also derives from:
+//   • working_hour_entries (efficiency ranking, headcount)
+//   • cost_ledger          (fabric usage past-30, cost-month KPI)
+//   • raw_materials, rm_batches (fabric on-hand)
+//   • fg_units, fg_batches (FG inventory)
+//   • workers              (active headcount by dept)
+//   • customers            (outstanding A/R total)
+//   • bom_templates        (next-30 fabric forecast)
+//   • sales_order_items, delivery_order_items, invoice_items
+//     (per-line aggregations for revenue and outstanding totals)
+//
+// Direct edits to any of these (admin script tweaks employee hours,
+// inventory adjustment, manual cost ledger entry, etc.) used to leave
+// the dashboard showing stale numbers for up to 24 hours (until the
+// nightly Layer 3 cron force-rebuilt). Now Layer 2 catches them on
+// the next read. Adding tables is always safe (stricter freshness);
+// removing risks a write slipping past.
 const TRACKED_TABLES = [
+  // Original 5 — confirmed coverage of all SO/DO/Invoice/JC KPIs.
   "sales_orders",
   "delivery_orders",
   "invoices",
   "job_cards",
   "payment_records",
+  // Tier C C1 additions — Dashboard cells these power were stale-
+  // tolerant before.
+  "sales_order_items",
+  "delivery_order_items",
+  "invoice_items",
+  "working_hour_entries",
+  "cost_ledger",
+  "raw_materials",
+  "rm_batches",
+  "fg_units",
+  "fg_batches",
+  "workers",
+  "customers",
+  "bom_templates",
 ] as const;
 
 export type DashboardSnapshotRow = {

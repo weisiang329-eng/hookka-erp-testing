@@ -976,6 +976,31 @@ app.put("/:id", async (c) => {
         after: afterSnapshot,
       });
       if (auditStmt) statements.push(auditStmt);
+
+      // PR 0 (2026-05-20, owner-confirmed) — reverse the customer's
+      // outstanding A/R for the unpaid portion of the cancelled invoice.
+      // Previously a CANCELLED transition wrote only the audit row, so
+      // customers.outstandingSen kept carrying the cancelled amount —
+      // AR drifted up forever (every cancelled SENT/PARTIAL_PAID/OVERDUE
+      // invoice padded the balance with money the customer no longer owed).
+      //
+      // unpaidSen = totalSen - paidAmount = the portion that was still on
+      // the customer's tab at cancel time. Already-paid portion stays out
+      // of the reversal — the cash is real, it just needs a refund / CN
+      // path which is a separate decision.
+      //
+      // MAX(0, ...) clamps in case the original create path didn't bump
+      // outstandingSen for this invoice (the manual POST /api/invoices
+      // path doesn't, only the auto-create-from-DO path does). Matches
+      // the guard pattern used in credit-notes.ts:256 and payments.ts:389.
+      const unpaidSen = existing.totalSen - existing.paidAmount;
+      if (unpaidSen > 0 && existing.customerId) {
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+          ).bind(unpaidSen, existing.customerId),
+        );
+      }
     }
 
     await c.var.DB.batch(statements);
@@ -1006,11 +1031,22 @@ app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
+  // PR 0 (2026-05-20, owner-confirmed) — pull customerId + amounts so we can
+  // reverse the customer's outstandingSen if the deleted DRAFT had been
+  // bumped on create. (Auto-created DRAFT invoices from delivery-orders.ts
+  // bump outstandingSen on create; manual POST invoices.ts does not. The
+  // MAX(0, ...) guard below handles both paths safely.)
   const existing = await c.var.DB.prepare(
-    "SELECT id, status FROM invoices WHERE id = ?",
+    "SELECT id, status, customerId, totalSen, paidAmount FROM invoices WHERE id = ?",
   )
     .bind(id)
-    .first<{ id: string; status: string }>();
+    .first<{
+      id: string;
+      status: string;
+      customerId: string;
+      totalSen: number;
+      paidAmount: number;
+    }>();
   if (!existing) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
@@ -1020,7 +1056,21 @@ app.delete("/:id", async (c) => {
       400,
     );
   }
-  await c.var.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id).run();
+  // Same reversal logic as the PUT void path (see comment above the
+  // isVoidTransition branch in this file). Done as a batch so DELETE +
+  // customer adjustment either both land or both roll back.
+  const unpaidSen = existing.totalSen - existing.paidAmount;
+  const stmts: D1PreparedStatement[] = [
+    c.var.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id),
+  ];
+  if (unpaidSen > 0 && existing.customerId) {
+    stmts.push(
+      c.var.DB.prepare(
+        `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+      ).bind(unpaidSen, existing.customerId),
+    );
+  }
+  await c.var.DB.batch(stmts);
   return c.json({ success: true });
 });
 

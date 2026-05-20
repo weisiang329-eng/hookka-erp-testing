@@ -5056,6 +5056,16 @@ app.post("/:id/scan-complete", async (c) => {
   const allJcRes = await db.prepare("SELECT * FROM job_cards").all<JobCardRow>();
   const allJcs = allJcRes.results ?? [];
 
+  // Tier B B2 fix 2026-05-21 (Agent C #2) — index allPos by id once so
+  // the spec-candidate filter below stops being O(N×M). At current data
+  // (530 POs × 2,200 JCs) the per-scan cost drops from ~1.16M
+  // comparisons to ~2,730 ops. This endpoint runs on every worker
+  // sticker scan, so the saving is per-action, not per-page-load.
+  const posById = new Map<string, ProductionOrderRow>();
+  for (const p of allPos) posById.set(p.id, p);
+  const jcsById = new Map<string, JobCardRow>();
+  for (const j of allJcs) jcsById.set(j.id, j);
+
   type Hit = {
     po: ProductionOrderRow;
     jc: JobCardRow;
@@ -5065,7 +5075,7 @@ app.post("/:id/scan-complete", async (c) => {
   // Find sticker binding first.
   let bound: Hit | null = null;
   const specJcs = allJcs.filter((j) => {
-    const p = allPos.find((pp) => pp.id === j.productionOrderId);
+    const p = posById.get(j.productionOrderId);
     return p && specKeyFor(j, p) === targetKey;
   });
   if (specJcs.length > 0) {
@@ -5079,8 +5089,8 @@ app.post("/:id/scan-complete", async (c) => {
       .all<PiecePicRow>();
     const hit = picsRes.results?.[0];
     if (hit) {
-      const jc = allJcs.find((j) => j.id === hit.jobCardId);
-      const po = jc ? allPos.find((p) => p.id === jc.productionOrderId) : undefined;
+      const jc = jcsById.get(hit.jobCardId);
+      const po = jc ? posById.get(jc.productionOrderId) : undefined;
       if (jc && po) {
         bound = { po, jc, slot: hit };
       }
@@ -5095,7 +5105,7 @@ app.post("/:id/scan-complete", async (c) => {
     const candidates: Hit[] = [];
     for (const jc of specJcs) {
       if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") continue;
-      const po = allPos.find((p) => p.id === jc.productionOrderId);
+      const po = posById.get(jc.productionOrderId);
       if (!po) continue;
       const slots = await ensurePiecePicsForJc(db, jc);
 

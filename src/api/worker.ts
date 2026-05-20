@@ -291,33 +291,11 @@ app.get("/api/pg-ping", async (c) => {
   }
 });
 
-// Phase 4 — refresh all dashboard materialized views.  Meant to be hit by
-// a Cron Trigger (external cron service or a separate Worker with scheduled
-// handler — Pages Functions doesn't support scheduled events directly).
-// Gated by CRON_SECRET + constant-time compare.  Returns 503 (not 403)
-// when the secret env var is missing on the server, so a misconfigured
-// deploy fails closed instead of allowing anonymous calls.
-app.post("/api/internal/refresh-mvs", async (c) => {
-  const expected = c.env.CRON_SECRET;
-  if (!expected || expected.length < 16) {
-    console.error("[refresh-mvs] CRON_SECRET unset or too short — refusing");
-    return c.json({ ok: false, error: "service unavailable" }, 503);
-  }
-  const given = c.req.header("x-cron-secret") || "";
-  if (!(await constantTimeEqual(given, expected))) {
-    return c.json({ ok: false, error: "forbidden" }, 403);
-  }
-  const t0 = Date.now();
-  try {
-    await c.var.DB.prepare("SELECT refresh_dashboard_mvs()").run();
-    const { invalidate } = await import("./lib/kv-cache");
-    await invalidate(c, "dashboard:summary:v1");
-    return c.json({ ok: true, elapsedMs: Date.now() - t0 });
-  } catch (e) {
-    console.error("[refresh-mvs] error:", e);
-    return c.json({ ok: false, error: "refresh failed" }, 500);
-  }
-});
+// PR 2 (2026-05-20) — /api/internal/refresh-mvs deleted along with the
+// 9901/9902 Materialized Views it served. The dashboard now reads from
+// the application-managed dashboard_snapshot table (PR 1). The Layer 3
+// equivalent of this endpoint is /api/internal/rebuild-dashboard-snapshot
+// (in PR 1), also CRON_SECRET-gated, called nightly at 02:00 SGT.
 
 // Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
 // /api/internal/refresh-mvs above. The cron workflow at
@@ -465,35 +443,12 @@ app.onError((err, c) => {
 // Auth-gated routes (registered AFTER authMiddleware)
 // ---------------------------------------------------------------------------
 
-// Phase 4 — dashboard summary from materialized views.  Auth-gated: aggregate
-// revenue + production volume are competitively sensitive.  30s KV cache.
-app.get("/api/dashboard/summary", async (c) => {
-  const { cached } = await import("./lib/kv-cache");
-  try {
-    const data = await cached(c, "dashboard:summary:v1", 30, async () => {
-      // MV columns are snake_case (not in the rename map used by the D1-
-      // compat adapter since they weren't in the SQLite source schema) —
-      // reference them literally.  postgres.js's toCamel transform still
-      // hands camelCase keys to the handler body.
-      const [so, po, jc] = await Promise.all([
-        c.var.DB.prepare("SELECT status, order_count, total_sen FROM mv_so_summary").all(),
-        c.var.DB.prepare("SELECT status, po_count FROM mv_po_pipeline").all(),
-        c.var.DB
-          .prepare("SELECT department_code, status, jc_count FROM mv_jc_by_dept")
-          .all(),
-      ]);
-      return {
-        salesOrders: so.results ?? [],
-        productionOrders: po.results ?? [],
-        jobCards: jc.results ?? [],
-      };
-    });
-    return c.json({ ok: true, ...data });
-  } catch (e) {
-    console.error("[dashboard/summary] error:", e);
-    return c.json({ ok: false, error: "dashboard unavailable" }, 500);
-  }
-});
+// PR 2 (2026-05-20) — /api/dashboard/summary deleted. Read from the 5
+// dashboard MVs (mv_so_summary, mv_po_pipeline, mv_jc_by_dept). Agent A
+// audit confirmed zero frontend callers anywhere in src/pages or
+// src/components — orphan endpoint, refreshing nightly for nobody.
+// Dashboard data now comes from /api/dashboard/overview (cache-aside
+// via dashboard_snapshot table, PR 1).
 
 // ---------------------------------------------------------------------------
 // Route registrations — add each migrated route here.
@@ -564,8 +519,6 @@ import jobCards from "./routes/job-cards";
 // Universal audit_events read endpoint — feeds AuditHistoryPanel on every
 // detail page so the operator can see "who changed what and when" per record.
 import auditEvents from "./routes/audit-events";
-// Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
-import dashboardRevenue from "./routes/dashboard-revenue";
 import dashboardOverview from "./routes/dashboard-overview";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes/mdm";
@@ -722,10 +675,10 @@ app.route("/api/admin", admin);
 // future PATCH/DELETE audit screens can mount here.
 app.route("/api/job-cards", jobCards);
 app.route("/api/audit-events", auditEvents);
-// Phase C #5 quick-win — revenue chart from mv_revenue_by_month_by_org.
-// MUST be mounted BEFORE the catch-all /api/* stub at the bottom and
-// AFTER authMiddleware so the orgId scope is in place.
-app.route("/api/dashboard/revenue", dashboardRevenue);
+// PR 2 (2026-05-20) — /api/dashboard/revenue route removed along with
+// its mv_revenue_by_month_by_org source. Monthly revenue is computed
+// inline by /api/dashboard/overview (per the 2026-05-16 rebuild in
+// BUG-2026-05-16-013) and served via the new dashboard_snapshot cache.
 app.route("/api/dashboard/overview", dashboardOverview);
 // Phase C #4 quick-win — MDM duplicate-detection review queue. Routes
 // scoped by orgId via getOrgId(c); detection-pass endpoint is admin-only

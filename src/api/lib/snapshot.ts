@@ -43,20 +43,22 @@ export type SnapshotRow = {
 
 // ---------------------------------------------------------------------------
 // Read a single snapshot row. Returns null if missing or unparseable.
+// cacheKey defaults to '' for param-less endpoints.
 // ---------------------------------------------------------------------------
 export async function readSnapshot(
   db: D1Database,
   config: SnapshotConfig,
   orgId: string,
+  cacheKey: string = "",
 ): Promise<SnapshotRow | null> {
   const row = await db
     .prepare(
       `SELECT data, built_from AS "builtFrom", built_at AS "builtAt",
               refresh_count AS "refreshCount"
          FROM ${config.tableName}
-        WHERE org_id = ?`,
+        WHERE org_id = ? AND cache_key = ?`,
     )
-    .bind(orgId)
+    .bind(orgId, cacheKey)
     .first<{
       data: string;
       builtFrom: string;
@@ -90,20 +92,21 @@ export async function writeSnapshot(
   orgId: string,
   data: Record<string, unknown>,
   builtFrom: string,
+  cacheKey: string = "",
 ): Promise<void> {
   const dataJson = JSON.stringify(data);
   const builtAt = new Date().toISOString();
   await db
     .prepare(
-      `INSERT INTO ${config.tableName} (org_id, data, built_from, built_at, refresh_count)
-       VALUES (?, ?, ?, ?, 1)
-       ON CONFLICT (org_id) DO UPDATE
+      `INSERT INTO ${config.tableName} (org_id, cache_key, data, built_from, built_at, refresh_count)
+       VALUES (?, ?, ?, ?, ?, 1)
+       ON CONFLICT (org_id, cache_key) DO UPDATE
        SET data = EXCLUDED.data,
            built_from = EXCLUDED.built_from,
            built_at = EXCLUDED.built_at,
            refresh_count = ${config.tableName}.refresh_count + 1`,
     )
-    .bind(orgId, dataJson, builtFrom, builtAt)
+    .bind(orgId, cacheKey, dataJson, builtFrom, builtAt)
     .run();
 }
 
@@ -156,9 +159,10 @@ export async function withSnapshot<T extends Record<string, unknown>>(
   config: SnapshotConfig,
   orgId: string,
   computeFresh: () => Promise<T>,
+  cacheKey: string = "",
 ): Promise<T> {
   const [snap, currentMax] = await Promise.all([
-    readSnapshot(db, config, orgId),
+    readSnapshot(db, config, orgId, cacheKey),
     getMaxSourceUpdatedAt(db, config),
   ]);
   if (isSnapshotFresh(snap, currentMax) && snap) {
@@ -172,6 +176,7 @@ export async function withSnapshot<T extends Record<string, unknown>>(
       orgId,
       data,
       currentMax ?? new Date().toISOString(),
+      cacheKey,
     );
   } catch (e) {
     console.warn(`[${config.tableName}] write-back failed:`, e);
@@ -188,9 +193,20 @@ export async function invalidateSnapshot(
   db: D1Database,
   config: SnapshotConfig,
   orgId: string,
+  cacheKey?: string,
 ): Promise<void> {
-  await db
-    .prepare(`DELETE FROM ${config.tableName} WHERE org_id = ?`)
-    .bind(orgId)
-    .run();
+  if (cacheKey === undefined) {
+    // Wipe every cache_key row for this org.
+    await db
+      .prepare(`DELETE FROM ${config.tableName} WHERE org_id = ?`)
+      .bind(orgId)
+      .run();
+  } else {
+    await db
+      .prepare(
+        `DELETE FROM ${config.tableName} WHERE org_id = ? AND cache_key = ?`,
+      )
+      .bind(orgId, cacheKey)
+      .run();
+  }
 }

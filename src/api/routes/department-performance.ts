@@ -102,6 +102,28 @@ app.get("/", async (c) => {
       ? (categoryQRaw as "SOFA" | "BEDFRAME")
       : null;
 
+  // PR 7 — cache-aside snapshot. Snapshot row keyed by full param tuple
+  // so different (date range × dept × category) combos don't collide.
+  // Read-then-fallthrough pattern (vs withSnapshot wrap) keeps the
+  // 360-line compute below at its original indent level.
+  const { getOrgId } = await import("../lib/tenant");
+  const { readSnapshot, writeSnapshot, getMaxSourceUpdatedAt, isSnapshotFresh } =
+    await import("../lib/snapshot");
+  const orgId = getOrgId(c);
+  const snapConfig = {
+    tableName: "department_performance_snapshot",
+    sourceTables: ["job_cards", "working_hour_entries"],
+  };
+  const cacheKey = `from=${fromStr}&to=${toStr}&dept=${departmentCode ?? ""}&cat=${category ?? ""}`;
+  const _snap_check = await Promise.all([
+    readSnapshot(c.var.DB, snapConfig, orgId, cacheKey),
+    getMaxSourceUpdatedAt(c.var.DB, snapConfig),
+  ]);
+  if (isSnapshotFresh(_snap_check[0], _snap_check[1]) && _snap_check[0]) {
+    return c.json({ success: true, ..._snap_check[0].data });
+  }
+  const _snap_currentMax = _snap_check[1];
+
   // ---- Per-date accumulators.
   type WorkerJobCell = {
     jobCardId: string;
@@ -443,8 +465,7 @@ app.get("/", async (c) => {
   const totalWorking = daily.reduce((s, r) => s + r.workingMinutes, 0);
   const totalProduction = daily.reduce((s, r) => s + r.productionMinutes, 0);
 
-  return c.json({
-    success: true,
+  const _snap_payload = {
     data: {
       range: { from: fromStr, to: toStr },
       departmentCode,
@@ -460,6 +481,26 @@ app.get("/", async (c) => {
       },
       daily,
     },
+  };
+  // PR 7 — write-back. Errors swallowed; cache is best-effort.
+  try {
+    await writeSnapshot(
+      c.var.DB,
+      snapConfig,
+      orgId,
+      _snap_payload,
+      _snap_currentMax ?? new Date().toISOString(),
+      cacheKey,
+    );
+  } catch (e) {
+    console.warn("[department-performance-snapshot] write-back failed:", e);
+  }
+  return c.json({
+    success: true,
+    ..._snap_payload,
+    // Preserve old shape: data field at top level (above).
+    // The original return had `data: {...}` here too.
+    ...{} as Record<string, never>,
   });
 });
 

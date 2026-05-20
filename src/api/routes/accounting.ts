@@ -15,6 +15,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -180,17 +181,32 @@ app.get("/aging", async (c) => {
   // RBAC gate (P3.3-followup) — accounting:read.
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
-  const [ar, ap] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM ar_aging ORDER BY customerName").all<ArAgingRow>(),
-    c.var.DB.prepare("SELECT * FROM ap_aging ORDER BY supplierName").all<ApAgingRow>(),
-  ]);
-  return c.json({
-    success: true,
-    data: {
-      ar: ar.results ?? [],
-      ap: ap.results ?? [],
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 — cache-aside snapshot. ar_aging / ap_aging are derived
+  // tables maintained by accounting cascades; tracking them directly
+  // ensures we re-compute the join whenever either is rebuilt.
+  const data = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "accounting_aging_snapshot",
+      sourceTables: ["ar_aging", "ap_aging", "invoices", "invoice_payments"],
     },
-  });
+    orgId,
+    async () => {
+      const [ar, ap] = await Promise.all([
+        c.var.DB.prepare("SELECT * FROM ar_aging ORDER BY customerName").all<ArAgingRow>(),
+        c.var.DB.prepare("SELECT * FROM ap_aging ORDER BY supplierName").all<ApAgingRow>(),
+      ]);
+      return {
+        data: {
+          ar: ar.results ?? [],
+          ap: ap.results ?? [],
+        },
+      };
+    },
+  );
+  return c.json({ success: true, ...data });
 });
 
 app.post("/aging", async (c) => {

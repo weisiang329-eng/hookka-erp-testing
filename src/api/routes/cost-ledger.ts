@@ -20,6 +20,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { laborRateForDate } from "../../lib/costing";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -223,55 +224,71 @@ app.get("/fg-batches", async (c) => {
 app.get("/summary", async (c) => {
   const denied = await requirePermission(c, "cost-ledger", "read");
   if (denied) return denied;
-  const [rmRes, fgRes, ledgerRes] = await Promise.all([
-    c.var.DB.prepare(
-      "SELECT remainingQty, unitCostSen FROM rm_batches",
-    ).all<{ remainingQty: number; unitCostSen: number }>(),
-    c.var.DB.prepare(
-      "SELECT remainingQty, unitCostSen FROM fg_batches",
-    ).all<{ remainingQty: number; unitCostSen: number }>(),
-    c.var.DB.prepare(
-      "SELECT date, type, totalCostSen FROM cost_ledger",
-    ).all<{ date: string; type: string; totalCostSen: number }>(),
-  ]);
-
-  const rmOnHandSen = (rmRes.results ?? []).reduce(
-    (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
-    0,
-  );
-  const fgOnHandSen = (fgRes.results ?? []).reduce(
-    (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
-    0,
-  );
-
-  const now = new Date();
-  const entries = ledgerRes.results ?? [];
-  const inMonth = (iso: string) => {
-    const d = new Date(iso);
-    return (
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth()
-    );
-  };
-  const cogsThisMonthSen = entries
-    .filter((e) => e.type === "FG_DELIVERED" && inMonth(e.date))
-    .reduce((s, e) => s + e.totalCostSen, 0);
-  const laborPostedThisMonthSen = entries
-    .filter((e) => e.type === "LABOR_POSTED" && inMonth(e.date))
-    .reduce((s, e) => s + e.totalCostSen, 0);
-
-  return c.json({
-    success: true,
-    data: {
-      asOf: now.toISOString(),
-      laborRatePerMinuteSen: laborRateForDate(now),
-      rmOnHandSen,
-      fgOnHandSen,
-      totalLedgerEntries: entries.length,
-      cogsThisMonthSen,
-      laborPostedThisMonthSen,
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 — cache-aside snapshot. cache_key = current YYYY-MM so the
+  // month-boundary roll-over (e.g. June 1) automatically gets a fresh
+  // row instead of serving stale May data. Old months' rows remain
+  // valid for historical reads (no extra cleanup needed — they just
+  // sit until nightly cron eventually wipes everything).
+  const cacheKey = new Date().toISOString().slice(0, 7);
+  const data = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "cost_ledger_summary_snapshot",
+      sourceTables: ["cost_ledger", "rm_batches", "fg_batches"],
     },
-  });
+    orgId,
+    async () => {
+      const [rmRes, fgRes, ledgerRes] = await Promise.all([
+        c.var.DB.prepare(
+          "SELECT remainingQty, unitCostSen FROM rm_batches",
+        ).all<{ remainingQty: number; unitCostSen: number }>(),
+        c.var.DB.prepare(
+          "SELECT remainingQty, unitCostSen FROM fg_batches",
+        ).all<{ remainingQty: number; unitCostSen: number }>(),
+        c.var.DB.prepare(
+          "SELECT date, type, totalCostSen FROM cost_ledger",
+        ).all<{ date: string; type: string; totalCostSen: number }>(),
+      ]);
+      const rmOnHandSen = (rmRes.results ?? []).reduce(
+        (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
+        0,
+      );
+      const fgOnHandSen = (fgRes.results ?? []).reduce(
+        (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
+        0,
+      );
+      const now = new Date();
+      const entries = ledgerRes.results ?? [];
+      const inMonth = (iso: string) => {
+        const d = new Date(iso);
+        return (
+          d.getFullYear() === now.getFullYear() &&
+          d.getMonth() === now.getMonth()
+        );
+      };
+      const cogsThisMonthSen = entries
+        .filter((e) => e.type === "FG_DELIVERED" && inMonth(e.date))
+        .reduce((s, e) => s + e.totalCostSen, 0);
+      const laborPostedThisMonthSen = entries
+        .filter((e) => e.type === "LABOR_POSTED" && inMonth(e.date))
+        .reduce((s, e) => s + e.totalCostSen, 0);
+      return {
+        data: {
+          asOf: now.toISOString(),
+          laborRatePerMinuteSen: laborRateForDate(now),
+          rmOnHandSen,
+          fgOnHandSen,
+          totalLedgerEntries: entries.length,
+          cogsThisMonthSen,
+          laborPostedThisMonthSen,
+        },
+      };
+    },
+    cacheKey,
+  );
+  return c.json({ success: true, ...data });
 });
 
 export default app;

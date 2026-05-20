@@ -35,12 +35,12 @@ export default function DebitNotesPage() {
   const [reasonDetail, setReasonDetail] = useState("");
   // Editor rows carry a client-only `_uid` so React keys stay stable across
   // add / remove / reorder. The uid is stripped before POST in handleCreate().
-  type DebitNoteItemRow = { _uid: string; description: string; quantity: number; unitPrice: number };
+  type DebitNoteItemRow = { _uid: string; description: string; quantity: number; unitPriceSen: number };
   const newDNItem = (): DebitNoteItemRow => ({
     _uid: crypto.randomUUID(),
     description: "",
     quantity: 1,
-    unitPrice: 0,
+    unitPriceSen: 0,
   });
   const [items, setItems] = useState<DebitNoteItemRow[]>([newDNItem()]);
   const [creating, setCreating] = useState(false);
@@ -64,7 +64,7 @@ export default function DebitNotesPage() {
     setItems(updated);
   };
 
-  const totalAmount = items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+  const totalAmount = items.reduce((sum, item) => sum + item.quantity * item.unitPriceSen, 0);
 
   const handleCreate = async () => {
     if (!selectedInvoiceId || items.length === 0) return;
@@ -72,8 +72,8 @@ export default function DebitNotesPage() {
     try {
       // Strip the client-only `_uid` before POST.
       const payloadItems = items
-        .filter((i) => i.description && i.unitPrice > 0)
-        .map((i) => ({ description: i.description, quantity: i.quantity, unitPrice: i.unitPrice }));
+        .filter((i) => i.description && i.unitPriceSen > 0)
+        .map((i) => ({ description: i.description, quantity: i.quantity, unitPriceSen: i.unitPriceSen }));
       const data = await fetchJson("/api/debit-notes", DNMutationSchema, {
         method: "POST",
         body: {
@@ -341,15 +341,15 @@ export default function DebitNotesPage() {
                         step="0.01"
                         inputMode="decimal"
                         placeholder="Unit Price (RM)"
-                        value={item.unitPrice ? (item.unitPrice / 100).toFixed(2) : ""}
+                        value={item.unitPriceSen ? (item.unitPriceSen / 100).toFixed(2) : ""}
                         onChange={(e) => {
                           const rm = parseFloat(e.target.value);
                           const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
-                          updateItem(idx, "unitPrice", sen);
+                          updateItem(idx, "unitPriceSen", sen);
                         }}
                       />
                       <span className="text-sm text-gray-500 py-2 w-28 text-right">
-                        {formatCurrency(item.quantity * item.unitPrice)}
+                        {formatCurrency(item.quantity * item.unitPriceSen)}
                       </span>
                       {items.length > 1 && (
                         <button onClick={() => removeItem(idx)} className="p-2 text-[#9A3A2D] hover:text-[#7A2E24]">

@@ -805,7 +805,15 @@ app.put("/:id", async (c) => {
       for (const raw of body.items as Array<Record<string, unknown>>) {
         const quantity = Number(raw.quantity) || 0;
         const unitPriceSen = Number(raw.unitPriceSen) || 0;
-        const totalSen = Number(raw.totalSen) || unitPriceSen * quantity;
+        // Tier D D4 fix 2026-05-21 — back-door write. Original code did
+        // `Number(raw.totalSen) || unitPriceSen * quantity`, which let
+        // the API caller pass an arbitrary totalSen that disagreed with
+        // qty × unitPriceSen (e.g. via curl). The operator UI has no
+        // input cell for totalSen — it's always displayed = qty × price.
+        // Per the memory rule feedback_no_back_door_writes.md, the
+        // backend must not accept a value the UI can't supply. Always
+        // recompute server-side now; raw.totalSen ignored if present.
+        const totalSen = unitPriceSen * quantity;
         computedSubtotal += totalSen;
         statements.push(
           c.var.DB.prepare(

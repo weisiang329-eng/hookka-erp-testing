@@ -212,8 +212,14 @@ app.post("/", async (c) => {
         400,
       );
     }
+    // PR 5 (2026-05-20) — also pull the customer-block fields from the
+    // invoice so the CN can snapshot them. Migration 0119 added these
+    // columns to the invoices table; from this PR forward they're
+    // populated at invoice-create time.
     const invoice = await c.var.DB.prepare(
-      "SELECT id, invoiceNo, customerId, customerName FROM invoices WHERE id = ?",
+      `SELECT id, invoiceNo, customerId, customerName, customerState,
+              customerAddress, attention, customerPhone
+         FROM invoices WHERE id = ?`,
     )
       .bind(invoiceId)
       .first<{
@@ -221,6 +227,10 @@ app.post("/", async (c) => {
         invoiceNo: string;
         customerId: string;
         customerName: string;
+        customerState: string | null;
+        customerAddress: string | null;
+        attention: string | null;
+        customerPhone: string | null;
       }>();
     if (!invoice) {
       return c.json({ success: false, error: "Invoice not found" }, 404);
@@ -298,9 +308,12 @@ app.post("/", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
+        // PR 5 — INSERT carries customerState / customerAddress /
+        // attention / customerPhone snapshotted from the invoice.
         `INSERT INTO credit_notes (id, noteNumber, invoiceId, invoiceNumber, customerId,
-           customerName, date, reason, reasonDetail, totalAmount, status, approvedBy, items)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           customerName, customerState, customerAddress, attention, customerPhone,
+           date, reason, reasonDetail, totalAmount, status, approvedBy, items)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         noteNumber,
@@ -308,6 +321,10 @@ app.post("/", async (c) => {
         invoice.invoiceNo,
         invoice.customerId,
         invoice.customerName,
+        invoice.customerState,
+        invoice.customerAddress,
+        invoice.attention,
+        invoice.customerPhone,
         date,
         reason,
         reasonDetail || "",

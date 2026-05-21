@@ -364,6 +364,11 @@ type DoForDeliveredCascade = {
   customerId: string;
   customerName: string;
   customerState: string | null;
+  // PR 5 (2026-05-20) — customer-block snapshot for invoice creation.
+  deliveryAddress: string | null;
+  contactPerson: string | null;
+  contactPhone: string | null;
+  customerPOId: string | null;
   hubId: string | null;
   hubName: string | null;
 };
@@ -615,12 +620,16 @@ async function buildDoDeliveredSoAndInvoice(
     rebuildInvoiceInsert = (no: string) =>
       db
         .prepare(
+          // PR 5 — INSERT carries customerAddress / attention /
+          // customerPhone / customerPOId snapshotted from the DO.
+          // Mirrors the manual POST /api/invoices INSERT in invoices.ts.
           `INSERT INTO invoices (
              id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
-             customerId, customerName, customerState, hubId, hubName,
+             customerId, customerName, customerState, customerAddress,
+             attention, customerPhone, customerPOId, hubId, hubName,
              subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
              paymentDate, paymentMethod, notes, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           invId,
@@ -632,6 +641,10 @@ async function buildDoDeliveredSoAndInvoice(
           doRow.customerId,
           doRow.customerName,
           doRow.customerState,
+          doRow.deliveryAddress,
+          doRow.contactPerson,
+          doRow.contactPhone,
+          doRow.customerPOId,
           doRow.hubId,
           doRow.hubName,
           computedTotal,

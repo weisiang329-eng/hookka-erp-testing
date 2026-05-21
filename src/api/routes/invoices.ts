@@ -45,6 +45,13 @@ type InvoiceRow = {
   customerId: string;
   customerName: string;
   customerState: string | null;
+  // PR 5 (2026-05-20) — full customer contact block snapshotted from
+  // the source DO at invoice-create time. Source: delivery_orders'
+  // delivery_address / contact_person / contact_phone / customer_po_id.
+  customerAddress: string | null;
+  attention: string | null;
+  customerPhone: string | null;
+  customerPOId: string | null;
   hubId: string | null;
   hubName: string | null;
   subtotalSen: number;
@@ -128,6 +135,14 @@ function rowToInvoice(
     customerId: row.customerId,
     customerName: row.customerName,
     customerState: row.customerState ?? "",
+    // PR 5 — return the new customer-block fields so the PDF
+    // generator's `invoice.customerAddress || invoice.customerState`
+    // fallback at generate-invoice-pdf.ts:77 finally has a real value
+    // to read instead of always falling back to state.
+    customerAddress: row.customerAddress ?? "",
+    attention: row.attention ?? "",
+    customerPhone: row.customerPhone ?? "",
+    customerPOId: row.customerPOId ?? "",
     hubId: row.hubId,
     hubName: row.hubName ?? "",
     items: items
@@ -509,9 +524,13 @@ app.post("/", async (c) => {
       );
     }
 
+    // PR 5 (2026-05-20) — pull the full customer-contact block from the
+    // source DO so invoice PDF stops showing "Address: KL" and
+    // "Contact: -" (BUG-2026-05-20-009, Agent B Tier 1 findings B1/B2/B3).
     const doRow = await c.var.DB.prepare(
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
-              customerState, hubId, hubName, status
+              customerState, deliveryAddress, contactPerson, contactPhone,
+              customerPOId, hubId, hubName, status
          FROM delivery_orders WHERE id = ?`,
     )
       .bind(deliveryOrderId)
@@ -523,6 +542,10 @@ app.post("/", async (c) => {
         customerId: string;
         customerName: string;
         customerState: string | null;
+        deliveryAddress: string | null;
+        contactPerson: string | null;
+        contactPhone: string | null;
+        customerPOId: string | null;
         hubId: string | null;
         hubName: string | null;
         status: string;
@@ -599,12 +622,16 @@ app.post("/", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
+        // PR 5 — INSERT also captures customerAddress / attention /
+        // customerPhone / customerPOId from the DO. These columns were
+        // added by migration 0119 (postgres) / 0079 (d1).
         `INSERT INTO invoices (
            id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
-           customerId, customerName, customerState, hubId, hubName,
+           customerId, customerName, customerState, customerAddress,
+           attention, customerPhone, customerPOId, hubId, hubName,
            subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
            paymentDate, paymentMethod, notes, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         invoiceNo,
@@ -615,6 +642,10 @@ app.post("/", async (c) => {
         doRow.customerId,
         doRow.customerName,
         doRow.customerState,
+        doRow.deliveryAddress,
+        doRow.contactPerson,
+        doRow.contactPhone,
+        doRow.customerPOId,
         doRow.hubId,
         doRow.hubName,
         subtotalSen,

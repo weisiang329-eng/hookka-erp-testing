@@ -34,6 +34,268 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-20-008 — Backfill route had no double-click guard (FOAM 326 inflation pattern)
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** infrastructure
+
+**Symptom:** Admin double-clicked "Run backfill" in dev tooling; the
+`/api/import/backfill-cascade-wip-producers` endpoint had no request
+dedup or hash-keyed completion lock. Both invocations re-fired
+`applyWipInventoryChange` for every cascade-completed JC, doubling
+wip_items stockQty (the documented FOAM 326 inflation, BUG-2026-05-12
+series).
+
+**Root cause:** The endpoint at import-completion.ts:3552-3996 looped
+over candidate JCs and pushed UPDATE batches without any idempotency
+key tying the run to a specific candidate set. Two parallel runs
+appeared as two distinct WIP increments to the system.
+
+**Fix:** Per owner direction "我们已经没有 backfill 功能了" — deleted the
+endpoint outright (445 lines) rather than retrofit a dedup table. The
+backfill purpose was a one-shot migration that's done; keeping an
+unprotected admin endpoint live in production was the lower-value
+trade-off. RefundCandidateRow + RefundSiblingRow type definitions
+relocated next to the surviving `/refund-backfill-overconsume` route.
+Commit `a54a7e9`.
+
+**Verify:** `tsc -b` clean post-deletion. No frontend caller existed
+(verified — grep `/api/import/*` returned nothing in `src/pages` or
+`src/components`). The 19 sibling backfill admin endpoints in the same
+file remain untouched per the PR 0 allowlist; logged for follow-up in
+`docs/AUDIT-BACKLOG-2026-05-20.md`.
+
+---
+
+## BUG-2026-05-20-007 — SO cancel cascade left cancelled JCs' cost_ledger in WIP forever
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** sales-orders
+
+**Symptom:** Cancelling an SO that had active POs/JCs (some COMPLETED,
+some IN_PROGRESS) moved the in-flight JCs to CANCELLED but never
+reversed the cost_ledger entries those JCs had accumulated. P&L
+carried WIP cost from abandoned work indefinitely; the dashboard
+"Pending Production Time" KPI kept the cancelled work in its bucket.
+
+**Root cause:** `sales-orders.ts:580-625` cascade UPDATEd
+production_orders.status + job_cards.status but never wrote a
+matching ADJUSTMENT row in cost_ledger to net out the cancelled
+work's existing LABOR_POSTED / FG_COMPLETED entries. Searched whole
+codebase — no REFUND/REVERSAL/ADJUSTMENT-on-cancel rows anywhere.
+
+**Fix:** After the JC status UPDATE batch, SELECT cost_ledger entries
+with `refType='JOB_CARD'` AND `refId IN (cancelled JC ids)`, then
+push a matching ADJUSTMENT row for each with the OPPOSITE direction
+('IN' ↔ 'OUT') and same qty/cost. Running totals net to zero.
+ADJUSTMENT is the existing reversal type per the CHECK constraint at
+`migrations-postgres/0001_init.sql:838` (no new migration). Commit
+`2b50123`.
+
+**Memory rule honored** (`feedback_protect_completed_work.md`):
+refType='PRODUCTION_ORDER' entries (RM_ISSUE that fired upstream from
+COMPLETED FAB_CUT JCs, FG_DELIVERED from already-shipped units) are
+NOT touched — only JOB_CARD-keyed entries on the JUST-cancelled JCs.
+
+**Verify:** `tsc -b` clean. Practical scope: most cancelled JCs are
+WAITING (no entries) so reversal inserts 0 rows in typical cases;
+fix matters for IN_PROGRESS/PAUSED JCs that had partial completion
+posted.
+
+---
+
+## BUG-2026-05-20-006 — Two POs completing same minute over-pulled the same FIFO rm_batch (cost+inventory silent corruption)
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** inventory-cascade
+
+**Symptom:** Two POs completing simultaneously and consuming the same
+RM batch could both schedule decrements against the snapshot
+remainingQty. Atomic SQL kept the rm_batches column itself
+mathematically correct, but each PO's cost_ledger entry was computed
+against the SNAPSHOT — total issued material could exceed actual
+batch capacity. `raw_materials.balanceQty` got floored by
+`GREATEST(0, ...)` and silently under-deducted. cost_ledger
+over-counted materials issued; P&L wrong, inventory wrong, no error
+surfaced.
+
+**Root cause:** `po-cost-cascade.ts:471-540` — `fifoConsume()` ran
+purely against the in-memory snapshot of rm_batches read at the
+start of the function. Two concurrent invocations both saw e.g.
+remainingQty=10, both picked an 8m slice, both pushed a -8m UPDATE
+that decremented the column to -6m without anyone failing.
+
+**Fix:** Per-slice UPDATE now carries `AND remainingQty >= ?` guard
+and runs serially with `await ... .run()` (out of the batch). After
+each UPDATE we inspect `meta.changes` — 0 means race lost → throw a
+clear operator-language error naming PO, line, slice qty. cost_ledger
+INSERT only fires if the UPDATE succeeded, so the ledger can never
+claim material that wasn't actually consumed. `raw_materials`
+balance UPDATE stays in the deferred batch (line-level sum, safe).
+Commit `b0e8e90`.
+
+**Verify:** `tsc -b` clean. Cost: ~5 extra round-trips per PO
+completion (slices serial vs batched) — acceptable given the
+consequence (silent inventory corruption) it prevents.
+
+---
+
+## BUG-2026-05-20-005 — Credit Note unitPrice ambiguous (RM vs sen) — 100× silent off-by-decimal risk
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** invoices
+
+**Symptom:** A caller POSTing `unitPrice: 4800.00` to `/api/credit-notes`
+(meaning RM 4800) would silently land 4800 SEN (= RM 48) in the
+`customers.outstandingSen` decrement — 100× off, customer credit
+under-applied. The on-page frontend stored sen internally so the UI
+path was fine, but any external integrator or curl call would hit
+the trap.
+
+**Root cause:** `credit-notes.ts:201-209` accepted `item.unitPrice`
+without unit-naming convention or integer validation. The DB column
+`total_amount` was integer sen, but the JSON items field was named
+`unitPrice` / `total` with no `_sen` suffix — schema-internal vs API-
+boundary contract drift. Both directions (RM-as-sen or sen-as-RM)
+were undetectable.
+
+**Fix:** Renamed JSON shape to `unitPriceSen` / `totalSen`. Backend
+POST handler rejects (1) `unitPrice` (without _sen) with a clear
+error pointing at the new name + `Math.round(rm * 100)` recipe,
+(2) non-integer `unitPriceSen` (catches RM-decimal sneak path), and
+(3) non-positive quantity. Frontend `CreditNoteItemRow` type +
+handlers updated to send the new name. `parseItems()` reads either
+legacy `{unitPrice, total}` OR new `{unitPriceSen, totalSen}` so
+existing DB rows render correctly (value was already in sen, only
+the field name differed). PDF generator already read `unitPriceSen ?? 0`
+defensively, no change needed there. Commit `cb63b4b`.
+
+**Memory rule honored** (`feedback_reject_dont_normalize.md`,
+`feedback_validation_frontend_backend_unified.md`): reject ambiguous
+input at the explicit name boundary; don't silently coerce.
+
+**Sister bug NOT fixed in this PR** (per owner allowlist): the same
+ambiguous `unitPrice` pattern exists in `debit-notes.ts` /
+`debit-notes.tsx`. Logged for follow-up.
+
+**Verify:** `tsc -b` clean.
+
+---
+
+## BUG-2026-05-20-004 — Invoice cancel/delete left customers.outstandingSen forever inflated (AR drift)
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** invoices
+
+**Symptom:** Cancelling a SENT/PARTIAL_PAID/OVERDUE invoice (or
+deleting a DRAFT) wrote only the audit/void row but never reversed
+the customer's `outstandingSen`. The customer's AR balance kept the
+cancelled amount forever — every void / delete padded the running tab
+with money the customer no longer owed. Operator-visible everywhere:
+customer detail page, dashboard outstanding KPI, aging report.
+
+**Root cause:** `invoices.ts:716` (PUT into CANCELLED branch) and
+`invoices.ts:1023` (DELETE handler) had no `UPDATE customers SET
+outstandingSen = ...` statement. The auto-create-from-DO path
+(`delivery-orders.ts:678`) DOES bump outstandingSen on create — the
+reverse leg was missing.
+
+**Fix:** PUT void path now appends a batch statement that subtracts
+`(totalSen - paidAmount)` (the unpaid portion = what was still on
+the customer's tab at cancel) from `customers.outstandingSen`. DELETE
+handler extended to SELECT customerId/totalSen/paidAmount, switched
+from a bare DELETE to a batch that includes the same reversal.
+`MAX(0, ...)` guards both writes so the manual-POST path (which
+doesn't bump on create) can't drive the balance negative — same
+guard pattern as `credit-notes.ts:256` and `payments.ts:389`. Commit
+`08807e0`.
+
+**Verify:** `tsc -b` clean.
+
+---
+
+## BUG-2026-05-20-003 — Overpayment silently flipped invoice PAID; customer credit balance vanished
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** payments
+
+**Symptom:** Operator records a payment larger than the invoice owed.
+The endpoint accepted it: `newPaid = paidAmount + amount` flipped
+status to PAID and left `paidAmount > totalSen`. The customer's
+overpayment (the credit they should have on file) vanished from the
+system — no refund row, no credit balance tracked.
+
+**Root cause:** `payments.ts:268-274` checked only `isFullyPaid =
+newPaid >= totalSen` and pushed the UPDATE unconditionally. No upper
+bound.
+
+**Fix:** Added a pre-batch validation loop that rejects with 400 when
+`snap.paidAmount + alloc.amount > snap.totalSen`, reporting the exact
+overshoot in sen and recommending Credit Note before retry. Same
+commit as BUG-2026-05-20-001/002. Commit `85e839e`.
+
+**Verify:** `tsc -b` clean. Note: the race-window pathway (two
+concurrent payments squeezing past the validation) still exists but
+caps damage at "paidAmount slightly exceeds totalSen" — operator-
+visible and correctable, vs the original silent vanish.
+
+---
+
+## BUG-2026-05-20-002 — Negative payment amount accepted, bypassed Credit Note workflow
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** payments
+
+**Symptom:** Operator (or curl) could record a payment with negative
+amount (e.g. `-RM 5000`). The endpoint silently subtracted from
+`paidAmount`, bypassing the Credit Note workflow — no refund reason,
+no CN audit trail, no journal entries on the reversal side.
+
+**Root cause:** `payments.ts:225` used `Number(a.amount) || 0` —
+allowed negatives through; downstream math then propagated.
+
+**Fix:** Pre-batch validation loop rejects with 400 when any
+allocation amount < 0, with a plain-English error pointing the
+operator at the Credit Note workflow as the correct path. Same
+commit as BUG-2026-05-20-001/003. Commit `85e839e`.
+
+**Verify:** `tsc -b` clean.
+
+---
+
+## BUG-2026-05-20-001 — Two simultaneous payments on same invoice silently lost one (last-write-wins on paidAmount)
+
+**Status:** 🟢 Fixed (2026-05-20)
+**Category:** payments
+
+**Symptom:** Owner-reported daily-bite risk: two finance staff record
+payment on the same invoice concurrently. payment_records ends up
+with both rows (good), but invoice.paidAmount reflects only one of
+them. Customer pays e.g. RM 8000 split across two staff (RM 5000 +
+RM 3000); system books only RM 3000 paid; finance later chases the
+customer for the "missing" RM 5000 they already paid.
+
+**Root cause:** `payments.ts:268-310` read `paidAmount` into a JS
+snapshot, computed `newPaid = snap.paidAmount + alloc.amount`, then
+wrote `UPDATE invoices SET paidAmount = ?` with the computed value.
+Two concurrent requests both snapshot the same paidAmount=X, both
+compute newPaid=X+delta, last UPDATE wins, the other delta vanishes.
+
+**Fix:** Switched to atomic SQL increment. UPDATE now reads
+`SET paidAmount = paidAmount + ?` (DB-side arithmetic; never reads
+the snapshot value). status + paymentDate computed in a CASE
+expression against the post-increment value so they stay consistent
+with the actual stored amount. Two concurrent payments now both
+land cleanly. Bundled with negative-payment rejection (BUG-2026-05-20-002)
+and overpayment rejection (BUG-2026-05-20-003) in the same commit.
+Commit `85e839e`.
+
+**Verify:** `tsc -b` clean. Sister bug NOT fixed in this PR: the
+BOUNCED rollback path at `payments.ts:477-528` has the same read-
+then-write race. Logged for follow-up.
+
+---
+
 ## BUG-2026-05-17-001 — Fabric Past-30 / Next-30 showed SKU totals under both Bedframe & Sofa (bedframe fabric counted as sofa demand)
 
 **Status:** 🟢 Fixed (2026-05-17)

@@ -225,6 +225,51 @@ app.post("/", async (c) => {
       amount: Number(a.amount) || 0,
     }));
 
+    // PR 0 (2026-05-20, owner-confirmed) — Reject negative and overpayment
+    // at the request boundary. Both were silent-money-bug paths:
+    //   • amount < 0 let an "RM -5000" payment slip through and bypass the
+    //     Credit Note workflow (no refund reason, no audit trail).
+    //   • paidAmount + amount > totalSen flipped the invoice to PAID and
+    //     left paidAmount above totalSen — the customer's overpayment
+    //     vanished from the system instead of becoming a credit balance.
+    // Race window note: this validation uses the snapshot read above, so a
+    // second concurrent payment can still squeeze through. The atomic
+    // UPDATE below caps the silent-loss damage to "paidAmount slightly
+    // exceeds totalSen" — visibly wrong and easy for the operator to spot
+    // and correct, vs the original silent-overwrite bug which the
+    // operator could not see at all.
+    for (const alloc of parsedAllocations) {
+      if (alloc.amount < 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Payment amount cannot be negative (received ${alloc.amount} for invoice ${alloc.invoiceNumber || alloc.invoiceId}). Use a Credit Note for refunds.`,
+          },
+          400,
+        );
+      }
+      const snap = invoiceSnapshots.get(alloc.invoiceId);
+      if (!snap) {
+        return c.json(
+          {
+            success: false,
+            error: `Invoice ${alloc.invoiceId} not found.`,
+          },
+          400,
+        );
+      }
+      if (snap.paidAmount + alloc.amount > snap.totalSen) {
+        const overshootSen = snap.paidAmount + alloc.amount - snap.totalSen;
+        return c.json(
+          {
+            success: false,
+            error: `Payment would overpay invoice ${snap.invoiceNo} by ${overshootSen} sen (already paid ${snap.paidAmount}, total ${snap.totalSen}, this payment ${alloc.amount}). Reduce the amount or issue a Credit Note first.`,
+          },
+          400,
+        );
+      }
+    }
+
     const id = genPaymentId();
     const date = new Date().toISOString().split("T")[0];
     const receiptNumber = body.receiptNumber || (await nextReceiptNo(c.var.DB));
@@ -265,13 +310,14 @@ app.post("/", async (c) => {
     for (const alloc of parsedAllocations) {
       const snap = invoiceSnapshots.get(alloc.invoiceId);
       if (!snap) continue;
+      // newPaid here is the *expected* post-write value, used only for
+      // the snapshot-based SO cascade detection below. The actual
+      // paidAmount write is atomic SQL — see the UPDATE further down.
+      // newStatus removed (PR 0 2026-05-20) — the CASE expression in
+      // the UPDATE now computes status from the real post-increment
+      // value instead of the snapshot-derived guess.
       const newPaid = snap.paidAmount + alloc.amount;
       const isFullyPaid = newPaid >= snap.totalSen;
-      const newStatus = isFullyPaid
-        ? "PAID"
-        : newPaid > 0
-          ? "PARTIAL_PAID"
-          : "SENT";
       totalAllocatedSen += alloc.amount;
       if (isFullyPaid && snap.salesOrderId) {
         fullyPaidSOIds.push(snap.salesOrderId);
@@ -295,15 +341,37 @@ app.post("/", async (c) => {
           reference || "",
         ),
       );
+      // PR 0 (2026-05-20) — atomic increment. Original code wrote
+      //   SET paidAmount = ?  (newPaid computed from snapshot)
+      // which loses the second of two simultaneous payments — both
+      // readers see the same snapshot, both compute the same newPaid
+      // candidate against stale data, last UPDATE wins.
+      // Atomic SQL += keeps both deltas. Status / paymentDate are
+      // recomputed against the post-increment value so they stay
+      // consistent. Pre-batch validation above already rejects negative
+      // and overpayment from the same request; this guards the
+      // concurrent-payment race.
       statements.push(
         c.var.DB.prepare(
           `UPDATE invoices
-             SET paidAmount = ?, status = ?, paymentDate = ?, updated_at = ?
+             SET paidAmount = paidAmount + ?,
+                 status = CASE
+                   WHEN paidAmount + ? >= totalSen THEN 'PAID'
+                   WHEN paidAmount + ? > 0 THEN 'PARTIAL_PAID'
+                   ELSE 'SENT'
+                 END,
+                 paymentDate = CASE
+                   WHEN paidAmount + ? >= totalSen THEN ?
+                   ELSE paymentDate
+                 END,
+                 updated_at = ?
            WHERE id = ?`,
         ).bind(
-          newPaid,
-          newStatus,
-          isFullyPaid ? date : null,
+          alloc.amount,
+          alloc.amount,
+          alloc.amount,
+          alloc.amount,
+          date,
           now,
           alloc.invoiceId,
         ),

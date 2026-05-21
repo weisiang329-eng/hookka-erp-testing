@@ -297,6 +297,52 @@ app.get("/api/pg-ping", async (c) => {
 // equivalent of this endpoint is /api/internal/rebuild-dashboard-snapshot
 // (in PR 1), also CRON_SECRET-gated, called nightly at 02:00 SGT.
 
+// PR 1 (2026-05-20) — Dashboard snapshot Layer 3 reconciliation.
+//
+// Nightly cron at 02:00 SGT (.github/workflows/rebuild-dashboard-snapshot.yml)
+// hits this endpoint to force-invalidate the dashboard_snapshot for every
+// tenant. The next read of /api/dashboard/overview re-computes against
+// fresh data and writes the new row. This is belt-and-braces protection
+// vs any silent drift that escaped Layer 1 (write-through) and Layer 2
+// (read-time MAX(updated_at) check) — e.g. an admin script that UPDATEs
+// a source table without bumping its updated_at column.
+//
+// Same CRON_SECRET pattern as /api/internal/refresh-mvs.
+app.post("/api/internal/rebuild-dashboard-snapshot", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error(
+      "[rebuild-dashboard-snapshot] CRON_SECRET unset or too short — refusing",
+    );
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  try {
+    // Wipe every tenant's dashboard_snapshot row. Next /api/dashboard/
+    // overview read for each tenant re-computes and writes a fresh
+    // row via the cache-aside path in routes/dashboard-overview.ts.
+    // DELETE then COUNT gives us an observable "tenants invalidated"
+    // figure for the cron logs.
+    const beforeRes = await c.var.DB.prepare(
+      "SELECT COUNT(*) AS n FROM dashboard_snapshot",
+    ).first<{ n: number }>();
+    await c.var.DB.prepare("DELETE FROM dashboard_snapshot").run();
+    return c.json({
+      ok: true,
+      tenantsInvalidated: beforeRes?.n ?? 0,
+      elapsedMs: Date.now() - t0,
+      note: "Snapshots invalidated; next /api/dashboard/overview read re-computes per tenant.",
+    });
+  } catch (e) {
+    console.error("[rebuild-dashboard-snapshot] error:", e);
+    return c.json({ ok: false, error: "rebuild failed" }, 500);
+  }
+});
+
 // Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
 // /api/internal/refresh-mvs above. The cron workflow at
 // .github/workflows/process-email-outbox.yml hits this every 5 min; the

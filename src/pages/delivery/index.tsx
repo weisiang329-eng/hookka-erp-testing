@@ -2933,6 +2933,7 @@ export default function DeliveryPage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No items in planning."
               groupBy="customerState"
+              autoGroup={false}
             />
           </CardContent>
         </Card>
@@ -2997,6 +2998,7 @@ export default function DeliveryPage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No items pending delivery."
               groupBy="customerState"
+              autoGroup={false}
               selectable
               onSelectionChange={(rows) =>
                 // Drop incomplete SOFA sets defensively — even if the user

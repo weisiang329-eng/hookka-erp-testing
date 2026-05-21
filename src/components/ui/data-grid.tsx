@@ -100,6 +100,10 @@ export type DataGridProps<T> = {
   className?: string;
   gridId?: string; // unique key for persisting column visibility in localStorage
   groupBy?: string; // column key to group rows by — inserts group header rows
+  // When `groupBy` is set, grouping is auto-enabled on first render by
+  // default. Pass `autoGroup={false}` to keep the grid FLAT on open — the
+  // "Group" toggle button still shows so the operator can group on demand.
+  autoGroup?: boolean;
   viewStorageKey?: string; // when provided, enables saved views feature; used as localStorage prefix
   // Fires whenever the currently filtered + sorted rows change. Lets the
   // parent mirror the grid's internal filter state — e.g. to scope a
@@ -1255,6 +1259,7 @@ export function DataGrid<T extends Record<string, any>>({
   className,
   gridId,
   groupBy,
+  autoGroup = true,
   viewStorageKey,
   onFilteredDataChange,
   onSearchChange,
@@ -1672,13 +1677,13 @@ export function DataGrid<T extends Record<string, any>>({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; row: T } | null>(null);
 
   // ── Grouping state ──
-  const [groupEnabled, setGroupEnabled] = useState(!!groupBy);
+  const [groupEnabled, setGroupEnabled] = useState(!!groupBy && autoGroup);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [groupFilter, setGroupFilter] = useState<Set<string> | null>(null); // null = show all
   const [showGroupDropdown, setShowGroupDropdown] = useState(false);
 
   // Sync groupEnabled when groupBy prop changes
-  useEffect(() => { setGroupEnabled(!!groupBy); }, [groupBy]);
+  useEffect(() => { setGroupEnabled(!!groupBy && autoGroup); }, [groupBy, autoGroup]);
 
   // 2026-05-12 perf: groups default collapsed on first paint. See the effect
   // body further down (lives after the allGroupValues useMemo so we can
@@ -1758,11 +1763,11 @@ export function DataGrid<T extends Record<string, any>>({
     setColumnValueFilters({});
     setSortKey(null);
     setSortDir("asc");
-    setGroupEnabled(!!groupBy);
+    setGroupEnabled(!!groupBy && autoGroup);
     setGroupFilter(null);
     setCollapsedGroups(new Set());
     setShowViewsDropdown(false);
-  }, [groupBy]);
+  }, [groupBy, autoGroup]);
 
   // Close views dropdown on outside click
   useEffect(() => {

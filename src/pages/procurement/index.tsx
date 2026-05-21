@@ -1799,6 +1799,7 @@ export default function ProcurementPage() {
             keyField="id"
             loading={loading}
             stickyHeader={true}
+            virtualize
             selectable={true}
             onSelectionChange={setSelectedPOs}
             onDoubleClick={(row) => navigate(`/procurement/${row.id}`)}

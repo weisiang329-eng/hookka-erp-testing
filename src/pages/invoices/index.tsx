@@ -589,6 +589,7 @@ export default function InvoicesPage() {
                 columns={invoiceGridColumns}
                 data={filteredInvoices}
                 keyField="id"
+                virtualize
                 selectable
                 onSelectionChange={(rows: Invoice[]) => setSelectedInvoices(rows)}
                 onDoubleClick={(row) => navigate(`/invoices/${row.id}`)}

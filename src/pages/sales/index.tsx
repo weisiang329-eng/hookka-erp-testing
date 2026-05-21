@@ -236,7 +236,6 @@ export default function SalesPage() {
   useMemo(() => statusChangesResp?.success ? statusChangesResp.data || [] : [], [statusChangesResp]);
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
   const [bulkConverting, setBulkConverting] = useState(false);
-  const [bulkPrinting, setBulkPrinting] = useState(false);
   // Bulk-review modal — flat table of every line item across all DRAFT
   // SOs in the current view. Lets the operator scan productCode / size /
   // fabric / divan / leg / gap / special / qty for 50+ items in one
@@ -928,38 +927,6 @@ export default function SalesPage() {
               >
                 <CheckCircle className="h-4 w-4" /> {bulkConverting ? "Converting..." : "Convert to Confirmed"}
               </Button>
-            </div>
-          )}
-          {tab === "CONFIRMED" && selectedRows.length > 0 && (
-            <div className="mb-3 flex items-center justify-between rounded-md border border-[#A8CAD2] bg-[#E0EDF0] px-3 py-2 text-sm">
-              <span className="text-[#3E6570]">
-                {selectedRows.length} order(s) selected
-              </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={bulkPrinting}
-                  onClick={async () => {
-                    setBulkPrinting(true);
-                    try {
-                      const { generateSOPdf } = await import("@/lib/generate-so-pdf");
-                      for (const so of selectedRows) {
-                        generateSOPdf(so, customers.find(c => c.id === so.customerId) ?? null);
-                        // Tiny pacing delay between PDFs so the browser doesn't
-                        // queue all download dialogs in the same tick. Inside
-                        // an async event handler, not a React effect.
-                        // eslint-disable-next-line no-restricted-syntax -- pacing delay inside async event handler loop
-                        await new Promise(r => setTimeout(r, 120));
-                      }
-                    } finally {
-                      setBulkPrinting(false);
-                    }
-                  }}
-                >
-                  <Printer className="h-4 w-4" /> {bulkPrinting ? "Printing..." : "Bulk Print PDF"}
-                </Button>
-              </div>
             </div>
           )}
           <DataGrid<SalesOrder>

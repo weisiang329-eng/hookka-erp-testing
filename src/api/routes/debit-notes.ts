@@ -32,17 +32,38 @@ type DebitNoteRow = {
   items: string | null;
 };
 
+// Tier D D2 fix 2026-05-21 — mirror of PR 0 #6 for Credit Notes. The
+// original `unitPrice` / `total` field names were unit-ambiguous; a
+// caller posting `unitPrice: 4800.00` (RM 4800) would land 4800 in
+// `outstandingSen` (= RM 48, 100× off). Renamed to `unitPriceSen` /
+// `totalSen` at the JSON shape boundary, with read-side back-compat
+// for legacy rows.
 type DNItem = {
   description: string;
   quantity: number;
-  unitPrice: number;
-  total: number;
+  unitPriceSen: number;
+  totalSen: number;
+};
+
+type LegacyDNItem = {
+  description: string;
+  quantity: number;
+  unitPrice?: number;
+  total?: number;
+  unitPriceSen?: number;
+  totalSen?: number;
 };
 
 function parseItems(raw: string | null): DNItem[] {
   if (!raw) return [];
   try {
-    return JSON.parse(raw) as DNItem[];
+    const parsed = JSON.parse(raw) as LegacyDNItem[];
+    return parsed.map((item) => ({
+      description: item.description,
+      quantity: item.quantity,
+      unitPriceSen: item.unitPriceSen ?? item.unitPrice ?? 0,
+      totalSen: item.totalSen ?? item.total ?? 0,
+    }));
   } catch {
     return [];
   }
@@ -138,15 +159,53 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "Invoice not found" }, 404);
     }
 
-    const parsedItems: DNItem[] = (
-      items as { description: string; quantity: number; unitPrice: number }[]
-    ).map((item) => ({
-      description: item.description,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      total: item.quantity * item.unitPrice,
-    }));
-    const totalAmount = parsedItems.reduce((sum, item) => sum + item.total, 0);
+    // Tier D D2 — strict validation: reject unitPrice (legacy ambiguous),
+    // require unitPriceSen integer.
+    const rawItems = items as Array<{
+      description?: string;
+      quantity?: number;
+      unitPriceSen?: number;
+      unitPrice?: number;
+    }>;
+    const parsedItems: DNItem[] = [];
+    for (const item of rawItems) {
+      if (item.unitPriceSen === undefined && item.unitPrice !== undefined) {
+        return c.json(
+          {
+            success: false,
+            error: `Debit note item must send 'unitPriceSen' (integer sen), not 'unitPrice'. Use Math.round(rm * 100) on the client.`,
+          },
+          400,
+        );
+      }
+      const unitPriceSen = Number(item.unitPriceSen);
+      if (!Number.isInteger(unitPriceSen) || unitPriceSen < 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Debit note unitPriceSen must be a non-negative integer (got ${item.unitPriceSen}).`,
+          },
+          400,
+        );
+      }
+      const quantity = Number(item.quantity);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Debit note quantity must be > 0 (got ${item.quantity}).`,
+          },
+          400,
+        );
+      }
+      parsedItems.push({
+        description: String(item.description ?? ""),
+        quantity,
+        unitPriceSen,
+        totalSen: quantity * unitPriceSen,
+      });
+    }
+    const totalAmount = parsedItems.reduce((sum, item) => sum + item.totalSen, 0);
 
     const id = genId();
     const noteNumber = await nextDNNo(c.var.DB);

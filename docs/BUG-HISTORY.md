@@ -34,6 +34,138 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-21-004 — Customer `outstandingSen` writable by hand-crafted POST/PUT (back-door past the invoice ledger)
+
+**Status:** 🟢 Fixed (2026-05-21)
+**Category:** data-integrity
+
+**Symptom:** The customer create/edit dialog has no input cell for
+`outstandingSen` — it's a derived A/R balance that should only move
+via invoice POST (+), payment POST (−), credit-note POST (−), debit-note
+POST (+). But `POST /api/customers` accepted `body.outstandingSen ?? 0`
+and `PUT /api/customers/:id` accepted `body.outstandingSen ?? existing`.
+Any admin script (or anyone hand-crafting a request) could seed or
+overwrite A/R with a number that had no supporting invoice row. The next
+payment posting would then over- or under-decrement against ghost A/R.
+
+**Root cause:** Pairs the same back-door pattern Wei Siang flagged for
+debit-note items and invoice line totals — the route accepted a field
+the UI never sends, with no validation that the value reconciles to
+the ledger.
+
+**Fix (`src/api/routes/customers.ts`):**
+- POST: hard-pin `outstandingSen` to 0 at creation (was `body.outstandingSen ?? 0`).
+- PUT: hard-pin `merged.outstandingSen = existing.outstandingSen`
+  (was `body.outstandingSen ?? existing.outstandingSen`).
+- The four legitimate writers (`invoices.ts`, `payments.ts`,
+  `credit-notes.ts`, `debit-notes.ts`) all use atomic
+  `outstandingSen = outstandingSen +/- ?` SQL and never touch these
+  routes — confirmed by grep.
+
+**Verify on prod (read-only):** `tsc` clean. Create / edit customer
+from UI → row's `outstandingSen` unchanged by save. POST or invoice
+or payment → atomic update still moves the balance.
+
+---
+
+## BUG-2026-05-21-003 — Invoice line item `totalSen` writable from client (back-door past `unitPriceSen × quantity`)
+
+**Status:** 🟢 Fixed (2026-05-21)
+**Category:** data-integrity
+
+**Symptom:** `POST /api/invoices` and the PUT counterpart computed
+`const totalSen = Number(raw.totalSen) || unitPriceSen * quantity`. A
+caller could send `totalSen: 999_999` and the server would store it
+verbatim, decoupled from `unitPriceSen × quantity`. Invoice header
+`totalSen` is the sum of items' `totalSen`, so the customer A/R
+increment (and downstream payment math) would track the back-door
+number, not the line economics.
+
+**Root cause:** Same back-door pattern as the debit-note `unitPrice/total`
+issue (BUG-2026-05-21-002 below) — accepting a derived field from the
+client rather than recomputing server-side.
+
+**Fix (`src/api/routes/invoices.ts`):** drop the `Number(raw.totalSen) ||`
+branch — `totalSen` is now always `unitPriceSen * quantity`, computed
+server-side. Header `totalSen` continues to sum the item totals so the
+invariant holds: `header.totalSen = Σ(items[i].unitPriceSen × items[i].quantity)`.
+
+**Verify on prod (read-only):** `tsc` clean. Create invoice from UI →
+each item's `totalSen` matches `unitPriceSen × quantity`. Header total
+matches the sum.
+
+---
+
+## BUG-2026-05-21-002 — Debit Note line items used unit-ambiguous `unitPrice` / `total` (caller posting RM landed in sen field 100× off)
+
+**Status:** 🟢 Fixed (2026-05-21)
+**Category:** data-integrity
+
+**Symptom:** Debit-note items used field names `unitPrice` and `total`
+with no unit suffix. A caller posting `unitPrice: 4800.00` (intending
+RM 4800) would land `4800` in the `outstandingSen` increment — RM 48,
+**100× off**. Mirror of the credit-note `_sen` rename Wei Siang did
+earlier; debit-note was missed in that pass.
+
+**Root cause:** Inherited the legacy non-`_sen` field shape from
+pre-_sen-rename code. The system-wide convention is integer sen on
+the wire; debit-note items broke it.
+
+**Fix:**
+- `src/api/routes/debit-notes.ts`:
+  - Renamed `DNItem.unitPrice` → `unitPriceSen`, `total` → `totalSen`.
+  - Added `LegacyDNItem` shape + `parseItems` back-compat shim that
+    reads old rows (legacy `unitPrice`/`total`) and surfaces them as
+    `unitPriceSen`/`totalSen` — no DB migration needed.
+  - POST strictly rejects payloads sending `unitPrice` instead of
+    `unitPriceSen` (`400` with a clear "use Math.round(rm * 100)"
+    message). `unitPriceSen` must be a non-negative integer; quantity
+    must be > 0. Server recomputes `totalSen = unitPriceSen × quantity`
+    (no client-supplied total).
+- `src/pages/invoices/debit-notes.tsx`: every `unitPrice` / `total`
+  on the line-item form switched to `unitPriceSen` / `totalSen`. The
+  form already sent integer sen via `Math.round(rm * 100)` — name
+  change only.
+
+**Verify on prod (read-only):** `tsc` clean. Create DN from UI → POST
+payload uses `unitPriceSen`. Existing DN rows in the legacy shape
+render unchanged (back-compat shim). Status → POSTED still increments
+customer `outstandingSen` by the correct sen amount.
+
+---
+
+## BUG-2026-05-21-001 — Payment BOUNCED rollback raced (read-then-write decrement could go negative or skip a status transition)
+
+**Status:** 🟢 Fixed (2026-05-21)
+**Category:** payments
+
+**Symptom:** When a payment moved to `BOUNCED`, the route read the
+invoice, subtracted the payment amount in JS, picked the new status
+in JS, then wrote back. Two BOUNCED transitions arriving close
+together could read the same `paidAmount`, both decrement against
+the stale value, and one would either drive `paidAmount` negative
+or fail to recompute the status correctly.
+
+**Root cause:** Read-then-write decrement without DB-side guards.
+Same anti-pattern that bit the customer-A/R math earlier; mirror of
+the GREATEST/CASE atomic pattern used in `credit-notes.ts`.
+
+**Fix (`src/api/routes/payments.ts`):** the BOUNCED rollback now uses
+a single atomic SQL `UPDATE invoices SET paidAmount = GREATEST(0,
+paidAmount - ?), status = CASE WHEN GREATEST(0, paidAmount - ?) <= 0
+THEN 'SENT' WHEN GREATEST(0, paidAmount - ?) < totalSen THEN
+'PARTIAL_PAID' ELSE 'PAID' END, updated_at = ? WHERE id = ?`. No
+read-then-write window; clamp prevents negative balance even if the
+ledger ever drifted.
+
+**Verify on prod (read-only):** `tsc` clean. Mark a posted payment as
+BOUNCED → invoice `paidAmount` drops by exactly the payment amount,
+status walks to the right bucket. Two concurrent BOUNCED transitions
+on different payments of the same invoice both apply correctly with
+no negative landing.
+
+---
+
 ## BUG-2026-05-20-008 — Backfill route had no double-click guard (FOAM 326 inflation pattern)
 
 **Status:** 🟢 Fixed (2026-05-20)

@@ -780,6 +780,15 @@ function rowToPO(
   pics: PiecePicRow[] = [],
   leadTimeMap: LeadTimeMap | null = null,
 ) {
+  // Tier B B1 fix 2026-05-21 (Agent C #1, the 5-17s Production page
+  // slowness) — when this function is called from a batched
+  // caller (.map over many POs with the SAME full arrays), the inner
+  // .filter is O(N×M). For 530 PO × 2200 JC that's ~1.16M comparisons
+  // per page load. Batched callers should use rowsToPOsBatch() below
+  // which pre-groups once at O(N+M). This direct function is
+  // preserved verbatim (same .filter, same output shape) for the few
+  // single-PO callers (line 1586, GET /api/production-orders/:id)
+  // and any future caller that genuinely has one PO at a time.
   const parentTargetEndDate = row.targetEndDate ?? null;
   const parentItemCategory = row.itemCategory ?? null;
   const myJCs = jobCards
@@ -832,6 +841,135 @@ function rowToPO(
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Batched PO → JSON converter (Tier B B1, Agent C #1, 2026-05-21).
+//
+// Same output as `rows.map(r => rowToPO(r, allJcs, allPics, leadTimeMap))`
+// but O(N + M) instead of O(N × M). Builds two indexes once:
+//   • jcsByPoId : Map<poId, JobCardRow[]>
+//   • picsByJcId: Map<jcId, PiecePicRow[]>
+// Then each PO row does an O(1) lookup. Output shape is identical
+// (verified field-by-field against rowToPO + rowToJobCard) so every
+// frontend (Production matrix, dept tabs, dashboard cross-dept dates,
+// Workers page completion dates) sees exactly the same data — only
+// the server-side compute path changes.
+//
+// Measured win at current data (530 PO × 2200 JC): 1.16M comparisons
+// → 2,730 ops. ~400× cheaper per request.
+//
+// Sorting honoured: JCs by sequence, pics by pieceNo — same as rowToPO/
+// rowToJobCard. Sorting happens once per bucket here vs per-PO before.
+// ---------------------------------------------------------------------------
+function rowsToPOsBatch(
+  rows: ProductionOrderRow[],
+  allJcs: JobCardRow[],
+  allPics: PiecePicRow[],
+  leadTimeMap: LeadTimeMap | null = null,
+): ReturnType<typeof rowToPO>[] {
+  // Group JCs by productionOrderId, sorted by sequence within each bucket.
+  const jcsByPoId = new Map<string, JobCardRow[]>();
+  for (const j of allJcs) {
+    const arr = jcsByPoId.get(j.productionOrderId);
+    if (arr) arr.push(j);
+    else jcsByPoId.set(j.productionOrderId, [j]);
+  }
+  for (const arr of jcsByPoId.values()) {
+    arr.sort((a, b) => a.sequence - b.sequence);
+  }
+
+  // Group pics by jobCardId, sorted by pieceNo within each bucket.
+  const picsByJcId = new Map<string, PiecePicRow[]>();
+  for (const p of allPics) {
+    const arr = picsByJcId.get(p.jobCardId);
+    if (arr) arr.push(p);
+    else picsByJcId.set(p.jobCardId, [p]);
+  }
+  for (const arr of picsByJcId.values()) {
+    arr.sort((a, b) => a.pieceNo - b.pieceNo);
+  }
+
+  return rows.map((row) => {
+    const parentTargetEndDate = row.targetEndDate ?? null;
+    const parentItemCategory = row.itemCategory ?? null;
+    const myJCs = (jcsByPoId.get(row.id) ?? []).map((j) => {
+      const myPics = (picsByJcId.get(j.id) ?? []).map(rowToPiecePic);
+      return {
+        id: j.id,
+        departmentId: j.departmentId ?? "",
+        departmentCode: j.departmentCode ?? "",
+        departmentName: j.departmentName ?? "",
+        sequence: j.sequence,
+        status: j.status,
+        dueDate: j.dueDate ?? "",
+        expectedDueDate: computeExpectedDueDate(
+          parentTargetEndDate,
+          parentItemCategory,
+          j.departmentCode,
+          leadTimeMap,
+        ),
+        wipKey: j.wipKey ?? undefined,
+        wipCode: j.wipCode ?? undefined,
+        wipType: j.wipType ?? undefined,
+        wipLabel: j.wipLabel ?? undefined,
+        wipQty: j.wipQty ?? undefined,
+        branchKey: j.branchKey ?? undefined,
+        prerequisiteMet: Boolean(j.prerequisiteMet),
+        pic1Id: j.pic1Id,
+        pic1Name: j.pic1Name ?? "",
+        pic2Id: j.pic2Id,
+        pic2Name: j.pic2Name ?? "",
+        completedDate: j.completedDate,
+        estMinutes: j.estMinutes,
+        actualMinutes: j.actualMinutes,
+        category: j.category ?? "",
+        productionTimeMinutes: j.productionTimeMinutes,
+        overdue: j.overdue ?? "",
+        rackingNumber: j.rackingNumber ?? undefined,
+        distributedAt: j.distributedAt ?? null,
+        piecePics: myPics.length > 0 ? myPics : undefined,
+      };
+    });
+    return {
+      id: row.id,
+      poNo: row.poNo,
+      salesOrderId: row.salesOrderId ?? "",
+      salesOrderNo: row.salesOrderNo ?? "",
+      lineNo: row.lineNo,
+      customerPOId: row.customerPOId ?? "",
+      customerReference: row.customerReference ?? "",
+      customerName: row.customerName ?? "",
+      customerState: row.customerState ?? "",
+      companySOId: row.companySOId ?? "",
+      consignmentOrderId: row.consignmentOrderId ?? "",
+      companyCOId: row.companyCOId ?? "",
+      productId: row.productId ?? "",
+      productCode: row.productCode ?? "",
+      productName: row.productName ?? "",
+      itemCategory: row.itemCategory ?? "BEDFRAME",
+      sizeCode: row.sizeCode ?? "",
+      sizeLabel: row.sizeLabel ?? "",
+      fabricCode: row.fabricCode ?? "",
+      quantity: row.quantity,
+      gapInches: row.gapInches,
+      divanHeightInches: row.divanHeightInches,
+      legHeightInches: row.legHeightInches,
+      specialOrder: row.specialOrder ?? "",
+      notes: row.notes ?? "",
+      status: row.status,
+      currentDepartment: row.currentDepartment ?? "",
+      progress: row.progress,
+      jobCards: myJCs,
+      startDate: row.startDate ?? "",
+      targetEndDate: row.targetEndDate ?? "",
+      completedDate: row.completedDate,
+      rackingNumber: row.rackingNumber ?? "",
+      stockedIn: Boolean(row.stockedIn),
+      createdAt: row.createdAt ?? "",
+      updatedAt: row.updatedAt ?? "",
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -955,9 +1093,9 @@ async function fetchAllPOs(
       .bind(orgId)
       .all<PiecePicRow>(),
   ]);
-  return (pos.results ?? []).map((p) =>
-    rowToPO(p, jcs.results ?? [], pics.results ?? []),
-  );
+  // Tier B B1 (2026-05-21) — batched O(N+M) conversion. Same output as
+  // .map(rowToPO) but ~400× cheaper at current data scale.
+  return rowsToPOsBatch(pos.results ?? [], jcs.results ?? [], pics.results ?? []);
 }
 
 // Variant of fetchAllPOs that supports server-side status filtering and
@@ -1273,8 +1411,12 @@ async function fetchFilteredPOs(
         .bind(orgId)
         .all<PiecePicRow>(),
     ]);
-    return (pos.results ?? []).map((p) =>
-      rowToPO(p, jcs.results ?? [], pics.results ?? [], leadTimeMap),
+    // Tier B B1 (2026-05-21) — batched O(N+M).
+    return rowsToPOsBatch(
+      pos.results ?? [],
+      jcs.results ?? [],
+      pics.results ?? [],
+      leadTimeMap,
     );
   }
   if (hasFilter) {
@@ -1306,7 +1448,8 @@ async function fetchFilteredPOs(
         poIds,
       ),
     ]);
-    return poRows.map((p) => rowToPO(p, jcs, pics, leadTimeMap));
+    // Tier B B1 (2026-05-21) — batched O(N+M).
+    return rowsToPOsBatch(poRows, jcs, pics, leadTimeMap);
   }
   // No status filter, no dept filter: legacy full-fetch backward-compat path.
   const jcStmt = db
@@ -1320,8 +1463,12 @@ async function fetchFilteredPOs(
       .bind(orgId)
       .all<PiecePicRow>(),
   ]);
-  return (pos.results ?? []).map((p) =>
-    rowToPO(p, jcs.results ?? [], pics.results ?? [], leadTimeMap),
+  // Tier B B1 (2026-05-21) — batched O(N+M).
+  return rowsToPOsBatch(
+    pos.results ?? [],
+    jcs.results ?? [],
+    pics.results ?? [],
+    leadTimeMap,
   );
 }
 
@@ -1552,7 +1699,8 @@ async function fetchPaginatedPOs(
   }
 
   return {
-    data: posRows.map((p) => rowToPO(p, jcs, pics, leadTimeMap)),
+    // Tier B B1 (2026-05-21) — batched O(N+M).
+    data: rowsToPOsBatch(posRows, jcs, pics, leadTimeMap),
     total,
   };
 }
@@ -4908,6 +5056,16 @@ app.post("/:id/scan-complete", async (c) => {
   const allJcRes = await db.prepare("SELECT * FROM job_cards").all<JobCardRow>();
   const allJcs = allJcRes.results ?? [];
 
+  // Tier B B2 fix 2026-05-21 (Agent C #2) — index allPos by id once so
+  // the spec-candidate filter below stops being O(N×M). At current data
+  // (530 POs × 2,200 JCs) the per-scan cost drops from ~1.16M
+  // comparisons to ~2,730 ops. This endpoint runs on every worker
+  // sticker scan, so the saving is per-action, not per-page-load.
+  const posById = new Map<string, ProductionOrderRow>();
+  for (const p of allPos) posById.set(p.id, p);
+  const jcsById = new Map<string, JobCardRow>();
+  for (const j of allJcs) jcsById.set(j.id, j);
+
   type Hit = {
     po: ProductionOrderRow;
     jc: JobCardRow;
@@ -4917,7 +5075,7 @@ app.post("/:id/scan-complete", async (c) => {
   // Find sticker binding first.
   let bound: Hit | null = null;
   const specJcs = allJcs.filter((j) => {
-    const p = allPos.find((pp) => pp.id === j.productionOrderId);
+    const p = posById.get(j.productionOrderId);
     return p && specKeyFor(j, p) === targetKey;
   });
   if (specJcs.length > 0) {
@@ -4931,8 +5089,8 @@ app.post("/:id/scan-complete", async (c) => {
       .all<PiecePicRow>();
     const hit = picsRes.results?.[0];
     if (hit) {
-      const jc = allJcs.find((j) => j.id === hit.jobCardId);
-      const po = jc ? allPos.find((p) => p.id === jc.productionOrderId) : undefined;
+      const jc = jcsById.get(hit.jobCardId);
+      const po = jc ? posById.get(jc.productionOrderId) : undefined;
       if (jc && po) {
         bound = { po, jc, slot: hit };
       }
@@ -4947,7 +5105,7 @@ app.post("/:id/scan-complete", async (c) => {
     const candidates: Hit[] = [];
     for (const jc of specJcs) {
       if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") continue;
-      const po = allPos.find((p) => p.id === jc.productionOrderId);
+      const po = posById.get(jc.productionOrderId);
       if (!po) continue;
       const slots = await ensurePiecePicsForJc(db, jc);
 

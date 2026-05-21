@@ -251,6 +251,7 @@ async function cascadeCOStatusToPOs(
   coId: string,
   newStatus: string,
   now: string,
+  fromStatus: string = "",
 ): Promise<COCascadeResult> {
   const result: COCascadeResult = {
     statements: [],
@@ -258,11 +259,25 @@ async function cascadeCOStatusToPOs(
     affectedJcCount: 0,
     poNos: [],
   };
-  // Only CANCELLED is wired today. ON_HOLD / RESUME (the SO equivalents
-  // that mirror PAUSED/RESUMED) aren't in CO's status enum yet — when
-  // they land, extend this function the same way cascadeSOStatusToPOs
-  // grew its branches.
-  if (newStatus !== "CANCELLED") return result;
+  // Tier A fix 2026-05-21 (BUG-2026-05-20 series, Agent A finding A2):
+  // Previously this function early-returned on every transition except
+  // CANCELLED. CO_VALID_TRANSITIONS allows ON_HOLD from CONFIRMED /
+  // IN_PRODUCTION / READY_TO_SHIP and resume from ON_HOLD back to
+  // CONFIRMED / IN_PRODUCTION, but neither cascade ran — operator
+  // could pause a CO while its child POs / JCs kept running on the
+  // shop floor (the symptom Wei Siang flagged: "my CO 设 ON_HOLD 但
+  // 工人继续在做").
+  //
+  // Now mirrors cascadeSOStatusToPOs (sales-orders.ts:524) exactly —
+  // 3 branches: ON_HOLD / CANCELLED / RESUME. Memory rule
+  // feedback_protect_completed_work honoured: COMPLETED / TRANSFERRED
+  // / CANCELLED JCs never touched.
+  const isHold = newStatus === "ON_HOLD";
+  const isCancel = newStatus === "CANCELLED";
+  const isResume =
+    fromStatus === "ON_HOLD" &&
+    (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+  if (!isHold && !isCancel && !isResume) return result;
 
   const posRes = await db
     .prepare(
@@ -273,6 +288,45 @@ async function cascadeCOStatusToPOs(
   const pos = posRes.results ?? [];
   if (pos.length === 0) return result;
 
+  if (isHold) {
+    const affected = pos.filter(
+      (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED",
+    );
+    if (affected.length === 0) return result;
+    for (const p of affected) {
+      result.statements.push(
+        db
+          .prepare(
+            "UPDATE production_orders SET status = 'ON_HOLD', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, p.id),
+      );
+      result.poNos.push(p.poNo);
+    }
+    result.affectedPoCount = affected.length;
+    return result;
+  }
+
+  if (isResume) {
+    // Flip ON_HOLD POs back to PENDING — same as SO resume path.
+    // Already-COMPLETED / CANCELLED POs stay put.
+    const affected = pos.filter((p) => p.status === "ON_HOLD");
+    if (affected.length === 0) return result;
+    for (const p of affected) {
+      result.statements.push(
+        db
+          .prepare(
+            "UPDATE production_orders SET status = 'PENDING', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, p.id),
+      );
+      result.poNos.push(p.poNo);
+    }
+    result.affectedPoCount = affected.length;
+    return result;
+  }
+
+  // isCancel — original behaviour, preserved.
   const affected = pos.filter(
     (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED",
   );
@@ -646,15 +700,55 @@ app.get("/stats", async (c) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/consignment-orders/status-changes — full audit log.
-// Currently returns an empty list because consignment_order_status_changes
-// table doesn't exist yet (parallel to so_status_changes). The CO Detail
-// page subscribes to this hook so we return the success envelope to keep
-// it from showing a loading skeleton forever.
-// TODO: add a consignment_order_status_changes table (and INSERT rows from
-// the /confirm + /:id PUT handlers) so CO status history is observable.
+//
+// Tier A fix 2026-05-21 (Agent A finding A1, Wei Siang report
+// "CO Detail 页一直显示空白历史"): previously returned hardcoded
+// empty array based on the outdated comment "table doesn't exist yet".
+// Migration 0104 added `co_status_changes` and the cascades in
+// production-orders.ts (lines 2732, 2764, 2902, 2981, 3047, 3106)
+// have been writing to it for months. The endpoint just never read.
+//
+// Reads the same shape as /api/sales-orders/status-changes returns —
+// newest-first, capped at 500 rows so a single huge org doesn't
+// blow the response.
 // ---------------------------------------------------------------------------
 app.get("/status-changes", async (c) => {
-  return c.json({ success: true, data: [], total: 0 });
+  const res = await c.var.DB
+    .prepare(
+      `SELECT id, coId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions
+         FROM co_status_changes
+        ORDER BY timestamp DESC, id DESC
+        LIMIT 500`,
+    )
+    .all<{
+      id: string;
+      coId: string;
+      fromStatus: string | null;
+      toStatus: string;
+      changedBy: string | null;
+      timestamp: string;
+      notes: string | null;
+      autoActions: string | null;
+    }>();
+  const data = (res.results ?? []).map((r) => ({
+    id: r.id,
+    coId: r.coId,
+    fromStatus: r.fromStatus ?? "",
+    toStatus: r.toStatus,
+    changedBy: r.changedBy ?? "System",
+    timestamp: r.timestamp,
+    notes: r.notes ?? "",
+    autoActions: r.autoActions
+      ? (() => {
+          try {
+            return JSON.parse(r.autoActions) as string[];
+          } catch {
+            return [];
+          }
+        })()
+      : [],
+  }));
+  return c.json({ success: true, data, total: data.length });
 });
 
 // ---------------------------------------------------------------------------
@@ -1532,16 +1626,25 @@ app.put("/:id", async (c) => {
       ),
     );
 
-    // Cascade CANCELLED through to the CO's child production_orders +
-    // job_cards. Mirrors cascadeSOStatusToPOs in routes/sales-orders.ts.
-    // Without this, the CN page's Planning + Pending CN filters keep
-    // surfacing the leaked POs (Wei Siang, 2026-05-05).
-    if (merged.status === "CANCELLED" && existing.status !== "CANCELLED") {
+    // Cascade through to the CO's child production_orders + job_cards.
+    // Mirrors cascadeSOStatusToPOs in routes/sales-orders.ts.
+    // Tier A fix 2026-05-21: also triggers on ON_HOLD and RESUME
+    // transitions (the function now handles all 3 branches; the
+    // ON_HOLD cascade gap was the silent-bug Agent A audit flagged).
+    if (
+      merged.status !== existing.status &&
+      (merged.status === "CANCELLED" ||
+        merged.status === "ON_HOLD" ||
+        (existing.status === "ON_HOLD" &&
+          (merged.status === "CONFIRMED" ||
+            merged.status === "IN_PRODUCTION")))
+    ) {
       const cascade = await cascadeCOStatusToPOs(
         c.var.DB,
         id,
-        "CANCELLED",
+        merged.status,
         now,
+        existing.status,
       );
       stmts.push(...cascade.statements);
     }

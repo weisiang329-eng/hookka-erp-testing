@@ -571,18 +571,30 @@ app.put("/:id", async (c) => {
         for (const [invoiceId, delta] of deltaByInvoice) {
           const inv = invMap.get(invoiceId);
           if (!inv) continue;
-          const newPaid = Math.max(0, inv.paidAmount - delta);
-          const newStatus =
-            newPaid <= 0
-              ? "SENT"
-              : newPaid < inv.totalSen
-                ? "PARTIAL_PAID"
-                : "PAID";
+          // Tier D D1 fix 2026-05-21 — same atomic-SQL pattern as PR 0 #1.
+          // Original code wrote `SET paidAmount = ?` with the snapshot-
+          // computed newPaid, which lost the second of two concurrent
+          // BOUNCED rollbacks (last-write-wins). Now uses atomic
+          // SQL-side subtraction (GREATEST/MAX in DB so floors at 0)
+          // so two simultaneous rollbacks both land cleanly. Status is
+          // recomputed in CASE against the post-decrement value.
+          // totalRolledBack still tracks the *intended* rollback for
+          // the customer outstandingSen restore — capped at the
+          // pre-decrement paid amount so we don't restore more than
+          // was paid (same Math.min as before).
           totalRolledBack += Math.min(delta, inv.paidAmount);
           statements.push(
             c.var.DB.prepare(
-              `UPDATE invoices SET paidAmount = ?, status = ?, updated_at = ? WHERE id = ?`,
-            ).bind(newPaid, newStatus, now, invoiceId),
+              `UPDATE invoices
+                 SET paidAmount = GREATEST(0, paidAmount - ?),
+                     status = CASE
+                       WHEN GREATEST(0, paidAmount - ?) <= 0 THEN 'SENT'
+                       WHEN GREATEST(0, paidAmount - ?) < totalSen THEN 'PARTIAL_PAID'
+                       ELSE 'PAID'
+                     END,
+                     updated_at = ?
+               WHERE id = ?`,
+            ).bind(delta, delta, delta, now, invoiceId),
           );
         }
       }

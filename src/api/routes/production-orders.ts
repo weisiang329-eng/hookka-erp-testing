@@ -1184,7 +1184,11 @@ async function fetchFilteredPOs(
   // text to teal when an operator has manually moved a JC off the
   // current leadtime plan. Single round-trip; safe to fail-soft (a null
   // map yields expectedDueDate = "" which the FE treats as "on plan").
-  const leadTimeMap = await loadLeadTimes(db).catch(() => null);
+  // Perf 2026-05-22 — kick the lead-time query off here but DON'T await it
+  // yet; it's joined into the Promise.all with the BOM/siblings fetch below
+  // so the two run in parallel instead of as two serial Hyperdrive
+  // round-trips. leadTimeMap is only consumed after that await.
+  const leadTimeP = loadLeadTimes(db).catch(() => null);
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const placeholders = hasFilter
     ? statuses.map(() => "?").join(",")
@@ -1387,12 +1391,17 @@ async function fetchFilteredPOs(
   // of just the anchor PO. Bedframe / accessory paths get a no-op map.
   // Index also carries productCode → baseModel so callers can compute the
   // group key (which is `${SO|CO}::${baseModel}::${fabricCode}`).
-  const [bomByProductCode, siblingsIdx] = minimal
-    ? await Promise.all([
-        fetchBomWipComponentsByCode(db),
-        fetchSofaSiblingsByGroupKey(db, orgId),
-      ])
-    : [null, null];
+  // Perf 2026-05-22 — run the lead-time, BOM and sofa-siblings queries as
+  // ONE parallel batch instead of three serial Hyperdrive round-trips.
+  const [leadTimeMap, [bomByProductCode, siblingsIdx]] = await Promise.all([
+    leadTimeP,
+    minimal
+      ? Promise.all([
+          fetchBomWipComponentsByCode(db),
+          fetchSofaSiblingsByGroupKey(db, orgId),
+        ])
+      : Promise.resolve([null, null] as [null, null]),
+  ]);
   const siblingsByGroupKey = siblingsIdx?.byGroupKey ?? null;
   const baseModelByProductCode = siblingsIdx?.baseModelByProductCode ?? null;
 

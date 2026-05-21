@@ -2427,7 +2427,7 @@ app.post("/", async (c) => {
 // Invoice printout needs that are NOT denormalised onto the DO payload,
 // fetched via joins ONLY for this one DO so the (recently stabilised)
 // core DO/invoice APIs are untouched:
-//   - customerSO   : sales_orders.customerSO  (via delivery_orders.salesOrderId)
+//   - customerSO   : sales_orders.customerSOId  (via delivery_orders.salesOrderId)
 //   - customerRef   : first non-empty production_orders.customerReference
 //                     across the DO's items
 //   - per item      : gap / divan / leg inches + computed total height,
@@ -2458,11 +2458,11 @@ app.get("/:id/print-extras", async (c) => {
   let customerSO = "";
   if (doRow.salesOrderId) {
     const so = await c.var.DB.prepare(
-      "SELECT customerSO FROM sales_orders WHERE id = ?",
+      "SELECT customerSOId FROM sales_orders WHERE id = ?",
     )
       .bind(doRow.salesOrderId)
-      .first<{ customerSO: string | null }>();
-    customerSO = so?.customerSO ?? "";
+      .first<{ customerSOId: string | null }>();
+    customerSO = so?.customerSOId ?? "";
   }
 
   // Deliver-To address MUST follow the hub the DO is assigned to — a
@@ -2523,14 +2523,14 @@ app.get("/:id/print-extras", async (c) => {
             po.gapInches AS gapInches,
             po.divanHeightInches AS divanHeightInches,
             po.legHeightInches AS legHeightInches,
-            poso.customerSO AS lineCustomerSO,
+            poso.customerSOId AS lineCustomerSO,
             poso.customerPO AS posoCustomerPO,
             poso.customerPOId AS posoCustomerPOId,
             poso.reference AS posoReference,
             so2.id AS soId2,
             so2.customerPO AS soCustomerPO,
             so2.customerPOId AS soCustomerPOId,
-            so2.customerSO AS soCustomerSO,
+            so2.customerSOId AS soCustomerSO,
             so2.reference AS soReference
        FROM delivery_order_items di
        LEFT JOIN production_orders po ON po.id = di.productionOrderId
@@ -2713,9 +2713,9 @@ app.get("/:id/print-extras", async (c) => {
   }
   // Reliable customer PO / SO / Ref via the SALES ORDER — the same path
   // the on-screen items table uses. The arbitrary multi-join aliases
-  // (poso.customerSO / so2.customerSO …) don't round-trip the Postgres
-  // compat layer, so customerSO came back blank even when it exists.
-  // Resolve from a clean sales_orders query keyed by SO no. / id.
+  // (poso.customerSOId / so2.customerSOId …) don't round-trip the
+  // Postgres compat layer, so customerSO came back blank even when it
+  // exists. Resolve from a clean sales_orders query keyed by SO no. / id.
   const diSoById = new Map<string, string>();
   {
     const diRes = await c.var.DB.prepare(
@@ -2747,7 +2747,7 @@ app.get("/:id/print-extras", async (c) => {
   if (soKeys.length > 0) {
     const ph = soKeys.map(() => "?").join(",");
     const soRes = await c.var.DB.prepare(
-      `SELECT id, companySO, companySOId, customerPO, customerSO, reference
+      `SELECT id, companySO, companySOId, customerPO, customerSOId, reference
          FROM sales_orders
         WHERE companySOId IN (${ph}) OR companySO IN (${ph}) OR id IN (${ph})`,
     )
@@ -2757,13 +2757,13 @@ app.get("/:id/print-extras", async (c) => {
         companySO: string | null;
         companySOId: string | null;
         customerPO: string | null;
-        customerSO: string | null;
+        customerSOId: string | null;
         reference: string | null;
       }>();
     for (const s of soRes.results ?? []) {
       const v: SoRef = {
         customerPO: s.customerPO ?? null,
-        customerSO: s.customerSO ?? null,
+        customerSO: s.customerSOId ?? null,
         reference: s.reference ?? null,
       };
       for (const k of [s.companySOId, s.companySO, s.id])

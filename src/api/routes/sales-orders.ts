@@ -268,6 +268,27 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// rowToSOList — slim variant of rowToSO for the LIST endpoint
+// (GET /api/sales-orders). The list grid, every column, the filters and the
+// CSV export only ever read each line item's `quantity` and `itemCategory`
+// (item count, total qty, primary-category filter) — never the price / spec
+// fields — and the list never shows the scanned-PO image. The detail
+// endpoints keep the full rowToSO payload. This drops the bulk of the list
+// payload (per-SO base64 PO image + full line-item rows) with ZERO change to
+// anything the grid shows, filters, sorts, or exports. Detail = double-click
+// into an SO, which fetches the full payload separately.
+// ---------------------------------------------------------------------------
+function rowToSOList(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
+  return {
+    ...rowToSO(row, items),
+    customerPOImageB64: null,
+    items: items
+      .filter((i) => i.salesOrderId === row.id)
+      .map((i) => ({ quantity: i.quantity, itemCategory: i.itemCategory })),
+  };
+}
+
 function parseAutoActions(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -831,7 +852,7 @@ app.get("/", async (c) => {
         .all<SalesOrderItemRow>(),
     ]);
     const data = (sos.results ?? []).map((s) =>
-      rowToSO(s, items.results ?? []),
+      rowToSOList(s, items.results ?? []),
     );
     return c.json({ success: true, data, total: data.length });
   }
@@ -866,7 +887,7 @@ app.get("/", async (c) => {
       .all<SalesOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const data = soRows.map((s) => rowToSO(s, items));
+  const data = soRows.map((s) => rowToSOList(s, items));
   return c.json({ success: true, data, page, limit, total });
 });
 

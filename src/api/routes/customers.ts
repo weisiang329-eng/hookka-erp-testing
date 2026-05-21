@@ -148,6 +148,15 @@ app.post("/", async (c) => {
     const id = genId();
     const isActive = body.isActive === false ? 0 : 1;
 
+    // Tier D D5 fix 2026-05-21 — back-door write removed.
+    // outstandingSen is a derived A/R balance owned by the invoice +
+    // payment + CN/DN ledger. The customers create form has no input
+    // cell for it; accepting `body.outstandingSen` here let admin
+    // scripts (and any caller hand-crafting a POST) seed an arbitrary
+    // opening balance that has no supporting invoice row, so the next
+    // payment posting would either over- or under-decrement against
+    // ghost A/R. Force to 0 at creation; the value will move only
+    // through the invoice / payment / CN / DN routes' atomic SQL.
     await c.var.DB.prepare(
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
          creditLimitSen, outstandingSen, isActive, contactName, phone, email)
@@ -161,7 +170,7 @@ app.post("/", async (c) => {
         body.companyAddress ?? "",
         body.creditTerms ?? "NET30",
         body.creditLimitSen ?? 0,
-        body.outstandingSen ?? 0,
+        0,
         isActive,
         body.contactName ?? "",
         body.phone ?? "",
@@ -230,6 +239,17 @@ app.put("/:id", async (c) => {
       if (!dv.ok) return c.json({ success: false, error: dv.error }, 400);
     }
 
+    // Tier D D5 fix 2026-05-21 — back-door write removed.
+    // outstandingSen is derived from the invoice + payment + CN/DN
+    // ledger. The customer edit dialog has no input cell for it, so any
+    // value arriving in `body.outstandingSen` came from a hand-crafted
+    // PUT or stale admin script. Pinning to existing prevents a one-off
+    // PUT from silently overwriting the ledger-derived balance with
+    // whatever the caller felt like. The four legitimate writers
+    // (invoices.ts AR add, payments.ts decrement on POST + GREATEST
+    // rollback on BOUNCED, credit-notes.ts decrement, debit-notes.ts
+    // increment) all use atomic `outstandingSen = outstandingSen +/- ?`
+    // SQL and never touch this PUT route.
     const merged = {
       code:
         body.code !== undefined ? String(body.code).trim() : existing.code,
@@ -238,7 +258,7 @@ app.put("/:id", async (c) => {
       companyAddress: body.companyAddress ?? existing.companyAddress ?? "",
       creditTerms: body.creditTerms ?? existing.creditTerms ?? "NET30",
       creditLimitSen: body.creditLimitSen ?? existing.creditLimitSen,
-      outstandingSen: body.outstandingSen ?? existing.outstandingSen,
+      outstandingSen: existing.outstandingSen,
       isActive:
         body.isActive === undefined
           ? existing.isActive

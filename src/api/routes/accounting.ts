@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { monthsOverdue } from "../../lib/terms";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -162,84 +163,101 @@ app.get("/aging", async (c) => {
   // RBAC gate (P3.3-followup) — accounting:read.
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
-  const [invRes, piRes] = await Promise.all([
-    c.var.DB.prepare(
-      "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate FROM invoices",
-    ).all<{
-      customerId: string;
-      customerName: string;
-      totalSen: number;
-      paidAmount: number;
-      status: string;
-      dueDate: string | null;
-      invoiceDate: string | null;
-    }>(),
-    c.var.DB.prepare(
-      "SELECT supplierId, supplierName, amountSen, status, dueDate, invoiceDate FROM purchase_invoices",
-    ).all<{
-      supplierId: string;
-      supplierName: string;
-      amountSen: number;
-      status: string;
-      dueDate: string | null;
-      invoiceDate: string | null;
-    }>(),
-  ]);
-
-  const arMap = new Map<string, ArAgingRow>();
-  for (const i of invRes.results ?? []) {
-    if (["DRAFT", "CANCELLED", "PAID"].includes(i.status)) continue;
-    const outstanding =
-      (Number(i.totalSen) || 0) - (Number(i.paidAmount) || 0);
-    if (outstanding <= 0) continue;
-    let row = arMap.get(i.customerId);
-    if (!row) {
-      row = {
-        customerId: i.customerId,
-        customerName: i.customerName || "Unknown",
-        currentSen: 0,
-        days30Sen: 0,
-        days60Sen: 0,
-        days90Sen: 0,
-        over90Sen: 0,
-      };
-      arMap.set(i.customerId, row);
-    }
-    addToBucket(row, monthsOverdue(i.invoiceDate ?? i.dueDate), outstanding);
-  }
-
-  const apMap = new Map<string, ApAgingRow>();
-  for (const p of piRes.results ?? []) {
-    if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
-    const outstanding = Number(p.amountSen) || 0;
-    if (outstanding <= 0) continue;
-    let row = apMap.get(p.supplierId);
-    if (!row) {
-      row = {
-        supplierId: p.supplierId,
-        supplierName: p.supplierName || "Unknown",
-        currentSen: 0,
-        days30Sen: 0,
-        days60Sen: 0,
-        days90Sen: 0,
-        over90Sen: 0,
-      };
-      apMap.set(p.supplierId, row);
-    }
-    addToBucket(row, monthsOverdue(p.invoiceDate ?? p.dueDate), outstanding);
-  }
-
-  return c.json({
-    success: true,
-    data: {
-      ar: [...arMap.values()].sort((a, b) =>
-        a.customerName.localeCompare(b.customerName),
-      ),
-      ap: [...apMap.values()].sort((a, b) =>
-        a.supplierName.localeCompare(b.supplierName),
-      ),
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 — cache-aside snapshot. AR/AP aging is computed live from
+  // unpaid invoices + purchase invoices, bucketed by months overdue
+  // (the prod-correct source — the old ar_aging / ap_aging snapshot
+  // tables are dead). The snapshot caches that computed result and
+  // rebuilds whenever either source table changes.
+  const data = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "accounting_aging_snapshot",
+      sourceTables: ["invoices", "purchase_invoices"],
     },
-  });
+    orgId,
+    async () => {
+      const [invRes, piRes] = await Promise.all([
+        c.var.DB.prepare(
+          "SELECT customerId, customerName, totalSen, paidAmount, status, dueDate, invoiceDate FROM invoices",
+        ).all<{
+          customerId: string;
+          customerName: string;
+          totalSen: number;
+          paidAmount: number;
+          status: string;
+          dueDate: string | null;
+          invoiceDate: string | null;
+        }>(),
+        c.var.DB.prepare(
+          "SELECT supplierId, supplierName, amountSen, status, dueDate, invoiceDate FROM purchase_invoices",
+        ).all<{
+          supplierId: string;
+          supplierName: string;
+          amountSen: number;
+          status: string;
+          dueDate: string | null;
+          invoiceDate: string | null;
+        }>(),
+      ]);
+
+      const arMap = new Map<string, ArAgingRow>();
+      for (const i of invRes.results ?? []) {
+        if (["DRAFT", "CANCELLED", "PAID"].includes(i.status)) continue;
+        const outstanding =
+          (Number(i.totalSen) || 0) - (Number(i.paidAmount) || 0);
+        if (outstanding <= 0) continue;
+        let row = arMap.get(i.customerId);
+        if (!row) {
+          row = {
+            customerId: i.customerId,
+            customerName: i.customerName || "Unknown",
+            currentSen: 0,
+            days30Sen: 0,
+            days60Sen: 0,
+            days90Sen: 0,
+            over90Sen: 0,
+          };
+          arMap.set(i.customerId, row);
+        }
+        addToBucket(row, monthsOverdue(i.invoiceDate ?? i.dueDate), outstanding);
+      }
+
+      const apMap = new Map<string, ApAgingRow>();
+      for (const p of piRes.results ?? []) {
+        if (["DRAFT", "CANCELLED", "PAID"].includes(p.status)) continue;
+        const outstanding = Number(p.amountSen) || 0;
+        if (outstanding <= 0) continue;
+        let row = apMap.get(p.supplierId);
+        if (!row) {
+          row = {
+            supplierId: p.supplierId,
+            supplierName: p.supplierName || "Unknown",
+            currentSen: 0,
+            days30Sen: 0,
+            days60Sen: 0,
+            days90Sen: 0,
+            over90Sen: 0,
+          };
+          apMap.set(p.supplierId, row);
+        }
+        addToBucket(row, monthsOverdue(p.invoiceDate ?? p.dueDate), outstanding);
+      }
+
+      return {
+        data: {
+          ar: [...arMap.values()].sort((a, b) =>
+            a.customerName.localeCompare(b.customerName),
+          ),
+          ap: [...apMap.values()].sort((a, b) =>
+            a.supplierName.localeCompare(b.supplierName),
+          ),
+        },
+      };
+    },
+  );
+  return c.json({ success: true, ...data });
 });
 
 app.post("/aging", async (c) => {

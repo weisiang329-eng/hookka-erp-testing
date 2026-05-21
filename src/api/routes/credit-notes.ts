@@ -32,17 +32,45 @@ type CreditNoteRow = {
   items: string | null;
 };
 
+// PR 0 (2026-05-20, owner-confirmed) — rename to make the unit explicit.
+// Original `unitPrice` / `total` were ambiguous — frontend stored in sen
+// but the API accepted either sen or RM-decimal silently, so a caller
+// posting `unitPrice: 4800.00` (meaning RM 4800) would land RM 48 in the
+// outstandingSen cascade (100× off). New names force the unit at the
+// contract surface, and the POST handler now validates the value is an
+// integer (decimal RM values get rejected at the boundary).
 type CNItem = {
   description: string;
   quantity: number;
-  unitPrice: number;
-  total: number;
+  unitPriceSen: number;
+  totalSen: number;
+};
+
+// Backward-compat shape for reading legacy CN rows whose JSON was written
+// before the rename. Read-only — never written back in this shape.
+type LegacyCNItem = {
+  description: string;
+  quantity: number;
+  unitPrice?: number;
+  total?: number;
+  unitPriceSen?: number;
+  totalSen?: number;
 };
 
 function parseItems(raw: string | null): CNItem[] {
   if (!raw) return [];
   try {
-    return JSON.parse(raw) as CNItem[];
+    const parsed = JSON.parse(raw) as LegacyCNItem[];
+    // Promote legacy {unitPrice, total} → {unitPriceSen, totalSen}. The
+    // numeric value is already in sen on every existing row (the column
+    // total_amount is integer sen and items JSON mirrored that), the
+    // rename is name-only.
+    return parsed.map((item) => ({
+      description: item.description,
+      quantity: item.quantity,
+      unitPriceSen: item.unitPriceSen ?? item.unitPrice ?? 0,
+      totalSen: item.totalSen ?? item.total ?? 0,
+    }));
   } catch {
     return [];
   }
@@ -184,8 +212,14 @@ app.post("/", async (c) => {
         400,
       );
     }
+    // PR 5 (2026-05-20) — also pull the customer-block fields from the
+    // invoice so the CN can snapshot them. Migration 0119 added these
+    // columns to the invoices table; from this PR forward they're
+    // populated at invoice-create time.
     const invoice = await c.var.DB.prepare(
-      "SELECT id, invoiceNo, customerId, customerName FROM invoices WHERE id = ?",
+      `SELECT id, invoiceNo, customerId, customerName, customerState,
+              customerAddress, attention, customerPhone
+         FROM invoices WHERE id = ?`,
     )
       .bind(invoiceId)
       .first<{
@@ -193,20 +227,66 @@ app.post("/", async (c) => {
         invoiceNo: string;
         customerId: string;
         customerName: string;
+        customerState: string | null;
+        customerAddress: string | null;
+        attention: string | null;
+        customerPhone: string | null;
       }>();
     if (!invoice) {
       return c.json({ success: false, error: "Invoice not found" }, 404);
     }
 
-    const parsedItems: CNItem[] = (
-      items as { description: string; quantity: number; unitPrice: number }[]
-    ).map((item) => ({
-      description: item.description,
-      quantity: item.quantity,
-      unitPrice: item.unitPrice,
-      total: item.quantity * item.unitPrice,
-    }));
-    const totalAmount = parsedItems.reduce((sum, item) => sum + item.total, 0);
+    // PR 0 (2026-05-20) — require unitPriceSen and validate it's an integer.
+    // Original code accepted `unitPrice` with no validation, so a caller
+    // sending RM-decimal (e.g. 4800.00) would land 4800 in outstandingSen
+    // = RM 48 instead of RM 4800 (100× discrepancy). Frontend was already
+    // storing in sen; this just makes the contract explicit and fails
+    // closed when a caller forgets.
+    const rawItems = items as Array<{
+      description?: string;
+      quantity?: number;
+      unitPriceSen?: number;
+      unitPrice?: number; // legacy — rejected below if used
+    }>;
+    const parsedItems: CNItem[] = [];
+    for (const item of rawItems) {
+      if (item.unitPriceSen === undefined && item.unitPrice !== undefined) {
+        return c.json(
+          {
+            success: false,
+            error: `Credit note item must send 'unitPriceSen' (integer sen), not 'unitPrice'. Use Math.round(rm * 100) on the client.`,
+          },
+          400,
+        );
+      }
+      const unitPriceSen = Number(item.unitPriceSen);
+      if (!Number.isInteger(unitPriceSen) || unitPriceSen < 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Credit note unitPriceSen must be a non-negative integer (got ${item.unitPriceSen}). Convert RM to sen with Math.round(rm * 100).`,
+          },
+          400,
+        );
+      }
+      const quantity = Number(item.quantity);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Credit note quantity must be > 0 (got ${item.quantity}).`,
+          },
+          400,
+        );
+      }
+      parsedItems.push({
+        description: String(item.description ?? ""),
+        quantity,
+        unitPriceSen,
+        totalSen: quantity * unitPriceSen,
+      });
+    }
+    const totalAmount = parsedItems.reduce((sum, item) => sum + item.totalSen, 0);
 
     const id = genId();
     const noteNumber = await nextCNNo(c.var.DB);
@@ -228,9 +308,12 @@ app.post("/", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
+        // PR 5 — INSERT carries customerState / customerAddress /
+        // attention / customerPhone snapshotted from the invoice.
         `INSERT INTO credit_notes (id, noteNumber, invoiceId, invoiceNumber, customerId,
-           customerName, date, reason, reasonDetail, totalAmount, status, approvedBy, items)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           customerName, customerState, customerAddress, attention, customerPhone,
+           date, reason, reasonDetail, totalAmount, status, approvedBy, items)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         noteNumber,
@@ -238,6 +321,10 @@ app.post("/", async (c) => {
         invoice.invoiceNo,
         invoice.customerId,
         invoice.customerName,
+        invoice.customerState,
+        invoice.customerAddress,
+        invoice.attention,
+        invoice.customerPhone,
         date,
         reason,
         reasonDetail || "",

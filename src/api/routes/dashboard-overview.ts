@@ -15,6 +15,12 @@ import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { loadSoLinePriceIndex, priceForItem } from "../lib/do-value";
 import { computeFabricNext30ByCategory } from "../lib/fabric-usage";
+import {
+  readSnapshot,
+  writeSnapshot,
+  getMaxSourceUpdatedAt,
+  isSnapshotFresh,
+} from "../lib/dashboard-snapshot";
 
 // DO statuses that mean goods have shipped — same set the all-time
 // "Delivered" figure uses (loadDeliveredItemsValueSen) so This-Month
@@ -43,6 +49,29 @@ app.get("/", async (c) => {
   // the payload is period-independent. Cached per period.
   const periodRaw = c.req.query("period") ?? "all";
   const period = /^\d{4}-\d{2}$/.test(periodRaw) ? periodRaw : "all";
+
+  // PR 1 (2026-05-20) — read-through dashboard snapshot.
+  //
+  // Three-layer freshness model (see src/api/lib/dashboard-snapshot.ts
+  // for the architecture write-up):
+  //   1. dashboard_snapshot table — persisted across deploys, data-
+  //      change-aware via the built_from column. Checked first.
+  //   2. 60s KV cache (the existing `cached(...)` wrapper below) —
+  //      smooths out within-minute repeats when the snapshot misses.
+  //   3. Full compute — the 27-query path below, ~200ms cold.
+  //
+  // Snapshot is only used for the default `period=all` view. Specific
+  // month filters skip the snapshot and run the compute (those reads
+  // are rare — operator usually leaves it on "All").
+  if (period === "all") {
+    const [snap, currentMax] = await Promise.all([
+      readSnapshot(c.var.DB, orgId),
+      getMaxSourceUpdatedAt(c.var.DB),
+    ]);
+    if (isSnapshotFresh(snap, currentMax) && snap) {
+      return c.json({ success: true, ...snap.data });
+    }
+  }
 
   const data = await cached(c, `dashboard:overview:${orgId}:v17:${period}`, 60, async () => {
     const db = c.var.DB;
@@ -1285,6 +1314,29 @@ app.get("/", async (c) => {
       },
     };
   });
+
+  // PR 1 (2026-05-20) — write-back to dashboard_snapshot for the next
+  // read. Only for period=all (the dominant view); month-specific reads
+  // skip the snapshot entirely. Errors are swallowed: the cache write
+  // is a perf optimisation, not load-bearing. The user already has the
+  // computed payload in `data` and gets it back via the c.json below.
+  if (period === "all") {
+    try {
+      const currentMax = await getMaxSourceUpdatedAt(c.var.DB);
+      // currentMax may be null on a brand-new install (every tracked
+      // table empty). In that case use the wall-clock now as
+      // built_from so the row gets a non-null timestamp.
+      const builtFrom = currentMax ?? new Date().toISOString();
+      await writeSnapshot(
+        c.var.DB,
+        orgId,
+        data as Record<string, unknown>,
+        builtFrom,
+      );
+    } catch (e) {
+      console.warn("[dashboard-snapshot] write-back failed:", e);
+    }
+  }
 
   return c.json({ success: true, ...data });
 });

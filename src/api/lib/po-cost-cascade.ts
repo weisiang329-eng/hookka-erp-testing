@@ -492,32 +492,71 @@ export async function consumeRawMaterialsForPO(
 
     const result = fifoConsume(batches, required);
 
+    // PR 0 (2026-05-20, owner-confirmed) — per-slice WHERE guard +
+    // serial execution to prevent FIFO over-pull race.
+    //
+    // Old behaviour:
+    //   1. Snapshot all batches with remainingQty > 0 (line 471-476)
+    //   2. fifoConsume() picks slices against the JS snapshot
+    //   3. Push UPDATE/INSERT pairs into one batch
+    //   4. db.batch(statements) commits at the end
+    //
+    // The UPDATE was `SET remainingQty = remainingQty - ?` — atomic
+    // arithmetic, so two concurrent decrements both land correctly on
+    // remainingQty itself. But fifoConsume() ran against the SNAPSHOT,
+    // so two parallel PO completions both think batch B has 10m
+    // available, both pick a 5m slice, both push UPDATE -5, both push
+    // INSERT cost_ledger {qty: 5}. End state: remainingQty=0 (correct
+    // physical consumption) but cost_ledger has 2×5m=10m issued from
+    // a batch that only had 10m physical — fine in this exact case,
+    // but if either PO needed 8m, the math breaks: total issued
+    // 8+8=16m against a 10m physical batch. raw_materials.balanceQty
+    // would be floored by GREATEST(0,...) and silently under-deducted.
+    //
+    // New behaviour: run each slice as a single conditional UPDATE
+    // (`AND remainingQty >= ?` guard) and inspect meta.changes. If
+    // another writer has already drained the batch below what we
+    // claimed, the UPDATE no-ops and we throw — the caller sees the
+    // race and the PO completion fails atomically (no cost_ledger row
+    // for the failed slice, raw_materials still consistent with
+    // rm_batches). Operator retries; on retry the snapshot reflects
+    // the post-race state and fifoConsume picks differently.
+    //
+    // Serial execution means the slices for THIS PO run one-at-a-time
+    // before the function returns. For a typical PO with 2-3 RM lines
+    // × 1-2 slices each, that's ~5 extra round-trips per completion.
+    // Acceptable given the consequence (silent inventory corruption).
     for (const slice of result.slices) {
-      statements.push(
-        db
-          .prepare(
-            "UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ?",
-          )
-          .bind(slice.qty, slice.batchId),
-        db
-          .prepare(
-            `INSERT INTO cost_ledger
-               (id, date, type, itemType, itemId, batchId, qty, direction,
-                unitCostSen, totalCostSen, refType, refId, notes)
-             VALUES (?, ?, 'RM_ISSUE', 'RM', ?, ?, ?, 'OUT', ?, ?, 'PRODUCTION_ORDER', ?, ?)`,
-          )
-          .bind(
-            genLedgerId("rmi"),
-            dateIso,
-            rm.id,
-            slice.batchId,
-            slice.qty,
-            slice.unitCostSen,
-            slice.totalCostSen,
-            poId,
-            `Issued for ${po.poNo} (${line.name})`,
-          ),
-      );
+      const updateRes = await db
+        .prepare(
+          "UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ? AND remainingQty >= ?",
+        )
+        .bind(slice.qty, slice.batchId, slice.qty)
+        .run();
+      if (!updateRes.meta || updateRes.meta.changes === 0) {
+        throw new Error(
+          `RM batch ${slice.batchId} race lost: PO ${po.poNo} (${line.name}) tried to consume ${slice.qty} but another writer left less than that available. Retry the completion.`,
+        );
+      }
+      await db
+        .prepare(
+          `INSERT INTO cost_ledger
+             (id, date, type, itemType, itemId, batchId, qty, direction,
+              unitCostSen, totalCostSen, refType, refId, notes)
+           VALUES (?, ?, 'RM_ISSUE', 'RM', ?, ?, ?, 'OUT', ?, ?, 'PRODUCTION_ORDER', ?, ?)`,
+        )
+        .bind(
+          genLedgerId("rmi"),
+          dateIso,
+          rm.id,
+          slice.batchId,
+          slice.qty,
+          slice.unitCostSen,
+          slice.totalCostSen,
+          poId,
+          `Issued for ${po.poNo} (${line.name})`,
+        )
+        .run();
       materialCostSen += slice.totalCostSen;
     }
 

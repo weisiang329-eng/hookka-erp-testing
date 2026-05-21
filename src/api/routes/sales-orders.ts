@@ -614,6 +614,79 @@ async function cascadeSOStatusToPOs(
           .bind(jcId),
       );
     }
+
+    // PR 0 (2026-05-20, owner-confirmed) — reverse cost_ledger entries
+    // for the cancelled JCs so P&L doesn't carry WIP cost forever after
+    // a cancel. Memory rule (feedback_protect_completed_work): COMPLETED
+    // JC ledger refs stay inviolate, so we ONLY reverse refType='JOB_CARD'
+    // entries on the JUST-cancelled JCs (they were WAITING / IN_PROGRESS /
+    // PAUSED — not COMPLETED — per the SELECT filter above).
+    //
+    // refType='PRODUCTION_ORDER' entries (RM_ISSUE that fired from already-
+    // completed FAB_CUT JCs, FG_DELIVERED from shipped units) are NOT
+    // touched. Those represent real consumption / delivery and the memory
+    // rule says we don't unwind real work — operator must use stock
+    // adjustments if they actually want to claw material back.
+    //
+    // Reversal pattern: write a matching ADJUSTMENT row with the OPPOSITE
+    // direction ('IN' instead of 'OUT' or vice versa). Same magnitude on
+    // qty + totalCostSen so running totals net to zero. ADJUSTMENT is
+    // an allowed type per the CHECK constraint at
+    // migrations-postgres/0001_init.sql:838.
+    if (jcIds.length > 0) {
+      const ledgerToReverse = await db
+        .prepare(
+          `SELECT id, type, itemType, itemId, batchId, qty, direction,
+                  unitCostSen, totalCostSen, refType, refId, notes
+             FROM cost_ledger
+            WHERE refType = 'JOB_CARD'
+              AND refId IN (${jcIds.map(() => "?").join(",")})`,
+        )
+        .bind(...jcIds)
+        .all<{
+          id: string;
+          type: string;
+          itemType: string;
+          itemId: string;
+          batchId: string | null;
+          qty: number;
+          direction: string;
+          unitCostSen: number;
+          totalCostSen: number;
+          refType: string;
+          refId: string;
+          notes: string | null;
+        }>();
+      for (const entry of ledgerToReverse.results ?? []) {
+        const oppositeDirection = entry.direction === "OUT" ? "IN" : "OUT";
+        result.statements.push(
+          db
+            .prepare(
+              `INSERT INTO cost_ledger
+                 (id, date, type, itemType, itemId, batchId, qty, direction,
+                  unitCostSen, totalCostSen, refType, refId, notes)
+               VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?, 'JOB_CARD', ?, ?)`,
+            )
+            .bind(
+              `cl-rev-${crypto.randomUUID().slice(0, 12)}`,
+              now,
+              entry.itemType,
+              entry.itemId,
+              entry.batchId,
+              entry.qty,
+              oppositeDirection,
+              entry.unitCostSen,
+              entry.totalCostSen,
+              entry.refId,
+              `Reversal of ${entry.type} (cl=${entry.id}) — JC ${entry.refId} cancelled via SO cancel cascade`,
+            ),
+        );
+      }
+      result.actions.push(
+        `${ledgerToReverse.results?.length ?? 0} cost_ledger entry/entries reversed (ADJUSTMENT) for cancelled JCs.`,
+      );
+    }
+
     result.affectedPoCount = affected.length;
     result.affectedJcCount = jcIds.length;
     result.actions.push(
@@ -843,54 +916,70 @@ const CS_STATUSES = new Set([
 ]);
 
 app.get("/stats", async (c) => {
-  const { whereSql: orgWhere, params: orgParams } = withOrgScope(
-    c,
-    "sales_orders",
-  );
-  const res = await c.var.DB
-    .prepare(
-      `SELECT status                        AS "status",
-              COUNT(*)                      AS "n",
-              COALESCE(SUM(totalSen), 0)    AS "revenueSen"
-         FROM sales_orders
-         ${orgWhere}
-         GROUP BY status`,
-    )
-    .bind(...orgParams)
-    .all<{ status: string; n: number; revenueSen: number }>();
-  const byStatus: Record<string, number> = {};
-  const revenueByStatus: Record<string, number> = {};
-  let total = 0;
-  let totalRevenueSen = 0;
-  let csRevenueSen = 0;
-  for (const row of res.results ?? []) {
-    byStatus[row.status] = row.n;
-    revenueByStatus[row.status] = Number(row.revenueSen) || 0;
-    total += row.n;
-    totalRevenueSen += Number(row.revenueSen) || 0;
-    if (CS_STATUSES.has(row.status)) {
-      csRevenueSen += Number(row.revenueSen) || 0;
-    }
-  }
-  // Wei Siang 2026-05-16: item-level delivered value. A partially-
-  // delivered SO must count only the value of the items that actually
-  // went on a delivery note as "Delivered" — not its whole header total.
-  // Same resolver the Delivery side uses, so the two reconcile to the
-  // cent. Outstanding (item-level) = confirmed book − this.
-  const deliveredItemsSen = await loadDeliveredItemsValueSen(
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 (2026-05-20) — cache-aside snapshot. Source tables:
+  // sales_orders (bucket counts + revenue) and delivery_orders +
+  // delivery_order_items + sales_order_items (deliveredItemsSen
+  // resolver). Layer 2 invalidates on any of them changing.
+  const data = await withSnapshot(
     c.var.DB,
-    getOrgId(c),
+    {
+      tableName: "sales_orders_stats_snapshot",
+      sourceTables: [
+        "sales_orders",
+        "sales_order_items",
+        "delivery_orders",
+        "delivery_order_items",
+      ],
+    },
+    orgId,
+    async () => {
+      const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+        c,
+        "sales_orders",
+      );
+      const res = await c.var.DB
+        .prepare(
+          `SELECT status                        AS "status",
+                  COUNT(*)                      AS "n",
+                  COALESCE(SUM(totalSen), 0)    AS "revenueSen"
+             FROM sales_orders
+             ${orgWhere}
+             GROUP BY status`,
+        )
+        .bind(...orgParams)
+        .all<{ status: string; n: number; revenueSen: number }>();
+      const byStatus: Record<string, number> = {};
+      const revenueByStatus: Record<string, number> = {};
+      let total = 0;
+      let totalRevenueSen = 0;
+      let csRevenueSen = 0;
+      for (const row of res.results ?? []) {
+        byStatus[row.status] = row.n;
+        revenueByStatus[row.status] = Number(row.revenueSen) || 0;
+        total += row.n;
+        totalRevenueSen += Number(row.revenueSen) || 0;
+        if (CS_STATUSES.has(row.status)) {
+          csRevenueSen += Number(row.revenueSen) || 0;
+        }
+      }
+      const deliveredItemsSen = await loadDeliveredItemsValueSen(
+        c.var.DB,
+        orgId,
+      );
+      return {
+        byStatus,
+        revenueByStatus,
+        total,
+        totalRevenueSen,
+        csRevenueSen,
+        deliveredItemsSen,
+        outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
+      };
+    },
   );
-  return c.json({
-    success: true,
-    byStatus,
-    revenueByStatus,
-    total,
-    totalRevenueSen,
-    csRevenueSen,
-    deliveredItemsSen,
-    outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
-  });
+  return c.json({ success: true, ...data });
 });
 
 // ---------------------------------------------------------------------------

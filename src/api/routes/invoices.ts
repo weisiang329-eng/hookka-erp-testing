@@ -205,6 +205,13 @@ type InvoiceRow = {
   customerId: string;
   customerName: string;
   customerState: string | null;
+  // PR 5 (2026-05-20) — full customer contact block snapshotted from
+  // the source DO at invoice-create time. Source: delivery_orders'
+  // delivery_address / contact_person / contact_phone / customer_po_id.
+  customerAddress: string | null;
+  attention: string | null;
+  customerPhone: string | null;
+  customerPOId: string | null;
   hubId: string | null;
   hubName: string | null;
   subtotalSen: number;
@@ -301,6 +308,14 @@ function rowToInvoice(
     customerId: row.customerId,
     customerName: row.customerName,
     customerState: row.customerState ?? "",
+    // PR 5 — return the new customer-block fields so the PDF
+    // generator's `invoice.customerAddress || invoice.customerState`
+    // fallback at generate-invoice-pdf.ts:77 finally has a real value
+    // to read instead of always falling back to state.
+    customerAddress: row.customerAddress ?? "",
+    attention: row.attention ?? "",
+    customerPhone: row.customerPhone ?? "",
+    customerPOId: row.customerPOId ?? "",
     hubId: row.hubId,
     hubName: row.hubName ?? "",
     items: items
@@ -615,6 +630,23 @@ app.get("/", async (c) => {
 app.get("/stats", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
+
+  const orgId = getOrgId(c);
+
+  // PR 4 (2026-05-20) — cache-aside snapshot. See lib/invoice-snapshot.ts.
+  // Same pattern as dashboard-snapshot (PR 1) and delivery-snapshot (PR 3).
+  {
+    const { readInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt, isSnapshotFresh } =
+      await import("../lib/invoice-snapshot");
+    const [snap, currentMax] = await Promise.all([
+      readInvoiceStatsSnapshot(c.var.DB, orgId),
+      getInvoiceStatsMaxUpdatedAt(c.var.DB),
+    ]);
+    if (isSnapshotFresh(snap, currentMax) && snap) {
+      return c.json({ success: true, ...snap.data });
+    }
+  }
+
   const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
     .all<{ status: string; n: number }>();
@@ -624,7 +656,23 @@ app.get("/stats", async (c) => {
     byStatus[row.status] = row.n;
     total += row.n;
   }
-  return c.json({ success: true, byStatus, total });
+  const payload = { byStatus, total };
+
+  try {
+    const { writeInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt } =
+      await import("../lib/invoice-snapshot");
+    const currentMax = await getInvoiceStatsMaxUpdatedAt(c.var.DB);
+    await writeInvoiceStatsSnapshot(
+      c.var.DB,
+      orgId,
+      payload as Record<string, unknown>,
+      currentMax ?? new Date().toISOString(),
+    );
+  } catch (e) {
+    console.warn("[invoice-stats-snapshot] write-back failed:", e);
+  }
+
+  return c.json({ success: true, ...payload });
 });
 
 // POST /api/invoices — create from a DELIVERED delivery order.
@@ -649,9 +697,13 @@ app.post("/", async (c) => {
       );
     }
 
+    // PR 5 (2026-05-20) — pull the full customer-contact block from the
+    // source DO so invoice PDF stops showing "Address: KL" and
+    // "Contact: -" (BUG-2026-05-20-009, Agent B Tier 1 findings B1/B2/B3).
     const doRow = await c.var.DB.prepare(
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
-              customerState, hubId, hubName, status
+              customerState, deliveryAddress, contactPerson, contactPhone,
+              customerPOId, hubId, hubName, status
          FROM delivery_orders WHERE id = ?`,
     )
       .bind(deliveryOrderId)
@@ -663,6 +715,10 @@ app.post("/", async (c) => {
         customerId: string;
         customerName: string;
         customerState: string | null;
+        deliveryAddress: string | null;
+        contactPerson: string | null;
+        contactPhone: string | null;
+        customerPOId: string | null;
         hubId: string | null;
         hubName: string | null;
         status: string;
@@ -716,12 +772,16 @@ app.post("/", async (c) => {
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
+        // PR 5 — INSERT also captures customerAddress / attention /
+        // customerPhone / customerPOId from the DO. These columns were
+        // added by migration 0119 (postgres) / 0079 (d1).
         `INSERT INTO invoices (
            id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
-           customerId, customerName, customerState, hubId, hubName,
+           customerId, customerName, customerState, customerAddress,
+           attention, customerPhone, customerPOId, hubId, hubName,
            subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
            paymentDate, paymentMethod, notes, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         invoiceNo,
@@ -732,6 +792,10 @@ app.post("/", async (c) => {
         doRow.customerId,
         doRow.customerName,
         doRow.customerState,
+        doRow.deliveryAddress,
+        doRow.contactPerson,
+        doRow.contactPhone,
+        doRow.customerPOId,
         doRow.hubId,
         doRow.hubName,
         subtotalSen,
@@ -1303,7 +1367,15 @@ app.put("/:id", async (c) => {
       for (const raw of body.items as Array<Record<string, unknown>>) {
         const quantity = Number(raw.quantity) || 0;
         const unitPriceSen = Number(raw.unitPriceSen) || 0;
-        const totalSen = Number(raw.totalSen) || unitPriceSen * quantity;
+        // Tier D D4 fix 2026-05-21 — back-door write. Original code did
+        // `Number(raw.totalSen) || unitPriceSen * quantity`, which let
+        // the API caller pass an arbitrary totalSen that disagreed with
+        // qty × unitPriceSen (e.g. via curl). The operator UI has no
+        // input cell for totalSen — it's always displayed = qty × price.
+        // Per the memory rule feedback_no_back_door_writes.md, the
+        // backend must not accept a value the UI can't supply. Always
+        // recompute server-side now; raw.totalSen ignored if present.
+        const totalSen = unitPriceSen * quantity;
         computedSubtotal += totalSen;
         statements.push(
           c.var.DB.prepare(
@@ -1658,6 +1730,31 @@ app.put("/:id", async (c) => {
           e,
         );
       }
+
+      // PR 0 (2026-05-20, owner-confirmed) — reverse the customer's
+      // outstanding A/R for the unpaid portion of the cancelled invoice.
+      // Previously a CANCELLED transition wrote only the audit row, so
+      // customers.outstandingSen kept carrying the cancelled amount —
+      // AR drifted up forever (every cancelled SENT/PARTIAL_PAID/OVERDUE
+      // invoice padded the balance with money the customer no longer owed).
+      //
+      // unpaidSen = totalSen - paidAmount = the portion that was still on
+      // the customer's tab at cancel time. Already-paid portion stays out
+      // of the reversal — the cash is real, it just needs a refund / CN
+      // path which is a separate decision.
+      //
+      // MAX(0, ...) clamps in case the original create path didn't bump
+      // outstandingSen for this invoice (the manual POST /api/invoices
+      // path doesn't, only the auto-create-from-DO path does). Matches
+      // the guard pattern used in credit-notes.ts:256 and payments.ts:389.
+      const unpaidSen = existing.totalSen - existing.paidAmount;
+      if (unpaidSen > 0 && existing.customerId) {
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+          ).bind(unpaidSen, existing.customerId),
+        );
+      }
     }
 
     await c.var.DB.batch(statements);
@@ -1688,11 +1785,22 @@ app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "delete");
   if (denied) return denied;
   const id = c.req.param("id");
+  // PR 0 (2026-05-20, owner-confirmed) — pull customerId + amounts so we can
+  // reverse the customer's outstandingSen if the deleted DRAFT had been
+  // bumped on create. (Auto-created DRAFT invoices from delivery-orders.ts
+  // bump outstandingSen on create; manual POST invoices.ts does not. The
+  // MAX(0, ...) guard below handles both paths safely.)
   const existing = await c.var.DB.prepare(
-    "SELECT id, status FROM invoices WHERE id = ?",
+    "SELECT id, status, customerId, totalSen, paidAmount FROM invoices WHERE id = ?",
   )
     .bind(id)
-    .first<{ id: string; status: string }>();
+    .first<{
+      id: string;
+      status: string;
+      customerId: string;
+      totalSen: number;
+      paidAmount: number;
+    }>();
   if (!existing) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
@@ -1702,7 +1810,21 @@ app.delete("/:id", async (c) => {
       400,
     );
   }
-  await c.var.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id).run();
+  // Same reversal logic as the PUT void path (see comment above the
+  // isVoidTransition branch in this file). Done as a batch so DELETE +
+  // customer adjustment either both land or both roll back.
+  const unpaidSen = existing.totalSen - existing.paidAmount;
+  const stmts: D1PreparedStatement[] = [
+    c.var.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id),
+  ];
+  if (unpaidSen > 0 && existing.customerId) {
+    stmts.push(
+      c.var.DB.prepare(
+        `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+      ).bind(unpaidSen, existing.customerId),
+    );
+  }
+  await c.var.DB.batch(stmts);
   return c.json({ success: true });
 });
 

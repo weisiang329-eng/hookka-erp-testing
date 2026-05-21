@@ -490,8 +490,8 @@ type MinimalPOOut = {
   companyCOId: string;
   customerPOId: string;
   customerReference: string;
-  // Customer's own SO number (sales_orders.customerSO), or the customer's
-  // CO number (consignment_orders.customerCO) for CO-origin POs. NOT a
+  // Customer's own SO number (sales_orders.customerSOId), or the customer's
+  // CO number (consignment_orders.customerCOId) for CO-origin POs. NOT a
   // production_orders column — batch-joined onto the payload by
   // attachCustomerSO() at the route boundary. "" until then.
   customerSO: string;
@@ -1114,9 +1114,12 @@ async function fetchAllPOs(
 //   SQL layer.
 // - includeJobCards: when false, skip the job_cards + piece_pics fetches and
 //   return POs with `jobCards: []`. Defaults to true for backward compat.
-// The customer's own SO number lives on sales_orders.customerSO (and the
-// customer's CO number on consignment_orders.customerCO for CO-origin
-// POs) — NOT on production_orders. The Production dept sheet's
+// The customer's own SO number lives on sales_orders.customerSOId (and the
+// customer's CO number on consignment_orders.customerCOId for CO-origin
+// POs) — NOT on production_orders. The legacy customerSO / customerCO
+// columns are dead (always empty); the live data is in the *Id columns,
+// matching the Sales/Consignment grids' own column keys. The Production
+// dept sheet's
 // "Customer SO" column needs it, so we batch-join it onto the PO payload
 // at the route boundary. Doing it here (one spot) keeps the many
 // rowToPO / rowToMinimalPO call sites untouched. CO POs fall back to the
@@ -1144,19 +1147,19 @@ async function attachCustomerSO(
     const slice = soIds.slice(i, i + CHUNK);
     const placeholders = slice.map(() => "?").join(",");
     const res = await db
-      .prepare(`SELECT id, customerSO FROM sales_orders WHERE id IN (${placeholders})`)
+      .prepare(`SELECT id, customerSOId FROM sales_orders WHERE id IN (${placeholders})`)
       .bind(...slice)
-      .all<{ id: string; customerSO: string | null }>();
-    for (const r of res.results ?? []) soMap.set(r.id, r.customerSO || "");
+      .all<{ id: string; customerSOId: string | null }>();
+    for (const r of res.results ?? []) soMap.set(r.id, r.customerSOId || "");
   }
   for (let i = 0; i < coIds.length; i += CHUNK) {
     const slice = coIds.slice(i, i + CHUNK);
     const placeholders = slice.map(() => "?").join(",");
     const res = await db
-      .prepare(`SELECT id, customerCO FROM consignment_orders WHERE id IN (${placeholders})`)
+      .prepare(`SELECT id, customerCOId FROM consignment_orders WHERE id IN (${placeholders})`)
       .bind(...slice)
-      .all<{ id: string; customerCO: string | null }>();
-    for (const r of res.results ?? []) coMap.set(r.id, r.customerCO || "");
+      .all<{ id: string; customerCOId: string | null }>();
+    for (const r of res.results ?? []) coMap.set(r.id, r.customerCOId || "");
   }
   for (const p of pos) {
     p.customerSO =

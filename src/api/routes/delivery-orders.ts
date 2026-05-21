@@ -272,6 +272,58 @@ function rowToOrder(
   return base;
 }
 
+// ---------------------------------------------------------------------------
+// rowToOrderList — slim variant of rowToOrder for the LIST endpoint
+// (GET /api/delivery-orders). The delivery list page (src/pages/delivery/
+// index.tsx) maps each DO through mapDOToRow, which only ever reads a small
+// fixed set of per-item fields, and the list grid / its columns / filters /
+// sort / per-row Print DO + Print Packing List only ever consume those.
+// It never shows the proof-of-delivery blob (signature + up to 5 photos,
+// all base64 data URLs) or the DO QR-code image. The detail endpoint
+// GET /:id keeps the full rowToOrder payload (the standalone DO detail
+// route still loads everything).
+//
+// What this drops, with zero change to anything the grid shows / filters /
+// sorts / exports / prints:
+//   - proofOfDelivery -> null   (huge base64 signature + photo blob; the
+//     list page's mapDOToRow does not read it at all)
+//   - doQrCode        -> null   (base64 QR image; mapDOToRow does not read it)
+//   - items[]         -> slimmed to exactly the 11 fields mapDOToRow reads:
+//       id, productionOrderId, salesOrderNo, poNo, productCode, productName,
+//       sizeLabel, fabricCode, quantity, itemM3, rackingNumber
+//     The only per-item field dropped is `packingStatus` — mapDOToRow never
+//     reads it, and the only writer of packingStatus on the list page sends
+//     a hardcoded literal ("PACKED") on PUT, never the read-back value.
+// ---------------------------------------------------------------------------
+function rowToOrderList(
+  row: DeliveryOrderRow,
+  items: DeliveryOrderItemRow[] = [],
+  productM3Map?: Map<string, number>,
+  hubStateMap?: Map<string, string>,
+): Record<string, unknown> {
+  const full = rowToOrder(row, items, productM3Map, hubStateMap);
+  return {
+    ...full,
+    proofOfDelivery: null,
+    doQrCode: null,
+    items: items
+      .filter((i) => i.deliveryOrderId === row.id)
+      .map((it) => ({
+        id: it.id,
+        productionOrderId: it.productionOrderId ?? "",
+        salesOrderNo: it.salesOrderNo ?? "",
+        poNo: it.poNo ?? "",
+        productCode: it.productCode ?? "",
+        productName: it.productName ?? "",
+        sizeLabel: it.sizeLabel ?? "",
+        fabricCode: it.fabricCode ?? "",
+        quantity: it.quantity,
+        itemM3: pickItemM3(it, productM3Map),
+        rackingNumber: it.rackingNumber ?? "",
+      })),
+  };
+}
+
 function genDoId(): string {
   return `do-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -751,7 +803,7 @@ app.get("/", async (c) => {
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
     ]);
     const data = orderRows.map((o) => {
-      const order = rowToOrder(o, itemRows, m3Map, hubStateMap);
+      const order = rowToOrderList(o, itemRows, m3Map, hubStateMap);
       order.valueSen = valueMap.get(o.id) ?? 0;
       return order;
     });
@@ -796,7 +848,7 @@ app.get("/", async (c) => {
     loadDoValueMap(db, orgId),
   ]);
   const data = orderRows.map((o) => {
-    const order = rowToOrder(o, items, m3Map, hubStateMap);
+    const order = rowToOrderList(o, items, m3Map, hubStateMap);
     order.valueSen = valueMap.get(o.id) ?? 0;
     return order;
   });

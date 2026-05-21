@@ -172,6 +172,54 @@ function rowToCO(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// rowToCOList — slim variant of rowToCO for the LIST endpoint
+// (GET /api/consignment-orders). The list grid ships, per CO, every line
+// item's FULL row (23 fields each via rowToItem). The list page never needs
+// most of those: the grid columns / filters / CSV only read each item's
+// `quantity` + `itemCategory` (item count, total qty, primary-category
+// filter), and the in-page "Transfer to Delivery Order" dialog + the "Print
+// / Preview" / "Bulk Print PDF" actions (which run off the list row, not a
+// re-fetch) read `productCode`, `productName`, `sizeLabel`, `fabricCode`
+// and the price/surcharge fields the PDF renderer needs.
+//
+// So this drops only the genuinely-unused per-item fields — id,
+// consignmentOrderId, lineNo, lineSuffix, productId, sizeCode, notes — with
+// ZERO change to anything the grid shows, filters, sorts, exports, or
+// prints. The CO has no base64 image field, so there is no image to null
+// out. The detail endpoint (GET /:id) keeps the full rowToCO payload.
+// ---------------------------------------------------------------------------
+function rowToCOListItem(it: ConsignmentOrderItemRow) {
+  return {
+    productCode: it.productCode ?? "",
+    productName: it.productName ?? "",
+    itemCategory: it.itemCategory ?? "",
+    sizeLabel: it.sizeLabel ?? "",
+    fabricCode: it.fabricCode ?? "",
+    quantity: it.quantity,
+    gapInches: it.gapInches,
+    divanHeightInches: it.divanHeightInches,
+    divanPriceSen: it.divanPriceSen,
+    legHeightInches: it.legHeightInches,
+    legPriceSen: it.legPriceSen,
+    specialOrder: it.specialOrder ?? "",
+    specialOrderPriceSen: it.specialOrderPriceSen,
+    basePriceSen: it.basePriceSen,
+    unitPriceSen: it.unitPriceSen,
+    lineTotalSen: it.lineTotalSen,
+  };
+}
+
+function rowToCOList(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
+  return {
+    ...rowToCO(row, items),
+    items: items
+      .filter((it) => it.consignmentOrderId === row.id)
+      .sort((a, b) => a.lineNo - b.lineNo)
+      .map(rowToCOListItem),
+  };
+}
+
 function rowToItem(it: ConsignmentOrderItemRow) {
   return {
     id: it.id,
@@ -397,7 +445,7 @@ app.get("/", async (c) => {
     c.var.DB.prepare("SELECT * FROM consignment_order_items").all<ConsignmentOrderItemRow>(),
   ]);
   const items = itemRes.results ?? [];
-  const data = (orderRes.results ?? []).map((r) => rowToCO(r, items));
+  const data = (orderRes.results ?? []).map((r) => rowToCOList(r, items));
   return c.json({ success: true, data, total: data.length });
 });
 

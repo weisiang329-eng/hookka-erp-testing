@@ -338,6 +338,37 @@ function rowToInvoice(
   };
 }
 
+// ---------------------------------------------------------------------------
+// rowToInvoiceList — slim variant of rowToInvoice for the LIST endpoint
+// (GET /api/invoices). The Invoices list page (src/pages/invoices/index.tsx)
+// — its DataGrid columns (invoiceNo, doNo, customerName, invoiceDate,
+// dueDate, totalSen, paidAmount, status), its global search / per-column
+// filters (all read column `key` only), its status/customer/date filters,
+// its KPI cards (Total, Outstanding, Collected MTD, Overdue read status /
+// totalSen / paidAmount / invoiceDate), and its AR Aging tab (status /
+// totalSen / paidAmount / dueDate / customerName) — only ever read the
+// invoice's own scalar columns. It NEVER reads the nested `items` or
+// `payments` arrays of a row. There is no CSV export on this page and no
+// base64 image field anywhere in the invoice payload.
+//
+// So the list-only slim payload drops the two heavy nested arrays — full
+// invoice_items rows (incl. the per-line price build-up) and invoice_payments
+// rows — down to empty arrays. The `items` / `payments` keys are kept so the
+// response shape and the `Invoice` type contract (items: InvoiceItem[],
+// payments: InvoicePayment[]) stay valid. The detail endpoint GET /:id keeps
+// the full rowToInvoice payload — double-clicking into an invoice fetches
+// everything separately. MONEY-PAGE SAFE: every visible/filterable/sortable/
+// KPI figure is a top-level scalar and is returned untouched by rowToInvoice
+// via the spread below.
+// ---------------------------------------------------------------------------
+function rowToInvoiceList(row: InvoiceRow) {
+  return {
+    ...rowToInvoice(row, [], []),
+    items: [] as ReturnType<typeof rowToItem>[],
+    payments: [] as ReturnType<typeof rowToPayment>[],
+  };
+}
+
 function genInvoiceId(): string {
   return `inv-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -537,44 +568,19 @@ app.get("/", async (c) => {
   const clause = `WHERE ${where.join(" AND ")}`;
 
   if (!paginate) {
-    // 2026-04-26 prod 500 fix: cap the unbounded items + payments fetch
-    // when no customer/status filter is applied. The unfiltered
-    // `SELECT * FROM invoice_items` was the prime suspect for the 500
-    // surfaced in the dogfood test (Server-Timing showed app-time + 0
-    // db queries, consistent with a result-set or CPU-budget exception
-    // inside the handler before any timer fires). Past this cap callers
-    // must pass ?page=N&limit=M.
-    const ROWS_HARD_CAP = 5000;
-    const [invs, items, payments] = await Promise.all([
-      db
-        .prepare(`SELECT * FROM invoices ${clause} ORDER BY created_at DESC`)
-        .bind(...params)
-        .all<InvoiceRow>(),
-      db
-        .prepare(
-          customerId || status
-            ? `SELECT i.* FROM invoice_items i
-                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/(?<![\w.])orgId/g, "v.orgId").replace(/(?<![\w.])customerId/g, "v.customerId").replace(/(?<![\w.])status/g, "v.status")}
-                 LIMIT ${ROWS_HARD_CAP}`
-            : `SELECT * FROM invoice_items WHERE orgId = ? LIMIT ${ROWS_HARD_CAP}`,
-        )
-        .bind(...(customerId || status ? params : [orgId]))
-        .all<InvoiceItemRow>(),
-      db
-        .prepare(
-          customerId || status
-            ? `SELECT p.* FROM invoice_payments p
-                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/(?<![\w.])orgId/g, "v.orgId").replace(/(?<![\w.])customerId/g, "v.customerId").replace(/(?<![\w.])status/g, "v.status")}
-                 LIMIT ${ROWS_HARD_CAP}`
-            : `SELECT * FROM invoice_payments WHERE orgId = ? LIMIT ${ROWS_HARD_CAP}`,
-        )
-        .bind(...(customerId || status ? params : [orgId]))
-        .all<InvoicePaymentRow>(),
-    ]);
+    // List payload trim (2026-05-21): the Invoices list page never reads
+    // any invoice's nested `items` / `payments` arrays (see rowToInvoiceList
+    // above). Only the invoice rows themselves are fetched here now — the
+    // previously-fetched invoice_items + invoice_payments result sets are
+    // dropped entirely, and rowToInvoiceList ships `items: []` / `payments:
+    // []`. This also retires the 2026-04-26 ROWS_HARD_CAP workaround whose
+    // sole purpose was capping those two unbounded child fetches.
+    const invs = await db
+      .prepare(`SELECT * FROM invoices ${clause} ORDER BY created_at DESC`)
+      .bind(...params)
+      .all<InvoiceRow>();
 
-    const data = (invs.results ?? []).map((inv) =>
-      rowToInvoice(inv, items.results ?? [], payments.results ?? []),
-    );
+    const data = (invs.results ?? []).map((inv) => rowToInvoiceList(inv));
     return c.json({ success: true, data, total: data.length });
   }
 
@@ -598,25 +604,11 @@ app.get("/", async (c) => {
   const total = countRes?.n ?? 0;
   const invRows = pageRes.results ?? [];
 
-  let items: InvoiceItemRow[] = [];
-  let payments: InvoicePaymentRow[] = [];
-  if (invRows.length > 0) {
-    const ids = invRows.map((r) => r.id);
-    const placeholders = ids.map(() => "?").join(",");
-    const [itemsRes, paymentsRes] = await Promise.all([
-      db
-        .prepare(`SELECT * FROM invoice_items WHERE invoiceId IN (${placeholders})`)
-        .bind(...ids)
-        .all<InvoiceItemRow>(),
-      db
-        .prepare(`SELECT * FROM invoice_payments WHERE invoiceId IN (${placeholders})`)
-        .bind(...ids)
-        .all<InvoicePaymentRow>(),
-    ]);
-    items = itemsRes.results ?? [];
-    payments = paymentsRes.results ?? [];
-  }
-  const data = invRows.map((inv) => rowToInvoice(inv, items, payments));
+  // List payload trim (2026-05-21): the Invoices list page never reads any
+  // invoice's nested `items` / `payments` arrays (see rowToInvoiceList). The
+  // per-page invoice_items + invoice_payments fetches are dropped; the slim
+  // mapper ships `items: []` / `payments: []`.
+  const data = invRows.map((inv) => rowToInvoiceList(inv));
   return c.json({ success: true, data, page, limit, total });
 });
 

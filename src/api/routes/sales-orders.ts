@@ -269,23 +269,18 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
 }
 
 // ---------------------------------------------------------------------------
-// rowToSOList — slim variant of rowToSO for the LIST endpoint
-// (GET /api/sales-orders). The list grid, every column, the filters and the
-// CSV export only ever read each line item's `quantity` and `itemCategory`
-// (item count, total qty, primary-category filter) — never the price / spec
-// fields — and the list never shows the scanned-PO image. The detail
-// endpoints keep the full rowToSO payload. This drops the bulk of the list
-// payload (per-SO base64 PO image + full line-item rows) with ZERO change to
-// anything the grid shows, filters, sorts, or exports. Detail = double-click
-// into an SO, which fetches the full payload separately.
+// rowToSOList — list-endpoint variant of rowToSO (GET /api/sales-orders).
+// Drops ONLY the per-SO base64 customerPOImageB64 scan image — by far the
+// biggest item in the list payload, and something the list grid never shows.
+// Line items are kept in FULL: the Sales Orders list page prints SO PDFs
+// straight from the list row (generateSOPdf — context-menu "Print / Preview"
+// + "Bulk Print PDF"), and that PDF needs every per-item price / spec field.
+// The detail endpoints keep the complete rowToSO payload (image included).
 // ---------------------------------------------------------------------------
 function rowToSOList(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
   return {
     ...rowToSO(row, items),
     customerPOImageB64: null,
-    items: items
-      .filter((i) => i.salesOrderId === row.id)
-      .map((i) => ({ quantity: i.quantity, itemCategory: i.itemCategory })),
   };
 }
 

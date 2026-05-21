@@ -442,6 +442,23 @@ app.get("/", async (c) => {
 app.get("/stats", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
+
+  const orgId = getOrgId(c);
+
+  // PR 4 (2026-05-20) — cache-aside snapshot. See lib/invoice-snapshot.ts.
+  // Same pattern as dashboard-snapshot (PR 1) and delivery-snapshot (PR 3).
+  {
+    const { readInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt, isSnapshotFresh } =
+      await import("../lib/invoice-snapshot");
+    const [snap, currentMax] = await Promise.all([
+      readInvoiceStatsSnapshot(c.var.DB, orgId),
+      getInvoiceStatsMaxUpdatedAt(c.var.DB),
+    ]);
+    if (isSnapshotFresh(snap, currentMax) && snap) {
+      return c.json({ success: true, ...snap.data });
+    }
+  }
+
   const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
     .all<{ status: string; n: number }>();
@@ -451,7 +468,23 @@ app.get("/stats", async (c) => {
     byStatus[row.status] = row.n;
     total += row.n;
   }
-  return c.json({ success: true, byStatus, total });
+  const payload = { byStatus, total };
+
+  try {
+    const { writeInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt } =
+      await import("../lib/invoice-snapshot");
+    const currentMax = await getInvoiceStatsMaxUpdatedAt(c.var.DB);
+    await writeInvoiceStatsSnapshot(
+      c.var.DB,
+      orgId,
+      payload as Record<string, unknown>,
+      currentMax ?? new Date().toISOString(),
+    );
+  } catch (e) {
+    console.warn("[invoice-stats-snapshot] write-back failed:", e);
+  }
+
+  return c.json({ success: true, ...payload });
 });
 
 // POST /api/invoices — create from a DELIVERED delivery order.

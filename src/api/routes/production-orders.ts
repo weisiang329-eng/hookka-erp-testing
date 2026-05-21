@@ -4455,95 +4455,129 @@ app.get("/", async (c) => {
 // Distinct WIPs that have appeared in any JobCard to date.
 // ---------------------------------------------------------------------------
 app.get("/historical-wips", async (c) => {
-  const all = await fetchAllPOs(c.var.DB, getOrgId(c));
-  type H = {
-    wipLabel: string;
-    wipKey?: string;
-    wipCode?: string;
-    wipType?: string;
-    sourcePoId: string;
-    sourceJcId: string;
-    sourcePoNo: string;
-    itemCategory: string;
-    productCode: string;
-    productName: string;
-    sizeCode: string;
-    sizeLabel: string;
-    fabricCode: string;
-    lastSeen: string;
-  };
-  const seen = new Map<string, H>();
-  for (const po of all) {
-    for (const jc of po.jobCards) {
-      if (!jc.wipLabel) continue;
-      const key = `${jc.wipLabel}::${jc.wipKey ?? ""}::${po.sizeCode}::${po.fabricCode}`;
-      const prev = seen.get(key);
-      if (!prev || (po.createdAt || "") > (prev.lastSeen || "")) {
-        seen.set(key, {
-          wipLabel: jc.wipLabel,
-          wipKey: jc.wipKey,
-          wipCode: jc.wipCode,
-          wipType: jc.wipType,
-          sourcePoId: po.id,
-          sourceJcId: jc.id,
-          sourcePoNo: po.poNo,
-          itemCategory: po.itemCategory,
-          productCode: po.productCode,
-          productName: po.productName,
-          sizeCode: po.sizeCode,
-          sizeLabel: po.sizeLabel,
-          fabricCode: po.fabricCode,
-          lastSeen: po.createdAt || "",
-        });
+  const orgId = getOrgId(c);
+  // PR 7 follow-up 2026-05-21 — cache-aside snapshot. This endpoint scans
+  // every PO + every job card via fetchAllPOs() then dedups into a small
+  // distinct-WIP list; it was missed in the original PR 7 sweep. Heavy
+  // compute, tiny result — same cache-aside treatment as the other
+  // aggregation endpoints. cache_key='' (no query params).
+  const { withSnapshot } = await import("../lib/snapshot");
+  const result = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "historical_wips_snapshot",
+      sourceTables: ["production_orders", "job_cards"],
+    },
+    orgId,
+    async () => {
+      const all = await fetchAllPOs(c.var.DB, orgId);
+      type H = {
+        wipLabel: string;
+        wipKey?: string;
+        wipCode?: string;
+        wipType?: string;
+        sourcePoId: string;
+        sourceJcId: string;
+        sourcePoNo: string;
+        itemCategory: string;
+        productCode: string;
+        productName: string;
+        sizeCode: string;
+        sizeLabel: string;
+        fabricCode: string;
+        lastSeen: string;
+      };
+      const seen = new Map<string, H>();
+      for (const po of all) {
+        for (const jc of po.jobCards) {
+          if (!jc.wipLabel) continue;
+          const key = `${jc.wipLabel}::${jc.wipKey ?? ""}::${po.sizeCode}::${po.fabricCode}`;
+          const prev = seen.get(key);
+          if (!prev || (po.createdAt || "") > (prev.lastSeen || "")) {
+            seen.set(key, {
+              wipLabel: jc.wipLabel,
+              wipKey: jc.wipKey,
+              wipCode: jc.wipCode,
+              wipType: jc.wipType,
+              sourcePoId: po.id,
+              sourceJcId: jc.id,
+              sourcePoNo: po.poNo,
+              itemCategory: po.itemCategory,
+              productCode: po.productCode,
+              productName: po.productName,
+              sizeCode: po.sizeCode,
+              sizeLabel: po.sizeLabel,
+              fabricCode: po.fabricCode,
+              lastSeen: po.createdAt || "",
+            });
+          }
+        }
       }
-    }
-  }
-  const list = Array.from(seen.values()).sort((a, b) => {
-    if (a.lastSeen !== b.lastSeen) return a.lastSeen > b.lastSeen ? -1 : 1;
-    return a.wipLabel.localeCompare(b.wipLabel);
-  });
-  return c.json({ success: true, data: list });
+      const list = Array.from(seen.values()).sort((a, b) => {
+        if (a.lastSeen !== b.lastSeen) return a.lastSeen > b.lastSeen ? -1 : 1;
+        return a.wipLabel.localeCompare(b.wipLabel);
+      });
+      return { success: true, data: list };
+    },
+  );
+  return c.json(result);
 });
 
 // ---------------------------------------------------------------------------
 // GET /api/production-orders/historical-fgs
 // ---------------------------------------------------------------------------
 app.get("/historical-fgs", async (c) => {
-  const all = await fetchAllPOs(c.var.DB, getOrgId(c));
-  type H = {
-    sourcePoId: string;
-    sourcePoNo: string;
-    itemCategory: string;
-    productCode: string;
-    productName: string;
-    sizeCode: string;
-    sizeLabel: string;
-    fabricCode: string;
-    lastSeen: string;
-  };
-  const seen = new Map<string, H>();
-  for (const po of all) {
-    const key = `${po.productCode}::${po.sizeCode}::${po.fabricCode}`;
-    const prev = seen.get(key);
-    if (!prev || (po.createdAt || "") > (prev.lastSeen || "")) {
-      seen.set(key, {
-        sourcePoId: po.id,
-        sourcePoNo: po.poNo,
-        itemCategory: po.itemCategory,
-        productCode: po.productCode,
-        productName: po.productName,
-        sizeCode: po.sizeCode,
-        sizeLabel: po.sizeLabel,
-        fabricCode: po.fabricCode,
-        lastSeen: po.createdAt || "",
+  const orgId = getOrgId(c);
+  // PR 7 follow-up 2026-05-21 — cache-aside snapshot (see historical-wips
+  // above). Scans every PO via fetchAllPOs() then dedups into a small
+  // distinct-FG list; missed in the original PR 7 sweep.
+  const { withSnapshot } = await import("../lib/snapshot");
+  const result = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "historical_fgs_snapshot",
+      sourceTables: ["production_orders", "job_cards"],
+    },
+    orgId,
+    async () => {
+      const all = await fetchAllPOs(c.var.DB, orgId);
+      type H = {
+        sourcePoId: string;
+        sourcePoNo: string;
+        itemCategory: string;
+        productCode: string;
+        productName: string;
+        sizeCode: string;
+        sizeLabel: string;
+        fabricCode: string;
+        lastSeen: string;
+      };
+      const seen = new Map<string, H>();
+      for (const po of all) {
+        const key = `${po.productCode}::${po.sizeCode}::${po.fabricCode}`;
+        const prev = seen.get(key);
+        if (!prev || (po.createdAt || "") > (prev.lastSeen || "")) {
+          seen.set(key, {
+            sourcePoId: po.id,
+            sourcePoNo: po.poNo,
+            itemCategory: po.itemCategory,
+            productCode: po.productCode,
+            productName: po.productName,
+            sizeCode: po.sizeCode,
+            sizeLabel: po.sizeLabel,
+            fabricCode: po.fabricCode,
+            lastSeen: po.createdAt || "",
+          });
+        }
+      }
+      const list = Array.from(seen.values()).sort((a, b) => {
+        if (a.lastSeen !== b.lastSeen) return a.lastSeen > b.lastSeen ? -1 : 1;
+        return a.productName.localeCompare(b.productName);
       });
-    }
-  }
-  const list = Array.from(seen.values()).sort((a, b) => {
-    if (a.lastSeen !== b.lastSeen) return a.lastSeen > b.lastSeen ? -1 : 1;
-    return a.productName.localeCompare(b.productName);
-  });
-  return c.json({ success: true, data: list });
+      return { success: true, data: list };
+    },
+  );
+  return c.json(result);
 });
 
 // ---------------------------------------------------------------------------

@@ -14,8 +14,8 @@ import RequireRole from './components/auth/RequireRole'
 
 // ── Lazy-loaded pages ─────────────────────────────────────────────────────
 
-// Dashboard
-const Dashboard = lazy(() => import('./pages/dashboard'))
+// Dashboard — the old /dashboard page was retired 2026-05-21. Dashboard B
+// is now the one and only dashboard, served at /dashboard.
 const DashboardB = lazy(() => import('./pages/dashboard-b'))
 
 // Sales
@@ -158,9 +158,11 @@ function S({ children }: { children: React.ReactNode }) {
 // by import specifier).
 
 export const DASHBOARD_ROUTES: RouteObject[] = [
-  // Dashboard
-  { path: '/dashboard', element: <S><Dashboard /></S> },
-  { path: '/dashboard-b', element: <S><DashboardB /></S> },
+  // Dashboard — Dashboard B is the canonical dashboard. The old
+  // /dashboard-b URL redirects to /dashboard so existing links / bookmarks
+  // keep working.
+  { path: '/dashboard', element: <S><DashboardB /></S> },
+  { path: '/dashboard-b', element: <Navigate to="/dashboard" replace /> },
 
   // Sales
   { path: '/sales', element: <S><Sales /></S> },

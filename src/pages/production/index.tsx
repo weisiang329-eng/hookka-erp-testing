@@ -467,8 +467,15 @@ export default function ProductionPage({
   /* eslint-disable react-hooks/set-state-in-effect -- syncing activeTab to URL deptCode on route change */
   useLayoutEffect(() => {
     if (mode === "dept" && deptCode && deptCode !== activeTab) {
+      // activeTab stays an URGENT update — the H2 / sidebar / column set
+      // must flip on the first frame of the new dept (see comment above).
       setActiveTabRaw(deptCode);
-      setOrders([]);
+      // The setOrders([]) clear forces baseRows to rebuild every grid row.
+      // Run it as an interruptible transition so the operator's clicks
+      // during the switch aren't blocked by that synchronous recompute.
+      startDeptSwitch(() => {
+        setOrders([]);
+      });
     } else if (mode === "overview" && activeTab !== "ALL") {
       setActiveTabRaw("ALL");
     }
@@ -666,6 +673,16 @@ export default function ProductionPage({
   const [fltDueFromInput, setFltDueFromInput] = useState(fltDueFrom);
   const [fltDueToInput, setFltDueToInput] = useState(fltDueTo);
   const [, startDateTransition] = useTransition();
+  // Dept-switch transition. A department hop (Fab Cut → Fab Sew) clears
+  // `orders` then refills it once the new dept's fetch lands. Both writes
+  // force the heavy filteredOrders → pickerIndex → baseRows recompute
+  // (baseRows rebuilds every grid row for ALL departments). Run those two
+  // setOrders writes inside this transition so React renders the recompute
+  // as INTERRUPTIBLE work — the operator's clicks during the switch are no
+  // longer dropped while the main thread rebuilds rows. The existing
+  // `loading` badge (driven by the fetch) already covers the visible wait,
+  // so the transition's pending flag is intentionally not consumed.
+  const [, startDeptSwitch] = useTransition();
   // Re-sync local mirror when URL state changes externally (Clear all,
   // first-mount seed, deep link, back-button). Skip when the input
   // already matches to dodge a self-loop.
@@ -1378,25 +1395,35 @@ export default function ProductionPage({
     // edits stay visible on the matrix until they hit the server.
     const draftedIds = new Set(Array.from(draftsRef.current.keys()));
     if (pending.size === 0 && draftedIds.size === 0) {
-      setOrders(fresh);
+      // Refilling `orders` after a dept switch re-runs the heavy baseRows
+      // rebuild. Run it as an interruptible transition so the operator's
+      // clicks stay responsive while React reshapes the grid. Behaviour is
+      // unchanged — same `fresh` data lands, just rendered without blocking.
+      startDeptSwitch(() => {
+        setOrders(fresh);
+      });
       return;
     }
     // Splice the optimistic JC version back over the server snapshot so the
     // PATCH-in-flight value the user can see survives the refetch.
-    setOrders((prev) => {
-      const prevJcMap = new Map<string, JobCard>();
-      for (const po of prev) {
-        for (const jc of po.jobCards) {
-          if (pending.has(jc.id) || draftedIds.has(jc.id)) prevJcMap.set(jc.id, jc);
+    // Also wrapped in the dept-switch transition for the same reason — the
+    // optimistic splice still happens, just as interruptible render work.
+    startDeptSwitch(() => {
+      setOrders((prev) => {
+        const prevJcMap = new Map<string, JobCard>();
+        for (const po of prev) {
+          for (const jc of po.jobCards) {
+            if (pending.has(jc.id) || draftedIds.has(jc.id)) prevJcMap.set(jc.id, jc);
+          }
         }
-      }
-      if (prevJcMap.size === 0) return fresh;
-      return fresh.map((po) => ({
-        ...po,
-        jobCards: po.jobCards.map((jc) =>
-          prevJcMap.has(jc.id) ? (prevJcMap.get(jc.id) as JobCard) : jc,
-        ),
-      }));
+        if (prevJcMap.size === 0) return fresh;
+        return fresh.map((po) => ({
+          ...po,
+          jobCards: po.jobCards.map((jc) =>
+            prevJcMap.has(jc.id) ? (prevJcMap.get(jc.id) as JobCard) : jc,
+          ),
+        }));
+      });
     });
   }, [ordersResp]);
 

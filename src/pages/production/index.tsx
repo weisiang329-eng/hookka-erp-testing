@@ -5500,15 +5500,10 @@ export default function ProductionPage({
             // Roll out the newly-added Customer SO column to existing users
             // whose saved column layout predates it (one-time per user/grid).
             ensureColumns={["customerSO"]}
-            // Render-only cap so the initial paint on Fab Sew (~1.2k rows)
-            // and similar large depts stays snappy. Filter / Search / Sort /
-            // Print / QR / Total strip all act on the full filtered set via
-            // gridFilteredDeptRows — capping is purely how many rows get
-            // painted into the DOM at once. Operator can click "Show all N"
-            // in the grid footer to lift the cap for that session.
-            // (Confirmed NOT the cause of the bottom-right-corner judder —
-            // removing it 2026-05-21 did not stop the judder; re-enabled.)
-            defaultRowCap={500}
+            // Rendering is handled by `virtualize` (windowed — only the
+            // on-screen rows are painted), so the dept sheet needs no
+            // defaultRowCap. Removed 2026-05-22 to unify every grid on the
+            // one virtualize path (no "Showing 500 of N" footer).
             onFilteredDataChange={setGridFilteredDeptRows}
             // Batch-action multi-select. Adds the checkbox column on the
             // left + populates `selectedDeptRows` for the toolbar below.

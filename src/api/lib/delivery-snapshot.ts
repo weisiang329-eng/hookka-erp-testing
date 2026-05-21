@@ -19,6 +19,8 @@
 //                                  the resolver output.
 // ---------------------------------------------------------------------------
 
+import { getMaxSourceUpdatedAt } from "./snapshot-freshness";
+
 type SnapRow = {
   data: Record<string, unknown>;
   builtFrom: string;
@@ -92,14 +94,11 @@ async function getMaxUpdatedAtFor(
   db: D1Database,
   tables: readonly string[],
 ): Promise<string | null> {
-  const unionParts = tables
-    .map((t) => `SELECT MAX(updated_at) AS t FROM ${t}`)
-    .join(" UNION ALL ");
-  const sql = `SELECT MAX(t) AS "maxUpdatedAt" FROM (${unionParts}) sub`;
-  const row = await db
-    .prepare(sql)
-    .first<{ maxUpdatedAt: string | null }>();
-  return row?.maxUpdatedAt ?? null;
+  // Bug fix 2026-05-21 — delegate to the schema-aware probe.
+  // delivery_order_items / sales_order_items have no `updated_at`
+  // column; the old hard-coded MAX(updated_at) errored with
+  // `column "updated_at" does not exist` -> HTTP 500 on po-values.
+  return getMaxSourceUpdatedAt(db, tables);
 }
 
 function isFresh(snap: SnapRow | null, currentMax: string | null): boolean {

@@ -34,6 +34,51 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-21-005 — Snapshot freshness check assumed a universal `updated_at` column → 9 of 15 snapshot endpoints HTTP 500 on deploy
+
+**Status:** 🟢 Fixed (2026-05-21)
+**Category:** infrastructure
+
+**Symptom:** After the snapshot work (PR 1/3/4/7) deployed to staging,
+**9 of 15 snapshot-backed endpoints returned HTTP 500** — dashboard/overview,
+sales-orders/stats, delivery-orders/po-values, accounting/aging,
+cost-ledger/summary, production-orders/overdue-counts, department-performance,
+job-cards/summary, consignment-notes/stats. Error body:
+`{"success":false,"error":"column \"updated_at\" does not exist"}`. The
+6 endpoints whose source tables all happen to have `updated_at` worked
+(and their before/after output matched byte-for-byte).
+
+**Root cause:** Every snapshot helper's Layer 2 freshness check hard-coded
+`SELECT MAX(updated_at) FROM <source_table>` for each source table, on
+the assumption that `updated_at` is a universal column. It is not — a
+staging `information_schema` probe showed only **28 of 130+ tables** carry
+`updated_at`. Line-item tables (`sales_order_items`, `delivery_order_items`,
+`invoice_items`), append-only tables (`cost_ledger`, `rm_batches`,
+`fg_batches`), and others (`job_cards`, `payment_records`, `customers`,
+`fg_units`, `workers`, `bom_templates`) have none. Any snapshot whose
+source list included one of those → SQL error → 500.
+
+Not caught by `tsc` or `npm test` — neither connects to the real DB
+schema. Caught by the 2026-05-21 staging before/after verification, which
+is exactly what that step exists for (had this gone straight to prod,
+9 prod endpoints would have been down).
+
+**Fix:** New `src/api/lib/snapshot-freshness.ts` — a schema-aware probe
+that queries `information_schema` once (cached per isolate) to learn each
+source table's best timestamp-typed column (`updated_at` preferred, else
+`created_at`), then builds the freshness `UNION ALL` with the right column
+per table. Tables with no timestamp-typed column are skipped — they
+cannot be tracked incrementally and the Layer 3 nightly rebuild covers
+them (≤24h staleness worst case). All four snapshot helpers
+(`dashboard-snapshot.ts`, `snapshot.ts`, `delivery-snapshot.ts`,
+`invoice-snapshot.ts`) now delegate to this one probe.
+
+**Verify (staging):** redeploy → re-run the 15-endpoint before/after
+diff; all 15 expected `200` + data parity. `tsc` clean; `npm test`
+185/185.
+
+---
+
 ## BUG-2026-05-21-004 — Customer `outstandingSen` writable by hand-crafted POST/PUT (back-door past the invoice ledger)
 
 **Status:** 🟢 Fixed (2026-05-21)

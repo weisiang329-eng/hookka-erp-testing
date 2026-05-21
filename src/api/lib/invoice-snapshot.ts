@@ -6,6 +6,8 @@
 // for the table def and architecture overview.
 // ---------------------------------------------------------------------------
 
+import { getMaxSourceUpdatedAt } from "./snapshot-freshness";
+
 type SnapRow = {
   data: Record<string, unknown>;
   builtFrom: string;
@@ -76,14 +78,11 @@ export async function writeInvoiceStatsSnapshot(
 export async function getInvoiceStatsMaxUpdatedAt(
   db: D1Database,
 ): Promise<string | null> {
-  const unionParts = SOURCE_TABLES
-    .map((t) => `SELECT MAX(updated_at) AS t FROM ${t}`)
-    .join(" UNION ALL ");
-  const sql = `SELECT MAX(t) AS "maxUpdatedAt" FROM (${unionParts}) sub`;
-  const row = await db
-    .prepare(sql)
-    .first<{ maxUpdatedAt: string | null }>();
-  return row?.maxUpdatedAt ?? null;
+  // Bug fix 2026-05-21 — delegate to the schema-aware probe (consistency
+  // with the other snapshot helpers; `invoices` has `updated_at` so this
+  // endpoint was not among the broken ones, but the shared probe keeps
+  // all four helpers on one freshness implementation).
+  return getMaxSourceUpdatedAt(db, SOURCE_TABLES);
 }
 
 export function isSnapshotFresh(

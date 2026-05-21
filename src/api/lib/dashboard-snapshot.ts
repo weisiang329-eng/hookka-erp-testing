@@ -33,6 +33,8 @@
 // tenants.
 // ---------------------------------------------------------------------------
 
+import { getMaxSourceUpdatedAt as probeMaxSourceUpdatedAt } from "./snapshot-freshness";
+
 // Source tables whose MAX(updated_at) feeds the Layer 2 freshness check.
 //
 // Tier C C1 fix 2026-05-21 — expanded from 5 to 17 tables to close
@@ -143,14 +145,12 @@ export async function readSnapshot(
 export async function getMaxSourceUpdatedAt(
   db: D1Database,
 ): Promise<string | null> {
-  const unionParts = TRACKED_TABLES.map(
-    (t) => `SELECT MAX(updated_at) AS t FROM ${t}`,
-  ).join(" UNION ALL ");
-  const sql = `SELECT MAX(t) AS "maxUpdatedAt" FROM (${unionParts}) sub`;
-  const row = await db
-    .prepare(sql)
-    .first<{ maxUpdatedAt: string | null }>();
-  return row?.maxUpdatedAt ?? null;
+  // Bug fix 2026-05-21 — delegate to the schema-aware probe. Many
+  // TRACKED_TABLES (job_cards, payment_records, *_items, cost_ledger,
+  // fg_units, fg_batches, rm_batches, workers, customers, bom_templates)
+  // have no `updated_at` column; the old hard-coded MAX(updated_at)
+  // errored with `column "updated_at" does not exist` -> HTTP 500.
+  return probeMaxSourceUpdatedAt(db, TRACKED_TABLES);
 }
 
 // ---------------------------------------------------------------------------

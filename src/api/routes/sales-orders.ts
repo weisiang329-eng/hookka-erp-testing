@@ -916,54 +916,70 @@ const CS_STATUSES = new Set([
 ]);
 
 app.get("/stats", async (c) => {
-  const { whereSql: orgWhere, params: orgParams } = withOrgScope(
-    c,
-    "sales_orders",
-  );
-  const res = await c.var.DB
-    .prepare(
-      `SELECT status                        AS "status",
-              COUNT(*)                      AS "n",
-              COALESCE(SUM(totalSen), 0)    AS "revenueSen"
-         FROM sales_orders
-         ${orgWhere}
-         GROUP BY status`,
-    )
-    .bind(...orgParams)
-    .all<{ status: string; n: number; revenueSen: number }>();
-  const byStatus: Record<string, number> = {};
-  const revenueByStatus: Record<string, number> = {};
-  let total = 0;
-  let totalRevenueSen = 0;
-  let csRevenueSen = 0;
-  for (const row of res.results ?? []) {
-    byStatus[row.status] = row.n;
-    revenueByStatus[row.status] = Number(row.revenueSen) || 0;
-    total += row.n;
-    totalRevenueSen += Number(row.revenueSen) || 0;
-    if (CS_STATUSES.has(row.status)) {
-      csRevenueSen += Number(row.revenueSen) || 0;
-    }
-  }
-  // Wei Siang 2026-05-16: item-level delivered value. A partially-
-  // delivered SO must count only the value of the items that actually
-  // went on a delivery note as "Delivered" — not its whole header total.
-  // Same resolver the Delivery side uses, so the two reconcile to the
-  // cent. Outstanding (item-level) = confirmed book − this.
-  const deliveredItemsSen = await loadDeliveredItemsValueSen(
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 (2026-05-20) — cache-aside snapshot. Source tables:
+  // sales_orders (bucket counts + revenue) and delivery_orders +
+  // delivery_order_items + sales_order_items (deliveredItemsSen
+  // resolver). Layer 2 invalidates on any of them changing.
+  const data = await withSnapshot(
     c.var.DB,
-    getOrgId(c),
+    {
+      tableName: "sales_orders_stats_snapshot",
+      sourceTables: [
+        "sales_orders",
+        "sales_order_items",
+        "delivery_orders",
+        "delivery_order_items",
+      ],
+    },
+    orgId,
+    async () => {
+      const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+        c,
+        "sales_orders",
+      );
+      const res = await c.var.DB
+        .prepare(
+          `SELECT status                        AS "status",
+                  COUNT(*)                      AS "n",
+                  COALESCE(SUM(totalSen), 0)    AS "revenueSen"
+             FROM sales_orders
+             ${orgWhere}
+             GROUP BY status`,
+        )
+        .bind(...orgParams)
+        .all<{ status: string; n: number; revenueSen: number }>();
+      const byStatus: Record<string, number> = {};
+      const revenueByStatus: Record<string, number> = {};
+      let total = 0;
+      let totalRevenueSen = 0;
+      let csRevenueSen = 0;
+      for (const row of res.results ?? []) {
+        byStatus[row.status] = row.n;
+        revenueByStatus[row.status] = Number(row.revenueSen) || 0;
+        total += row.n;
+        totalRevenueSen += Number(row.revenueSen) || 0;
+        if (CS_STATUSES.has(row.status)) {
+          csRevenueSen += Number(row.revenueSen) || 0;
+        }
+      }
+      const deliveredItemsSen = await loadDeliveredItemsValueSen(
+        c.var.DB,
+        orgId,
+      );
+      return {
+        byStatus,
+        revenueByStatus,
+        total,
+        totalRevenueSen,
+        csRevenueSen,
+        deliveredItemsSen,
+        outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
+      };
+    },
   );
-  return c.json({
-    success: true,
-    byStatus,
-    revenueByStatus,
-    total,
-    totalRevenueSen,
-    csRevenueSen,
-    deliveredItemsSen,
-    outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
-  });
+  return c.json({ success: true, ...data });
 });
 
 // ---------------------------------------------------------------------------

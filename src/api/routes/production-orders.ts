@@ -4024,6 +4024,21 @@ app.get("/overdue-counts", async (c) => {
       : null;
   const today = new Date().toISOString().slice(0, 10);
 
+  // PR 7 — cache-aside snapshot. cache_key encodes both the dept
+  // filter AND today's date — overdue counts are inherently
+  // today-relative so the snapshot must roll forward at the day
+  // boundary (a PO that became overdue at midnight yesterday should
+  // start counting overdue today, even if no source row changed).
+  const cacheKey = `dept=${dept ?? ""}&today=${today}`;
+  const { withSnapshot } = await import("../lib/snapshot");
+  const result = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "production_overdue_snapshot",
+      sourceTables: ["production_orders", "job_cards"],
+    },
+    orgId,
+    async () => {
   // One SQL per request; the slim row list (~800 max) is aggregated in JS.
   // Per-PO `earliestOverdue` is computed via the same predicate the FE used
   // to apply locally — overview branch is anchored on PO.targetEndDate and
@@ -4141,10 +4156,11 @@ app.get("/overdue-counts", async (c) => {
     r.overdueCategories.includes("SOFA"),
   ).length;
 
-  return c.json({
-    success: true,
-    data: { bedframeCount, sofaCount, breakdown },
-  });
+      return { data: { bedframeCount, sofaCount, breakdown } };
+    },
+    cacheKey,
+  );
+  return c.json({ success: true, ...result });
 });
 
 

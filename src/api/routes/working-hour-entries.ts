@@ -484,6 +484,24 @@ app.get("/summary", async (c) => {
     return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
   }
 
+  // PR 7 — cache-aside snapshot.
+  const { getOrgId: _getOrgIdSum } = await import("../lib/tenant");
+  const _snapMod = await import("../lib/snapshot");
+  const _orgIdSum = _getOrgIdSum(c);
+  const _snapCfgSum = {
+    tableName: "whe_summary_snapshot",
+    sourceTables: ["working_hour_entries"],
+  };
+  const _cacheKeySum = `from=${from}&to=${to}`;
+  const _checkSum = await Promise.all([
+    _snapMod.readSnapshot(c.var.DB, _snapCfgSum, _orgIdSum, _cacheKeySum),
+    _snapMod.getMaxSourceUpdatedAt(c.var.DB, _snapCfgSum),
+  ]);
+  if (_snapMod.isSnapshotFresh(_checkSum[0], _checkSum[1]) && _checkSum[0]) {
+    return c.json({ success: true, ..._checkSum[0].data });
+  }
+  const _currentMaxSum = _checkSum[1];
+
   // One query per (worker, dept) bucket — totals are derived in JS by
   // summing across each worker's bucket rows. distinct(date) per worker
   // gives the daysWithEntries count without a second round trip.
@@ -542,7 +560,20 @@ app.get("/summary", async (c) => {
   }
 
   const data = Array.from(byWorker.values()).sort((a, b) => b.totalHours - a.totalHours);
-  return c.json({ success: true, data, total: data.length });
+  const _payloadSum = { data, total: data.length };
+  try {
+    await _snapMod.writeSnapshot(
+      c.var.DB,
+      _snapCfgSum,
+      _orgIdSum,
+      _payloadSum,
+      _currentMaxSum ?? new Date().toISOString(),
+      _cacheKeySum,
+    );
+  } catch (e) {
+    console.warn("[whe-summary-snapshot] write-back failed:", e);
+  }
+  return c.json({ success: true, ..._payloadSum });
 });
 
 // ---------------------------------------------------------------------------
@@ -565,6 +596,24 @@ app.get("/dept-category-summary", async (c) => {
     return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
   }
 
+  // PR 7 — cache-aside snapshot.
+  const { getOrgId: _getOrgIdDC } = await import("../lib/tenant");
+  const _snapModDC = await import("../lib/snapshot");
+  const _orgIdDC = _getOrgIdDC(c);
+  const _snapCfgDC = {
+    tableName: "whe_dept_category_snapshot",
+    sourceTables: ["working_hour_entries"],
+  };
+  const _cacheKeyDC = `from=${from}&to=${to}`;
+  const _checkDC = await Promise.all([
+    _snapModDC.readSnapshot(c.var.DB, _snapCfgDC, _orgIdDC, _cacheKeyDC),
+    _snapModDC.getMaxSourceUpdatedAt(c.var.DB, _snapCfgDC),
+  ]);
+  if (_snapModDC.isSnapshotFresh(_checkDC[0], _checkDC[1]) && _checkDC[0]) {
+    return c.json({ success: true, ..._checkDC[0].data });
+  }
+  const _currentMaxDC = _checkDC[1];
+
   const res = await c.var.DB
     .prepare(
       `SELECT departmentCode,
@@ -583,13 +632,22 @@ app.get("/dept-category-summary", async (c) => {
     hours: typeof r.hours === "number" ? r.hours : Number(r.hours) || 0,
   }));
 
-  return c.json({
-    success: true,
-    data: {
-      range: { from, to },
-      buckets,
-    },
-  });
+  const _payloadDC = {
+    data: { range: { from, to }, buckets },
+  };
+  try {
+    await _snapModDC.writeSnapshot(
+      c.var.DB,
+      _snapCfgDC,
+      _orgIdDC,
+      _payloadDC,
+      _currentMaxDC ?? new Date().toISOString(),
+      _cacheKeyDC,
+    );
+  } catch (e) {
+    console.warn("[whe-dept-category-snapshot] write-back failed:", e);
+  }
+  return c.json({ success: true, ..._payloadDC });
 });
 
 // ---------------------------------------------------------------------------

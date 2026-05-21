@@ -95,41 +95,52 @@ app.get("/summary", async (c) => {
   const denied = await requirePermission(c, "supplier-scorecards", "read");
   if (denied) return denied;
   const orgId = getOrgId(c);
-  const res = await c.var.DB.prepare(
-    `SELECT supplierId, expectedDate, receivedDate, status
-     FROM purchase_orders
-     WHERE orgId = ?`,
-  )
-    .bind(orgId)
-    .all<PoStatRow>();
-  const rows = res.results ?? [];
-
-  const acc = new Map<
-    string,
-    { totalPOs: number; onTimeCount: number }
-  >();
-  for (const r of rows) {
-    if (!r.supplierId) continue;
-    const onTime = isReceivedOnTime(r);
-    if (onTime === null) continue;
-    const e = acc.get(r.supplierId) ?? { totalPOs: 0, onTimeCount: 0 };
-    e.totalPOs += 1;
-    if (onTime) e.onTimeCount += 1;
-    acc.set(r.supplierId, e);
-  }
-
-  const data: Record<
-    string,
-    { onTimeRate: number; totalPOs: number; onTimeCount: number }
-  > = {};
-  for (const [sid, s] of acc) {
-    data[sid] = {
-      onTimeRate: s.totalPOs > 0 ? (s.onTimeCount / s.totalPOs) * 100 : 0,
-      totalPOs: s.totalPOs,
-      onTimeCount: s.onTimeCount,
-    };
-  }
-  return c.json({ success: true, data });
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 — cache-aside snapshot.
+  const data = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "supplier_scorecards_summary_snapshot",
+      sourceTables: ["purchase_orders"],
+    },
+    orgId,
+    async () => {
+      const res = await c.var.DB.prepare(
+        `SELECT supplierId, expectedDate, receivedDate, status
+         FROM purchase_orders
+         WHERE orgId = ?`,
+      )
+        .bind(orgId)
+        .all<PoStatRow>();
+      const rows = res.results ?? [];
+      const acc = new Map<
+        string,
+        { totalPOs: number; onTimeCount: number }
+      >();
+      for (const r of rows) {
+        if (!r.supplierId) continue;
+        const onTime = isReceivedOnTime(r);
+        if (onTime === null) continue;
+        const e = acc.get(r.supplierId) ?? { totalPOs: 0, onTimeCount: 0 };
+        e.totalPOs += 1;
+        if (onTime) e.onTimeCount += 1;
+        acc.set(r.supplierId, e);
+      }
+      const data: Record<
+        string,
+        { onTimeRate: number; totalPOs: number; onTimeCount: number }
+      > = {};
+      for (const [sid, s] of acc) {
+        data[sid] = {
+          onTimeRate: s.totalPOs > 0 ? (s.onTimeCount / s.totalPOs) * 100 : 0,
+          totalPOs: s.totalPOs,
+          onTimeCount: s.onTimeCount,
+        };
+      }
+      return { data };
+    },
+  );
+  return c.json({ success: true, ...data });
 });
 
 // ---------------------------------------------------------------------------

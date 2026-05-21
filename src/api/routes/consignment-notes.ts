@@ -27,6 +27,7 @@ import {
 } from "../lib/consignment-note-shared";
 import { cascadeCNCompletionToCO, cascadeCNReversalToCO } from "./production-orders";
 import { nextInvoiceNo } from "./invoices";
+import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 
@@ -131,48 +132,51 @@ app.get("/", async (c) => {
 // no collision with the PUT /:id route registered later in the file.
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
-  // byStatus aggregate. Same shape as /api/delivery-orders/stats so a
-  // future refactor can collapse the two if we ever decide to.
-  const aggRes = await c.var.DB
-    .prepare(
-      "SELECT status, COUNT(*) AS n FROM consignment_notes GROUP BY status",
-    )
-    .all<{ status: string; n: number }>();
-  const byStatus: Record<string, number> = {};
-  for (const row of aggRes.results ?? []) {
-    byStatus[row.status] = Number(row.n) || 0;
-  }
-
-  // deliveredMTD — count of FULLY_SOLD CNs whose deliveredAt timestamp is
-  // ≥ first-of-this-month (UTC). Operator's KPI: "how many CNs reached
-  // the branch this month so far". String comparison works because
-  // deliveredAt is stored as ISO 8601 (lexicographic order = chronological
-  // order for same-format ISO strings).
-  const now = new Date();
-  const startOfMonth = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-  ).toISOString();
-  const mtdRes = await c.var.DB
-    .prepare(
-      `SELECT COUNT(*) AS n FROM consignment_notes
-         WHERE status = 'FULLY_SOLD' AND deliveredAt >= ?`,
-    )
-    .bind(startOfMonth)
-    .first<{ n: number }>();
-  const deliveredMTD = Number(mtdRes?.n) || 0;
-
-  return c.json({
-    success: true,
-    data: {
-      // pendingCN intentionally omitted — see route header rationale.
-      pendingDispatch: byStatus.ACTIVE ?? 0,
-      dispatched: byStatus.PARTIALLY_SOLD ?? 0,
-      inTransit: byStatus.IN_TRANSIT ?? 0,
-      delivered: byStatus.FULLY_SOLD ?? 0,
-      deliveredMTD,
-      acknowledged: byStatus.CLOSED ?? 0,
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 — cache-aside snapshot.
+  const data = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "consignment_notes_stats_snapshot",
+      sourceTables: ["consignment_notes"],
     },
-  });
+    orgId,
+    async () => {
+      const aggRes = await c.var.DB
+        .prepare(
+          "SELECT status, COUNT(*) AS n FROM consignment_notes GROUP BY status",
+        )
+        .all<{ status: string; n: number }>();
+      const byStatus: Record<string, number> = {};
+      for (const row of aggRes.results ?? []) {
+        byStatus[row.status] = Number(row.n) || 0;
+      }
+      const now = new Date();
+      const startOfMonth = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+      ).toISOString();
+      const mtdRes = await c.var.DB
+        .prepare(
+          `SELECT COUNT(*) AS n FROM consignment_notes
+             WHERE status = 'FULLY_SOLD' AND deliveredAt >= ?`,
+        )
+        .bind(startOfMonth)
+        .first<{ n: number }>();
+      const deliveredMTD = Number(mtdRes?.n) || 0;
+      return {
+        data: {
+          pendingDispatch: byStatus.ACTIVE ?? 0,
+          dispatched: byStatus.PARTIALLY_SOLD ?? 0,
+          inTransit: byStatus.IN_TRANSIT ?? 0,
+          delivered: byStatus.FULLY_SOLD ?? 0,
+          deliveredMTD,
+          acknowledged: byStatus.CLOSED ?? 0,
+        },
+      };
+    },
+  );
+  return c.json({ success: true, ...data });
 });
 
 // POST /api/consignment-notes

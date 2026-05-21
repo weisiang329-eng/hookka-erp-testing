@@ -28,6 +28,7 @@ import {
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import {
   consumeEditLockOverrideToken,
   createEditLockOverride,
@@ -684,18 +685,32 @@ app.post("/", async (c) => {
 // wildcard /:id would otherwise swallow "/stats").
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
-  const res = await c.var.DB
-    .prepare(
-      "SELECT status, COUNT(*) AS n FROM consignment_orders GROUP BY status",
-    )
-    .all<{ status: string; n: number }>();
-  const byStatus: Record<string, number> = {};
-  let total = 0;
-  for (const row of res.results ?? []) {
-    byStatus[row.status] = row.n;
-    total += row.n;
-  }
-  return c.json({ success: true, byStatus, total });
+  const orgId = getOrgId(c);
+  const { withSnapshot } = await import("../lib/snapshot");
+  // PR 7 — cache-aside snapshot.
+  const data = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "consignment_orders_stats_snapshot",
+      sourceTables: ["consignment_orders"],
+    },
+    orgId,
+    async () => {
+      const res = await c.var.DB
+        .prepare(
+          "SELECT status, COUNT(*) AS n FROM consignment_orders GROUP BY status",
+        )
+        .all<{ status: string; n: number }>();
+      const byStatus: Record<string, number> = {};
+      let total = 0;
+      for (const row of res.results ?? []) {
+        byStatus[row.status] = row.n;
+        total += row.n;
+      }
+      return { byStatus, total };
+    },
+  );
+  return c.json({ success: true, ...data });
 });
 
 // ---------------------------------------------------------------------------

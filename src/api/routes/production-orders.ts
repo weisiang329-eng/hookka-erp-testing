@@ -1141,24 +1141,47 @@ async function attachCustomerSO(
   );
   const soMap = new Map<string, string>();
   const coMap = new Map<string, string>();
-  // Chunk well under SQLite's 999-bound-variable ceiling.
+  // Chunk well under the bound-variable ceiling.
   const CHUNK = 200;
+  // Perf 2026-05-22 — fire every SO chunk + CO chunk query as ONE parallel
+  // batch instead of awaiting each chunk in sequence. With ~1000 distinct
+  // SO ids on a Production dept load that was ~6 serial Hyperdrive
+  // round-trips (~0.9s of pure latency); now it is a single wave. Output
+  // is identical — same per-chunk SQL, same maps.
+  const soChunks: string[][] = [];
   for (let i = 0; i < soIds.length; i += CHUNK) {
-    const slice = soIds.slice(i, i + CHUNK);
-    const placeholders = slice.map(() => "?").join(",");
-    const res = await db
-      .prepare(`SELECT id, customerSOId FROM sales_orders WHERE id IN (${placeholders})`)
-      .bind(...slice)
-      .all<{ id: string; customerSOId: string | null }>();
+    soChunks.push(soIds.slice(i, i + CHUNK));
+  }
+  const coChunks: string[][] = [];
+  for (let i = 0; i < coIds.length; i += CHUNK) {
+    coChunks.push(coIds.slice(i, i + CHUNK));
+  }
+  const [soResults, coResults] = await Promise.all([
+    Promise.all(
+      soChunks.map((slice) =>
+        db
+          .prepare(
+            `SELECT id, customerSOId FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
+          )
+          .bind(...slice)
+          .all<{ id: string; customerSOId: string | null }>(),
+      ),
+    ),
+    Promise.all(
+      coChunks.map((slice) =>
+        db
+          .prepare(
+            `SELECT id, customerCOId FROM consignment_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
+          )
+          .bind(...slice)
+          .all<{ id: string; customerCOId: string | null }>(),
+      ),
+    ),
+  ]);
+  for (const res of soResults) {
     for (const r of res.results ?? []) soMap.set(r.id, r.customerSOId || "");
   }
-  for (let i = 0; i < coIds.length; i += CHUNK) {
-    const slice = coIds.slice(i, i + CHUNK);
-    const placeholders = slice.map(() => "?").join(",");
-    const res = await db
-      .prepare(`SELECT id, customerCOId FROM consignment_orders WHERE id IN (${placeholders})`)
-      .bind(...slice)
-      .all<{ id: string; customerCOId: string | null }>();
+  for (const res of coResults) {
     for (const r of res.results ?? []) coMap.set(r.id, r.customerCOId || "");
   }
   for (const p of pos) {

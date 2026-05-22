@@ -11,6 +11,7 @@
 import { useMemo, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
+import { Skeleton, SkeletonDashboard } from "@/components/ui/skeleton";
 import { useCachedJson } from "@/lib/cached-fetch";
 import {
   buildLinkedPOIds,
@@ -335,6 +336,7 @@ function KTile({
   spark,
   delta = null,
   onClick,
+  loading = false,
 }: {
   label: string;
   value: string;
@@ -344,6 +346,10 @@ function KTile({
   spark?: number[];
   delta?: number | null;
   onClick?: () => void;
+  // When true the value slot shows a pulsing skeleton — used for tiles
+  // backed by a slower live fetch while the snapshot-fast tiles are
+  // already painted (progressive render).
+  loading?: boolean;
 }) {
   return (
     <Card
@@ -367,9 +373,13 @@ function KTile({
           </div>
         </div>
         <div className="mt-3 flex items-end gap-2">
-          <p className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B] tabular-nums leading-none">
-            {value}
-          </p>
+          {loading ? (
+            <Skeleton height={26} width={96} />
+          ) : (
+            <p className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B] tabular-nums leading-none">
+              {value}
+            </p>
+          )}
           <DeltaChip pct={delta} />
         </div>
         <div className="mt-2 flex items-end justify-between">
@@ -384,6 +394,23 @@ function KTile({
         style={{ background: accent, opacity: 0.65 }}
       />
     </Card>
+  );
+}
+
+// Skeleton placeholder for a card section whose own live fetch is still in
+// flight — keeps the card at roughly its final height so the page doesn't
+// jump when the real rows arrive (progressive render).
+function SectionRowsSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="space-y-2 py-1">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="flex items-center gap-3">
+          <Skeleton height={12} width={88} />
+          <Skeleton height={12} className="flex-1" />
+          <Skeleton height={12} width={56} />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -681,9 +708,20 @@ export default function DashboardBPage() {
   const { data: workersRaw, loading: workersL } =
     useCachedJson<WorkersResp>("/api/workers");
 
-  const loading =
-    soL || ovL || poL || doL || poValL || soItemsL || jcSumL || wheSumL ||
-    workersL;
+  // Progressive render — the page used to block on ALL nine fetches before
+  // painting anything. Now it gates only on the overview fetch, which is
+  // snapshot-accelerated (fast). Every other section renders the instant ITS
+  // OWN data arrives; sections still waiting show a skeleton placeholder.
+  //
+  //   • ovL        → overview (KPI rail, Revenue, Plant Load, Sales by
+  //                  Customer, Top Sellers, Fabric, Dept Backlog,
+  //                  Purchasing). Snapshot-backed — resolves quickly.
+  //   • soL        → Order Pipeline + the "Outstanding" KPI tile.
+  //   • pendingL   → the "Pending Delivery" KPI tile (4 heavy live fetches).
+  //   • effL       → Worker Efficiency (3 live fetches).
+  const overviewLoading = ovL;
+  const pendingL = poL || doL || poValL || soItemsL;
+  const effL = jcSumL || wheSumL || workersL;
 
   // Pending Delivery — identical computation to /dashboard.
   const pendingDeliveryValueSen = useMemo(() => {
@@ -809,10 +847,14 @@ export default function DashboardBPage() {
   const aovMonthly = ov.aovMonthlyByCustomer ?? {};
   const tsByCust = ov.topSellersByCustomer;
 
-  if (loading) {
+  // Only the overview fetch gates the first paint — it is snapshot-backed
+  // and fast. While it resolves, show a layout-shaped skeleton instead of a
+  // bare centred string, so the page never flashes empty.
+  if (overviewLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <p className="text-xs text-[#6B7280]">Loading Dashboard B…</p>
+      <div className="space-y-5">
+        <p className="sr-only">Loading Dashboard</p>
+        <SkeletonDashboard />
       </div>
     );
   }
@@ -869,6 +911,7 @@ export default function DashboardBPage() {
           sub="confirmed · not yet delivered"
           icon={Clock}
           accent={C_INV}
+          loading={soL}
         />
         <KTile
           label="Pending Delivery"
@@ -876,6 +919,7 @@ export default function DashboardBPage() {
           sub="made, not yet on a DO"
           icon={Package}
           accent={C_GREEN}
+          loading={pendingL}
         />
       </div>
 
@@ -1214,49 +1258,59 @@ export default function DashboardBPage() {
                   <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">
                     Delivered rate
                   </p>
-                  <p className="text-base font-bold text-[#15803D]">
-                    {deliveredRate.toFixed(1)}%
-                  </p>
+                  {soL ? (
+                    <Skeleton height={20} width={56} className="ml-auto" />
+                  ) : (
+                    <p className="text-base font-bold text-[#15803D]">
+                      {deliveredRate.toFixed(1)}%
+                    </p>
+                  )}
                 </div>
               }
             />
-            {[
-              { k: "Confirmed", v: confirmed, c: C_SO, pct: 100 },
-              {
-                k: "Outstanding",
-                v: outstanding,
-                c: C_PROD,
-                pct: confirmed > 0 ? (outstanding / confirmed) * 100 : 0,
-              },
-              {
-                k: "Delivered",
-                v: delivered,
-                c: C_GREEN,
-                pct: deliveredRate,
-              },
-            ].map((s) => (
-              <div key={s.k} className="flex items-center gap-3 py-1.5">
-                <span className="w-24 text-xs text-[#5A5550]">{s.k}</span>
-                <div className="flex-1 h-3 rounded-full bg-[#F5F2ED] overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${Math.max(3, (s.v / pipeMax) * 100)}%`,
-                      background: s.c,
-                    }}
-                  />
-                </div>
-                <span className="w-12 text-right text-[11px] text-[#9CA3AF] tabular-nums">
-                  {s.pct.toFixed(0)}%
-                </span>
-                <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
-                  {rm(s.v)}
-                </span>
-              </div>
-            ))}
-            <p className="mt-2 text-[11px] text-[#9CA3AF]">
-              {rm(outstanding)} still to ship of {rm(confirmed)} confirmed.
-            </p>
+            {soL ? (
+              <SectionRowsSkeleton rows={3} />
+            ) : (
+              <>
+                {[
+                  { k: "Confirmed", v: confirmed, c: C_SO, pct: 100 },
+                  {
+                    k: "Outstanding",
+                    v: outstanding,
+                    c: C_PROD,
+                    pct: confirmed > 0 ? (outstanding / confirmed) * 100 : 0,
+                  },
+                  {
+                    k: "Delivered",
+                    v: delivered,
+                    c: C_GREEN,
+                    pct: deliveredRate,
+                  },
+                ].map((s) => (
+                  <div key={s.k} className="flex items-center gap-3 py-1.5">
+                    <span className="w-24 text-xs text-[#5A5550]">{s.k}</span>
+                    <div className="flex-1 h-3 rounded-full bg-[#F5F2ED] overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${Math.max(3, (s.v / pipeMax) * 100)}%`,
+                          background: s.c,
+                        }}
+                      />
+                    </div>
+                    <span className="w-12 text-right text-[11px] text-[#9CA3AF] tabular-nums">
+                      {s.pct.toFixed(0)}%
+                    </span>
+                    <span className="w-24 text-right text-xs font-semibold text-[#1F1D1B] tabular-nums">
+                      {rm(s.v)}
+                    </span>
+                  </div>
+                ))}
+                <p className="mt-2 text-[11px] text-[#9CA3AF]">
+                  {rm(outstanding)} still to ship of {rm(confirmed)} confirmed.
+                </p>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -1266,6 +1320,9 @@ export default function DashboardBPage() {
               title="Worker Efficiency"
               sub="production mins ÷ clocked hours · last 7 working days"
             />
+            {effL ? (
+              <SectionRowsSkeleton rows={5} />
+            ) : (
             <div className="grid grid-cols-2 gap-5">
               <div>
                 <p className="text-[11px] font-semibold text-[#15803D] mb-1.5">
@@ -1316,6 +1373,7 @@ export default function DashboardBPage() {
                 ))}
               </div>
             </div>
+            )}
           </CardContent>
         </Card>
       </div>

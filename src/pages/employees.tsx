@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { countPublicHolidaysInMonth } from "@/lib/labor-engine";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -3035,6 +3036,15 @@ function DepartmentLaborTab({
     [entriesResp]
   );
 
+  // Public holidays — drive the holiday-adjusted production-cost day rate.
+  const { data: holidaysResp } = useCachedJson<{ data?: string[] }>(
+    "/api/kv-config/public_holidays",
+  );
+  const holidayList = useMemo(
+    () => (Array.isArray(holidaysResp?.data) ? holidaysResp.data : []),
+    [holidaysResp],
+  );
+
   const workerById = useMemo(() => {
     const m = new Map<string, Worker>();
     for (const w of workers) m.set(w.id, w);
@@ -3059,13 +3069,14 @@ function DepartmentLaborTab({
   }, [allDepts]);
 
   const rows: DepartmentLaborRow[] = useMemo(() => {
-    // Working-days denominator for the regular rate. Same branching as
-    // Labor Cost: when `period` is set, use workingDaysInMonth (full
-    // calendar month, Sundays excluded); otherwise fall to
-    // workingDaysInRange so custom ranges still get a sane denom.
-    const wdInMonth = period
-      ? workingDaysInMonth(period)
-      : workingDaysInRange(dateFrom, dateTo);
+    // Public holidays in the reporting month — the production-cost regular
+    // day rate divides the salary by (workingDaysPerMonth − holidays), so a
+    // holiday month costs each productive hour more.
+    const [hYear, hMonth] = (period || dateFrom).slice(0, 7).split("-").map(Number);
+    const holidays =
+      hYear && hMonth
+        ? countPublicHolidaysInMonth(hYear, hMonth, holidayList)
+        : 0;
 
     // Group raw entries by (worker, date) so we can apply OT pro-rata
     // within each workday. Same shape as Labor Cost's segsByWorkerDate.
@@ -3083,14 +3094,18 @@ function DepartmentLaborTab({
       const [workerId] = k.split("|");
       const w = workerById.get(workerId);
       if (!w || !w.basicSalarySen) continue;
-      // Same rates as Labor Cost tab: regular rate uses calendar working
-      // days; OT base rate stays anchored at /26/9 so OT premium doesn't
-      // fluctuate month-to-month.
-      const regularRateSen = w.basicSalarySen / wdInMonth / 9;
-      const otBaseRateSen = w.basicSalarySen / 26 / 9;
+      // Per-worker rates — OT threshold, hours/day and days/month all come
+      // from this worker's own Employee Master figures (no hard-coded 9 h).
+      // Regular day rate divides by (days − public holidays); the OT base
+      // rate stays on the full ÷26 so OT pay matches payroll.
+      const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
+      const regularDays = Math.max(1, monthDays - holidays);
+      const regularRateSen = w.basicSalarySen / regularDays / stdHours;
+      const otBaseRateSen = w.basicSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      const otTotalH = Math.max(0, totalH - 9);
+      const otTotalH = Math.max(0, totalH - stdHours);
       const otShare = totalH > 0 ? otTotalH / totalH : 0;
 
       for (const e of segs) {
@@ -3125,7 +3140,7 @@ function DepartmentLaborTab({
         estCostSen: Math.round(cell?.costSen ?? 0),
       };
     });
-  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter]);
+  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter, holidayList]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -4892,46 +4907,6 @@ function buildPeriodOptions(): { value: string; label: string }[] {
   return out;
 }
 
-// Calendar-based working days for the period — Mon–Sat in the actual month,
-// Sundays excluded. Replaces the earlier fixed-26 baseline so months with
-// extra Saturdays (27 days) or short Februarys (24 days) are reflected
-// faithfully in the hourly rate. Falls back to 26 on bad input so the rate
-// calc never divides by zero.
-function workingDaysInMonth(period: string): number {
-  const [y, m] = period.split("-").map(Number);
-  if (!y || !m) return 26;
-  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  let count = 0;
-  for (let d = 1; d <= lastDay; d++) {
-    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-    if (dow !== 0) count++;
-  }
-  return count;
-}
-
-// Effective working-days denominator for a custom date range. Used to derive
-// the per-worker hourly rate when the range isn't a single calendar month.
-//
-// Always returns the calendar working days of the FROM-date's month (Mon-Sat).
-// The hourly rate is a property of the contract month, not the report
-// window — picking a 2-day filter must NOT change a worker's per-hour cost.
-//
-// Bug fix 2026-04-30 per user (Labor Cost vs Revenue showing 480% on a
-// 29-30 Apr filter, 3.2% on a 1-30 Apr filter for the SAME 16.5h of work):
-// the prior implementation counted Mon-Sat days inside [from, to] (so a
-// 2-day window divided monthly salary by 2, inflating the rate ~13x).
-// The OT base rate already used a fixed 26-day denominator at the call
-// site; the regular rate now matches that intent via the FROM month's
-// real Mon-Sat count.
-//
-// Falls back to 26 on unparseable input.
-function workingDaysInRange(from: string, _to: string): number {
-  const fy = Number(from.slice(0, 4));
-  const fm = Number(from.slice(5, 7));
-  if (!fy || !fm) return 26;
-  return workingDaysInMonth(`${fy}-${String(fm).padStart(2, "0")}`);
-}
-
 // Inline panel — create / edit / delete departments. Lives under LaborCostTab
 // but operates on the same /api/departments source-of-truth that every dept
 // dropdown across the page reads from. New depts appear immediately in
@@ -5316,6 +5291,15 @@ function LaborCostTab({
     return m;
   }, [workers]);
 
+  // Public holidays — drive the holiday-adjusted production-cost day rate.
+  const { data: holidaysResp } = useCachedJson<{ data?: string[] }>(
+    "/api/kv-config/public_holidays",
+  );
+  const holidayList = useMemo(
+    () => (Array.isArray(holidaysResp?.data) ? holidaysResp.data : []),
+    [holidaysResp],
+  );
+
   const rows: LaborCostRow[] = useMemo(() => {
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
     const revData = plResp?.success ? plResp.data ?? {} : {};
@@ -5326,20 +5310,15 @@ function LaborCostTab({
     // deployments) so the table still renders with zeroes rather than NaN.
     const byDeptCategory: Record<string, number> = revData.byDeptCategory ?? {};
 
-    // Two rates per worker, intentionally asymmetric:
-    //  - Regular hourly rate uses calendar-based working days for the
-    //    selected month (Mon–Sat; Sundays excluded). Feb (24 days) → higher
-    //    regular rate; months with 27 working days → lower regular rate.
-    //  - OT base rate stays anchored at the fixed-26 standard rate, then
-    //    multiplied by otMultiplier (default 1.5×). OT premium does NOT
-    //    fluctuate month-to-month — it's tied to a "standard" hourly rate
-    //    so a worker doing OT in February doesn't get a windfall vs March.
-    // When `period` is a single calendar month this matches the prior
-    // behaviour exactly. When the user picks a custom range the rate is
-    // derived from Mon-Sat days actually in the range — see workingDaysInRange.
-    const wdInMonth = period
-      ? workingDaysInMonth(period)
-      : workingDaysInRange(from, to);
+    // Public holidays in the reporting month — the production-cost regular
+    // day rate divides the salary by (workingDaysPerMonth − holidays), so a
+    // holiday month makes each productive hour cost more. The OT base rate
+    // stays on the full ÷26 so OT pay matches payroll.
+    const [hYear, hMonth] = (period || from).slice(0, 7).split("-").map(Number);
+    const holidays =
+      hYear && hMonth
+        ? countPublicHolidaysInMonth(hYear, hMonth, holidayList)
+        : 0;
 
     // Group by (departmentCode, category). Hours summed; cost = sum over each
     // entry of regular_hours × regular_rate + ot_hours × ot_base_rate × multiplier.
@@ -5365,11 +5344,16 @@ function LaborCostTab({
       const [workerId] = k.split("|");
       const w = workersById.get(workerId);
       if (!w || !w.basicSalarySen) continue;
-      const regularRateSen = w.basicSalarySen / wdInMonth / 9;
-      const otBaseRateSen = w.basicSalarySen / 26 / 9;
+      // Per-worker rates — OT threshold, hours/day and days/month all come
+      // from this worker's own Employee Master figures (no hard-coded 9 h).
+      const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
+      const regularDays = Math.max(1, monthDays - holidays);
+      const regularRateSen = w.basicSalarySen / regularDays / stdHours;
+      const otBaseRateSen = w.basicSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      const otTotalH = Math.max(0, totalH - 9);
+      const otTotalH = Math.max(0, totalH - stdHours);
       const otShare = totalH > 0 ? otTotalH / totalH : 0;
 
       for (const e of segs) {
@@ -5425,7 +5409,7 @@ function LaborCostTab({
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter]);
+  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter, holidayList]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);

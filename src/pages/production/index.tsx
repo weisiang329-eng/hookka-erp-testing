@@ -462,6 +462,32 @@ export default function ProductionPage({
   // stale result from a superseded post (operator changed the filter
   // again mid-compute) is dropped instead of flashing outdated rows.
   const baserowsReqRef = useRef(0);
+  // Phase 3 — incremental picker-index cache. The worker keeps a per-PO
+  // picker-index cache and rebuilds an entry only for POs whose jobCards
+  // actually changed; a pure filter / dept change rebuilds nothing. To
+  // drive that, the page diffs `orders` PO-by-PO whenever the array
+  // reference changes: every optimistic edit / batch / refetch does
+  // `prev.map(o => o.id !== id ? o : {...o})`, so an UNCHANGED PO keeps
+  // its object identity and a CHANGED PO gets a fresh reference. A
+  // reference-level diff therefore yields the exact set of POs the worker
+  // must re-index. `pendingDirtyPoIdsRef` accumulates those ids across
+  // every render until the post effect consumes (and clears) them — more
+  // than one render can land between two worker posts.
+  const ordersIdentityRef = useRef<ProductionOrder[] | null>(null);
+  const prevOrdersByIdRef = useRef<Map<string, ProductionOrder>>(new Map());
+  const pendingDirtyPoIdsRef = useRef<Set<string>>(new Set());
+  if (ordersIdentityRef.current !== orders) {
+    const prevById = prevOrdersByIdRef.current;
+    const nextById = new Map<string, ProductionOrder>();
+    for (const o of orders) {
+      nextById.set(o.id, o);
+      // A PO is dirty when it's new or its object reference changed
+      // (a JC was patched on it). Unchanged POs keep their identity.
+      if (prevById.get(o.id) !== o) pendingDirtyPoIdsRef.current.add(o.id);
+    }
+    ordersIdentityRef.current = orders;
+    prevOrdersByIdRef.current = nextById;
+  }
   // The worker's most recent result. Starts empty — a brief empty grid on
   // the very first compute is acceptable; on later recomputes the previous
   // rows stay rendered until the new ones land, so a filter change never
@@ -2269,30 +2295,50 @@ export default function ProductionPage({
   // compute + clone out) and the previous rows stay rendered until the
   // reply lands, so an edit never blanks or sticks the grid.
   //
-  // Phase 3: a cell edit currently triggers a full buildBaseRows pass in
-  // the worker. A future polish could patch just the touched row in-place
-  // for sub-frame edit feedback and skip the round-trip when only one JC
-  // changed. Correct (no lost edits, no stale cell) and non-blocking for
-  // Phase 2; the round-trip is the remaining latency to shave.
+  // Phase 3 — cut the structured-clone cost. The page no longer clones
+  // the full unfiltered `orders` (~15k job cards) into the worker. It
+  // posts only `filteredOrders` — the rows the grid will actually build —
+  // plus `dirtyPoIds`, the POs whose jobCards changed since the last post
+  // (drained from pendingDirtyPoIdsRef). The worker keeps a per-PO
+  // picker-index cache and rebuilds an entry only for a dirty / uncached
+  // PO, so:
+  //   • a pure filter / dept change posts a (often small) filteredOrders
+  //     with ZERO dirty POs → the worker reuses its whole cached index;
+  //   • an optimistic cell edit posts filteredOrders with exactly one
+  //     dirty PO → the worker re-indexes one order, not all 1040.
+  // Either way the grid is byte-identical: the SAME buildBaseRows runs
+  // over the SAME filteredOrders, and every index entry it reads equals
+  // a fresh buildPickerIndex entry (entries are per-PO independent).
   useEffect(() => {
     const worker = baserowsWorkerRef.current;
     if (!worker) return;
     const today = new Date().toISOString().slice(0, 10);
     const reqId = ++baserowsReqRef.current;
     setBaserowsPending(true);
+    // Drain the accumulated dirty-PO set — this post takes ownership of
+    // it so the worker's cache is brought current; later edits start a
+    // fresh set.
+    const dirtyPoIds = Array.from(pendingDirtyPoIdsRef.current);
+    pendingDirtyPoIdsRef.current = new Set();
     worker.postMessage({
       reqId,
-      orders,
       filteredOrders,
+      dirtyPoIds,
+      // Cache generation is currently constant — the per-PO dirty diff is
+      // exact, so the worker's cache never needs a blanket reset. Kept as
+      // a forward-compatible safety valve (see baserows.worker.ts).
+      cacheGeneration: 0,
       mode,
       activeTab,
       today,
     });
-    // `orders` is posted because buildPickerIndex keys on the UNFILTERED
-    // list; mode + activeTab drive the scopeDept guard inside
-    // buildBaseRows. In "full" mode activeTab does not affect the result
-    // (scopeDept = null), so it's excluded there to avoid a redundant
-    // recompute on every in-page tab switch — mirrors the old memo deps.
+    // `orders` is in the deps so a genuine `orders` change re-fires this
+    // effect (and the dirty-PO diff above will already have recorded
+    // which POs changed); mode + activeTab drive the scopeDept guard
+    // inside buildBaseRows. In "full" mode activeTab does not affect the
+    // result (scopeDept = null), so it's excluded there to avoid a
+    // redundant recompute on every in-page tab switch — mirrors the old
+    // memo deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders, filteredOrders, mode, mode === "full" ? null : activeTab]);
 

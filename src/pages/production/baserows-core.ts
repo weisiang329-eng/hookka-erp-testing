@@ -137,46 +137,55 @@ export const buildSched = (
 // (PO, JC) × every dept-column the grid renders — at 500 POs × 8 JCs ×
 // 8 dept-columns that's 32k filter+sort passes per render. Now: 8 ×
 // (jobCards × 2) per PO at index time, O(1) lookups during render.
+
+// Build the PickerByDept for ONE order. The order's index entry depends
+// only on that order's own jobCards — entries are fully independent — so
+// the worker can rebuild a single dirty PO's entry and reuse the cache
+// for the rest (Phase 3). buildPickerIndex below is just this applied to
+// every order; the per-order body is unchanged from before the split.
+export const buildOnePickerEntry = (o: ProductionOrder): PickerByDept => {
+  const byDept: PickerByDept = new Map();
+  for (const j of o.jobCards) {
+    const code = j.departmentCode;
+    let m = byDept.get(code);
+    if (!m) {
+      m = new Map();
+      byDept.set(code, m);
+    }
+    const wipKey = j.wipKey || "";
+    // Latest-due wins (mirrors the previous picker's sort step).
+    const prevForKey = m.get(wipKey);
+    if (
+      !prevForKey ||
+      (j.dueDate || "").localeCompare(prevForKey.dueDate || "") > 0
+    ) {
+      m.set(wipKey, j);
+    }
+    // Track the fallback ("*") = latest-due across ALL wipKeys in
+    // this (PO, dept). Mirrors the picker's second pass when no
+    // wipKey-matched card exists.
+    const prevAny = m.get("*");
+    if (
+      !prevAny ||
+      (j.dueDate || "").localeCompare(prevAny.dueDate || "") > 0
+    ) {
+      m.set("*", j);
+    }
+  }
+  return byDept;
+};
+
 export const buildPickerIndex = (
   orders: ProductionOrder[],
 ): Map<string, PickerByDept> => {
   const idx = new Map<string, PickerByDept>();
-  // Perf 2026-05-22 — keyed on the UNFILTERED `orders`, not filteredOrders.
   // The entry for a given o.id depends only on that order's own jobCards,
   // so a pure display-filter change (category / search / state / date)
-  // cannot alter it. Keying here lets a filter click SKIP this whole
-  // ~15k-job-card index rebuild — baseRows still looks the index up by
-  // o.id for the orders it actually emits, so the result is identical.
+  // cannot alter it — and baseRows looks the index up by o.id only for
+  // the orders it actually emits, so building it from the filtered set
+  // yields the identical result the worker now relies on (Phase 3).
   for (const o of orders) {
-    const byDept: PickerByDept = new Map();
-    for (const j of o.jobCards) {
-      const code = j.departmentCode;
-      let m = byDept.get(code);
-      if (!m) {
-        m = new Map();
-        byDept.set(code, m);
-      }
-      const wipKey = j.wipKey || "";
-      // Latest-due wins (mirrors the previous picker's sort step).
-      const prevForKey = m.get(wipKey);
-      if (
-        !prevForKey ||
-        (j.dueDate || "").localeCompare(prevForKey.dueDate || "") > 0
-      ) {
-        m.set(wipKey, j);
-      }
-      // Track the fallback ("*") = latest-due across ALL wipKeys in
-      // this (PO, dept). Mirrors the picker's second pass when no
-      // wipKey-matched card exists.
-      const prevAny = m.get("*");
-      if (
-        !prevAny ||
-        (j.dueDate || "").localeCompare(prevAny.dueDate || "") > 0
-      ) {
-        m.set("*", j);
-      }
-    }
-    idx.set(o.id, byDept);
+    idx.set(o.id, buildOnePickerEntry(o));
   }
   return idx;
 };

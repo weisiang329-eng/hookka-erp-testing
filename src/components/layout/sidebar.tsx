@@ -48,6 +48,7 @@ import {
 import { cn } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import { usePermissions } from "@/lib/use-permission";
+import { prefetchRoute } from "@/dashboard-routes";
 
 interface NavItem {
   name: string;
@@ -259,6 +260,25 @@ export function Sidebar({
       // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot localStorage rehydrate on mount; pre-existing pattern, separate cleanup task
       if (saved) setCollapsedGroups(new Set(JSON.parse(saved)));
     } catch { /* ignore */ }
+  }, []);
+
+  // Warm the Dashboard chunk during the browser's idle time — it's the
+  // default landing route and the most-revisited page, so prefetching it
+  // off the critical path makes the very first navigation back to it
+  // instant. requestIdleCallback yields to anything more urgent first.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const ric = (
+      window as unknown as {
+        requestIdleCallback?: (cb: () => void) => number;
+      }
+    ).requestIdleCallback;
+    if (ric) {
+      ric(() => prefetchRoute("/dashboard"));
+    } else {
+      const t = window.setTimeout(() => prefetchRoute("/dashboard"), 1500);
+      return () => window.clearTimeout(t);
+    }
   }, []);
 
   const toggleGroup = (label: string) => {
@@ -579,6 +599,7 @@ export function Sidebar({
                   return (
                     <div key={item.name}>
                       <button
+                        onMouseEnter={() => prefetchRoute(item.href)}
                         onClick={() => {
                           const next = new Set(expandedMenus);
                           if (isExpanded) next.delete(item.name);
@@ -611,6 +632,7 @@ export function Sidebar({
                               <Link
                                 key={child.href}
                                 to={child.href}
+                                onMouseEnter={() => prefetchRoute(child.href)}
                                 className={cn(
                                   "group relative flex items-center gap-3 rounded-md text-[13px] font-medium transition-colors",
                                   "h-8 px-3",
@@ -634,6 +656,7 @@ export function Sidebar({
                   <Link
                     key={item.href}
                     to={item.href}
+                    onMouseEnter={() => prefetchRoute(item.href)}
                     className={cn(
                       "group relative flex items-center gap-3 rounded-md text-sm font-medium transition-colors",
                       "h-9 px-3",

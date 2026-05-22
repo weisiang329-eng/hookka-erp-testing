@@ -11,6 +11,7 @@ import { Navigate, Route, type RouteObject } from 'react-router-dom'
 import { ErrorBoundary } from './components/ui/error-boundary'
 import RequirePermission from './components/auth/RequirePermission'
 import RequireRole from './components/auth/RequireRole'
+import { PageSkeleton } from './components/ui/skeleton'
 
 // ── Lazy-loaded pages ─────────────────────────────────────────────────────
 
@@ -130,12 +131,17 @@ const ConsignmentReturn = lazy(() => import('./pages/consignment/return'))
 const Forecast = lazy(() => import('./pages/analytics/forecast'))
 
 // ── Loading fallback ──────────────────────────────────────────────────────
+// A layout-shaped skeleton (header + toolbar + table) shown while a lazy
+// route chunk downloads. Nicer than a bare "Loading..." string and matches
+// the rest of the app's loading UX. The visually-hidden "Loading..." span
+// keeps the state announced to screen readers.
 
 function PageLoading() {
   return (
-    <div className="flex items-center justify-center min-h-[40vh]">
-      <div className="animate-pulse text-sm text-[#5A5550]">Loading...</div>
-    </div>
+    <>
+      <span className="sr-only" role="status">Loading...</span>
+      <PageSkeleton />
+    </>
   )
 }
 
@@ -390,3 +396,97 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 export const DASHBOARD_ROUTE_ELEMENTS = DASHBOARD_ROUTES.map((r) => (
   <Route key={r.path!} path={r.path!} element={r.element} />
 ))
+
+// ── Route chunk prefetch ──────────────────────────────────────────────────
+// Lazy route chunks only download on first navigation, so the first click on
+// a sidebar link pays the full network cost of the JS bundle before the page
+// can even start fetching its data. To hide that latency we prefetch a
+// route's chunk on sidebar-link HOVER (the user has signalled intent ~200ms
+// before they click).
+//
+// The map below uses the SAME `import('./pages/...')` specifiers as the
+// lazy() calls above. Vite/ESM caches a dynamic import by specifier, so
+// calling import() here and again inside lazy() loads the chunk exactly
+// once — whichever fires first wins, the other is a cache hit.
+//
+// Keyed by the sidebar's top-level `href`. Only the routes the sidebar
+// actually links to need an entry; anything missing simply isn't prefetched
+// (safe no-op).
+const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
+  '/dashboard': () => import('./pages/dashboard-b'),
+  '/notifications': () => import('./pages/notifications'),
+  '/analytics/forecast': () => import('./pages/analytics/forecast'),
+  '/sales': () => import('./pages/sales'),
+  '/delivery': () => import('./pages/delivery'),
+  '/invoices': () => import('./pages/invoices'),
+  '/invoices/credit-notes': () => import('./pages/invoices/credit-notes'),
+  '/invoices/debit-notes': () => import('./pages/invoices/debit-notes'),
+  '/invoices/payments': () => import('./pages/invoices/payments'),
+  '/invoices/e-invoice': () => import('./pages/invoices/e-invoice'),
+  '/consignment': () => import('./pages/consignment'),
+  '/consignment/note': () => import('./pages/consignment/note'),
+  '/consignment/return': () => import('./pages/consignment/return'),
+  '/customers': () => import('./pages/customers'),
+  '/production': () => import('./pages/production/overview'),
+  '/production/fab-cut': () => import('./pages/production/dept'),
+  '/production/fab-sew': () => import('./pages/production/dept'),
+  '/production/foam': () => import('./pages/production/dept'),
+  '/production/wood-cut': () => import('./pages/production/dept'),
+  '/production/framing': () => import('./pages/production/dept'),
+  '/production/webbing': () => import('./pages/production/dept'),
+  '/production/upholstery': () => import('./pages/production/dept'),
+  '/production/packing': () => import('./pages/production/dept'),
+  '/production/scan': () => import('./pages/production/scan'),
+  '/production/folders': () => import('./pages/production/folders'),
+  '/planning': () => import('./pages/planning'),
+  '/planning/mrp': () => import('./pages/planning/mrp'),
+  '/products': () => import('./pages/products'),
+  '/bom': () => import('./pages/bom'),
+  '/bom/wip-times': () => import('./pages/production/wip-times'),
+  '/maintenance/sofa-combos': () => import('./pages/maintenance/sofa-combos'),
+  '/inventory': () => import('./pages/inventory'),
+  '/inventory/fabrics': () => import('./pages/inventory/fabrics'),
+  '/inventory/stock-value': () => import('./pages/inventory/stock-value'),
+  '/inventory/adjustments': () => import('./pages/inventory/adjustments'),
+  '/warehouse': () => import('./pages/warehouse'),
+  '/procurement': () => import('./pages/procurement'),
+  '/procurement/in-transit': () => import('./pages/procurement/in-transit'),
+  '/procurement/grn': () => import('./pages/procurement/grn'),
+  '/procurement/pi': () => import('./pages/procurement/pi'),
+  '/procurement/pricing': () => import('./pages/procurement/pricing'),
+  '/procurement/maintenance': () => import('./pages/procurement/maintenance'),
+  '/rd': () => import('./pages/rd'),
+  '/rd/maintenance': () => import('./pages/rd/maintenance'),
+  '/quality': () => import('./pages/quality'),
+  '/service-cases': () => import('./pages/service-cases'),
+  '/accounting': () => import('./pages/accounting'),
+  '/accounting/cash-flow': () => import('./pages/accounting/cash-flow'),
+  '/reports': () => import('./pages/reports'),
+  '/employees': () => import('./pages/employees'),
+  '/maintenance': () => import('./pages/maintenance'),
+  '/settings': () => import('./pages/settings'),
+  '/settings/organisations': () => import('./pages/settings/organisations'),
+  '/settings/users': () => import('./pages/settings/Users'),
+  '/admin/health': () => import('./pages/admin/health'),
+}
+
+// Per-path dedupe — once a chunk has been requested we never request it
+// again (the browser caches it, but skipping the call avoids churn).
+const prefetched = new Set<string>()
+
+/**
+ * Prefetch the lazy JS chunk for a route. Safe to call repeatedly and for
+ * unknown paths (no-op). Errors are swallowed — a failed prefetch just means
+ * the chunk loads normally on click.
+ */
+export function prefetchRoute(href: string): void {
+  if (prefetched.has(href)) return
+  const loader = ROUTE_CHUNK_LOADERS[href]
+  if (!loader) return
+  prefetched.add(href)
+  loader().catch(() => {
+    // Network error / chunk 404 — drop the dedupe mark so a later
+    // navigation can retry via lazy()'s own import.
+    prefetched.delete(href)
+  })
+}

@@ -74,6 +74,8 @@ type PayData = {
     workedDays: number;
     absentDays: number;
     otMinutes: number;
+    fullSalarySen: number;
+    absenceDeductionSen: number;
     basicEarnedSen: number;
     otSen: number;
     efficiencyAllowanceSen: number;
@@ -171,6 +173,10 @@ function asPayData(v: unknown): PayData | null {
   const workedDays = asNumber(v.current.workedDays);
   const absentDays = asNumber(v.current.absentDays) ?? 0;
   const otMinutes = asNumber(v.current.otMinutes);
+  // fullSalarySen / absenceDeductionSen — newer fields; tolerate an older
+  // backend response that predates them by falling back to 0.
+  const fullSalarySen = asNumber(v.current.fullSalarySen) ?? 0;
+  const absenceDeductionSen = asNumber(v.current.absenceDeductionSen) ?? 0;
   const basicEarnedSen = asNumber(v.current.basicEarnedSen);
   const otSen = asNumber(v.current.otSen);
   const efficiencyAllowanceSen = asNumber(v.current.efficiencyAllowanceSen) ?? 0;
@@ -182,6 +188,8 @@ function asPayData(v: unknown): PayData | null {
       workedDays,
       absentDays,
       otMinutes,
+      fullSalarySen,
+      absenceDeductionSen,
       basicEarnedSen,
       otSen,
       efficiencyAllowanceSen,
@@ -307,12 +315,25 @@ export default function WorkerPayPage() {
         <p className="text-[11px] text-[#B0AAA3] mt-1">{t("pay.estimate")}</p>
 
         <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
+          {/* Full salary → minus absence → basic earned. The full figure
+              is always shown so the worker sees their baseline; the
+              deduction row only appears when they were actually absent. */}
           <Row
-            label={
-              pay.current.absentDays > 0
-                ? t("pay.basicAbsent").replace("{n}", String(pay.current.absentDays))
-                : t("pay.basicFullMonth")
-            }
+            label={t("pay.fullSalary")}
+            value={rm(pay.current.fullSalarySen)}
+          />
+          {pay.current.absentDays > 0 && (
+            <Row
+              label={t("pay.absentDeduction").replace(
+                "{n}",
+                String(pay.current.absentDays),
+              )}
+              value={`− ${rm(pay.current.absenceDeductionSen)}`}
+              muted
+            />
+          )}
+          <Row
+            label={t("pay.basicEarned")}
             value={rm(pay.current.basicEarnedSen)}
           />
           <Row label={`${t("pay.ot")} · ${otHours}h`} value={rm(pay.current.otSen)} />

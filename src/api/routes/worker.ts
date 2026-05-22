@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
+import { computeMonthlyLabor } from "../../lib/labor-engine";
 
 const app = new Hono<Env>();
 
@@ -62,6 +63,7 @@ type WorkerRow = {
   basicSalarySen: number;
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
+  otMultiplier: number;
 };
 
 // Parse the workers.departmentCodes JSON array safely. Falls back to the
@@ -105,7 +107,7 @@ async function getWorker(
     };
   }
   const w = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentId, departmentCode, departmentCodes, categories, position, phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth FROM workers WHERE id = ?",
+    "SELECT id, empNo, name, departmentId, departmentCode, departmentCodes, categories, position, phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier FROM workers WHERE id = ?",
   )
     .bind(workerId)
     .first<WorkerRow>();
@@ -900,53 +902,27 @@ app.get("/payslips", async (c) => {
     taxSen: r.pcbSen,
   }));
 
-  // Live current-month estimate so the worker sees something between
-  // monthly payroll runs.  Same prorated-basic + OT 1.5x + piece bonus
-  // formula the mock used.  Never overrides what's in `history` — once
-  // the admin generates the period's payslip, the row in `history` is
-  // the source of truth and this `current` becomes a redundant preview.
+  // Live current-month estimate, computed by the shared labor engine —
+  // the SAME engine that drives the admin Payroll screen and production
+  // labor cost, so the worker's phone shows exactly what payroll will
+  // pay. Never overrides `history`: once the admin generates the period's
+  // payslip, the stored row is the source of truth and this is just a
+  // preview. (Wei Siang 2026-05-22.)
   const now = new Date();
   const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const monthPrefix = `${period}-`;
 
-  const worker = auth.worker as {
-    basicSalarySen?: number;
-    workingDaysPerMonth?: number;
-    workingHoursPerDay?: number;
-  };
-  const basicSalarySen = worker.basicSalarySen ?? 0;
-  const daysInMonth = worker.workingDaysPerMonth ?? 26;
-  const hoursPerDay = worker.workingHoursPerDay ?? 8;
-
-  // ---------------------------------------------------------------
-  // Salary model (Wei Siang 2026-05-10):
-  //   • Workers see FULL monthly salary (e.g. RM 2050) as the baseline
-  //     unless they're absent.
-  //   • Each absent workday inside the month-to-date window deducts
-  //     one daily rate (basicSalarySen / workingDaysPerMonth).
-  //   • A workday is "absent" when no working_hour_entries row exists
-  //     for that date — workers no longer clock in/out, so the office
-  //     fill-in IS the source of truth.
-  //   • OT comes from working_hour_entries too: hours in excess of
-  //     workingHoursPerDay per date count as OT (1.5× hourly rate).
-  //   • Piece bonus has been retired.  Replaced by an efficiency
-  //     allowance line (formula pending — currently 0).
-  // ---------------------------------------------------------------
+  // This worker's Working Hours rows for the current month.
   const wheRes = await c.var.DB.prepare(
     `SELECT date, hours FROM working_hour_entries
       WHERE workerId = ? AND date LIKE ?`,
   )
     .bind(workerId, `${monthPrefix}%`)
     .all<{ date: string; hours: number }>();
-  const hoursByDate = new Map<string, number>();
-  for (const r of wheRes.results ?? []) {
-    hoursByDate.set(r.date, (hoursByDate.get(r.date) ?? 0) + Number(r.hours));
-  }
-  const workedDays = hoursByDate.size;
 
-  // Public holidays — stored in kv_config['public_holidays'] as a JSON
-  // array of YYYY-MM-DD strings. Office fills these via the Working Hours
-  // tab so that 1 May / Hari Raya / etc. don't get charged as absences.
+  // Public holidays — kv_config['public_holidays'], a JSON array of
+  // YYYY-MM-DD strings. A holiday is never charged to the worker as an
+  // absence (the divisor still stays at workingDaysPerMonth).
   const phRes = await c.var.DB.prepare(
     "SELECT value FROM kv_config WHERE key = ?",
   )
@@ -966,34 +942,24 @@ app.get("/payslips", async (c) => {
     } catch { /* malformed payload — treat as no holidays */ }
   }
 
-  // Count workdays elapsed in this month up to today (Mon–Sat),
-  // excluding declared public holidays.
-  const monthYear = now.getFullYear();
-  const monthIdx = now.getMonth(); // 0-based
-  const todayDate = now.getDate();
-  let workdaysElapsed = 0;
-  for (let d = 1; d <= todayDate; d++) {
-    const dow = new Date(monthYear, monthIdx, d).getDay(); // 0 = Sun
-    if (dow === 0) continue; // Sunday off
-    const iso = `${monthYear}-${String(monthIdx + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    if (publicHolidays.has(iso)) continue; // public holiday
-    workdaysElapsed++;
-  }
-  const absentDays = Math.max(0, workdaysElapsed - workedDays);
-
-  const dailyRateSen = daysInMonth > 0 ? basicSalarySen / daysInMonth : 0;
-  const hourlyRateSen = hoursPerDay > 0 ? dailyRateSen / hoursPerDay : 0;
-  const basicEarnedSen = Math.max(
-    0,
-    Math.round(basicSalarySen - absentDays * dailyRateSen),
-  );
-
-  // OT = hours per date above the standard workingHoursPerDay.
-  let otMinutes = 0;
-  for (const h of hoursByDate.values()) {
-    if (h > hoursPerDay) otMinutes += Math.round((h - hoursPerDay) * 60);
-  }
-  const otSen = Math.round((otMinutes / 60) * hourlyRateSen * 1.5);
+  const labor = computeMonthlyLabor({
+    worker: {
+      basicSalarySen: auth.worker.basicSalarySen,
+      workingDaysPerMonth: auth.worker.workingDaysPerMonth,
+      workingHoursPerDay: auth.worker.workingHoursPerDay,
+      otMultiplier: auth.worker.otMultiplier,
+    },
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    days: (wheRes.results ?? []).map((r) => ({
+      date: r.date,
+      hours: Number(r.hours) || 0,
+    })),
+    publicHolidays,
+    // Current month — count absences only through today, so days that
+    // haven't happened yet aren't charged.
+    absenceThroughDay: now.getDate(),
+  });
 
   // Efficiency allowance — placeholder until Wei Siang specifies the
   // formula (likely: efficiency % thresholds → flat allowance).
@@ -1004,13 +970,15 @@ app.get("/payslips", async (c) => {
     data: {
       current: {
         period,
-        workedDays,
-        absentDays,
-        otMinutes,
-        basicEarnedSen,
-        otSen,
+        workedDays: labor.daysWorked,
+        absentDays: labor.payroll.absentDays,
+        otMinutes: Math.round(labor.otHours * 60),
+        fullSalarySen: labor.payroll.fullSalarySen,
+        absenceDeductionSen: labor.payroll.absenceDeductionSen,
+        basicEarnedSen: labor.payroll.basicEarnedSen,
+        otSen: labor.payroll.otPaySen,
         efficiencyAllowanceSen,
-        estimatedGrossSen: basicEarnedSen + otSen + efficiencyAllowanceSen,
+        estimatedGrossSen: labor.payroll.grossSen + efficiencyAllowanceSen,
       },
       history,
     },

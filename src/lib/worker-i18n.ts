@@ -408,6 +408,18 @@ const dict: Dict = {
     zh: '底薪 · 缺勤 {n} 天',
     my: 'အခြေခံလစာ · {n}ရက် မလာ',
   },
+  'pay.fullSalary': {
+    en: 'Full salary',
+    ms: 'Gaji penuh',
+    zh: '全月薪水',
+    my: 'လစာအပြည့်',
+  },
+  'pay.absentDeduction': {
+    en: 'Absent · {n}d',
+    ms: 'Tidak hadir · {n}h',
+    zh: '缺勤 · {n} 天',
+    my: 'မလာ · {n}ရက်',
+  },
   'pay.efficiencyAllowance': {
     en: 'Efficiency allowance',
     ms: 'Elaun kecekapan',

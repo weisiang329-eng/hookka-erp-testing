@@ -9,7 +9,8 @@
 // The backend validates the source-order shipped status — the UI mirror
 // is a UX nicety; the truth lives in the API.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -117,6 +118,15 @@ export default function ServiceOrdersListPage() {
 
   const orders = useMemo(() => listResp?.data ?? [], [listResp]);
 
+  // Window the order list so a long history doesn't mount every row.
+  const orderScrollRef = useRef<HTMLDivElement>(null);
+  const orderRowVirtualizer = useVirtualizer({
+    count: orders.length,
+    getScrollElement: () => orderScrollRef.current,
+    estimateSize: () => 37,
+    overscan: 12,
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
@@ -181,9 +191,13 @@ export default function ServiceOrdersListPage() {
               No service orders {statusFilter ? `in status ${statusFilter}` : "yet"}.
             </p>
           ) : (
-            <div className="overflow-x-auto">
+            <div
+              ref={orderScrollRef}
+              className="overflow-auto"
+              style={{ maxHeight: "calc(100vh - 320px)" }}
+            >
               <table className="w-full text-sm">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-white">
                   <tr className="border-b border-[#E2DDD8] text-left text-xs uppercase text-[#6B7280]">
                     <th className="py-2 px-2">SVC No</th>
                     <th className="py-2 px-2">Source</th>
@@ -196,9 +210,29 @@ export default function ServiceOrdersListPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.map((o) => (
+                  {(() => {
+                    const vItems = orderRowVirtualizer.getVirtualItems();
+                    const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                    const padBottom =
+                      vItems.length > 0
+                        ? orderRowVirtualizer.getTotalSize() -
+                          vItems[vItems.length - 1].end
+                        : 0;
+                    return (
+                      <>
+                        {padTop > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={8} style={{ height: padTop, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                        {vItems.map((vi) => {
+                          const o = orders[vi.index];
+                          if (!o) return null;
+                          return (
                     <tr
                       key={o.id}
+                      data-index={vi.index}
+                      ref={orderRowVirtualizer.measureElement}
                       onClick={() => navigate(`/service-orders/${o.id}`)}
                       className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7] cursor-pointer"
                     >
@@ -228,7 +262,16 @@ export default function ServiceOrdersListPage() {
                         {dateLabel(o.createdAt)}
                       </td>
                     </tr>
-                  ))}
+                          );
+                        })}
+                        {padBottom > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={8} style={{ height: padBottom, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                      </>
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>

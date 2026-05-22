@@ -841,6 +841,7 @@ export default function SupplierMaintenancePage() {
             columns={supplierColumns}
             data={filteredSuppliers}
             keyField="id"
+            virtualize
             gridId="supplier-info"
             contextMenuItems={supplierContextMenu}
             onDoubleClick={(row) => navigate(`/suppliers/${row.id}`)}
@@ -894,6 +895,7 @@ export default function SupplierMaintenancePage() {
             columns={skuColumns}
             data={filteredSKU}
             keyField="id"
+            virtualize
             gridId="supplier-sku-costing"
             contextMenuItems={skuContextMenu}
             onDoubleClick={(row) => { setEditingSKU(row); setShowSKUForm(true); }}

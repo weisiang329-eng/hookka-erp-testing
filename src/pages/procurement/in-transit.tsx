@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -167,6 +168,15 @@ export default function GoodsInTransitPage() {
     [data, selectedLandedId]
   );
 
+  // Window the transit table so a long PO pipeline doesn't mount every row.
+  const transitScrollRef = useRef<HTMLDivElement>(null);
+  const transitRowVirtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => transitScrollRef.current,
+    estimateSize: () => 53,
+    overscan: 10,
+  });
+
   // --- Tab buttons ---
   const tabs = [
     { key: "dashboard" as const, label: "Dashboard", icon: Box },
@@ -322,9 +332,13 @@ export default function GoodsInTransitPage() {
           {/* Main Table */}
           <Card>
             <CardContent className="p-0">
-              <div className="overflow-x-auto">
+              <div
+                ref={transitScrollRef}
+                className="overflow-auto"
+                style={{ maxHeight: "calc(100vh - 340px)" }}
+              >
                 <table className="w-full text-sm">
-                  <thead>
+                  <thead className="sticky top-0 z-10 bg-white">
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]/50">
                       <th className="text-left px-4 py-3 font-medium text-[#6B7280]">PO #</th>
                       <th className="text-left px-4 py-3 font-medium text-[#6B7280]">Supplier</th>
@@ -344,11 +358,30 @@ export default function GoodsInTransitPage() {
                         </td>
                       </tr>
                     )}
-                    {filtered.map((item) => {
-                      const overdue = isOverdue(item);
+                    {(() => {
+                      const vItems = transitRowVirtualizer.getVirtualItems();
+                      const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                      const padBottom =
+                        vItems.length > 0
+                          ? transitRowVirtualizer.getTotalSize() -
+                            vItems[vItems.length - 1].end
+                          : 0;
                       return (
+                        <>
+                          {padTop > 0 && (
+                            <tr aria-hidden="true">
+                              <td colSpan={8} style={{ height: padTop, padding: 0, border: 0 }} />
+                            </tr>
+                          )}
+                          {vItems.map((vi) => {
+                            const item = filtered[vi.index];
+                            if (!item) return null;
+                            const overdue = isOverdue(item);
+                            return (
                         <tr
                           key={item.id}
+                          data-index={vi.index}
+                          ref={transitRowVirtualizer.measureElement}
                           className={`border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/30 transition-colors ${
                             overdue ? "bg-red-50/50" : ""
                           }`}
@@ -391,8 +424,16 @@ export default function GoodsInTransitPage() {
                             {formatCurrency(item.landedCost)}
                           </td>
                         </tr>
+                            );
+                          })}
+                          {padBottom > 0 && (
+                            <tr aria-hidden="true">
+                              <td colSpan={8} style={{ height: padBottom, padding: 0, border: 0 }} />
+                            </tr>
+                          )}
+                        </>
                       );
-                    })}
+                    })()}
                   </tbody>
                 </table>
               </div>

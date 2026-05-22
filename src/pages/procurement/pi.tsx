@@ -388,6 +388,7 @@ export default function PurchaseInvoicesPage() {
             columns={piGridColumns}
             data={filteredInvoices}
             keyField="id"
+            virtualize
             loading={loading}
             stickyHeader={true}
             onDoubleClick={(row) => navigate(`/procurement/pi/${row.id}`)}

@@ -11,7 +11,8 @@
 //   On the detail page, you see the case info + any spawned orders, and
 //   can spawn more orders or close the case.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Link, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
@@ -105,6 +106,15 @@ export default function ServiceCasesListPage() {
     [cases, statusFilter],
   );
 
+  // Window the case list so a long history doesn't mount every row.
+  const caseScrollRef = useRef<HTMLDivElement>(null);
+  const caseRowVirtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => caseScrollRef.current,
+    estimateSize: () => 38,
+    overscan: 12,
+  });
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -145,9 +155,13 @@ export default function ServiceCasesListPage() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
+          <div
+            ref={caseScrollRef}
+            className="overflow-auto"
+            style={{ maxHeight: "calc(100vh - 300px)" }}
+          >
             <table className="w-full text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10">
                 <tr className="border-b border-[#E2DDD8] text-left text-xs uppercase text-[#6B7280] bg-[#FAF9F7]">
                   <th className="py-2 px-3">Case No</th>
                   <th className="py-2 px-3">Customer</th>
@@ -171,9 +185,29 @@ export default function ServiceCasesListPage() {
                     </td>
                   </tr>
                 ) : (
-                  filtered.map((c) => (
+                  (() => {
+                    const vItems = caseRowVirtualizer.getVirtualItems();
+                    const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                    const padBottom =
+                      vItems.length > 0
+                        ? caseRowVirtualizer.getTotalSize() -
+                          vItems[vItems.length - 1].end
+                        : 0;
+                    return (
+                      <>
+                        {padTop > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={10} style={{ height: padTop, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                        {vItems.map((vi) => {
+                          const c = filtered[vi.index];
+                          if (!c) return null;
+                          return (
                     <tr
                       key={c.id}
+                      data-index={vi.index}
+                      ref={caseRowVirtualizer.measureElement}
                       onClick={() => navigate(`/service-cases/${c.id}`)}
                       className="border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF9F7]"
                     >
@@ -247,7 +281,16 @@ export default function ServiceCasesListPage() {
                         {dateLabel(c.createdAt)}
                       </td>
                     </tr>
-                  ))
+                          );
+                        })}
+                        {padBottom > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={10} style={{ height: padBottom, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                      </>
+                    );
+                  })()
                 )}
               </tbody>
             </table>

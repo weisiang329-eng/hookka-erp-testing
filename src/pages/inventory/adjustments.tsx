@@ -15,7 +15,8 @@
 // Per user 2026-04-28: form must support unlimited rows + compact per-row
 // layout (the prior single-form version made batch entry tedious).
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -182,6 +183,15 @@ export default function StockAdjustmentsPage() {
     [invResp],
   );
   const history = useMemo(() => historyResp?.data ?? [], [historyResp]);
+
+  // Window the adjustment-history table so a long ledger stays light.
+  const historyScrollRef = useRef<HTMLDivElement>(null);
+  const historyRowVirtualizer = useVirtualizer({
+    count: history.length,
+    getScrollElement: () => historyScrollRef.current,
+    estimateSize: () => 37,
+    overscan: 12,
+  });
 
   // ---- per-row mutators ----
   function patchRow(uid: string, p: Partial<DraftRow>) {
@@ -650,9 +660,13 @@ export default function StockAdjustmentsPage() {
           {history.length === 0 ? (
             <p className="text-sm text-[#9CA3AF] py-8 text-center">No adjustments yet.</p>
           ) : (
-            <div className="overflow-x-auto">
+            <div
+              ref={historyScrollRef}
+              className="overflow-auto"
+              style={{ maxHeight: "calc(100vh - 320px)" }}
+            >
               <table className="w-full text-sm">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-white">
                   <tr className="border-b border-[#E2DDD8] text-left text-xs uppercase text-[#6B7280]">
                     <th className="py-2 px-2">Date</th>
                     <th className="py-2 px-2">Type</th>
@@ -665,8 +679,26 @@ export default function StockAdjustmentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((row) => (
-                    <tr key={row.id} className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]">
+                  {(() => {
+                    const vItems = historyRowVirtualizer.getVirtualItems();
+                    const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                    const padBottom =
+                      vItems.length > 0
+                        ? historyRowVirtualizer.getTotalSize() -
+                          vItems[vItems.length - 1].end
+                        : 0;
+                    return (
+                      <>
+                        {padTop > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={8} style={{ height: padTop, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                        {vItems.map((vi) => {
+                          const row = history[vi.index];
+                          if (!row) return null;
+                          return (
+                    <tr key={row.id} data-index={vi.index} ref={historyRowVirtualizer.measureElement} className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]">
                       <td className="py-2 px-2 whitespace-nowrap text-xs">
                         {dateLabel(row.adjustedAt)}
                       </td>
@@ -706,7 +738,16 @@ export default function StockAdjustmentsPage() {
                       </td>
                       <td className="py-2 px-2 text-xs text-[#6B7280]">{row.notes || "—"}</td>
                     </tr>
-                  ))}
+                          );
+                        })}
+                        {padBottom > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={8} style={{ height: padBottom, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                      </>
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>

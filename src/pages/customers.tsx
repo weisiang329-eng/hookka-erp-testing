@@ -3507,6 +3507,7 @@ export default function CustomersPage() {
             columns={columns}
             data={data}
             keyField="id"
+            virtualize
             gridId="customers"
             loading={loading}
             stickyHeader={true}

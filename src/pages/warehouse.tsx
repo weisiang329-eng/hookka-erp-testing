@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -770,15 +771,29 @@ export default function WarehousePage() {
 
 // ---------- Movement Table Component ----------
 function MovementTable({ movements }: { movements: StockMovement[] }) {
+  // Stock-movement history grows without bound — window the rendering so a
+  // big warehouse log doesn't mount thousands of rows at once.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: movements.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 41,
+    overscan: 12,
+  });
+
   if (movements.length === 0) {
     return <p className="text-sm text-[#6B7280] text-center py-8">No movements found.</p>;
   }
 
   return (
     <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
-      <div className="overflow-x-auto">
+      <div
+        ref={scrollRef}
+        className="overflow-auto"
+        style={{ maxHeight: "calc(100vh - 320px)" }}
+      >
         <table className="w-full text-sm">
-          <thead>
+          <thead className="sticky top-0 z-10">
             <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Date</th>
               <th className="h-10 px-4 text-left font-medium text-[#374151]">Type</th>
@@ -790,8 +805,25 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
             </tr>
           </thead>
           <tbody>
-            {movements.map((m) => (
-              <tr key={m.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+            {(() => {
+              const vItems = rowVirtualizer.getVirtualItems();
+              const padTop = vItems.length > 0 ? vItems[0].start : 0;
+              const padBottom =
+                vItems.length > 0
+                  ? rowVirtualizer.getTotalSize() - vItems[vItems.length - 1].end
+                  : 0;
+              return (
+                <>
+                  {padTop > 0 && (
+                    <tr aria-hidden="true">
+                      <td colSpan={7} style={{ height: padTop, padding: 0, border: 0 }} />
+                    </tr>
+                  )}
+                  {vItems.map((vi) => {
+                    const m = movements[vi.index];
+                    if (!m) return null;
+                    return (
+              <tr key={m.id} data-index={vi.index} ref={rowVirtualizer.measureElement} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
                 <td className="h-10 px-4 text-[#4B5563] whitespace-nowrap">
                   {new Date(m.createdAt).toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}
                 </td>
@@ -814,7 +846,16 @@ function MovementTable({ movements }: { movements: StockMovement[] }) {
                 <td className="h-10 px-4 text-[#4B5563] max-w-[200px] truncate">{m.reason}</td>
                 <td className="h-10 px-4 text-[#4B5563]">{m.performedBy}</td>
               </tr>
-            ))}
+                    );
+                  })}
+                  {padBottom > 0 && (
+                    <tr aria-hidden="true">
+                      <td colSpan={7} style={{ height: padBottom, padding: 0, border: 0 }} />
+                    </tr>
+                  )}
+                </>
+              );
+            })()}
           </tbody>
         </table>
       </div>

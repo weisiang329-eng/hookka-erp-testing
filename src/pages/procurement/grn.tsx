@@ -666,6 +666,7 @@ export default function GRNPage() {
             columns={grnGridColumns}
             data={filteredGRNs}
             keyField="id"
+            virtualize
             loading={loading}
             stickyHeader={true}
             onDoubleClick={(row) => navigate(`/procurement/grn/${row.id}`)}

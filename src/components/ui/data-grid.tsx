@@ -376,15 +376,17 @@ function ColumnFilterDropdown<T>({
   // Wei Siang 2026-05-15: hold the latest `checked` in a ref so the OK
   // button's onClick reads the freshest value rather than a closure that
   // can race a still-committing checkbox click. The user-reported
-  // symptom was "first OK click does nothing, second one filters" —
-  // verified live in the browser by clicking OK immediately after a
-  // checkbox toggle; the React closure on OK saw an empty set and
-  // skipped the setColumnValueFilters call. Update the ref
-  // SYNCHRONOUSLY inside the setChecked callback (NOT via useEffect)
-  // so it's correct even if the next click fires before the next
-  // commit / effect flush. uniqueValues comes from useMemo above and
-  // is stable per-render, so reading it from closure at click time is
-  // safe.
+  // symptom was "first OK click does nothing, second one filters".
+  // 2026-05-22: the original fix assigned the ref INSIDE the setChecked
+  // updater — but that updater body runs at React's render time, not at
+  // click time. So an OK click batched into the same tick as a checkbox
+  // toggle still read the pre-toggle ref, and the bug persisted
+  // intermittently (fast clicks fail, slow clicks work). toggleAll /
+  // toggleValue / setRaws now ALL compute the next set and assign
+  // checkedRef SYNCHRONOUSLY at click time, before setChecked — so the
+  // ref is correct the instant any checkbox handler returns. uniqueValues
+  // comes from the useMemo above and is stable per-render, so reading it
+  // from closure at click time is safe.
   const checkedRef = useRef(checked);
 
   const toggleAll = () => {
@@ -432,13 +434,14 @@ function ColumnFilterDropdown<T>({
   }, [uniqueValues]);
 
   const toggleValue = (v: string) => {
-    setChecked(prev => {
-      const next = new Set(prev);
-      if (next.has(v)) next.delete(v);
-      else next.add(v);
-      checkedRef.current = next; // sync ref synchronously — see comment on checkedRef
-      return next;
-    });
+    // Compute the next set from checkedRef (kept in lockstep with the
+    // `checked` state) and assign the ref BEFORE setChecked, so a same-
+    // tick OK click reads the fresh value. See the checkedRef comment.
+    const next = new Set(checkedRef.current);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    checkedRef.current = next;
+    setChecked(next);
   };
 
   // ----- Date column: Year ▸ Month ▸ Day tree + period presets -----
@@ -489,15 +492,15 @@ function ColumnFilterDropdown<T>({
   const [expY, setExpY] = useState<Set<number>>(new Set());
   const [expM, setExpM] = useState<Set<string>>(new Set());
   const setRaws = (raws: string[], on: boolean) => {
-    setChecked((prev) => {
-      const next = new Set(prev);
-      for (const r of raws) {
-        if (on) next.add(r);
-        else next.delete(r);
-      }
-      checkedRef.current = next;
-      return next;
-    });
+    // See toggleValue — assign checkedRef synchronously at click time,
+    // not inside the setChecked updater, so a same-tick OK click is fresh.
+    const next = new Set(checkedRef.current);
+    for (const r of raws) {
+      if (on) next.add(r);
+      else next.delete(r);
+    }
+    checkedRef.current = next;
+    setChecked(next);
   };
   const allRawsOn = (raws: string[]) =>
     raws.length > 0 && raws.every((r) => checked.has(r));

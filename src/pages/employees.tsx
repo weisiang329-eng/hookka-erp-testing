@@ -309,11 +309,15 @@ function WorkingHoursTab({
   refreshAttendance,
   departments,
   productionDeptCodes,
+  onDateChange,
 }: {
   workers: Worker[];
   refreshAttendance: (date: string) => void;
   departments: DepartmentLite[];
   productionDeptCodes: Set<string>;
+  // Reports this tab's selected date range up to EmployeesPage so the
+  // page-level summary cards follow the operator's date pick.
+  onDateChange?: (from: string, to: string) => void;
 }) {
   // Fall back to seed if API hasn't loaded — avoids dropdown flash on first
   // render. After /api/departments resolves, the prop wins and any new
@@ -336,7 +340,8 @@ function WorkingHoursTab({
   );
   useEffect(() => {
     writePersistedDateRange("employees:working-hours:dateRange", dateFrom, dateTo);
-  }, [dateFrom, dateTo]);
+    onDateChange?.(dateFrom, dateTo);
+  }, [dateFrom, dateTo, onDateChange]);
   const isMultiDay = dateFrom !== dateTo;
   const [rows, setRows] = useState<EntryDraft[]>([]);
   const [loading, setLoading] = useState(false);
@@ -6269,6 +6274,32 @@ export default function EmployeesPage() {
   );
   const loading = workersLoading || attendanceLoading;
 
+  // ── Summary-card date — mirrors the Working Hours tab's date picker so the
+  //    four cards at the top reflect the day the operator selected, instead
+  //    of a hard-coded "today". Seeded from the same persisted range.
+  const [summaryRange, setSummaryRange] = useState<{ from: string; to: string }>(
+    () => {
+      const persisted = readPersistedDateRange("employees:working-hours:dateRange");
+      const today = todayStr();
+      return { from: persisted.from ?? today, to: persisted.to ?? today };
+    },
+  );
+  const handleWorkingHoursDateChange = useCallback(
+    (from: string, to: string) => {
+      setSummaryRange((prev) =>
+        prev.from === from && prev.to === to ? prev : { from, to },
+      );
+    },
+    [],
+  );
+  // The summary cards read real working_hour_entries + job-card figures for
+  // the selected day via /api/department-performance — Present, Working
+  // Hours, Avg Efficiency — instead of the near-empty attendance table.
+  const { data: summaryPerfResp } = useCachedJson<DeptPerfResponse>(
+    `/api/department-performance?from=${summaryRange.from}&to=${summaryRange.to}`,
+  );
+  const summaryTotals = summaryPerfResp?.data?.totals;
+
   const fetchWorkers = useCallback(() => {
     invalidateCachePrefix("/api/workers");
     invalidateCachePrefix("/api/payslips");
@@ -6304,26 +6335,18 @@ export default function EmployeesPage() {
     [fetchDateAttendance, fetchTodayAttendance]
   );
 
-  // Summary stats
+  // Summary stats — driven by `summaryRange` (the Working Hours date pick).
   const totalWorkers = workers.length;
-  const todayRecords = todayAttendance.filter((a) => a.date === todayStr());
-  const presentToday = todayRecords.filter(
-    (a) => a.status === "PRESENT" || a.status === "HALF_DAY"
-  ).length;
-  const totalProductionMinutes = todayRecords.reduce(
-    (sum, a) => sum + a.productionTimeMinutes,
-    0
-  );
-  const workingRecords = todayRecords.filter(
-    (a) => a.status === "PRESENT" || a.status === "HALF_DAY"
-  );
+  const presentCount = summaryTotals?.workerCount ?? 0;
+  const summaryWorkingMinutes = summaryTotals?.workingMinutes ?? 0;
   const avgEfficiency =
-    workingRecords.length > 0
-      ? (
-          workingRecords.reduce((sum, a) => sum + a.efficiencyPct, 0) /
-          workingRecords.length
-        ).toFixed(1)
+    summaryTotals && summaryTotals.workingMinutes > 0
+      ? summaryTotals.efficiencyPct.toFixed(1)
       : "0";
+  const summaryDateLabel =
+    summaryRange.from === summaryRange.to
+      ? formatDateDMY(summaryRange.from)
+      : `${formatDateDMY(summaryRange.from)} – ${formatDateDMY(summaryRange.to)}`;
 
   if (loading) {
     return (
@@ -6345,60 +6368,66 @@ export default function EmployeesPage() {
         </p>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
-        <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#E0EDF0] p-2.5">
-              <Users className="h-5 w-5 text-[#3E6570]" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">{totalWorkers}</p>
-              <p className="text-xs text-[#6B7280]">Total Workers</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
-              <UserCheck className="h-5 w-5 text-[#4F7C3A]" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold text-[#4F7C3A]">
-                {presentToday}/{totalWorkers}
-              </p>
-              <p className="text-xs text-[#6B7280]">Present Today</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
-              <Clock className="h-5 w-5 text-[#9C6F1E]" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">
-                {(totalProductionMinutes / 60).toFixed(1)}h
-              </p>
-              <p className="text-xs text-[#6B7280]">Production Hours Today</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F1E6F0] p-2.5">
-              <Activity className="h-5 w-5 text-[#6B4A6D]" />
-            </div>
-            <div>
-              <p
-                className={`text-2xl font-bold ${Number(avgEfficiency) >= 85 ? "text-[#4F7C3A]" : Number(avgEfficiency) >= 70 ? "text-[#9C6F1E]" : "text-[#9A3A2D]"}`}
-              >
-                {avgEfficiency}%
-              </p>
-              <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
-            </div>
-          </CardContent>
-        </Card>
+      {/* Summary Cards — follow the Working Hours tab's selected date. */}
+      <div>
+        <p className="mb-2 text-xs text-[#6B7280]">
+          Summary for{" "}
+          <span className="font-medium text-[#1F1D1B]">{summaryDateLabel}</span>
+        </p>
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
+          <Card>
+            <CardContent className="p-4 flex items-center gap-3">
+              <div className="rounded-lg bg-[#E0EDF0] p-2.5">
+                <Users className="h-5 w-5 text-[#3E6570]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold">{totalWorkers}</p>
+                <p className="text-xs text-[#6B7280]">Total Workers</p>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4 flex items-center gap-3">
+              <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+                <UserCheck className="h-5 w-5 text-[#4F7C3A]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-[#4F7C3A]">
+                  {presentCount}/{totalWorkers}
+                </p>
+                <p className="text-xs text-[#6B7280]">Present</p>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4 flex items-center gap-3">
+              <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+                <Clock className="h-5 w-5 text-[#9C6F1E]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold">
+                  {(summaryWorkingMinutes / 60).toFixed(1)}h
+                </p>
+                <p className="text-xs text-[#6B7280]">Working Hours</p>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4 flex items-center gap-3">
+              <div className="rounded-lg bg-[#F1E6F0] p-2.5">
+                <Activity className="h-5 w-5 text-[#6B4A6D]" />
+              </div>
+              <div>
+                <p
+                  className={`text-2xl font-bold ${Number(avgEfficiency) >= 85 ? "text-[#4F7C3A]" : Number(avgEfficiency) >= 70 ? "text-[#9C6F1E]" : "text-[#9A3A2D]"}`}
+                >
+                  {avgEfficiency}%
+                </p>
+                <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
 
       {/* Tab Navigation */}
@@ -6428,6 +6457,7 @@ export default function EmployeesPage() {
           refreshAttendance={refreshAttendance}
           departments={departments}
           productionDeptCodes={productionDeptCodes}
+          onDateChange={handleWorkingHoursDateChange}
         />
       )}
 

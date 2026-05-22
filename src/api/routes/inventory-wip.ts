@@ -34,6 +34,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { laborRateForDate } from "../../lib/costing";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -158,6 +159,11 @@ type WIPRow = {
 // Endpoint
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  // WIP inventory view — gate with the same inventory-read permission
+  // as inventory.ts.
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+
   const db = c.var.DB;
 
   // 1) The ledger — every wip_items row with non-zero stock. This is

@@ -32,6 +32,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -68,6 +69,12 @@ type WorkerJcRow = {
 };
 
 app.get("/", async (c) => {
+  // job_cards is production data — gate with the same production-read
+  // permission as production-orders.ts so the Employee Performance tab
+  // (whose users already read /api/production-orders) is unaffected.
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+
   const picId = c.req.query("picId");
   if (!picId) {
     return c.json({ success: false, error: "picId required" }, 400);
@@ -194,6 +201,9 @@ type WorkerProdSummaryRow = {
 };
 
 app.get("/summary", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+
   const from = c.req.query("from");
   const to = c.req.query("to");
   if (!from || !to) {
@@ -325,6 +335,9 @@ type EventRow = {
 };
 
 app.get("/:id/events", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+
   const jobCardId = c.req.param("id");
   if (!jobCardId) {
     return c.json({ success: false, error: "jobCardId required" }, 400);

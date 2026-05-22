@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -57,6 +58,11 @@ function rowToApi(r: RmBatchRow) {
 
 // GET /api/rm-batches  (optional ?rmId=)
 app.get("/", async (c) => {
+  // rm_batches are raw-material FIFO lots — gate with the same
+  // raw-materials-read permission as raw-materials.ts.
+  const denied = await requirePermission(c, "raw-materials", "read");
+  if (denied) return denied;
+
   const rmId = c.req.query("rmId");
   const sql = rmId
     ? "SELECT * FROM rm_batches WHERE rmId = ? ORDER BY receivedDate DESC"
@@ -71,6 +77,9 @@ app.get("/", async (c) => {
 
 // GET /api/rm-batches/:id
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "read");
+  if (denied) return denied;
+
   const id = c.req.param("id");
   const row = await c.var.DB.prepare(
     "SELECT * FROM rm_batches WHERE id = ?",

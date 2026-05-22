@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -72,6 +73,11 @@ function rowToConfig(row: ProductDeptConfigRow) {
 
 // GET /api/product-configs — list all product dept configs
 app.get("/", async (c) => {
+  // product_dept_configs are per-product lookup data — gate with the same
+  // products-read permission as products.ts.
+  const denied = await requirePermission(c, "products", "read");
+  if (denied) return denied;
+
   const res = await c.var.DB.prepare(
     "SELECT * FROM product_dept_configs ORDER BY productCode",
   ).all<ProductDeptConfigRow>();

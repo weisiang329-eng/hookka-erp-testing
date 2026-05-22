@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -55,6 +56,11 @@ function rowToHub(row: CustomerHubRow) {
 
 // GET /api/customer-hubs?parentId=hub-houzs
 app.get("/", async (c) => {
+  // customer-hubs is the customer-branch directory — gate with the same
+  // customers-read permission as customers.ts.
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+
   const parentId = c.req.query("parentId");
   const stmt = parentId
     ? c.var.DB.prepare(

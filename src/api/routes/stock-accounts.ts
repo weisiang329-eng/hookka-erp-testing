@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -26,6 +27,11 @@ function rowToAccount(r: StockAccountRow) {
 
 // GET /api/stock-accounts — list all stock accounts
 app.get("/", async (c) => {
+  // stock_accounts is the FG/WIP/RAW_MATERIAL chart — warehouse/inventory
+  // domain, gate with the same inventory-read permission as inventory.ts.
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+
   const res = await c.var.DB.prepare(
     "SELECT * FROM stock_accounts ORDER BY code",
   ).all<StockAccountRow>();

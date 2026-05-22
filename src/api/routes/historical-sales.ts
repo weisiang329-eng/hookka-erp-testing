@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -35,6 +36,11 @@ type ProductLookupRow = {
 
 // GET /api/historical-sales?productId=xxx&from=2025-05&to=2026-04
 app.get("/", async (c) => {
+  // Historical sales are derived from invoices — sales data, gate with the
+  // same sales-orders-read permission as sales-orders.ts.
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+
   const productId = c.req.query("productId");
   const from = c.req.query("from"); // "YYYY-MM"
   const to = c.req.query("to"); // "YYYY-MM"

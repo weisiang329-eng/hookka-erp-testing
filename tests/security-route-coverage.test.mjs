@@ -169,6 +169,40 @@ const routes = [
       ["credit-notes", "update"],
     ],
   },
+  // ---------------------------------------------------------------------
+  // 2026-05-22 — closed an authz gap: these 7 route files sat behind
+  // authMiddleware (login required) but had NO per-role requirePermission
+  // gate, so any logged-in user of any role could read them. Each GET now
+  // mirrors the read permission of its nearest already-gated sibling.
+  // ---------------------------------------------------------------------
+  {
+    file: "src/api/routes/job-cards.ts",
+    required: [["production-orders", "read"]],
+  },
+  {
+    file: "src/api/routes/customer-hubs.ts",
+    required: [["customers", "read"]],
+  },
+  {
+    file: "src/api/routes/inventory-wip.ts",
+    required: [["inventory", "read"]],
+  },
+  {
+    file: "src/api/routes/rm-batches.ts",
+    required: [["raw-materials", "read"]],
+  },
+  {
+    file: "src/api/routes/product-configs.ts",
+    required: [["products", "read"]],
+  },
+  {
+    file: "src/api/routes/stock-accounts.ts",
+    required: [["inventory", "read"]],
+  },
+  {
+    file: "src/api/routes/historical-sales.ts",
+    required: [["sales-orders", "read"]],
+  },
 ];
 
 for (const r of routes) {
@@ -257,7 +291,18 @@ test("total requirePermission call count across gated routes does not regress", 
   // Total = 86. (One sales-orders read used to count via a different
   // file; rely on the live sum below — FLOOR is a tripwire, not an
   // exact match.) If you add a gate, raise this number with the same PR.
-  const FLOOR = 86;
+  //
+  // 2026-05-22 — closed an authz gap by gating 7 previously-ungated route
+  // files, adding 10 requirePermission calls:
+  //   job-cards.ts:       3 (GET / + GET /summary + GET /:id/events)
+  //   customer-hubs.ts:   1
+  //   inventory-wip.ts:   1
+  //   rm-batches.ts:      2 (GET / + GET /:id)
+  //   product-configs.ts: 1
+  //   stock-accounts.ts:  1
+  //   historical-sales.ts:1
+  // New floor = 86 + 10 = 96.
+  const FLOOR = 96;
   assert.ok(
     total >= FLOOR,
     `requirePermission gate count ${total} < floor ${FLOOR} — a gate was removed`,

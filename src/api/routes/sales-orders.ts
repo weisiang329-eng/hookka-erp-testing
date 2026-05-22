@@ -835,21 +835,47 @@ app.get("/", async (c) => {
     // cap, callers must pass ?page=N&limit=M (the paginated branch
     // below already scopes items via salesOrderId IN (...)).
     const ITEMS_HARD_CAP = 5000;
-    const [sos, items] = await Promise.all([
-      db
-        .prepare(
-          `SELECT * FROM ${soSourceSql} ${orgWhere} ORDER BY created_at DESC, id DESC`,
-        )
-        .bind(...orgParams)
-        .all<SalesOrderRow>(),
-      db
-        .prepare(`SELECT * FROM ${itemsSourceSql} LIMIT ${ITEMS_HARD_CAP}`)
-        .all<SalesOrderItemRow>(),
-    ]);
-    const data = (sos.results ?? []).map((s) =>
-      rowToSOList(s, items.results ?? []),
+    const computeFullList = async () => {
+      const [sos, items] = await Promise.all([
+        db
+          .prepare(
+            `SELECT * FROM ${soSourceSql} ${orgWhere} ORDER BY created_at DESC, id DESC`,
+          )
+          .bind(...orgParams)
+          .all<SalesOrderRow>(),
+        db
+          .prepare(`SELECT * FROM ${itemsSourceSql} LIMIT ${ITEMS_HARD_CAP}`)
+          .all<SalesOrderItemRow>(),
+      ]);
+      const data = (sos.results ?? []).map((s) =>
+        rowToSOList(s, items.results ?? []),
+      );
+      return { success: true as const, data, total: data.length };
+    };
+
+    // The archive variant (?includeArchive=true) unions in an extra table
+    // and is rarely requested — skip the cache for it so the snapshot row
+    // only ever holds the canonical (non-archive) list.
+    if (includeArchive) {
+      return c.json(await computeFullList());
+    }
+
+    // PR 8 (2026-05-22) — cache-aside snapshot. The dashboard fetches this
+    // whole list to resolve per-product SO unit prices; it is a SELECT *
+    // over sales_orders + sales_order_items (one of the two heaviest
+    // dashboard reads) and the data is relatively static. Layer 2
+    // invalidates the moment either source table's freshness column moves.
+    const { withSnapshot } = await import("../lib/snapshot");
+    const data = await withSnapshot(
+      db,
+      {
+        tableName: "sales_orders_list_snapshot",
+        sourceTables: ["sales_orders", "sales_order_items"],
+      },
+      getOrgId(c),
+      computeFullList,
     );
-    return c.json({ success: true, data, total: data.length });
+    return c.json(data);
   }
 
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);

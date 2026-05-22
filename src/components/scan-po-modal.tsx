@@ -128,6 +128,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [step, setStep] = useState<StepState>("upload");
   const [files, setFiles] = useState<File[]>([]);
   const [parsing, setParsing] = useState(false);
+  // Per-file OCR status, keyed by file name. Lets the operator see each
+  // PDF advance through queued → scanning → done/failed during a batch
+  // instead of one generic "Parsing..." spinner. Display-only — does not
+  // affect the upload/queue/OCR logic.
+  const [fileProgress, setFileProgress] = useState<Record<string, "queued" | "scanning" | "done" | "failed">>({});
   const [parseResult, setParseResult] = useState<POParseResult | null>(null);
   const [claudeRows, setClaudeRows] = useState<ClaudeScanRow[]>([]);
   const [usedClaude, setUsedClaude] = useState(false);
@@ -163,6 +168,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setStep("upload");
     setFiles([]);
     setParsing(false);
+    setFileProgress({});
     setParseResult(null);
     setClaudeRows([]);
     setUsedClaude(false);
@@ -197,6 +203,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setFiles(pdfFiles);
     setParsing(true);
     setErrors([]);
+    // Seed every file as "queued" so the UploadStep list renders a row per
+    // PDF the moment processing starts. Status keyed by file name.
+    setFileProgress(Object.fromEntries(pdfFiles.map((f) => [f.name, "queued" as const])));
 
     // --- Pass 1: try Claude OCR (per-page parallel) -------------------
     // Phase 4: each multi-page PDF is split client-side into one PDF per
@@ -222,6 +231,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         claudeWarnings.push(
           `${file.name}: failed to split PDF — ${err instanceof Error ? err.message : "unknown"}`,
         );
+        setFileProgress((prev) => ({ ...prev, [file.name]: "failed" }));
       }
     }
 
@@ -304,10 +314,49 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     // server-served config so it tunes without a redeploy.
     const CONCURRENCY = 5;
     const claudeResults: PromiseSettledResult<JobRes>[] = [];
+    // Per-file page-job accounting so the progress list flips a file to
+    // done/failed only once every one of its pages has settled. A file
+    // is "failed" if any of its pages failed (mirrors claudeFailures).
+    const remainingPages: Record<string, number> = {};
+    const fileHadFailure: Record<string, boolean> = {};
+    for (const job of allJobs) {
+      remainingPages[job.file.name] = (remainingPages[job.file.name] ?? 0) + 1;
+    }
     for (let i = 0; i < allJobs.length; i += CONCURRENCY) {
       const batch = allJobs.slice(i, i + CONCURRENCY);
+      // Mark every file in this batch "scanning" as its first page starts.
+      setFileProgress((prev) => {
+        const next = { ...prev };
+        for (const job of batch) {
+          if (next[job.file.name] === "queued") next[job.file.name] = "scanning";
+        }
+        return next;
+      });
       const settled = await Promise.allSettled(batch.map(runOne));
       claudeResults.push(...settled);
+      // After the batch settles, decrement each file's outstanding page
+      // count and flip it to done/failed once all its pages are accounted
+      // for. A rejected promise counts as a failure for its file.
+      const completedFiles: { name: string; failed: boolean }[] = [];
+      for (let b = 0; b < batch.length; b++) {
+        const job = batch[b];
+        const s = settled[b];
+        const pageFailed = s.status === "rejected" || s.value.kind === "fail";
+        if (pageFailed) fileHadFailure[job.file.name] = true;
+        remainingPages[job.file.name] -= 1;
+        if (remainingPages[job.file.name] === 0) {
+          completedFiles.push({ name: job.file.name, failed: !!fileHadFailure[job.file.name] });
+        }
+      }
+      if (completedFiles.length > 0) {
+        setFileProgress((prev) => {
+          const next = { ...prev };
+          for (const cf of completedFiles) {
+            next[cf.name] = cf.failed ? "failed" : "done";
+          }
+          return next;
+        });
+      }
     }
 
     for (const r of claudeResults) {
@@ -705,7 +754,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={handleClose}>
       <div
-        className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col"
+        className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -741,6 +790,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             <UploadStep
               files={files}
               parsing={parsing}
+              fileProgress={fileProgress}
               errors={errors}
               fileInputRef={fileInputRef}
               onFiles={handleFiles}
@@ -802,29 +852,40 @@ function StepDot({ active, done, label }: { active: boolean; done: boolean; labe
 }
 
 function UploadStep({
-  files, parsing, errors, fileInputRef, onFiles, onDrop,
+  files, parsing, fileProgress, errors, fileInputRef, onFiles, onDrop,
 }: {
   files: File[];
   parsing: boolean;
+  fileProgress: Record<string, "queued" | "scanning" | "done" | "failed">;
   errors: string[];
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onFiles: (files: FileList | null) => void;
   onDrop: (e: React.DragEvent) => void;
 }) {
+  const doneCount = files.filter(f => {
+    const s = fileProgress[f.name];
+    return s === "done" || s === "failed";
+  }).length;
   return (
     <div className="space-y-4">
       {/* Drop zone */}
       <div
-        className="border-2 border-dashed border-[#D1D5DB] rounded-xl p-12 text-center hover:border-[#6B5C32] hover:bg-[#FAFAF9] transition-colors cursor-pointer"
+        className={`border-2 border-dashed border-[#D1D5DB] rounded-xl p-12 text-center transition-colors ${
+          parsing ? "cursor-default" : "hover:border-[#6B5C32] hover:bg-[#FAFAF9] cursor-pointer"
+        }`}
         onDragOver={e => e.preventDefault()}
         onDrop={onDrop}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => { if (!parsing) fileInputRef.current?.click(); }}
       >
         {parsing ? (
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="h-12 w-12 text-[#6B5C32] animate-spin" />
-            <p className="text-lg font-medium text-[#1F1D1B]">Parsing PDF{files.length > 1 ? "s" : ""}...</p>
-            <p className="text-sm text-[#6B7280]">Extracting text and identifying purchase orders</p>
+            <p className="text-lg font-medium text-[#1F1D1B]">
+              Scanning {files.length} PDF{files.length > 1 ? "s" : ""}...
+            </p>
+            <p className="text-sm text-[#6B7280]">
+              {doneCount} of {files.length} done — extracting items, fabric, config
+            </p>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-3">
@@ -843,6 +904,24 @@ function UploadStep({
           onChange={e => onFiles(e.target.files)}
         />
       </div>
+
+      {/* Per-file progress list — one row per PDF while a batch scans */}
+      {parsing && files.length > 0 && (
+        <div className="border border-[#E2DDD8] rounded-lg divide-y divide-[#E2DDD8]">
+          {files.map((f, i) => {
+            const status = fileProgress[f.name] ?? "queued";
+            return (
+              <div key={`${f.name}-${i}`} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
+                  <span className="text-sm text-[#1F1D1B] truncate">{f.name}</span>
+                </div>
+                <FileStatusBadge status={status} />
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Errors */}
       {errors.length > 0 && (
@@ -863,6 +942,40 @@ function UploadStep({
         <InfoCard icon="📋" title="Create SO" desc="Review then create as DRAFT" />
       </div>
     </div>
+  );
+}
+
+// Per-file status pill for the UploadStep progress list. Plain text +
+// Tailwind, no emoji — consistent with the rest of the modal.
+function FileStatusBadge({ status }: { status: "queued" | "scanning" | "done" | "failed" }) {
+  if (status === "scanning") {
+    return (
+      <span className="flex items-center gap-1.5 text-xs font-medium text-[#6B5C32] flex-shrink-0">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Scanning
+      </span>
+    );
+  }
+  if (status === "done") {
+    return (
+      <span className="flex items-center gap-1.5 text-xs font-medium text-green-700 flex-shrink-0">
+        <CheckCircle className="h-3.5 w-3.5" />
+        Done
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="flex items-center gap-1.5 text-xs font-medium text-red-700 flex-shrink-0">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        Failed
+      </span>
+    );
+  }
+  return (
+    <span className="text-xs font-medium text-[#9CA3AF] flex-shrink-0">
+      Queued
+    </span>
   );
 }
 
@@ -995,7 +1108,7 @@ function PreviewStep({
       )}
 
       {/* PO Cards */}
-      <div className="space-y-3 max-h-[50vh] overflow-y-auto">
+      <div className="space-y-3 max-h-[65vh] overflow-y-auto">
         {claudeRows.map((row, idx) => (
           <ClaudePOCard
             key={`claude-${idx}`}

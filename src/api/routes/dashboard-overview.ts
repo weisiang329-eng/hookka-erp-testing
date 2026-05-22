@@ -143,7 +143,7 @@ app.get("/", async (c) => {
     ] = await Promise.all([
       db
         .prepare(
-          "SELECT status, estMinutes, actualMinutes, wipQty, completedDate, dueDate FROM job_cards WHERE orgId = ?",
+          "SELECT status, estMinutes, actualMinutes, wipQty, completedDate, dueDate, pic1Id, pic2Id FROM job_cards WHERE orgId = ?",
         )
         .bind(orgId)
         .all<{
@@ -153,6 +153,8 @@ app.get("/", async (c) => {
           wipQty: number | null;
           completedDate: string | null;
           dueDate: string | null;
+          pic1Id: string | null;
+          pic2Id: string | null;
         }>(),
       // Active Jobs — still-in-production POs, split Bedframe (units =
       // qty) vs Sofa (sets = distinct SOs), with the customer for the
@@ -613,6 +615,11 @@ app.get("/", async (c) => {
     let capacityMin = 0;
     let backlogMin = 0;
     const capByDay = new Map<string, number>();
+    // Distinct workers (PIC1/PIC2 ids) credited on the job cards COMPLETED
+    // each day — the denominator for the per-worker capacity figure in the
+    // Daily Capacity drill-down. Same job-card set that feeds capByDay, so
+    // capacity ÷ workers is internally consistent.
+    const workersByDay = new Map<string, Set<string>>();
     for (const jc of jcRes.results ?? []) {
       const wip = Math.max(1, jc.wipQty ?? 1);
       const done = jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
@@ -624,6 +631,13 @@ app.get("/", async (c) => {
             jc.completedDate,
             (capByDay.get(jc.completedDate) ?? 0) + mins,
           );
+          let wset = workersByDay.get(jc.completedDate);
+          if (!wset) {
+            wset = new Set<string>();
+            workersByDay.set(jc.completedDate, wset);
+          }
+          if (jc.pic1Id) wset.add(jc.pic1Id);
+          if (jc.pic2Id) wset.add(jc.pic2Id);
         }
       }
       if (
@@ -642,7 +656,11 @@ app.get("/", async (c) => {
     // Daily Capacity drill-down: last 7 working days, oldest first.
     const capacityDays = [...windowDays]
       .sort((a, b) => a.localeCompare(b))
-      .map((date) => ({ date, minutes: capByDay.get(date) ?? 0 }));
+      .map((date) => ({
+        date,
+        minutes: capByDay.get(date) ?? 0,
+        workers: workersByDay.get(date)?.size ?? 0,
+      }));
 
     // ---- Backlog per department (mirror of Planning capacityData) ----
     const DEPARTMENTS: { code: string; name: string }[] = [

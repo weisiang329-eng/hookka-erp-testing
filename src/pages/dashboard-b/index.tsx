@@ -66,7 +66,7 @@ type Overview = {
     activeJobs: JobsBreakdown;
     completedYesterday: JobsBreakdown;
     completedLast7: { date: string; bedframeUnits: number; sofaSets: number }[];
-    capacityDays: { date: string; minutes: number }[];
+    capacityDays: { date: string; minutes: number; workers: number }[];
     backlogByDept: {
       dept: string;
       sofaMin: number;
@@ -1025,28 +1025,50 @@ export default function DashboardBPage() {
               <button
                 type="button"
                 disabled={!prod?.capacityDays}
-                onClick={() =>
-                  prod?.capacityDays &&
+                onClick={() => {
+                  if (!prod?.capacityDays) return;
+                  const days = prod.capacityDays;
+                  // 7-day average capacity per worker — avg daily capacity
+                  // ÷ avg workers/day. Days with zero credited workers are
+                  // left out so they don't distort the average.
+                  const wDays = days.filter((d) => (d.workers ?? 0) > 0);
+                  const avgWorkers = wDays.length
+                    ? wDays.reduce((s, d) => s + (d.workers ?? 0), 0) /
+                      wDays.length
+                    : 0;
+                  const perWorkerAvg =
+                    avgWorkers > 0
+                      ? hm(Math.round(prod.dailyCapacityMin / avgWorkers))
+                      : "—";
                   setDrill({
                     title: "Daily Capacity — Past 7 Working Days",
-                    subtitle: `Average ${hm(prod.dailyCapacityMin)}/day across all production depts`,
+                    subtitle: `Average ${hm(prod.dailyCapacityMin)}/day · ${perWorkerAvg}/worker across all production depts`,
                     node: (
                       <MiniTable
-                        cols={["Date", "Production time", "vs Avg"]}
-                        rows={[...prod.capacityDays]
+                        cols={[
+                          "Date",
+                          "Production time",
+                          "Workers",
+                          "Per Worker",
+                          "vs Avg",
+                        ]}
+                        rows={[...days]
                           .sort((a, b) => a.date.localeCompare(b.date))
                           .map((d) => {
                             const diff = d.minutes - prod.dailyCapacityMin;
+                            const w = d.workers ?? 0;
                             return [
                               d.date,
                               hm(d.minutes),
+                              w > 0 ? String(w) : "—",
+                              w > 0 ? hm(Math.round(d.minutes / w)) : "—",
                               `${diff >= 0 ? "+" : "−"}${hm(Math.abs(diff))}`,
                             ];
                           })}
                       />
                     ),
-                  })
-                }
+                  });
+                }}
                 className="w-full flex items-center justify-between rounded-lg bg-[#F7F4EF] hover:bg-[#F0ECE6] px-3 py-2 text-left transition-colors"
               >
                 <span className="flex items-center gap-2">

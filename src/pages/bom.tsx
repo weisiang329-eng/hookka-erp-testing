@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo, useDeferredValue } from "react";
+import React, { useState, useEffect, useMemo, useDeferredValue, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import {
@@ -6250,6 +6251,19 @@ function DeptPivotCategoryDialog({
     });
   }, [rows, searchDeferred, modelFilter, branchFilter]);
 
+  // ── Row virtualization for the dept-pivot process table ────────────────
+  // A busy department's pivot can list every process row across every BOM
+  // (hundreds of rows, each with a category <select>). Rendering them all
+  // janks the dialog open and every keystroke. Keep only the visible window
+  // mounted; measureElement covers the 2-line Model cell height variance.
+  const pivotScrollRef = useRef<HTMLDivElement>(null);
+  const pivotRowVirtualizer = useVirtualizer({
+    count: filteredRows.length,
+    getScrollElement: () => pivotScrollRef.current,
+    estimateSize: () => 48,
+    overscan: 10,
+  });
+
   // (Stale-row detection + Resync helper removed per user feedback —
   // they were the visible UI of PR #28. The bug-fix logic for
   // "minutes-only changes count as dirty" lives in `isRowDirty` above
@@ -6536,7 +6550,7 @@ function DeptPivotCategoryDialog({
 
           {/* Pivot table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <div className="max-h-[60vh] overflow-y-auto">
+            <div ref={pivotScrollRef} className="max-h-[60vh] overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="bg-[#FAF9F7] sticky top-0 z-10">
                   <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
@@ -6566,7 +6580,24 @@ function DeptPivotCategoryDialog({
                       </td>
                     </tr>
                   )}
-                  {filteredRows.map((r) => {
+                  {(() => {
+                    const vItems = pivotRowVirtualizer.getVirtualItems();
+                    const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                    const padBottom =
+                      vItems.length > 0
+                        ? pivotRowVirtualizer.getTotalSize() -
+                          vItems[vItems.length - 1].end
+                        : 0;
+                    return (
+                      <>
+                        {padTop > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={6} style={{ height: padTop, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                        {vItems.map((vi) => {
+                    const r = filteredRows[vi.index];
+                    if (!r) return null;
                     const dirty = isRowDirty(r);
                     const isSelected = selectedKeys.has(r.rowKey);
                     // Reverted (PR #28 → restore pre-#28 format): no
@@ -6580,6 +6611,8 @@ function DeptPivotCategoryDialog({
                     return (
                       <tr
                         key={r.rowKey}
+                        data-index={vi.index}
+                        ref={pivotRowVirtualizer.measureElement}
                         className={`border-t border-[#E2DDD8] ${rowTone}`}
                       >
                         <td className="px-3 py-2">
@@ -6635,7 +6668,15 @@ function DeptPivotCategoryDialog({
                         </td>
                       </tr>
                     );
-                  })}
+                        })}
+                        {padBottom > 0 && (
+                          <tr aria-hidden="true">
+                            <td colSpan={6} style={{ height: padBottom, padding: 0, border: 0 }} />
+                          </tr>
+                        )}
+                      </>
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>

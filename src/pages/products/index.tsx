@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
@@ -1927,6 +1928,21 @@ export default function ProductsPage() {
     });
   }, [products, categoryFilter, searchQuery]);
 
+  // ── Row virtualization for the SKU-master catalog table ────────────────
+  // The catalog renders one inline-edit row per product (10+ grid cells,
+  // price inputs, an expand panel). At a few hundred SKUs that is thousands
+  // of DOM nodes — slow first paint, and a full re-render of every row on
+  // each price keystroke. The virtualizer keeps only the visible window
+  // (~20 rows) mounted; row heights vary (a row grows tall when expanded),
+  // so measureElement measures each rendered row instead of a fixed guess.
+  const productsScrollRef = useRef<HTMLDivElement>(null);
+  const catalogRowVirtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => productsScrollRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  });
+
   function totalConfigMinutes(cfg: ProductDeptConfig): number {
     return cfg.fabCutMinutes + cfg.fabSewMinutes + cfg.foamMinutes + cfg.framingMinutes + cfg.upholsteryMinutes + cfg.packingMinutes;
   }
@@ -2137,9 +2153,13 @@ export default function ProductsPage() {
         const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
         return (
       <div className="bg-white rounded-lg border border-[#E5E7EB] overflow-hidden">
-        <div className="overflow-x-auto">
+        <div
+          ref={productsScrollRef}
+          className="overflow-auto"
+          style={{ maxHeight: "calc(100vh - 320px)" }}
+        >
           <table className="min-w-full divide-y divide-[#E5E7EB]">
-            <thead className="bg-[#F9FAFB]">
+            <thead className="bg-[#F9FAFB] sticky top-0 z-10">
               <tr>
                 <th colSpan={colSpanN} className="p-0">
                   <div className="grid" style={{ gridTemplateColumns: gridCols }}>
@@ -2190,7 +2210,27 @@ export default function ProductsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#E5E7EB]">
-              {filtered.map((p) => {
+              {(() => {
+                const vItems = catalogRowVirtualizer.getVirtualItems();
+                const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                const padBottom =
+                  vItems.length > 0
+                    ? catalogRowVirtualizer.getTotalSize() -
+                      vItems[vItems.length - 1].end
+                    : 0;
+                return (
+                  <>
+                    {padTop > 0 && (
+                      <tr aria-hidden="true">
+                        <td
+                          colSpan={colSpanN}
+                          style={{ height: padTop, padding: 0, border: 0 }}
+                        />
+                      </tr>
+                    )}
+                    {vItems.map((vi) => {
+                const p = filtered[vi.index];
+                if (!p) return null;
                 const cfg = configMap.get(p.code);
                 const isExpanded = expandedId === p.id;
                 // /api/products now returns productionTimeMinutes derived
@@ -2219,7 +2259,12 @@ export default function ProductsPage() {
                 const isEditingThisPrice = editingPrice === p.id;
 
                 return (
-                  <tr key={p.id} className="group">
+                  <tr
+                    key={p.id}
+                    data-index={vi.index}
+                    ref={catalogRowVirtualizer.measureElement}
+                    className="group"
+                  >
                     <td colSpan={colSpanN} className="p-0">
                       {/* Main row */}
                       <div
@@ -2641,7 +2686,18 @@ export default function ProductsPage() {
                     </td>
                   </tr>
                 );
-              })}
+                    })}
+                    {padBottom > 0 && (
+                      <tr aria-hidden="true">
+                        <td
+                          colSpan={colSpanN}
+                          style={{ height: padBottom, padding: 0, border: 0 }}
+                        />
+                      </tr>
+                    )}
+                  </>
+                );
+              })()}
             </tbody>
           </table>
         </div>

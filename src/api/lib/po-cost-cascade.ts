@@ -19,8 +19,10 @@
 //
 //   F2. Labor posting per completed job card (handled by postJobCardLabor):
 //       - On each job_card status flip to COMPLETED/TRANSFERRED, post a
-//         LABOR_POSTED cost_ledger entry. Uses the floating laborRateForDate()
-//         (there's no per-department rate column in schema today).
+//         LABOR_POSTED cost_ledger entry. The JC's production minutes are
+//         costed at each attributed worker's own production-cost rate
+//         (basic salary ÷ holiday-adjusted working days ÷ hours/day ÷ 60)
+//         via the shared labor engine.
 //       - Idempotent per jobCardId — we key by refType='JOB_CARD', refId=jc.id.
 //
 //   F3. FG batch cost backfill:
@@ -42,7 +44,11 @@
 //     Legacy pre-0011 rows may still exist as ADJUSTMENT with a
 //     "WIP_COMPLETED" notes prefix — the idempotency check covers both.
 // ---------------------------------------------------------------------------
-import { fifoConsume, laborRateForDate } from "../../lib/costing";
+import { fifoConsume } from "../../lib/costing";
+import {
+  productionCostRatePerMinuteSen,
+  costingWorkerOrDefault,
+} from "../../lib/labor-engine";
 import type { RMBatch } from "../../types";
 import {
   expandMaterialQty,
@@ -600,9 +606,14 @@ export async function consumeRawMaterialsForPO(
 // ANY pic1Id or pic2Id slot for this JC, then split the JC's production
 // minutes evenly across them — one cost_ledger row per worker.
 //
+// Per-worker rate: each worker's minutes are costed at THEIR own
+// production-cost rate — basic salary ÷ (working days − public holidays)
+// ÷ hours/day ÷ 60 — via the shared labor engine. A worker with no salary
+// set falls back to the default (RM 2050 / 9 h / 26 days).
+//
 // If no workers are attributed (no piece_pics rows, or all slots null),
-// fall back to a single un-attributed LABOR_POSTED row so the FG-batch
-// cost rollup stays correct.
+// fall back to a single un-attributed LABOR_POSTED row at the default
+// rate so the FG-batch cost rollup stays correct.
 // ---------------------------------------------------------------------------
 export async function postJobCardLabor(
   db: D1Database,
@@ -653,12 +664,42 @@ export async function postJobCardLabor(
     return { skipped: false, laborSen: 0, minutes: 0, workerCount: 0 };
   }
 
-  // TODO(labor-rate): once departments.laborRatePerMinSen lands, prefer it
-  // over the global floating rate. Today we use the calendar-aware default.
   const dateIso = jc.completedDate
     ? new Date(`${jc.completedDate}T12:00:00`).toISOString()
     : new Date().toISOString();
-  const ratePerMin = laborRateForDate(dateIso);
+  const completionDate = new Date(dateIso);
+  const rateYear = completionDate.getFullYear();
+  const rateMonth = completionDate.getMonth() + 1;
+
+  // Public holidays for the completion month — the production-cost rate
+  // divides the monthly salary by (working days − public holidays), so a
+  // holiday month costs each produced minute more.
+  const phRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string | null }>();
+  const publicHolidays = new Set<string>();
+  if (phRow?.value) {
+    try {
+      const parsed = JSON.parse(phRow.value);
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) {
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+            publicHolidays.add(d);
+          }
+        }
+      }
+    } catch {
+      /* malformed payload — treat as no holidays */
+    }
+  }
+  // Rate for un-attributed labor / a deleted or un-configured worker.
+  const defaultRatePerMin = productionCostRatePerMinuteSen(
+    costingWorkerOrDefault(undefined),
+    rateYear,
+    rateMonth,
+    publicHolidays,
+  );
 
   // Collect distinct worker ids from piece_pics for this JC.
   const picsRes = await db
@@ -674,10 +715,10 @@ export async function postJobCardLabor(
     if (row.pic2Id) distinctWorkers.add(row.pic2Id);
   }
 
-  // No attributed workers → single un-attributed LABOR_POSTED row so the
-  // FG rollup still captures the labor cost.
+  // No attributed workers → single un-attributed LABOR_POSTED row, at the
+  // default rate, so the FG rollup still captures the labor cost.
   if (distinctWorkers.size === 0) {
-    const laborSen = Math.round(ratePerMin * minutes);
+    const laborSen = Math.round(defaultRatePerMin * minutes);
     if (laborSen <= 0) {
       return { skipped: false, laborSen: 0, minutes, workerCount: 0 };
     }
@@ -693,7 +734,7 @@ export async function postJobCardLabor(
         dateIso,
         productionOrderId,
         minutes,
-        Math.round(ratePerMin),
+        Math.round(defaultRatePerMin),
         laborSen,
         jobCardId,
         `Labor posted for ${jc.departmentCode ?? "?"} (${minutes} min) — no worker attributed`,
@@ -702,12 +743,42 @@ export async function postJobCardLabor(
     return { skipped: false, laborSen, minutes, workerCount: 0 };
   }
 
+  // Per-worker rate — load each attributed worker's Employee Master
+  // figures in one query and compute their own production-cost rate.
+  const workerIds = [...distinctWorkers];
+  const workerPlaceholders = workerIds.map(() => "?").join(", ");
+  const workerRowsRes = await db
+    .prepare(
+      `SELECT id, basicSalarySen, workingHoursPerDay, workingDaysPerMonth FROM workers WHERE id IN (${workerPlaceholders})`,
+    )
+    .bind(...workerIds)
+    .all<{
+      id: string;
+      basicSalarySen: number | null;
+      workingHoursPerDay: number | null;
+      workingDaysPerMonth: number | null;
+    }>();
+  const rateByWorker = new Map<string, number>();
+  for (const w of workerRowsRes.results ?? []) {
+    rateByWorker.set(
+      w.id,
+      productionCostRatePerMinuteSen(
+        costingWorkerOrDefault(w),
+        rateYear,
+        rateMonth,
+        publicHolidays,
+      ),
+    );
+  }
+
   // Split minutes evenly across distinct workers (round half-up).
   const n = distinctWorkers.size;
   const perWorkerMinutes = Math.round((minutes / n) * 10) / 10; // 1 dp
   const statements: D1PreparedStatement[] = [];
   let totalLaborSen = 0;
   for (const wid of distinctWorkers) {
+    // A worker id with no workers-table row (deleted) → default rate.
+    const ratePerMin = rateByWorker.get(wid) ?? defaultRatePerMin;
     const workerSen = Math.round(ratePerMin * perWorkerMinutes);
     totalLaborSen += workerSen;
     if (workerSen <= 0) continue;

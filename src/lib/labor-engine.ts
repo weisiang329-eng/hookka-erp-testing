@@ -293,3 +293,87 @@ export function computeMonthlyLabor(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Production labor cost — per-minute rate for cost_ledger.
+//
+// computeMonthlyLabor (above) answers "what does this worker's MONTH cost
+// and earn". The cost ledger needs a finer figure: when a job card
+// completes, its production minutes are costed straight into cost_ledger.
+//
+// Per Wei Siang (2026-05-22): a job card is NOT traced back to actual
+// working hours — it is costed off its production minutes ×
+// productionCostRatePerMinuteSen. The rate uses the production-cost
+// divisor (working days − public holidays) so a holiday month costs each
+// produced minute more.
+// ---------------------------------------------------------------------------
+
+/** Fallback worker figures — un-attributed labor, or a half-set-up worker. */
+export const DEFAULT_COSTING_WORKER: LaborWorker = {
+  basicSalarySen: 205_000, // RM 2050 / month
+  workingDaysPerMonth: 26,
+  workingHoursPerDay: 9,
+  otMultiplier: 1.5,
+};
+
+/**
+ * Coerce a (possibly half-set-up) worker record into a usable LaborWorker.
+ * Any missing or non-positive field falls back to DEFAULT_COSTING_WORKER,
+ * so a worker with no salary set still costs at the default rate rather
+ * than zero. Pass `undefined` for un-attributed labor.
+ */
+export function costingWorkerOrDefault(worker?: {
+  basicSalarySen?: number | null;
+  workingHoursPerDay?: number | null;
+  workingDaysPerMonth?: number | null;
+  otMultiplier?: number | null;
+}): LaborWorker {
+  return {
+    basicSalarySen:
+      worker?.basicSalarySen && worker.basicSalarySen > 0
+        ? worker.basicSalarySen
+        : DEFAULT_COSTING_WORKER.basicSalarySen,
+    workingHoursPerDay:
+      worker?.workingHoursPerDay && worker.workingHoursPerDay > 0
+        ? worker.workingHoursPerDay
+        : DEFAULT_COSTING_WORKER.workingHoursPerDay,
+    workingDaysPerMonth:
+      worker?.workingDaysPerMonth && worker.workingDaysPerMonth > 0
+        ? worker.workingDaysPerMonth
+        : DEFAULT_COSTING_WORKER.workingDaysPerMonth,
+    otMultiplier:
+      worker?.otMultiplier && worker.otMultiplier > 0
+        ? worker.otMultiplier
+        : DEFAULT_COSTING_WORKER.otMultiplier,
+  };
+}
+
+/**
+ * Production-cost labor rate, in SEN per MINUTE, for one worker in the
+ * given month:
+ *
+ *   rate = basicSalary ÷ (workingDaysPerMonth − public holidays)
+ *               ÷ workingHoursPerDay ÷ 60
+ *
+ * The divisor drops the month's public holidays — the same production-cost
+ * divisor computeMonthlyLabor uses — so a holiday month costs each
+ * produced minute more. Returns 0 only when salary or hours/day is
+ * non-positive. `month` is 1-indexed.
+ */
+export function productionCostRatePerMinuteSen(
+  worker: LaborWorker,
+  year: number,
+  month: number,
+  publicHolidays: Iterable<string>,
+): number {
+  const basicSalarySen = Math.max(0, worker.basicSalarySen || 0);
+  const workingHoursPerDay = Math.max(0, worker.workingHoursPerDay || 0);
+  if (basicSalarySen <= 0 || workingHoursPerDay <= 0) return 0;
+  const workingDaysPerMonth =
+    worker.workingDaysPerMonth > 0
+      ? worker.workingDaysPerMonth
+      : FALLBACK_WORKING_DAYS_PER_MONTH;
+  const holidays = countPublicHolidaysInMonth(year, month, publicHolidays);
+  const costingDivisor = Math.max(1, workingDaysPerMonth - holidays);
+  return basicSalarySen / costingDivisor / workingHoursPerDay / 60;
+}

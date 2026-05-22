@@ -359,3 +359,82 @@ test("computeMonthlyLabor: a worker with no salary set costs nothing (no crash)"
   assert.equal(r.payroll.grossSen, 0);
   assert.ok(Number.isFinite(r.costingDailyRateSen));
 });
+
+// ── productionCostRatePerMinuteSen — cost_ledger per-minute rate ─────────────
+
+test("productionCostRatePerMinuteSen: ANN May 2026 = 265000 ÷ 24 ÷ 8 ÷ 60", () => {
+  const rate = labor.productionCostRatePerMinuteSen(
+    ANN,
+    2026,
+    5,
+    MAY_HOLIDAYS, // 2 holidays → divisor 24
+  );
+  // 265000 / 24 / 8 / 60 ≈ 23.003 sen/min.
+  assert.ok(
+    Math.abs(rate - 265_000 / 24 / 8 / 60) < 1e-9,
+    `rate ${rate} out of band`,
+  );
+});
+
+test("productionCostRatePerMinuteSen: a public holiday raises the rate", () => {
+  const withHolidays = labor.productionCostRatePerMinuteSen(
+    ANN, 2026, 5, MAY_HOLIDAYS,
+  );
+  const noHolidays = labor.productionCostRatePerMinuteSen(ANN, 2026, 5, []);
+  assert.ok(
+    withHolidays > noHolidays,
+    `${withHolidays} should exceed ${noHolidays}`,
+  );
+  // No holidays → 265000 / 26 / 8 / 60.
+  assert.ok(Math.abs(noHolidays - 265_000 / 26 / 8 / 60) < 1e-9);
+});
+
+test("productionCostRatePerMinuteSen: zero salary or zero hours → 0", () => {
+  assert.equal(
+    labor.productionCostRatePerMinuteSen(
+      { ...ANN, basicSalarySen: 0 }, 2026, 5, MAY_HOLIDAYS,
+    ),
+    0,
+  );
+  assert.equal(
+    labor.productionCostRatePerMinuteSen(
+      { ...ANN, workingHoursPerDay: 0 }, 2026, 5, MAY_HOLIDAYS,
+    ),
+    0,
+  );
+});
+
+// ── costingWorkerOrDefault ──────────────────────────────────────────────────
+
+test("costingWorkerOrDefault: undefined → the system default worker", () => {
+  const w = labor.costingWorkerOrDefault(undefined);
+  assert.equal(w.basicSalarySen, 205_000);
+  assert.equal(w.workingDaysPerMonth, 26);
+  assert.equal(w.workingHoursPerDay, 9);
+  assert.equal(w.otMultiplier, 1.5);
+});
+
+test("costingWorkerOrDefault: a fully-set worker keeps their own figures", () => {
+  const w = labor.costingWorkerOrDefault({
+    basicSalarySen: 265_000,
+    workingHoursPerDay: 8,
+    workingDaysPerMonth: 26,
+    otMultiplier: 1.5,
+  });
+  assert.equal(w.basicSalarySen, 265_000);
+  assert.equal(w.workingHoursPerDay, 8);
+});
+
+test("costingWorkerOrDefault: a no-salary worker falls back to the default rate (not 0)", () => {
+  // "CHAU" in prod — salary/hours unset. Must still cost at the default.
+  const w = labor.costingWorkerOrDefault({
+    basicSalarySen: 0,
+    workingHoursPerDay: 0,
+    workingDaysPerMonth: 26,
+    otMultiplier: 1,
+  });
+  assert.equal(w.basicSalarySen, 205_000);
+  assert.equal(w.workingHoursPerDay, 9);
+  const rate = labor.productionCostRatePerMinuteSen(w, 2026, 5, MAY_HOLIDAYS);
+  assert.ok(rate > 0, "an unconfigured worker should cost at the default rate");
+});

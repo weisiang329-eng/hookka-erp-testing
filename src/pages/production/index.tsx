@@ -2417,7 +2417,13 @@ export default function ProductionPage({
   type PickerByDept = Map<string, Map<string, JobCard>>;
   const pickerIndex = useMemo(() => {
     const idx = new Map<string, PickerByDept>();
-    for (const o of filteredOrders) {
+    // Perf 2026-05-22 — keyed on the UNFILTERED `orders`, not filteredOrders.
+    // The entry for a given o.id depends only on that order's own jobCards,
+    // so a pure display-filter change (category / search / state / date)
+    // cannot alter it. Keying here lets a filter click SKIP this whole
+    // ~15k-job-card index rebuild — baseRows still looks the index up by
+    // o.id for the orders it actually emits, so the result is identical.
+    for (const o of orders) {
       const byDept: PickerByDept = new Map();
       for (const j of o.jobCards) {
         const code = j.departmentCode;
@@ -2449,7 +2455,7 @@ export default function ProductionPage({
       idx.set(o.id, byDept);
     }
     return idx;
-  }, [filteredOrders]);
+  }, [orders]);
 
   const baseRows = useMemo<Array<DeptRow & { _deptCode: string }>>(() => {
     const today = new Date().toISOString().slice(0, 10);

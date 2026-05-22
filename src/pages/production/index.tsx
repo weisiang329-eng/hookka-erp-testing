@@ -2382,15 +2382,16 @@ export default function ProductionPage({
     };
   };
 
-  // Heavy row-building pass — keyed on `filteredOrders` only so tab
-  // switches don't trigger the full JC-to-row transformation + every
-  // per-JC picker chain. Each row carries its own `_deptCode` so the
-  // cheap `deptRows` memo below can filter without re-running picker
-  // logic or buildSched per dept.
+  // Heavy row-building pass. In the per-route dept pages (mode "dept" /
+  // "overview") it emits rows for the ACTIVE dept only — see the scopeDept
+  // guard inside. In legacy "full" mode it builds every dept's rows so the
+  // in-page tab bar can switch dept without a refetch. Each row carries
+  // its own `_deptCode` so the cheap `deptRows` memo below filters without
+  // re-running the picker / buildSched chain.
   //
-  // Attaching _deptCode on the row (rather than filtering JCs upstream)
-  // keeps the sched_FAB_CUT…sched_PACKING grid-column data intact for
-  // every row — those columns are user-toggleable on any dept tab.
+  // The sched_FAB_CUT…sched_PACKING columns read pickerIndex / o.jobCards
+  // (every dept, never scoped), so they stay intact for every kept row —
+  // those columns are user-toggleable on any dept tab.
   // Sprint 5 F4: pre-compute the picker index. Per (poId, deptCode, wipKey)
   // store the latest-due JobCard; per (poId, deptCode, "*") store the
   // fallback (any wipKey on that PO/dept). The previous implementation
@@ -2464,9 +2465,22 @@ export default function ProductionPage({
       else ordersByGroup.set(gid, [o]);
     }
 
+    // Perf 2026-05-22 — emit grid rows for the ACTIVE dept only. baseRows
+    // used to build a row for ALL 8 depts' job cards (~15k rows) on every
+    // dept-page load, then deptRows discarded 7/8 of them — that 8× over-
+    // build is the ~0.3-0.6s synchronous main-thread freeze the operator
+    // hit when switching depts. Legacy "full" mode switches dept via an
+    // in-page tab bar with no refetch, so it still needs every dept pre-
+    // built (scopeDept = null there).
+    const scopeDept = mode === "full" ? null : activeTab;
+
     for (const o of filteredOrders) {
       const poDeptIndex = pickerIndex.get(o.id);
       for (const jc of o.jobCards) {
+        // Skip job cards outside the active dept — see scopeDept above.
+        // The sched_* columns still read pickerIndex / o.jobCards (every
+        // dept, unchanged), so each kept row's cell values are identical.
+        if (scopeDept && jc.departmentCode !== scopeDept) continue;
         // F4: O(1) picker lookup against the pre-built (deptCode, wipKey)
         // index. wipKey-strict only — NO cross-wipKey fallback. Previously
         // a `byDept.get("*")` fallback returned "any wipKey" JC on this PO
@@ -2753,7 +2767,7 @@ export default function ProductionPage({
     // on every render. Intentionally not listed. pickerIndex is recomputed
     // when filteredOrders changes so listing both is fine.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredOrders, pickerIndex]);
+  }, [filteredOrders, pickerIndex, mode, mode === "full" ? null : activeTab]);
 
   const deptRows = useMemo<DeptRow[]>(() => {
     if (activeTab === "ALL") return [];

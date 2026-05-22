@@ -4,6 +4,7 @@ import DashboardLayout from './layouts/DashboardLayout'
 import WorkerLayout from './layouts/WorkerLayout'
 import { ErrorBoundary, ErrorFallback } from './components/ui/error-boundary'
 import RequireAuth from './components/RequireAuth'
+import { PageSkeleton } from './components/ui/skeleton'
 
 // ── Standalone / non-dashboard lazy pages ─────────────────────────────────
 
@@ -24,12 +25,16 @@ const WorkerMe = lazy(() => import('./pages/worker/me'))
 const WorkerTeam = lazy(() => import('./pages/worker/team'))
 
 // ── Loading fallback ──────────────────────────────────────────────────────
+// Layout-shaped skeleton shown while a lazy route chunk downloads — matches
+// the loading UX used by the dashboard route table. The visually-hidden
+// "Loading..." span keeps the state announced to screen readers.
 
 function PageLoading() {
   return (
-    <div className="flex items-center justify-center min-h-[40vh]">
-      <div className="animate-pulse text-sm text-[#5A5550]">Loading...</div>
-    </div>
+    <>
+      <span className="sr-only" role="status">Loading...</span>
+      <PageSkeleton />
+    </>
   )
 }
 

@@ -176,6 +176,37 @@ export function SkeletonDetailPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Page skeleton — generic layout-shaped fallback for a lazy route chunk that
+// is still downloading. Replaces the bare "Loading..." text so a route swap
+// shows a tidy, brand-tinted placeholder roughly the shape of a list page
+// (header + filter bar + table) instead of a blank flash.
+// ---------------------------------------------------------------------------
+export function PageSkeleton() {
+  return (
+    <div className="space-y-5">
+      {/* Page header */}
+      <div className="flex items-center justify-between">
+        <div className="space-y-2">
+          <Skeleton height={26} width={200} />
+          <Skeleton height={13} width={260} />
+        </div>
+        <Skeleton height={36} width={120} />
+      </div>
+
+      {/* Filter / toolbar row */}
+      <div className="flex items-center gap-3">
+        <Skeleton height={34} width={220} />
+        <Skeleton height={34} width={130} />
+        <Skeleton height={34} width={130} />
+      </div>
+
+      {/* Content table */}
+      <SkeletonTable rows={8} columns={6} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard skeleton — stat cards + chart area
 // ---------------------------------------------------------------------------
 export function SkeletonDashboard() {

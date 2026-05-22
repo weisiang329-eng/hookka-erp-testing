@@ -18,6 +18,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn, formatDateDMY, formatNumber, formatRM, getStatusColor } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import { useToast } from "@/components/ui/toast";
+import { Skeleton } from "@/components/ui/skeleton";
 
 // Stable identifier for namespacing per-user grid preferences in localStorage.
 // Using email (lowercased) so column visibility / order / saved views are
@@ -2465,11 +2466,28 @@ export function DataGrid<T extends Record<string, any>>({
 
           <tbody>
             {loading ? (
-              <tr>
-                <td colSpan={visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0)} className="py-8 text-center text-[12px] text-[#999]">
-                  <span className="inline-block animate-pulse">Loading...</span>
-                </td>
-              </tr>
+              // Skeleton rows — one cell per visible column so the grid keeps
+              // its shape while data loads, instead of a single centred
+              // "Loading..." string that collapses the layout.
+              Array.from({ length: 6 }).map((_, rowIdx) => (
+                <tr key={`skeleton-${rowIdx}`} className="border-b border-[#E2DDD8]">
+                  {selectable && (
+                    <td className="px-2 py-2.5">
+                      <Skeleton height={14} width={14} />
+                    </td>
+                  )}
+                  {visibleColumns.map((col, colIdx) => (
+                    <td key={col.key} className="px-3 py-2.5">
+                      <Skeleton height={13} width={colIdx === 0 ? "60%" : "85%"} />
+                    </td>
+                  ))}
+                  {hasContextMenu && (
+                    <td className="px-1 py-2.5">
+                      <Skeleton height={14} width={14} />
+                    </td>
+                  )}
+                </tr>
+              ))
             ) : sortedData.length === 0 ? (
               <tr>
                 <td colSpan={visibleColumns.length + (selectable ? 1 : 0) + (hasContextMenu ? 1 : 0)} className="py-8 text-center text-[12px] text-[#999]">

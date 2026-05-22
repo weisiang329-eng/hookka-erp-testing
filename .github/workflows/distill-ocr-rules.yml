@@ -1,6 +1,6 @@
 name: OCR Rules — Weekly Distill Cron
 
-# Fires POST /api/internal/distill-ocr-rules every Sunday night
+# Fires POST /api/internal/distill-ocr-rules every Sunday noon
 # (and on demand via workflow_dispatch). The endpoint loops customers,
 # re-generates each customer's customers.ocrPromptRules block from their
 # gold-marked scan samples (po_scan_samples WHERE isGold = 1), and skips
@@ -19,7 +19,7 @@ name: OCR Rules — Weekly Distill Cron
 #   4. Re-deploy Pages so the new env var is live.
 on:
   schedule:
-    - cron: '0 18 * * 0'  # weekly, Sunday 18:00 UTC (Sunday night)
+    - cron: '0 4 * * 0'  # weekly, Sunday 04:00 UTC = Sunday 12:00 noon Malaysia time (UTC+8)
   workflow_dispatch:
 
 # Hard-cap the job to a single run at a time. If a previous run is still

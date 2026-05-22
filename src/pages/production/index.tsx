@@ -32,14 +32,17 @@ function csrfHeaders(extra?: Record<string, string>): Record<string, string> {
   return h;
 }
 
-import type { CellState, JobCard, ProductionOrder, Worker, DeptRow, DeptSched } from "./types";
+// `Worker` from ./types is the employee/worker RECORD type — aliased to
+// WorkerRec here so the DOM `Worker` global (used for the baseRows compute
+// Web Worker, Phase 2) is not shadowed inside this module.
+import type { CellState, JobCard, ProductionOrder, Worker as WorkerRec, DeptRow, DeptSched } from "./types";
 import {
   DEPARTMENTS,
   cellFor,
   fmtShortDate,
   todayISO,
 } from "./utils";
-import { buildPickerIndex, buildBaseRows } from "./baserows-core";
+import type { BaseRowsResponse } from "./baserows.worker";
 import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
@@ -444,9 +447,30 @@ export default function ProductionPage({
   // diff with surrounding code that reads `datesSeeded` directly.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- setDatesSeeded retained for future flip if needed; intentionally unused after F1
   const [datesSeeded, setDatesSeeded] = useState<boolean>(true);
-  const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
+  const { data: workersResp } = useCachedJson<{ success?: boolean; data?: WorkerRec[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
+
+  // Phase 2 — baseRows Web Worker state. Declared here (with the other
+  // state hooks) so the filter-row "Updating…" hint can read
+  // `baserowsPending`; the effects that instantiate the worker, post
+  // inputs to it, and consume its replies live further down by the
+  // `deptRows` derivation. See baserows.worker.ts.
+  const baserowsWorkerRef = useRef<Worker | null>(null);
+  // Monotonically increasing request id. Each post carries the next id;
+  // only the reply whose id === baserowsReqRef.current is accepted, so a
+  // stale result from a superseded post (operator changed the filter
+  // again mid-compute) is dropped instead of flashing outdated rows.
+  const baserowsReqRef = useRef(0);
+  // The worker's most recent result. Starts empty — a brief empty grid on
+  // the very first compute is acceptable; on later recomputes the previous
+  // rows stay rendered until the new ones land, so a filter change never
+  // flashes the grid to empty.
+  const [baseRows, setBaseRows] = useState<Array<DeptRow & { _deptCode: string }>>([]);
+  // True between posting inputs to the worker and receiving the matching
+  // reply. Wired to the existing "Updating…" hint in the filter row.
+  const [baserowsPending, setBaserowsPending] = useState(false);
+
   // When mounted at /production/<code>, lock activeTab to that dept code
   // immediately so the first render skips the Overview matrix. overview.tsx
   // leaves it at ALL. The plain /production mount (mode=full) also starts
@@ -498,7 +522,7 @@ export default function ProductionPage({
       console.warn(`[slow-tab] tab=${activeTab} dur_ms=${dur}`);
     }
   }, [activeTab]);
-  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [workers, setWorkers] = useState<WorkerRec[]>([]);
   // Warehouse rack slots — fetched once, used by the Packing dept Rack
   // column's dropdown. Each entry carries its occupancy state so the <select>
   // can grey out taken racks.
@@ -1456,8 +1480,8 @@ export default function ProductionPage({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const d: any = workersResp;
     if (d) {
-      const list: Worker[] =
-        (d.success ? d.data : Array.isArray(d) ? d : []) as Worker[];
+      const list: WorkerRec[] =
+        (d.success ? d.data : Array.isArray(d) ? d : []) as WorkerRec[];
       if (Array.isArray(list)) setWorkers(list);
     }
   }
@@ -1924,6 +1948,13 @@ export default function ProductionPage({
     fltCategory !== deferredFltCategory ||
     incompleteOnly !== deferredIncompleteOnly;
 
+  // Phase 2 — also surface "Updating…" while the baseRows Web Worker is
+  // mid-compute. `filtersPending` only covers the brief useDeferredValue
+  // lag before the new filter value is applied; the heavy row build then
+  // runs in the worker (`baserowsPending`). ORing them keeps the hint
+  // visible for the whole "click filter → grid refreshed" window.
+  const updatingHint = filtersPending || baserowsPending;
+
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
   // a non-empty cell in that dept).
@@ -2194,28 +2225,76 @@ export default function ProductionPage({
   // the user showed. Each row also carries the upstream (previous) dept's
   // scheduling/completion info so the grid can render a pending/overdue/
   // done pill like the Google sheet.
-  // Sprint 5 F4: pre-compute the picker index. Per (poId, deptCode, wipKey)
-  // store the latest-due JobCard; per (poId, deptCode, "*") store the
-  // fallback (any wipKey on that PO/dept). See buildPickerIndex in
-  // baserows-core.ts. Keyed on the UNFILTERED `orders` so a pure
-  // display-filter change can SKIP this ~15k-job-card index rebuild.
-  const pickerIndex = useMemo(() => buildPickerIndex(orders), [orders]);
+  //
+  // Phase 2 (Production performance refactor): the heavy buildPickerIndex
+  // → buildBaseRows pass — which used to run synchronously in two useMemos
+  // here and froze the main thread for hundreds of ms on every filter
+  // change / dept switch — now runs inside baserows.worker.ts (a module
+  // Web Worker). This page posts the render-scope inputs to the worker
+  // whenever they change and writes the worker's reply into `baseRows`
+  // state. The pure functions are unchanged, so the rendered grid is
+  // identical — it just no longer blocks paint while it computes.
+  // (The worker ref + `baseRows` / `baserowsPending` state are declared
+  // up with the other state hooks so the filter-row "Updating…" hint can
+  // read `baserowsPending`; the effects that drive them live here.)
 
-  // Heavy row-building pass. In the per-route dept pages (mode "dept" /
-  // "overview") it emits rows for the ACTIVE dept only; in legacy "full"
-  // mode it builds every dept's rows. The actual logic lives in the pure
-  // buildBaseRows function in baserows-core.ts — this memo just feeds it
-  // the render-scope inputs (filteredOrders, pickerIndex, mode, activeTab,
-  // and today) and runs it synchronously. Phase 2 will move that call into
-  // a Web Worker; this stays synchronous for now.
-  const baseRows = useMemo<Array<DeptRow & { _deptCode: string }>>(() => {
+  // Instantiate the worker once. Vite's native worker syntax — no extra
+  // vite.config.ts setup needed (the { type: "module" } worker is bundled
+  // automatically). Terminated on unmount so a dept-page navigation
+  // doesn't leak a worker.
+  useEffect(() => {
+    const worker = new Worker(
+      new URL("./baserows.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    baserowsWorkerRef.current = worker;
+    worker.onmessage = (e: MessageEvent<BaseRowsResponse>) => {
+      const { reqId, rows } = e.data;
+      // Drop stale replies: a newer post has already superseded this one.
+      if (reqId !== baserowsReqRef.current) return;
+      setBaseRows(rows);
+      setBaserowsPending(false);
+    };
+    return () => {
+      worker.terminate();
+      baserowsWorkerRef.current = null;
+    };
+  }, []);
+
+  // Post the render-scope inputs to the worker whenever they change. An
+  // optimistic cell edit mutates `orders` (see patchJobCard's setOrders
+  // splice), which flows through `filteredOrders` and re-fires this
+  // effect — so an edit reaches the grid after one worker round-trip.
+  // The worker turnaround is fast (structured-clone in + pure off-thread
+  // compute + clone out) and the previous rows stay rendered until the
+  // reply lands, so an edit never blanks or sticks the grid.
+  //
+  // Phase 3: a cell edit currently triggers a full buildBaseRows pass in
+  // the worker. A future polish could patch just the touched row in-place
+  // for sub-frame edit feedback and skip the round-trip when only one JC
+  // changed. Correct (no lost edits, no stale cell) and non-blocking for
+  // Phase 2; the round-trip is the remaining latency to shave.
+  useEffect(() => {
+    const worker = baserowsWorkerRef.current;
+    if (!worker) return;
     const today = new Date().toISOString().slice(0, 10);
-    return buildBaseRows(filteredOrders, pickerIndex, mode, activeTab, today);
-    // pickerIndex is recomputed when `orders` changes; mode + activeTab
-    // drive the scopeDept guard inside buildBaseRows. `today` is captured
-    // fresh on every recompute (was already computed inline before).
+    const reqId = ++baserowsReqRef.current;
+    setBaserowsPending(true);
+    worker.postMessage({
+      reqId,
+      orders,
+      filteredOrders,
+      mode,
+      activeTab,
+      today,
+    });
+    // `orders` is posted because buildPickerIndex keys on the UNFILTERED
+    // list; mode + activeTab drive the scopeDept guard inside
+    // buildBaseRows. In "full" mode activeTab does not affect the result
+    // (scopeDept = null), so it's excluded there to avoid a redundant
+    // recompute on every in-page tab switch — mirrors the old memo deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredOrders, pickerIndex, mode, mode === "full" ? null : activeTab]);
+  }, [orders, filteredOrders, mode, mode === "full" ? null : activeTab]);
 
   const deptRows = useMemo<DeptRow[]>(() => {
     if (activeTab === "ALL") return [];
@@ -4743,7 +4822,7 @@ export default function ProductionPage({
         <span className="ml-auto text-[10px] text-[#8A7F73]">
           {!shouldFetch ? (
             "Pick a filter (or Load all) to fetch orders"
-          ) : filtersPending ? (
+          ) : updatingHint ? (
             <span className="text-[#9C6F1E] font-semibold">Updating…</span>
           ) : (
             `${filteredOrders.length} of ${orders.length} orders`

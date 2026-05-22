@@ -1908,6 +1908,21 @@ export default function ProductionPage({
   const deferredOverviewFilters = useDeferredValue(overviewFilters);
   const deferredOverviewSort = useDeferredValue(overviewSort);
 
+  // Perf 2026-05-22 — true while a filter change is still being absorbed by
+  // the heavy downstream recompute (the useDeferredValue lag). Drives the
+  // "Updating…" hint in the filter row so the operator sees the click
+  // registered and doesn't re-click (re-clicking restarts the recompute).
+  // Scalar filters only — the object-valued overview filters would
+  // false-positive on every render.
+  const filtersPending =
+    fltSearch !== deferredFltSearch ||
+    fltState !== deferredFltState ||
+    fltCustomer !== deferredFltCustomer ||
+    fltDueFrom !== deferredFltDueFrom ||
+    fltDueTo !== deferredFltDueTo ||
+    fltCategory !== deferredFltCategory ||
+    incompleteOnly !== deferredIncompleteOnly;
+
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
   // a non-empty cell in that dept).
@@ -5293,9 +5308,13 @@ export default function ProductionPage({
           Clear all
         </button>
         <span className="ml-auto text-[10px] text-[#8A7F73]">
-          {shouldFetch
-            ? `${filteredOrders.length} of ${orders.length} orders`
-            : "Pick a filter (or Load all) to fetch orders"}
+          {!shouldFetch ? (
+            "Pick a filter (or Load all) to fetch orders"
+          ) : filtersPending ? (
+            <span className="text-[#9C6F1E] font-semibold">Updating…</span>
+          ) : (
+            `${filteredOrders.length} of ${orders.length} orders`
+          )}
         </span>
       </div>
 

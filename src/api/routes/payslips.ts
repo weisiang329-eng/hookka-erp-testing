@@ -14,6 +14,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { computeMonthlyLabor } from "../../lib/labor-engine";
 
 const app = new Hono<Env>();
 
@@ -25,6 +26,8 @@ type WorkerRow = {
   status: string;
   basicSalarySen: number;
   workingDaysPerMonth: number;
+  workingHoursPerDay: number;
+  otMultiplier: number;
 };
 
 type PayslipRow = {
@@ -36,6 +39,8 @@ type PayslipRow = {
   period: string;
   basicSalarySen: number;
   workingDays: number;
+  absentDays: number;
+  absenceDeductionSen: number;
   otWeekdayHours: number;
   otSundayHours: number;
   otPhHours: number;
@@ -75,6 +80,8 @@ function rowToPayslip(r: PayslipRow) {
     period: r.period,
     basicSalary: r.basicSalarySen,
     workingDays: r.workingDays,
+    absentDays: r.absentDays,
+    absenceDeductionSen: r.absenceDeductionSen,
     otWeekdayHours: r.otWeekdayHours,
     otSundayHours: r.otSundayHours,
     otPHHours: r.otPhHours,
@@ -104,20 +111,6 @@ function rowToPayslip(r: PayslipRow) {
 // ---------------------------------------------------------------------------
 // Malaysian statutory helpers
 // ---------------------------------------------------------------------------
-function calcHourlyRate(basicSalarySen: number): number {
-  return Math.round(basicSalarySen / (26 * 9));
-}
-function calcOT(
-  hourlyRateSen: number,
-  weekdayHrs: number,
-  sundayHrs: number,
-  phHrs: number,
-) {
-  const weekday = Math.round(hourlyRateSen * 1.5 * weekdayHrs);
-  const sunday = Math.round(hourlyRateSen * 2.0 * sundayHrs);
-  const ph = Math.round(hourlyRateSen * 3.0 * phHrs);
-  return { weekday, sunday, ph, total: weekday + sunday + ph };
-}
 function calcStatutory(basicSalarySen: number) {
   return {
     epfEmployee: Math.round(basicSalarySen * 0.11),
@@ -221,38 +214,111 @@ app.post("/", async (c) => {
     }
 
     const wres = await c.var.DB.prepare(
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth FROM workers WHERE status = 'ACTIVE'",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier FROM workers WHERE status = 'ACTIVE'",
     ).all<WorkerRow>();
     const activeWorkers = wres.results ?? [];
 
+    // Public holidays — kv_config['public_holidays']. A holiday is never
+    // charged as an absence; it does not change the ÷26 payroll divisor.
+    const phRow = await c.var.DB.prepare(
+      "SELECT value FROM kv_config WHERE key = ?",
+    )
+      .bind("public_holidays")
+      .first<{ value: string | null }>();
+    const publicHolidays = new Set<string>();
+    if (phRow?.value) {
+      try {
+        const parsed = JSON.parse(phRow.value);
+        if (Array.isArray(parsed)) {
+          for (const d of parsed) {
+            if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+              publicHolidays.add(d);
+            }
+          }
+        }
+      } catch {
+        /* malformed payload — treat as no holidays */
+      }
+    }
+
+    // Every worker's Working Hours rows for the period, fetched in one
+    // query and grouped by worker for the engine.
+    const wheRes = await c.var.DB.prepare(
+      "SELECT workerId, date, hours FROM working_hour_entries WHERE date LIKE ?",
+    )
+      .bind(`${period}-%`)
+      .all<{ workerId: string; date: string; hours: number }>();
+    const daysByWorker = new Map<string, { date: string; hours: number }[]>();
+    for (const r of wheRes.results ?? []) {
+      const arr = daysByWorker.get(r.workerId) ?? [];
+      arr.push({ date: r.date, hours: Number(r.hours) || 0 });
+      daysByWorker.set(r.workerId, arr);
+    }
+
+    // Absences are only counted for elapsed working days: a finished
+    // month counts the whole month; the current month stops at today.
+    const [pYear, pMonth] = period.split("-").map(Number);
+    const today = new Date();
+    const isCurrentMonth =
+      pYear === today.getFullYear() && pMonth === today.getMonth() + 1;
+    const absenceThroughDay = isCurrentMonth
+      ? today.getDate()
+      : new Date(pYear, pMonth, 0).getDate();
+
     const rows: PayslipRow[] = [];
     for (const worker of activeWorkers) {
-      const hourlyRate = calcHourlyRate(worker.basicSalarySen);
-      const otWeekday = Math.floor(Math.random() * 16) + 2;
-      const otSunday = Math.random() > 0.5 ? Math.floor(Math.random() * 8) : 0;
-      const otPH = Math.random() > 0.8 ? Math.floor(Math.random() * 8) : 0;
-      const allowances = 0;
+      // One engine call per worker — the SAME computeMonthlyLabor that
+      // drives production labor cost and the worker phone view, so a
+      // payslip and the worker's phone always agree.
+      const labor = computeMonthlyLabor({
+        worker: {
+          basicSalarySen: worker.basicSalarySen,
+          workingDaysPerMonth: worker.workingDaysPerMonth,
+          workingHoursPerDay: worker.workingHoursPerDay,
+          otMultiplier: worker.otMultiplier,
+        },
+        year: pYear,
+        month: pMonth,
+        days: daysByWorker.get(worker.id) ?? [],
+        publicHolidays,
+        absenceThroughDay,
+      });
 
-      const ot = calcOT(hourlyRate, otWeekday, otSunday, otPH);
-      const grossPay = worker.basicSalarySen + ot.total + allowances;
+      const allowances = 0;
+      // Statutory deductions stay computed on the full monthly salary —
+      // unchanged from before; the engine rework only touches basic + OT.
       const stat = calcStatutory(worker.basicSalarySen);
+      // Gross = basic earned (full salary − absences) + OT + allowances.
+      const grossPay = labor.payroll.grossSen + allowances;
       const totalDeductions =
         stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
       const netPay = grossPay - totalDeductions;
       const bankAccount = `CIMB-${worker.empNo.replace("EMP-", "")}XXXX`;
 
+      // Base hourly rate (full salary ÷ 26 ÷ hours/day) for the payslip's
+      // OT-calculation display. The engine returns ONE overtime figure —
+      // the operator's model is a single OT rate — so it goes in the
+      // weekday slot; the Sunday / public-holiday slots stay 0.
+      const hourlyRate =
+        worker.workingHoursPerDay > 0
+          ? Math.round(labor.payrollDailyRateSen / worker.workingHoursPerDay)
+          : 0;
+      const otHoursWhole = Math.round(labor.otHours);
+
       const id = await nextPayslipId(c.var.DB, period);
       await c.var.DB.prepare(
         `INSERT OR IGNORE INTO payslips (
            id, employeeId, employeeName, employeeNo, departmentCode, period,
-           basicSalarySen, workingDays, otWeekdayHours, otSundayHours, otPhHours,
+           basicSalarySen, workingDays, absentDays, absenceDeductionSen,
+           otWeekdayHours, otSundayHours, otPhHours,
            hourlyRateSen, otWeekdayAmtSen, otSundayAmtSen, otPhAmtSen, totalOtSen,
            allowancesSen, grossPaySen, epfEmployeeSen, epfEmployerSen,
            socsoEmployeeSen, socsoEmployerSen, eisEmployeeSen, eisEmployerSen, pcbSen,
            totalDeductionsSen, netPaySen, bankAccount, status
          ) VALUES (
            ?, ?, ?, ?, ?, ?,
-           ?, ?, ?, ?, ?,
+           ?, ?, ?, ?,
+           ?, ?, ?,
            ?, ?, ?, ?, ?,
            ?, ?, ?, ?,
            ?, ?, ?, ?, ?,
@@ -268,14 +334,16 @@ app.post("/", async (c) => {
           period,
           worker.basicSalarySen,
           worker.workingDaysPerMonth,
-          otWeekday,
-          otSunday,
-          otPH,
+          labor.payroll.absentDays,
+          labor.payroll.absenceDeductionSen,
+          otHoursWhole,
+          0,
+          0,
           hourlyRate,
-          ot.weekday,
-          ot.sunday,
-          ot.ph,
-          ot.total,
+          labor.payroll.otPaySen,
+          0,
+          0,
+          labor.payroll.otPaySen,
           allowances,
           grossPay,
           stat.epfEmployee,

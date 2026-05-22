@@ -1,4 +1,6 @@
 {
+  "absenceDeductionSen": "absence_deduction_sen",
+  "absentDays": "absent_days",
   "acceptedAt": "accepted_at",
   "acceptedQty": "accepted_qty",
   "accountCode": "account_code",

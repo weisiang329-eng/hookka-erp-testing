@@ -433,6 +433,37 @@ function ColumnFilterDropdown<T>({
       .filter((q) => q.matchValues.length > 0);
   }, [uniqueValues]);
 
+  // Quick-filter chips are MULTI-SELECT toggles over groups of values.
+  // Clicking a chip toggles its whole prefix-group in `checked` (like
+  // ticking every checkbox under that prefix), so the operator can stack
+  // e.g. Overdue + Pending and then press OK. checkedRef is assigned
+  // synchronously (see the checkedRef comment) so a same-tick OK is fresh.
+  const toggleChip = (matchValues: string[]) => {
+    const cur = checkedRef.current;
+    const isAll = cur.size === uniqueValues.length;
+    const groupOn =
+      matchValues.length > 0 && matchValues.every((v) => cur.has(v));
+    let next: Set<string>;
+    if (isAll) {
+      // From the default "everything selected" state, the first chip click
+      // narrows to JUST that group; further chip clicks add/remove.
+      next = new Set(matchValues);
+    } else if (groupOn) {
+      // Group is on — remove it.
+      next = new Set(cur);
+      for (const v of matchValues) next.delete(v);
+      // Removing the last active group returns to "show all" (no filter),
+      // never "show nothing".
+      if (next.size === 0) next = new Set(uniqueValues.map(([v]) => v));
+    } else {
+      // Group is off — add it.
+      next = new Set(cur);
+      for (const v of matchValues) next.add(v);
+    }
+    checkedRef.current = next;
+    setChecked(next);
+  };
+
   const toggleValue = (v: string) => {
     // Compute the next set from checkedRef (kept in lockstep with the
     // `checked` state) and assign the ref BEFORE setChecked, so a same-
@@ -635,20 +666,29 @@ function ColumnFilterDropdown<T>({
           {/* Quick-filter chips — non-date columns only. */}
           {!isDateCol && quickFilterChips.length > 0 && (
             <div className="flex flex-wrap gap-1 px-2 py-1.5 border-t border-[#F0F0F0] bg-[#FAF8F4]">
-              {quickFilterChips.map(({ prefix, matchValues, rowCount }) => (
-                <button
-                  key={prefix}
-                  type="button"
-                  className="rounded border border-[#D0D0D0] bg-white px-2 py-0.5 text-[10px] text-[#333] hover:bg-[#6B5C32] hover:text-white hover:border-[#6B5C32] transition-colors"
-                  onClick={() => {
-                    onApplyValues(new Set(matchValues));
-                    onClose();
-                  }}
-                  title={`Apply: show ${rowCount} ${prefix.toLowerCase()} row${rowCount === 1 ? "" : "s"} across ${matchValues.length} distinct value${matchValues.length === 1 ? "" : "s"}`}
-                >
-                  {prefix} <span className="text-[#888]">({rowCount})</span>
-                </button>
-              ))}
+              {quickFilterChips.map(({ prefix, matchValues, rowCount }) => {
+                // Lit when this whole group is selected AND we are in a
+                // filtered state (not the default everything-checked).
+                const chipOn = !allChecked && allRawsOn(matchValues);
+                return (
+                  <button
+                    key={prefix}
+                    type="button"
+                    className={`rounded border px-2 py-0.5 text-[10px] transition-colors ${
+                      chipOn
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : "border-[#D0D0D0] bg-white text-[#333] hover:bg-[#F0ECE9]"
+                    }`}
+                    onClick={() => toggleChip(matchValues)}
+                    title={`${chipOn ? "Remove" : "Add"} ${prefix} (${rowCount} row${rowCount === 1 ? "" : "s"}) — chips stack (e.g. Overdue + Pending); click OK to apply.`}
+                  >
+                    {prefix}{" "}
+                    <span className={chipOn ? "text-[#E8E0CC]" : "text-[#888]"}>
+                      ({rowCount})
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
           {isDateCol ? (

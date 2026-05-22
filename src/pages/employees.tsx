@@ -310,7 +310,6 @@ function WorkingHoursTab({
   productionDeptCodes,
 }: {
   workers: Worker[];
-  attendance: AttendanceRecord[];
   refreshAttendance: (date: string) => void;
   departments: DepartmentLite[];
   productionDeptCodes: Set<string>;
@@ -3349,12 +3348,10 @@ type WorkerJobCardRow = {
 
 function EmployeeDetailTab({
   workers,
-  allAttendance,
   departments,
   initialWorkerId,
 }: {
   workers: Worker[];
-  allAttendance: AttendanceRecord[];
   departments: DepartmentLite[];
   // When the operator double-clicks a row on the Efficiency Overview tab the
   // page passes the chosen workerId in here so the dropdown lands on that
@@ -3423,19 +3420,25 @@ function EmployeeDetailTab({
     [wheResp]
   );
 
-  // Filter attendance for this employee and date range (client-side) —
-  // still needed for the Daily Breakdown table and for OT.
+  // FOURTH data source — attendance_records scoped to this tab's date range.
+  // Self-fetches the same dateFrom/dateTo window the jobs and working-hours
+  // sources use, rather than reading a page-wide all-attendance prop. Still
+  // needed for the Daily Breakdown table and for OT.
+  const attUrl = `/api/attendance?from=${dateFrom}&to=${dateTo}`;
+  const { data: attResp } = useCachedJson<{ data?: AttendanceRecord[] }>(attUrl);
+  const rangeAttendance: AttendanceRecord[] = useMemo(
+    () => (attResp?.data ?? []),
+    [attResp]
+  );
+
+  // Filter the range attendance down to this employee (client-side) — the
+  // fetch already scoped it to dateFrom..dateTo.
   const empRecords = useMemo(
     () =>
-      allAttendance
-        .filter(
-          (a) =>
-            a.employeeId === selectedEmployeeId &&
-            a.date >= dateFrom &&
-            a.date <= dateTo
-        )
+      rangeAttendance
+        .filter((a) => a.employeeId === selectedEmployeeId)
         .sort((a, b) => b.date.localeCompare(a.date)),
-    [allAttendance, selectedEmployeeId, dateFrom, dateTo]
+    [rangeAttendance, selectedEmployeeId]
   );
 
   // Total working hours from the new entries source. Sum decimal hours,
@@ -6250,7 +6253,10 @@ export default function EmployeesPage() {
   const [pendingDetailWorkerId, setPendingDetailWorkerId] = useState<string | undefined>(undefined);
 
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkersHook } = useCachedJson<{ data?: Worker[] }>("/api/workers");
-  const { data: attendanceResp, loading: attendanceLoading, refresh: refreshAttendanceHook } = useCachedJson<{ data?: AttendanceRecord[] }>("/api/attendance");
+  // Page-level attendance is only used for the four today-summary cards, so it
+  // only fetches TODAY. The Working Hours and Employee Detail tabs each
+  // self-fetch the date range they actually display.
+  const { data: attendanceResp, loading: attendanceLoading, refresh: refreshAttendanceHook } = useCachedJson<{ data?: AttendanceRecord[] }>(`/api/attendance?date=${todayStr()}`);
   // /api/departments is the source of truth for which dept codes exist + which
   // are production. Replaces the formerly-hardcoded ALL_DEPARTMENTS and
   // PRODUCTION_DEPT_CODES constants — new depts added via the Manage UI on the
@@ -6271,7 +6277,7 @@ export default function EmployeesPage() {
     () => new Set(departments.filter((d) => d.isProduction).map((d) => d.code)),
     [departments]
   );
-  const allAttendance: AttendanceRecord[] = useMemo(
+  const todayAttendance: AttendanceRecord[] = useMemo(
     () => ((attendanceResp as { data?: AttendanceRecord[] } | AttendanceRecord[] | null)
       ? ((attendanceResp as { data?: AttendanceRecord[] }).data ?? (Array.isArray(attendanceResp) ? (attendanceResp as AttendanceRecord[]) : []))
       : []),
@@ -6286,7 +6292,7 @@ export default function EmployeesPage() {
     refreshWorkersHook();
   }, [refreshWorkersHook]);
 
-  const fetchAllAttendance = useCallback(() => {
+  const fetchTodayAttendance = useCallback(() => {
     invalidateCachePrefix("/api/attendance");
     invalidateCachePrefix("/api/workers");
     refreshAttendanceHook();
@@ -6299,25 +6305,24 @@ export default function EmployeesPage() {
       .catch(() => {});
   }, []);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- derived: pluck today's rows out of the all-attendance list */
+  /* eslint-disable react-hooks/set-state-in-effect -- derived: today's rows for the working hours tab */
   useEffect(() => {
-    // Also set today's attendance for the working hours tab
-    const today = todayStr();
-    setDateAttendance(allAttendance.filter((r: AttendanceRecord) => r.date === today));
-  }, [allAttendance]);
+    // Page-level attendance is already scoped to today, so this is just a copy.
+    setDateAttendance(todayAttendance);
+  }, [todayAttendance]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const refreshAttendance = useCallback(
     (date: string) => {
       fetchDateAttendance(date);
-      fetchAllAttendance();
+      fetchTodayAttendance();
     },
-    [fetchDateAttendance, fetchAllAttendance]
+    [fetchDateAttendance, fetchTodayAttendance]
   );
 
   // Summary stats
   const totalWorkers = workers.length;
-  const todayRecords = allAttendance.filter((a) => a.date === todayStr());
+  const todayRecords = todayAttendance.filter((a) => a.date === todayStr());
   const presentToday = todayRecords.filter(
     (a) => a.status === "PRESENT" || a.status === "HALF_DAY"
   ).length;
@@ -6436,7 +6441,6 @@ export default function EmployeesPage() {
       {activeTab === "working-hours" && (
         <WorkingHoursTab
           workers={workers}
-          attendance={allAttendance}
           refreshAttendance={refreshAttendance}
           departments={departments}
           productionDeptCodes={productionDeptCodes}
@@ -6469,7 +6473,6 @@ export default function EmployeesPage() {
       {activeTab === "detail" && (
         <EmployeeDetailTab
           workers={workers}
-          allAttendance={allAttendance}
           departments={departments}
           initialWorkerId={pendingDetailWorkerId}
         />

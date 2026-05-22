@@ -2,8 +2,10 @@
 // D1-backed attendance route.
 //
 // Mirrors the old src/api/routes/attendance.ts shape:
-//   GET  /api/attendance?date=YYYY-MM-DD  → list records (optionally by date)
-//   POST /api/attendance                   → CLOCK_IN / CLOCK_OUT
+//   GET  /api/attendance?date=YYYY-MM-DD             → list records for one day
+//   GET  /api/attendance?from=YYYY-MM-DD&to=YYYY-MM-DD → list records in a range
+//   GET  /api/attendance                             → list all records
+//   POST /api/attendance                             → CLOCK_IN / CLOCK_OUT
 //
 // `deptBreakdown` is stored as JSON in the DB and parsed back into an array
 // in the response so the frontend can render per-department minutes.
@@ -87,18 +89,29 @@ function genId(): string {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/attendance?date=YYYY-MM-DD
+// GET /api/attendance?date=YYYY-MM-DD            → single day
+// GET /api/attendance?from=YYYY-MM-DD&to=YYYY-MM-DD → date range
+// GET /api/attendance                            → all records
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const date = c.req.query("date");
-  const stmt = date
-    ? c.var.DB.prepare(
-        "SELECT * FROM attendance_records WHERE orgId = ? AND date = ? ORDER BY employeeId",
-      ).bind(orgId, date)
-    : c.var.DB.prepare(
-        "SELECT * FROM attendance_records WHERE orgId = ? ORDER BY date DESC, employeeId",
-      ).bind(orgId);
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  let stmt;
+  if (from && to) {
+    stmt = c.var.DB.prepare(
+      "SELECT * FROM attendance_records WHERE orgId = ? AND date >= ? AND date <= ? ORDER BY date DESC, employeeId",
+    ).bind(orgId, from, to);
+  } else if (date) {
+    stmt = c.var.DB.prepare(
+      "SELECT * FROM attendance_records WHERE orgId = ? AND date = ? ORDER BY employeeId",
+    ).bind(orgId, date);
+  } else {
+    stmt = c.var.DB.prepare(
+      "SELECT * FROM attendance_records WHERE orgId = ? ORDER BY date DESC, employeeId",
+    ).bind(orgId);
+  }
   const res = await stmt.all<AttendanceRow>();
   const data = (res.results ?? []).map(rowToAttendance);
   return c.json({ success: true, data, total: data.length });

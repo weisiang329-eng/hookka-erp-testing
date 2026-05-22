@@ -7,7 +7,10 @@
 // figure silently disagrees. Lock the numbers in here.
 //
 // Reference worker throughout: ANN — RM2,650/mo, 26 days, 8 h/day, OT ×1.5.
-// Reference month: May 2026, one public holiday (1 May, a Friday).
+// Reference month: May 2026. Its public holidays — verified against the
+// live kv_config['public_holidays'] on 2026-05-22 — are 1 May (Friday) and
+// 27 May (Wednesday): two working-weekday holidays, so May has 24 working
+// days (26 calendar Mon–Sat minus the two holidays).
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -35,29 +38,35 @@ const ANN = {
   otMultiplier: 1.5,
 };
 
-// The 25 working days of May 2026 (Mon–Sat, excludes the four Sundays
-// 3/10/17/24/31 and the 1 May public holiday).
+// May 2026 public holidays, as stored in production kv_config.
+const MAY_HOLIDAYS = ["2026-05-01", "2026-05-27"];
+
+// The 24 working days of May 2026 — Mon–Sat, excluding the four Sundays
+// (3/10/17/24/31) and the two public holidays (1 May, 27 May).
 const MAY_WORKDAYS = [
   "2026-05-02",
   "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08", "2026-05-09",
   "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-16",
   "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22", "2026-05-23",
-  "2026-05-25", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30",
+  "2026-05-25", "2026-05-26", "2026-05-28", "2026-05-29", "2026-05-30",
 ];
 
-const MAY_HOLIDAYS = ["2026-05-01"];
-
-// 25 days present: first 20 at 8 h (no OT), last 5 at 11 h (3 h OT each →
+// 24 days present: first 19 at 8 h (no OT), last 5 at 11 h (3 h OT each →
 // 15 h OT for the month).
 const annFullMonth = MAY_WORKDAYS.map((date, i) => ({
   date,
-  hours: i < 20 ? 8 : 11,
+  hours: i < 19 ? 8 : 11,
 }));
 
 // ── countPublicHolidaysInMonth ──────────────────────────────────────────────
 
 test("countPublicHolidaysInMonth: 1 May 2026 (Friday) counts as 1", () => {
-  assert.equal(labor.countPublicHolidaysInMonth(2026, 5, MAY_HOLIDAYS), 1);
+  assert.equal(labor.countPublicHolidaysInMonth(2026, 5, ["2026-05-01"]), 1);
+});
+
+test("countPublicHolidaysInMonth: real May 2026 fixture has 2 weekday holidays", () => {
+  // 1 May (Fri) + 27 May (Wed) — both land on working weekdays.
+  assert.equal(labor.countPublicHolidaysInMonth(2026, 5, MAY_HOLIDAYS), 2);
 });
 
 test("countPublicHolidaysInMonth: a holiday on a Sunday does not count", () => {
@@ -66,7 +75,8 @@ test("countPublicHolidaysInMonth: a holiday on a Sunday does not count", () => {
 });
 
 test("countPublicHolidaysInMonth: holiday in another month is ignored", () => {
-  assert.equal(labor.countPublicHolidaysInMonth(2026, 5, ["2026-04-01"]), 0);
+  // 2026-06-01 is also a real holiday — but it belongs to June, not May.
+  assert.equal(labor.countPublicHolidaysInMonth(2026, 5, ["2026-06-01"]), 0);
 });
 
 test("countPublicHolidaysInMonth: empty list -> 0", () => {
@@ -81,8 +91,8 @@ test("countPublicHolidaysInMonth: only weekday holidays in-month are counted", (
 
 // ── countElapsedWorkingDays ─────────────────────────────────────────────────
 
-test("countElapsedWorkingDays: full May 2026 minus 1 holiday -> 25", () => {
-  assert.equal(labor.countElapsedWorkingDays(2026, 5, 31, MAY_HOLIDAYS), 25);
+test("countElapsedWorkingDays: full May 2026 minus 2 holidays -> 24", () => {
+  assert.equal(labor.countElapsedWorkingDays(2026, 5, 31, MAY_HOLIDAYS), 24);
 });
 
 test("countElapsedWorkingDays: full May 2026 with no holidays -> 26", () => {
@@ -91,11 +101,12 @@ test("countElapsedWorkingDays: full May 2026 with no holidays -> 26", () => {
 
 test("countElapsedWorkingDays: partial month (through 9 May) -> 7", () => {
   // Days 1–9: 1 May holiday, 3 May Sunday → 2/4/5/6/7/8/9 = 7 working days.
+  // (27 May is out of range, so it doesn't affect this window.)
   assert.equal(labor.countElapsedWorkingDays(2026, 5, 9, MAY_HOLIDAYS), 7);
 });
 
 test("countElapsedWorkingDays: throughDay past month-end clamps to last day", () => {
-  assert.equal(labor.countElapsedWorkingDays(2026, 5, 999, MAY_HOLIDAYS), 25);
+  assert.equal(labor.countElapsedWorkingDays(2026, 5, 999, MAY_HOLIDAYS), 24);
 });
 
 // ── computeMonthlyLabor: ANN, full attendance ───────────────────────────────
@@ -109,16 +120,19 @@ test("computeMonthlyLabor: ANN full attendance — rates", () => {
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
   });
-  assert.equal(r.holidaysInMonth, 1);
-  assert.equal(r.daysWorked, 25);
+  assert.equal(r.holidaysInMonth, 2);
+  assert.equal(r.daysWorked, 24);
   assert.equal(r.otHours, 15);
   // Payroll day rate ÷26 = 265000/26 ≈ 10192.31 sen.
   assert.ok(
     Math.abs(r.payrollDailyRateSen - 265_000 / 26) < 1e-6,
     `payroll day rate ${r.payrollDailyRateSen}`,
   );
-  // Production day rate ÷(26−1) = 265000/25 = 10600 sen exactly.
-  assert.equal(r.costingDailyRateSen, 10_600);
+  // Production day rate ÷(26−2) = 265000/24 ≈ 11041.67 sen.
+  assert.ok(
+    Math.abs(r.costingDailyRateSen - 265_000 / 24) < 1e-6,
+    `production day rate ${r.costingDailyRateSen}`,
+  );
   // OT hourly = 265000/26/8 × 1.5 ≈ 1911.06 sen.
   assert.ok(
     Math.abs(r.otHourlyRateSen - (265_000 / 26 / 8) * 1.5) < 1e-6,
@@ -152,7 +166,8 @@ test("computeMonthlyLabor: ANN full attendance — production cost = RM2,936.66"
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
   });
-  assert.equal(r.cost.regularCostSen, 265_000); // 25 days × 10600
+  // 24 days × (265000/24) = 265000 sen exactly.
+  assert.equal(r.cost.regularCostSen, 265_000);
   assert.equal(r.cost.otCostSen, 28_666); // identical to payroll OT
   assert.equal(r.cost.totalCostSen, 293_666); // RM2,936.66
 });
@@ -172,7 +187,7 @@ test("computeMonthlyLabor: full attendance — payroll gross equals production c
 // ── computeMonthlyLabor: ANN, absent 2 days ─────────────────────────────────
 
 test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷26", () => {
-  // Drop the first two 8 h days → 23 days present, still 15 h OT.
+  // Drop the first two 8 h days → 22 days present, still 15 h OT.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -181,7 +196,7 @@ test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷26", () => {
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
   });
-  assert.equal(r.daysWorked, 23);
+  assert.equal(r.daysWorked, 22);
   assert.equal(r.payroll.absentDays, 2);
   // 2 × 265000/26 = 20384.62 → 20385 sen.
   assert.equal(r.payroll.absenceDeductionSen, 20_385);
@@ -198,14 +213,14 @@ test("computeMonthlyLabor: ANN absent 2 days — production cost is days-worked 
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
   });
-  // 23 days × 10600 = 243800 sen.
-  assert.equal(r.cost.regularCostSen, 243_800);
-  assert.equal(r.cost.totalCostSen, 272_466); // 243800 + 28666
+  // 22 days × (265000/24) = 242916.67 → 242917 sen.
+  assert.equal(r.cost.regularCostSen, 242_917);
+  assert.equal(r.cost.totalCostSen, 271_583); // 242917 + 28666
 });
 
 // ── Holiday effect ──────────────────────────────────────────────────────────
 
-test("computeMonthlyLabor: a public holiday makes the production day rate higher", () => {
+test("computeMonthlyLabor: public holidays make the production day rate higher", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -214,7 +229,7 @@ test("computeMonthlyLabor: a public holiday makes the production day rate higher
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
   });
-  // Production day rate (÷25) must exceed the payroll day rate (÷26).
+  // Production day rate (÷24) must exceed the payroll day rate (÷26).
   assert.ok(
     r.costingDailyRateSen > r.payrollDailyRateSen,
     `${r.costingDailyRateSen} should exceed ${r.payrollDailyRateSen}`,
@@ -222,14 +237,14 @@ test("computeMonthlyLabor: a public holiday makes the production day rate higher
 });
 
 test("computeMonthlyLabor: no holidays — production day rate equals payroll day rate", () => {
-  // June 2026, no public holidays → both divisors are 26.
+  // A month with no public holidays → both divisors are 26.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
-    month: 6,
-    days: [{ date: "2026-06-01", hours: 8 }],
+    month: 7,
+    days: [{ date: "2026-07-01", hours: 8 }],
     publicHolidays: [],
-    absenceThroughDay: 30,
+    absenceThroughDay: 31,
   });
   assert.equal(r.holidaysInMonth, 0);
   assert.equal(r.costingDailyRateSen, r.payrollDailyRateSen);

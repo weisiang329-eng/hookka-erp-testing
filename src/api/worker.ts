@@ -406,6 +406,43 @@ app.post("/api/internal/replay-audit-dlq", async (c) => {
   }
 });
 
+// Weekly OCR rule-distill cron entry. Same CRON_SECRET pattern as the
+// internal endpoints above. The cron workflow at
+// .github/workflows/distill-ocr-rules.yml hits this every Sunday night; the
+// handler loops customers, calls distillCustomerRules per customer, and
+// re-generates each customer's customers.ocrPromptRules block from their
+// gold-marked scan samples (po_scan_samples WHERE isGold = 1). Customers
+// with fewer than 2 gold samples are skipped cheaply — no Anthropic call —
+// so iterating every customer is fine; only eligible ones cost an API call.
+// Per-customer errors are caught so one failure cannot abort the run.
+// Runtime logic lives in src/api/lib/ocr-distill.ts (distillAllCustomerRules).
+app.post("/api/internal/distill-ocr-rules", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[distill-ocr-rules] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  try {
+    const { distillAllCustomerRules } = await import("./lib/ocr-distill");
+    // Optional ?limit=N override; default 200 keeps a single Workers
+    // invocation well under any reasonable subrequest budget.
+    const url = new URL(c.req.url);
+    const limitRaw = url.searchParams.get("limit");
+    const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 200;
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 200;
+    const result = await distillAllCustomerRules(c.var.DB, c.env, safeLimit);
+    return c.json({ ok: true, elapsedMs: Date.now() - t0, ...result });
+  } catch (e) {
+    console.error("[distill-ocr-rules] error:", e);
+    return c.json({ ok: false, error: "distill failed" }, 500);
+  }
+});
+
 /**
  * Constant-time string equality.  Hashes both sides before comparing so the
  * comparison time depends only on the hash output length, never on the

@@ -1,0 +1,66 @@
+name: OCR Rules — Weekly Distill Cron
+
+# Fires POST /api/internal/distill-ocr-rules every Sunday night
+# (and on demand via workflow_dispatch). The endpoint loops customers,
+# re-generates each customer's customers.ocrPromptRules block from their
+# gold-marked scan samples (po_scan_samples WHERE isGold = 1), and skips
+# customers with fewer than 2 gold samples without an Anthropic call.
+#
+# Auth: x-cron-secret header. Same shared secret as process-email-outbox.yml
+# — set CRON_SECRET as a repo secret AND on Cloudflare Pages env so the
+# server-side compare succeeds.
+#
+# To bootstrap (one-time, when first enabling this workflow):
+#   1. Generate a strong random string (32+ chars).
+#   2. Set it as a repo secret (if not already set by another cron):
+#        gh secret set CRON_SECRET --body "<value>"
+#   3. Mirror to Cloudflare Pages:
+#        wrangler pages secret put CRON_SECRET --project-name hookka-erp-testing
+#   4. Re-deploy Pages so the new env var is live.
+on:
+  schedule:
+    - cron: '0 18 * * 0'  # weekly, Sunday 18:00 UTC (Sunday night)
+  workflow_dispatch:
+
+# Hard-cap the job to a single run at a time. If a previous run is still
+# going (Anthropic lag, cold-start, etc.), skip rather than overlap — the
+# distill is idempotent (regenerate-from-gold-pool, REPLACE not merge).
+concurrency:
+  group: ocr-rules-distill
+  cancel-in-progress: false
+
+jobs:
+  distill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: POST /api/internal/distill-ocr-rules
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See workflow header for setup."
+            exit 1
+          fi
+
+          # Capture status + body so a 4xx/5xx surfaces in the job log
+          # rather than failing silently. 60s max-time covers cold start +
+          # the per-customer Anthropic round-trips.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            'https://hookka-erp-testing.pages.dev/api/internal/distill-ocr-rules')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::distill failed with HTTP $status"
+            exit 1
+          fi

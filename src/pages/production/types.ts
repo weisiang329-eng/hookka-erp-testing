@@ -104,6 +104,105 @@ export type Worker = {
   empNo?: string;
 };
 
+// Dept-view scheduling/row types. Extracted from production/index.tsx so
+// the pure baseRows compute module (baserows-core.ts) and the page module
+// can both import them without a circular dependency.
+//
+// Dept-view rows: one row per JobCard in the selected dept, flattened
+// across all production orders. Matches the "Production Sheet" columns
+// the user showed. Each row also carries the upstream (previous) dept's
+// scheduling/completion info so the grid can render a pending/overdue/
+// done pill like the Google sheet.
+export type PrevState = "pending" | "overdue" | "done" | "none";
+export type DeptSched = {
+  due: string;         // YYYY-MM-DD
+  completed: string;   // YYYY-MM-DD or ""
+  state: PrevState;    // "none" when no JobCard exists for this dept
+  sortKey: number;     // overdue(3)>pending(2)>done(1)>none(0) — for column sort
+  poId: string;        // parent production order id (for PATCH routing)
+  jobCardId: string;   // the underlying job card id to patch
+  deptCode: string;    // this cell's dept code (needed for upstream-lock check)
+  wipKey: string;      // this cell's wipKey (scopes the upstream-lock check)
+  // True when any job card LATER in DEPT_ORDER within the same wipKey is
+  // already COMPLETED or TRANSFERRED. When true, the cell's date picker
+  // is disabled — the operator must un-complete the downstream dept first.
+  locked: boolean;
+};
+export type DeptRow = {
+  id: string;            // `${po.id}:${jc.id}`
+  poId: string;
+  jobCardId: string;
+  rowNo: number;
+  soId: string;          // line-suffixed SO ID, unique per production line (= poNo)
+  salesOrderNo: string;  // parent sales order id, NOT unique per line
+  salesOrderId: string;  // SO primary key — used to route double-click to /sales/:id
+  consignmentOrderId: string;  // CO primary key — used to route to /consignment/:id when SO id is empty
+  customerPOId: string;
+  customerRef: string;
+  customerSO: string;   // customer's own SO no. (CO no. for CO-origin rows)
+  customerName: string;
+  customerState: string;
+  model: string;
+  // Full product code (includes variant suffix for SOFA, e.g.
+  // "5540-1A(LHF)" / "5540-2A(LHF)"). Bedframe/Accessory share the
+  // same value as `model` since their productCode IS the model. Used
+  // by the FAB_SEW BASE sticker so workers see which sofa variant
+  // they're sewing (1A LHF / 2A RHF / etc.), not just the bare base
+  // model number.
+  productCode: string;
+  wip: string;
+  category: string;     // SOFA / BEDFRAME / ACCESSORY (from PO/SO item)
+  wipType: string;      // DIVAN / HEADBOARD / SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST
+  size: string;
+  colour: string;
+  gap: string;
+  divan: string;
+  leg: string;
+  totalHeight: string;  // gap + divan + leg, inches
+  qty: number;
+  specialOrder: string; // free-text note from the SO line ("custom legs", "no piping", etc.)
+  prodTime: number;     // per-jc production minutes (merged sum on FAB_CUT rows)
+  rack: string;         // Packing dept — assigned rack location ("Rack 3")
+  dueDate: string;
+  completedDate: string;
+  // Per-piece progress for the Completion column. piecesTotal floors
+  // at 1 (single-piece JCs); piecesDone is 0 until at least one piece
+  // has been QR-scanned. Renders "X/Y" when 0 < piecesDone < piecesTotal.
+  piecesTotal: number;
+  piecesDone: number;
+  // ISO timestamp of the "Sent to floor" tick (job_cards.distributedAt).
+  // NULL until the operator hands the printed sheet to the production
+  // worker. Drives the leftmost Sent column on the dept grid.
+  distributedAt: string | null;
+  // Derived "Yes"/"No" so the column-level Values filter can group
+  // rows by sent-state. Without this the filter sees only the
+  // ISO-timestamp string and dumps every row into "(blank)".
+  sent: "Yes" | "No";
+  // Predicted fabric meters for this WIP, computed server-side by
+  // walking the parent PO's BOM template (bom_templates.wipComponents)
+  // and summing FAB_CUT-node fabric materials × node.quantity ×
+  // po.quantity × scaling. Populated only for FAB_CUT JCs; 0 for
+  // every other dept. Drives the FAB_CUT dept page's Fabric Usage
+  // column.
+  fabricUsage: number;
+  pic1: string;
+  pic2: string;
+  status: string;        // job_card status
+  poStatus: string;      // parent production_order status — drives ON_HOLD / CANCELLED styling
+  // Scheduling info for every one of the 8 departments — NOT just
+  // upstreams. The user can toggle any dept column on/off via the grid's
+  // Columns button. Each entry is flattened into `sched_<CODE>` keys so
+  // DataGrid can sort/filter per-column without touching a nested object.
+  sched_FAB_CUT: DeptSched;
+  sched_FAB_SEW: DeptSched;
+  sched_FOAM: DeptSched;
+  sched_WOOD_CUT: DeptSched;
+  sched_FRAMING: DeptSched;
+  sched_WEBBING: DeptSched;
+  sched_UPHOLSTERY: DeptSched;
+  sched_PACKING: DeptSched;
+};
+
 // Stock PO dialog source types — historical WIPs/FGs surfaced for the
 // "make-to-stock" picker. Only SKUs previously produced show up.
 export type HistoricalWip = {

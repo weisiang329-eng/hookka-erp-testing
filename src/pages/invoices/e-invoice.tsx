@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -197,6 +198,22 @@ export default function EInvoicePage() {
     [eInvoices, selectedXmlId]
   );
 
+  // Window both e-invoice tables so large invoice volumes stay light.
+  const submissionsScrollRef = useRef<HTMLDivElement>(null);
+  const submissionsVirtualizer = useVirtualizer({
+    count: eInvoices.length,
+    getScrollElement: () => submissionsScrollRef.current,
+    estimateSize: () => 53,
+    overscan: 10,
+  });
+  const availableScrollRef = useRef<HTMLDivElement>(null);
+  const availableVirtualizer = useVirtualizer({
+    count: availableInvoices.length,
+    getScrollElement: () => availableScrollRef.current,
+    estimateSize: () => 49,
+    overscan: 10,
+  });
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-[#6B7280]">
@@ -310,9 +327,13 @@ export default function EInvoicePage() {
                   No e-invoices found. Go to the Generate tab to create one.
                 </p>
               ) : (
-                <div className="overflow-x-auto">
+                <div
+                  ref={submissionsScrollRef}
+                  className="overflow-auto"
+                  style={{ maxHeight: "calc(100vh - 340px)" }}
+                >
                   <table className="w-full text-sm">
-                    <thead>
+                    <thead className="sticky top-0 z-10">
                       <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                         <th className="text-left py-3 px-4 text-xs font-bold text-[#4B5563]">
                           Invoice No
@@ -335,9 +356,29 @@ export default function EInvoicePage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {eInvoices.map((einv) => (
+                      {(() => {
+                        const vItems = submissionsVirtualizer.getVirtualItems();
+                        const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                        const padBottom =
+                          vItems.length > 0
+                            ? submissionsVirtualizer.getTotalSize() -
+                              vItems[vItems.length - 1].end
+                            : 0;
+                        return (
+                          <>
+                            {padTop > 0 && (
+                              <tr aria-hidden="true">
+                                <td colSpan={6} style={{ height: padTop, padding: 0, border: 0 }} />
+                              </tr>
+                            )}
+                            {vItems.map((vi) => {
+                              const einv = eInvoices[vi.index];
+                              if (!einv) return null;
+                              return (
                         <tr
                           key={einv.id}
+                          data-index={vi.index}
+                          ref={submissionsVirtualizer.measureElement}
                           className="border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50"
                         >
                           <td className="py-3 px-4 font-medium text-[#1F1D1B]">
@@ -405,7 +446,16 @@ export default function EInvoicePage() {
                             )}
                           </td>
                         </tr>
-                      ))}
+                              );
+                            })}
+                            {padBottom > 0 && (
+                              <tr aria-hidden="true">
+                                <td colSpan={6} style={{ height: padBottom, padding: 0, border: 0 }} />
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -442,9 +492,13 @@ export default function EInvoicePage() {
                 All invoices have been submitted as e-invoices.
               </p>
             ) : (
-              <div className="overflow-x-auto">
+              <div
+                ref={availableScrollRef}
+                className="overflow-auto"
+                style={{ maxHeight: "calc(100vh - 340px)" }}
+              >
                 <table className="w-full text-sm">
-                  <thead>
+                  <thead className="sticky top-0 z-10">
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                       <th className="py-3 px-4 text-left">
                         <input
@@ -476,10 +530,29 @@ export default function EInvoicePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {availableInvoices.map((inv) => {
+                    {(() => {
+                      const vItems = availableVirtualizer.getVirtualItems();
+                      const padTop = vItems.length > 0 ? vItems[0].start : 0;
+                      const padBottom =
+                        vItems.length > 0
+                          ? availableVirtualizer.getTotalSize() -
+                            vItems[vItems.length - 1].end
+                          : 0;
                       return (
+                        <>
+                          {padTop > 0 && (
+                            <tr aria-hidden="true">
+                              <td colSpan={6} style={{ height: padTop, padding: 0, border: 0 }} />
+                            </tr>
+                          )}
+                          {vItems.map((vi) => {
+                            const inv = availableInvoices[vi.index];
+                            if (!inv) return null;
+                            return (
                         <tr
                           key={inv.id}
+                          data-index={vi.index}
+                          ref={availableVirtualizer.measureElement}
                           className={`border-b border-[#E2DDD8] hover:bg-[#F0ECE9]/50 cursor-pointer ${
                             selectedInvoiceIds.has(inv.id)
                               ? "bg-[#6B5C32]/5"
@@ -511,8 +584,16 @@ export default function EInvoicePage() {
                             <Badge variant="status" status={inv.status} />
                           </td>
                         </tr>
+                            );
+                          })}
+                          {padBottom > 0 && (
+                            <tr aria-hidden="true">
+                              <td colSpan={6} style={{ height: padBottom, padding: 0, border: 0 }} />
+                            </tr>
+                          )}
+                        </>
                       );
-                    })}
+                    })()}
                   </tbody>
                 </table>
               </div>

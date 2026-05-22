@@ -294,6 +294,7 @@ export default function PaymentsPage() {
             columns={columns}
             data={payments}
             keyField="id"
+            virtualize
             gridId="payments"
             contextMenuItems={contextMenuItems}
           />

@@ -467,6 +467,7 @@ function OverviewTab({
             columns={recentColumns}
             data={recentJournals}
             keyField="id"
+            virtualize
             gridId="accounting-overview-journals"
             contextMenuItems={overviewContextMenu}
           />
@@ -955,6 +956,7 @@ function JournalsTab({
             columns={columns}
             data={journals}
             keyField="id"
+            virtualize
             gridId="accounting-journals"
             contextMenuItems={contextMenuItems}
           />

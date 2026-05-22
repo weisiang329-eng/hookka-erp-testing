@@ -248,6 +248,7 @@ export default function DebitNotesPage() {
             columns={columns}
             data={debitNotes}
             keyField="id"
+            virtualize
             gridId="debit-notes"
             contextMenuItems={contextMenuItems}
           />

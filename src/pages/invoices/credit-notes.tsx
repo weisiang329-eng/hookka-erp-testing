@@ -252,6 +252,7 @@ export default function CreditNotesPage() {
             columns={columns}
             data={creditNotes}
             keyField="id"
+            virtualize
             gridId="credit-notes"
             contextMenuItems={contextMenuItems}
           />

@@ -3038,28 +3038,23 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            {isServiceOrderMode ? (
-              // 0134 — Service Order mode: price is operator-typed, never
-              // derived from the fabric's price tier. Fabric is still
-              // required for production routing but doesn't gate pricing.
-              <Input
-                type="number"
-                onFocus={(e) => e.currentTarget.select()}
-                min={0}
-                step="0.01"
-                value={item.basePriceSen / 100}
-                onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })}
-                className="h-8 text-right"
-              />
-            ) : (
-              <div className={`h-8 flex items-center justify-end px-2 rounded border text-sm ${
-                item.basePriceSen > 0
-                  ? "border-[#E2DDD8] bg-[#FAF9F7] text-[#111827] font-medium"
-                  : "border-dashed border-[#E8D597] bg-[#FAEFCB] text-[#9C6F1E] text-xs"
-              }`}>
-                {item.basePriceSen > 0 ? (item.basePriceSen / 100).toFixed(0) : "Select fabric"}
-              </div>
-            )}
+            {/* 2026-05-24 — Bedframe Base Price is always editable on every SO
+                type. Previously read-only on regular SO (catalog-driven); Wei
+                Siang feedback: catalog can be wrong, operator needs a one-off
+                override. Default value still seeds from fabric-tier/cp catalog
+                (in regular mode) or 0 (in Service Order mode) — operator types
+                over it when needed. Matches the always-editable SOFA + ACCESSORY
+                Base Price input above. */}
+            <Input
+              type="number"
+              onFocus={(e) => e.currentTarget.select()}
+              min={0}
+              step="0.01"
+              value={item.basePriceSen / 100}
+              onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })}
+              placeholder={item.basePriceSen === 0 && !isServiceOrderMode ? "Pick fabric to auto-fill, or type" : ""}
+              className={`h-8 text-right ${item.basePriceSen === 0 && !isServiceOrderMode ? "bg-[#FAEFCB]/30 border-[#E8D597]" : ""}`}
+            />
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Gap</label>

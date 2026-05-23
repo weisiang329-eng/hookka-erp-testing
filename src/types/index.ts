@@ -262,6 +262,11 @@ export type SalesOrder = {
    *  via the Scan PO flow. Used by the SO detail page's "View original PO"
    *  button as proof-of-source for customer disputes. Null otherwise. */
   customerPOImageB64?: string | null;
+  /** 0134 — TRUE marks this SO as an aftersales Service Order (companySOId
+   *  uses the `SV-YYMM-NNN` prefix and the row is hidden from the regular
+   *  Sales Orders list). The whole production cascade (PO / DO / Invoice)
+   *  reuses unchanged. */
+  isServiceOrder?: boolean;
   createdAt: string;
   updatedAt: string;
 };

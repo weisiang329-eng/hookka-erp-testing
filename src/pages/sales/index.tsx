@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSOMode, soBasePath, soPageTitle, soNewButtonLabel } from "@/lib/so-mode";
 import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -132,6 +133,18 @@ function soStageLabel(status: string): string {
 export default function SalesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
+  // 0134 — mode flips this page between the regular Sales Orders list
+  // (/sales) and the Service Orders list (/service-order). The mode comes
+  // from the URL pathname. See src/lib/so-mode.ts for the rationale.
+  const mode = useSOMode();
+  const basePath = soBasePath(mode);
+  const isServiceOrderMode = mode === "service-order";
+  // Append the service-order filter to the fetch URL so the backend only
+  // returns the matching subset. Default (sales mode) sends
+  // isServiceOrder=false; service-order mode sends isServiceOrder=true.
+  const soFilterQs = isServiceOrderMode
+    ? "isServiceOrder=true"
+    : "isServiceOrder=false";
 
   // Pagination — server-side. Filter/tab changes reset to page 1.
   // URL-synced so refresh / share-link land back on the same page.
@@ -168,8 +181,8 @@ export default function SalesPage() {
     _filtersActive
       // No page params → server returns the whole dataset (capped at 5000
       // server-side, well above current ~350 SOs). Client filters/paginates.
-      ? `/api/sales-orders`
-      : `/api/sales-orders?page=${page}&limit=${PAGE_SIZE}`,
+      ? `/api/sales-orders?${soFilterQs}`
+      : `/api/sales-orders?page=${page}&limit=${PAGE_SIZE}&${soFilterQs}`,
   );
   // Whole-dataset status bucket counts — tab badges read from this so
   // "Draft (N)" / "Confirmed (N)" reflect the full table, not just the
@@ -517,12 +530,12 @@ export default function SalesPage() {
     {
       label: "View",
       icon: <Eye className="h-3.5 w-3.5" />,
-      action: () => navigate(`/sales/${row.id}`),
+      action: () => navigate(`${basePath}/${row.id}`),
     },
     {
       label: "Edit",
       icon: <Pencil className="h-3.5 w-3.5" />,
-      action: () => navigate(`/sales/${row.id}/edit`),
+      action: () => navigate(`${basePath}/${row.id}/edit`),
     },
     {
       label: "",
@@ -587,7 +600,7 @@ export default function SalesPage() {
     {
       label: "View Document Status Change Log",
       icon: <ClipboardList className="h-3.5 w-3.5" />,
-      action: () => navigate(`/sales/${row.id}?tab=status-log`),
+      action: () => navigate(`${basePath}/${row.id}?tab=status-log`),
     },
     {
       label: "",
@@ -663,15 +676,22 @@ export default function SalesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-[#1F1D1B]">Sales Orders</h1>
-          <p className="text-xs text-[#6B7280]">Manage customer orders from creation to delivery</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">{soPageTitle(mode)}</h1>
+          <p className="text-xs text-[#6B7280]">
+            {isServiceOrderMode
+              ? "Aftersales orders cloned from a Sales / Consignment Order. Same production cascade, prices default to 0."
+              : "Manage customer orders from creation to delivery"}
+          </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setScanPOOpen(true)}>
-            <ScanLine className="h-4 w-4" /> Scan PO
-          </Button>
-          <Button variant="primary" onClick={() => navigate("/sales/create")}>
-            <Plus className="h-4 w-4" /> New Sales Order
+          {/* Scan PO is sales-only — service orders never come from a PO scan. */}
+          {!isServiceOrderMode && (
+            <Button variant="outline" onClick={() => setScanPOOpen(true)}>
+              <ScanLine className="h-4 w-4" /> Scan PO
+            </Button>
+          )}
+          <Button variant="primary" onClick={() => navigate(`${basePath}/create`)}>
+            <Plus className="h-4 w-4" /> {soNewButtonLabel(mode)}
           </Button>
         </div>
       </div>
@@ -938,7 +958,7 @@ export default function SalesPage() {
             virtualize
             maxHeight="calc(100vh - 320px)"
             emptyMessage={tab === "DRAFT" ? "No draft orders." : "No confirmed orders."}
-            onDoubleClick={(row) => navigate(`/sales/${row.id}`)}
+            onDoubleClick={(row) => navigate(`${basePath}/${row.id}`)}
             contextMenuItems={getContextMenuItems}
             selectable
             onSelectionChange={setSelectedRows}
@@ -1303,7 +1323,7 @@ export default function SalesPage() {
           onClose={() => setShowItemReview(false)}
           onOpenSO={(id) => {
             setShowItemReview(false);
-            navigate(`/sales/${id}`);
+            navigate(`${basePath}/${id}`);
           }}
         />
       )}

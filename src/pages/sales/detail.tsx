@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
+import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -214,6 +215,11 @@ export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  // 0134 — flips this detail page between regular Sales Order and
+  // Service Order modes (route-derived). Only navigates + header copy
+  // differ.
+  const mode = useSOMode();
+  const basePath = soBasePath(mode);
   const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
@@ -367,7 +373,7 @@ export default function SalesOrderDetailPage() {
       // which is exactly the lifetime we want — refresh / back-button
       // doesn't accidentally re-use a token. The edit page reads it via
       // useLocation() and forwards on the PUT body.
-      navigate(`/sales/${id}/edit`, {
+      navigate(`${basePath}/${id}/edit`, {
         state: { overrideToken: data.overrideToken, overrideReason: reason },
       });
     } catch (e) {
@@ -377,7 +383,7 @@ export default function SalesOrderDetailPage() {
         error: e instanceof Error ? e.message : "Network error",
       }));
     }
-  }, [id, overrideModal.reason, navigate, toast, refreshEligibility]);
+  }, [id, overrideModal.reason, navigate, toast, refreshEligibility, basePath]);
 
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
@@ -521,7 +527,7 @@ export default function SalesOrderDetailPage() {
       invalidateCachePrefix("/api/sales-orders");
       invalidateCachePrefix("/api/production-orders");
       if (id) invalidateCache(`/api/sales-orders/${id}`);
-      navigate("/sales");
+      navigate(basePath);
     } catch (err) {
       const detail = err instanceof Error ? err.message : "try again";
       toast.error(`Failed to delete order: ${detail}`);
@@ -561,11 +567,11 @@ export default function SalesOrderDetailPage() {
       })),
     };
     localStorage.setItem("so-clone-data", JSON.stringify(cloneData));
-    navigate("/sales/create?clone=1");
+    navigate(`${basePath}/create?clone=1`);
   };
 
   if (loading) return <div className="flex items-center justify-center h-64 text-[#6B7280]">Loading...</div>;
-  if (!order) return <div className="flex flex-col items-center justify-center h-64 gap-4"><div className="text-[#6B7280]">Order not found</div><Button variant="outline" onClick={() => navigate("/sales")}>Back</Button></div>;
+  if (!order) return <div className="flex flex-col items-center justify-center h-64 gap-4"><div className="text-[#6B7280]">Order not found</div><Button variant="outline" onClick={() => navigate(basePath)}>Back</Button></div>;
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
   // Cascade lock — surfaced from the API; if non-null the SO has a downstream
@@ -731,7 +737,7 @@ export default function SalesOrderDetailPage() {
       )}
 
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate("/sales")}><ArrowLeft className="h-5 w-5" /></Button>
+        <Button variant="ghost" size="icon" onClick={() => navigate(basePath)}><ArrowLeft className="h-5 w-5" /></Button>
         <div className="flex-1">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.companySOId}</h1>
@@ -747,7 +753,7 @@ export default function SalesOrderDetailPage() {
           }}><Download className="h-4 w-4" /> PDF</Button>
           <Button variant="outline" size="sm" onClick={handleClone}><Copy className="h-4 w-4" /> Clone</Button>
           {canEdit && (
-            <Button variant="outline" size="sm" onClick={() => navigate(`/sales/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>
+            <Button variant="outline" size="sm" onClick={() => navigate(`${basePath}/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>
           )}
           {/* Rule-3 production_window lock surface. Non-admins see a
               disabled "Edit (locked)" with a tooltip explaining the cutoff;
@@ -1283,7 +1289,7 @@ export default function SalesOrderDetailPage() {
           const nodes: DocNode[] = [
             {
               type: "SO",
-              label: "Sales Order",
+              label: soSingularNoun(mode),
               docNo: order.companySOId,
               status: order.status,
               isCurrent: true,

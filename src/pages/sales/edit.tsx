@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
+import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,6 +159,12 @@ export default function EditSalesOrderPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
+  // 0134 — flips this edit form between regular Sales Order mode and
+  // Service Order mode (route-derived). Only navigates + header copy
+  // differ; the PUT body preserves isServiceOrder from the row, so we
+  // don't override it here.
+  const mode = useSOMode();
+  const basePath = soBasePath(mode);
   // Override token forwarded from the SO detail page when an admin
   // overrode the Rule-3 production_window lock. Survives a single
   // navigation through router state, NOT through query params or
@@ -766,7 +773,7 @@ export default function EditSalesOrderPage() {
       // cascade to regenerating linked POs on the server.
       if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
-      navigate(`/sales/${id}`);
+      navigate(`${basePath}/${id}`);
     } catch (e) {
       setSaving(false);
       toast.error(e instanceof Error ? e.message : "Network error — changes not saved");
@@ -778,7 +785,7 @@ export default function EditSalesOrderPage() {
   if (!order) return (
     <div className="flex flex-col items-center justify-center h-64 gap-4">
       <div className="text-[#6B7280]">Order not found</div>
-      <Button variant="outline" onClick={() => navigate("/sales")}>Back</Button>
+      <Button variant="outline" onClick={() => navigate(basePath)}>Back</Button>
     </div>
   );
 
@@ -815,11 +822,11 @@ export default function EditSalesOrderPage() {
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate(`/sales/${id}`)}>
+          <Button variant="ghost" size="icon" onClick={() => navigate(`${basePath}/${id}`)}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div className="flex-1">
-            <h1 className="text-xl font-bold text-[#1F1D1B]">Edit Sales Order</h1>
+            <h1 className="text-xl font-bold text-[#1F1D1B]">Edit {soSingularNoun(mode)}</h1>
           </div>
         </div>
         <Card>
@@ -835,7 +842,7 @@ export default function EditSalesOrderPage() {
                 </p>
                 <p className="text-sm text-[#6B7280]">{ruleText}</p>
               </div>
-              <Button variant="primary" onClick={() => navigate(`/sales/${id}`)}>
+              <Button variant="primary" onClick={() => navigate(`${basePath}/${id}`)}>
                 Back to Order Details
               </Button>
             </div>
@@ -858,14 +865,14 @@ export default function EditSalesOrderPage() {
       <LockBanner reason={lockReason} />
 
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate(`/sales/${id}`)}>
+        <Button variant="ghost" size="icon" onClick={() => navigate(`${basePath}/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
           <h1 className="text-xl font-bold text-[#1F1D1B]">Edit {order.companySOId}</h1>
-          <p className="text-xs text-[#6B7280]">Modify sales order details and line items</p>
+          <p className="text-xs text-[#6B7280]">Modify {soSingularNoun(mode).toLowerCase()} details and line items</p>
         </div>
-        <Button variant="outline" onClick={() => navigate(`/sales/${id}`)}>Cancel</Button>
+        <Button variant="outline" onClick={() => navigate(`${basePath}/${id}`)}>Cancel</Button>
         <Button
           variant="primary"
           onClick={handleSubmit}

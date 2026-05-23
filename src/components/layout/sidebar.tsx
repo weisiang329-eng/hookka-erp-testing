@@ -156,23 +156,21 @@ const navigationGroups: NavGroup[] = [
     items: [
       { name: "QC / Quality", href: "/quality", icon: ShieldCheck },
       // Service Cases (parent) — every customer-facing service interaction
-      // logs here. A case may spawn 0+ Repair Orders (the heavy
-      // rework/swap/repair flow) under it. Refactored from sibling-table to
-      // parent-child in migration 0074. Distinct from the QC inspection
-      // module (Phase 1) which is internal-pre-ship; this one is post-ship.
+      // logs here. Refactored from sibling-table to parent-child in
+      // migration 0074. Distinct from the QC inspection module (Phase 1)
+      // which is internal-pre-ship; this one is post-ship.
       { name: "Service Cases", href: "/service-cases", icon: Wrench },
       // Service Order (0134) — aftersales order cloned from a SO/CO.
       // Reuses the entire sales_orders → PO → DO → Invoice cascade with
       // is_service_order = TRUE so the operator can ship warranty repairs,
-      // free swaps, etc. through the same production pipeline. Distinct
-      // from Repair Orders below (the older /service-orders module —
-      // case-driven rework that targets shipped units).
+      // free swaps, etc. through the same production pipeline.
       { name: "Service Order", href: "/service-order", icon: Wrench },
-      // Repair Orders — the older case-driven rework flow (REPRODUCE /
-      // STOCK_SWAP / REPAIR). Route name kept as /service-orders so
-      // existing bookmarks survive; sidebar label renamed 2026-05-23
-      // to free up "Service Order" for the new aftersales-SO module.
-      { name: "Repair Orders", href: "/service-orders", icon: Wrench },
+      // 2026-05-24 — old "Repair Orders" sidebar entry (route
+      // /service-orders, the REPRODUCE / STOCK_SWAP / REPAIR module from
+      // before is_service_order shipped) was removed at Wei Siang's
+      // request — he doesn't use it. The route + page files stay on disk
+      // so direct-URL access still works; re-adding the entry is a 1-line
+      // revert if it's ever needed again.
     ],
   },
   {

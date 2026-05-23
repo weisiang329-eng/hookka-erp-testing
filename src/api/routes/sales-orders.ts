@@ -825,16 +825,15 @@ app.get("/", async (c) => {
   );
 
   if (!paginate) {
-    // 2026-04-26 prod 500 fix: cap the unbounded items fetch. The
-    // unfiltered `SELECT *` over `sales_order_items` was the prime
-    // suspect for the 500 surfaced in the dogfood test (Server-Timing
-    // showed app-time + 0 db queries, consistent with a result-set or
-    // CPU-budget exception inside the handler before any timer fires).
-    // 5,000 rows ≈ ~50 SOs of 100 items — still covers the entire
-    // current dataset with headroom. Once the dataset grows past this
-    // cap, callers must pass ?page=N&limit=M (the paginated branch
-    // below already scopes items via salesOrderId IN (...)).
-    const ITEMS_HARD_CAP = 5000;
+    // 2026-05-23 perf fix: FK-scope the items fetch and drop the 5,000-row
+    // cap. The previous unfiltered `SELECT * FROM sales_order_items
+    // LIMIT 5000` shipped EVERY org's items (no orgId / FK filter) and
+    // was capped at an arbitrary 5K rows — which both leaked data across
+    // tenants and silently truncated payloads as the dataset grew.
+    // The paginated branch below already uses the FK-scope pattern;
+    // mirror it here via the same `salesOrderId IN (SELECT id FROM ...)`
+    // subquery so the cache-aside path and the paginated path return the
+    // same shape, and the items are bounded by the current org's SOs.
     const computeFullList = async () => {
       const [sos, items] = await Promise.all([
         db
@@ -844,7 +843,11 @@ app.get("/", async (c) => {
           .bind(...orgParams)
           .all<SalesOrderRow>(),
         db
-          .prepare(`SELECT * FROM ${itemsSourceSql} LIMIT ${ITEMS_HARD_CAP}`)
+          .prepare(
+            `SELECT * FROM ${itemsSourceSql}
+              WHERE salesOrderId IN (SELECT id FROM ${soSourceSql} ${orgWhere})`,
+          )
+          .bind(...orgParams)
           .all<SalesOrderItemRow>(),
       ]);
       const data = (sos.results ?? []).map((s) =>

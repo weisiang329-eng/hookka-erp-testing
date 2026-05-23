@@ -9,6 +9,8 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { computeFabricMetrics } from "../lib/fabric-usage";
+import { getOrgId } from "../lib/tenant";
+import { withSnapshot } from "../lib/snapshot";
 
 const app = new Hono<Env>();
 
@@ -112,77 +114,118 @@ const FABRIC_GROUPS = new Set(["B.M-FABR", "S-FABR", "S.M-FABR", "LINING", "WEBB
 app.get("/", async (c) => {
   const category = c.req.query("category");
   const shortageOnly = c.req.query("shortageOnly") === "true";
+  const orgId = getOrgId(c);
 
-  // Pull every fabric raw material + the static fabric_trackings rows
-  // (used as metadata cache) + live metrics in parallel.
-  const [rmRes, trackingsRes, liveMetrics] = await Promise.all([
-    c.var.DB.prepare(
-      `SELECT id, itemCode, description, itemGroup
-         FROM raw_materials
-        WHERE itemCode IS NOT NULL
-          AND itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
-        ORDER BY itemCode`,
-    ).all<RawMaterialFabricRow>(),
-    c.var.DB.prepare("SELECT * FROM fabric_trackings").all<FabricTrackingRow>(),
-    computeFabricMetrics(c.var.DB),
-  ]);
+  // 2026-05-23 perf fix — cache-aside snapshot. Same pattern as
+  // sales-orders/stats (~line 960). The endpoint joins across 6 source
+  // tables (job_cards, production_orders, raw_materials,
+  // purchase_order_items, cost_ledger, bom_templates) and the result is
+  // stable between fabric movements, so it's a textbook cache candidate.
+  // Layer 2 invalidates the moment any source table's freshness column
+  // moves; the schema-aware probe in snapshot-freshness.ts handles tables
+  // that lack `updated_at` (it falls back to `created_at` or skips them).
+  //
+  // cache_key encodes the ?category= and ?shortageOnly= query-string
+  // variants so each combo gets its own row.
+  const cacheKey = `category=${category ?? ""}&shortageOnly=${
+    shortageOnly ? "1" : "0"
+  }`;
 
-  // Build a fabricCode → tracking-cache map for metadata merging.
-  const trackingByCode = new Map<string, FabricTrackingRow>();
-  for (const t of trackingsRes.results ?? []) {
-    if (t.fabricCode) trackingByCode.set(t.fabricCode, t);
-  }
+  const payload = await withSnapshot(
+    c.var.DB,
+    {
+      tableName: "fabric_tracking_snapshot",
+      sourceTables: [
+        "job_cards",
+        "production_orders",
+        "raw_materials",
+        "purchase_order_items",
+        "cost_ledger",
+        "bom_templates",
+      ],
+    },
+    orgId,
+    async () => {
+      // Pull every fabric raw material + the static fabric_trackings rows
+      // (used as metadata cache) + live metrics in parallel.
+      const [rmRes, trackingsRes, liveMetrics] = await Promise.all([
+        c.var.DB.prepare(
+          `SELECT id, itemCode, description, itemGroup
+             FROM raw_materials
+            WHERE itemCode IS NOT NULL
+              AND itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
+            ORDER BY itemCode`,
+        ).all<RawMaterialFabricRow>(),
+        c.var.DB.prepare(
+          "SELECT * FROM fabric_trackings",
+        ).all<FabricTrackingRow>(),
+        computeFabricMetrics(c.var.DB),
+      ]);
 
-  // One response row per fabric raw material. Metadata defaults from the
-  // RM row (itemGroup → fabricCategory, description → fabricDescription,
-  // unitPriceSen → price); the fabric_trackings cache adds priceTier /
-  // supplier / leadTimeDays / reorderPoint when present.
-  let data = (rmRes.results ?? [])
-    .filter((rm) => rm.itemGroup && FABRIC_GROUPS.has(rm.itemGroup))
-    .map((rm) => {
-      const cached = trackingByCode.get(rm.itemCode);
-      const m = liveMetrics.get(rm.itemCode);
-      // Price comes from the legacy fabric_trackings cache when present
-      // (manually maintained); raw_materials has no per-fabric price
-      // column today, so 0 is the default for fabrics with no cache row.
-      const priceDisplay = cached?.price ?? 0;
-      return {
-        // Identity. Prefer the cached tracking id so existing PUT writes
-        // hit the same row; fall back to the RM id for fabrics that have
-        // no tracking row yet.
-        id: cached?.id ?? rm.id,
-        fabricCode: rm.itemCode,
-        fabricDescription: cached?.fabricDescription ?? rm.description ?? "",
-        fabricCategory:
-          (cached?.fabricCategory as FabricTrackingRow["fabricCategory"]) ??
-          (rm.itemGroup as FabricTrackingRow["fabricCategory"]) ??
-          "B.M-FABR",
-        priceTier: cached?.priceTier ?? "PRICE_1",
-        sofaPriceTier: cached?.sofaPriceTier ?? null,
-        bedframePriceTier: cached?.bedframePriceTier ?? null,
-        price: priceDisplay,
-        // ----- LIVE metric columns -----
-        soh: m?.soh ?? 0,
-        poOutstanding: m?.poOutstanding ?? 0,
-        lastMonthUsage: m?.lastMonthUsage ?? 0,
-        oneWeekUsage: m?.oneWeekUsage ?? 0,
-        twoWeeksUsage: m?.twoWeeksUsage ?? 0,
-        oneMonthUsage: m?.oneMonthUsage ?? 0,
-        shortage: m?.shortage ?? 0,
-        // ----- Metadata pass-through -----
-        reorderPoint: cached?.reorderPoint ?? 0,
-        supplier: cached?.supplier ?? "",
-        leadTimeDays: cached?.leadTimeDays ?? 0,
-      };
-    });
+      // Build a fabricCode → tracking-cache map for metadata merging.
+      const trackingByCode = new Map<string, FabricTrackingRow>();
+      for (const t of trackingsRes.results ?? []) {
+        if (t.fabricCode) trackingByCode.set(t.fabricCode, t);
+      }
 
-  if (category) {
-    data = data.filter((r) => r.fabricCategory === category);
-  }
-  if (shortageOnly) {
-    data = data.filter((r) => r.shortage < 0);
-  }
-  return c.json({ success: true, data });
+      // One response row per fabric raw material. Metadata defaults from
+      // the RM row (itemGroup → fabricCategory, description →
+      // fabricDescription, unitPriceSen → price); the fabric_trackings
+      // cache adds priceTier / supplier / leadTimeDays / reorderPoint
+      // when present.
+      let data = (rmRes.results ?? [])
+        .filter((rm) => rm.itemGroup && FABRIC_GROUPS.has(rm.itemGroup))
+        .map((rm) => {
+          const cached = trackingByCode.get(rm.itemCode);
+          const m = liveMetrics.get(rm.itemCode);
+          // Price comes from the legacy fabric_trackings cache when
+          // present (manually maintained); raw_materials has no
+          // per-fabric price column today, so 0 is the default for
+          // fabrics with no cache row.
+          const priceDisplay = cached?.price ?? 0;
+          return {
+            // Identity. Prefer the cached tracking id so existing PUT
+            // writes hit the same row; fall back to the RM id for
+            // fabrics that have no tracking row yet.
+            id: cached?.id ?? rm.id,
+            fabricCode: rm.itemCode,
+            fabricDescription:
+              cached?.fabricDescription ?? rm.description ?? "",
+            fabricCategory:
+              (cached?.fabricCategory as FabricTrackingRow["fabricCategory"]) ??
+              (rm.itemGroup as FabricTrackingRow["fabricCategory"]) ??
+              "B.M-FABR",
+            priceTier: cached?.priceTier ?? "PRICE_1",
+            sofaPriceTier: cached?.sofaPriceTier ?? null,
+            bedframePriceTier: cached?.bedframePriceTier ?? null,
+            price: priceDisplay,
+            // ----- LIVE metric columns -----
+            soh: m?.soh ?? 0,
+            poOutstanding: m?.poOutstanding ?? 0,
+            lastMonthUsage: m?.lastMonthUsage ?? 0,
+            oneWeekUsage: m?.oneWeekUsage ?? 0,
+            twoWeeksUsage: m?.twoWeeksUsage ?? 0,
+            oneMonthUsage: m?.oneMonthUsage ?? 0,
+            shortage: m?.shortage ?? 0,
+            // ----- Metadata pass-through -----
+            reorderPoint: cached?.reorderPoint ?? 0,
+            supplier: cached?.supplier ?? "",
+            leadTimeDays: cached?.leadTimeDays ?? 0,
+          };
+        });
+
+      if (category) {
+        data = data.filter((r) => r.fabricCategory === category);
+      }
+      if (shortageOnly) {
+        data = data.filter((r) => r.shortage < 0);
+      }
+      return { success: true as const, data };
+    },
+    cacheKey,
+  );
+
+  return c.json(payload);
 });
 
 type FabricTrackingBody = {

@@ -214,7 +214,7 @@ app.post("/", async (c) => {
   if (denied) return denied;
   try {
     const body = await c.req.json();
-    const { period } = body;
+    const { period, regenerate } = body;
     if (!period) {
       return c.json(
         { success: false, error: "Period is required (e.g. 2026-04)" },
@@ -222,16 +222,49 @@ app.post("/", async (c) => {
       );
     }
 
-    const existing = await c.var.DB.prepare(
-      "SELECT COUNT(*) AS c FROM payslips WHERE period = ?",
-    )
-      .bind(period)
-      .first<{ c: number }>();
-    if ((existing?.c ?? 0) > 0) {
-      return c.json(
-        { success: false, error: "Payslips already generated for this period." },
-        400,
-      );
+    // 2026-05-24 — added `regenerate` body flag. When the operator changes
+    // a worker's master-data (statutory toggle, OT multiplier, salary)
+    // AFTER the period's drafts were generated, the stored drafts still
+    // hold the old numbers. Posting with `regenerate: true` wipes the
+    // period's DRAFT rows so the recompute below picks up the current
+    // worker config. APPROVED rows are protected — once payroll is
+    // signed off the audit trail is inviolate, the operator has to
+    // un-approve first (a separate flow) before a regenerate.
+    if (regenerate) {
+      const approvedRow = await c.var.DB.prepare(
+        "SELECT COUNT(*) AS c FROM payslips WHERE period = ? AND status != 'DRAFT'",
+      )
+        .bind(period)
+        .first<{ c: number }>();
+      if ((approvedRow?.c ?? 0) > 0) {
+        return c.json(
+          {
+            success: false,
+            error: "Cannot regenerate — at least one payslip in this period is already approved. Un-approve first.",
+          },
+          400,
+        );
+      }
+      await c.var.DB.prepare(
+        "DELETE FROM payslips WHERE period = ? AND status = 'DRAFT'",
+      )
+        .bind(period)
+        .run();
+    } else {
+      const existing = await c.var.DB.prepare(
+        "SELECT COUNT(*) AS c FROM payslips WHERE period = ?",
+      )
+        .bind(period)
+        .first<{ c: number }>();
+      if ((existing?.c ?? 0) > 0) {
+        return c.json(
+          {
+            success: false,
+            error: "Payslips already generated for this period. Use Regenerate to refresh after master-data changes.",
+          },
+          400,
+        );
+      }
     }
 
     const wres = await c.var.DB.prepare(

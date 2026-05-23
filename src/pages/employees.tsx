@@ -4500,6 +4500,41 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     setGenerating(false);
   };
 
+  // 2026-05-24 — operator path to re-apply current worker master-data
+  // (statutory toggle, OT multiplier, salary) onto an already-generated
+  // period. Wipes DRAFTs and recomputes; APPROVED rows refuse (backend
+  // enforces). Confirm dialog because operator loses any per-row tweaks.
+  const regeneratePayslips = async () => {
+    if (
+      !confirm(
+        `Re-generate payslips for ${months[selectedMonth - 1]} ${selectedYear}?\n\nAll current DRAFT rows for this period will be deleted and recomputed from the latest worker master-data (statutory toggles, salary, OT multiplier). APPROVED rows stay untouched.`,
+      )
+    ) {
+      return;
+    }
+    setGenerating(true);
+    try {
+      const res = await fetch("/api/payslips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ period, regenerate: true }),
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(data?.error || `Failed to regenerate payslips (HTTP ${res.status})`);
+      } else if (data.success) {
+        toast.success("Payslips regenerated with current worker data.");
+        fetchPayslips();
+      } else {
+        toast.error(data.error || "Failed to regenerate payslips");
+      }
+    } catch {
+      toast.error("Error regenerating payslips");
+    }
+    setGenerating(false);
+  };
+
   const approveAll = async () => {
     setApproving(true);
     try {
@@ -4702,6 +4737,17 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                 <Button variant="primary" onClick={approveAll} disabled={approving}>
                   <Check className="h-4 w-4" />
                   {approving ? "Approving..." : "Approve All"}
+                </Button>
+              )}
+              {payslipData.length > 0 && payslipData.some((r) => r.status === "DRAFT") && (
+                <Button
+                  variant="outline"
+                  onClick={regeneratePayslips}
+                  disabled={generating}
+                  title="Wipe this period's DRAFT rows and recompute from current worker master-data (statutory toggles, salary, OT multiplier). APPROVED rows are protected."
+                >
+                  <DollarSign className="h-4 w-4" />
+                  {generating ? "Regenerating..." : "Regenerate"}
                 </Button>
               )}
               {payslipData.length > 0 && (

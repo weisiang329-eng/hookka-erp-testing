@@ -542,7 +542,8 @@ export default function ConsignmentNotePage() {
   // Pull POs to build Planning + Pending CN tabs. Same endpoint DO uses,
   // but we filter for `consignmentOrderId` set instead of `salesOrderId`.
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } =
-    useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
+    // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (UPH lookup uses them).
+    useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders?fields=minimal&include=jobCards");
 
   // Pull CO list for hookkaExpectedDD + companyCOId join (DO uses
   // /api/sales-orders for the same purpose).

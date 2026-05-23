@@ -93,7 +93,11 @@ export default function SalesPage() {
     total?: number;
   }>("/api/consignment-orders/stats");
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
-  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
+  // ?fields=minimal&include= → server drops ~20 unused PO fields, the
+  // piece_pics tree, AND the whole jobCards array. This page only reads
+  // {salesOrderId, poNo, status} (the type at the destructure proves it),
+  // so the full 12MB payload was 99%+ waste. Trims to ~100KB.
+  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders?fields=minimal&include=");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/consignment-orders/status-changes");
   const orders: SalesOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),

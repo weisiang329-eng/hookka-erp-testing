@@ -362,7 +362,10 @@ function utilizationColor(pct: number): { bar: string; text: string; bg: string 
 export default function PlanningPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>("capacity");
-  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders");
+  // ?fields=minimal&include=jobCards → drops ~20 unused PO fields and the
+  // piece_pics tree. jobCards still arrive (planning iterates order.jobCards
+  // throughout for capacity / scheduling math).
+  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards");
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkers } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: schedResp, refresh: refreshSched } = useCachedJson<{ data?: ScheduleEntry[] }>("/api/scheduling");
   // Wei Siang 2026-05-15: Capacity Loading lists only production depts.

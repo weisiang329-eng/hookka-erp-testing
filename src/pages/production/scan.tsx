@@ -148,7 +148,8 @@ function ScannerPage() {
     setSelectedWorkerId("");
 
     try {
-      const data = await fetchJson("/api/production-orders", ProductionOrderListSchema);
+      // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (scan lookup reads order.jobCards).
+      const data = await fetchJson("/api/production-orders?fields=minimal&include=jobCards", ProductionOrderListSchema);
       if (!data.success) {
         setLookupError("Failed to fetch production orders.");
         setLoading(false);

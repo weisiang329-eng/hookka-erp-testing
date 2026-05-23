@@ -1198,7 +1198,9 @@ export default function InventoryPage() {
 
     const fetchPOs = async (): Promise<ProductionOrderLike[]> => {
       try {
-        const json = await cachedFetchJson<{ success?: boolean; data?: ProductionOrderLike[]; _stub?: boolean }>("/api/production-orders");
+        // ?fields=minimal&include=jobCards — drops unused PO fields + piece_pics.
+        // jobCards stay (UPH-cards / wipQty math reads them).
+        const json = await cachedFetchJson<{ success?: boolean; data?: ProductionOrderLike[]; _stub?: boolean }>("/api/production-orders?fields=minimal&include=jobCards");
         if (json && json.success && Array.isArray(json.data) && !json._stub) {
           return json.data as ProductionOrderLike[];
         }

@@ -107,7 +107,8 @@ function getDeptEfficiency(orders: ProductionOrder[]) {
 
 export default function MasterTrackerPage() {
   const navigate = useNavigate();
-  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (per-dept JC lookup uses them).
+  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards");
   const orders: ProductionOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
     [ordersResp]

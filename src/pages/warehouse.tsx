@@ -136,7 +136,10 @@ export default function WarehousePage() {
 
   const { data: rackResp, loading: rackLoading, refresh: fetchRackLocations } = useCachedJson<{ success?: boolean; data?: RackLocation[]; summary?: Summary }>("/api/warehouse");
   const { data: movementsResp, loading: movementsLoading, refresh: fetchMovements } = useCachedJson<{ success?: boolean; data?: StockMovement[] }>(movementsUrl);
-  const { data: poResp, loading: poLoading, refresh: fetchProductionOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  // ?fields=minimal&include= → drop jobCards (this page only reads PO
+  // basics — productionOrders.find / .filter — never .jobCards).
+  // Trims a 12MB payload to ~100-300KB.
+  const { data: poResp, loading: poLoading, refresh: fetchProductionOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=");
 
   const rackLocations: RackLocation[] = useMemo(
     () => (rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : []),

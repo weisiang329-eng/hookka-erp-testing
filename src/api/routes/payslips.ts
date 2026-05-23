@@ -28,6 +28,12 @@ type WorkerRow = {
   workingDaysPerMonth: number;
   workingHoursPerDay: number;
   otMultiplier: number;
+  // Per-worker statutory toggles (migration 0131). NULL/undefined falls
+  // back to true downstream so legacy rows keep their pre-toggle behaviour.
+  epfEnabled: boolean | null;
+  socsoEnabled: boolean | null;
+  eisEnabled: boolean | null;
+  pcbEnabled: boolean | null;
 };
 
 type PayslipRow = {
@@ -111,15 +117,30 @@ function rowToPayslip(r: PayslipRow) {
 // ---------------------------------------------------------------------------
 // Malaysian statutory helpers
 // ---------------------------------------------------------------------------
-function calcStatutory(basicSalarySen: number) {
+// Worker-level toggle flags. NULL/undefined defaults to TRUE so legacy
+// workers (and the mock-data path) keep the current behaviour. A FALSE
+// flag zeroes the matching line in the result — when all four are false
+// the worker's deductions total 0 and Net Pay equals Gross Pay.
+type StatutoryFlags = {
+  epfEnabled?: boolean | null;
+  socsoEnabled?: boolean | null;
+  eisEnabled?: boolean | null;
+  pcbEnabled?: boolean | null;
+};
+
+function calcStatutory(basicSalarySen: number, flags: StatutoryFlags = {}) {
+  const epfOn = flags.epfEnabled !== false;
+  const socsoOn = flags.socsoEnabled !== false;
+  const eisOn = flags.eisEnabled !== false;
+  const pcbOn = flags.pcbEnabled !== false;
   return {
-    epfEmployee: Math.round(basicSalarySen * 0.11),
-    epfEmployer: Math.round(basicSalarySen * 0.13),
-    socsoEmployee: 745,
-    socsoEmployer: 2615,
-    eisEmployee: 390,
-    eisEmployer: 390,
-    pcb: 0,
+    epfEmployee: epfOn ? Math.round(basicSalarySen * 0.11) : 0,
+    epfEmployer: epfOn ? Math.round(basicSalarySen * 0.13) : 0,
+    socsoEmployee: socsoOn ? 745 : 0,
+    socsoEmployer: socsoOn ? 2615 : 0,
+    eisEmployee: eisOn ? 390 : 0,
+    eisEmployer: eisOn ? 390 : 0,
+    pcb: pcbOn ? 0 : 0, // PCB still 0 baseline; flag is forward-compat for when PCB calc lands.
   };
 }
 
@@ -214,7 +235,7 @@ app.post("/", async (c) => {
     }
 
     const wres = await c.var.DB.prepare(
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier FROM workers WHERE status = 'ACTIVE'",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled FROM workers WHERE status = 'ACTIVE'",
     ).all<WorkerRow>();
     const activeWorkers = wres.results ?? [];
 
@@ -287,7 +308,12 @@ app.post("/", async (c) => {
       const allowances = 0;
       // Statutory deductions stay computed on the full monthly salary —
       // unchanged from before; the engine rework only touches basic + OT.
-      const stat = calcStatutory(worker.basicSalarySen);
+      const stat = calcStatutory(worker.basicSalarySen, {
+        epfEnabled: worker.epfEnabled,
+        socsoEnabled: worker.socsoEnabled,
+        eisEnabled: worker.eisEnabled,
+        pcbEnabled: worker.pcbEnabled,
+      });
       // Gross = basic earned (full salary − absences) + OT + allowances.
       const grossPay = labor.payroll.grossSen + allowances;
       const totalDeductions =

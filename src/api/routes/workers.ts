@@ -34,6 +34,14 @@ type WorkerRow = {
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
   otMultiplier: number | null;
+  // Per-worker statutory toggles (migration 0131). When false the matching
+  // line in calcStatutory (payslips.ts) is zeroed out. Defaults to TRUE on
+  // existing rows via the migration so legacy behaviour is preserved; the
+  // operator opts out individual workers via the Employee Master tab.
+  epfEnabled: boolean | null;
+  socsoEnabled: boolean | null;
+  eisEnabled: boolean | null;
+  pcbEnabled: boolean | null;
   joinDate: string | null;
   icNumber: string | null;
   passportNumber: string | null;
@@ -93,6 +101,12 @@ function rowToWorker(row: WorkerRow) {
     workingHoursPerDay: row.workingHoursPerDay,
     workingDaysPerMonth: row.workingDaysPerMonth,
     otMultiplier: row.otMultiplier ?? 1.5,
+    // Statutory toggles — null/undefined treated as true so the response
+    // shape is always boolean (matches the DB default of TRUE).
+    epfEnabled: row.epfEnabled !== false,
+    socsoEnabled: row.socsoEnabled !== false,
+    eisEnabled: row.eisEnabled !== false,
+    pcbEnabled: row.pcbEnabled !== false,
     joinDate: row.joinDate ?? "",
     icNumber: row.icNumber ?? "",
     passportNumber: row.passportNumber ?? "",
@@ -338,6 +352,22 @@ app.put("/:id", async (c) => {
         body.workingDaysPerMonth ?? existing.workingDaysPerMonth,
       otMultiplier:
         body.otMultiplier ?? existing.otMultiplier ?? 1.5,
+      epfEnabled:
+        typeof body.epfEnabled === "boolean"
+          ? body.epfEnabled
+          : existing.epfEnabled !== false,
+      socsoEnabled:
+        typeof body.socsoEnabled === "boolean"
+          ? body.socsoEnabled
+          : existing.socsoEnabled !== false,
+      eisEnabled:
+        typeof body.eisEnabled === "boolean"
+          ? body.eisEnabled
+          : existing.eisEnabled !== false,
+      pcbEnabled:
+        typeof body.pcbEnabled === "boolean"
+          ? body.pcbEnabled
+          : existing.pcbEnabled !== false,
       joinDate: body.joinDate ?? existing.joinDate ?? "",
       icNumber: body.icNumber ?? existing.icNumber ?? "",
       passportNumber: body.passportNumber ?? existing.passportNumber ?? "",
@@ -349,6 +379,7 @@ app.put("/:id", async (c) => {
          name = ?, empNo = ?, departmentId = ?, departmentCode = ?, departmentCodes = ?, categories = ?,
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
+         epfEnabled = ?, socsoEnabled = ?, eisEnabled = ?, pcbEnabled = ?,
          joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?
        WHERE id = ?`,
     )
@@ -366,6 +397,10 @@ app.put("/:id", async (c) => {
         merged.workingHoursPerDay,
         merged.workingDaysPerMonth,
         merged.otMultiplier,
+        merged.epfEnabled,
+        merged.socsoEnabled,
+        merged.eisEnabled,
+        merged.pcbEnabled,
         merged.joinDate,
         merged.icNumber,
         merged.passportNumber,

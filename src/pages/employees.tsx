@@ -82,6 +82,12 @@ type Worker = {
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
   otMultiplier?: number;
+  /** Per-worker statutory toggles (migration 0131). Default true — when
+   *  false the matching deduction is zeroed on the payslip. */
+  epfEnabled?: boolean;
+  socsoEnabled?: boolean;
+  eisEnabled?: boolean;
+  pcbEnabled?: boolean;
   joinDate: string;
   icNumber: string;
   passportNumber: string;
@@ -1089,6 +1095,12 @@ type WorkerFormData = {
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
   otMultiplier: number;
+  // Statutory enable flags — POSTed/PUTed as booleans. Backend defaults
+  // each to TRUE for new workers, so the form ships TRUE here too.
+  epfEnabled: boolean;
+  socsoEnabled: boolean;
+  eisEnabled: boolean;
+  pcbEnabled: boolean;
   joinDate: string;
   nationality: string;
   status: string;
@@ -1106,6 +1118,10 @@ const emptyForm: WorkerFormData = {
   workingHoursPerDay: 9,
   workingDaysPerMonth: 26,
   otMultiplier: 1.5,
+  epfEnabled: true,
+  socsoEnabled: true,
+  eisEnabled: true,
+  pcbEnabled: true,
   joinDate: todayStr(),
   nationality: "",
   status: "ACTIVE",
@@ -1475,6 +1491,10 @@ function EmployeeMasterTab({
       workingHoursPerDay: w.workingHoursPerDay,
       workingDaysPerMonth: w.workingDaysPerMonth,
       otMultiplier: w.otMultiplier ?? 1.5,
+      epfEnabled: w.epfEnabled !== false,
+      socsoEnabled: w.socsoEnabled !== false,
+      eisEnabled: w.eisEnabled !== false,
+      pcbEnabled: w.pcbEnabled !== false,
       joinDate: w.joinDate,
       nationality: w.nationality,
       status: w.status,
@@ -1778,6 +1798,96 @@ function EmployeeMasterTab({
             <span title="OT premium multiplier (hourly rate × this for OT hours)">
               {mult.toFixed(1)}×
             </span>
+          );
+        },
+      },
+      {
+        // Statutory toggles — EPF / SOCSO / EIS / PCB. View mode shows
+        // each as a coloured chip (green = on, grey + strikethrough = off);
+        // Edit mode swaps to checkboxes. Backend defaults each to TRUE,
+        // operator unchecks any that don't apply to that worker (e.g. a
+        // foreign worker not in the EPF scheme).
+        key: "statutory",
+        label: "EPF / SOCSO / EIS / PCB",
+        align: "center",
+        width: "210px",
+        render: (_value, row) => {
+          const epfOn = row.epfEnabled !== false;
+          const socsoOn = row.socsoEnabled !== false;
+          const eisOn = row.eisEnabled !== false;
+          const pcbOn = row.pcbEnabled !== false;
+          if (editingId === row.id) {
+            return (
+              <div className="flex items-center justify-center gap-2 text-[10px]">
+                <label
+                  className="flex items-center gap-1 cursor-pointer"
+                  title="EPF — 11% employee + 13% employer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={editForm.epfEnabled}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, epfEnabled: e.target.checked }))
+                    }
+                  />
+                  EPF
+                </label>
+                <label
+                  className="flex items-center gap-1 cursor-pointer"
+                  title="SOCSO — RM 7.45 employee + RM 26.15 employer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={editForm.socsoEnabled}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, socsoEnabled: e.target.checked }))
+                    }
+                  />
+                  SOCSO
+                </label>
+                <label
+                  className="flex items-center gap-1 cursor-pointer"
+                  title="EIS — RM 3.90 employee + RM 3.90 employer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={editForm.eisEnabled}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, eisEnabled: e.target.checked }))
+                    }
+                  />
+                  EIS
+                </label>
+                <label
+                  className="flex items-center gap-1 cursor-pointer"
+                  title="PCB — income tax"
+                >
+                  <input
+                    type="checkbox"
+                    checked={editForm.pcbEnabled}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, pcbEnabled: e.target.checked }))
+                    }
+                  />
+                  PCB
+                </label>
+              </div>
+            );
+          }
+          const chipOn =
+            "px-1 py-0.5 rounded text-[#4F7C3A] bg-[#EEF3E4] border border-[#C6DBA8]";
+          const chipOff =
+            "px-1 py-0.5 rounded text-[#9CA3AF] bg-[#F0ECE9] border border-[#E2DDD8] line-through";
+          return (
+            <div
+              className="flex items-center justify-center gap-1 text-[10px] font-medium"
+              title="EPF / SOCSO / EIS / PCB — green = will be deducted; grey = skipped. Click Edit to change."
+            >
+              <span className={epfOn ? chipOn : chipOff}>EPF</span>
+              <span className={socsoOn ? chipOn : chipOff}>SOCSO</span>
+              <span className={eisOn ? chipOn : chipOff}>EIS</span>
+              <span className={pcbOn ? chipOn : chipOff}>PCB</span>
+            </div>
           );
         },
       },

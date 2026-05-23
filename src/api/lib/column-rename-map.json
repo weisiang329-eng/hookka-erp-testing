@@ -1,6 +1,10 @@
 {
   "absenceDeductionSen": "absence_deduction_sen",
   "absentDays": "absent_days",
+  "eisEnabled": "eis_enabled",
+  "epfEnabled": "epf_enabled",
+  "pcbEnabled": "pcb_enabled",
+  "socsoEnabled": "socso_enabled",
   "acceptedAt": "accepted_at",
   "acceptedQty": "accepted_qty",
   "accountCode": "account_code",

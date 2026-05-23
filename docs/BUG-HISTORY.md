@@ -34,6 +34,74 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-23-001 — Service Order copy-from missing EX prefix + Base Price stuck on "Select fabric" + no line-item picker
+
+**Status:** 🟢 Fixed (2026-05-23)
+**Category:** sales-orders
+
+**Symptom:** First-day review of the just-shipped Service Order copy-from
+feature (`/service-order/create` → "Copy from SO/CO" button) surfaced three
+operator-facing gaps:
+
+1. Destination Service Order's Customer PO No / Reference fields carried the
+   source's raw values verbatim (e.g. "PO-2605-030") — no visual marker that
+   this was a copy, easy to confuse with the original on the doc-flow tree.
+2. The "Base Price (RM)" cell on every copied line rendered as the regular
+   SO yellow "Select fabric" prompt — Service Orders are supposed to start
+   at RM 0 with the operator typing the agreed service price, not derive
+   the price from the customer's fabric tier book.
+3. The Copy modal was 1-step: type "SO-2605-111" → Copy → ALL lines came
+   over. If the source had 5 lines and the operator only wanted to invoice
+   1 line of repair, they had to delete 4 lines after the import.
+
+**Root cause:**
+
+1. `POST /api/sales-orders/copy-for-service-order` (sales-orders.ts:3344)
+   passed `customer.customerPO` / `customerPOId` through verbatim and built
+   `reference = "Copied from SO <id>"` — no EX tag.
+2. `LineItemCard` (sales/create.tsx:2604) rendered the Base Price cell as a
+   read-only `<div>` for the BEDFRAME layout, displaying "Select fabric"
+   when `basePriceSen === 0`. The component didn't know about Service Order
+   mode, so even when `useSOMode()` said `service-order`, the price field
+   stayed read-only and dependent on fabric pick.
+3. The modal explicitly shipped Phase 1 = copy-all per Agent D's commit;
+   Phase 2 picker was a TODO at the bottom of the file.
+
+**Fix:**
+
+- `src/api/routes/sales-orders.ts` (copy-for-service-order handler): added
+  an `exPrefix(raw)` helper (idempotent — won't double-prefix if value
+  already starts with `EX-` / `EX `). Applied to `customerPO`,
+  `customerPOId`. Reference now reads `EX <SO|CO> <sourceNo>` (e.g.
+  "EX SO-2605-111").
+- `src/pages/sales/create.tsx` (LineItemCard): threaded `isServiceOrderMode`
+  as a prop from the parent; the Base Price cell now renders an editable
+  `<Input type="number">` (defaults to 0) in Service Order mode, falling
+  back to the existing fabric-driven read-only display for normal Sales
+  Orders. Fabric dropdown is unchanged — still required for production
+  routing.
+- `src/pages/sales/create.tsx` (CopyFromSourceModal): refactored to a
+  2-step wizard. Step 1 unchanged (SO/CO tab + id input). Step 2 fetches
+  `/api/sales-orders/:id` or `/api/consignment-orders/:id`, renders the
+  source's line items in a table with checkboxes (default all checked,
+  with check-all/uncheck-all toggle), and "Copy Selected (N)" button posts
+  the picked `lineItemIds` to the existing endpoint (already accepted the
+  param).
+
+Also verified Issue from the same review: copied lines DO carry
+`specialOrder` + `customSpecials` from the SO source (line 3440-3456 in the
+handler maps both; the CO source has no `customSpecials` column so it
+correctly defaults to `[]`). Frontend `onCopied` handler (create.tsx:1956)
+already hydrates both fields into the LineItem form draft. No fix needed.
+
+**Verified:**
+
+- `npm run typecheck:app` — passes
+- `npm run build` — passes (pre-existing 500KB chunk warning unchanged)
+- `npm test` — 480/481 (1 pre-existing skip), no regressions
+
+---
+
 ## BUG-2026-05-21-005 — Snapshot freshness check assumed a universal `updated_at` column → 9 of 15 snapshot endpoints HTTP 500 on deploy
 
 **Status:** 🟢 Fixed (2026-05-21)

@@ -385,21 +385,50 @@ function ColumnFilterDropdown<T>({
   // intermittently (fast clicks fail, slow clicks work). toggleAll /
   // toggleValue / setRaws now ALL compute the next set and assign
   // checkedRef SYNCHRONOUSLY at click time, before setChecked — so the
-  // ref is correct the instant any checkbox handler returns. uniqueValues
-  // comes from the useMemo above and is stable per-render, so reading it
-  // from closure at click time is safe.
+  // ref is correct the instant any checkbox handler returns.
+  //
+  // 2026-05-24: the bug returned. Root cause this time: the OK handler
+  // reads `uniqueValues.length` from CLOSURE, not from the ref. When the
+  // popover opens against the SO ID column on Production (or any grid
+  // with the 20s passive poll), a polling refetch lands BETWEEN the
+  // checkbox toggle and the OK click. `data` → `scopedData` → `allData`
+  // → `uniqueValues` all reflow with the new data — but the OK button's
+  // onClick closure was created on the PRIOR render, so its
+  // `uniqueValues.length` is stale. If the poll-induced count happens to
+  // equal `checkedRef.current.size`, `latestAllChecked` lies: the
+  // handler treats the user's narrowed selection as "all checked" and
+  // calls `onApplyValues(null)` — filter wiped, popover closes, user
+  // sees "nothing happened". Second click works because that render's
+  // closure carries the fresh `uniqueValues.length` and the equality
+  // mismatch resolves correctly.
+  //
+  // Fix: mirror `uniqueValues` into a ref too (synced post-commit via a
+  // tiny useEffect), and read BOTH the checked set and the unique-values
+  // count from refs at click time. No more closure-captured length, no
+  // more race.
   const checkedRef = useRef(checked);
+  const uniqueValuesRef = useRef(uniqueValues);
+  // Sync the unique-values ref AFTER commit so the OK button's onClick
+  // (which runs in an event handler, well after commit) reads the same
+  // count React just rendered with — even if the parent's data changed
+  // mid-popover (e.g. the Production page's 20s poll). Cheap (a pointer
+  // assignment) and lint-clean (no ref writes during render — see
+  // react-hooks/refs).
+  useEffect(() => {
+    uniqueValuesRef.current = uniqueValues;
+  }, [uniqueValues]);
 
   const toggleAll = () => {
-    if (allChecked) {
-      const next = new Set<string>();
-      checkedRef.current = next;
-      setChecked(next);
-    } else {
-      const next = new Set(uniqueValues.map(([v]) => v));
-      checkedRef.current = next;
-      setChecked(next);
-    }
+    // Read both inputs from refs so a (very rare) same-tick double-click
+    // on (All) still resolves to a clean toggle even if React hasn't
+    // re-rendered between the two clicks. `allChecked` derived from
+    // render-state would lie on the second click.
+    const cur = checkedRef.current;
+    const unique = uniqueValuesRef.current;
+    const isAll = cur.size === unique.length;
+    const next = isAll ? new Set<string>() : new Set(unique.map(([v]) => v));
+    checkedRef.current = next;
+    setChecked(next);
   };
 
   // Quick-filter chips for status-style columns (operator request
@@ -441,7 +470,8 @@ function ColumnFilterDropdown<T>({
   // synchronously (see the checkedRef comment) so a same-tick OK is fresh.
   const toggleChip = (matchValues: string[]) => {
     const cur = checkedRef.current;
-    const isAll = cur.size === uniqueValues.length;
+    const unique = uniqueValuesRef.current;
+    const isAll = cur.size === unique.length;
     const groupOn =
       matchValues.length > 0 && matchValues.every((v) => cur.has(v));
     let next: Set<string>;
@@ -455,7 +485,7 @@ function ColumnFilterDropdown<T>({
       for (const v of matchValues) next.delete(v);
       // Removing the last active group returns to "show all" (no filter),
       // never "show nothing".
-      if (next.size === 0) next = new Set(uniqueValues.map(([v]) => v));
+      if (next.size === 0) next = new Set(unique.map(([v]) => v));
     } else {
       // Group is off — add it.
       next = new Set(cur);
@@ -856,10 +886,11 @@ function ColumnFilterDropdown<T>({
           )}
           {/* Actions — `type="button"` everywhere to short-circuit any
               accidental form-submit behaviour, and OK reads from
-              checkedRef so it's never staler than the latest checkbox
-              click. Wider hit-targets (px-4 py-1.5) so the OK and
-              Close don't overlap on touch (Wei Siang reported tapping
-              the seam between them and missing OK). */}
+              checkedRef + uniqueValuesRef so it's never staler than the
+              latest checkbox click OR a poll-induced data refresh.
+              Wider hit-targets (px-4 py-1.5) so the OK and Close don't
+              overlap on touch (Wei Siang reported tapping the seam
+              between them and missing OK). */}
           <div className="flex items-center justify-between border-t border-[#E2DDD8] px-2 py-1.5">
             <button
               type="button"
@@ -873,8 +904,24 @@ function ColumnFilterDropdown<T>({
                 type="button"
                 className="rounded border border-[#6B5C32] bg-[#6B5C32] px-4 py-1.5 text-[11px] font-semibold text-white hover:bg-[#4D4224]"
                 onClick={() => {
+                  // Read BOTH the checked set and the unique-values count
+                  // from refs (synced every render). Reading
+                  // `uniqueValues.length` from closure was the 2026-05-24
+                  // regression: a passive poll between checkbox-toggle and
+                  // OK left the closure with a stale length, and an
+                  // accidental size match made the handler treat a
+                  // narrowed selection as "all checked" → wiped the
+                  // filter on the first click. See checkedRef comment.
                   const latestChecked = checkedRef.current;
-                  const latestAllChecked = latestChecked.size === uniqueValues.length;
+                  const latestUnique = uniqueValuesRef.current;
+                  // "All checked" requires BOTH equal size AND every
+                  // unique value being present — a same-size mismatch
+                  // (e.g. one value swapped after a poll) used to fall
+                  // through the size-only check and incorrectly clear
+                  // the filter. Belt-and-braces.
+                  const latestAllChecked =
+                    latestChecked.size === latestUnique.length &&
+                    latestUnique.every(([v]) => latestChecked.has(v));
                   if (latestAllChecked) onApplyValues(null); // no filter
                   else onApplyValues(new Set(latestChecked));
                   onClose();

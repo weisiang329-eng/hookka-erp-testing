@@ -163,17 +163,18 @@ type ProductionOrderLike = {
 // Same WIP code = one row, qty summed. Double-click to see all SO IDs.
 type WIPSource = {
   poCode: string;
+  // The producer (positive row) or trigger (negative stub) JC id. Used
+  // by the WIP detail dialog's "Job Cards" table — replaces the legacy
+  // `members[]` mirror that duplicated poCode/quantity/wipType
+  // alongside this id.
+  jobCardId: string;
   quantity: number;  // component pieces (= JC wipQty; may include BOM multiplier)
-  poQty: number;     // PO.quantity — canonical "set count" driver for sofa merge;
-                     // see mergeSofaWIPSets for how it maps to the set-level Qty
-                     // column that mirrors Production Fab Cut's "1 set" display.
   completedDate: string;
   ageDays: number;
-  // Carried on each source so the sofa-set merge can compute
-  // (salesOrderNo, fabricCode) keys without re-fetching the PO.
+  // Carried on each source so the sofa-set merge (now dormant in the
+  // backend) can compute (salesOrderNo, fabricCode) keys without
+  // re-fetching the PO. Still emitted by the live backend response.
   fabricCode: string;
-  baseModel: string;
-  itemCategory: string;
 };
 type WIPItem = {
   id: string;
@@ -187,6 +188,10 @@ type WIPItem = {
   // there's no producer JC yet — the UI renders "—" for null.
   oldestAgeDays: number | null;
   sources: WIPSource[]; // individual POs for detail view
+  // True when every contributing source PO is in category SOFA. The
+  // backend computes this once at row build time so the merged-set view
+  // (currently dormant) doesn't have to walk `sources[]` to derive it.
+  isAllSofa: boolean;
   // Estimated cost (display only — WIP has no real FIFO batch).
   // Material is allocated across the WHOLE PO's minutes: each production
   // minute carries (fullBOM / totalPOMinsPerUnit) sen of material. A WIP
@@ -197,16 +202,6 @@ type WIPItem = {
   // Both 0 on negative rows — UI renders "—" in those cells.
   estUnitCostSen: number;
   estTotalValueSen: number;
-  // Per-JC breakdown (optional — populated for backend-derived rows). Used by
-  // the WIP detail dialog to diagnose qty mismatches between the Production
-  // Sheet and Inventory WIP (e.g. duplicate JCs in the same wipKey vs single
-  // JC with a high wipQty).
-  members?: Array<{
-    poNo: string;
-    jobCardId: string;
-    wipType: string;
-    quantity: number;
-  }>;
 };
 
 // --- Create FG form ---
@@ -353,31 +348,20 @@ type BackendWipRow = {
   category: "SOFA" | "BEDFRAME" | "ACCESSORY";
   completedBy: string;
   relatedProduct: string;
-  setQty: number;
-  pieceQty: number;
   salesOrderNo: string | null;
   fabric: string;
   oldestAgeDays: number | null;
   estUnitCostSen: number;
   estTotalValueSen: number;
-  members: Array<{
-    poNo: string;
-    jobCardId: string;
-    wipType: string;
-    quantity: number;
-  }>;
-  components?: Array<{ wipType: string; qty: number }>;
-  memberItemIds?: string[];
   totalQty: number;
+  isAllSofa: boolean;
   sources: Array<{
     poCode: string;
+    jobCardId: string;
     quantity: number;
-    poQty: number;
     completedDate: string;
     ageDays: number;
     fabricCode: string;
-    baseModel: string;
-    itemCategory: string;
   }>;
 };
 
@@ -1409,7 +1393,7 @@ export default function InventoryPage() {
           sources: r.sources,
           estUnitCostSen: r.estUnitCostSen,
           estTotalValueSen: r.estTotalValueSen,
-          members: r.members,
+          isAllSofa: r.isAllSofa,
         })),
     [backendWipRows],
   );
@@ -1455,46 +1439,23 @@ export default function InventoryPage() {
     return map;
   }, [wipItems]);
 
-  const _sofaSetRows = useMemo<SofaSetRow[]>(() => {
-    const q = wipSearch.trim().toLowerCase();
-    const matchSearch = (row: BackendWipRow): boolean => {
-      if (!q) return true;
-      if (row.wipCode.toLowerCase().includes(q)) return true;
-      if ((row.relatedProduct || "").toLowerCase().includes(q)) return true;
-      if ((row.fabric || "").toLowerCase().includes(q)) return true;
-      if ((row.salesOrderNo || "").toLowerCase().includes(q)) return true;
-      if (row.members.some((m) => m.poNo.toLowerCase().includes(q))) return true;
-      return false;
-    };
-    return backendWipRows
-      .filter((r) => r.wipType === "SET" && matchSearch(r))
-      .map<SofaSetRow>((r) => {
-        const members = (r.memberItemIds || [])
-          .map((id) => wipItemsById.get(id))
-          .filter((w): w is WIPItem => !!w);
-        return {
-          id: r.id,
-          setLabel: r.wipCode,
-          salesOrderNo: r.salesOrderNo || "",
-          fabric: r.fabric,
-          totalQty: r.setQty,
-          oldestAgeDays: r.oldestAgeDays,
-          estTotalValueSen: r.estTotalValueSen,
-          components: r.components || [],
-          members,
-        };
-      })
-      .sort((a, b) => (b.oldestAgeDays ?? -1) - (a.oldestAgeDays ?? -1));
-  }, [backendWipRows, wipSearch, wipItemsById]);
+  // Merged sofa-set view memo. Backend stopped emitting SET rows in
+  // Phase 4.5 (defensive filter at line ~1399 drops any stragglers) and
+  // the slim-payload pass dropped setQty / components / memberItemIds /
+  // members from the wire — so this memo can only ever resolve to an
+  // empty array now. Kept as a stable empty-array reference so anything
+  // that might re-wire the merged view in the future has a hook to grab.
+  const _sofaSetRows = useMemo<SofaSetRow[]>(() => [], []);
+  void _sofaSetRows;
+  void wipItemsById;
 
   // Non-sofa WIPs shown alongside sofa set rows when merged-view is on.
   // Per-component SOFA rows are filtered out here so they only appear when
   // the user switches to PER_COMPONENT view (otherwise they'd double-count
-  // against the merged SET rows).
+  // against the merged SET rows). Uses the row-level `isAllSofa` flag —
+  // see slim-payload commit removing `sources[].itemCategory`.
   const _filteredWIPNonSofa = useMemo(
-    () => filteredWIP.filter(
-      (w) => !(w.sources.length > 0 && w.sources.every((s) => s.itemCategory === "SOFA")),
-    ),
+    () => filteredWIP.filter((w) => !w.isAllSofa),
     [filteredWIP],
   );
 
@@ -2619,12 +2580,18 @@ export default function InventoryPage() {
               {/* Job-Card-level breakdown — diagnoses qty mismatches between
                   Production Sheet and Inventory WIP. If two rows show the
                   same wipType for one PO it's duplicate JCs in the wipKey;
-                  one row with a high quantity means wipQty is set on the JC. */}
-              {wipDetail.members && wipDetail.members.length > 0 && (
+                  one row with a high quantity means wipQty is set on the JC.
+
+                  Slim-payload note: previously read a separate `members[]`
+                  array that was a 4-field mirror of `sources[]`. The
+                  backend now emits `jobCardId` directly on each source,
+                  so the table renders straight from `sources` — wipType
+                  is row-level (constant across all JCs of the row). */}
+              {wipDetail.sources.length > 0 && (
                 <div className="mt-4">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-sm font-medium text-[#374151]">Job Cards</span>
-                    <span className="text-xs text-[#6B7280]">{wipDetail.members.length} JC(s)</span>
+                    <span className="text-xs text-[#6B7280]">{wipDetail.sources.length} JC(s)</span>
                   </div>
                   <table className="w-full text-sm">
                     <thead>
@@ -2636,12 +2603,12 @@ export default function InventoryPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {wipDetail.members.map((m, i) => (
+                      {wipDetail.sources.map((s, i) => (
                         <tr key={i} className="border-b border-[#F0ECE9]">
-                          <td className="py-2 doc-number text-xs" title={m.jobCardId}>{m.jobCardId.slice(0, 8)}</td>
-                          <td className="py-2 doc-number text-xs">{m.poNo}</td>
-                          <td className="py-2 text-xs text-[#374151]">{m.wipType}</td>
-                          <td className="py-2 text-right">{m.quantity}</td>
+                          <td className="py-2 doc-number text-xs" title={s.jobCardId}>{s.jobCardId.slice(0, 8)}</td>
+                          <td className="py-2 doc-number text-xs">{s.poCode}</td>
+                          <td className="py-2 text-xs text-[#374151]">{wipDetail.wipType}</td>
+                          <td className="py-2 text-right">{s.quantity}</td>
                         </tr>
                       ))}
                     </tbody>

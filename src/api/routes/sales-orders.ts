@@ -83,6 +83,12 @@ export type SalesOrderRow = {
   // Base64-encoded PNG of the original customer PO page(s) when this SO was
   // created from a Scan PO upload. Nullable — populated only by PO_SCAN_CLAUDE.
   customerPOImageB64: string | null;
+  // Service-Order flag — 0134. TRUE marks this SO as an aftersales Service
+  // Order (companySOId prefix `SV-...`, hidden from the normal Sales Orders
+  // list, excluded from revenue later). FALSE = normal customer SO. The
+  // column is NOT NULL DEFAULT FALSE in the DB; the type is nullable here
+  // so old serialized rows / partial selects don't choke on absent values.
+  isServiceOrder: boolean | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -263,6 +269,10 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     overdue: row.overdue ?? "PENDING",
     notes: row.notes ?? "",
     customerPOImageB64: row.customerPOImageB64 ?? null,
+    // Service-order flag — 0134. Default FALSE when missing because the
+    // column default is FALSE; only rows explicitly created via the new
+    // Service Order module flip this to true.
+    isServiceOrder: row.isServiceOrder === true,
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -471,10 +481,21 @@ export async function createProductionOrdersForSO(
 
 // Generate next SO number by scanning existing companySOId values for the
 // current YYMM prefix and incrementing the max sequence. Falls back to 001.
-async function generateCompanySOId(db: D1Database): Promise<string> {
+//
+// 0134 — Service Orders use a distinct `SV-YYMM-NNN` prefix so the operator
+// can tell them apart in any list / PO downstream that displays the SO id
+// (production orders, delivery orders, invoices). The SV sequence is
+// scanned INDEPENDENTLY of the SO sequence — first SV of the month is
+// always SV-YYMM-001 even when SO-YYMM-007 already exists. (Avoid
+// colliding with the older service_orders module's `SVC-` prefix, which
+// is its own separate id space.)
+async function generateCompanySOId(
+  db: D1Database,
+  isServiceOrder = false,
+): Promise<string> {
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const prefix = `SO-${yymm}-`;
+  const prefix = isServiceOrder ? `SV-${yymm}-` : `SO-${yymm}-`;
   const res = await db
     .prepare(
       "SELECT companySOId FROM sales_orders WHERE companySOId LIKE ? ORDER BY companySOId DESC LIMIT 1",
@@ -799,6 +820,27 @@ app.get("/", async (c) => {
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
   const includeArchive = c.req.query("includeArchive") === "true";
+  // 0134 — Service Order vs Sales Order filter.
+  //
+  // ?isServiceOrder=true  → only Service Orders (the new /service-order list)
+  // ?isServiceOrder=false → only normal Sales Orders (the default — the
+  //                         legacy /sales list MUST never show service
+  //                         orders, so when the query param is absent we
+  //                         force it to false too).
+  // ?isServiceOrder=all   → both (rare — admin/reporting only).
+  //
+  // The filter is added to the WHERE clause via an extra AND clause built
+  // here and threaded into withOrgScope's extra-where slot. Snapshot
+  // cache is bypassed whenever the filter is anything other than the
+  // default (false) so we don't end up serving a service-orders list out
+  // of the normal SO cache key.
+  const isServiceOrderParam = c.req.query("isServiceOrder");
+  const serviceOrderFilter: "true" | "false" | "all" =
+    isServiceOrderParam === "true"
+      ? "true"
+      : isServiceOrderParam === "all"
+        ? "all"
+        : "false";
 
   // Union fragment used whenever includeArchive is on. `SELECT * FROM
   // sales_orders` is padded with a literal '' for archivedAt so the
@@ -819,9 +861,16 @@ app.get("/", async (c) => {
   // Tenant scope — first bind param on every query against soSourceSql.
   // Items are scoped transitively via salesOrderId IN (...) so they don't
   // need their own orgId filter (the archive table doesn't have orgId yet).
+  const extraWhere =
+    serviceOrderFilter === "true"
+      ? "is_service_order = TRUE"
+      : serviceOrderFilter === "false"
+        ? "(is_service_order = FALSE OR is_service_order IS NULL)"
+        : "";
   const { whereSql: orgWhere, params: orgParams } = withOrgScope(
     c,
     "sales_orders",
+    extraWhere,
   );
 
   if (!paginate) {
@@ -858,8 +907,12 @@ app.get("/", async (c) => {
 
     // The archive variant (?includeArchive=true) unions in an extra table
     // and is rarely requested — skip the cache for it so the snapshot row
-    // only ever holds the canonical (non-archive) list.
-    if (includeArchive) {
+    // only ever holds the canonical (non-archive) list. Service-order
+    // filtered requests also bypass the cache because the snapshot row
+    // holds the unfiltered "normal SOs only" list — if a SV-filtered
+    // payload landed in it, the next /sales fetch would serve service
+    // orders.
+    if (includeArchive || serviceOrderFilter !== "false") {
       return c.json(await computeFullList());
     }
 
@@ -1711,7 +1764,13 @@ app.post("/", async (c) => {
 
     const subtotalSen = items.reduce((sum, i) => sum + i.lineTotalSen, 0);
     const now = new Date().toISOString();
-    const companySOId = await generateCompanySOId(c.var.DB);
+    // 0134 — Service-Order flag. When true, pick the `SV-YYMM-NNN` id
+    // prefix instead of `SO-YYMM-NNN` and persist is_service_order = TRUE
+    // so the new SO lands on the Service Orders list (and stays out of
+    // the regular Sales Orders list, which filters
+    // ?isServiceOrder=false by default).
+    const isServiceOrder = body.isServiceOrder === true;
+    const companySOId = await generateCompanySOId(c.var.DB, isServiceOrder);
     const soId = genSoId();
     const today = now.split("T")[0];
 
@@ -1763,8 +1822,8 @@ app.post("/", async (c) => {
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
            subtotalSen, totalSen, status, overdue, notes,
-           customerPOImageB64, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           customerPOImageB64, is_service_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -1778,7 +1837,8 @@ app.post("/", async (c) => {
         customerState,
         chosenHub?.id ?? null,
         chosenHub?.shortName ?? null,
-        body.companySO ?? `Sales Order ${companySOId.split("-").pop()}`,
+        body.companySO ??
+          `${isServiceOrder ? "Service Order" : "Sales Order"} ${companySOId.split("-").pop()}`,
         companySOId,
         body.companySODate ?? today,
         body.customerDeliveryDate ?? "",
@@ -1790,6 +1850,7 @@ app.post("/", async (c) => {
         "PENDING",
         body.notes ?? "",
         customerPOImageB64,
+        isServiceOrder,
         now,
         now,
       ),
@@ -2581,6 +2642,13 @@ app.put("/:id", async (c) => {
     }
 
     // --- Merge scalar fields ---
+    // 0134 — isServiceOrder is allowed in the PUT body but rarely changes
+    // (the only legitimate reason is a backfill / admin correction). When
+    // absent we preserve whatever the row already has.
+    const mergedIsServiceOrder: boolean =
+      typeof body.isServiceOrder === "boolean"
+        ? body.isServiceOrder
+        : existing.isServiceOrder === true;
     const merged = {
       customerPO: body.customerPO ?? existing.customerPO ?? "",
       customerPOId: body.customerPOId ?? existing.customerPOId ?? "",
@@ -2891,7 +2959,7 @@ app.put("/:id", async (c) => {
            hubId = ?, hubName = ?, companySO = ?, companySODate = ?,
            customerDeliveryDate = ?, hookkaExpectedDD = ?, hookkaDeliveryOrder = ?,
            subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
-           notes = ?,
+           notes = ?, is_service_order = ?,
            updated_at = ?
          WHERE id = ?`,
       ).bind(
@@ -2916,6 +2984,7 @@ app.put("/:id", async (c) => {
         newStatus,
         merged.overdue,
         merged.notes,
+        mergedIsServiceOrder,
         now,
         id,
       ),
@@ -3235,6 +3304,321 @@ app.delete("/:id", async (c) => {
   }
   await c.var.DB.prepare("DELETE FROM sales_orders WHERE id = ?").bind(id).run();
   return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sales-orders/copy-for-service-order — 0134.
+//
+// Returns a DRAFT Service Order payload built from an existing Sales Order
+// or Consignment Order. The frontend then submits this payload back to
+// POST /api/sales-orders (with isServiceOrder: true) to actually create
+// the new SO row.
+//
+// Body:
+//   {
+//     sourceType: "SO" | "CO",
+//     sourceId: "<uuid>",
+//     lineItemIds: ["<line-uuid>", ...]  // OPTIONAL — copy ALL lines if absent
+//   }
+//
+// Response (200):
+//   {
+//     success: true,
+//     data: {
+//       customerId, hubId, hubName, customerName, customerState,
+//       items: [...],            // unit / base / divan / leg / special prices all reset to 0
+//       sourceType, sourceId, sourceNo,
+//       customerPO, customerPOId, // copied for reference only
+//     }
+//   }
+//
+// 4xx on bad sourceType, missing source row, or empty line-item match.
+//
+// Service-order policy:
+//   * prices reset to 0 — operator MUST edit each line before save
+//   * dates default to today (frontend supplies)
+//   * customer + hub copied verbatim
+//   * maintenance options (divan/leg/gap/special/customSpecials) copied
+//     so all the wearings (Fabricolor / Saffa / Bigfoot / etc.) survive
+// ---------------------------------------------------------------------------
+app.post("/copy-for-service-order", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const sourceType: string =
+      typeof body.sourceType === "string" ? body.sourceType.toUpperCase() : "";
+    const sourceId: string =
+      typeof body.sourceId === "string" ? body.sourceId : "";
+    const lineItemIds: string[] = Array.isArray(body.lineItemIds)
+      ? body.lineItemIds.filter((x: unknown): x is string => typeof x === "string")
+      : [];
+
+    if (sourceType !== "SO" && sourceType !== "CO") {
+      return c.json(
+        { success: false, error: "sourceType must be 'SO' or 'CO'" },
+        400,
+      );
+    }
+    if (!sourceId) {
+      return c.json({ success: false, error: "sourceId required" }, 400);
+    }
+
+    // Pull source order + lines. SO and CO have parallel schemas but
+    // different table names + a couple of column-name differences (no
+    // customSpecials on the CO side, no customerPOImageB64). Branch once.
+    let customer:
+      | {
+          customerId: string;
+          customerName: string;
+          customerState: string;
+          hubId: string | null;
+          hubName: string;
+          customerPO: string;
+          customerPOId: string;
+          sourceNo: string;
+        }
+      | null = null;
+    type SrcItem = {
+      id: string;
+      productId: string;
+      productCode: string;
+      productName: string;
+      itemCategory: string;
+      sizeCode: string;
+      sizeLabel: string;
+      fabricCode: string;
+      quantity: number;
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+      specialOrder: string;
+      notes: string;
+      customSpecials: Array<{ description: string; surchargeSen: number }>;
+    };
+    let items: SrcItem[] = [];
+
+    if (sourceType === "SO") {
+      const so = await c.var.DB
+        .prepare("SELECT * FROM sales_orders WHERE id = ?")
+        .bind(sourceId)
+        .first<SalesOrderRow>();
+      if (!so) {
+        return c.json(
+          { success: false, error: "Source sales order not found" },
+          404,
+        );
+      }
+      const itemRes = await c.var.DB
+        .prepare("SELECT * FROM sales_order_items WHERE salesOrderId = ? ORDER BY lineNo ASC")
+        .bind(sourceId)
+        .all<SalesOrderItemRow>();
+      const all = itemRes.results ?? [];
+      const filtered =
+        lineItemIds.length > 0
+          ? all.filter((it) => lineItemIds.includes(it.id))
+          : all;
+      if (filtered.length === 0) {
+        return c.json(
+          {
+            success: false,
+            error: "No matching line items on the source sales order",
+          },
+          400,
+        );
+      }
+      customer = {
+        customerId: so.customerId,
+        customerName: so.customerName,
+        customerState: so.customerState ?? "",
+        hubId: so.hubId,
+        hubName: so.hubName ?? "",
+        customerPO: so.customerPO ?? "",
+        customerPOId: so.customerPOId ?? "",
+        sourceNo: so.companySOId ?? "",
+      };
+      items = filtered.map((it) => ({
+        id: it.id,
+        productId: it.productId ?? "",
+        productCode: it.productCode ?? "",
+        productName: it.productName ?? "",
+        itemCategory: it.itemCategory ?? "BEDFRAME",
+        sizeCode: it.sizeCode ?? "",
+        sizeLabel: it.sizeLabel ?? "",
+        fabricCode: it.fabricCode ?? "",
+        quantity: it.quantity,
+        gapInches: it.gapInches,
+        divanHeightInches: it.divanHeightInches,
+        legHeightInches: it.legHeightInches,
+        specialOrder: it.specialOrder ?? "",
+        notes: it.notes ?? "",
+        customSpecials: parseCustomSpecials(it.customSpecials),
+      }));
+    } else {
+      // CO branch — separate tables, slightly different shape.
+      const co = await c.var.DB
+        .prepare("SELECT * FROM consignment_orders WHERE id = ?")
+        .bind(sourceId)
+        .first<{
+          id: string;
+          customerId: string;
+          customerName: string;
+          customerState: string | null;
+          hubId: string | null;
+          hubName: string | null;
+          companyCOId: string | null;
+          customerCO: string | null;
+          customerCOId: string | null;
+        }>();
+      if (!co) {
+        return c.json(
+          { success: false, error: "Source consignment order not found" },
+          404,
+        );
+      }
+      const itemRes = await c.var.DB
+        .prepare("SELECT * FROM consignment_order_items WHERE consignmentOrderId = ? ORDER BY lineNo ASC")
+        .bind(sourceId)
+        .all<{
+          id: string;
+          productId: string | null;
+          productCode: string | null;
+          productName: string | null;
+          itemCategory: string | null;
+          sizeCode: string | null;
+          sizeLabel: string | null;
+          fabricCode: string | null;
+          quantity: number;
+          gapInches: number | null;
+          divanHeightInches: number | null;
+          legHeightInches: number | null;
+          specialOrder: string | null;
+          notes: string | null;
+        }>();
+      const all = itemRes.results ?? [];
+      const filtered =
+        lineItemIds.length > 0
+          ? all.filter((it) => lineItemIds.includes(it.id))
+          : all;
+      if (filtered.length === 0) {
+        return c.json(
+          {
+            success: false,
+            error: "No matching line items on the source consignment order",
+          },
+          400,
+        );
+      }
+      customer = {
+        customerId: co.customerId,
+        customerName: co.customerName,
+        customerState: co.customerState ?? "",
+        hubId: co.hubId,
+        hubName: co.hubName ?? "",
+        customerPO: co.customerCO ?? "",
+        customerPOId: co.customerCOId ?? "",
+        sourceNo: co.companyCOId ?? "",
+      };
+      items = filtered.map((it) => ({
+        id: it.id,
+        productId: it.productId ?? "",
+        productCode: it.productCode ?? "",
+        productName: it.productName ?? "",
+        itemCategory: it.itemCategory ?? "BEDFRAME",
+        sizeCode: it.sizeCode ?? "",
+        sizeLabel: it.sizeLabel ?? "",
+        fabricCode: it.fabricCode ?? "",
+        quantity: it.quantity,
+        gapInches: it.gapInches,
+        divanHeightInches: it.divanHeightInches,
+        legHeightInches: it.legHeightInches,
+        specialOrder: it.specialOrder ?? "",
+        notes: it.notes ?? "",
+        customSpecials: [],
+      }));
+    }
+
+    if (!customer) {
+      return c.json(
+        { success: false, error: "Could not resolve customer from source" },
+        500,
+      );
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Build the draft payload. ALL prices reset to 0 — the operator MUST
+    // edit each line's unit price before saving. This is the headline
+    // policy for Service Orders: no silent inheritance of the customer's
+    // price book, no implicit free-of-charge.
+    const draftPayload = {
+      customerId: customer.customerId,
+      customerName: customer.customerName,
+      customerState: customer.customerState,
+      hubId: customer.hubId,
+      hubName: customer.hubName,
+      customerPO: customer.customerPO,
+      customerPOId: customer.customerPOId,
+      customerPODate: "",
+      customerSO: "",
+      customerSOId: "",
+      reference: customer.sourceNo ? `Copied from ${sourceType} ${customer.sourceNo}` : "",
+      companySODate: today,
+      customerDeliveryDate: today,
+      hookkaExpectedDD: "",
+      hookkaDeliveryOrder: "",
+      notes: "",
+      isServiceOrder: true,
+      items: items.map((it, idx) => ({
+        lineNo: idx + 1,
+        lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
+        productId: it.productId,
+        productCode: it.productCode,
+        productName: it.productName,
+        itemCategory: it.itemCategory,
+        sizeCode: it.sizeCode,
+        sizeLabel: it.sizeLabel,
+        fabricCode: it.fabricCode,
+        quantity: it.quantity,
+        gapInches: it.gapInches,
+        divanHeightInches: it.divanHeightInches,
+        // Maintenance prices ALL reset to 0 — operator edits per line.
+        divanPriceSen: 0,
+        legHeightInches: it.legHeightInches,
+        legPriceSen: 0,
+        specialOrder: it.specialOrder,
+        specialOrderPriceSen: 0,
+        // Carry the descriptions through but zero out the surcharge sen —
+        // the line items themselves come over (Fabricolor / Saffa /
+        // Bigfoot etc. are encoded in `specialOrder` text + customSpecials
+        // entries) but the operator must price them fresh for the
+        // service order.
+        customSpecials: it.customSpecials.map((cs) => ({
+          description: cs.description,
+          surchargeSen: 0,
+        })),
+        basePriceSen: 0,
+        unitPriceSen: 0,
+        lineTotalSen: 0,
+        notes: it.notes,
+      })),
+      sourceType,
+      sourceId,
+      sourceNo: customer.sourceNo,
+    };
+
+    return c.json({ success: true, data: draftPayload });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/sales-orders/copy-for-service-order] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json(
+      { success: false, error: msg || "Internal error building service-order draft" },
+      500,
+    );
+  }
 });
 
 export default app;

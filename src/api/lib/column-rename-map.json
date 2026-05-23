@@ -417,6 +417,7 @@
   "isProduction": "is_production",
   "isRead": "is_read",
   "isReconciled": "is_reconciled",
+  "isServiceOrder": "is_service_order",
   "issueDescription": "issue_description",
   "issuePhotos": "issue_photos",
   "issueSummary": "issue_summary",

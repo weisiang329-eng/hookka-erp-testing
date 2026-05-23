@@ -131,7 +131,7 @@ export default function ServiceOrdersListPage() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-[#1F1D1B]">Service Orders</h1>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Repair Orders</h1>
           <p className="text-xs text-[#6B7280]">
             Service Orders — customer-reported defects on shipped Sales / Consignment
             orders. Three resolution modes: REPRODUCE (new PO), STOCK_SWAP

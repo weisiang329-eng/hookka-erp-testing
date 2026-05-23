@@ -1,6 +1,7 @@
 import { useState, useEffect, Suspense, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -204,6 +205,14 @@ function CreateSalesOrderPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  // 0134 — flips this create form between regular Sales Order mode
+  // (/sales/create) and Service Order mode (/service-order/create). In
+  // Service Order mode: page header copy changes, POST body carries
+  // isServiceOrder: true, navigates land on /service-order/:id, and the
+  // copy-from-SO/CO button is rendered up top.
+  const mode = useSOMode();
+  const basePath = soBasePath(mode);
+  const isServiceOrderMode = mode === "service-order";
   // Catalog endpoints — opt into focus revalidation so adding a new product /
   // fabric / customer in Maintenance becomes visible without a hard refresh.
   // Cross-tab BroadcastChannel + same-tab invalidate-listener (via cached-fetch)
@@ -381,6 +390,14 @@ function CreateSalesOrderPage() {
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([makeEmptyLine()]);
+
+  // 0134 — Copy-from modal state (Service Order mode only). Wei Siang
+  // 2026-05-23: Phase 1 ships with a SIMPLIFIED modal — the operator
+  // pastes a source SO/CO number, the form fetches the matching order,
+  // and ALL of its line items are imported (prices zeroed). A future
+  // iteration will add the multi-select line-picker / search UI per the
+  // original spec; see TODO at the bottom of CopyFromSourceModal below.
+  const [copyFromOpen, setCopyFromOpen] = useState(false);
 
   // Mark this tab as dirty (un-evictable from the 10-tab cap) the moment
   // the user has touched the form. Heuristic: any of the header fields
@@ -1527,6 +1544,10 @@ function CreateSalesOrderPage() {
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
           items: itemsForServer,
           status,
+          // 0134 — flips the new SO into a Service Order (SV-YYMM-NNN
+          // prefix + is_service_order = TRUE) when the operator came
+          // from /service-order/create.
+          isServiceOrder: isServiceOrderMode,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string; companySOId?: string } };
@@ -1574,7 +1595,7 @@ function CreateSalesOrderPage() {
           // a draft and let them retry confirm from the list/detail page.
           const reason = confirmData.error || `HTTP ${confirmRes.status}`;
           toast.warning(`Order saved as draft - confirm manually from list. Reason: ${reason}`);
-          navigate(`/sales/${newId}`);
+          navigate(`${basePath}/${newId}`);
           return;
         }
         invalidateCachePrefix("/api/sales-orders");
@@ -1588,7 +1609,7 @@ function CreateSalesOrderPage() {
             ? `Order created and in production: ${newSoNumber}`
             : "Order created and in production",
         );
-        navigate(`/sales/${newId}`);
+        navigate(`${basePath}/${newId}`);
         return;
       }
 
@@ -1600,7 +1621,7 @@ function CreateSalesOrderPage() {
         toast.success(
           newSoNumber ? `Draft saved: ${newSoNumber}` : "Draft saved",
         );
-        navigate(`/sales/${newId}`);
+        navigate(`${basePath}/${newId}`);
       }
     } catch (e) {
       setSaving(false);
@@ -1656,7 +1677,7 @@ function CreateSalesOrderPage() {
                 onClick={() => {
                   const soId = bomError.soId;
                   setBomError({ open: false, incompleteProducts: [], soId: null });
-                  if (soId) navigate(`/sales/${soId}`);
+                  if (soId) navigate(`${basePath}/${soId}`);
                 }}
               >
                 Open SO as Draft
@@ -1688,14 +1709,36 @@ function CreateSalesOrderPage() {
       )}
 
       <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate("/sales")}>
+        <Button variant="ghost" size="icon" onClick={() => navigate(basePath)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-xl font-bold text-[#1F1D1B]">{isClone ? "Clone Sales Order" : "New Sales Order"}</h1>
-          <p className="text-xs text-[#6B7280]">{isClone ? "Create a new order based on an existing one" : "Create a new sales order for a customer"}</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">
+            {isClone
+              ? `Clone ${soSingularNoun(mode)}`
+              : `New ${soSingularNoun(mode)}`}
+          </h1>
+          <p className="text-xs text-[#6B7280]">
+            {isServiceOrderMode
+              ? "Aftersales order — copy lines from an existing Sales / Consignment Order, then edit each line's price (defaults to 0)."
+              : isClone
+                ? "Create a new order based on an existing one"
+                : "Create a new sales order for a customer"}
+          </p>
         </div>
-        <Button variant="outline" onClick={() => navigate("/sales")}>Cancel</Button>
+        {/* Copy-from button — Service Order mode only. Opens a modal that
+            lets the operator pick a source SO/CO and a subset of its
+            lines, then fills this form via POST /copy-for-service-order. */}
+        {isServiceOrderMode && (
+          <Button
+            variant="outline"
+            onClick={() => setCopyFromOpen(true)}
+            disabled={saving}
+          >
+            Copy from SO/CO
+          </Button>
+        )}
+        <Button variant="outline" onClick={() => navigate(basePath)}>Cancel</Button>
         <Button
           variant="outline"
           onClick={() => handleSubmit("DRAFT")}
@@ -1890,6 +1933,268 @@ function CreateSalesOrderPage() {
           ))}
         </CardContent>
       </Card>
+
+      {/* 0134 — Copy-from-SO/CO modal (Service Order mode only). */}
+      {copyFromOpen && isServiceOrderMode && (
+        <CopyFromSourceModal
+          onClose={() => setCopyFromOpen(false)}
+          onCopied={(draft) => {
+            // Hydrate the form from the draft payload returned by
+            // POST /api/sales-orders/copy-for-service-order. We deliberately
+            // skip the `companySODate` / `customerDeliveryDate` overrides if
+            // the operator already typed something in — only blank fields
+            // get the today-default from the draft.
+            setCustomerId(draft.customerId || "");
+            setCustomerPOId(draft.customerPOId || "");
+            setReference(draft.reference || "");
+            if (draft.hubId) setDeliveryHubId(draft.hubId);
+            if (!companySODate) setCompanySODate(draft.companySODate || "");
+            if (!customerDeliveryDate)
+              setCustomerDeliveryDate(draft.customerDeliveryDate || "");
+            // Build LineItems from the draft's items. Prices are all 0
+            // per spec — operator MUST edit each line before save.
+            const built: LineItem[] = (draft.items || []).map((it) => ({
+              ...EMPTY_LINE,
+              _uid: crypto.randomUUID(),
+              productId: it.productId || "",
+              productCode: it.productCode || "",
+              productName: it.productName || "",
+              itemCategory: it.itemCategory || "BEDFRAME",
+              baseModel: "",
+              sizeCode: it.sizeCode || "",
+              sizeLabel: it.sizeLabel || "",
+              fabricCode: it.fabricCode || "",
+              quantity: Number(it.quantity) || 1,
+              basePriceSen: 0,
+              seatHeight: "",
+              selectedModules: [],
+              gapInches: it.gapInches ?? null,
+              divanHeightInches: it.divanHeightInches ?? null,
+              divanPriceSen: 0,
+              legHeightInches: it.legHeightInches ?? null,
+              legPriceSen: 0,
+              totalHeightPriceSen: 0,
+              specialOrders: it.specialOrder
+                ? String(it.specialOrder)
+                    .split(/[;,]/)
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                : [],
+              specialOrderPriceSen: 0,
+              specialOrder: it.specialOrder || "",
+              customSpecials: Array.isArray(it.customSpecials)
+                ? it.customSpecials.map((cs) => ({
+                    description: cs.description,
+                    surchargeSen: 0,
+                  }))
+                : [],
+              notes: it.notes || "",
+            }));
+            if (built.length > 0) setItems(built);
+            setCopyFromOpen(false);
+            toast.success(
+              `Copied ${built.length} line(s) from ${draft.sourceType} ${draft.sourceNo}. Set prices before saving.`,
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Copy-from Source Modal (0134 Service Order — Phase 1 simplified) ────
+//
+// The operator types the source SO/CO id (e.g. SO-2605-014 or CO-2605-003)
+// and the modal calls POST /api/sales-orders/copy-for-service-order. Phase 1
+// imports ALL line items — Phase 2 will add a search + multi-select picker
+// per the original Wei Siang spec (see TODO at end). The Phase 1 reduced
+// scope ships the rest of the module today.
+//
+// On success the parent's onCopied receives the draft payload (customer,
+// hub, lines, dates, prices reset to 0).
+type CopyDraftItem = {
+  productId?: string;
+  productCode?: string;
+  productName?: string;
+  itemCategory?: string;
+  sizeCode?: string;
+  sizeLabel?: string;
+  fabricCode?: string;
+  quantity: number;
+  gapInches?: number | null;
+  divanHeightInches?: number | null;
+  legHeightInches?: number | null;
+  specialOrder?: string;
+  notes?: string;
+  customSpecials?: Array<{ description: string; surchargeSen: number }>;
+};
+type CopyDraft = {
+  customerId: string;
+  customerName?: string;
+  customerState?: string;
+  hubId: string | null;
+  hubName?: string;
+  customerPO?: string;
+  customerPOId?: string;
+  reference?: string;
+  companySODate?: string;
+  customerDeliveryDate?: string;
+  items: CopyDraftItem[];
+  sourceType: "SO" | "CO";
+  sourceId: string;
+  sourceNo: string;
+};
+function CopyFromSourceModal({
+  onClose,
+  onCopied,
+}: {
+  onClose: () => void;
+  onCopied: (draft: CopyDraft) => void;
+}) {
+  const [sourceType, setSourceType] = useState<"SO" | "CO">("SO");
+  const [sourceLookup, setSourceLookup] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleCopy() {
+    if (!sourceLookup.trim()) {
+      setError("Enter a source order number");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      // Resolve the typed company-order-id to the underlying row id.
+      // The copy endpoint takes a row id; the operator types the human
+      // identifier (SO-2605-014 / CO-2605-003) so we look it up first
+      // in the source table.
+      const listUrl =
+        sourceType === "SO"
+          ? `/api/sales-orders?isServiceOrder=all`
+          : `/api/consignment-orders`;
+      const listRes = await fetch(listUrl);
+      const listJson = (await listRes.json()) as {
+        success?: boolean;
+        data?: Array<{ id: string; companySOId?: string; companyCOId?: string }>;
+      };
+      const candidates = listJson.data ?? [];
+      const target = String(sourceLookup).trim().toUpperCase();
+      const match = candidates.find(
+        (r) =>
+          (sourceType === "SO" ? r.companySOId : r.companyCOId)
+            ?.toUpperCase() === target,
+      );
+      if (!match) {
+        setError(`No ${sourceType} found with id ${target}`);
+        setBusy(false);
+        return;
+      }
+      const res = await fetch("/api/sales-orders/copy-for-service-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceType,
+          sourceId: match.id,
+          // Phase 1 — copy ALL line items. Phase 2 will surface a
+          // checkbox picker so the operator can copy a subset.
+          lineItemIds: [],
+        }),
+      });
+      const json = (await res.json()) as {
+        success?: boolean;
+        error?: string;
+        data?: CopyDraft;
+      };
+      if (!res.ok || !json.success || !json.data) {
+        setError(json.error || `HTTP ${res.status}`);
+        setBusy(false);
+        return;
+      }
+      onCopied(json.data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="fixed inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-md mx-4 p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold text-[#1F1D1B]">
+            Copy from Sales / Consignment Order
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[#9CA3AF] hover:text-[#374151]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <p className="text-xs text-[#6B7280]">
+          Enter the source order number (e.g. <span className="font-mono">SO-2605-014</span>{" "}
+          or <span className="font-mono">CO-2605-003</span>). All line items
+          will be copied with prices reset to 0. Edit each line&apos;s price
+          before saving.
+        </p>
+
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setSourceType("SO")}
+            className={`flex-1 py-1.5 text-sm rounded border ${
+              sourceType === "SO"
+                ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                : "border-[#E2DDD8] text-[#5A5550] hover:bg-[#F4EFE3]"
+            }`}
+          >
+            Sales Order
+          </button>
+          <button
+            type="button"
+            onClick={() => setSourceType("CO")}
+            className={`flex-1 py-1.5 text-sm rounded border ${
+              sourceType === "CO"
+                ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                : "border-[#E2DDD8] text-[#5A5550] hover:bg-[#F4EFE3]"
+            }`}
+          >
+            Consignment Order
+          </button>
+        </div>
+
+        <Input
+          autoFocus
+          value={sourceLookup}
+          onChange={(e) => setSourceLookup(e.target.value)}
+          placeholder={
+            sourceType === "SO" ? "SO-YYMM-NNN" : "CO-YYMM-NNN"
+          }
+        />
+
+        {error && (
+          <p className="text-xs text-[#7A2E24]">{error}</p>
+        )}
+
+        {/* TODO Phase 2 — add a search-by-customer-name input and, once a
+            source order is selected, render its line items with checkboxes
+            so the operator can pick a SUBSET (e.g. 3 items, pick 1). The
+            backend endpoint already takes `lineItemIds: string[]` and only
+            copies the matching subset; just pass them in. */}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="sm" onClick={handleCopy} disabled={busy}>
+            {busy ? "Copying…" : "Copy"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

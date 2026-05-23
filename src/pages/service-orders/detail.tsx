@@ -153,7 +153,7 @@ export default function ServiceOrderDetailPage() {
           to="/service-orders"
           className="text-sm text-[#6B5C32] hover:underline inline-flex items-center gap-1"
         >
-          <ArrowLeft className="h-3.5 w-3.5" /> Service Orders
+          <ArrowLeft className="h-3.5 w-3.5" /> Repair Orders
         </Link>
         <p className="text-sm text-[#9CA3AF]">Loading…</p>
       </div>

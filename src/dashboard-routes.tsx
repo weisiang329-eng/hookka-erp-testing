@@ -25,6 +25,14 @@ const SalesCreate = lazy(() => import('./pages/sales/create'))
 const SalesDetail = lazy(() => import('./pages/sales/detail'))
 const SalesEdit = lazy(() => import('./pages/sales/edit'))
 
+// Service Order (0134) — aftersales SO module. Re-exports the Sales pages
+// with route-derived mode switching (see src/lib/so-mode.ts). Same data
+// model, same form, different list filter + ID prefix.
+const ServiceOrder = lazy(() => import('./pages/service-order'))
+const ServiceOrderCreate = lazy(() => import('./pages/service-order/create'))
+const ServiceOrderDetailV2 = lazy(() => import('./pages/service-order/detail'))
+const ServiceOrderEdit = lazy(() => import('./pages/service-order/edit'))
+
 // Production
 // The split-by-dept refactor introduced overview.tsx (/production) and
 // dept.tsx (/production/:deptCode) as thin wrappers over the main
@@ -175,6 +183,15 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/sales/create', element: <S><SalesCreate /></S> },
   { path: '/sales/:id', element: <S><SalesDetail /></S> },
   { path: '/sales/:id/edit', element: <S><SalesEdit /></S> },
+
+  // Service Order (0134) — aftersales SO. Same components as /sales/* but
+  // the route prefix flips `useSOMode()` to "service-order", which switches
+  // the list filter (?isServiceOrder=true), the POST body
+  // (isServiceOrder: true), and every internal navigate(...) base path.
+  { path: '/service-order', element: <S><ServiceOrder /></S> },
+  { path: '/service-order/create', element: <S><ServiceOrderCreate /></S> },
+  { path: '/service-order/:id', element: <S><ServiceOrderDetailV2 /></S> },
+  { path: '/service-order/:id/edit', element: <S><ServiceOrderEdit /></S> },
 
   // Production
   // Order matters: specific literal child paths (scan, fg-scan, the 8 dept

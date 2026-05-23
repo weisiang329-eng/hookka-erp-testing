@@ -3547,6 +3547,20 @@ app.post("/copy-for-service-order", async (c) => {
 
     const today = new Date().toISOString().slice(0, 10);
 
+    // EX-prefix the operator-facing reference fields so the destination
+    // Service Order is visibly tagged as a copy. The original SO/CO id
+    // is preserved verbatim under sourceNo / sourceId so cascade lookups
+    // still work. Customer PO is the operator's external reference; we
+    // prefix it (idempotent — never double-prefix). Customer SO is rarely
+    // set on the source but follow the same rule when present.
+    const exPrefix = (raw: string): string => {
+      const v = (raw ?? "").trim();
+      if (!v) return "";
+      return /^EX[-\s]/i.test(v) ? v : `EX-${v}`;
+    };
+    const prefixedCustomerPO = exPrefix(customer.customerPO);
+    const prefixedCustomerPOId = exPrefix(customer.customerPOId);
+
     // Build the draft payload. ALL prices reset to 0 — the operator MUST
     // edit each line's unit price before saving. This is the headline
     // policy for Service Orders: no silent inheritance of the customer's
@@ -3557,12 +3571,12 @@ app.post("/copy-for-service-order", async (c) => {
       customerState: customer.customerState,
       hubId: customer.hubId,
       hubName: customer.hubName,
-      customerPO: customer.customerPO,
-      customerPOId: customer.customerPOId,
+      customerPO: prefixedCustomerPO,
+      customerPOId: prefixedCustomerPOId,
       customerPODate: "",
       customerSO: "",
       customerSOId: "",
-      reference: customer.sourceNo ? `Copied from ${sourceType} ${customer.sourceNo}` : "",
+      reference: customer.sourceNo ? `EX ${sourceType} ${customer.sourceNo}` : "",
       companySODate: today,
       customerDeliveryDate: today,
       hookkaExpectedDD: "",

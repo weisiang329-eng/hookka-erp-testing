@@ -1929,6 +1929,7 @@ function CreateSalesOrderPage() {
               getLineTotal={getLineTotal}
               getTotalHeight={getTotalHeight}
               maintenanceConfig={maintenanceConfig}
+              isServiceOrderMode={isServiceOrderMode}
             />
           ))}
         </CardContent>
@@ -2002,13 +2003,14 @@ function CreateSalesOrderPage() {
   );
 }
 
-// ─── Copy-from Source Modal (0134 Service Order — Phase 1 simplified) ────
+// ─── Copy-from Source Modal (0134 Service Order — two-step picker) ─────
 //
-// The operator types the source SO/CO id (e.g. SO-2605-014 or CO-2605-003)
-// and the modal calls POST /api/sales-orders/copy-for-service-order. Phase 1
-// imports ALL line items — Phase 2 will add a search + multi-select picker
-// per the original Wei Siang spec (see TODO at end). The Phase 1 reduced
-// scope ships the rest of the module today.
+// Step 1: operator picks SO or CO and types the source order id
+//         (SO-2605-014 / CO-2605-003).
+// Step 2: the modal fetches the source order's line items and renders a
+//         checklist (all checked by default). Operator unchecks the lines
+//         they don't want, then clicks "Copy Selected" — the backend gets
+//         lineItemIds: [picked] and returns a draft with just those lines.
 //
 // On success the parent's onCopied receives the draft payload (customer,
 // hub, lines, dates, prices reset to 0).
@@ -2044,6 +2046,18 @@ type CopyDraft = {
   sourceId: string;
   sourceNo: string;
 };
+// Shape of one source line item the picker shows in Step 2. We only
+// pluck the identifying fields (product / size / fabric / qty) — pricing
+// data is irrelevant here because the backend zeroes all prices anyway.
+type SourceLineRow = {
+  id: string;
+  productCode: string;
+  productName: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+};
+
 function CopyFromSourceModal({
   onClose,
   onCopied,
@@ -2051,12 +2065,21 @@ function CopyFromSourceModal({
   onClose: () => void;
   onCopied: (draft: CopyDraft) => void;
 }) {
+  // Step 1 = "pick source", Step 2 = "pick line items".
+  const [step, setStep] = useState<1 | 2>(1);
   const [sourceType, setSourceType] = useState<"SO" | "CO">("SO");
   const [sourceLookup, setSourceLookup] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function handleCopy() {
+  // Step-2 state: the resolved source row + its line items + checked set.
+  const [resolvedSourceId, setResolvedSourceId] = useState("");
+  const [resolvedSourceNo, setResolvedSourceNo] = useState("");
+  const [sourceLines, setSourceLines] = useState<SourceLineRow[]>([]);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+
+  // Step 1 → Step 2: look up the typed order id, then fetch its lines.
+  async function handleResolveSource() {
     if (!sourceLookup.trim()) {
       setError("Enter a source order number");
       return;
@@ -2064,10 +2087,8 @@ function CopyFromSourceModal({
     setBusy(true);
     setError("");
     try {
-      // Resolve the typed company-order-id to the underlying row id.
-      // The copy endpoint takes a row id; the operator types the human
-      // identifier (SO-2605-014 / CO-2605-003) so we look it up first
-      // in the source table.
+      // Resolve the typed company-order-id to the underlying row id. The
+      // copy endpoint takes a row id; the operator types the human id.
       const listUrl =
         sourceType === "SO"
           ? `/api/sales-orders?isServiceOrder=all`
@@ -2089,15 +2110,82 @@ function CopyFromSourceModal({
         setBusy(false);
         return;
       }
+
+      // Fetch the source order detail to pull its line items for the picker.
+      const detailUrl =
+        sourceType === "SO"
+          ? `/api/sales-orders/${match.id}`
+          : `/api/consignment-orders/${match.id}`;
+      const detailRes = await fetch(detailUrl);
+      const detailJson = (await detailRes.json()) as {
+        success?: boolean;
+        error?: string;
+        data?: {
+          companySOId?: string;
+          companyCOId?: string;
+          items?: Array<{
+            id: string;
+            productCode?: string;
+            productName?: string;
+            sizeLabel?: string;
+            fabricCode?: string;
+            quantity?: number;
+          }>;
+        };
+      };
+      if (!detailRes.ok || !detailJson.success || !detailJson.data) {
+        setError(detailJson.error || `HTTP ${detailRes.status}`);
+        setBusy(false);
+        return;
+      }
+      const rawItems = detailJson.data.items ?? [];
+      if (rawItems.length === 0) {
+        setError(`${target} has no line items to copy`);
+        setBusy(false);
+        return;
+      }
+      const lines: SourceLineRow[] = rawItems.map((it) => ({
+        id: it.id,
+        productCode: it.productCode ?? "",
+        productName: it.productName ?? "",
+        sizeLabel: it.sizeLabel ?? "",
+        fabricCode: it.fabricCode ?? "",
+        quantity: Number(it.quantity) || 0,
+      }));
+      setResolvedSourceId(match.id);
+      setResolvedSourceNo(
+        (sourceType === "SO"
+          ? detailJson.data.companySOId
+          : detailJson.data.companyCOId) ?? target,
+      );
+      setSourceLines(lines);
+      // Default all checked — operator unchecks what they don't want.
+      setCheckedIds(new Set(lines.map((l) => l.id)));
+      setStep(2);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Step 2 → Done: post the selected line item ids to the copy endpoint.
+  async function handleCopySelected() {
+    const picked = Array.from(checkedIds);
+    if (picked.length === 0) {
+      setError("Pick at least one line to copy");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
       const res = await fetch("/api/sales-orders/copy-for-service-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceType,
-          sourceId: match.id,
-          // Phase 1 — copy ALL line items. Phase 2 will surface a
-          // checkbox picker so the operator can copy a subset.
-          lineItemIds: [],
+          sourceId: resolvedSourceId,
+          lineItemIds: picked,
         }),
       });
       const json = (await res.json()) as {
@@ -2118,13 +2206,30 @@ function CopyFromSourceModal({
     }
   }
 
+  function toggleLine(id: string) {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function setAll(checked: boolean) {
+    setCheckedIds(checked ? new Set(sourceLines.map((l) => l.id)) : new Set());
+  }
+
+  const allChecked = sourceLines.length > 0 && checkedIds.size === sourceLines.length;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-md mx-4 p-5 space-y-4">
+      <div className={`relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full mx-4 p-5 space-y-4 ${step === 2 ? "max-w-2xl" : "max-w-md"}`}>
         <div className="flex items-center justify-between">
           <h3 className="text-base font-semibold text-[#1F1D1B]">
-            Copy from Sales / Consignment Order
+            {step === 1
+              ? "Copy from Sales / Consignment Order"
+              : `Pick lines to copy from ${sourceType} ${resolvedSourceNo}`}
           </h3>
           <button
             type="button"
@@ -2135,65 +2240,158 @@ function CopyFromSourceModal({
           </button>
         </div>
 
-        <p className="text-xs text-[#6B7280]">
-          Enter the source order number (e.g. <span className="font-mono">SO-2605-014</span>{" "}
-          or <span className="font-mono">CO-2605-003</span>). All line items
-          will be copied with prices reset to 0. Edit each line&apos;s price
-          before saving.
-        </p>
+        {step === 1 ? (
+          <>
+            <p className="text-xs text-[#6B7280]">
+              Enter the source order number (e.g. <span className="font-mono">SO-2605-014</span>{" "}
+              or <span className="font-mono">CO-2605-003</span>). The next
+              step lets you pick which lines to copy. All prices reset to 0 —
+              edit each line&apos;s price before saving.
+            </p>
 
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setSourceType("SO")}
-            className={`flex-1 py-1.5 text-sm rounded border ${
-              sourceType === "SO"
-                ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                : "border-[#E2DDD8] text-[#5A5550] hover:bg-[#F4EFE3]"
-            }`}
-          >
-            Sales Order
-          </button>
-          <button
-            type="button"
-            onClick={() => setSourceType("CO")}
-            className={`flex-1 py-1.5 text-sm rounded border ${
-              sourceType === "CO"
-                ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                : "border-[#E2DDD8] text-[#5A5550] hover:bg-[#F4EFE3]"
-            }`}
-          >
-            Consignment Order
-          </button>
-        </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setSourceType("SO")}
+                className={`flex-1 py-1.5 text-sm rounded border ${
+                  sourceType === "SO"
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                    : "border-[#E2DDD8] text-[#5A5550] hover:bg-[#F4EFE3]"
+                }`}
+              >
+                Sales Order
+              </button>
+              <button
+                type="button"
+                onClick={() => setSourceType("CO")}
+                className={`flex-1 py-1.5 text-sm rounded border ${
+                  sourceType === "CO"
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                    : "border-[#E2DDD8] text-[#5A5550] hover:bg-[#F4EFE3]"
+                }`}
+              >
+                Consignment Order
+              </button>
+            </div>
 
-        <Input
-          autoFocus
-          value={sourceLookup}
-          onChange={(e) => setSourceLookup(e.target.value)}
-          placeholder={
-            sourceType === "SO" ? "SO-YYMM-NNN" : "CO-YYMM-NNN"
-          }
-        />
+            <Input
+              autoFocus
+              value={sourceLookup}
+              onChange={(e) => setSourceLookup(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !busy) handleResolveSource();
+              }}
+              placeholder={
+                sourceType === "SO" ? "SO-YYMM-NNN" : "CO-YYMM-NNN"
+              }
+            />
 
-        {error && (
-          <p className="text-xs text-[#7A2E24]">{error}</p>
+            {error && (
+              <p className="text-xs text-[#7A2E24]">{error}</p>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" onClick={handleResolveSource} disabled={busy}>
+                {busy ? "Loading…" : "Next"}
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-[#6B7280]">
+                {checkedIds.size} of {sourceLines.length} line(s) selected.
+                Uncheck the ones you don&apos;t want.
+              </p>
+              <button
+                type="button"
+                onClick={() => setAll(!allChecked)}
+                className="text-xs text-[#6B5C32] hover:underline"
+              >
+                {allChecked ? "Uncheck all" : "Check all"}
+              </button>
+            </div>
+
+            <div className="max-h-72 overflow-y-auto border border-[#E2DDD8] rounded">
+              <table className="w-full text-sm">
+                <thead className="bg-[#FAF9F7] text-xs text-[#6B7280] border-b border-[#E2DDD8]">
+                  <tr>
+                    <th className="w-8 px-2 py-1.5"></th>
+                    <th className="text-left px-2 py-1.5">Product</th>
+                    <th className="text-left px-2 py-1.5">Size</th>
+                    <th className="text-left px-2 py-1.5">Fabric</th>
+                    <th className="text-right px-2 py-1.5">Qty</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sourceLines.map((line) => {
+                    const checked = checkedIds.has(line.id);
+                    return (
+                      <tr
+                        key={line.id}
+                        className={`border-b border-[#F0EDE8] last:border-0 cursor-pointer ${checked ? "" : "opacity-50"}`}
+                        onClick={() => toggleLine(line.id)}
+                      >
+                        <td className="px-2 py-1.5">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleLine(line.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="h-4 w-4"
+                          />
+                        </td>
+                        <td className="px-2 py-1.5 text-[#1F1D1B]">
+                          <div className="font-medium">{line.productCode || "(no code)"}</div>
+                          {line.productName && (
+                            <div className="text-xs text-[#6B7280]">{line.productName}</div>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5 text-[#5A5550]">{line.sizeLabel || "-"}</td>
+                        <td className="px-2 py-1.5 text-[#5A5550] font-mono text-xs">{line.fabricCode || "-"}</td>
+                        <td className="px-2 py-1.5 text-right text-[#1F1D1B]">{line.quantity}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {error && (
+              <p className="text-xs text-[#7A2E24]">{error}</p>
+            )}
+
+            <div className="flex justify-between gap-2 pt-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setStep(1);
+                  setError("");
+                }}
+                disabled={busy}
+              >
+                Back
+              </Button>
+              <div className="flex gap-2">
+                <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleCopySelected}
+                  disabled={busy || checkedIds.size === 0}
+                >
+                  {busy ? "Copying…" : `Copy Selected (${checkedIds.size})`}
+                </Button>
+              </div>
+            </div>
+          </>
         )}
-
-        {/* TODO Phase 2 — add a search-by-customer-name input and, once a
-            source order is selected, render its line items with checkboxes
-            so the operator can pick a SUBSET (e.g. 3 items, pick 1). The
-            backend endpoint already takes `lineItemIds: string[]` and only
-            copies the matching subset; just pass them in. */}
-
-        <div className="flex justify-end gap-2 pt-2">
-          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button variant="primary" size="sm" onClick={handleCopy} disabled={busy}>
-            {busy ? "Copying…" : "Copy"}
-          </Button>
-        </div>
       </div>
     </div>
   );
@@ -2224,6 +2422,11 @@ type LineItemCardProps = {
   getLineTotal: (item: LineItem) => number;
   getTotalHeight: (item: LineItem) => number;
   maintenanceConfig: Record<string, MaintenanceConfigValue[]> | null;
+  // 0134 — Service Order mode lets the operator type Base Price directly
+  // instead of waiting for the fabric pick to seed the per-tier price.
+  // Fabric is still required for production routing; it just doesn't
+  // drive the price field in this mode.
+  isServiceOrderMode: boolean;
 };
 
 function LineItemCard({
@@ -2234,6 +2437,7 @@ function LineItemCard({
   onAddCustomSpecial, onUpdateCustomSpecial, onRemoveCustomSpecial,
   onAddSofaModules, onUpdate, onRemove, canRemove,
   getUnitPrice, getLineTotal, getTotalHeight, maintenanceConfig,
+  isServiceOrderMode,
 }: LineItemCardProps) {
   const [showSpecialOrders, setShowSpecialOrders] = useState(false);
   const [showModuleDropdown, setShowModuleDropdown] = useState(false);
@@ -2601,13 +2805,28 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <div className={`h-8 flex items-center justify-end px-2 rounded border text-sm ${
-              item.basePriceSen > 0
-                ? "border-[#E2DDD8] bg-[#FAF9F7] text-[#111827] font-medium"
-                : "border-dashed border-[#E8D597] bg-[#FAEFCB] text-[#9C6F1E] text-xs"
-            }`}>
-              {item.basePriceSen > 0 ? (item.basePriceSen / 100).toFixed(0) : "Select fabric"}
-            </div>
+            {isServiceOrderMode ? (
+              // 0134 — Service Order mode: price is operator-typed, never
+              // derived from the fabric's price tier. Fabric is still
+              // required for production routing but doesn't gate pricing.
+              <Input
+                type="number"
+                onFocus={(e) => e.currentTarget.select()}
+                min={0}
+                step="0.01"
+                value={item.basePriceSen / 100}
+                onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })}
+                className="h-8 text-right"
+              />
+            ) : (
+              <div className={`h-8 flex items-center justify-end px-2 rounded border text-sm ${
+                item.basePriceSen > 0
+                  ? "border-[#E2DDD8] bg-[#FAF9F7] text-[#111827] font-medium"
+                  : "border-dashed border-[#E8D597] bg-[#FAEFCB] text-[#9C6F1E] text-xs"
+              }`}>
+                {item.basePriceSen > 0 ? (item.basePriceSen / 100).toFixed(0) : "Select fabric"}
+              </div>
+            )}
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Gap</label>

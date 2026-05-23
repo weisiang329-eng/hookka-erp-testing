@@ -718,12 +718,15 @@ function CreateSalesOrderPage() {
         baseModel: prod.baseModel,
         sizeCode: prod.sizeCode,
         sizeLabel: prod.sizeLabel,
-        basePriceSen: priceSen,
+        // 0134 — Service Order mode: every variant/base price seed is 0.
+        // Template.legPriceSen is already 0 in this mode (selectLeg zeroes
+        // it), but belt-and-braces guard the basePrice here too.
+        basePriceSen: isServiceOrderMode ? 0 : priceSen,
         seatHeight: template.seatHeight,
         fabricCode: template.fabricCode,
         quantity: 1,
         legHeightInches: isSofa ? template.legHeightInches : null,
-        legPriceSen: isSofa ? template.legPriceSen : 0,
+        legPriceSen: isServiceOrderMode ? 0 : (isSofa ? template.legPriceSen : 0),
       } as LineItem;
     }).filter(Boolean) as LineItem[];
     if (newLines.length === 0) return;
@@ -751,10 +754,12 @@ function CreateSalesOrderPage() {
     setItems(prev => prev.map((item, i) => {
       if (i !== idx) return item;
       const merged = { ...item, ...updates };
-      // Recalculate total height surcharge whenever gap/divan/leg changes
+      // Recalculate total height surcharge whenever gap/divan/leg changes.
+      // 0134 — Service Order mode: total-height surcharge is also 0
+      // (variant pricing suppressed across the board).
       if ("gapInches" in updates || "divanHeightInches" in updates || "legHeightInches" in updates) {
         const th = (merged.gapInches || 0) + (merged.divanHeightInches || 0) + (merged.legHeightInches || 0);
-        merged.totalHeightPriceSen = calcTotalHeightSurcharge(th);
+        merged.totalHeightPriceSen = isServiceOrderMode ? 0 : calcTotalHeightSurcharge(th);
       }
       return merged;
     }));
@@ -923,9 +928,14 @@ function CreateSalesOrderPage() {
       // Base price: resolves once fabric is known. For sofa, the seat-tier
       // matrix gives a price even without fabric (via the seedSeat lookup
       // below); for bedframe, leave 0 unless the default fabric pinned it.
-      basePriceSen: isSofa
-        ? (sofaSeatTier?.priceSen ?? 0)
-        : bfBasePriceFromFabric,
+      // 0134 — Service Order mode: skip auto-seed entirely; operator types
+      // every Base Price by hand. Same goes for all variant surcharges
+      // below (divan / leg / special-order).
+      basePriceSen: isServiceOrderMode
+        ? 0
+        : isSofa
+          ? (sofaSeatTier?.priceSen ?? 0)
+          : bfBasePriceFromFabric,
       price1Sen: seedPrice1,
       seatHeightPrices: seedSeat,
       // Fabric prefill (applies to all categories).
@@ -945,19 +955,28 @@ function CreateSalesOrderPage() {
           .filter(Boolean)
           .map((d) => `OTHER: ${d}`),
       ].join("; "),
-      specialOrderPriceSen:
-        defaultSpecialSurcharge +
-        items[idx].customSpecials.reduce(
-          (s, c) => s + (Number.isFinite(c.surchargeSen) && c.surchargeSen > 0 ? Math.round(c.surchargeSen) : 0),
-          0,
-        ),
+      specialOrderPriceSen: isServiceOrderMode
+        ? 0
+        : defaultSpecialSurcharge +
+          items[idx].customSpecials.reduce(
+            (s, c) => s + (Number.isFinite(c.surchargeSen) && c.surchargeSen > 0 ? Math.round(c.surchargeSen) : 0),
+            0,
+          ),
       // Category-specific dimension prefills.
       seatHeight: sofaSeat,
       gapInches: isSofa ? null : (bfGapInches ?? items[idx].gapInches),
       divanHeightInches: isSofa ? null : (bfDivanInches ?? items[idx].divanHeightInches),
-      divanPriceSen: isSofa ? 0 : (bfDivanInches != null ? bfDivanPrice : items[idx].divanPriceSen),
+      divanPriceSen: isServiceOrderMode
+        ? 0
+        : isSofa
+          ? 0
+          : (bfDivanInches != null ? bfDivanPrice : items[idx].divanPriceSen),
       legHeightInches: isSofa ? sofaLegInches : (bfLegInches ?? items[idx].legHeightInches),
-      legPriceSen: isSofa ? sofaLegPrice : (bfLegInches != null ? bfLegPrice : items[idx].legPriceSen),
+      legPriceSen: isServiceOrderMode
+        ? 0
+        : isSofa
+          ? sofaLegPrice
+          : (bfLegInches != null ? bfLegPrice : items[idx].legPriceSen),
       totalHeightPriceSen: 0, // recomputed by updateItem when divan/leg/gap change
     });
   };
@@ -995,6 +1014,19 @@ function CreateSalesOrderPage() {
     const fab = fabrics.find(f => f.code === fabricCode);
     if (!fab) return;
     const item = items[idx];
+
+    // 0134 — Service Order mode: fabric is still required (production
+    // routing) but does NOT seed basePriceSen from the tier matrix.
+    // Operator types Base Price directly; auto-seeding would override
+    // whatever they already typed.
+    if (isServiceOrderMode) {
+      if (item?.itemCategory === "SOFA") {
+        propagateSofaVariant(idx, { fabricCode: fab.code });
+      } else {
+        updateItem(idx, { fabricCode: fab.code });
+      }
+      return;
+    }
 
     if (item?.itemCategory === "SOFA") {
       // Tier-aware sofa pricing: when both seat height and fabric are
@@ -1055,7 +1087,12 @@ function CreateSalesOrderPage() {
       }
       updateItem(idx, {
         divanHeightInches: parseInches(opt.height),
-        divanPriceSen: surcharge,
+        // 0134 — Service Order mode: variant surcharges are RM 0 by default.
+        // The operator picks the divan height for production routing, not
+        // for pricing; price lives in Base Price (editable). Catalog
+        // surcharge is suppressed so the line total stays at 0 until the
+        // operator edits Base Price.
+        divanPriceSen: isServiceOrderMode ? 0 : surcharge,
       });
     }
   };
@@ -1082,7 +1119,8 @@ function CreateSalesOrderPage() {
       }
       apply({
         legHeightInches: parseInches(opt.height),
-        legPriceSen: surcharge,
+        // 0134 — Service Order mode: leg surcharges suppressed (see selectDivan).
+        legPriceSen: isServiceOrderMode ? 0 : surcharge,
       });
     }
   };
@@ -1116,7 +1154,10 @@ function CreateSalesOrderPage() {
       seatHeight: value,
       sizeLabel: value,
       sizeCode,
-      basePriceSen: tier?.priceSen || 0,
+      // 0134 — Service Order mode: don't seed basePriceSen from the seat
+      // tier matrix. Operator types Base Price; auto-seeding would
+      // overwrite their input on each size change.
+      basePriceSen: isServiceOrderMode ? 0 : (tier?.priceSen || 0),
     });
   };
 
@@ -1183,7 +1224,13 @@ function CreateSalesOrderPage() {
       ? current.filter(c => c !== code)
       : [...current, code];
 
-    const surcharge = calcTotalSpecialSurcharge(next, item.customSpecials, isSofa);
+    // 0134 — Service Order mode: special-order surcharges are RM 0.
+    // Operator picks the spec for production routing (Front Drawer changes
+    // what's built); pricing lives in Base Price (editable). Catalog
+    // surcharge is suppressed so the line total stays at 0.
+    const surcharge = isServiceOrderMode
+      ? 0
+      : calcTotalSpecialSurcharge(next, item.customSpecials, isSofa);
     const label = buildSpecialOrderText(next, item.customSpecials);
     const patch = {
       specialOrders: next,
@@ -1205,7 +1252,12 @@ function CreateSalesOrderPage() {
   const applyCustomSpecials = (idx: number, customs: CustomSpecial[]) => {
     const item = items[idx];
     const isSofa = item?.itemCategory === "SOFA";
-    const surcharge = calcTotalSpecialSurcharge(item.specialOrders, customs, isSofa);
+    // 0134 — Service Order mode: custom-special surcharges also suppressed.
+    // The description carries (production sees it) but the surcharge total
+    // is 0 — Base Price is the single price field operator edits.
+    const surcharge = isServiceOrderMode
+      ? 0
+      : calcTotalSpecialSurcharge(item.specialOrders, customs, isSofa);
     const label = buildSpecialOrderText(item.specialOrders, customs);
     const patch: Partial<LineItem> = {
       customSpecials: customs,
@@ -1948,6 +2000,12 @@ function CreateSalesOrderPage() {
             // get the today-default from the draft.
             setCustomerId(draft.customerId || "");
             setCustomerPOId(draft.customerPOId || "");
+            // 0134 — copy-from-SO/CO writes "EX-<sourceNo>" (e.g.
+            // "EX-SO-2605-121") into the Customer SO slot so the destination
+            // Service Order visibly carries the source id in the right field.
+            // Reference takes the source's own reference field (EX-prefixed),
+            // not the source id — that lives in Customer SO now.
+            setCustomerSOId(draft.customerSOId || "");
             setReference(draft.reference || "");
             if (draft.hubId) setDeliveryHubId(draft.hubId);
             if (!companySODate) setCompanySODate(draft.companySODate || "");
@@ -2044,6 +2102,11 @@ type CopyDraft = {
   hubName?: string;
   customerPO?: string;
   customerPOId?: string;
+  // 0134 — destination Service Order's Customer SO slot carries the EX-
+  // prefixed source order id (e.g. "EX-SO-2605-121"). Backend now sets
+  // both fields; the form binds to customerSOId.
+  customerSO?: string;
+  customerSOId?: string;
   reference?: string;
   companySODate?: string;
   customerDeliveryDate?: string;
@@ -2717,8 +2780,13 @@ function LineItemCard({
     });
   }, [maintenanceConfig, isSofa]);
 
-  // Helper: get config surcharge for a given option value, or fall back to default
+  // Helper: get config surcharge for a given option value, or fall back to default.
+  // 0134 — Service Order mode: every variant surcharge is RM 0 by default
+  // (the operator types Base Price directly). Returning 0 here makes the
+  // dropdown labels drop the "(+RM55)" suffix and the special-orders
+  // checkboxes show "RM 0", matching the cleared line-total math.
   function getConfigSurcharge(cfgKey: string, value: string, defaultSurcharge: number): number {
+    if (isServiceOrderMode) return 0;
     if (!maintenanceConfig?.[cfgKey]) return defaultSurcharge;
     const entry = maintenanceConfig[cfgKey].find((e: {value:string; priceSen:number} | string) =>
       typeof e === "object" && e.value === value
@@ -3145,24 +3213,31 @@ function LineItemCard({
                     placeholder="e.g. Custom Foam Density 35D"
                     className="h-8 flex-1 text-sm"
                   />
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-[#9CA3AF]">RM</span>
-                    <Input
-                      type="number"
-                      onFocus={(e) => e.currentTarget.select()}
-                      min={0}
-                      step={0.01}
-                      value={cs.surchargeSen / 100}
-                      onChange={(e) =>
-                        onUpdateCustomSpecial(idx, csIdx, {
-                          surchargeSen: Math.round(
-                            parseFloat(e.target.value || "0") * 100,
-                          ),
-                        })
-                      }
-                      className="h-8 w-24 text-right text-sm"
-                    />
-                  </div>
+                  {/* 0134 — Service Order mode: per-special-item surcharge
+                      input is hidden. Whatever the operator types here
+                      would be zeroed by applyCustomSpecials anyway (SO mode
+                      keeps all variant prices at 0); price lives in the
+                      single editable Base Price field. */}
+                  {!isServiceOrderMode && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-[#9CA3AF]">RM</span>
+                      <Input
+                        type="number"
+                        onFocus={(e) => e.currentTarget.select()}
+                        min={0}
+                        step={0.01}
+                        value={cs.surchargeSen / 100}
+                        onChange={(e) =>
+                          onUpdateCustomSpecial(idx, csIdx, {
+                            surchargeSen: Math.round(
+                              parseFloat(e.target.value || "0") * 100,
+                            ),
+                          })
+                        }
+                        className="h-8 w-24 text-right text-sm"
+                      />
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={() => onRemoveCustomSpecial(idx, csIdx)}

@@ -1200,6 +1200,7 @@ async function fetchFilteredPOs(
   deptFilter: string | null = null,
   dueFrom: string | null = null,
   dueTo: string | null = null,
+  catFilter: string | null = null,
 ): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
   // Load the (category, deptCode) → days map once per request. Drives the
   // derived `expectedDueDate` field on each JC — the FE compares it
@@ -1273,12 +1274,14 @@ async function fetchFilteredPOs(
     }
   }
   const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
+  const catWhere = catFilter ? ' AND itemCategory = ?' : '';
+  const catBindings: string[] = catFilter ? [catFilter] : [];
   const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${dueWhere} ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere} ORDER BY created_at DESC, id DESC`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
-    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...dueBindings)
-    : db.prepare(poSql).bind(orgId, ...dueBindings);
+    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings)
+    : db.prepare(poSql).bind(orgId, ...dueBindings, ...catBindings);
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
@@ -1605,6 +1608,7 @@ async function fetchPaginatedPOs(
   deptFilter: string | null = null,
   dueFrom: string | null = null,
   dueTo: string | null = null,
+  catFilter: string | null = null,
 ): Promise<{ data: ProductionOrderOut[] | MinimalPOOut[]; total: number }> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const statusPlaceholders = hasFilter
@@ -1659,20 +1663,22 @@ async function fetchPaginatedPOs(
     }
   }
   const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
+  const catWhere = catFilter ? ' AND itemCategory = ?' : '';
+  const catBindings: string[] = catFilter ? [catFilter] : [];
 
   const countSql = hasFilter
-    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}`
-    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?${dueWhere}`;
+    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}${catWhere}`
+    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere}`;
   const pageSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere}${catWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
 
   const countStmt = hasFilter
-    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]), ...dueBindings)
-    : db.prepare(countSql).bind(orgId, ...dueBindings);
+    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings)
+    : db.prepare(countSql).bind(orgId, ...dueBindings, ...catBindings);
   const pageStmt = hasFilter
-    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), ...dueBindings, limit, offset)
-    : db.prepare(pageSql).bind(orgId, ...dueBindings, limit, offset);
+    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), ...dueBindings, ...catBindings, limit, offset)
+    : db.prepare(pageSql).bind(orgId, ...dueBindings, ...catBindings, limit, offset);
 
   const [countRes, pageRes] = await Promise.all([
     countStmt.first<{ n: number }>(),
@@ -4379,6 +4385,15 @@ app.get("/", async (c) => {
       ? deptParamRaw.trim().toUpperCase()
       : null;
 
+  // Server-side itemCategory filter (BEDFRAME / SOFA / ACCESSORY). Mirrors
+  // the dept normalisation above: trim + uppercase, null when empty.
+  // Replaces the prior client-side .filter() pass on the Production page.
+  const catParamRaw = c.req.query("cat");
+  const catFilter =
+    catParamRaw && catParamRaw.trim().length > 0
+      ? catParamRaw.trim().toUpperCase()
+      : null;
+
   // Server-side targetEndDate window. Both bounds are optional; either or
   // both can be supplied. NULL targetEndDate rows are preserved on both
   // sides so undated POs aren't silently hidden — matches the client-side
@@ -4424,6 +4439,7 @@ app.get("/", async (c) => {
       deptFilter,
       dueFrom,
       dueTo,
+      catFilter,
     );
     await attachCustomerSO(
       c.var.DB,
@@ -4462,6 +4478,7 @@ app.get("/", async (c) => {
     deptFilter,
     dueFrom,
     dueTo,
+    catFilter,
   );
   await attachCustomerSO(
     c.var.DB,

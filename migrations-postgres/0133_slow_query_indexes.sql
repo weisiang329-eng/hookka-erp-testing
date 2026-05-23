@@ -42,8 +42,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_so_org_created
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_so_updated_at
   ON sales_orders(updated_at);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_so_items_updated_at
-  ON sales_order_items(updated_at);
+-- NOTE: `sales_order_items` has no `updated_at` column in this schema
+-- (verified 2026-05-23 against prod information_schema). The agent that
+-- drafted this migration assumed it did. The snapshot-freshness probe
+-- (src/api/lib/snapshot-freshness.ts) skips source tables that lack a
+-- timestamp-typed column, so item-only edits never trip snapshot
+-- invalidation today anyway — the parent sales_orders.updated_at bump
+-- on every items-touching route handles it. If a future migration adds
+-- sales_order_items.updated_at, add the index back here.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_jc_dept_status
   ON job_cards(department_code, status);

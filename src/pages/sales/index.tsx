@@ -196,7 +196,7 @@ export default function SalesPage() {
     csRevenueSen?: number;
     deliveredItemsSen?: number;
     outstandingItemsSen?: number;
-  }>("/api/sales-orders/stats");
+  }>(`/api/sales-orders/stats?${soFilterQs}`);
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
@@ -230,6 +230,11 @@ export default function SalesPage() {
   // Completed = fully closed orders (paid + delivered + closed). DELIVERED
   // and INVOICED still belong to Outstanding because the cycle isn't done.
   const completedCount = sumStatuses(["CLOSED"]);
+  // 0134 — Service Order mode swaps the Revenue + Outstanding RM cards for
+  // count-based status buckets (SV is 0-amount by design, so RM cards are
+  // always 0). Re-uses the same /stats byStatus aggregate.
+  const inProductionCount = sumStatuses(["IN_PRODUCTION"]);
+  const deliveredCount = sumStatuses(["DELIVERED", "INVOICED"]);
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -697,26 +702,40 @@ export default function SalesPage() {
       </div>
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
-        <Card>
-          <CardContent className="p-2.5">
-            <p
-              className="text-xs text-[#6B7280]"
-              title={hasActiveFilters ? undefined : "Excludes Draft and Cancelled"}
-            >
-              {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
-            </p>
-            <p className={cn(
-              "text-xl font-bold",
-              hasActiveFilters && "text-[#6B5C32]"
-            )}>
-              {formatCurrency(displayRevenue)}
-            </p>
-          </CardContent>
-        </Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{completedCount}</p></CardContent></Card>
+        {isServiceOrderMode ? (
+          // Service Order mode: every card is count-based — SVs are priced
+          // at 0 by default so Revenue / Outstanding RM are always 0.
+          <>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Service Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">In Production</p><p className="text-xl font-bold text-[#6B5C32]">{inProductionCount}</p></CardContent></Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Delivered</p><p className="text-xl font-bold text-[#4F7C3A]">{deliveredCount + completedCount}</p></CardContent></Card>
+          </>
+        ) : (
+          <>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
+            <Card>
+              <CardContent className="p-2.5">
+                <p
+                  className="text-xs text-[#6B7280]"
+                  title={hasActiveFilters ? undefined : "Excludes Draft and Cancelled"}
+                >
+                  {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
+                </p>
+                <p className={cn(
+                  "text-xl font-bold",
+                  hasActiveFilters && "text-[#6B5C32]"
+                )}>
+                  {formatCurrency(displayRevenue)}
+                </p>
+              </CardContent>
+            </Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
+            <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{completedCount}</p></CardContent></Card>
+          </>
+        )}
       </div>
 
       {/* Filters */}
@@ -851,7 +870,7 @@ export default function SalesPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> Sales Orders</CardTitle>
+            <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> {soPageTitle(mode)}</CardTitle>
             <div className="flex items-center gap-2">
               {tab === "DRAFT" && draftCount > 0 && (
                 <Button

@@ -1015,6 +1015,82 @@ const CS_STATUSES = new Set([
 
 app.get("/stats", async (c) => {
   const orgId = getOrgId(c);
+  // 0134 — Service Order vs Sales Order scope. Same semantics as the GET
+  // list above so /service-order's tab badges + dashboard cards read off
+  // a SV-only aggregate instead of the combined ~570-row total.
+  //   ?isServiceOrder=true  → only Service Orders (is_service_order=TRUE)
+  //   ?isServiceOrder=false → only normal Sales Orders (the default)
+  //   ?isServiceOrder=all   → both (admin/reporting)
+  const isServiceOrderParam = c.req.query("isServiceOrder");
+  const serviceOrderFilter: "true" | "false" | "all" =
+    isServiceOrderParam === "true"
+      ? "true"
+      : isServiceOrderParam === "all"
+        ? "all"
+        : "false";
+  const extraWhere =
+    serviceOrderFilter === "true"
+      ? "is_service_order = TRUE"
+      : serviceOrderFilter === "false"
+        ? "(is_service_order = FALSE OR is_service_order IS NULL)"
+        : "";
+
+  const compute = async () => {
+    const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+      c,
+      "sales_orders",
+      extraWhere,
+    );
+    const res = await c.var.DB
+      .prepare(
+        `SELECT status                        AS "status",
+                COUNT(*)                      AS "n",
+                COALESCE(SUM(totalSen), 0)    AS "revenueSen"
+           FROM sales_orders
+           ${orgWhere}
+           GROUP BY status`,
+      )
+      .bind(...orgParams)
+      .all<{ status: string; n: number; revenueSen: number }>();
+    const byStatus: Record<string, number> = {};
+    const revenueByStatus: Record<string, number> = {};
+    let total = 0;
+    let totalRevenueSen = 0;
+    let csRevenueSen = 0;
+    for (const row of res.results ?? []) {
+      byStatus[row.status] = row.n;
+      revenueByStatus[row.status] = Number(row.revenueSen) || 0;
+      total += row.n;
+      totalRevenueSen += Number(row.revenueSen) || 0;
+      if (CS_STATUSES.has(row.status)) {
+        csRevenueSen += Number(row.revenueSen) || 0;
+      }
+    }
+    // Service Orders are 0-amount by design, so the DO-value resolver
+    // would always return 0 anyway — skip the extra reads in that mode.
+    const deliveredItemsSen =
+      serviceOrderFilter === "true"
+        ? 0
+        : await loadDeliveredItemsValueSen(c.var.DB, orgId);
+    return {
+      byStatus,
+      revenueByStatus,
+      total,
+      totalRevenueSen,
+      csRevenueSen,
+      deliveredItemsSen,
+      outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
+    };
+  };
+
+  // Snapshot key is per-org and doesn't carry the SV filter, so anything
+  // other than the default (false → normal sales) bypasses the cache.
+  // Otherwise a SV-filtered payload could land in the cache and the next
+  // /sales fetch would serve the wrong totals.
+  if (serviceOrderFilter !== "false") {
+    return c.json({ success: true, ...(await compute()) });
+  }
+
   const { withSnapshot } = await import("../lib/snapshot");
   // PR 7 (2026-05-20) — cache-aside snapshot. Source tables:
   // sales_orders (bucket counts + revenue) and delivery_orders +
@@ -1032,50 +1108,7 @@ app.get("/stats", async (c) => {
       ],
     },
     orgId,
-    async () => {
-      const { whereSql: orgWhere, params: orgParams } = withOrgScope(
-        c,
-        "sales_orders",
-      );
-      const res = await c.var.DB
-        .prepare(
-          `SELECT status                        AS "status",
-                  COUNT(*)                      AS "n",
-                  COALESCE(SUM(totalSen), 0)    AS "revenueSen"
-             FROM sales_orders
-             ${orgWhere}
-             GROUP BY status`,
-        )
-        .bind(...orgParams)
-        .all<{ status: string; n: number; revenueSen: number }>();
-      const byStatus: Record<string, number> = {};
-      const revenueByStatus: Record<string, number> = {};
-      let total = 0;
-      let totalRevenueSen = 0;
-      let csRevenueSen = 0;
-      for (const row of res.results ?? []) {
-        byStatus[row.status] = row.n;
-        revenueByStatus[row.status] = Number(row.revenueSen) || 0;
-        total += row.n;
-        totalRevenueSen += Number(row.revenueSen) || 0;
-        if (CS_STATUSES.has(row.status)) {
-          csRevenueSen += Number(row.revenueSen) || 0;
-        }
-      }
-      const deliveredItemsSen = await loadDeliveredItemsValueSen(
-        c.var.DB,
-        orgId,
-      );
-      return {
-        byStatus,
-        revenueByStatus,
-        total,
-        totalRevenueSen,
-        csRevenueSen,
-        deliveredItemsSen,
-        outstandingItemsSen: Math.max(0, csRevenueSen - deliveredItemsSen),
-      };
-    },
+    compute,
   );
   return c.json({ success: true, ...data });
 });

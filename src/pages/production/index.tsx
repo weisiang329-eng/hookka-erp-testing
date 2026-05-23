@@ -796,13 +796,18 @@ export default function ProductionPage({
 
   // dueQueryFrag/baseUrl/ordersResp moved here from earlier in the file
   // to satisfy the TDZ for fltDueFrom/fltDueTo (declared just above).
+  // fltCategory hoisted up here (from ~853) for the same reason — it's
+  // now baked into the server-side fetch URL via `&cat=…` so the API
+  // returns only the rows for the active category instead of shipping
+  // everything for a client-side .filter() pass.
+  const [fltCategory, setFltCategory] = useUrlState<string>("cat", "");
   const dueQueryFrag =
     (effectiveDueFrom ? `&dueFrom=${encodeURIComponent(effectiveDueFrom)}` : "") +
     (effectiveDueTo ? `&dueTo=${encodeURIComponent(effectiveDueTo)}` : "");
   const baseUrl =
     mode === "dept" && deptCode
-      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}`
-      : `/api/production-orders?fields=minimal${dueQueryFrag}`;
+      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`
+      : `/api/production-orders?fields=minimal${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`;
   const ordersUrl: string | null = shouldFetch && datesSeeded ? baseUrl : null;
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   // Date-filter-INDEPENDENT fetch used solely by the "Total Overdue SO"
@@ -850,7 +855,8 @@ export default function ProductionPage({
   //  they didn't narrow the view in practice; the data now shows all
   //  item types + models by default. State hooks, URL params, and
   //  itemTypesByPo memo are gone with them.)
-  const [fltCategory, setFltCategory] = useUrlState<string>("cat", "");
+  // fltCategory hoisted up to the dueQueryFrag block (TDZ — baked into
+  // the server-side fetch URL now that the API filters by `?cat=…`).
   // Date-axis dropdown removed 2026-05-07 — fltDateAxis is now a constant
   // 'dueDate'. The state hook stays so the filter logic conditional below
   // still resolves correctly without a deeper refactor.

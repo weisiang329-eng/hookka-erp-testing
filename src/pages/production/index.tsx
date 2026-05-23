@@ -3600,6 +3600,82 @@ export default function ProductionPage({
     setFgPrintRequested(true);
   }, [filteredOrders, fgStickers, loadFgStickers, toast]);
 
+  // Foam Bonding pre-print of Packing stickers (Wei Siang 2026-05-23).
+  // Operators want to print the warehouse-style Packing stickers at the
+  // Foam Bonding stage so they're ready when Packing later actually
+  // processes the SO. The catch: a bedframe SO's DIVAN piece never has
+  // a FOAM job card, so the Foam tab's `orders` state (loaded with
+  // ?dept=FOAM) is missing those POs. We re-fetch without the dept
+  // filter scoped to the current search string and pipe the result
+  // through the SAME jspdf Packing-portrait renderer the dept page
+  // already uses (generateBatchStickersPdf with "PACKING"). The
+  // existing Packing dept button at /production/packing is untouched.
+  //
+  // Behaviour:
+  //   • Disabled until the operator types something into the Search
+  //     box (fltSearch matches the same haystack the page-level filter
+  //     uses: poNo / companySOId / customerName / productCode / fabric
+  //     / sizeLabel).
+  //   • On click: fetch /api/production-orders?fields=minimal&include=jobCards
+  //     (no &dept= so we get every PO of the SO), filter client-side by
+  //     the same haystack rule, then call generateBatchStickersPdf with
+  //     deptCode "PACKING".
+  //   • If the operator's filter pulled in non-SO results (the haystack
+  //     is freeform), we still print whatever matched — surfacing
+  //     "narrow your search" is on the operator.
+  const handlePrintFoamPackingStickers = useCallback(async () => {
+    const q = (fltSearch || "").trim().toLowerCase();
+    if (!q) {
+      toast.info("Filter by SO (Search box) first — this prints Packing stickers for every piece of the filtered SO.");
+      return;
+    }
+    try {
+      // Pull every PO with jobCards. No dept filter — Divan-only POs
+      // and any accessory POs of the SO need to be in the result even
+      // though they have no FOAM JC.
+      const res = await fetch(
+        "/api/production-orders?fields=minimal&include=jobCards",
+        { credentials: "include" },
+      );
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; data?: ProductionOrder[] }
+        | null;
+      const all: ProductionOrder[] = json?.success && Array.isArray(json.data) ? json.data : [];
+      if (all.length === 0) {
+        toast.warning("Could not load production orders.");
+        return;
+      }
+      // Replicate the page-level haystack search so the operator gets
+      // exactly the SO they're looking at on the Foam grid (plus any
+      // sibling POs of the same SO that the Foam grid hides because
+      // they lack a FOAM JC).
+      const scoped = all.filter((o) => {
+        const hay = [
+          o.poNo, o.companySOId, o.customerPOId, o.customerReference,
+          o.customerName, o.productCode, o.productName, o.fabricCode,
+          o.sizeLabel,
+        ].map((v) => (v || "").toLowerCase()).join(" ");
+        return hay.includes(q);
+      });
+      if (scoped.length === 0) {
+        toast.warning(`No production orders matched "${fltSearch}".`);
+        return;
+      }
+      const { generateBatchStickersPdf } = await import("@/lib/generate-sticker-pdf");
+      const { generated, skipped } = await generateBatchStickersPdf(scoped, "PACKING");
+      if (generated === 0) {
+        toast.warning("No Packing stickers generated — none of the matched POs have a PACKING job card.");
+      } else if (skipped > 0) {
+        toast.info(`Generated ${generated} stickers (${skipped} POs had no PACKING job card and were skipped).`);
+      } else {
+        toast.success(`Generated ${generated} Packing stickers for ${scoped.length} PO${scoped.length === 1 ? "" : "s"}.`);
+      }
+    } catch (err) {
+      console.error("[handlePrintFoamPackingStickers] failed", err);
+      toast.error("Failed to generate Packing stickers.");
+    }
+  }, [fltSearch, toast]);
+
   // Grid-filter scoped FG stickers — single source of truth shared by the
   // on-screen FG preview tiles AND the hidden print container, so what the
   // operator sees printed matches what the grid filter shows. Without this
@@ -4657,6 +4733,26 @@ export default function ProductionPage({
               own "Print All" button. */}
           {(activeTab === "UPHOLSTERY" || activeTab === "PACKING") && (
             <Button variant="outline" onClick={handlePrintFgStickers}>Print FG Stickers</Button>
+          )}
+          {/* Foam Bonding: pre-print Packing stickers for the whole SO so
+              they're ready when Packing actually runs later. Disabled until
+              the operator narrows by SO (Search box) — printing every
+              Packing sticker in the system is never what they want.
+              Routes through the same generator the Packing dept uses, so
+              the sticker layout matches 1:1 (HB / Divan / Sofa pieces). */}
+          {activeTab === "FOAM" && (
+            <Button
+              variant="outline"
+              onClick={handlePrintFoamPackingStickers}
+              disabled={!fltSearch.trim()}
+              title={
+                fltSearch.trim()
+                  ? "Print Packing stickers (HB / Divan / Sofa) for every piece of the filtered SO"
+                  : "Filter by SO in the Search box to print"
+              }
+            >
+              Print Packing Stickers
+            </Button>
           )}
         </div>
       </div>

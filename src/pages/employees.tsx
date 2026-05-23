@@ -1118,10 +1118,13 @@ const emptyForm: WorkerFormData = {
   workingHoursPerDay: 9,
   workingDaysPerMonth: 26,
   otMultiplier: 1.5,
-  epfEnabled: true,
-  socsoEnabled: true,
-  eisEnabled: true,
-  pcbEnabled: true,
+  // New-worker default: statutory OFF (matches the prod reality where most
+  // workers are not registered with EPF/SOCSO/EIS/PCB). Operator ticks the
+  // Statutory column on the row of the workers who ARE registered.
+  epfEnabled: false,
+  socsoEnabled: false,
+  eisEnabled: false,
+  pcbEnabled: false,
   joinDate: todayStr(),
   nationality: "",
   status: "ACTIVE",
@@ -1802,92 +1805,67 @@ function EmployeeMasterTab({
         },
       },
       {
-        // Statutory toggles — EPF / SOCSO / EIS / PCB. View mode shows
-        // each as a coloured chip (green = on, grey + strikethrough = off);
-        // Edit mode swaps to checkboxes. Backend defaults each to TRUE,
-        // operator unchecks any that don't apply to that worker (e.g. a
-        // foreign worker not in the EPF scheme).
+        // Statutory toggle — single tick for the four-flag bundle (EPF +
+        // SOCSO + EIS + PCB). Wei Siang 2026-05-23: per-flag granularity
+        // isn't needed in practice — a worker either is registered for the
+        // four Malaysian statutory schemes (ticked) or isn't (unticked, in
+        // which case Net Pay = Gross Pay). The DB still has four columns
+        // (forward-compat) but the operator writes the same boolean to all
+        // four. View mode = ticked green / dash grey; Edit mode = checkbox.
         key: "statutory",
-        label: "EPF / SOCSO / EIS / PCB",
+        label: "Statutory",
         align: "center",
-        width: "210px",
+        width: "90px",
         render: (_value, row) => {
-          const epfOn = row.epfEnabled !== false;
-          const socsoOn = row.socsoEnabled !== false;
-          const eisOn = row.eisEnabled !== false;
-          const pcbOn = row.pcbEnabled !== false;
+          const allOn =
+            row.epfEnabled !== false &&
+            row.socsoEnabled !== false &&
+            row.eisEnabled !== false &&
+            row.pcbEnabled !== false;
           if (editingId === row.id) {
+            const editAllOn =
+              editForm.epfEnabled &&
+              editForm.socsoEnabled &&
+              editForm.eisEnabled &&
+              editForm.pcbEnabled;
             return (
-              <div className="flex items-center justify-center gap-2 text-[10px]">
-                <label
-                  className="flex items-center gap-1 cursor-pointer"
-                  title="EPF — 11% employee + 13% employer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={editForm.epfEnabled}
-                    onChange={(e) =>
-                      setEditForm((f) => ({ ...f, epfEnabled: e.target.checked }))
-                    }
-                  />
-                  EPF
-                </label>
-                <label
-                  className="flex items-center gap-1 cursor-pointer"
-                  title="SOCSO — RM 7.45 employee + RM 26.15 employer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={editForm.socsoEnabled}
-                    onChange={(e) =>
-                      setEditForm((f) => ({ ...f, socsoEnabled: e.target.checked }))
-                    }
-                  />
-                  SOCSO
-                </label>
-                <label
-                  className="flex items-center gap-1 cursor-pointer"
-                  title="EIS — RM 3.90 employee + RM 3.90 employer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={editForm.eisEnabled}
-                    onChange={(e) =>
-                      setEditForm((f) => ({ ...f, eisEnabled: e.target.checked }))
-                    }
-                  />
-                  EIS
-                </label>
-                <label
-                  className="flex items-center gap-1 cursor-pointer"
-                  title="PCB — income tax"
-                >
-                  <input
-                    type="checkbox"
-                    checked={editForm.pcbEnabled}
-                    onChange={(e) =>
-                      setEditForm((f) => ({ ...f, pcbEnabled: e.target.checked }))
-                    }
-                  />
-                  PCB
-                </label>
-              </div>
+              <label
+                className="flex items-center justify-center cursor-pointer"
+                title="When ticked: EPF + SOCSO + EIS + PCB will all be deducted on this worker's payslip. Unticked: no statutory deductions — Net Pay = Gross Pay."
+              >
+                <input
+                  type="checkbox"
+                  checked={editAllOn}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setEditForm((f) => ({
+                      ...f,
+                      epfEnabled: v,
+                      socsoEnabled: v,
+                      eisEnabled: v,
+                      pcbEnabled: v,
+                    }));
+                  }}
+                  className="h-4 w-4 cursor-pointer"
+                />
+              </label>
             );
           }
-          const chipOn =
-            "px-1 py-0.5 rounded text-[#4F7C3A] bg-[#EEF3E4] border border-[#C6DBA8]";
-          const chipOff =
-            "px-1 py-0.5 rounded text-[#9CA3AF] bg-[#F0ECE9] border border-[#E2DDD8] line-through";
           return (
-            <div
-              className="flex items-center justify-center gap-1 text-[10px] font-medium"
-              title="EPF / SOCSO / EIS / PCB — green = will be deducted; grey = skipped. Click Edit to change."
+            <span
+              className="inline-block text-base font-semibold"
+              title={
+                allOn
+                  ? "Statutory ON — EPF / SOCSO / EIS / PCB will deduct on next payslip"
+                  : "Statutory OFF — no deductions; Net Pay = Gross Pay"
+              }
             >
-              <span className={epfOn ? chipOn : chipOff}>EPF</span>
-              <span className={socsoOn ? chipOn : chipOff}>SOCSO</span>
-              <span className={eisOn ? chipOn : chipOff}>EIS</span>
-              <span className={pcbOn ? chipOn : chipOff}>PCB</span>
-            </div>
+              {allOn ? (
+                <span className="text-[#4F7C3A]">✓</span>
+              ) : (
+                <span className="text-[#9CA3AF]">—</span>
+              )}
+            </span>
           );
         },
       },

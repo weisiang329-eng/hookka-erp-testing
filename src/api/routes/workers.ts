@@ -160,6 +160,10 @@ app.post("/", async (c) => {
       basicSalarySen,
       workingHoursPerDay,
       otMultiplier,
+      epfEnabled,
+      socsoEnabled,
+      eisEnabled,
+      pcbEnabled,
     } = body;
 
     if (!name || !empNo) {
@@ -206,8 +210,9 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, departmentCodes, categories, position,
          phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier,
+         epfEnabled, socsoEnabled, eisEnabled, pcbEnabled,
          joinDate, icNumber, passportNumber, nationality)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -224,6 +229,13 @@ app.post("/", async (c) => {
         resolvedHours,
         26,
         Number.isFinite(otMultiplier) ? otMultiplier : 1.5,
+        // Statutory flags — default false (matches the new-worker UX). The
+        // DB column default is TRUE for back-compat but we now opt-in via
+        // explicit value so the operator's unticked form is honoured.
+        typeof epfEnabled === "boolean" ? epfEnabled : false,
+        typeof socsoEnabled === "boolean" ? socsoEnabled : false,
+        typeof eisEnabled === "boolean" ? eisEnabled : false,
+        typeof pcbEnabled === "boolean" ? pcbEnabled : false,
         joinDate,
         "",
         "",

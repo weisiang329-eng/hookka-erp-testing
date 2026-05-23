@@ -34,6 +34,73 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-24-001 — DataGrid column-filter popover: first OK click does nothing (third regression)
+
+**Status:** 🟢 Fixed (2026-05-24)
+**Category:** ui-frontend
+
+**Symptom:** On the Production page (any grid with passive polling), opening
+a column's Values filter popover (e.g. SO ID), ticking a value, and clicking
+OK did nothing on the first click — popover either stayed open with no
+filter applied OR closed silently with no filter applied. A second OK click
+applied the filter correctly. Reproducible on Wei Siang's Production page
+sittings; intermittent on grids without polling.
+
+**Root cause:** The OK button's `onClick` read `checkedRef.current` (kept
+fresh by the prior 2026-05-22 fix) but compared its size against
+`uniqueValues.length` from the render-time CLOSURE. On Production the data
+poll fires every 20s (`src/pages/production/index.tsx:1395-1406`) — any
+refetch landing between the operator's last checkbox toggle and the OK
+click flowed through `data → scopedData → allData → uniqueValues` to a
+fresh array with a different length. The OK closure still held the prior
+length, so the equality check
+`latestChecked.size === uniqueValues.length` silently lied: if the poll's
+new length happened to match the narrowed selection size, the handler
+treated it as "user has everything checked" and called
+`onApplyValues(null)` — wiping the filter. Second click worked because by
+then the popover had re-rendered and the closure caught up.
+
+The two prior fixes ([3e1933f](https://github.com/weisiang329-eng/hookka-erp-testing/commit/3e1933f),
+[ef4b08e](https://github.com/weisiang329-eng/hookka-erp-testing/commit/ef4b08e))
+hardened the CHECKED side against same-tick batching (good — those fixes
+stay) but neither moved `uniqueValues` off the closure, so a data refresh
+beat them every time.
+
+**Fix:** `src/components/ui/data-grid.tsx` (ColumnFilterDropdown)
+
+- Added `uniqueValuesRef`, synced post-commit via a tiny
+  `useEffect(() => { uniqueValuesRef.current = uniqueValues; },
+  [uniqueValues])`. Effect commits run synchronously before the browser
+  yields to the next event tick, so any subsequent OK click reads the
+  same `uniqueValues` React just rendered with. Lint-clean
+  (react-hooks/refs forbids ref writes during render).
+- OK button now reads BOTH `checkedRef.current` and
+  `uniqueValuesRef.current`, with NO closure capture of either.
+- "All checked" check tightened from size-only to size-AND-content
+  (`unique.every(([v]) => latestChecked.has(v))`) so a same-size mismatch
+  (e.g. one value swapped after a poll) can't fall through and clear the
+  filter.
+- `toggleAll` and `toggleChip` also rewired to read uniqueValues from
+  the ref for symmetry — guards against a (very rare) same-tick
+  double-click on (All) or a chip resolving against stale render state.
+
+**Verification:**
+- `npm run typecheck:app` — passes
+- `npm run build` — passes
+- `npm test` — 480/481 pass (1 skipped, same baseline)
+- Operator to re-test: open SO ID popover on Production, wait for at
+  least one 20s poll tick, then tick a value + click OK once. Filter
+  should land on the first click; if it doesn't, capture console logs and
+  reopen this bug.
+
+**Related:** Two prior attempts at this bug —
+[3e1933f](https://github.com/weisiang329-eng/hookka-erp-testing/commit/3e1933f)
+(2026-05-22), [ef4b08e](https://github.com/weisiang329-eng/hookka-erp-testing/commit/ef4b08e)
+(2026-05-15). Both fixed the checked-set side of the race; this fix closes
+the `uniqueValues` side.
+
+---
+
 ## BUG-2026-05-23-001 — Service Order copy-from missing EX prefix + Base Price stuck on "Select fabric" + no line-item picker
 
 **Status:** 🟢 Fixed (2026-05-23)

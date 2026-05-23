@@ -391,12 +391,13 @@ function CreateSalesOrderPage() {
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([makeEmptyLine()]);
 
-  // 0134 — Copy-from modal state (Service Order mode only). Wei Siang
-  // 2026-05-23: Phase 1 ships with a SIMPLIFIED modal — the operator
-  // pastes a source SO/CO number, the form fetches the matching order,
-  // and ALL of its line items are imported (prices zeroed). A future
-  // iteration will add the multi-select line-picker / search UI per the
-  // original spec; see TODO at the bottom of CopyFromSourceModal below.
+  // 0134 — Copy-from modal state (Service Order mode only). Two-step:
+  // (1) pick source SO/CO by id, (2) tick which lines to copy and dial
+  // each one's Copy Qty down (defaults to source qty, max = source qty).
+  // Each row shows the full per-line spec (gap / divan / leg / special
+  // orders / custom specials) so the operator can distinguish lines
+  // that share product+size but differ on attributes. All prices reset
+  // to 0 on the copied draft — operator must price each line before save.
   const [copyFromOpen, setCopyFromOpen] = useState(false);
 
   // Mark this tab as dirty (un-evictable from the 10-tab cap) the moment
@@ -2008,9 +2009,14 @@ function CreateSalesOrderPage() {
 // Step 1: operator picks SO or CO and types the source order id
 //         (SO-2605-014 / CO-2605-003).
 // Step 2: the modal fetches the source order's line items and renders a
-//         checklist (all checked by default). Operator unchecks the lines
-//         they don't want, then clicks "Copy Selected" — the backend gets
-//         lineItemIds: [picked] and returns a draft with just those lines.
+//         checklist (all checked by default) with a per-line spec subline
+//         (gap / divan / leg / special orders / custom specials) so the
+//         operator can distinguish lines that share product+size but
+//         differ on attributes. Each row also exposes a "Copy Qty" input
+//         capped to the source line's qty — letting the operator take, say,
+//         1 of a 2-qty source line. On submit the backend gets
+//         lineItems: [{ id, qty }] and returns a draft with just those
+//         lines, qty-overridden.
 //
 // On success the parent's onCopied receives the draft payload (customer,
 // hub, lines, dates, prices reset to 0).
@@ -2046,17 +2052,32 @@ type CopyDraft = {
   sourceId: string;
   sourceNo: string;
 };
-// Shape of one source line item the picker shows in Step 2. We only
-// pluck the identifying fields (product / size / fabric / qty) — pricing
-// data is irrelevant here because the backend zeroes all prices anyway.
+// Shape of one source line item the picker shows in Step 2. We pluck
+// the identifying fields (product / size / fabric / qty) PLUS the per-line
+// spec (gap / divan / leg / special order / custom specials) so the operator
+// can distinguish lines that share product+size but differ on attributes.
+// Pricing data is irrelevant — the backend zeroes all prices anyway.
 type SourceLineRow = {
   id: string;
   productCode: string;
   productName: string;
+  itemCategory: string;
   sizeLabel: string;
   fabricCode: string;
   quantity: number;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  specialOrder: string;
+  customSpecials: Array<{ description: string; surchargeSen: number }>;
 };
+// SO lines persist customSpecials as a JSON string; CO lines don't store
+// any. Accept either shape from the detail fetch and normalize in the
+// modal. `null` covers the missing-key case.
+type SourceLinesRawCustomSpecials =
+  | string
+  | Array<{ description?: string; surchargeSen?: number }>
+  | null;
 
 function CopyFromSourceModal({
   onClose,
@@ -2072,11 +2093,13 @@ function CopyFromSourceModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  // Step-2 state: the resolved source row + its line items + checked set.
+  // Step-2 state: the resolved source row + its line items + checked set +
+  // per-line qty override map (line id → qty, defaults to source qty).
   const [resolvedSourceId, setResolvedSourceId] = useState("");
   const [resolvedSourceNo, setResolvedSourceNo] = useState("");
   const [sourceLines, setSourceLines] = useState<SourceLineRow[]>([]);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [qtyById, setQtyById] = useState<Map<string, number>>(new Map());
 
   // Step 1 → Step 2: look up the typed order id, then fetch its lines.
   async function handleResolveSource() {
@@ -2127,9 +2150,18 @@ function CopyFromSourceModal({
             id: string;
             productCode?: string;
             productName?: string;
+            itemCategory?: string;
             sizeLabel?: string;
             fabricCode?: string;
             quantity?: number;
+            gapInches?: number | null;
+            divanHeightInches?: number | null;
+            legHeightInches?: number | null;
+            specialOrder?: string | null;
+            customSpecials?:
+              | string
+              | Array<{ description?: string; surchargeSen?: number }>
+              | null;
           }>;
         };
       };
@@ -2144,13 +2176,49 @@ function CopyFromSourceModal({
         setBusy(false);
         return;
       }
+      // customSpecials comes down as a JSON string on SO lines and as an
+      // empty array on CO lines. Normalize both into the picker shape so
+      // the spec subline can render any saved special-order entries.
+      const normalizeCustomSpecials = (
+        raw: SourceLinesRawCustomSpecials,
+      ): Array<{ description: string; surchargeSen: number }> => {
+        if (!raw) return [];
+        let arr: unknown = raw;
+        if (typeof raw === "string") {
+          try {
+            arr = JSON.parse(raw);
+          } catch {
+            return [];
+          }
+        }
+        if (!Array.isArray(arr)) return [];
+        return arr
+          .map((x) => {
+            if (!x || typeof x !== "object") return null;
+            const obj = x as { description?: unknown; surchargeSen?: unknown };
+            return {
+              description: typeof obj.description === "string" ? obj.description : "",
+              surchargeSen: Number(obj.surchargeSen) || 0,
+            };
+          })
+          .filter(
+            (x): x is { description: string; surchargeSen: number } =>
+              x !== null && x.description.length > 0,
+          );
+      };
       const lines: SourceLineRow[] = rawItems.map((it) => ({
         id: it.id,
         productCode: it.productCode ?? "",
         productName: it.productName ?? "",
+        itemCategory: it.itemCategory ?? "BEDFRAME",
         sizeLabel: it.sizeLabel ?? "",
         fabricCode: it.fabricCode ?? "",
         quantity: Number(it.quantity) || 0,
+        gapInches: it.gapInches ?? null,
+        divanHeightInches: it.divanHeightInches ?? null,
+        legHeightInches: it.legHeightInches ?? null,
+        specialOrder: it.specialOrder ?? "",
+        customSpecials: normalizeCustomSpecials(it.customSpecials ?? null),
       }));
       setResolvedSourceId(match.id);
       setResolvedSourceNo(
@@ -2161,6 +2229,8 @@ function CopyFromSourceModal({
       setSourceLines(lines);
       // Default all checked — operator unchecks what they don't want.
       setCheckedIds(new Set(lines.map((l) => l.id)));
+      // Default qty override = source qty. Operator can dial it down.
+      setQtyById(new Map(lines.map((l) => [l.id, l.quantity])));
       setStep(2);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Network error");
@@ -2169,9 +2239,15 @@ function CopyFromSourceModal({
     }
   }
 
-  // Step 2 → Done: post the selected line item ids to the copy endpoint.
+  // Step 2 → Done: post the selected line items + their qty overrides to
+  // the copy endpoint. Backend clamps each qty to 1..sourceQty.
   async function handleCopySelected() {
-    const picked = Array.from(checkedIds);
+    const picked = sourceLines
+      .filter((l) => checkedIds.has(l.id))
+      .map((l) => ({
+        id: l.id,
+        qty: Math.max(1, Math.min(l.quantity, qtyById.get(l.id) ?? l.quantity)),
+      }));
     if (picked.length === 0) {
       setError("Pick at least one line to copy");
       return;
@@ -2185,7 +2261,7 @@ function CopyFromSourceModal({
         body: JSON.stringify({
           sourceType,
           sourceId: resolvedSourceId,
-          lineItemIds: picked,
+          lineItems: picked,
         }),
       });
       const json = (await res.json()) as {
@@ -2219,12 +2295,26 @@ function CopyFromSourceModal({
     setCheckedIds(checked ? new Set(sourceLines.map((l) => l.id)) : new Set());
   }
 
+  // Per-line qty override. Empty string clears to "0" but is clamped to 1
+  // on commit. Anything above sourceQty is clamped down. Backend clamps
+  // again to be safe.
+  function handleQtyChange(line: SourceLineRow, raw: string) {
+    const parsed = Number(raw);
+    const safe = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1;
+    const clamped = Math.max(1, Math.min(line.quantity, safe));
+    setQtyById((prev) => {
+      const next = new Map(prev);
+      next.set(line.id, clamped);
+      return next;
+    });
+  }
+
   const allChecked = sourceLines.length > 0 && checkedIds.size === sourceLines.length;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div className={`relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full mx-4 p-5 space-y-4 ${step === 2 ? "max-w-2xl" : "max-w-md"}`}>
+      <div className={`relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full mx-4 p-5 space-y-4 ${step === 2 ? "max-w-3xl" : "max-w-md"}`}>
         <div className="flex items-center justify-between">
           <h3 className="text-base font-semibold text-[#1F1D1B]">
             {step === 1
@@ -2304,7 +2394,8 @@ function CopyFromSourceModal({
             <div className="flex items-center justify-between">
               <p className="text-xs text-[#6B7280]">
                 {checkedIds.size} of {sourceLines.length} line(s) selected.
-                Uncheck the ones you don&apos;t want.
+                Uncheck the ones you don&apos;t want; dial down the Copy Qty
+                to take only part of a line.
               </p>
               <button
                 type="button"
@@ -2320,22 +2411,36 @@ function CopyFromSourceModal({
                 <thead className="bg-[#FAF9F7] text-xs text-[#6B7280] border-b border-[#E2DDD8]">
                   <tr>
                     <th className="w-8 px-2 py-1.5"></th>
-                    <th className="text-left px-2 py-1.5">Product</th>
+                    <th className="text-left px-2 py-1.5">Product / Spec</th>
                     <th className="text-left px-2 py-1.5">Size</th>
                     <th className="text-left px-2 py-1.5">Fabric</th>
-                    <th className="text-right px-2 py-1.5">Qty</th>
+                    <th className="text-right px-2 py-1.5">Copy Qty</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sourceLines.map((line) => {
                     const checked = checkedIds.has(line.id);
+                    // Pills: Gap / Divan (BEDFRAME only) / Leg / Special.
+                    // Mirrors the visual language on the SO detail page so
+                    // the operator scans these the same way they scan the
+                    // existing line table elsewhere in the app.
+                    const isBedframe = line.itemCategory === "BEDFRAME";
+                    const hasGap = (line.gapInches ?? 0) > 0;
+                    const hasDivan = isBedframe && (line.divanHeightInches ?? 0) > 0;
+                    const hasLeg = (line.legHeightInches ?? 0) > 0;
+                    const hasSpecial = !!line.specialOrder;
+                    const hasCustom = line.customSpecials.length > 0;
+                    const hasAnySpec = hasGap || hasDivan || hasLeg || hasSpecial || hasCustom;
+                    const qty = qtyById.get(line.id) ?? line.quantity;
                     return (
                       <tr
                         key={line.id}
-                        className={`border-b border-[#F0EDE8] last:border-0 cursor-pointer ${checked ? "" : "opacity-50"}`}
-                        onClick={() => toggleLine(line.id)}
+                        className={`border-b border-[#F0EDE8] last:border-0 ${checked ? "" : "opacity-50"}`}
                       >
-                        <td className="px-2 py-1.5">
+                        <td
+                          className="px-2 py-2 align-top cursor-pointer"
+                          onClick={() => toggleLine(line.id)}
+                        >
                           <input
                             type="checkbox"
                             checked={checked}
@@ -2344,15 +2449,75 @@ function CopyFromSourceModal({
                             className="h-4 w-4"
                           />
                         </td>
-                        <td className="px-2 py-1.5 text-[#1F1D1B]">
+                        <td
+                          className="px-2 py-2 text-[#1F1D1B] cursor-pointer"
+                          onClick={() => toggleLine(line.id)}
+                        >
                           <div className="font-medium">{line.productCode || "(no code)"}</div>
                           {line.productName && (
                             <div className="text-xs text-[#6B7280]">{line.productName}</div>
                           )}
+                          {hasAnySpec && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {hasGap && (
+                                <span className="text-xs bg-[#E0EDF0] text-[#3E6570] px-1.5 py-0.5 rounded">
+                                  Gap {line.gapInches}&quot;
+                                </span>
+                              )}
+                              {hasDivan && (
+                                <span className="text-xs bg-[#F1E6F0] text-[#6B4A6D] px-1.5 py-0.5 rounded">
+                                  Divan {line.divanHeightInches}&quot;
+                                </span>
+                              )}
+                              {hasLeg && (
+                                <span className="text-xs bg-[#FAEFCB] text-[#9C6F1E] px-1.5 py-0.5 rounded">
+                                  Leg {line.legHeightInches}&quot;
+                                </span>
+                              )}
+                              {hasSpecial && (
+                                <span className="text-xs bg-[#F9E1DA] text-[#9A3A2D] px-1.5 py-0.5 rounded">
+                                  {line.specialOrder.replace(/_/g, " ")}
+                                </span>
+                              )}
+                              {line.customSpecials.map((cs, i) => (
+                                <span
+                                  key={`${line.id}-cs-${i}`}
+                                  className="text-xs bg-[#F0E8DC] text-[#6B5C32] px-1.5 py-0.5 rounded"
+                                >
+                                  {cs.description}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </td>
-                        <td className="px-2 py-1.5 text-[#5A5550]">{line.sizeLabel || "-"}</td>
-                        <td className="px-2 py-1.5 text-[#5A5550] font-mono text-xs">{line.fabricCode || "-"}</td>
-                        <td className="px-2 py-1.5 text-right text-[#1F1D1B]">{line.quantity}</td>
+                        <td
+                          className="px-2 py-2 text-[#5A5550] align-top cursor-pointer"
+                          onClick={() => toggleLine(line.id)}
+                        >
+                          {line.sizeLabel || "-"}
+                        </td>
+                        <td
+                          className="px-2 py-2 text-[#5A5550] font-mono text-xs align-top cursor-pointer"
+                          onClick={() => toggleLine(line.id)}
+                        >
+                          {line.fabricCode || "-"}
+                        </td>
+                        <td className="px-2 py-2 text-right text-[#1F1D1B] align-top">
+                          <div className="inline-flex items-center gap-1 justify-end">
+                            <input
+                              type="number"
+                              min={1}
+                              max={line.quantity}
+                              step={1}
+                              value={qty}
+                              disabled={!checked}
+                              onChange={(e) => handleQtyChange(line, e.target.value)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="w-14 text-right text-sm border border-[#E2DDD8] rounded px-1.5 py-0.5 disabled:bg-[#F4EFE3] disabled:text-[#9CA3AF]"
+                            />
+                            <span className="text-xs text-[#9CA3AF]">/ {line.quantity}</span>
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}

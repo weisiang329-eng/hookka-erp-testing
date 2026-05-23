@@ -3351,8 +3351,15 @@ app.delete("/:id", async (c) => {
 //   {
 //     sourceType: "SO" | "CO",
 //     sourceId: "<uuid>",
-//     lineItemIds: ["<line-uuid>", ...]  // OPTIONAL — copy ALL lines if absent
+//     lineItems: [{ id: "<line-uuid>", qty: 1 }, ...] // PREFERRED — per-line qty override (qty must be 1..sourceQty)
+//     lineItemIds: ["<line-uuid>", ...]               // LEGACY — copies each picked line at its source qty
+//                                                     // Either is OPTIONAL; omit both to copy ALL lines at source qty
 //   }
+//
+// The qty override lets the operator copy only N of the source line's qty
+// (e.g. source had 2, only redo 1). If both lineItems and lineItemIds are
+// present, lineItems wins. Any qty <= 0 or > source qty is clamped to the
+// valid range.
 //
 // Response (200):
 //   {
@@ -3383,9 +3390,36 @@ app.post("/copy-for-service-order", async (c) => {
       typeof body.sourceType === "string" ? body.sourceType.toUpperCase() : "";
     const sourceId: string =
       typeof body.sourceId === "string" ? body.sourceId : "";
-    const lineItemIds: string[] = Array.isArray(body.lineItemIds)
-      ? body.lineItemIds.filter((x: unknown): x is string => typeof x === "string")
+
+    // New shape: lineItems = [{ id, qty }] — per-line qty override.
+    // Old shape: lineItemIds = [id, ...] — copies each at source qty.
+    // Either is optional; omit both to copy ALL lines at source qty.
+    // If both are present, lineItems wins (it's the richer shape).
+    type PickedLine = { id: string; qty: number | null };
+    const pickedFromRich: PickedLine[] = Array.isArray(body.lineItems)
+      ? body.lineItems
+          .map((x: unknown): PickedLine | null => {
+            if (!x || typeof x !== "object") return null;
+            const obj = x as { id?: unknown; qty?: unknown };
+            if (typeof obj.id !== "string" || !obj.id) return null;
+            const rawQty = Number(obj.qty);
+            const qty = Number.isFinite(rawQty) && rawQty > 0 ? Math.floor(rawQty) : null;
+            return { id: obj.id, qty };
+          })
+          .filter((x: PickedLine | null): x is PickedLine => x !== null)
       : [];
+    const pickedFromLegacy: PickedLine[] = Array.isArray(body.lineItemIds)
+      ? body.lineItemIds
+          .filter((x: unknown): x is string => typeof x === "string")
+          .map((id: string): PickedLine => ({ id, qty: null }))
+      : [];
+    // lineItems wins when present; legacy lineItemIds is the fallback.
+    const pickedLines: PickedLine[] =
+      pickedFromRich.length > 0 ? pickedFromRich : pickedFromLegacy;
+    // Map for O(1) qty lookup when stamping the draft items.
+    const pickedQtyById = new Map<string, number | null>();
+    for (const p of pickedLines) pickedQtyById.set(p.id, p.qty);
+    const lineItemIds: string[] = pickedLines.map((p) => p.id);
 
     if (sourceType !== "SO" && sourceType !== "CO") {
       return c.json(
@@ -3470,23 +3504,32 @@ app.post("/copy-for-service-order", async (c) => {
         customerPOId: so.customerPOId ?? "",
         sourceNo: so.companySOId ?? "",
       };
-      items = filtered.map((it) => ({
-        id: it.id,
-        productId: it.productId ?? "",
-        productCode: it.productCode ?? "",
-        productName: it.productName ?? "",
-        itemCategory: it.itemCategory ?? "BEDFRAME",
-        sizeCode: it.sizeCode ?? "",
-        sizeLabel: it.sizeLabel ?? "",
-        fabricCode: it.fabricCode ?? "",
-        quantity: it.quantity,
-        gapInches: it.gapInches,
-        divanHeightInches: it.divanHeightInches,
-        legHeightInches: it.legHeightInches,
-        specialOrder: it.specialOrder ?? "",
-        notes: it.notes ?? "",
-        customSpecials: parseCustomSpecials(it.customSpecials),
-      }));
+      items = filtered.map((it) => {
+        // Clamp the operator's qty override to 1..sourceQty. Falls back to
+        // the source qty when no override was supplied (legacy path or
+        // qty omitted).
+        const srcQty = Number(it.quantity) || 0;
+        const reqQty = pickedQtyById.get(it.id);
+        const qty =
+          reqQty == null ? srcQty : Math.max(1, Math.min(srcQty, reqQty));
+        return {
+          id: it.id,
+          productId: it.productId ?? "",
+          productCode: it.productCode ?? "",
+          productName: it.productName ?? "",
+          itemCategory: it.itemCategory ?? "BEDFRAME",
+          sizeCode: it.sizeCode ?? "",
+          sizeLabel: it.sizeLabel ?? "",
+          fabricCode: it.fabricCode ?? "",
+          quantity: qty,
+          gapInches: it.gapInches,
+          divanHeightInches: it.divanHeightInches,
+          legHeightInches: it.legHeightInches,
+          specialOrder: it.specialOrder ?? "",
+          notes: it.notes ?? "",
+          customSpecials: parseCustomSpecials(it.customSpecials),
+        };
+      });
     } else {
       // CO branch — separate tables, slightly different shape.
       const co = await c.var.DB
@@ -3552,23 +3595,30 @@ app.post("/copy-for-service-order", async (c) => {
         customerPOId: co.customerCOId ?? "",
         sourceNo: co.companyCOId ?? "",
       };
-      items = filtered.map((it) => ({
-        id: it.id,
-        productId: it.productId ?? "",
-        productCode: it.productCode ?? "",
-        productName: it.productName ?? "",
-        itemCategory: it.itemCategory ?? "BEDFRAME",
-        sizeCode: it.sizeCode ?? "",
-        sizeLabel: it.sizeLabel ?? "",
-        fabricCode: it.fabricCode ?? "",
-        quantity: it.quantity,
-        gapInches: it.gapInches,
-        divanHeightInches: it.divanHeightInches,
-        legHeightInches: it.legHeightInches,
-        specialOrder: it.specialOrder ?? "",
-        notes: it.notes ?? "",
-        customSpecials: [],
-      }));
+      items = filtered.map((it) => {
+        // Same clamp as the SO branch — operator override wins when supplied.
+        const srcQty = Number(it.quantity) || 0;
+        const reqQty = pickedQtyById.get(it.id);
+        const qty =
+          reqQty == null ? srcQty : Math.max(1, Math.min(srcQty, reqQty));
+        return {
+          id: it.id,
+          productId: it.productId ?? "",
+          productCode: it.productCode ?? "",
+          productName: it.productName ?? "",
+          itemCategory: it.itemCategory ?? "BEDFRAME",
+          sizeCode: it.sizeCode ?? "",
+          sizeLabel: it.sizeLabel ?? "",
+          fabricCode: it.fabricCode ?? "",
+          quantity: qty,
+          gapInches: it.gapInches,
+          divanHeightInches: it.divanHeightInches,
+          legHeightInches: it.legHeightInches,
+          specialOrder: it.specialOrder ?? "",
+          notes: it.notes ?? "",
+          customSpecials: [],
+        };
+      });
     }
 
     if (!customer) {

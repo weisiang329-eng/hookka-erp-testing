@@ -1306,6 +1306,19 @@ export default function ProductionPage({
   const [fgPrintRequested, setFgPrintRequested] = useState(false);
   // Loading flag while the FG preview is being populated (tab entry).
   const [loadingFgPreview, setLoadingFgPreview] = useState(false);
+  // Foam Bonding's "Print Packing Stickers" runs the same fgStickers
+  // pipeline but on a SO-scoped fetch (all POs of the SO, not just FOAM
+  // dept). Stored in a SEPARATE state so the PACKING tab's preview tiles
+  // + grid-scoped `visibleFgStickers` are NOT polluted when the foam
+  // print fires from a different tab. The hidden print container
+  // chooses which array to iterate based on whichever print flag is
+  // active (fgPrintRequested → visibleFgStickers, foamPrintRequested →
+  // foamPrintStickers). Both arrays go through the SAME pure aggregator
+  // (fetchFgStickersForOrders) so the sticker output is byte-identical
+  // between the two entry points.
+  const [foamPrintStickers, setFoamPrintStickers] = useState<FgSticker[]>([]);
+  const [foamPrintRequested, setFoamPrintRequested] = useState(false);
+  const [loadingFoamPrint, setLoadingFoamPrint] = useState(false);
 
   // Stock PO creation dialog — lets the factory spin up a PO against a
   // placeholder SOH-YYMM-NNN when there's spare capacity. Item pool comes
@@ -3201,35 +3214,21 @@ export default function ProductionPage({
   // and was clobbering the correct result. Bumping a ref-counter and
   // checking it against the snapshot at finish-time discards stale writes.
   const fgLoadVersion = useRef(0);
-  // Populate `fgStickers` state without firing window.print(). Used in two
-  // places: (1) auto-fired on entry to UPHOLSTERY/PACKING tabs so the preview
-  // tiles render, (2) called by `handlePrintFgStickers` which then flips
-  // `fgPrintRequested` to trigger the print useEffect.
-  //
-  // Returns the populated list (also stored in state) so callers can short-
-  // circuit if nothing came back. Silent — no alerts.
-  const loadFgStickers = useCallback(async (): Promise<FgSticker[]> => {
-    const myVersion = ++fgLoadVersion.current;
-    if (filteredOrders.length === 0) {
-      if (myVersion === fgLoadVersion.current) setFgStickers([]);
-      return [];
-    }
-    // Match what the Production Sheet shows above. The grid does its
-    // own search + per-column filter on top of the page-level filters
-    // (filteredOrders). Without this scoping the FG preview balloons
-    // to "125 units" while the sheet only shows 11 rows. Pull the
-    // visible PO ids from gridFilteredDeptRows (which the DataGrid
-    // mirrors via setGridFilteredDeptRows on every filter/sort).
-    const visiblePoIds = gridFilteredDeptRows
-      ? new Set(gridFilteredDeptRows.map((r) => r.poId))
-      : null;
-    const ordersToProcess = visiblePoIds
-      ? filteredOrders.filter((o) => visiblePoIds.has(o.id))
-      : filteredOrders;
-    if (ordersToProcess.length === 0) {
-      if (myVersion === fgLoadVersion.current) setFgStickers([]);
-      return [];
-    }
+  // Pure-ish aggregator: takes a scoped list of POs, fetches their FG
+  // units + product details + sales-order customerSO, runs the SO-level
+  // sofa + leg-pair + pillow-pair aggregation, and returns the resulting
+  // FgSticker[]. No React state writes — both `loadFgStickers` (PACKING
+  // tab preview + Print All) and `handlePrintFoamPackingStickers`
+  // (Foam-tab pre-print) call this so both produce IDENTICAL stickers.
+  // Refactored 2026-05-24: previously this logic lived inline in
+  // loadFgStickers; extracting it lets the Foam button share the exact
+  // same pipeline (sofa-SO grouping, legs-into-comp1 pairing, pillow-
+  // into-last-comp pairing, fullCompartment label) instead of falling
+  // back to the simpler jspdf-based generateBatchStickersPdf path.
+  const fetchFgStickersForOrders = useCallback(async (
+    ordersToProcess: ProductionOrder[],
+  ): Promise<FgSticker[]> => {
+    if (ordersToProcess.length === 0) return [];
     type ProductMini = {
       id: string; code: string;
       skuCode?: string; sizeCode?: string; fabricColor?: string;
@@ -3299,7 +3298,6 @@ export default function ProductionPage({
     };
 
     const all: FgSticker[] = [];
-    setLoadingFgPreview(true);
     try {
       for (const o of ordersToProcess) {
         const [gRes, pRes] = await Promise.all([
@@ -3365,8 +3363,7 @@ export default function ProductionPage({
         }
       }
     } catch (err) {
-      console.error("[loadFgStickers] failed", err);
-      setLoadingFgPreview(false);
+      console.error("[fetchFgStickersForOrders] failed", err);
       return [];
     }
     // SO-level sofa pack aggregation. Sofa pack count is computed across
@@ -3576,6 +3573,38 @@ export default function ProductionPage({
       aggregated.push(...outputForSo);
     }
 
+    return aggregated;
+  }, []);
+
+  // PACKING/UPH on-screen FG sticker loader. Wraps fetchFgStickersForOrders
+  // with the page-level + grid-level scope, the loading flag, the version
+  // guard (prevents stale concurrent loads from overwriting newer data),
+  // and the React state writes that drive the preview tiles + the hidden
+  // print container's #batch-fg-print render path.
+  const loadFgStickers = useCallback(async (): Promise<FgSticker[]> => {
+    const myVersion = ++fgLoadVersion.current;
+    if (filteredOrders.length === 0) {
+      if (myVersion === fgLoadVersion.current) setFgStickers([]);
+      return [];
+    }
+    // Match what the Production Sheet shows above. The grid does its
+    // own search + per-column filter on top of the page-level filters
+    // (filteredOrders). Without this scoping the FG preview balloons
+    // to "125 units" while the sheet only shows 11 rows. Pull the
+    // visible PO ids from gridFilteredDeptRows (which the DataGrid
+    // mirrors via setGridFilteredDeptRows on every filter/sort).
+    const visiblePoIds = gridFilteredDeptRows
+      ? new Set(gridFilteredDeptRows.map((r) => r.poId))
+      : null;
+    const ordersToProcess = visiblePoIds
+      ? filteredOrders.filter((o) => visiblePoIds.has(o.id))
+      : filteredOrders;
+    if (ordersToProcess.length === 0) {
+      if (myVersion === fgLoadVersion.current) setFgStickers([]);
+      return [];
+    }
+    setLoadingFgPreview(true);
+    const aggregated = await fetchFgStickersForOrders(ordersToProcess);
     // Guard: only commit if no newer load has started. Prevents the
     // stale-overwrite race when filters change mid-fetch.
     if (myVersion !== fgLoadVersion.current) return aggregated;
@@ -3583,7 +3612,7 @@ export default function ProductionPage({
     setFgStickers(aggregated);
     setLoadingFgPreview(false);
     return aggregated;
-  }, [filteredOrders, gridFilteredDeptRows]);
+  }, [filteredOrders, gridFilteredDeptRows, fetchFgStickersForOrders]);
 
   const handlePrintFgStickers = useCallback(async () => {
     if (filteredOrders.length === 0) {
@@ -3600,16 +3629,22 @@ export default function ProductionPage({
     setFgPrintRequested(true);
   }, [filteredOrders, fgStickers, loadFgStickers, toast]);
 
-  // Foam Bonding pre-print of Packing stickers (Wei Siang 2026-05-23).
+  // Foam Bonding pre-print of Packing stickers (Wei Siang 2026-05-23,
+  // refactored 2026-05-24 to share the PACKING tab pipeline).
   // Operators want to print the warehouse-style Packing stickers at the
   // Foam Bonding stage so they're ready when Packing later actually
   // processes the SO. The catch: a bedframe SO's DIVAN piece never has
   // a FOAM job card, so the Foam tab's `orders` state (loaded with
   // ?dept=FOAM) is missing those POs. We re-fetch without the dept
   // filter scoped to the current search string and pipe the result
-  // through the SAME jspdf Packing-portrait renderer the dept page
-  // already uses (generateBatchStickersPdf with "PACKING"). The
-  // existing Packing dept button at /production/packing is untouched.
+  // through `fetchFgStickersForOrders` — the SAME aggregator the
+  // PACKING tab uses (sofa-SO grouping, legs-into-comp1 pairing,
+  // pillow-into-last-comp pairing, fullCompartment label). The output
+  // is then injected into the hidden #batch-fg-print container via
+  // its own `foamPrintStickers` state (kept separate from the PACKING
+  // tab's `fgStickers` so the two flows can't pollute each other),
+  // and the print is triggered the same way (window.print() inside a
+  // useTimeout that waits for QR images to settle).
   //
   // Behaviour:
   //   • Disabled until the operator types something into the Search
@@ -3618,8 +3653,10 @@ export default function ProductionPage({
   //     / sizeLabel).
   //   • On click: fetch /api/production-orders?fields=minimal&include=jobCards
   //     (no &dept= so we get every PO of the SO), filter client-side by
-  //     the same haystack rule, then call generateBatchStickersPdf with
-  //     deptCode "PACKING".
+  //     the same haystack rule, then call fetchFgStickersForOrders →
+  //     setFoamPrintStickers → setFoamPrintRequested(true). The
+  //     useTimeout below fires window.print() once the hidden tree has
+  //     mounted + QRs have generated.
   //   • If the operator's filter pulled in non-SO results (the haystack
   //     is freeform), we still print whatever matched — surfacing
   //     "narrow your search" is on the operator.
@@ -3629,6 +3666,7 @@ export default function ProductionPage({
       toast.info("Filter by SO (Search box) first — this prints Packing stickers for every piece of the filtered SO.");
       return;
     }
+    setLoadingFoamPrint(true);
     try {
       // Pull every PO with jobCards. No dept filter — Divan-only POs
       // and any accessory POs of the SO need to be in the result even
@@ -3661,20 +3699,20 @@ export default function ProductionPage({
         toast.warning(`No production orders matched "${fltSearch}".`);
         return;
       }
-      const { generateBatchStickersPdf } = await import("@/lib/generate-sticker-pdf");
-      const { generated, skipped } = await generateBatchStickersPdf(scoped, "PACKING");
-      if (generated === 0) {
-        toast.warning("No Packing stickers generated — none of the matched POs have a PACKING job card.");
-      } else if (skipped > 0) {
-        toast.info(`Generated ${generated} stickers (${skipped} POs had no PACKING job card and were skipped).`);
-      } else {
-        toast.success(`Generated ${generated} Packing stickers for ${scoped.length} PO${scoped.length === 1 ? "" : "s"}.`);
+      const stickers = await fetchFgStickersForOrders(scoped);
+      if (stickers.length === 0) {
+        toast.warning("No FG units to print for the matched orders.");
+        return;
       }
+      setFoamPrintStickers(stickers);
+      setFoamPrintRequested(true);
     } catch (err) {
       console.error("[handlePrintFoamPackingStickers] failed", err);
       toast.error("Failed to generate Packing stickers.");
+    } finally {
+      setLoadingFoamPrint(false);
     }
-  }, [fltSearch, toast]);
+  }, [fltSearch, toast, fetchFgStickersForOrders]);
 
   // Grid-filter scoped FG stickers — single source of truth shared by the
   // on-screen FG preview tiles AND the hidden print container, so what the
@@ -3788,6 +3826,26 @@ export default function ProductionPage({
     // <QRImg> instances below skips the observer; this bumped delay
     // accommodates ~100 sequential 500px QR generations (~10-30ms each).
     fgPrintRequested ? 1500 : null,
+  );
+
+  // Foam-tab print timer — mirror of the PACKING-tab timer above. Same
+  // 1500ms QR-settle delay; clears `foamPrintStickers` after the dialog
+  // closes (the foam state is single-use per click, unlike `fgStickers`
+  // which keeps the PACKING preview tiles alive between prints).
+  useTimeout(
+    () => {
+      if (foamPrintStickers.length === 0) {
+        setFoamPrintRequested(false);
+        return;
+      }
+      window.print();
+      // eslint-disable-next-line no-restricted-syntax -- one-shot post-print cleanup, fires from print callback
+      setTimeout(() => {
+        setFoamPrintRequested(false);
+        setFoamPrintStickers([]);
+      }, 500);
+    },
+    foamPrintRequested ? 1500 : null,
   );
 
   // Print the current filtered schedule as an A4 landscape listing. Opens
@@ -4744,14 +4802,16 @@ export default function ProductionPage({
             <Button
               variant="outline"
               onClick={handlePrintFoamPackingStickers}
-              disabled={!fltSearch.trim()}
+              disabled={!fltSearch.trim() || loadingFoamPrint || foamPrintRequested}
               title={
                 fltSearch.trim()
                   ? "Print Packing stickers (HB / Divan / Sofa) for every piece of the filtered SO"
                   : "Filter by SO in the Search box to print"
               }
             >
-              Print Packing Stickers
+              {loadingFoamPrint || foamPrintRequested
+                ? "Preparing…"
+                : "Print Packing Stickers"}
             </Button>
           )}
         </div>
@@ -6650,11 +6710,18 @@ export default function ProductionPage({
         );
       })()}
 
-      {/* Batch FG stickers — one 100×150mm page per filtered PO. Iterates
-          `visibleFgStickers` (grid-filter scoped) so Print All on the
-          PACKING tab honours whatever the operator has narrowed the grid
-          down to (Wei Siang 2026-05-10). */}
-      {visibleFgStickers.length > 0 && (
+      {/* Batch FG stickers — one 100×150mm page per filtered PO. The
+          source list switches based on which print is active:
+            • fgPrintRequested  → visibleFgStickers (PACKING tab Print All,
+              grid-filter scoped, Wei Siang 2026-05-10)
+            • foamPrintRequested → foamPrintStickers (Foam tab Print Packing
+              Stickers, SO-scoped, refactored 2026-05-24 to share this
+              same hidden container instead of generating a jspdf file)
+          The two paths are mutually exclusive — only one button at a
+          time can be in flight. Either source produces the same FgSticker
+          shape (built by fetchFgStickersForOrders) so the rendering loop
+          below is identical for both. */}
+      {(visibleFgStickers.length > 0 || foamPrintStickers.length > 0) && (
         <>
           <style>{`
             @media print {
@@ -6703,7 +6770,17 @@ export default function ProductionPage({
               would leave every QR stuck as a gray placeholder.
               Reset 500ms after print closes wipes the tree again. */}
           <div id="batch-fg-print" className="hidden print:block">
-            {fgPrintRequested && visibleFgStickers.map((s) => {
+            {(() => {
+              // Pick the active source. Mutually exclusive — both print
+              // paths flip their flag and the useTimeout fires
+              // window.print() within 1500ms; the operator can't click
+              // the second button in between because the first click
+              // grabs focus into the OS print dialog.
+              if (!fgPrintRequested && !foamPrintRequested) return null;
+              const printSource: FgSticker[] = foamPrintRequested
+                ? foamPrintStickers
+                : visibleFgStickers;
+              return printSource.map((s) => {
               // Paired secondaries (Legs / Pillow) print inside their
               // primary's page — skip standalone.
               if (s.isSyntheticLegs || s.isSyntheticPillow) return null;
@@ -6719,10 +6796,10 @@ export default function ProductionPage({
               // FG sticker 是要合成逻辑的). The standalone case is
               // filtered out above with `if (s.isSyntheticLegs ||
               // s.isSyntheticPillow) return null;`.
-              const legsPair = visibleFgStickers.find(
+              const legsPair = printSource.find(
                 (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
               );
-              const pillowPair = visibleFgStickers.find(
+              const pillowPair = printSource.find(
                 (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
               );
               return (
@@ -6836,7 +6913,8 @@ export default function ProductionPage({
                   </div>
                 </div>
               );
-            })}
+            });
+            })()}
           </div>
         </>
       )}

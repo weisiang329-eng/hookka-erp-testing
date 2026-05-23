@@ -1933,13 +1933,19 @@ export default function ProductsPage() {
   // price inputs, an expand panel). At a few hundred SKUs that is thousands
   // of DOM nodes — slow first paint, and a full re-render of every row on
   // each price keystroke. The virtualizer keeps only the visible window
-  // (~20 rows) mounted; row heights vary (a row grows tall when expanded),
-  // so measureElement measures each rendered row instead of a fixed guess.
+  // (~20 rows) mounted.
+  //
+  // estimateSize = 45 — matches the actual measured height of a collapsed
+  // BEDFRAME / SOFA / ACCESSORY row (verified 2026-05-24 against prod DOM).
+  // When the guess matches reality, the first paint positions every row
+  // correctly and ResizeObserver measureElement never has to shift them —
+  // no layout jitter on scroll. Bumping or shrinking estimateSize would
+  // reintroduce a one-frame shift each time a new window mounts.
   const productsScrollRef = useRef<HTMLDivElement>(null);
   const catalogRowVirtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => productsScrollRef.current,
-    estimateSize: () => 40,
+    estimateSize: () => 45,
     overscan: 10,
   });
 

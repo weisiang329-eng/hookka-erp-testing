@@ -116,13 +116,6 @@ function stripPoSuffix(poCode: string): string {
 // Output shapes — preserved verbatim from the legacy JC-derivation path
 // so the frontend doesn't need to learn a new shape.
 // ---------------------------------------------------------------------------
-type WIPMember = {
-  poNo: string;
-  jobCardId: string;
-  wipType: string;
-  quantity: number;
-};
-
 type WIPRow = {
   id: string;
   wipCode: string;
@@ -130,8 +123,6 @@ type WIPRow = {
   category: "SOFA" | "BEDFRAME" | "ACCESSORY";
   completedBy: string;
   relatedProduct: string;
-  setQty: number;
-  pieceQty: number;
   salesOrderNo: string | null;
   fabric: string;
   // null for negative rows (frontend renders "—")
@@ -139,19 +130,25 @@ type WIPRow = {
   // 0 for negative rows (frontend renders "—")
   estUnitCostSen: number;
   estTotalValueSen: number;
-  members: WIPMember[];
-  components?: Array<{ wipType: string; qty: number }>;
-  memberItemIds?: string[];
   totalQty: number;
+  // Row-level convenience flag: every source row is from a SOFA PO. Set
+  // once at row build time so the frontend doesn't need to walk
+  // `sources[]` to recompute it (the legacy SET-merge code path was the
+  // sole consumer of `sources[].itemCategory`, which is no longer on the
+  // wire — see slim-payload commit dropping itemCategory/poQty/baseModel).
+  isAllSofa: boolean;
   sources: Array<{
     poCode: string;
+    // The JC that produced (positive row) or triggered (negative stub)
+    // this source. Used by the WIP detail dialog's "Job Cards" table to
+    // surface the per-JC breakdown. Replaces the legacy `members[]`
+    // mirror, which carried the same JC id alongside duplicates of
+    // poCode/quantity/wipType that are already on the row or source.
+    jobCardId: string;
     quantity: number;
-    poQty: number;
     completedDate: string;
     ageDays: number;
     fabricCode: string;
-    baseModel: string;
-    itemCategory: string;
   }>;
 };
 
@@ -290,28 +287,14 @@ app.get("/", async (c) => {
   const stubPos: POLite[] = stubPosRes.results ?? [];
   const stubJcs: JCLite[] = stubJcsRes.results ?? [];
 
-  // BUG-2026-04-27-009: baseModel was previously derived as
-  // `productCode.split("-")[0]` — a substring guess that breaks for any
-  // product whose canonical code carries an internal hyphen (e.g.
-  // "1003-A---K-" → "1003" is wrong; the canonical baseModel is "1003-A").
-  // Source of truth is `bom_templates.baseModel` keyed on `productCode`.
-  // Fetch once, cache in a Map. Fallback to the legacy split when the
-  // product has no BOM template registered (legacy / accessory rows that
-  // never had one — silent zero-baseModel here would surface as a blank
-  // column in the WIP detail panel, which is worse than the heuristic).
-  const bomRowsRes = await db
-    .prepare(`SELECT productCode, baseModel FROM bom_templates`)
-    .all<{ productCode: string; baseModel: string | null }>();
-  const baseModelByProductCode = new Map<string, string>();
-  for (const r of bomRowsRes.results ?? []) {
-    if (r.productCode && r.baseModel) {
-      baseModelByProductCode.set(r.productCode, r.baseModel);
-    }
-  }
-  const resolveBaseModel = (productCode: string | null | undefined): string => {
-    const code = productCode ?? "";
-    return baseModelByProductCode.get(code) ?? code.split("-")[0] ?? "";
-  };
+  // BUG-2026-04-27-009 NOTE: the prior code fetched `bom_templates` to
+  // resolve a canonical baseModel for each PO and emit it on every
+  // `sources[]` entry. As of the slim-payload pass that field has zero
+  // live UI consumers (the only readers were inside the dormant
+  // SET-merge code path under `_sofaSetRows` in inventory/index.tsx),
+  // so the SELECT + Map were removed along with `sources[].baseModel`.
+  // If a future view needs a canonical baseModel per source, restore
+  // the lookup here rather than fanning it out across the response.
 
   // Indexes for fast lookup.
   const poById = new Map<string, POLite>();
@@ -429,11 +412,16 @@ app.get("/", async (c) => {
 
     // ---- Sources, completedBy, age, cost ------------------------------
     const sources: WIPRow["sources"] = [];
-    const members: WIPMember[] = [];
     let completedBy = "";
     let oldestAgeDays: number | null = null;
     let estUnitCostSen = 0;
     let estTotalValueSen = 0;
+    // Track the row-level isAllSofa flag while we walk the sources, so
+    // the frontend doesn't have to re-derive it (the legacy
+    // `sources[].itemCategory` was the only reason the value was on the
+    // wire). A row with zero sources is treated as "not all sofa".
+    let sourceCount = 0;
+    let sofaSourceCount = 0;
 
     if (isNegative) {
       // BUG-2026-04-27-035: cascade-stub source attribution.
@@ -573,20 +561,14 @@ app.get("/", async (c) => {
           : 0;
         sources.push({
           poCode: tpo.poNo,
+          jobCardId: trigger.id,
           quantity: consumeQty,
-          poQty: tpo.quantity || 1,
           completedDate,
           ageDays,
           fabricCode: tpo.fabricCode || "",
-          baseModel: resolveBaseModel(tpo.productCode),
-          itemCategory: tpo.itemCategory || "",
         });
-        members.push({
-          poNo: tpo.poNo,
-          jobCardId: trigger.id,
-          wipType: wipTypeLabel,
-          quantity: consumeQty,
-        });
+        sourceCount++;
+        if ((tpo.itemCategory || "") === "SOFA") sofaSourceCount++;
       }
       completedBy = "PENDING";
       oldestAgeDays = null;
@@ -614,20 +596,14 @@ app.get("/", async (c) => {
         const qty = cj.wipQty || po.quantity || 0;
         sources.push({
           poCode: po.poNo,
+          jobCardId: cj.id,
           quantity: qty,
-          poQty: po.quantity || 1,
           completedDate,
           ageDays,
           fabricCode: po.fabricCode || "",
-          baseModel: resolveBaseModel(po.productCode),
-          itemCategory: po.itemCategory || "",
         });
-        members.push({
-          poNo: po.poNo,
-          jobCardId: cj.id,
-          wipType: wipTypeLabel,
-          quantity: qty,
-        });
+        sourceCount++;
+        if ((po.itemCategory || "") === "SOFA") sofaSourceCount++;
         if (ageDays > bestAge) {
           bestAge = ageDays;
           bestCompletedJc = cj;
@@ -668,15 +644,13 @@ app.get("/", async (c) => {
       category,
       completedBy,
       relatedProduct: productCode,
-      setQty: w.stockQty,
-      pieceQty: w.stockQty,
       salesOrderNo,
       fabric: firstSrc?.fabricCode || "",
       oldestAgeDays,
       estUnitCostSen,
       estTotalValueSen,
-      members,
       totalQty: w.stockQty,
+      isAllSofa: sourceCount > 0 && sofaSourceCount === sourceCount,
       sources,
     });
   }

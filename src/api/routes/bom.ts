@@ -78,6 +78,29 @@ function rowToTemplate(row: BOMTemplateRow) {
   };
 }
 
+// LIST-only projection — same as rowToTemplate but drops `effectiveTo`
+// and `changeLog`. Both fields have zero readers in src/pages/bom.tsx
+// and `changeLog` can be long free-text, so excluding them shaves the
+// /api/bom/templates LIST response (currently ~1.95 MB) without
+// affecting the single-template POST/PUT responses, which still return
+// the full shape via rowToTemplate.
+function rowToTemplateListItem(row: BOMTemplateRow) {
+  return {
+    id: row.id,
+    productCode: row.productCode,
+    baseModel: row.baseModel ?? row.productCode,
+    category: (row.category ?? "BEDFRAME") as "BEDFRAME" | "SOFA",
+    l1Processes: safeParse<unknown[]>(row.l1Processes, []),
+    wipComponents: safeParse<unknown[]>(row.wipComponents, []),
+    version: row.version,
+    versionStatus: (row.versionStatus ?? "DRAFT") as
+      | "DRAFT"
+      | "ACTIVE"
+      | "OBSOLETE",
+    effectiveFrom: row.effectiveFrom ?? "",
+  };
+}
+
 function rowToVersion(row: BOMVersionRow) {
   return {
     id: row.id,
@@ -271,7 +294,7 @@ app.get("/templates", async (c) => {
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<BOMTemplateRow>();
-  const data = (res.results ?? []).map(rowToTemplate);
+  const data = (res.results ?? []).map(rowToTemplateListItem);
   return c.json({ success: true, data });
 });
 

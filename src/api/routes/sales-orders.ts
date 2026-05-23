@@ -3444,6 +3444,14 @@ app.post("/copy-for-service-order", async (c) => {
           customerPO: string;
           customerPOId: string;
           sourceNo: string;
+          // 0134 — source-order reference field passes through to the
+          // destination Service Order's `reference` slot (EX-prefixed).
+          // Previously the destination reference was being filled with
+          // the source id ("EX SO SO-2605-121") which (a) used the wrong
+          // format and (b) shadowed the real Customer SO slot. Customer
+          // SO now holds EX-<sourceNo>; reference holds the source's own
+          // free-text reference verbatim.
+          reference: string;
         }
       | null = null;
     type SrcItem = {
@@ -3503,6 +3511,7 @@ app.post("/copy-for-service-order", async (c) => {
         customerPO: so.customerPO ?? "",
         customerPOId: so.customerPOId ?? "",
         sourceNo: so.companySOId ?? "",
+        reference: so.reference ?? "",
       };
       items = filtered.map((it) => {
         // Clamp the operator's qty override to 1..sourceQty. Falls back to
@@ -3545,6 +3554,7 @@ app.post("/copy-for-service-order", async (c) => {
           companyCOId: string | null;
           customerCO: string | null;
           customerCOId: string | null;
+          reference: string | null;
         }>();
       if (!co) {
         return c.json(
@@ -3594,6 +3604,7 @@ app.post("/copy-for-service-order", async (c) => {
         customerPO: co.customerCO ?? "",
         customerPOId: co.customerCOId ?? "",
         sourceNo: co.companyCOId ?? "",
+        reference: co.reference ?? "",
       };
       items = filtered.map((it) => {
         // Same clamp as the SO branch — operator override wins when supplied.
@@ -3643,6 +3654,14 @@ app.post("/copy-for-service-order", async (c) => {
     };
     const prefixedCustomerPO = exPrefix(customer.customerPO);
     const prefixedCustomerPOId = exPrefix(customer.customerPOId);
+    // 0134 — Customer SO field on the destination Service Order carries
+    // EX-<sourceNo>. sourceNo is the source's companySOId / companyCOId,
+    // which already includes the SO-/CO- prefix (e.g. "SO-2605-121"), so
+    // exPrefix yields "EX-SO-2605-121" / "EX-CO-2605-007" directly.
+    // Reference holds the source's own free-text reference verbatim with
+    // the EX- prefix (blank stays blank).
+    const prefixedCustomerSOId = exPrefix(customer.sourceNo);
+    const prefixedReference = exPrefix(customer.reference);
 
     // Build the draft payload. ALL prices reset to 0 — the operator MUST
     // edit each line's unit price before saving. This is the headline
@@ -3657,9 +3676,9 @@ app.post("/copy-for-service-order", async (c) => {
       customerPO: prefixedCustomerPO,
       customerPOId: prefixedCustomerPOId,
       customerPODate: "",
-      customerSO: "",
-      customerSOId: "",
-      reference: customer.sourceNo ? `EX ${sourceType} ${customer.sourceNo}` : "",
+      customerSO: prefixedCustomerSOId,
+      customerSOId: prefixedCustomerSOId,
+      reference: prefixedReference,
       companySODate: today,
       customerDeliveryDate: today,
       hookkaExpectedDD: "",

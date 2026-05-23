@@ -165,6 +165,11 @@ export default function EditSalesOrderPage() {
   // don't override it here.
   const mode = useSOMode();
   const basePath = soBasePath(mode);
+  // 0134 — Service Order mode: every variant/option surcharge is RM 0.
+  // Toggling a special order or picking a new divan/leg height while
+  // editing a Service Order must NOT silently re-introduce the catalog
+  // surcharge — operator types Base Price directly. Mirrors create.tsx.
+  const isServiceOrderMode = mode === "service-order";
   // Override token forwarded from the SO detail page when an admin
   // overrode the Rule-3 production_window lock. Survives a single
   // navigation through router state, NOT through query params or
@@ -451,8 +456,11 @@ export default function EditSalesOrderPage() {
     const next = item.specialOrders.includes(code)
       ? item.specialOrders.filter((c) => c !== code)
       : [...item.specialOrders, code];
-    const surcharge =
-      calcPredefinedSurcharge(next, isSofa) + sumCustomSpecials(item.customSpecials);
+    // 0134 — Service Order mode: catalog surcharge stays at 0; operator's
+    // manual Base Price (and the manual Special $ input) is the only price.
+    const surcharge = isServiceOrderMode
+      ? 0
+      : calcPredefinedSurcharge(next, isSofa) + sumCustomSpecials(item.customSpecials);
     const label = buildSpecialOrderText(next, item.customSpecials);
     updateItem(idx, {
       specialOrders: next,
@@ -466,8 +474,10 @@ export default function EditSalesOrderPage() {
   const applyCustomSpecials = (idx: number, customs: CustomSpecial[]) => {
     const item = items[idx];
     const isSofa = item.itemCategory === "SOFA";
-    const surcharge =
-      calcPredefinedSurcharge(item.specialOrders, isSofa) + sumCustomSpecials(customs);
+    // 0134 — Service Order mode: variant surcharge total stays at 0.
+    const surcharge = isServiceOrderMode
+      ? 0
+      : calcPredefinedSurcharge(item.specialOrders, isSofa) + sumCustomSpecials(customs);
     const label = buildSpecialOrderText(item.specialOrders, customs);
     updateItem(idx, {
       customSpecials: customs,
@@ -655,13 +665,18 @@ export default function EditSalesOrderPage() {
       baseModel: prod.baseModel,
       sizeCode: prod.sizeCode,
       sizeLabel: prod.sizeLabel,
-      basePriceSen: prod.costPriceSen || 0,
+      // 0134 — Service Order mode: don't auto-seed Base Price from product
+      // cost; operator types it. Existing variant prices on the line
+      // would already be 0 in SO mode (set by the write paths), but reset
+      // them here too in case the line is being re-pointed at a different
+      // product after a price was carried in via clone / draft restore.
+      basePriceSen: isServiceOrderMode ? 0 : (prod.costPriceSen || 0),
       seatHeight: "",
       gapInches: isSofa ? null : items[idx].gapInches,
       divanHeightInches: isSofa ? null : items[idx].divanHeightInches,
-      divanPriceSen: isSofa ? 0 : items[idx].divanPriceSen,
+      divanPriceSen: isServiceOrderMode ? 0 : (isSofa ? 0 : items[idx].divanPriceSen),
       legHeightInches: isSofa ? null : items[idx].legHeightInches,
-      legPriceSen: isSofa ? 0 : items[idx].legPriceSen,
+      legPriceSen: isServiceOrderMode ? 0 : (isSofa ? 0 : items[idx].legPriceSen),
     });
   };
 
@@ -691,7 +706,9 @@ export default function EditSalesOrderPage() {
       seatHeight: value,
       sizeLabel: value,
       sizeCode,
-      basePriceSen: tier?.priceSen || 0,
+      // 0134 — Service Order mode: don't seed basePriceSen from the tier
+      // matrix on size change; operator types Base Price directly.
+      basePriceSen: isServiceOrderMode ? 0 : (tier?.priceSen || 0),
     });
   };
 
@@ -1144,7 +1161,8 @@ export default function EditSalesOrderPage() {
                           const sc = opt ? getConfigSurcharge("sofaLegHeights", val, opt.surcharge) : 0;
                           updateItem(idx, {
                             legHeightInches: inches,
-                            legPriceSen: sc,
+                            // 0134 — Service Order mode: leg surcharge stays 0.
+                            legPriceSen: isServiceOrderMode ? 0 : sc,
                           });
                         }}
                         options={(() => {

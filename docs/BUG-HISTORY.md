@@ -34,6 +34,52 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-24-002 — DataGrid filter OK "still missed on first click" — touch hit-target too small
+
+**Status:** 🟢 Fixed (2026-05-24)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang reported the column-filter OK button STILL didn't
+respond to the first tap even after BUG-2026-05-24-001's fix landed and
+verified live. Tapping OK closed the popover but the filter didn't apply;
+a second tap on the next open worked.
+
+**Root cause:** The 2026-05-24-001 code fix is correct — programmatic
+click and pixel-perfect coord click both apply the filter on the first
+OK. The real culprit was finger imprecision on a 49×30-px OK button and a
+14-px checkbox sitting in a 21-px-tall row. On the factory-floor tablet,
+the user's tap routinely landed a few pixels outside the OK rect (hitting
+the gap before Close, or the popover border) so React's onClick never
+fired. The reproduction was confirmed live via Chrome MCP: a coord click
+4 px off the KL checkbox + a coord click on OK closed the popover with
+NO filter applied, while pixel-centered clicks worked every time.
+
+**Fix:** `src/components/ui/data-grid.tsx` — bump every tap target in the
+ColumnFilterDropdown:
+- Value-list rows: `py-0.5 → py-1.5`, `text-[11px] → text-[12px]`,
+  checkbox `h-3.5 w-3.5 → h-4 w-4` (row height 21 → 30 px, checkbox
+  14 → 16 px).
+- OK button: `px-4 py-1.5 text-[11px] → px-5 py-2.5 text-[12px]`,
+  added `min-w-[64px]` (size 49×30 → 64×40 px, +73% area).
+- Close button: same `px-5 py-2.5 min-w-[64px]` treatment.
+- Clear Filter: `px-3 py-1 → px-3 py-2`, `text-[11px] → text-[12px]`.
+- Action row: `px-2 py-1.5 → px-2 py-2`, gap between OK/Close
+  `gap-2 → gap-3` (8 → 12 px) so a near-miss doesn't accidentally hit
+  the wrong button.
+
+**Verification (live on prod):**
+- Navigated to https://hookka-erp-testing.pages.dev/production/fab-cut
+  via Chrome MCP after deploy 7159e84.
+- Measured new rects via DOM inspection: label 30 px tall, checkbox
+  16×16 px, OK 64×40 px, Close 70×40 px, OK→Close gap 12 px.
+- Toggled State filter (KL) + clicked OK on first tap → filter applied
+  (897 → 162 → cleared back to 897 with re-tick + OK).
+
+**Related:** Follow-up to BUG-2026-05-24-001 (the closure-race code
+fix). Both ship together — 59c3141 (logic) + 7159e84 (UX).
+
+---
+
 ## BUG-2026-05-24-001 — DataGrid column-filter popover: first OK click does nothing (third regression)
 
 **Status:** 🟢 Fixed (2026-05-24)

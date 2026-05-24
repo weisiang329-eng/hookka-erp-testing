@@ -804,10 +804,29 @@ export default function ProductionPage({
   const dueQueryFrag =
     (effectiveDueFrom ? `&dueFrom=${encodeURIComponent(effectiveDueFrom)}` : "") +
     (effectiveDueTo ? `&dueTo=${encodeURIComponent(effectiveDueTo)}` : "");
+  // Wei Siang 2026-05-14: Clear All v2 — first version wiped sessionStorage
+  // but the DataGrid's defaultExcludedValues useEffect re-applied the
+  // "hide COMPLETED/TRANSFERRED" Status filter on remount, so the user
+  // still saw the same filtered rowcount. While this flag is true,
+  // defaultExcludedValues passes through as undefined so the grid mounts
+  // with truly empty filter state. Resets on dept-tab change so navigating
+  // to a different dept restores the first-visit hide-COMPLETED default.
+  // Moved up from line ~1149 on 2026-05-24 because the fetch URL below
+  // also needs to honour it (Phase 4: skip COMPLETED at SQL level).
+  const [clearAllActive, setClearAllActive] = useState(false);
+  // Phase 4 (2026-05-24): drop COMPLETED / TRANSFERRED / CANCELLED rows at
+  // SQL level by default. The Production grid's defaultExcludedValues
+  // already hides those statuses client-side — shipping them just to
+  // discard them after JSON.parse wastes ~60% of the wire payload + ~1.3s
+  // of main-thread parse on tab switch (measured 2026-05-24 on /production/
+  // fab-sew: 7.6 MB decompressed → ~3 MB after this slim). When operator
+  // hits "Clear all" (clearAllActive=true) they explicitly want history →
+  // drop the flag so the refetch ships completed rows too.
+  const excludeCompletedFrag = clearAllActive ? "" : "&excludeCompleted=true";
   const baseUrl =
     mode === "dept" && deptCode
-      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`
-      : `/api/production-orders?fields=minimal${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`;
+      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${excludeCompletedFrag}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`
+      : `/api/production-orders?fields=minimal${excludeCompletedFrag}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`;
   const ordersUrl: string | null = shouldFetch && datesSeeded ? baseUrl : null;
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   // Date-filter-INDEPENDENT fetch used solely by the "Total Overdue SO"
@@ -1129,15 +1148,9 @@ export default function ProductionPage({
   // experience that the operator asked for: "彻彻底底、干干净净地把
   // Filter 都清掉".
   const [gridResetNonce, setGridResetNonce] = useState(0);
-  // Wei Siang 2026-05-14: Clear All v2 — the first version wiped
-  // sessionStorage but the DataGrid's defaultExcludedValues useEffect
-  // re-applied the "hide COMPLETED/TRANSFERRED" Status filter on
-  // remount, so the user still saw the same filtered rowcount. While
-  // this flag is true, defaultExcludedValues passes through as
-  // undefined so the grid mounts with truly empty filter state.
-  // Resets on dept-tab change so navigating to a different dept
-  // restores the first-visit hide-COMPLETED default behaviour.
-  const [clearAllActive, setClearAllActive] = useState(false);
+  // clearAllActive moved up near the fetch URL — declared above so the
+  // server-side excludeCompleted flag can flip when the operator wants
+  // history. See its first use in `excludeCompletedFrag` above.
   // 2026-05-24 — keep the defaultExcludedValues object STABLE across
   // renders. An inline literal was breaking the column-filter OK click
   // because DataGrid's seed effect re-fires whenever this prop changes

@@ -279,6 +279,14 @@ export default function SalesPage() {
   // to the same tuples so the rest of the component keeps the original
   // setFilterX names.
   const [filterStatus, setFilterStatus] = _flStatus;
+  // 2026-05-24 — defaultExcludedValues MUST be a stable reference, otherwise
+  // DataGrid's seed effect re-fires on every render and clobbers the
+  // operator's just-applied column filter. See BUG-2026-05-24-003.
+  const SHIPPED_STATUS_EXCLUDE = useMemo(
+    () => ({ status: ["SHIPPED", "DELIVERED", "CLOSED", "CANCELLED"] }),
+    [],
+  );
+  const salesGridDefaultExcluded = filterStatus ? undefined : SHIPPED_STATUS_EXCLUDE;
   const [filterCustomer, setFilterCustomer] = _flCustomer;
   const [filterDateFrom, setFilterDateFrom] = _flFrom;
   const [filterDateTo, setFilterDateTo] = _flTo;
@@ -995,11 +1003,7 @@ export default function SalesPage() {
             // operator explicitly picks a Status above, filteredOrders is
             // already scoped to exactly that status, so a second grid-level
             // exclusion would wrongly hide every matching row.
-            defaultExcludedValues={
-              filterStatus
-                ? undefined
-                : { status: ["SHIPPED", "DELIVERED", "CLOSED", "CANCELLED"] }
-            }
+            defaultExcludedValues={salesGridDefaultExcluded}
             rowClassName={(row) =>
               row.status === "DRAFT"
                 ? "!bg-[#FAEFCB]/60 border-l-2 border-l-amber-400"

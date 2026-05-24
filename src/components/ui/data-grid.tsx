@@ -1698,6 +1698,18 @@ export function DataGrid<T extends Record<string, any>>({
   // Once they touch a filter, we stop overriding their choice.
   const hasInitialFilterState = !!seeded?.columnValueFilters && Object.keys(seeded.columnValueFilters).length > 0;
   const [valueFilterTouched, setValueFilterTouched] = useState<boolean>(hasInitialFilterState);
+  // Mirror touched into a ref so the seed effect can short-circuit
+  // synchronously even when React is mid-batch between a touch event and
+  // the next effect commit. The 2026-05-24 OK-first-click bug was caused
+  // by the seed effect firing AFTER the operator's OK click but still
+  // reading the pre-click `valueFilterTouched=false` from closure — its
+  // `setColumnValueFilters(next)` then full-replaced the just-applied
+  // filter with the all-but-excluded default, silently wiping the
+  // selection. checkedRef-style ref keeps the guard honest.
+  const valueFilterTouchedRef = useRef(valueFilterTouched);
+  useEffect(() => {
+    valueFilterTouchedRef.current = valueFilterTouched;
+  }, [valueFilterTouched]);
 
   // Apply defaultExcludedValues once after data loads (and again whenever
   // data shape changes, e.g. a new status value appears) — but only if
@@ -1705,9 +1717,21 @@ export function DataGrid<T extends Record<string, any>>({
   // We compute the allowed-values Set as (all values currently in data)
   // minus (the caller's excluded list), so e.g. excluding "COMPLETED" on
   // the Status column ticks every other status box on by default.
+  //
+  // CRITICAL (2026-05-24): callers MUST pass a stable `defaultExcludedValues`
+  // reference (useMemo or hoisted const). An inline object literal makes
+  // this effect re-fire on EVERY parent render, and the prior code's
+  // `setColumnValueFilters(next)` was a FULL REPLACE — so a 20s passive
+  // poll on the Production page would fire this effect right after the
+  // operator's OK click and clobber their selection. Two safeguards now:
+  // (a) read touched from the ref so the guard sees the latest value
+  //     even in cross-batch firing, and
+  // (b) updater form on the setter so we never overwrite a non-empty
+  //     selection — once the operator has ANY filter active, the seed
+  //     stays out of the way.
   /* eslint-disable react-hooks/set-state-in-effect -- one-shot seed of value filters */
   useEffect(() => {
-    if (valueFilterTouched) return;
+    if (valueFilterTouchedRef.current) return;
     if (!defaultExcludedValues || data.length === 0) return;
     const next: Record<string, Set<string>> = {};
     for (const [colKey, excluded] of Object.entries(defaultExcludedValues)) {
@@ -1724,7 +1748,14 @@ export function DataGrid<T extends Record<string, any>>({
       // filter would hide every row, the inverse of what we want.
       if (allValues.size > 0) next[colKey] = allValues;
     }
-    setColumnValueFilters(next);
+    setColumnValueFilters(prev => {
+      // Operator already has something — DON'T overwrite. The touched
+      // flag is the primary guard; this is belt-and-braces for the
+      // window between setValueFilterTouched(true) being queued and
+      // the effect closure firing with the stale `false`.
+      if (Object.keys(prev).length > 0) return prev;
+      return next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-runs only when data/defaults change
   }, [data, defaultExcludedValues, valueFilterTouched]);
   /* eslint-enable react-hooks/set-state-in-effect */

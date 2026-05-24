@@ -1138,6 +1138,16 @@ export default function ProductionPage({
   // Resets on dept-tab change so navigating to a different dept
   // restores the first-visit hide-COMPLETED default behaviour.
   const [clearAllActive, setClearAllActive] = useState(false);
+  // 2026-05-24 — keep the defaultExcludedValues object STABLE across
+  // renders. An inline literal was breaking the column-filter OK click
+  // because DataGrid's seed effect re-fires whenever this prop changes
+  // reference, and the 20s passive poll triggered enough re-renders to
+  // clobber the operator's just-applied selection. See BUG-2026-05-24-003.
+  const DEPT_STATUS_EXCLUDE = useMemo(
+    () => ({ status: ["COMPLETED", "TRANSFERRED"] }),
+    [],
+  );
+  const deptDefaultExcluded = clearAllActive ? undefined : DEPT_STATUS_EXCLUDE;
   // Reset selection + close batch dialogs when the dept tab changes.
   /* eslint-disable react-hooks/set-state-in-effect -- reset on tab change */
   useEffect(() => {
@@ -5272,7 +5282,7 @@ export default function ProductionPage({
             // COMPLETED / TRANSFERRED in the Status filter to see
             // history. Mirrors the operator's request: fewer rows
             // means faster page open and a more focused live view.
-            defaultExcludedValues={clearAllActive ? undefined : { status: ["COMPLETED", "TRANSFERRED"] }}
+            defaultExcludedValues={deptDefaultExcluded}
             // Re-enabled 2026-05-10 after measuring a 5.4s React-render
             // block on Fab Sew (~1.4k rows × 25 cols) immediately after
             // clearing the From-date filter — operator's "卡着 needs refresh"

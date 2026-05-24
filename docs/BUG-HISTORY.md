@@ -34,6 +34,69 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-24-003 — DataGrid filter OK still wiped: seed effect re-fires on unstable `defaultExcludedValues` ref (5th regression, REAL fix)
+
+**Status:** 🟢 Fixed (2026-05-24)
+**Category:** ui-frontend
+
+**Symptom:** Even after BUG-2026-05-24-001 (closure-race fix) AND
+BUG-2026-05-24-002 (tap-target bump) shipped + verified live, Wei Siang
+reported the column filter STILL failed first-click on the Production page
+("还没修好吗"). Open Status / State popover, untick a value, tap OK →
+popover closes → filter NOT applied. Second open + same dance worked.
+
+**Root cause (the real one — agent dug it out):** Production page
+(`src/pages/production/index.tsx:5275`) and Sales page
+(`src/pages/sales/index.tsx:998`) both passed an INLINE OBJECT LITERAL to
+`<DataGrid defaultExcludedValues={...}>`. Every parent render =
+fresh object reference. DataGrid's seed effect at
+`src/components/ui/data-grid.tsx:1709` depends on
+`[data, defaultExcludedValues, valueFilterTouched]` — so the new ref
+re-fires the effect on every render. Production has a 20s passive poll
+(~3 re-renders/min). The effect's `setColumnValueFilters(next)` was a
+FULL REPLACE, not an updater-form merge, so it silently clobbered the
+operator's just-applied OK selection with the all-but-COMPLETED default.
+Symptom: tap OK, popover closes (filter WAS queued), 20-100ms later
+the seed effect commits and overwrites it.
+
+The earlier 4 fixes treated symptoms (closure capture of `uniqueValues`,
+ref-based `checked` set, bigger tap targets) — they all stay, they all
+prevent OTHER races. But the load-bearing wipe was happening in a
+totally different code path: the parent's render → child effect re-run.
+
+**Fix (3 parts in commit `9987842`):**
+
+1. `src/components/ui/data-grid.tsx` seed effect (line 1709-1751):
+   - Read `valueFilterTouched` from `valueFilterTouchedRef` (mirrored
+     via a tiny `useEffect` so cross-batch firing still sees the
+     latest value).
+   - `setColumnValueFilters` switched to **updater form** with a guard:
+     `prev => Object.keys(prev).length > 0 ? prev : next`. Once the
+     operator has ANY filter, the seed permanently stays out of the
+     way. Belt-and-braces.
+
+2. `src/pages/production/index.tsx:1142-1152`: hoisted
+   `DEPT_STATUS_EXCLUDE` to `useMemo`, derived
+   `deptDefaultExcluded = clearAllActive ? undefined : DEPT_STATUS_EXCLUDE`
+   outside the JSX. Pass the stable ref.
+
+3. `src/pages/sales/index.tsx:281-289`: same treatment —
+   `SHIPPED_STATUS_EXCLUDE` hoisted to `useMemo`.
+
+**Verification (live on prod, deploy `9987842`):**
+- Navigated to `https://hookka-erp-testing.pages.dev/production/fab-cut?_=cachebust`.
+- Opened State popover, unticked KL with a coord click, tapped OK once:
+  filter applied on first click (139 → 31 → 162 records depending on
+  whether default exclusion was also active).
+- Repeated after a 28-second idle wait (covers at least one passive-poll
+  cycle): still applied on first click. Previously this was when the
+  seed effect would clobber.
+
+**Related:** Symptoms of BUG-2026-05-24-001 / -002 were real but were
+SECONDARY races on top of this one. All three fixes ship together.
+
+---
+
 ## BUG-2026-05-24-002 — DataGrid filter OK "still missed on first click" — touch hit-target too small
 
 **Status:** 🟢 Fixed (2026-05-24)

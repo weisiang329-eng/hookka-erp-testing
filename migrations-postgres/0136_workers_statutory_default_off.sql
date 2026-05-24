@@ -25,7 +25,7 @@
 -- ---------------------------------------------------------------------------
 
 UPDATE workers
-   SET "enableEpf" = FALSE,
-       "enableSocso" = FALSE,
-       "enableEis" = FALSE,
-       "enablePcb" = FALSE;
+   SET epf_enabled = FALSE,
+       socso_enabled = FALSE,
+       eis_enabled = FALSE,
+       pcb_enabled = FALSE;

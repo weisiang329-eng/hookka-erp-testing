@@ -2096,56 +2096,58 @@ export default function DashboardBPage() {
             {(() => {
               const sofaOn = !hiddenDept.has("Sofa");
               const bedOn = !hiddenDept.has("Bedframe");
-              const mx = Math.max(
-                1,
-                ...(prod?.backlogByDept ?? []).map(
-                  (x) =>
-                    (sofaOn ? x.sofaMin : 0) + (bedOn ? x.bedframeMin : 0),
-                ),
-              );
-              const filtered = !(sofaOn && bedOn);
-              return (prod?.backlogByDept ?? []).map((d) => {
-                const visMin =
-                  (sofaOn ? d.sofaMin : 0) + (bedOn ? d.bedframeMin : 0);
-                const showDays = filtered
-                  ? d.dailyCapMin > 0
-                    ? visMin / d.dailyCapMin
-                    : 0
-                  : d.backlogDays;
-                return (
-                  <div
-                    key={d.dept}
-                    className="flex items-center gap-3 py-1"
-                  >
-                    <span className="w-28 text-xs text-[#1F1D1B]">
-                      {d.dept}
-                    </span>
-                    <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden flex">
-                      {sofaOn && (
-                        <div
-                          className="h-full"
-                          style={{
-                            width: `${(d.sofaMin / mx) * 100}%`,
-                            background: C_INV,
-                          }}
-                        />
-                      )}
-                      {bedOn && (
-                        <div
-                          className="h-full"
-                          style={{
-                            width: `${(d.bedframeMin / mx) * 100}%`,
-                            background: C_SO,
-                          }}
-                        />
-                      )}
-                    </div>
-                    <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
-                      {showDays.toFixed(1)}d
-                    </span>
-                  </div>
-                );
+              // 2026-05-25: bar widths now scale by DAYS-to-clear, not by
+              // raw work minutes. Wei Siang reported: "22.8d 的 bar 比 8.7d
+              // 还短" — because Fabric Sewing had high work-minutes (long
+              // bar) but ALSO high capacity (low days), while Foam Bonding
+              // had less work-minutes (short bar) but tiny capacity (high
+              // days). The right-side label is days, so the operator
+              // intuitively expects bar length to match. Per-segment days
+              // = segment minutes / dept's daily capacity; the bar's two
+              // segments now sum to `showDays` and each row's total bar
+              // width is proportional to the biggest dept's wait days.
+              const rows = (prod?.backlogByDept ?? []).map((d) => {
+                const cap = d.dailyCapMin > 0 ? d.dailyCapMin : 1;
+                const sofaDays = sofaOn ? d.sofaMin / cap : 0;
+                const bedDays = bedOn ? d.bedframeMin / cap : 0;
+                const filtered = !(sofaOn && bedOn);
+                const showDays = filtered ? sofaDays + bedDays : d.backlogDays;
+                return { d, sofaDays, bedDays, showDays };
               });
+              const mxDays = Math.max(1, ...rows.map((r) => r.showDays));
+              return rows.map(({ d, sofaDays, bedDays, showDays }) => (
+                <div
+                  key={d.dept}
+                  className="flex items-center gap-3 py-1"
+                >
+                  <span className="w-28 text-xs text-[#1F1D1B]">
+                    {d.dept}
+                  </span>
+                  <div className="flex-1 h-2.5 rounded bg-[#F5F2ED] overflow-hidden flex">
+                    {sofaOn && (
+                      <div
+                        className="h-full"
+                        style={{
+                          width: `${(sofaDays / mxDays) * 100}%`,
+                          background: C_INV,
+                        }}
+                      />
+                    )}
+                    {bedOn && (
+                      <div
+                        className="h-full"
+                        style={{
+                          width: `${(bedDays / mxDays) * 100}%`,
+                          background: C_SO,
+                        }}
+                      />
+                    )}
+                  </div>
+                  <span className="w-12 text-right text-xs font-semibold text-[#DC2626] tabular-nums">
+                    {showDays.toFixed(1)}d
+                  </span>
+                </div>
+              ));
             })()}
           </CardContent>
         </Card>

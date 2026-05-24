@@ -1328,6 +1328,11 @@ export default function ProductionPage({
   // between the two entry points.
   const [foamPrintStickers, setFoamPrintStickers] = useState<FgSticker[]>([]);
   const [foamPrintRequested, setFoamPrintRequested] = useState(false);
+  // 2026-05-24 — Wei Siang asked for an on-screen preview of the foam
+  // packing stickers (mirroring the Show QR / Print All split on the
+  // existing dept QR Stickers section). When true + foamPrintStickers
+  // populated, the tiles render under the QR Stickers panel.
+  const [showFoamPackingPreview, setShowFoamPackingPreview] = useState(false);
   const [loadingFoamPrint, setLoadingFoamPrint] = useState(false);
 
   // Stock PO creation dialog — lets the factory spin up a PO against a
@@ -3670,31 +3675,28 @@ export default function ProductionPage({
   //   • If the operator's filter pulled in non-SO results (the haystack
   //     is freeform), we still print whatever matched — surfacing
   //     "narrow your search" is on the operator.
-  const handlePrintFoamPackingStickers = useCallback(async () => {
-    // 2026-05-24 — accept TWO scope sources:
-    //   1. Top-bar search (`fltSearch`) — operator types SO id / customer.
-    //      Haystack match across all POs in the system.
-    //   2. Grid-scoped rows (`gridFilteredDeptRows`) — operator narrowed
-    //      the Foam sheet via column filters / in-grid search WITHOUT
-    //      typing into the top search box. Use the visible rows' SO ids
-    //      as the scope so sibling POs (Divan-only, sofa components on
-    //      other dept paths) still come out on the printout.
-    // Either path is enough to print. If both empty → genuinely nothing
-    // to print and we tell the operator.
+  // 2026-05-24 — load-only path (no print trigger). Returns the loaded
+  // stickers AND sets foamPrintStickers state so the on-screen preview +
+  // hidden print container both pull from the same array. Accepts TWO
+  // scope sources:
+  //   1. Top-bar search (`fltSearch`) — operator types SO id / customer.
+  //      Haystack match across all POs in the system.
+  //   2. Grid-scoped rows (`gridFilteredDeptRows`) — operator narrowed
+  //      the Foam sheet via column filters / in-grid search. Use the
+  //      visible rows' SO ids as scope so sibling POs (Divan-only,
+  //      sofa components on other dept paths) still come through.
+  const loadFoamPackingStickers = useCallback(async (): Promise<FgSticker[]> => {
     const q = (fltSearch || "").trim().toLowerCase();
     const gridRows =
       (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
     const hasGridScope =
       gridRows !== null && gridRows.length > 0 && gridRows.length < deptRows.length;
     if (!q && !hasGridScope) {
-      toast.info("Filter by SO first — either type in the top Search box or narrow the grid below.");
-      return;
+      toast.info("Filter the Foam grid first — either type in the top Search box or narrow a column below.");
+      return [];
     }
     setLoadingFoamPrint(true);
     try {
-      // Pull every PO with jobCards. No dept filter — Divan-only POs
-      // and any accessory POs of the SO need to be in the result even
-      // though they have no FOAM JC.
       const res = await fetch(
         "/api/production-orders?fields=minimal&include=jobCards",
         { credentials: "include" },
@@ -3705,11 +3707,10 @@ export default function ProductionPage({
       const all: ProductionOrder[] = json?.success && Array.isArray(json.data) ? json.data : [];
       if (all.length === 0) {
         toast.warning("Could not load production orders.");
-        return;
+        return [];
       }
       let scoped: ProductionOrder[];
       if (q) {
-        // Top-bar search path — haystack match (existing behaviour).
         scoped = all.filter((o) => {
           const hay = [
             o.poNo, o.companySOId, o.customerPOId, o.customerReference,
@@ -3719,11 +3720,6 @@ export default function ProductionPage({
           return hay.includes(q);
         });
       } else {
-        // Grid-scope path — use the visible Foam rows' parent SO ids
-        // (not the line-suffixed poNo) so EVERY production order of
-        // those SOs comes through, including Divan-only POs that have
-        // no FOAM JC and sofa-base/cushion/armrest POs that live on
-        // their own dept tracks.
         const soIds = new Set(
           (gridRows ?? [])
             .map((r) => r.salesOrderId || r.consignmentOrderId || "")
@@ -3739,22 +3735,59 @@ export default function ProductionPage({
             ? `No production orders matched "${fltSearch}".`
             : "Could not match the visible Foam rows to any production orders.",
         );
-        return;
+        return [];
       }
       const stickers = await fetchFgStickersForOrders(scoped);
       if (stickers.length === 0) {
         toast.warning("No FG units to print for the matched orders.");
-        return;
+        return [];
       }
       setFoamPrintStickers(stickers);
-      setFoamPrintRequested(true);
+      return stickers;
     } catch (err) {
-      console.error("[handlePrintFoamPackingStickers] failed", err);
+      console.error("[loadFoamPackingStickers] failed", err);
       toast.error("Failed to generate Packing stickers.");
+      return [];
     } finally {
       setLoadingFoamPrint(false);
     }
   }, [fltSearch, toast, fetchFgStickersForOrders, gridFilteredDeptRows, deptRows]);
+
+  // Preview toggle — loads (fresh, so a changed grid filter is honoured)
+  // and reveals the on-screen tile strip under the QR Stickers panel.
+  const handleShowFoamPackingPreview = useCallback(async () => {
+    if (showFoamPackingPreview) {
+      // Already showing — just hide. Keep loaded stickers around so a
+      // subsequent Show without changing filter is instant.
+      setShowFoamPackingPreview(false);
+      return;
+    }
+    const stickers = await loadFoamPackingStickers();
+    if (stickers.length === 0) return;
+    setShowFoamPackingPreview(true);
+  }, [showFoamPackingPreview, loadFoamPackingStickers]);
+
+  // Print — if preview already loaded the stickers, print those directly
+  // (operator can WYSIWYG check before printing). Otherwise load + print.
+  const handlePrintFoamPackingStickers = useCallback(async () => {
+    if (foamPrintStickers.length > 0) {
+      setFoamPrintRequested(true);
+      return;
+    }
+    const stickers = await loadFoamPackingStickers();
+    if (stickers.length === 0) return;
+    setFoamPrintRequested(true);
+  }, [foamPrintStickers, loadFoamPackingStickers]);
+
+  // Filter scope changed → invalidate any preview/print payload so the
+  // next Show / Print fetches fresh. Cheap (setState of an empty array
+  // is a no-op when already empty).
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional cache invalidation on filter change */
+  useEffect(() => {
+    setFoamPrintStickers([]);
+    setShowFoamPackingPreview(false);
+  }, [fltSearch, gridFilteredDeptRows]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Grid-filter scoped FG stickers — single source of truth shared by the
   // on-screen FG preview tiles AND the hidden print container, so what the
@@ -4834,59 +4867,12 @@ export default function ProductionPage({
           {(activeTab === "UPHOLSTERY" || activeTab === "PACKING") && (
             <Button variant="outline" onClick={handlePrintFgStickers}>Print FG Stickers</Button>
           )}
-          {/* Foam Bonding: pre-print Packing stickers for the whole SO so
-              they're ready when Packing actually runs later. Routes through
-              the same generator the Packing dept uses, so the sticker
-              layout matches 1:1 (HB / Divan / Sofa pieces).
-              2026-05-24: gating accepts EITHER top-bar search OR a grid
-              narrowed to ≤ MAX_SO_FOR_PRINT distinct SOs. The default
-              hide-COMPLETED exclusion alone is NOT enough — that would
-              still print hundreds of stickers and trash the printer. */}
-          {activeTab === "FOAM" && (() => {
-            const MAX_SO_FOR_PRINT = 10;
-            const hasTopSearch = !!fltSearch.trim();
-            const gridRows =
-              (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
-            const distinctSoIds = new Set<string>();
-            if (gridRows) {
-              for (const r of gridRows) {
-                const sid = r.salesOrderId || r.consignmentOrderId;
-                if (sid) distinctSoIds.add(sid);
-              }
-            }
-            const gridScoped =
-              gridRows !== null &&
-              gridRows.length > 0 &&
-              gridRows.length < deptRows.length &&
-              distinctSoIds.size > 0 &&
-              distinctSoIds.size <= MAX_SO_FOR_PRINT;
-            const tooWide =
-              !hasTopSearch &&
-              gridRows !== null &&
-              distinctSoIds.size > MAX_SO_FOR_PRINT;
-            const enabled =
-              (hasTopSearch || gridScoped) && !loadingFoamPrint && !foamPrintRequested;
-            return (
-              <Button
-                variant="outline"
-                onClick={handlePrintFoamPackingStickers}
-                disabled={!enabled}
-                title={
-                  hasTopSearch
-                    ? "Print Packing stickers (HB / Divan / Sofa) for every piece of the filtered SO"
-                    : gridScoped
-                      ? `Print Packing stickers for every piece of ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid`
-                      : tooWide
-                        ? `Too many SOs (${distinctSoIds.size}) — narrow the grid to ≤ ${MAX_SO_FOR_PRINT} SOs first, or type one in the top Search box`
-                        : "Filter by SO first — either the top Search box or a column filter on the Foam grid"
-                }
-              >
-                {loadingFoamPrint || foamPrintRequested
-                  ? "Preparing…"
-                  : "Print Packing Stickers"}
-              </Button>
-            );
-          })()}
+          {/* Foam Bonding packing-stickers entry point was MOVED out of
+              this header on 2026-05-24 per Wei Siang: he wanted the
+              Show / Print pair to live inside the QR Stickers panel
+              below (alongside Show QR / Print All) so the buttons sit
+              right next to the production-sheet grid that scopes them.
+              See the QR Stickers section render around line 6064. */}
         </div>
       </div>
 
@@ -6061,7 +6047,7 @@ export default function ProductionPage({
               </span>
             </h2>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap justify-end">
             {onScreenStickers.length > 0 && (
               <Button
                 variant="outline"
@@ -6081,6 +6067,71 @@ export default function ProductionPage({
                 {printingJobCards ? "Generating…" : "Print All"}
               </Button>
             )}
+            {/* Foam-only Packing-sticker controls. Both buttons gate on
+                the same scope rule: top-bar search OR ≤10 distinct SOs
+                in the grid. Show loads + reveals on-screen tiles for a
+                WYSIWYG check before printing; Print sends the same
+                payload to the hidden print container. */}
+            {activeTab === "FOAM" && (() => {
+              const MAX_SO_FOR_PRINT = 10;
+              const hasTopSearch = !!fltSearch.trim();
+              const gridRows =
+                (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
+              const distinctSoIds = new Set<string>();
+              if (gridRows) {
+                for (const r of gridRows) {
+                  const sid = r.salesOrderId || r.consignmentOrderId;
+                  if (sid) distinctSoIds.add(sid);
+                }
+              }
+              const gridScoped =
+                gridRows !== null &&
+                gridRows.length > 0 &&
+                gridRows.length < deptRows.length &&
+                distinctSoIds.size > 0 &&
+                distinctSoIds.size <= MAX_SO_FOR_PRINT;
+              const tooWide =
+                !hasTopSearch &&
+                gridRows !== null &&
+                distinctSoIds.size > MAX_SO_FOR_PRINT;
+              const scopeOK = hasTopSearch || gridScoped;
+              const enabled = scopeOK && !loadingFoamPrint && !foamPrintRequested;
+              const tooltipBase = hasTopSearch
+                ? `Packing stickers (HB / Divan / Sofa pieces) for every piece of the SO in the Search box`
+                : gridScoped
+                  ? `Packing stickers for ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid`
+                  : tooWide
+                    ? `Too many SOs (${distinctSoIds.size}) — narrow the grid to ≤ ${MAX_SO_FOR_PRINT} SOs first, or type one in the top Search box`
+                    : "Filter the Foam grid first — top Search box or a column filter below";
+              return (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleShowFoamPackingPreview}
+                    disabled={!enabled && !showFoamPackingPreview}
+                    title={`Preview — ${tooltipBase}`}
+                  >
+                    {loadingFoamPrint
+                      ? "Loading…"
+                      : showFoamPackingPreview
+                        ? "Hide Packing"
+                        : "Show Packing Stickers"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePrintFoamPackingStickers}
+                    disabled={!enabled}
+                    title={`Print — ${tooltipBase}`}
+                  >
+                    {loadingFoamPrint || foamPrintRequested
+                      ? "Preparing…"
+                      : "Print Packing Stickers"}
+                  </Button>
+                </>
+              );
+            })()}
           </div>
         </div>
         {onScreenStickers.length === 0 ? (
@@ -6279,6 +6330,123 @@ export default function ProductionPage({
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+        {/* Foam-only Packing-sticker on-screen preview. Lives INSIDE
+            the QR Stickers panel so the operator's mental model stays
+            "this panel = stickers from this dept", but the panel header
+            counter still shows the dept JC count (not packing count).
+            Each tile mirrors the 100×150mm print layout 1:1 at ~50%
+            scale so what they see = what prints, including the WIP
+            distinction between HB ("…-HB20\"") and Divan ("8\" Divan-SS"). */}
+        {activeTab === "FOAM" && showFoamPackingPreview && foamPrintStickers.length > 0 && (
+          <div className="border-t border-[#F0F0F0]">
+            <div className="px-4 py-2 bg-[#FAF8F4] border-b border-[#F0F0F0] text-xs text-[#6B5C32] font-semibold flex items-center justify-between">
+              <span>
+                Packing Stickers preview · {foamPrintStickers.filter(s => !s.isSyntheticLegs && !s.isSyntheticPillow).length} sticker
+                {foamPrintStickers.filter(s => !s.isSyntheticLegs && !s.isSyntheticPillow).length === 1 ? "" : "s"}
+              </span>
+              <span className="text-[#8A7F73] font-normal">
+                Same layout, size, content as Packing dept print
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <div className="flex gap-3 p-3 min-w-min">
+                {foamPrintStickers
+                  .filter(s => !s.isSyntheticLegs && !s.isSyntheticPillow)
+                  .map((s) => {
+                    const legsPair = foamPrintStickers.find(
+                      (x) => x.isSyntheticLegs && x.comboPairKey === s.key,
+                    );
+                    const pillowPair = foamPrintStickers.find(
+                      (x) => x.isSyntheticPillow && x.comboPairKey === s.key,
+                    );
+                    const customerLine = s.customerHub || s.customerName;
+                    return (
+                      <div
+                        key={s.key}
+                        className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col overflow-hidden"
+                        style={{ width: "200px", height: "300px", padding: "6px" }}
+                        title={`${s.poNo} · ${s.productCode} · ${s.pieceName} ${s.pieceNo}/${s.totalPieces}`}
+                      >
+                        <div className="text-center font-bold leading-tight" style={{ fontSize: "13px" }}>
+                          {customerLine || s.customerName || "—"}
+                        </div>
+                        <div className="border-t border-black my-1" />
+                        <div className="space-y-[1.5px] leading-tight text-[#1F1D1B]" style={{ fontSize: "9px" }}>
+                          <div className="truncate"><span className="inline-block w-[58px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Our SO</span>: {s.salesOrderNo || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Model</span>: <span className="font-bold">{s.productCode || "—"}</span></div>
+                          {s.boxLabel && (
+                            <div className="truncate"><span className="inline-block w-[58px] font-semibold text-[#6B7280]">WIP</span>: {s.boxLabel}</div>
+                          )}
+                        </div>
+                        <div className="border-t border-black my-1" />
+                        <div className="space-y-[1.5px] leading-tight text-[#1F1D1B]" style={{ fontSize: "9px" }}>
+                          <div><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+                          {s.itemCategory === "SOFA" && s.seatSize && (
+                            <div><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Seat</span>: {s.seatSize}"</div>
+                          )}
+                          <div><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Colour</span>: {s.fabricCode || "—"}</div>
+                          {s.itemCategory === "BEDFRAME" && (
+                            <>
+                              <div><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Gap</span>: {s.gapInches != null ? `${s.gapInches}"` : "—"}</div>
+                              <div><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                            </>
+                          )}
+                          <div><span className="inline-block w-[58px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                          {s.specialOrder && (
+                            <div className="truncate text-[#9A3A2D] font-bold">★ {s.specialOrder}</div>
+                          )}
+                        </div>
+                        <div className="mt-auto pt-1 border-t border-dashed border-black flex items-end gap-1">
+                          <QRImg
+                            eager
+                            data={typeof window !== "undefined" ? `${window.location.origin}/track?s=${encodeURIComponent(s.unitSerial)}` : ""}
+                            size={pillowPair ? 60 : 80}
+                            alt="FG QR"
+                            className="block"
+                          />
+                          <div className="flex-1 text-center min-w-0">
+                            {legsPair && (
+                              <>
+                                <div className="font-bold leading-none" style={{ fontSize: "14px" }}>
+                                  {legsPair.pieceNo}/{legsPair.totalPieces}
+                                </div>
+                                <div className="font-bold uppercase" style={{ fontSize: "8px" }}>{legsPair.pieceName}</div>
+                                <div className="text-[7px] text-[#888]">{legsPair.shortCode}</div>
+                                <div className="border-t border-dotted my-0.5" />
+                              </>
+                            )}
+                            <div className="font-bold leading-none" style={{ fontSize: "18px" }}>
+                              {s.pieceNo}/{s.totalPieces}
+                            </div>
+                            <div className="font-bold uppercase" style={{ fontSize: "9px" }}>{s.pieceName}</div>
+                            <div className="text-[7px] text-[#888]">{s.shortCode}</div>
+                          </div>
+                          {pillowPair && (
+                            <div className="text-center min-w-0">
+                              <QRImg
+                                eager
+                                data={typeof window !== "undefined" ? `${window.location.origin}/track?s=${encodeURIComponent(pillowPair.unitSerial)}` : ""}
+                                size={50}
+                                alt="Pillow QR"
+                                className="block"
+                              />
+                              <div className="font-bold leading-none" style={{ fontSize: "10px" }}>
+                                {pillowPair.pieceNo}/{pillowPair.totalPieces}
+                              </div>
+                              <div className="font-bold uppercase" style={{ fontSize: "7px" }}>{pillowPair.pieceName}</div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
             </div>
           </div>
         )}

@@ -11,6 +11,7 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useWorkerParsedJson } from "@/lib/use-worker-parsed-json";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
 import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
@@ -828,7 +829,14 @@ export default function ProductionPage({
       ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${excludeCompletedFrag}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`
       : `/api/production-orders?fields=minimal${excludeCompletedFrag}${dueQueryFrag}${fltCategory ? `&cat=${encodeURIComponent(fltCategory)}` : ""}`;
   const ordersUrl: string | null = shouldFetch && datesSeeded ? baseUrl : null;
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
+  // Phase 5 (2026-05-24): swap useCachedJson → useWorkerParsedJson for this
+  // one heavy fetch. Same shape ({ data, loading, refresh }), same call
+  // site behaviour — the difference is JSON.parse runs in a dedicated web
+  // worker so the ~150-200 ms parse cost no longer blocks paint on tab
+  // switch / refresh. The rest of the page (the lighter overdue-counts,
+  // org / worker / kv-config fetches) keeps the main-thread useCachedJson
+  // path because their payloads are < 10 KB and don't move the needle.
+  const { data: ordersResp, loading, refresh: refreshOrders } = useWorkerParsedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   // Date-filter-INDEPENDENT fetch used solely by the "Total Overdue SO"
   // header chip + drill-down panel. Pulls ALL POs (no dueFrom/dueTo, no
   // dept narrowing) so the count reflects the system-wide overdue state,

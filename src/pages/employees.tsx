@@ -6572,14 +6572,19 @@ export default function EmployeesPage() {
         </div>
       </div>
 
-      {/* Tab Navigation */}
+      {/* Tab Navigation — 2026-05-24: tighter font + whitespace-nowrap so
+          the 8 multi-word labels stay on ONE line. Was text-sm + px-5 py-3
+          which wrapped "Working Hours" / "Labor Cost" / "Efficiency
+          Overview" etc. into two lines on a 1366-px viewport. Now
+          text-xs + px-3.5 py-2.5 fits everything single-line. Smaller
+          icons (h-3.5 w-3.5) match the new font scale. */}
       <div className="border-b border-[#E2DDD8]">
         <nav className="flex gap-0 -mb-px">
           {TABS.map((tab) => (
             <button
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
-              className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key
                   ? "border-[#6B5C32] text-[#6B5C32]"
                   : "border-transparent text-[#6B7280] hover:text-[#1F1D1B] hover:border-[#E2DDD8]"

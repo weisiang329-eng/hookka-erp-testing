@@ -4769,26 +4769,34 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             </div>
           ) : (
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
-              <table className="w-full text-sm">
+              {/* 2026-05-24 layout fix: 17 columns under w-full squeezed
+                  every cell into too little width — employee names wrapped
+                  to two lines (EI PHOO / WEI), OT headers stacked vertical.
+                  Switch to min-w-max so columns size to content, all
+                  cells/headers use whitespace-nowrap, Employee gets a hard
+                  min-w-[180px] so abbreviations stay on one line. The
+                  parent overflow-x-auto already handles horizontal scroll
+                  on narrow screens (tablet portrait). */}
+              <table className="w-full min-w-max text-sm">
                 <thead>
                   <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                    <th className="h-10 px-2 text-left font-medium text-[#374151] w-8"></th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Employee</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Basic (RM)</th>
-                    <th className="h-10 px-2 text-center font-medium text-[#374151]">Days</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">OT Wk</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">OT Sun</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">OT PH</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">OT Amt</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Gross</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">EPF EE</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">EPF ER</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">SOCSO</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">EIS</th>
-                    <th className="h-10 px-2 text-right font-medium text-[#374151]">PCB</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Net Pay</th>
-                    <th className="h-10 px-2 text-center font-medium text-[#374151]">Status</th>
-                    <th className="h-10 px-2 text-center font-medium text-[#374151]">Print</th>
+                    <th className="h-10 px-2 text-left font-medium text-[#374151] w-8 whitespace-nowrap"></th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151] min-w-[180px] whitespace-nowrap">Employee</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Basic (RM)</th>
+                    <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Days</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Wk</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Sun</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT PH</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">OT Amt</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Gross</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EPF EE</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EPF ER</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">SOCSO</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EIS</th>
+                    <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">PCB</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Net Pay</th>
+                    <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Status</th>
+                    <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Print</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4801,23 +4809,23 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                         <td className="h-10 px-2 text-center text-[#6B7280]">
                           {expandedRow === r.id ? <ChevronDown className="h-4 w-4 inline" /> : <ChevronRight className="h-4 w-4 inline" />}
                         </td>
-                        <td className="h-10 px-3">
+                        <td className="h-10 px-3 whitespace-nowrap">
                           <div className="font-medium text-[#1F1D1B]">{r.employeeName}</div>
                           <div className="text-[10px] text-[#9CA3AF]">{r.employeeNo} - {r.departmentCode.replace(/_/g, " ")}</div>
                         </td>
-                        <td className="h-10 px-3 text-right">{formatCurrency(r.basicSalary)}</td>
-                        <td className="h-10 px-2 text-center">{r.workingDays}</td>
-                        <td className="h-10 px-2 text-right">{r.otWeekdayHours}h</td>
-                        <td className="h-10 px-2 text-right">{r.otSundayHours > 0 ? `${r.otSundayHours}h` : "-"}</td>
-                        <td className="h-10 px-2 text-right">{r.otPHHours > 0 ? `${r.otPHHours}h` : "-"}</td>
-                        <td className="h-10 px-3 text-right font-medium text-[#6B5C32]">{formatCurrency(r.totalOT)}</td>
-                        <td className="h-10 px-3 text-right font-semibold">{formatCurrency(r.grossPay)}</td>
-                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(r.epfEmployee)}</td>
-                        <td className="h-10 px-2 text-right text-[#3E6570] text-xs">{formatCurrency(r.epfEmployer)}</td>
-                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(r.socsoEmployee)}</td>
-                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{formatCurrency(r.eisEmployee)}</td>
-                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs">{r.pcb > 0 ? formatCurrency(r.pcb) : "-"}</td>
-                        <td className="h-10 px-3 text-right font-bold text-[#1F1D1B]">{formatCurrency(r.netPay)}</td>
+                        <td className="h-10 px-3 text-right whitespace-nowrap">{formatCurrency(r.basicSalary)}</td>
+                        <td className="h-10 px-2 text-center whitespace-nowrap">{r.workingDays}</td>
+                        <td className="h-10 px-2 text-right whitespace-nowrap">{r.otWeekdayHours}h</td>
+                        <td className="h-10 px-2 text-right whitespace-nowrap">{r.otSundayHours > 0 ? `${r.otSundayHours}h` : "-"}</td>
+                        <td className="h-10 px-2 text-right whitespace-nowrap">{r.otPHHours > 0 ? `${r.otPHHours}h` : "-"}</td>
+                        <td className="h-10 px-3 text-right font-medium text-[#6B5C32] whitespace-nowrap">{formatCurrency(r.totalOT)}</td>
+                        <td className="h-10 px-3 text-right font-semibold whitespace-nowrap">{formatCurrency(r.grossPay)}</td>
+                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.epfEmployee)}</td>
+                        <td className="h-10 px-2 text-right text-[#3E6570] text-xs whitespace-nowrap">{formatCurrency(r.epfEmployer)}</td>
+                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.socsoEmployee)}</td>
+                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.eisEmployee)}</td>
+                        <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{r.pcb > 0 ? formatCurrency(r.pcb) : "-"}</td>
+                        <td className="h-10 px-3 text-right font-bold text-[#1F1D1B] whitespace-nowrap">{formatCurrency(r.netPay)}</td>
                         <td className="h-10 px-2 text-center">
                           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${getStatusStyle(r.status)}`}>
                             {r.status}

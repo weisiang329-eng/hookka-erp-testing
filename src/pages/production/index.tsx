@@ -4838,18 +4838,32 @@ export default function ProductionPage({
               they're ready when Packing actually runs later. Routes through
               the same generator the Packing dept uses, so the sticker
               layout matches 1:1 (HB / Divan / Sofa pieces).
-              2026-05-24: gating relaxed — also enabled when the operator
-              narrowed the Foam GRID via column filter / in-grid search
-              (Wei Siang reported SOFA scope was unreachable because the
-              top Search box was empty). Disabled only when nothing is
-              scoped at all (printing every Packing sticker in the system
-              is never what they want). */}
+              2026-05-24: gating accepts EITHER top-bar search OR a grid
+              narrowed to ≤ MAX_SO_FOR_PRINT distinct SOs. The default
+              hide-COMPLETED exclusion alone is NOT enough — that would
+              still print hundreds of stickers and trash the printer. */}
           {activeTab === "FOAM" && (() => {
+            const MAX_SO_FOR_PRINT = 10;
             const hasTopSearch = !!fltSearch.trim();
+            const gridRows =
+              (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
+            const distinctSoIds = new Set<string>();
+            if (gridRows) {
+              for (const r of gridRows) {
+                const sid = r.salesOrderId || r.consignmentOrderId;
+                if (sid) distinctSoIds.add(sid);
+              }
+            }
             const gridScoped =
-              gridFilteredDeptRows !== null &&
-              gridFilteredDeptRows.length > 0 &&
-              gridFilteredDeptRows.length < deptRows.length;
+              gridRows !== null &&
+              gridRows.length > 0 &&
+              gridRows.length < deptRows.length &&
+              distinctSoIds.size > 0 &&
+              distinctSoIds.size <= MAX_SO_FOR_PRINT;
+            const tooWide =
+              !hasTopSearch &&
+              gridRows !== null &&
+              distinctSoIds.size > MAX_SO_FOR_PRINT;
             const enabled =
               (hasTopSearch || gridScoped) && !loadingFoamPrint && !foamPrintRequested;
             return (
@@ -4861,8 +4875,10 @@ export default function ProductionPage({
                   hasTopSearch
                     ? "Print Packing stickers (HB / Divan / Sofa) for every piece of the filtered SO"
                     : gridScoped
-                      ? "Print Packing stickers for every piece of the SOs shown in the Foam grid"
-                      : "Filter by SO first — either the top Search box or a column filter on the Foam grid"
+                      ? `Print Packing stickers for every piece of ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid`
+                      : tooWide
+                        ? `Too many SOs (${distinctSoIds.size}) — narrow the grid to ≤ ${MAX_SO_FOR_PRINT} SOs first, or type one in the top Search box`
+                        : "Filter by SO first — either the top Search box or a column filter on the Foam grid"
                 }
               >
                 {loadingFoamPrint || foamPrintRequested

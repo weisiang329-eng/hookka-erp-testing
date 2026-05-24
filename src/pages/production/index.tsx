@@ -3671,9 +3671,23 @@ export default function ProductionPage({
   //     is freeform), we still print whatever matched — surfacing
   //     "narrow your search" is on the operator.
   const handlePrintFoamPackingStickers = useCallback(async () => {
+    // 2026-05-24 — accept TWO scope sources:
+    //   1. Top-bar search (`fltSearch`) — operator types SO id / customer.
+    //      Haystack match across all POs in the system.
+    //   2. Grid-scoped rows (`gridFilteredDeptRows`) — operator narrowed
+    //      the Foam sheet via column filters / in-grid search WITHOUT
+    //      typing into the top search box. Use the visible rows' SO ids
+    //      as the scope so sibling POs (Divan-only, sofa components on
+    //      other dept paths) still come out on the printout.
+    // Either path is enough to print. If both empty → genuinely nothing
+    // to print and we tell the operator.
     const q = (fltSearch || "").trim().toLowerCase();
-    if (!q) {
-      toast.info("Filter by SO (Search box) first — this prints Packing stickers for every piece of the filtered SO.");
+    const gridRows =
+      (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
+    const hasGridScope =
+      gridRows !== null && gridRows.length > 0 && gridRows.length < deptRows.length;
+    if (!q && !hasGridScope) {
+      toast.info("Filter by SO first — either type in the top Search box or narrow the grid below.");
       return;
     }
     setLoadingFoamPrint(true);
@@ -3693,20 +3707,38 @@ export default function ProductionPage({
         toast.warning("Could not load production orders.");
         return;
       }
-      // Replicate the page-level haystack search so the operator gets
-      // exactly the SO they're looking at on the Foam grid (plus any
-      // sibling POs of the same SO that the Foam grid hides because
-      // they lack a FOAM JC).
-      const scoped = all.filter((o) => {
-        const hay = [
-          o.poNo, o.companySOId, o.customerPOId, o.customerReference,
-          o.customerName, o.productCode, o.productName, o.fabricCode,
-          o.sizeLabel,
-        ].map((v) => (v || "").toLowerCase()).join(" ");
-        return hay.includes(q);
-      });
+      let scoped: ProductionOrder[];
+      if (q) {
+        // Top-bar search path — haystack match (existing behaviour).
+        scoped = all.filter((o) => {
+          const hay = [
+            o.poNo, o.companySOId, o.customerPOId, o.customerReference,
+            o.customerName, o.productCode, o.productName, o.fabricCode,
+            o.sizeLabel,
+          ].map((v) => (v || "").toLowerCase()).join(" ");
+          return hay.includes(q);
+        });
+      } else {
+        // Grid-scope path — use the visible Foam rows' parent SO ids
+        // (not the line-suffixed poNo) so EVERY production order of
+        // those SOs comes through, including Divan-only POs that have
+        // no FOAM JC and sofa-base/cushion/armrest POs that live on
+        // their own dept tracks.
+        const soIds = new Set(
+          (gridRows ?? [])
+            .map((r) => r.salesOrderId || r.consignmentOrderId || "")
+            .filter(Boolean),
+        );
+        scoped = all.filter((o) =>
+          soIds.has(o.salesOrderId || o.consignmentOrderId || ""),
+        );
+      }
       if (scoped.length === 0) {
-        toast.warning(`No production orders matched "${fltSearch}".`);
+        toast.warning(
+          q
+            ? `No production orders matched "${fltSearch}".`
+            : "Could not match the visible Foam rows to any production orders.",
+        );
         return;
       }
       const stickers = await fetchFgStickersForOrders(scoped);
@@ -3722,7 +3754,7 @@ export default function ProductionPage({
     } finally {
       setLoadingFoamPrint(false);
     }
-  }, [fltSearch, toast, fetchFgStickersForOrders]);
+  }, [fltSearch, toast, fetchFgStickersForOrders, gridFilteredDeptRows, deptRows]);
 
   // Grid-filter scoped FG stickers — single source of truth shared by the
   // on-screen FG preview tiles AND the hidden print container, so what the
@@ -4803,27 +4835,42 @@ export default function ProductionPage({
             <Button variant="outline" onClick={handlePrintFgStickers}>Print FG Stickers</Button>
           )}
           {/* Foam Bonding: pre-print Packing stickers for the whole SO so
-              they're ready when Packing actually runs later. Disabled until
-              the operator narrows by SO (Search box) — printing every
-              Packing sticker in the system is never what they want.
-              Routes through the same generator the Packing dept uses, so
-              the sticker layout matches 1:1 (HB / Divan / Sofa pieces). */}
-          {activeTab === "FOAM" && (
-            <Button
-              variant="outline"
-              onClick={handlePrintFoamPackingStickers}
-              disabled={!fltSearch.trim() || loadingFoamPrint || foamPrintRequested}
-              title={
-                fltSearch.trim()
-                  ? "Print Packing stickers (HB / Divan / Sofa) for every piece of the filtered SO"
-                  : "Filter by SO in the Search box to print"
-              }
-            >
-              {loadingFoamPrint || foamPrintRequested
-                ? "Preparing…"
-                : "Print Packing Stickers"}
-            </Button>
-          )}
+              they're ready when Packing actually runs later. Routes through
+              the same generator the Packing dept uses, so the sticker
+              layout matches 1:1 (HB / Divan / Sofa pieces).
+              2026-05-24: gating relaxed — also enabled when the operator
+              narrowed the Foam GRID via column filter / in-grid search
+              (Wei Siang reported SOFA scope was unreachable because the
+              top Search box was empty). Disabled only when nothing is
+              scoped at all (printing every Packing sticker in the system
+              is never what they want). */}
+          {activeTab === "FOAM" && (() => {
+            const hasTopSearch = !!fltSearch.trim();
+            const gridScoped =
+              gridFilteredDeptRows !== null &&
+              gridFilteredDeptRows.length > 0 &&
+              gridFilteredDeptRows.length < deptRows.length;
+            const enabled =
+              (hasTopSearch || gridScoped) && !loadingFoamPrint && !foamPrintRequested;
+            return (
+              <Button
+                variant="outline"
+                onClick={handlePrintFoamPackingStickers}
+                disabled={!enabled}
+                title={
+                  hasTopSearch
+                    ? "Print Packing stickers (HB / Divan / Sofa) for every piece of the filtered SO"
+                    : gridScoped
+                      ? "Print Packing stickers for every piece of the SOs shown in the Foam grid"
+                      : "Filter by SO first — either the top Search box or a column filter on the Foam grid"
+                }
+              >
+                {loadingFoamPrint || foamPrintRequested
+                  ? "Preparing…"
+                  : "Print Packing Stickers"}
+              </Button>
+            );
+          })()}
         </div>
       </div>
 

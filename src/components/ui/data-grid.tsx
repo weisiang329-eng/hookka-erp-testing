@@ -873,13 +873,20 @@ function ColumnFilterDropdown<T>({
               )}
             </div>
           ) : (
-            /* Values list (non-date) */
+            /* Values list (non-date) — bumped row height (py-0.5 → py-1.5)
+               and checkbox size (h-3.5 → h-4) on 2026-05-24 because Wei
+               Siang's finger on the tablet kept missing the 14-px checkbox
+               and registering a tap on the 11-px label text, which read
+               back as "OK did nothing on first click". The actual race
+               (the 59c3141 closure fix) was solved at the code level —
+               this is the touch-target follow-up so a tap that lands
+               anywhere on the row toggles. */
             <div className="max-h-[200px] overflow-y-auto border-t border-[#F0F0F0]">
               {filteredValues.map(([val, count]) => (
-                <label key={val} className="flex items-center gap-2 px-3 py-0.5 text-[11px] text-[#333] cursor-pointer hover:bg-[#F0ECE9]">
-                  <input type="checkbox" checked={checked.has(val)} onChange={() => toggleValue(val)} className="h-3.5 w-3.5 accent-[#6B5C32]" />
+                <label key={val} className="flex items-center gap-2 px-3 py-1.5 text-[12px] text-[#333] cursor-pointer hover:bg-[#F0ECE9]">
+                  <input type="checkbox" checked={checked.has(val)} onChange={() => toggleValue(val)} className="h-4 w-4 accent-[#6B5C32]" />
                   <span className="truncate flex-1">{val || "(blank)"}</span>
-                  <span className="text-[9px] text-[#AAA]">{count}</span>
+                  <span className="text-[10px] text-[#AAA]">{count}</span>
                 </label>
               ))}
             </div>
@@ -888,21 +895,25 @@ function ColumnFilterDropdown<T>({
               accidental form-submit behaviour, and OK reads from
               checkedRef + uniqueValuesRef so it's never staler than the
               latest checkbox click OR a poll-induced data refresh.
-              Wider hit-targets (px-4 py-1.5) so the OK and Close don't
-              overlap on touch (Wei Siang reported tapping the seam
-              between them and missing OK). */}
-          <div className="flex items-center justify-between border-t border-[#E2DDD8] px-2 py-1.5">
+              2026-05-24 second bump: px-5 py-2.5 text-[12px] +
+              min-w-[64px] on OK so a tablet finger that lands anywhere
+              inside the button (not just dead-centre) hits it. Wei
+              Siang reported "tapped OK but nothing happened" after the
+              closure fix went live — turned out the click was missing
+              the 49×30-px button by a few pixels and landing on the
+              Close button's whitespace. */}
+          <div className="flex items-center justify-between gap-3 border-t border-[#E2DDD8] px-2 py-2">
             <button
               type="button"
-              className="rounded border border-[#D0D0D0] px-3 py-1 text-[11px] text-[#555] hover:bg-[#F0ECE9]"
+              className="rounded border border-[#D0D0D0] px-3 py-2 text-[12px] text-[#555] hover:bg-[#F0ECE9]"
               onClick={() => { onClear(); onClose(); }}
             >
               Clear Filter
             </button>
-            <div className="flex gap-2">
+            <div className="flex gap-3">
               <button
                 type="button"
-                className="rounded border border-[#6B5C32] bg-[#6B5C32] px-4 py-1.5 text-[11px] font-semibold text-white hover:bg-[#4D4224]"
+                className="min-w-[64px] rounded border border-[#6B5C32] bg-[#6B5C32] px-5 py-2.5 text-[12px] font-semibold text-white hover:bg-[#4D4224]"
                 onClick={() => {
                   // Read BOTH the checked set and the unique-values count
                   // from refs (synced every render). Reading
@@ -931,7 +942,7 @@ function ColumnFilterDropdown<T>({
               </button>
               <button
                 type="button"
-                className="rounded border border-[#D0D0D0] px-3 py-1 text-[11px] text-[#555] hover:bg-[#F0ECE9]"
+                className="min-w-[64px] rounded border border-[#D0D0D0] px-5 py-2.5 text-[12px] text-[#555] hover:bg-[#F0ECE9]"
                 onClick={onClose}
               >
                 Close

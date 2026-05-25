@@ -1289,8 +1289,23 @@ async function fetchFilteredPOs(
   // by ~60% on a typical dept tab (7.6 MB → ~3 MB measured).
   // CANCELLED rows are dropped too because the FE's special-pill render
   // already shows them via a separate path on overview only.
+  // 2026-05-25 — Wei Siang reported Planning page's "Past 7d Production"
+  // chart was undercounting because the original `excludeCompleted` filter
+  // (status NOT IN COMPLETED/TRANSFERRED/CANCELLED) dropped EVERY fully-
+  // completed PO, including those whose JCs were completed in the last
+  // week. Planning aggregates per-JC actualMinutes by completedDate, so
+  // it NEEDS the recently-completed POs to come through.
+  //
+  // Fix: when excludeCompleted is on, still drop OLD completed/cancelled
+  // POs but KEEP any PO that was completed in the last 35 days. 35 picked
+  // to cover Planning's 7-day past window with margin (and Master Tracker
+  // / monthly retro views that look back further). Per-row cost is small
+  // because the date filter is very selective.
+  const completedCutoffDate = new Date();
+  completedCutoffDate.setDate(completedCutoffDate.getDate() - 35);
+  const completedCutoffIso = completedCutoffDate.toISOString().slice(0, 10);
   const excludeCompletedWhere = excludeCompleted
-    ? ` AND status NOT IN ('COMPLETED','TRANSFERRED','CANCELLED')`
+    ? ` AND (status NOT IN ('COMPLETED','TRANSFERRED','CANCELLED') OR (completedDate IS NOT NULL AND completedDate >= '${completedCutoffIso}'))`
     : '';
   // Phase 4: when a dept tab fetches, drop POs that have NO JC for the
   // requested dept (sibling chain still preserved via companySOId /

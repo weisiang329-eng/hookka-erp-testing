@@ -365,7 +365,14 @@ export default function PlanningPage() {
   // ?fields=minimal&include=jobCards → drops ~20 unused PO fields and the
   // piece_pics tree. jobCards still arrive (planning iterates order.jobCards
   // throughout for capacity / scheduling math).
-  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards");
+  //
+  // 2026-05-25: added &excludeCompleted=true so completed / transferred /
+  // cancelled POs don't load. Planning is about FUTURE work — finished
+  // POs don't need scheduling. Cuts wire payload ~60% + parse cost on
+  // the page-load spinner. Mirrors the Phase 4 fix on the Production
+  // dept page. Server-side snapshot cache (Phase 6) also applies for
+  // free since this hits the same /api/production-orders endpoint.
+  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards&excludeCompleted=true");
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkers } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: schedResp, refresh: refreshSched } = useCachedJson<{ data?: ScheduleEntry[] }>("/api/scheduling");
   // Wei Siang 2026-05-15: Capacity Loading lists only production depts.

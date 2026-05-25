@@ -45,3 +45,21 @@ export function readCookie(name: string): string | null {
 export function readCsrfCookie(): string | null {
   return readCookie(CSRF_COOKIE_NAME);
 }
+
+/**
+ * Build headers for mutating fetches — sets Content-Type: application/json
+ * and X-CSRF-Token from the hookka_csrf cookie. Drops the header silently
+ * if the cookie isn't readable (server will 403 with a clear message; the
+ * helper stays infallible at the call site).
+ *
+ * Lives here so that the verified-save helper + any new code can reuse
+ * the same logic instead of redefining it per-module (Production page,
+ * folders page, folder-detail page all had separate copies — they now
+ * import from here).
+ */
+export function csrfHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json", ...(extra || {}) };
+  const csrf = readCsrfCookie();
+  if (csrf) h[CSRF_HEADER_NAME] = csrf;
+  return h;
+}

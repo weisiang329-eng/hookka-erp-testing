@@ -3770,10 +3770,20 @@ async function applyPoUpdate(
 
     await db
       .prepare(
+        // 2026-05-25: explicit `updated_at = NOW()` on every JC mutation
+        // so the Phase 6 snapshot cache's MAX(job_cards.updated_at)
+        // freshness probe sees the bump and invalidates the cached
+        // /api/production-orders payload. Without this, batch Apply PIC
+        // (and any other PATCH) wrote to job_cards but the next list
+        // fetch served stale rows from production_orders_list_snapshot,
+        // silently overwriting the FE's optimistic update with the old
+        // pic1Id=null. Same fix applied to the production_orders UPDATE
+        // path below for symmetry.
         `UPDATE job_cards SET
            status = ?, completedDate = ?, pic1Id = ?, pic1Name = ?,
            pic2Id = ?, pic2Name = ?, actualMinutes = ?, dueDate = ?,
-           rackingNumber = ?, overdue = ?, distributedAt = ?
+           rackingNumber = ?, overdue = ?, distributedAt = ?,
+           updated_at = NOW()
          WHERE id = ?`,
       )
       .bind(

@@ -953,22 +953,27 @@ export default function PlanningPage() {
     // loops in the per-dept map below.
     const futureBucket = new Map<string, Map<string, number>>();
     const pastBucket = new Map<string, Map<string, number>>();
+    // 2026-05-26: ALSO tally per-dept-per-category past minutes (regardless
+    // of the visible filter) so we can compute each category's "share" of
+    // the dept's capacity. Wei Siang's ask: when filter = Bedframe, the
+    // 100% reference line should be BEDFRAME's slice of dept capacity,
+    // not the whole dept. The ratio comes from the past 7d production
+    // mix — bedframe vs sofa minutes — and acts as the multiplier on
+    // dailyCap to get the effective denominator under the filter.
+    const pastByDeptByCategory = new Map<string, { bedframe: number; sofa: number }>();
 
     for (const order of orders) {
-      // 2026-05-26: Capacity Loading category filter. ALL = no skip; SOFA
-      // / BEDFRAME drop the other side so the chart isolates one product
-      // line's load. Drives off PO.itemCategory which is set at SO create
-      // time and never changes mid-flight, so cheap to check here.
-      if (
-        loadingCategoryFilter !== "ALL" &&
-        order.itemCategory !== loadingCategoryFilter
-      ) {
-        continue;
-      }
+      const isBedframe = order.itemCategory === "BEDFRAME";
+      const isSofa = order.itemCategory === "SOFA";
+      const passesFilter =
+        loadingCategoryFilter === "ALL" ||
+        order.itemCategory === loadingCategoryFilter;
       for (const jc of order.jobCards) {
         const wipQty = Math.max(1, jc.wipQty ?? 1);
-        // Future = active JC, dueDate in future window
+        // Future = active JC, dueDate in future window. Filter applies
+        // here so the planned-load bar only sums the visible category.
         if (
+          passesFilter &&
           (order.status === "IN_PROGRESS" || order.status === "PENDING") &&
           jc.dueDate &&
           futureDayIndex.has(jc.dueDate) &&
@@ -981,23 +986,57 @@ export default function PlanningPage() {
           const deptMap = futureBucket.get(jc.departmentCode) as Map<string, number>;
           deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + mins);
         }
-        // Past = completed JC, completedDate in past window
+        // Past = completed JC, completedDate in past window.
         if (
           (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") &&
           jc.completedDate &&
           pastDayIndex.has(jc.completedDate)
         ) {
           const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
-          if (!pastBucket.has(jc.departmentCode)) pastBucket.set(jc.departmentCode, new Map());
-          const deptMap = pastBucket.get(jc.departmentCode) as Map<string, number>;
-          deptMap.set(jc.completedDate, (deptMap.get(jc.completedDate) ?? 0) + mins);
+          // (a) Bucket for the visible filter — drives the chart bar.
+          if (passesFilter) {
+            if (!pastBucket.has(jc.departmentCode)) pastBucket.set(jc.departmentCode, new Map());
+            const deptMap = pastBucket.get(jc.departmentCode) as Map<string, number>;
+            deptMap.set(jc.completedDate, (deptMap.get(jc.completedDate) ?? 0) + mins);
+          }
+          // (b) Always tally by category (ignoring filter) so the
+          //     effective-capacity ratio is stable across filter changes.
+          if (isBedframe || isSofa) {
+            const e = pastByDeptByCategory.get(jc.departmentCode) ?? { bedframe: 0, sofa: 0 };
+            if (isBedframe) e.bedframe += mins;
+            else e.sofa += mins;
+            pastByDeptByCategory.set(jc.departmentCode, e);
+          }
         }
       }
     }
 
     return productionDepartments.map((dept) => {
       const capDept = capacityData.find((d) => d.code === dept.code);
-      const dailyCap = capDept?.dailyCapacity ?? 0;
+      const fullDailyCap = capDept?.dailyCapacity ?? 0;
+
+      // 2026-05-26: derive the EFFECTIVE daily capacity under the active
+      // filter. ALL → use the dept's full capacity. BEDFRAME/SOFA → scale
+      // the full capacity down by that category's share of past 7d work
+      // (e.g. if past mix was 60% bedframe / 40% sofa and full cap is
+      // 50h, Bedframe filter sees effective cap = 30h). This makes the
+      // bar % read as "how full is this category's slice of the dept",
+      // not "how much of the WHOLE dept is bedframe alone consuming"
+      // (which would always look small under a single-category filter
+      // and falsely read as "under-planned"). Edge case: if past 7d has
+      // zero of the active category for this dept (brand new line),
+      // fall back to full capacity so the bar still renders sensibly
+      // — operator can then visually compare against the dashed 100%
+      // line without a divide-by-zero.
+      const catPast = pastByDeptByCategory.get(dept.code) ?? { bedframe: 0, sofa: 0 };
+      const totalCatPast = catPast.bedframe + catPast.sofa;
+      let categoryShare = 1;
+      if (loadingCategoryFilter === "BEDFRAME") {
+        categoryShare = totalCatPast > 0 ? catPast.bedframe / totalCatPast : 1;
+      } else if (loadingCategoryFilter === "SOFA") {
+        categoryShare = totalCatPast > 0 ? catPast.sofa / totalCatPast : 1;
+      }
+      const dailyCap = fullDailyCap * categoryShare;
       const denom = dailyCap > 0 ? dailyCap : 1;
 
       const futureDeptBucket = futureBucket.get(dept.code);

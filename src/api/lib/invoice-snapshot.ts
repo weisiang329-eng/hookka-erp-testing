@@ -91,5 +91,12 @@ export function isSnapshotFresh(
 ): boolean {
   if (!snapshot) return false;
   if (!currentMax) return true;
-  return snapshot.builtFrom >= currentMax;
+  // Type-aware compare — pg driver returns TIMESTAMP cols as Date and
+  // MAX over TEXT cols as string; raw `>=` between mixed types silently
+  // misclassifies the snapshot as fresh or stale. See snapshot.ts
+  // isSnapshotFresh comment for the full sales-orders incident writeup.
+  const builtMs = new Date(snapshot.builtFrom as unknown as string).getTime();
+  const currentMs = new Date(currentMax as unknown as string).getTime();
+  if (Number.isNaN(builtMs) || Number.isNaN(currentMs)) return false;
+  return builtMs >= currentMs;
 }

@@ -157,9 +157,17 @@ export async function getMaxSourceUpdatedAt(
 // Is the snapshot we have fresh enough to serve?
 //
 // Comparison rule: snapshot is fresh iff snapshot.builtFrom >= currentMax.
-// String comparison works because ISO 8601 datetimes are lexicographically
-// orderable when the format is consistent (which it is — every route in
-// the codebase writes ISO datetimes via toISOString() or datetime('now')).
+//
+// 2026-05-26 — the "string comparison works because ISO 8601 is
+// lexicographically orderable" comment that lived here was a half-truth.
+// The pg driver returns TIMESTAMP columns as Date objects, and MAX over
+// a TEXT column (e.g. sales_orders.updated_at) as a string. Mixed-type
+// `Date >= string` coerces both via ToNumber → string becomes NaN →
+// always false → "constant recompute" failure mode. Mixed-format
+// strings ("2026-05-22T..." vs "2026-05-22 ...") also lie via
+// lexicographic order. Coerce both to numeric timestamps via Date.parse
+// so any combo of Date/string/ISO/postgres-format input compares
+// chronologically. See snapshot.ts for the full incident writeup.
 //
 // null currentMax means every tracked table is empty → snapshot is
 // trivially fresh (nothing has changed since we built it).
@@ -172,7 +180,10 @@ export function isSnapshotFresh(
 ): boolean {
   if (!snapshot) return false;
   if (!currentMax) return true;
-  return snapshot.builtFrom >= currentMax;
+  const builtMs = new Date(snapshot.builtFrom as unknown as string).getTime();
+  const currentMs = new Date(currentMax as unknown as string).getTime();
+  if (Number.isNaN(builtMs) || Number.isNaN(currentMs)) return false;
+  return builtMs >= currentMs;
 }
 
 // ---------------------------------------------------------------------------

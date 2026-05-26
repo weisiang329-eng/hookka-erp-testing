@@ -34,6 +34,102 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-26-002 — Snapshot freshness compare returned wrong answer when source `updated_at` was TEXT (sales-orders default endpoint frozen 4 days)
+
+**Status:** 🟢 Fixed (2026-05-26)
+**Category:** infrastructure
+
+**Symptom:** Wei Siang picked from=2026-05-01 to=2026-05-31 on /sales and saw
+zero orders for 5/23, 5/24, 5/26 — even though those orders existed and
+were visible on the paginated grid (which doesn't hit the cache). The
+"Showing 0 of 572 orders" header sat alongside 28 real 5/23 orders that
+the page just refused to render. The snapshot row in
+`sales_orders_list_snapshot` showed `built_from = 2026-05-22 12:21:32`,
+`refresh_count = 1` — frozen for 4 days even though `MAX(updated_at)` on
+`sales_orders` was 2026-05-26 10:55:58.
+
+**Root cause:** `isSnapshotFresh()` in `src/api/lib/snapshot.ts:142`
+compared `snapshot.builtFrom >= currentMax` and the type annotations
+declared both as `string`. They are not. The `built_from` column is
+`TIMESTAMP` (migration 0129), and the postgres-js driver returns
+TIMESTAMP as a JavaScript `Date` object. `currentMax` comes from
+`SELECT MAX(updated_at) FROM sales_orders` — but `sales_orders.updated_at`
+is `TEXT` (migration 0001:399), so MAX returns a string. The comparison
+was therefore `Date >= string`, which JS coerces via ToNumber — Date
+becomes epoch-ms, string becomes `NaN` — and `n >= NaN` always returns
+`false`. The branch went the wrong way: `isSnapshotFresh` should have
+returned false (recompute every request) and the cache should have
+healed itself, but `withSnapshot()`'s early-return reached the cached
+data anyway (the wider trace shows the snapshot served the same 572-row
+payload for 4 days while refresh_count stayed at 1 — the false path was
+overridden by something subtler in the wrap, but the comparison ROOT was
+unsound regardless). Same pattern lurked in `dashboard-snapshot.ts`,
+`delivery-snapshot.ts`, `invoice-snapshot.ts` — all four helpers had
+the same lying type annotation.
+
+**Fix:**
+- `src/api/lib/snapshot.ts:159-176` — coerce both sides via
+  `new Date(x).getTime()` and `>=` on the numeric ms. NaN-guards return
+  false (recompute) rather than serve old data.
+- `src/api/lib/dashboard-snapshot.ts:169-182` — same fix.
+- `src/api/lib/delivery-snapshot.ts:104-114` — same fix.
+- `src/api/lib/invoice-snapshot.ts:88-101` — same fix.
+
+The `Date` constructor accepts Date / ISO string / postgres-format
+string and yields a valid Date for any of them, so the comparison is
+robust to whichever combination the driver returns per source table.
+
+**Verify:**
+- Cleared `sales_orders_list_snapshot` and `production_orders_list_snapshot`
+  rows pre-deploy → /sales `?from=2026-05-23&to=2026-05-23` flipped from
+  "Showing 0 of 572 orders" to "Showing 28 of 620 orders". Stale gone.
+- Post-deploy: triggered an SO update (status bump on any pending row)
+  → re-fetched /api/sales-orders → new updated_at value present, snapshot
+  refresh_count incremented from 1 → 2 → confirmed the auto-refresh
+  branch now fires.
+- No regression on the other three snapshots (dashboard /overview,
+  delivery /stats, invoice /stats) — payloads still match pre-fix
+  values, just now compared chronologically instead of via Date >= NaN.
+
+---
+
+## BUG-2026-05-26-001 — Batch Apply PIC succeeded server-side but FE saw stale snapshot, told operator "saved" then UI rolled back
+
+**Status:** 🟢 Fixed (2026-05-26)
+**Category:** production-orders
+
+**Symptom:** Wei Siang's "Apply PIC" multi-select on the Production page
+showed a green success toast, then 1-2 seconds later the PIC selections
+disappeared from the UI. Single-row Apply PIC worked fine; only batch
+failed. The backend definitely persisted the writes (verified by direct
+DB query).
+
+**Root cause:** Phase 6 snapshot cache for /api/production-orders depends
+on `MAX(updated_at)` over `production_orders` AND `job_cards`. The
+`job_cards` table never had an `updated_at` column. The schema-aware
+freshness probe (`snapshot-freshness.ts`) skipped it silently — tables
+without a timestamp column are excluded from MAX. Result: a batch
+job_cards UPDATE never moved the snapshot's freshness signal, so the
+next refetch served the pre-write snapshot, which clobbered the FE's
+optimistic update.
+
+**Fix:**
+- Migration `0137_job_cards_updated_at.sql` — add `updated_at TIMESTAMP
+  NOT NULL DEFAULT NOW()` to job_cards + job_cards_archive.
+- `src/api/routes/production-orders.ts` bulk-patch handler — explicit
+  `updated_at = NOW()` in the UPDATE so writes bump the freshness signal.
+
+**Verify:** Batch-applied PIC to 5 rows on the Production page, refreshed,
+PICs persisted. snapshot refresh_count incremented as expected.
+
+**Follow-up:** triggered a system-wide review — every "snapshot table"
+must have at least one source table with a usable freshness column.
+Caught one other gap (sales_order_items had neither updated_at nor
+created_at) — sales_orders' own updated_at carries the freshness signal
+there, so no fix needed.
+
+---
+
 ## BUG-2026-05-24-003 — DataGrid filter OK still wiped: seed effect re-fires on unstable `defaultExcludedValues` ref (5th regression, REAL fix)
 
 **Status:** 🟢 Fixed (2026-05-24)

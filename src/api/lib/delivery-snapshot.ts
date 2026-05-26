@@ -104,7 +104,13 @@ async function getMaxUpdatedAtFor(
 function isFresh(snap: SnapRow | null, currentMax: string | null): boolean {
   if (!snap) return false;
   if (!currentMax) return true;
-  return snap.builtFrom >= currentMax;
+  // Type-aware compare — see snapshot.ts isSnapshotFresh comment for the
+  // full rationale. pg driver returns TIMESTAMP cols as Date, MAX over
+  // TEXT cols as string; raw `>=` between mixed types silently lies.
+  const builtMs = new Date(snap.builtFrom as unknown as string).getTime();
+  const currentMs = new Date(currentMax as unknown as string).getTime();
+  if (Number.isNaN(builtMs) || Number.isNaN(currentMs)) return false;
+  return builtMs >= currentMs;
 }
 
 // ============================================================================

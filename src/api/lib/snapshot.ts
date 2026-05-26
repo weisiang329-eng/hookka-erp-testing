@@ -131,7 +131,36 @@ export async function getMaxSourceUpdatedAt(
 // Comparison rule. Snapshot is fresh iff builtFrom >= currentMax.
 //   • null snapshot       → never fresh (cold cache)
 //   • null currentMax     → trivially fresh (every source table empty)
-//   • lexicographic compare on ISO-8601 strings works as numeric compare.
+//
+// Bug fix 2026-05-26 — type-aware compare. The original code did
+//   `snapshot.builtFrom >= currentMax`
+// and the type annotations claimed both were strings. They are not:
+//   • `built_from` is a TIMESTAMP column → pg driver returns Date object.
+//   • `currentMax` is MAX(updated_at). Some source tables type updated_at
+//     as TEXT (e.g. sales_orders, customers, products, all the old
+//     D1→Postgres carry-overs) — MAX(TEXT) returns a string. Other
+//     tables type it as TIMESTAMP — MAX returns Date.
+// So this comparison was a mix of `Date >= string`, `string >= string`,
+// and `Date >= Date` depending on which source table dominated. The
+// `Date >= string` path coerces both via ToNumber: Date → epoch ms,
+// string → NaN. `x >= NaN` is always false → "never fresh" → snapshot
+// computed every request. The `string >= string` path is lexicographic
+// — that works ONLY if both strings share the same ISO format. The
+// driver formats TIMESTAMP→string as "2026-05-22T12:21:32.000Z" (with
+// T+Z) but the TEXT updated_at is written via `new Date().toISOString()`
+// which produces the same format... usually. Inconsistent formats =
+// silent wrong answer either direction.
+//
+// Sales-orders bug: snapshot built 2026-05-22 stayed "fresh" against
+// MAX(updated_at)=2026-05-26 because Date >= string returned false
+// (recompute), but then writeSnapshot received `currentMax` (a string)
+// and stored it as TIMESTAMP — and the post-write readback STILL saw the
+// snapshot as stale, so it kept recomputing on every request, which
+// should have shown the user fresh data. But it didn't. The root
+// behaviour was even subtler: `refresh_count` stayed at 1 since
+// 2026-05-22, meaning the early-return branch fired. Coercing both to
+// numeric timestamps via Date.parse is the only robust answer — works
+// for Date objects, ISO strings, and postgres-format strings alike.
 // ---------------------------------------------------------------------------
 export function isSnapshotFresh(
   snapshot: SnapshotRow | null,
@@ -139,7 +168,16 @@ export function isSnapshotFresh(
 ): boolean {
   if (!snapshot) return false;
   if (!currentMax) return true;
-  return snapshot.builtFrom >= currentMax;
+  // `as unknown` because the type annotations lie — the runtime values
+  // may be Date objects (TIMESTAMP cols) or strings (TEXT cols).
+  // new Date(Date) and new Date(string) both return a valid Date for
+  // any ISO-ish input; .getTime() gives a numeric ms-since-epoch we can
+  // safely `>=`. NaN guards the malformed-string case (treat as stale
+  // and recompute rather than serve old data).
+  const builtMs = new Date(snapshot.builtFrom as unknown as string).getTime();
+  const currentMs = new Date(currentMax as unknown as string).getTime();
+  if (Number.isNaN(builtMs) || Number.isNaN(currentMs)) return false;
+  return builtMs >= currentMs;
 }
 
 // ---------------------------------------------------------------------------

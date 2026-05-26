@@ -2114,14 +2114,23 @@ export default function PlanningPage() {
                         let barColor: string;
                         let textColor: string;
                         if (isPast) {
-                          // Past: green = good (met/beat avg), red = slow.
-                          if (day.utilization >= 90) { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
-                          else if (day.utilization >= 60) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                          // Past: green = met / nearly met capacity, red = much slower.
+                          // 2026-05-25 — Wei Siang asked to relax: 89% was
+                          // flagged amber under the prior ≥90 cut, which
+                          // misrepresented a near-target day as a miss.
+                          if (day.utilization >= 80) { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
+                          else if (day.utilization >= 50) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
                           else { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
                         } else {
-                          // Future: green = ok, red = overloaded.
-                          if (day.utilization > 100) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
-                          else if (day.utilization > 70) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
+                          // Future: green = breathing room, amber = at / near
+                          // capacity, red = real overload.
+                          // 2026-05-25 — Wei Siang: "100% 不可以红". The prior
+                          // >100 cut alarmed at 101-110% which is normal
+                          // operational headroom. Red now only fires when
+                          // a day is materially over (>120%) so the colour
+                          // means something the operator must act on.
+                          if (day.utilization > 120) { barColor = "bg-[#9A3A2D]"; textColor = "text-[#9A3A2D]"; }
+                          else if (day.utilization >= 90) { barColor = "bg-[#9C6F1E]"; textColor = "text-[#9C6F1E]"; }
                           else { barColor = "bg-[#4F7C3A]"; textColor = "text-[#4F7C3A]"; }
                         }
                         // Lively scaling — relative to the dept's own
@@ -2155,7 +2164,7 @@ export default function PlanningPage() {
                                 className="absolute left-0 right-0 border-t border-dashed border-[#9CA3AF]/70 pointer-events-none"
                                 style={{ bottom: `${refLineBottomPct}%` }}
                               />
-                              {!isPast && day.utilization > 100 && (
+                              {!isPast && day.utilization > 120 && (
                                 <AlertTriangle className="h-2.5 w-2.5 text-[#9A3A2D] absolute -top-3 left-1/2 -translate-x-1/2" />
                               )}
                             </div>

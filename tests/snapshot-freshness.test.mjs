@@ -197,3 +197,93 @@ test("isSnapshotFresh: identical timestamps differing only in trailing precision
   const ts = "2026-05-21T10:30:00.000Z";
   assert.equal(isSnapshotFresh(snap(ts), ts), true);
 });
+
+// ---------------------------------------------------------------------------
+// 2026-05-26 regression tests — the type-aware compare bugfix.
+//
+// Sales-orders snapshot froze for 4 days because `built_from` is a TIMESTAMP
+// column (pg driver returns Date object) and `MAX(updated_at)` over the TEXT
+// updated_at column on sales_orders returns a string. Raw `Date >= string`
+// silently lied. These tests pin the comparison to chronological order for
+// any mix of Date / string / postgres-format input.
+// ---------------------------------------------------------------------------
+test("isSnapshotFresh: builtFrom as Date object, currentMax as ISO string -> compared chronologically", () => {
+  // The original sales-orders failure mode: snapshot built 2026-05-22 vs
+  // source bumped to 2026-05-26. Snapshot is stale -> false.
+  assert.equal(
+    isSnapshotFresh(
+      snap(new Date("2026-05-22T12:21:32.000Z")),
+      "2026-05-26T10:55:58.000Z",
+    ),
+    false,
+  );
+  // And the reverse — Date object snapshot newer than string source.
+  assert.equal(
+    isSnapshotFresh(
+      snap(new Date("2026-05-27T00:00:00.000Z")),
+      "2026-05-26T10:55:58.000Z",
+    ),
+    true,
+  );
+});
+
+test("isSnapshotFresh: builtFrom as ISO string, currentMax as Date object -> compared chronologically", () => {
+  assert.equal(
+    isSnapshotFresh(
+      snap("2026-05-22T12:21:32.000Z"),
+      new Date("2026-05-26T10:55:58.000Z"),
+    ),
+    false,
+  );
+  assert.equal(
+    isSnapshotFresh(
+      snap("2026-05-27T00:00:00.000Z"),
+      new Date("2026-05-26T10:55:58.000Z"),
+    ),
+    true,
+  );
+});
+
+test("isSnapshotFresh: both sides as Date objects -> compared chronologically", () => {
+  assert.equal(
+    isSnapshotFresh(
+      snap(new Date("2026-05-22T12:21:32.000Z")),
+      new Date("2026-05-26T10:55:58.000Z"),
+    ),
+    false,
+  );
+  assert.equal(
+    isSnapshotFresh(
+      snap(new Date("2026-05-27T00:00:00.000Z")),
+      new Date("2026-05-26T10:55:58.000Z"),
+    ),
+    true,
+  );
+});
+
+test("isSnapshotFresh: postgres-format timestamp string ('YYYY-MM-DD HH:MM:SS') parses correctly", () => {
+  // pg sometimes returns timestamps as 'YYYY-MM-DD HH:MM:SS' (no T, no Z)
+  // depending on column type and driver config. Date constructor handles
+  // both that and the ISO form, so the compare stays chronological.
+  assert.equal(
+    isSnapshotFresh(
+      snap("2026-05-22 12:21:32"),
+      "2026-05-26T10:55:58.000Z",
+    ),
+    false,
+  );
+  assert.equal(
+    isSnapshotFresh(
+      snap("2026-05-27 00:00:00"),
+      "2026-05-26T10:55:58.000Z",
+    ),
+    true,
+  );
+});
+
+test("isSnapshotFresh: malformed string in either side -> NaN guard returns false (recompute, don't serve old data)", () => {
+  // If something goes truly wrong with the input, prefer a cache miss
+  // (recompute) over silently serving whatever's in the snapshot row.
+  assert.equal(isSnapshotFresh(snap("not-a-date"), "2026-05-26T10:55:58.000Z"), false);
+  assert.equal(isSnapshotFresh(snap("2026-05-22T12:21:32.000Z"), "not-a-date"), false);
+});

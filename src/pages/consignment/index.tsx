@@ -245,29 +245,18 @@ export default function SalesPage() {
     );
   };
 
-  // ── Filter application split in two ───────────────────────────────────
-  // `filteredOrdersByUserFilters` applies ALL user filters except the
-  // Draft/Confirmed tab. KPI cards (Total / Outstanding / Pending Delivery
-  // / Completed) read from this so the numbers respect the filter regardless
-  // of which tab is currently active. `filteredOrders` layers the tab on
-  // top for the grid. 2026-05-26 system-wide filter audit — see Sales page
-  // for the same pattern.
+  // ── Filter application split in three ─────────────────────────────────
+  // Mirrors the Sales page after Wei Siang's 2026-05-26 third screenshot
+  // (Status=Outstanding+Bedframe made every bucket card tautological).
+  // See sales/index.tsx for the full rationale.
   //
-  // Status filter accepts the OUTSTANDING/CONFIRMED synthetic groups too
-  // (the dropdown offers them but the previous CO filter only matched
-  // exact-string statuses — picking "Outstanding" silently returned 0
-  // rows because no row has literal status "OUTSTANDING").
-  const filteredOrdersByUserFilters = useMemo(() => {
+  // 1. `filteredOrdersForKpi` — every filter EXCEPT Status. KPI bucket
+  //    cards read this so they show stage breakdown instead of "457/0/0".
+  // 2. `filteredOrdersByUserFilters` — same + Status. The list count
+  //    and the focused Revenue total read from this.
+  // 3. `filteredOrders` — same + Draft/Confirmed TAB. What the grid renders.
+  const filteredOrdersForKpi = useMemo(() => {
     return orders.filter(o => {
-      if (filterStatus) {
-        if (filterStatus === "OUTSTANDING") {
-          if (!OUTSTANDING_STATUSES.has(o.status)) return false;
-        } else if (filterStatus === "CONFIRMED") {
-          if (!CONFIRMED_STATUSES.has(o.status)) return false;
-        } else if (o.status !== filterStatus) {
-          return false;
-        }
-      }
       if (filterCustomer && o.customerId !== filterCustomer) return false;
       if (filterDateFrom) {
         const orderDate = o.companyCODate.split("T")[0];
@@ -278,9 +267,7 @@ export default function SalesPage() {
         if (orderDate > filterDateTo) return false;
       }
       // Category: derive ONE primary category per SO (SOFA > BEDFRAME >
-      // ACCESSORY) instead of "any line matches". Each SO is now exactly
-      // one of the three buckets — no double-counting a sofa+pillows order
-      // under both filters. SOFA / BEDFRAME mixing is blocked at create.
+      // ACCESSORY) instead of "any line matches".
       if (filterCategory && getPrimarySoCategory(o.items) !== filterCategory) return false;
       // Customer delivery date range — what sales staff actually filter on.
       if (filterDDFrom || filterDDTo) {
@@ -291,7 +278,22 @@ export default function SalesPage() {
       }
       return true;
     });
-  }, [orders, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+  }, [orders, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+
+  const filteredOrdersByUserFilters = useMemo(() => {
+    return filteredOrdersForKpi.filter(o => {
+      if (filterStatus) {
+        if (filterStatus === "OUTSTANDING") {
+          if (!OUTSTANDING_STATUSES.has(o.status)) return false;
+        } else if (filterStatus === "CONFIRMED") {
+          if (!CONFIRMED_STATUSES.has(o.status)) return false;
+        } else if (o.status !== filterStatus) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [filteredOrdersForKpi, filterStatus]);
 
   const filteredOrders = useMemo(() => {
     return filteredOrdersByUserFilters.filter(o => {
@@ -301,18 +303,19 @@ export default function SalesPage() {
     });
   }, [filteredOrdersByUserFilters, tab]);
 
-  // KPI source — filtered set when any filter is active (so cards match
-  // the list), otherwise the whole-org /stats aggregate.
+  // KPI source — non-status filtered set so the bucket cards stay
+  // informative even when Status is set (otherwise Status=Outstanding
+  // forces Outstanding=Total and Pending=Completed=0).
   const kpiSource = useMemo(() => {
     if (hasActiveFilters) {
       const byStatus: Record<string, number> = {};
-      for (const o of filteredOrdersByUserFilters) {
+      for (const o of filteredOrdersForKpi) {
         byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
       }
-      return { total: filteredOrdersByUserFilters.length, byStatus };
+      return { total: filteredOrdersForKpi.length, byStatus };
     }
     return { total: statsTotalRaw, byStatus: statsByStatus };
-  }, [hasActiveFilters, filteredOrdersByUserFilters, statsTotalRaw, statsByStatus]);
+  }, [hasActiveFilters, filteredOrdersForKpi, statsTotalRaw, statsByStatus]);
 
   const statsTotal = kpiSource.total;
   const draftCount = kpiSource.byStatus.DRAFT ?? 0;

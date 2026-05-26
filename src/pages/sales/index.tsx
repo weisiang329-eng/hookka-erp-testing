@@ -318,31 +318,35 @@ export default function SalesPage() {
     );
   };
 
-  // ── Filter application split in two ───────────────────────────────────
-  // `filteredOrdersByUserFilters` applies ALL user-driven filters (status,
-  // customer, dates, category, DD) but NOT the Draft/Confirmed tab. KPI
-  // cards (Total / Outstanding / Pending Delivery / Completed / Revenue)
-  // and tab badges read from THIS so the numbers respect the user's
-  // filter selection regardless of which tab is currently active.
+  // ── Filter application split in three ─────────────────────────────────
   //
-  // `filteredOrders` then layers the tab filter on top — that's what the
-  // list grid renders. Pre-2026-05-26 audit, the KPI cards instead read
-  // from /api/sales-orders/stats (which doesn't accept date/customer/cat
-  // params) → cards lied whenever any filter was set. See BUG-2026-05-26-
-  // 003.
-  const filteredOrdersByUserFilters = useMemo(() => {
+  // The Sales page combines three different filter "scopes". Mixing them
+  // up was the root cause of the 2026-05-26 KPI bugs Wei Siang flagged in
+  // a sequence of three screenshots — first the cards lied under any
+  // filter (snapshot stale), then the cards were tautological (Status=
+  // Outstanding made Outstanding=Total=457, Pending=Completed=0).
+  //
+  //   1. `filteredOrdersForKpi` — applies every filter EXCEPT Status.
+  //      The KPI bucket cards (Outstanding / Pending Delivery / Completed)
+  //      and the Total card read from this. Status is a "focus the list"
+  //      filter, not a "regroup the breakdown" filter — when the user
+  //      picks Status=Outstanding + Bedframe they want to see "of the
+  //      bedframe orders, how many are in each stage", not "457 / 0 / 0".
+  //
+  //   2. `filteredOrdersByUserFilters` — applies every filter INCLUDING
+  //      Status. The Revenue (filtered) card reads from this so the
+  //      money number matches the focused list, not the broader bucket
+  //      view. (Different scope, on purpose.)
+  //
+  //   3. `filteredOrders` — adds the Draft/Confirmed TAB on top of (2).
+  //      That's what the grid renders.
+  //
+  // Three scopes look heavy but each card / cell points at exactly one
+  // and the cards stay individually informative. The earlier "split in
+  // two" version had Outstanding = Total whenever Status=Outstanding,
+  // which trained the operator to ignore the cards.
+  const filteredOrdersForKpi = useMemo(() => {
     return orders.filter(o => {
-      if (filterStatus) {
-        if (filterStatus === "OUTSTANDING") {
-          if (!OUTSTANDING_STATUSES.has(o.status)) return false;
-        } else if (filterStatus === "CONFIRMED") {
-          // Synthetic group — see CONFIRMED_STATUSES in src/lib/so-status.ts.
-          // Matches the dropdown's "Confirmed (all)" semantics.
-          if (!CONFIRMED_STATUSES.has(o.status)) return false;
-        } else if (o.status !== filterStatus) {
-          return false;
-        }
-      }
       if (filterCustomer && o.customerId !== filterCustomer) return false;
       if (filterDateFrom) {
         const orderDate = o.companySODate.split("T")[0];
@@ -355,7 +359,7 @@ export default function SalesPage() {
       // Category: derive ONE primary category per SO (SOFA > BEDFRAME >
       // ACCESSORY) instead of "any line matches". Each SO is now exactly
       // one of the three buckets — no double-counting a sofa+pillows order
-      // under both filters. SOFA / BEDFRAME mixing is blocked at create.
+      // under both filters.
       if (filterCategory && getPrimarySoCategory(o.items) !== filterCategory) return false;
       // Customer delivery date range — what sales staff actually filter on.
       if (filterDDFrom || filterDDTo) {
@@ -366,7 +370,24 @@ export default function SalesPage() {
       }
       return true;
     });
-  }, [orders, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+  }, [orders, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+
+  const filteredOrdersByUserFilters = useMemo(() => {
+    return filteredOrdersForKpi.filter(o => {
+      if (filterStatus) {
+        if (filterStatus === "OUTSTANDING") {
+          if (!OUTSTANDING_STATUSES.has(o.status)) return false;
+        } else if (filterStatus === "CONFIRMED") {
+          // Synthetic group — see CONFIRMED_STATUSES in src/lib/so-status.ts.
+          // Matches the dropdown's "Confirmed (all)" semantics.
+          if (!CONFIRMED_STATUSES.has(o.status)) return false;
+        } else if (o.status !== filterStatus) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [filteredOrdersForKpi, filterStatus]);
 
   const filteredOrders = useMemo(() => {
     return filteredOrdersByUserFilters.filter(o => {
@@ -377,27 +398,31 @@ export default function SalesPage() {
   }, [filteredOrdersByUserFilters, tab]);
 
   // ── KPI counts ─────────────────────────────────────────────────────────
-  // When ANY filter is active, count from the filtered set so the cards
-  // match the list. Otherwise use the whole-org /stats aggregate (fast
-  // GROUP BY) so we don't iterate the full SO array on a cold view.
+  // Bucket cards read from `filteredOrdersForKpi` (no Status filter) so
+  // every bucket gets a real number even when Status=Outstanding is
+  // selected. Otherwise the cards are tautological (Outstanding=Total,
+  // Pending=Completed=0) and stop being informative.
+  //
+  // When NO filter is active, fall back to the whole-org /stats aggregate
+  // (fast GROUP BY) to skip the array iteration on a cold view.
   //
   // The Sales page always fetches the WHOLE dataset (no pagination) the
   // moment any filter is set — see `_filtersActive` ternary on the
-  // ordersResp fetch — so `filteredOrdersByUserFilters` is a complete
-  // server-side dataset under filter, NOT just the current page.
+  // ordersResp fetch — so `filteredOrdersForKpi` is a complete server-side
+  // dataset under filter, NOT just the current page.
   const kpiSource = useMemo(() => {
     if (hasActiveFilters) {
       const byStatus: Record<string, number> = {};
-      for (const o of filteredOrdersByUserFilters) {
+      for (const o of filteredOrdersForKpi) {
         byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
       }
       return {
-        total: filteredOrdersByUserFilters.length,
+        total: filteredOrdersForKpi.length,
         byStatus,
       };
     }
     return { total: statsTotalRaw, byStatus: statsByStatus };
-  }, [hasActiveFilters, filteredOrdersByUserFilters, statsTotalRaw, statsByStatus]);
+  }, [hasActiveFilters, filteredOrdersForKpi, statsTotalRaw, statsByStatus]);
 
   const statsTotal = kpiSource.total;
   const draftCount = kpiSource.byStatus.DRAFT ?? 0;

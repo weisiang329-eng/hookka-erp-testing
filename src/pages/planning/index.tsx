@@ -448,6 +448,12 @@ export default function PlanningPage() {
     return m;
   }, [workingHoursResp]);
 
+  // ── Capacity Loading filter (2026-05-26): operator can split the
+  //    Past/Future bars by item category. Default ALL so the chart shows
+  //    the whole picture; SOFA / BEDFRAME isolate the line to see if one
+  //    side alone is overloading the dept. ──
+  const [loadingCategoryFilter, setLoadingCategoryFilter] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
+
   // ── Master Tracker state ──
   const [trackerCategoryTab, setTrackerCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
   const [trackerSearch, setTrackerSearch] = useState("");
@@ -949,6 +955,16 @@ export default function PlanningPage() {
     const pastBucket = new Map<string, Map<string, number>>();
 
     for (const order of orders) {
+      // 2026-05-26: Capacity Loading category filter. ALL = no skip; SOFA
+      // / BEDFRAME drop the other side so the chart isolates one product
+      // line's load. Drives off PO.itemCategory which is set at SO create
+      // time and never changes mid-flight, so cheap to check here.
+      if (
+        loadingCategoryFilter !== "ALL" &&
+        order.itemCategory !== loadingCategoryFilter
+      ) {
+        continue;
+      }
       for (const jc of order.jobCards) {
         const wipQty = Math.max(1, jc.wipQty ?? 1);
         // Future = active JC, dueDate in future window
@@ -1040,7 +1056,7 @@ export default function PlanningPage() {
         futureAvgPct,
       };
     });
-  }, [orders, capacityData, productionDepartments]);
+  }, [orders, capacityData, productionDepartments, loadingCategoryFilter]);
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(
@@ -2021,12 +2037,39 @@ export default function PlanningPage() {
       {/* ═══════════════════════════════════════════ */}
       {activeTab === "loading" && (
         <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Gauge className="h-5 w-5 text-[#6B5C32]" />
-            <span className="text-sm font-medium text-[#1F1D1B]">
-              Daily Capacity Loading — Past {LOADING_CHART_PAST_DAYS} days · Next {LOADING_CHART_FUTURE_DAYS} days
-            </span>
-            <span className="text-xs text-[#6B7280]">(Mon-Sat, excl. Sundays · % vs 7-day rolling capacity)</span>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Gauge className="h-5 w-5 text-[#6B5C32]" />
+              <span className="text-sm font-medium text-[#1F1D1B]">
+                Daily Capacity Loading — Past {LOADING_CHART_PAST_DAYS} days · Next {LOADING_CHART_FUTURE_DAYS} days
+              </span>
+              <span className="text-xs text-[#6B7280]">(Mon-Sat, excl. Sundays · % vs 7-day rolling capacity)</span>
+            </div>
+            {/* 2026-05-26: Category toggle. Default ALL; SOFA / BEDFRAME
+                isolate the chart to a single product line. State lives on
+                the page (loadingCategoryFilter) and feeds dailyLoadingByDept's
+                filter loop — see "if (loadingCategoryFilter !== 'ALL'…)"
+                in the useMemo body around L955. */}
+            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-white overflow-hidden text-xs">
+              {(["ALL", "BEDFRAME", "SOFA"] as const).map((opt) => {
+                const label = opt === "ALL" ? "All" : opt === "BEDFRAME" ? "Bedframe" : "Sofa";
+                const active = loadingCategoryFilter === opt;
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setLoadingCategoryFilter(opt)}
+                    className={`px-3 py-1.5 font-medium transition-colors ${
+                      active
+                        ? "bg-[#6B5C32] text-white"
+                        : "text-[#6B7280] hover:bg-[#F0ECE9]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Wei Siang 2026-05-16: ONE continuous chart per dept —

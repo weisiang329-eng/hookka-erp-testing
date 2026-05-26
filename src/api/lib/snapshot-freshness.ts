@@ -35,6 +35,26 @@ async function resolveFreshnessColumns(
   const cached = schemaCache.get(key);
   if (cached) return cached;
 
+  // Bug fix 2026-05-26 — accept TEXT columns too.
+  //
+  // The old probe filtered `data_type LIKE 'timestamp%'`, but most
+  // operator-facing tables in this codebase (sales_orders, customers,
+  // products, …) carry their freshness column as TEXT (the D1 → Postgres
+  // migration kept the TEXT type from D1 to avoid touching the route
+  // code that writes new Date().toISOString()). The probe was silently
+  // skipping every such table → `currentMax` came back null → snapshot
+  // was considered "trivially fresh" forever → snapshot rows lived
+  // indefinitely without ever picking up downstream writes (4-day stale
+  // sales-orders bug, 285-SO cascade backfill not visible in the cards,
+  // …).
+  //
+  // Fix: include text/varchar/character-varying typed columns named
+  // updated_at or created_at. MAX over a TEXT column returns the
+  // lexically-max string — for an ISO-8601 timestamp (which is what
+  // every route writes via toISOString()) that's also chronologically
+  // max, so the existing comparison logic continues to work unchanged.
+  // Tables whose updated_at contains free-form text would break this
+  // assumption, but no such table exists in our schema.
   const placeholders = tables.map(() => "?").join(", ");
   const res = await db
     .prepare(
@@ -43,7 +63,10 @@ async function resolveFreshnessColumns(
         WHERE table_schema = 'public'
           AND table_name IN (${placeholders})
           AND column_name IN ('updated_at', 'created_at')
-          AND data_type LIKE 'timestamp%'`,
+          AND (
+            data_type LIKE 'timestamp%'
+            OR data_type IN ('text','character varying','varchar','character')
+          )`,
     )
     .bind(...tables)
     .all<{ tableName: string; columnName: string }>();
@@ -58,7 +81,7 @@ async function resolveFreshnessColumns(
   const resolved = new Map<string, string>();
   for (const t of tables) {
     const cols = has.get(t);
-    if (!cols) continue; // no timestamp-typed column — nightly cron covers it
+    if (!cols) continue; // no freshness column — nightly cron covers it
     resolved.set(t, cols.has("updated_at") ? "updated_at" : "created_at");
   }
   schemaCache.set(key, resolved);

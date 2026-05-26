@@ -193,7 +193,58 @@ the current 200-row page only** (page-only undercount past 200 invoices)
 
 ---
 
-## BUG-2026-05-26-002 — Snapshot freshness compare returned wrong answer when source `updated_at` was TEXT (sales-orders default endpoint frozen 4 days)
+## BUG-2026-05-26-005 — Real root cause of perma-stale snapshots: schema-aware freshness probe filtered TEXT columns out of the probe
+
+**Status:** 🟢 Fixed (2026-05-26)
+**Category:** infrastructure
+
+**Symptom:** Despite BUG-2026-05-26-002's "type-aware compare" fix
+shipping cleanly, snapshots STILL refused to auto-invalidate. The
+2026-05-26 SO cascade backfill advanced 285 SOs READY_TO_SHIP →
+DELIVERED — every paginated read confirmed it (`?limit=500` returned
+286 DELIVERED), but the snapshot-cached default `/api/sales-orders`
+kept serving the pre-backfill 1 DELIVERED for hours afterward.
+
+**Root cause:** `resolveFreshnessColumns()` in
+`src/api/lib/snapshot-freshness.ts:46` filtered by
+`data_type LIKE 'timestamp%'`. `sales_orders.updated_at` is **TEXT**
+(migration 0001:399 — the D1→Postgres migration kept TEXT so the route
+code could keep writing `new Date().toISOString()` unchanged). The
+probe returned an empty column set → `getMaxSourceUpdatedAt()` returned
+null → `isSnapshotFresh()` hit the `if (!currentMax) return true`
+branch → snapshot trivially fresh forever.
+
+The earlier "Date vs string compare" fix (BUG-2026-05-26-002) was the
+WRONG root cause — that path never even fired because `currentMax` was
+null all along. Snapshot only refreshed when manually TRUNCATEd.
+
+The same gap silently applies to every snapshot whose source list
+contains a table with TEXT `updated_at`: sales_orders, customers,
+products, sales_orders_archive, … the bulk of operator-facing tables.
+
+**Fix:**
+- `src/api/lib/snapshot-freshness.ts:39-49` — probe SQL now also
+  accepts TEXT / VARCHAR columns named `updated_at` or `created_at`.
+  MAX over a TEXT column returns the lexically-max string; for the
+  ISO-8601 timestamps every route writes via `toISOString()` that's
+  also the chronologically-max value, so the comparison stays
+  correct end-to-end.
+- The 2026-05-26-002 type-aware compare in `snapshot.ts` /
+  `dashboard-snapshot.ts` / `delivery-snapshot.ts` /
+  `invoice-snapshot.ts` stays — it's still needed for tables whose
+  freshness column IS TIMESTAMP (the pg driver returns those as Date
+  objects, which would still cause Date-vs-string trouble post-fix).
+
+**Verify:**
+- Pre-fix: snapshot `sales_orders_list_snapshot` rebuilt at 12:30
+  serves pre-12:30 data forever, even after writes at 13:00 / 14:00.
+- Post-fix: write at 14:00 → next read 14:01 → freshness probe sees
+  MAX(updated_at)=14:00 > snapshot.built_from=12:30 → snapshot
+  recomputes → 14:01 read returns 14:00-fresh data.
+
+---
+
+## BUG-2026-05-26-002 — Snapshot freshness compare returned wrong answer when source `updated_at` was TEXT (sales-orders default endpoint frozen 4 days) [SUPERSEDED BY 005]
 
 **Status:** 🟢 Fixed (2026-05-26)
 **Category:** infrastructure

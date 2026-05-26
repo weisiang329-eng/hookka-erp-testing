@@ -105,9 +105,22 @@ export async function getMaxSourceUpdatedAt(
   const cols = await resolveFreshnessColumns(db, tables);
   if (cols.size === 0) return null;
 
+  // CAST to text so the UNION can combine source tables whose
+  // updated_at is TIMESTAMP (production_orders, job_cards, …) with
+  // ones whose updated_at is TEXT (sales_orders, customers, …) in the
+  // same probe. Postgres rejects "UNION types text and timestamp
+  // without time zone cannot be matched" otherwise — broke
+  // /api/dashboard/overview and /api/production-orders at deploy time.
+  // 2026-05-26 hotfix.
+  //
+  // For TIMESTAMP columns Postgres serialises MAX(updated_at)::text as
+  // "2026-05-26 13:45:30.123+00" (postgres native format). For TEXT
+  // columns it's whatever was inserted — every route writes
+  // toISOString() → "2026-05-26T13:45:30.123Z". new Date(x) parses
+  // both, so the downstream comparison still works.
   const parts: string[] = [];
   for (const [table, col] of cols) {
-    parts.push(`SELECT MAX(${col}) AS t FROM ${table}`);
+    parts.push(`SELECT MAX(${col})::text AS t FROM ${table}`);
   }
   const sql = `SELECT MAX(t) AS "maxUpdatedAt" FROM (${parts.join(
     " UNION ALL ",

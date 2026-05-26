@@ -15,6 +15,13 @@ import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, F
 // vendor chunk only ships when the user actually prints.
 import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import {
+  OUTSTANDING_STATUSES,
+  PENDING_DELIVERY_STATUSES,
+  COMPLETED_STATUSES,
+  CONFIRMED_STATUSES,
+  sumByStatuses,
+} from "@/lib/so-status";
 import type { ConsignmentOrder as SalesOrder } from "@/types";
 import type { Customer, DeliveryOrder } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -77,13 +84,41 @@ export default function SalesPage() {
   // URL-synced so refresh / share-link land back on the same page.
   const [page, setPage] = useUrlStateNumber("page", 1);
 
+  // Filter state declared up here (instead of below the fetch) so we can
+  // widen the fetch to the WHOLE dataset the moment ANY filter is active —
+  // otherwise the filter only scopes the current 200-row server page and
+  // KPI cards lie. Pre-2026-05-26 audit fix for Sales applied here too.
+  const [filterStatus, setFilterStatus] = useUrlState<string>("status", "");
+  const [filterCustomer, setFilterCustomer] = useUrlState<string>("customer", "");
+  const [filterDateFrom, setFilterDateFrom] = useUrlState<string>("from", "");
+  const [filterDateTo, setFilterDateTo] = useUrlState<string>("to", "");
+  // Category matches if ANY line on the SO is the chosen category. DD axis
+  // = customerDeliveryDate (sales staff filter on the date the customer
+  // expects delivery, not SO entry date / internal expected DD).
+  const [filterCategory, setFilterCategory] = useUrlState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("cat", "");
+  const [filterDDFrom, setFilterDDFrom] = useUrlState<string>("ddFrom", "");
+  const [filterDDTo, setFilterDDTo] = useUrlState<string>("ddTo", "");
+
+  const _filtersActive = !!(
+    filterStatus || filterCustomer || filterDateFrom || filterDateTo ||
+    filterCategory || filterDDFrom || filterDDTo
+  );
+
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
     success?: boolean;
     data?: SalesOrder[];
     page?: number;
     limit?: number;
     total?: number;
-  }>(`/api/consignment-orders?page=${page}&limit=${PAGE_SIZE}`);
+  }>(
+    _filtersActive
+      // No page params → server returns the whole CO list (capped at
+      // 5000 server-side, well above current ~200 COs). Client filters /
+      // paginates. This is what the Sales page already does — applies the
+      // same pattern here so KPI counts can match the filtered list.
+      ? "/api/consignment-orders"
+      : `/api/consignment-orders?page=${page}&limit=${PAGE_SIZE}`,
+  );
   // Whole-dataset status bucket counts — tab badges read from this so
   // "Draft (N)" / "Confirmed (N)" reflect the full table, not just the
   // current page of rows.
@@ -105,18 +140,12 @@ export default function SalesPage() {
   );
   const totalOrdersServer = ordersResp?.total ?? orders.length;
   const totalPages = Math.max(1, Math.ceil(totalOrdersServer / PAGE_SIZE));
-  // Tab badge counts come from the server-side /stats aggregate so they
-  // reflect the whole dataset, not just the current paginated page.
-  // "Confirmed" is anything that isn't DRAFT.
+  // Raw /stats payload — used as KPI source when NO filter is active
+  // (whole-org aggregate). Under a filter, KPI cards switch to counting
+  // the filtered set so they always match what the list shows. See the
+  // `kpiSource` useMemo below the filteredOrders memo for the toggle.
   const statsByStatus = statsResp?.byStatus ?? {};
-  const statsTotal = statsResp?.total ?? totalOrdersServer;
-  const sumStatuses = (statuses: string[]): number =>
-    statuses.reduce((n, s) => n + (statsByStatus[s] ?? 0), 0);
-  const draftCount = statsByStatus.DRAFT ?? 0;
-  const confirmedCount = Math.max(0, statsTotal - draftCount);
-  const outstandingCount = sumStatuses(["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "SHIPPED"]);
-  const pendingDeliveryCount = sumStatuses(["READY_TO_SHIP", "SHIPPED"]);
-  const completedCount = sumStatuses(["DELIVERED", "INVOICED", "CLOSED"]);
+  const statsTotalRaw = statsResp?.total ?? totalOrdersServer;
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -152,21 +181,9 @@ export default function SalesPage() {
   const [transferSuccess, setTransferSuccess] = useState<{ type: "do" | "inv"; docNo: string } | null>(null);
   const [matchedDO, setMatchedDO] = useState<DeliveryOrder | null>(null);
 
-  // Filters — URL-synced so refresh / shared link / back-forward keeps
-  // the user's exact view. Default values are stripped from the URL so
-  // empty filters don't litter the address bar.
-  const [filterStatus, setFilterStatus] = useUrlState<string>("status", "");
-  const [filterCustomer, setFilterCustomer] = useUrlState<string>("customer", "");
-  const [filterDateFrom, setFilterDateFrom] = useUrlState<string>("from", "");
-  const [filterDateTo, setFilterDateTo] = useUrlState<string>("to", "");
-  // Category matches if ANY line on the SO is the chosen category. DD axis
-  // = customerDeliveryDate (sales staff filter on the date the customer
-  // expects delivery, not SO entry date / internal expected DD).
-  const [filterCategory, setFilterCategory] = useUrlState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("cat", "");
-  const [filterDDFrom, setFilterDDFrom] = useUrlState<string>("ddFrom", "");
-  const [filterDDTo, setFilterDDTo] = useUrlState<string>("ddTo", "");
-  // Show/hide filter panel — sessionStorage so closing the tab forgets,
-  // but a refresh keeps the panel open if user had it open.
+  // Filter state declared earlier (above the fetch) so `_filtersActive`
+  // can drive the conditional fetch URL. Only the show-filters panel
+  // toggle stays here because it doesn't affect data fetching.
   const [showFilters, setShowFilters] = useSessionState<boolean>("sales:showFilters", false);
 
   // Restore scroll position after navigating back to this page.
@@ -228,11 +245,29 @@ export default function SalesPage() {
     );
   };
 
-  const filteredOrders = useMemo(() => {
+  // ── Filter application split in two ───────────────────────────────────
+  // `filteredOrdersByUserFilters` applies ALL user filters except the
+  // Draft/Confirmed tab. KPI cards (Total / Outstanding / Pending Delivery
+  // / Completed) read from this so the numbers respect the filter regardless
+  // of which tab is currently active. `filteredOrders` layers the tab on
+  // top for the grid. 2026-05-26 system-wide filter audit — see Sales page
+  // for the same pattern.
+  //
+  // Status filter accepts the OUTSTANDING/CONFIRMED synthetic groups too
+  // (the dropdown offers them but the previous CO filter only matched
+  // exact-string statuses — picking "Outstanding" silently returned 0
+  // rows because no row has literal status "OUTSTANDING").
+  const filteredOrdersByUserFilters = useMemo(() => {
     return orders.filter(o => {
-      if (tab === "DRAFT" && o.status !== "DRAFT") return false;
-      if (tab === "CONFIRMED" && o.status === "DRAFT") return false;
-      if (filterStatus && o.status !== filterStatus) return false;
+      if (filterStatus) {
+        if (filterStatus === "OUTSTANDING") {
+          if (!OUTSTANDING_STATUSES.has(o.status)) return false;
+        } else if (filterStatus === "CONFIRMED") {
+          if (!CONFIRMED_STATUSES.has(o.status)) return false;
+        } else if (o.status !== filterStatus) {
+          return false;
+        }
+      }
       if (filterCustomer && o.customerId !== filterCustomer) return false;
       if (filterDateFrom) {
         const orderDate = o.companyCODate.split("T")[0];
@@ -256,7 +291,40 @@ export default function SalesPage() {
       }
       return true;
     });
-  }, [orders, tab, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+  }, [orders, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+
+  const filteredOrders = useMemo(() => {
+    return filteredOrdersByUserFilters.filter(o => {
+      if (tab === "DRAFT" && o.status !== "DRAFT") return false;
+      if (tab === "CONFIRMED" && o.status === "DRAFT") return false;
+      return true;
+    });
+  }, [filteredOrdersByUserFilters, tab]);
+
+  // KPI source — filtered set when any filter is active (so cards match
+  // the list), otherwise the whole-org /stats aggregate.
+  const kpiSource = useMemo(() => {
+    if (hasActiveFilters) {
+      const byStatus: Record<string, number> = {};
+      for (const o of filteredOrdersByUserFilters) {
+        byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
+      }
+      return { total: filteredOrdersByUserFilters.length, byStatus };
+    }
+    return { total: statsTotalRaw, byStatus: statsByStatus };
+  }, [hasActiveFilters, filteredOrdersByUserFilters, statsTotalRaw, statsByStatus]);
+
+  const statsTotal = kpiSource.total;
+  const draftCount = kpiSource.byStatus.DRAFT ?? 0;
+  const confirmedCount = Math.max(0, statsTotal - draftCount);
+  // Status buckets from src/lib/so-status.ts — shared with Sales so the
+  // two pages agree. Pre-2026-05-26 audit, CO's Outstanding bucket
+  // included SHIPPED (Sales' didn't), and CO had READY_TO_SHIP in BOTH
+  // Outstanding and Pending Delivery (double-count). Both fixed by
+  // routing through the shared sets.
+  const outstandingCount = sumByStatuses(kpiSource.byStatus, OUTSTANDING_STATUSES);
+  const pendingDeliveryCount = sumByStatuses(kpiSource.byStatus, PENDING_DELIVERY_STATUSES);
+  const completedCount = sumByStatuses(kpiSource.byStatus, COMPLETED_STATUSES);
 
   const exportCSV = () => {
     const headers = [

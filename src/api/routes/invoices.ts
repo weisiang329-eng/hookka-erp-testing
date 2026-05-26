@@ -639,16 +639,41 @@ app.get("/stats", async (c) => {
     }
   }
 
-  const res = await c.var.DB
-    .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
-    .all<{ status: string; n: number }>();
+  // 2026-05-26 filter-audit fix — extend /stats with whole-dataset money
+  // aggregates so the Invoices KPI cards (Outstanding RM, Collected MTD)
+  // stop computing on the current 200-row page only. Pre-fix, an account
+  // with >200 invoices showed an undercounted Outstanding figure that
+  // shrank as the user paginated. Two SQL round-trips in parallel — one
+  // for the byStatus map, one for the cross-status money sums.
+  const currentMonthLike = `${new Date().toISOString().slice(0, 7)}%`;
+  const [byStatusRes, sumsRes] = await Promise.all([
+    c.var.DB
+      .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
+      .all<{ status: string; n: number }>(),
+    c.var.DB
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN status IN ('SENT','OVERDUE','PARTIAL_PAID')
+                              THEN totalSen - paidAmount ELSE 0 END), 0) AS "outstandingSen",
+           COALESCE(SUM(CASE WHEN status = 'PAID' AND invoiceDate LIKE ?
+                              THEN paidAmount ELSE 0 END), 0)              AS "paidMTDSen"
+           FROM invoices`,
+      )
+      .bind(currentMonthLike)
+      .first<{ outstandingSen: number; paidMTDSen: number }>(),
+  ]);
   const byStatus: Record<string, number> = {};
   let total = 0;
-  for (const row of res.results ?? []) {
+  for (const row of byStatusRes.results ?? []) {
     byStatus[row.status] = row.n;
     total += row.n;
   }
-  const payload = { byStatus, total };
+  const payload = {
+    byStatus,
+    total,
+    outstandingSen: Number(sumsRes?.outstandingSen ?? 0),
+    paidMTDSen: Number(sumsRes?.paidMTDSen ?? 0),
+  };
 
   try {
     const { writeInvoiceStatsSnapshot, getInvoiceStatsMaxUpdatedAt } =

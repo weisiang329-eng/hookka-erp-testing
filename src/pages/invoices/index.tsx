@@ -49,12 +49,17 @@ export default function InvoicesPage() {
     limit?: number;
     total?: number;
   }>(`/api/invoices?page=${page}&limit=${PAGE_SIZE}`);
-  // Whole-dataset status bucket counts — KPI cards read from this so they
-  // reflect the full table, not just the current paginated page.
+  // Whole-dataset KPI numbers — bucket counts AND money aggregates.
+  // 2026-05-26 audit: outstandingSen / paidMTDSen were previously
+  // computed on the current 200-row page only, so the KPI cards
+  // undercounted as soon as the invoices table grew past one page.
+  // Backend /stats now returns the sums whole-dataset.
   const { data: invStatsResp, refresh: refreshInvStats } = useCachedJson<{
     success?: boolean;
     byStatus?: Record<string, number>;
     total?: number;
+    outstandingSen?: number;
+    paidMTDSen?: number;
   }>("/api/invoices/stats");
   const invoices: Invoice[] = useMemo(
     () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
@@ -251,21 +256,15 @@ export default function InvoicesPage() {
     });
   }, [invoices, filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
 
-  // KPI calculations. Count-based KPIs (Total, Overdue) read from the
-  // server /stats aggregate so they reflect the whole dataset. Dollar KPIs
-  // (Outstanding, Collected MTD) still iterate the current page because
-  // they need per-row totalSen/paidAmount — documented in the footer's
-  // total-count badge.
+  // KPI calculations. All four (Total, Overdue, Outstanding RM, Collected
+  // MTD) now read from the server /stats aggregate so they reflect the
+  // whole dataset. 2026-05-26 audit fix — Outstanding RM and Collected MTD
+  // previously iterated the current 200-row page only and undercounted
+  // past page 1 (BUG-2026-05-26-003).
   const invStatsByStatus = invStatsResp?.byStatus ?? {};
   const totalInvoices = invStatsResp?.total ?? totalInvoicesServer;
-  const outstandingSen = invoices
-    .filter((inv) => ["SENT", "OVERDUE", "PARTIAL_PAID"].includes(inv.status))
-    .reduce((s, inv) => s + (inv.totalSen - inv.paidAmount), 0);
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const paidMTDSen = invoices
-    .filter((inv) => inv.status === "PAID" && inv.invoiceDate.startsWith(currentMonth))
-    .reduce((s, inv) => s + inv.paidAmount, 0);
+  const outstandingSen = invStatsResp?.outstandingSen ?? 0;
+  const paidMTDSen = invStatsResp?.paidMTDSen ?? 0;
   // OVERDUE is a first-class status in the invoices table (advanced by the
   // backend when dueDate passes). Use the stats bucket rather than iterating
   // the current page, so the KPI reflects the whole dataset.

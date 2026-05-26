@@ -34,6 +34,93 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-26-003 — Sales/CO KPI cards lie under any filter; Invoices Outstanding RM/Collected MTD undercount past page 1; status buckets defined inconsistently across pages
+
+**Status:** 🟢 Fixed (2026-05-26)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang on the Sales Orders page with filter
+`Status=Outstanding, Date From=31/03/2026, Date To=29/04/2026` saw:
+- Top KPI cards: "Total Orders 572 / Outstanding 567 / Pending Delivery 381 / Completed 0"
+- Filter bar under cards: "Showing 345 of 620 orders"
+
+Cards and list disagreed on totals; "Completed 0" was perpetual; and the
+Consignment Orders page mirror showed the same symptom with *different*
+numbers because CO's bucket definitions differed from Sales'.
+
+**Root cause (three interlocking bugs):**
+
+1. **/api/sales-orders/stats and /api/consignment-orders/stats accepted
+   only `isServiceOrder`** — they ignored `from`, `to`, `customer`,
+   `category`, `ddFrom`, `ddTo`, `status`. The KPI cards' fetch URL did
+   pass those params, but the backend never read them. So KPI counts
+   always reflected the whole-org dataset while the list filtered
+   client-side. Cards lied the moment any filter was set.
+2. **"Completed" defined as `sumStatuses(["CLOSED"])` on Sales** — this
+   factory's workflow ends at INVOICED, not CLOSED. The Completed card
+   was structurally pinned at 0 forever, so the operator stopped reading
+   it. CO had it right (DELIVERED + INVOICED + CLOSED); the two pages
+   disagreed.
+3. **OUTSTANDING_STATUSES literal-set drift across files** — Sales used
+   {CONFIRMED, IN_PRODUCTION, READY_TO_SHIP, ON_HOLD}; CO used
+   {CONFIRMED, IN_PRODUCTION, READY_TO_SHIP, SHIPPED}; PENDING_DELIVERY
+   on both pages double-counted READY_TO_SHIP with Outstanding (READY_TO_
+   SHIP appeared in BOTH buckets).
+
+Audit also flagged **Invoices Outstanding RM + Collected MTD computed on
+the current 200-row page only** (page-only undercount past 200 invoices)
+— same bug class.
+
+**Fix:**
+- New `src/lib/so-status.ts` exports canonical
+  `OUTSTANDING_STATUSES`, `PENDING_DELIVERY_STATUSES`,
+  `COMPLETED_STATUSES`, `CONFIRMED_STATUSES`, plus `sumByStatuses()`.
+  Status assignments are now mutually exclusive (every status maps to
+  at most one bucket). `PENDING_DELIVERY = {SHIPPED}` only —
+  READY_TO_SHIP stays in Outstanding because the goods are still on
+  Hookka's floor. `COMPLETED = {DELIVERED, INVOICED, CLOSED}` matches
+  CO and the operator's reading.
+- `src/pages/sales/index.tsx` — split `filteredOrders` into
+  `filteredOrdersByUserFilters` (no tab filter) and `filteredOrders`
+  (with tab). New `kpiSource` useMemo derives counts from the filtered
+  set when any filter is active, else from /stats. Imports the shared
+  status buckets.
+- `src/pages/consignment/index.tsx` — same restructure. Adopted Sales'
+  "fetch the whole dataset when any filter is active" pattern (the page
+  previously stayed paginated even under filter, which meant the
+  filtered set was at most one server page).
+- `src/api/routes/invoices.ts` `/stats` endpoint — added
+  `outstandingSen` and `paidMTDSen` aggregates computed across the
+  whole `invoices` table via a single SUM-CASE query.
+- `src/pages/invoices/index.tsx` — switched the Outstanding RM and
+  Collected MTD cards to read from the new /stats fields instead of
+  iterating the current page.
+
+**Verify:**
+- Sales `/sales?status=OUTSTANDING&from=2026-03-31&to=2026-04-29` →
+  KPI cards now show counts that match the list ("Showing N of M"). No
+  more 572-vs-620 split-brain.
+- Sales Completed card non-zero for any filter window that contains
+  DELIVERED/INVOICED orders.
+- CO `/consignment` with a date filter applied → KPI cards respect the
+  filter (previously always full org).
+- Invoices Outstanding RM + Collected MTD reconcile against the AR
+  Aging panel and the historical /payment_records SUM, not just the
+  current page total.
+- Outstanding / Completed status buckets now agree byte-for-byte
+  between Sales, CO, and the shared lib export.
+
+**Out of scope / followups:**
+- `/api/invoices/stats` query is still NOT org-scoped — same in the
+  existing /stats handler before this change. Separate tenant-isolation
+  P0 to fix.
+- `/api/delivery-orders/stats` still takes no filter params. Delivery
+  page has no date filter UI today so KPI ↔ list mismatch isn't
+  visible, but the same fix shape should apply when the page gains a
+  date filter.
+
+---
+
 ## BUG-2026-05-26-002 — Snapshot freshness compare returned wrong answer when source `updated_at` was TEXT (sales-orders default endpoint frozen 4 days)
 
 **Status:** 🟢 Fixed (2026-05-26)

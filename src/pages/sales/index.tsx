@@ -16,6 +16,13 @@ import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, F
 // 1MB jspdf vendor chunk only ships when the user actually prints a SO.
 import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import {
+  OUTSTANDING_STATUSES,
+  PENDING_DELIVERY_STATUSES,
+  COMPLETED_STATUSES,
+  CONFIRMED_STATUSES,
+  sumByStatuses,
+} from "@/lib/so-status";
 import type { SalesOrder } from "@/types";
 import type { Customer, DeliveryOrder } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
@@ -50,36 +57,12 @@ type SOStatusChangeEntry = {
   autoActions: string[];
 };
 
-// `OUTSTANDING` is a synthetic option (not a stored status).
-// Wei Siang 2026-05-16: Outstanding = goods NOT yet out the door.
-// "Pending dispatch" (READY_TO_SHIP) still counts; the moment a DO
-// dispatches the SO cascades to SHIPPED (delivery-orders.ts) and it
-// drops out of Outstanding — dispatched = sent out = not outstanding.
-// SHIPPED / DELIVERED / INVOICED / CLOSED are all excluded. ON_HOLD
-// stays in because the order is still owed, just paused.
-const OUTSTANDING_STATUSES = new Set([
-  "CONFIRMED",
-  "IN_PRODUCTION",
-  "READY_TO_SHIP",
-  "ON_HOLD",
-]);
-// `CONFIRMED` is also a synthetic group — Wei Siang's "CS" (Confirmed
-// Sales) reads as "every order I've actually sold", which in practice means
-// post-DRAFT + non-paused + non-cancelled. The literal CONFIRMED status is
-// just a brief checkpoint between Draft and IN_PRODUCTION; treating the
-// dropdown option as that single status meant a 444-order book with one
-// SO at literal CONFIRMED reported RM 287 of revenue while all the real
-// money sat under IN_PRODUCTION / READY_TO_SHIP. Mirrors the server-side
-// `CS_STATUSES` set in routes/sales-orders.ts.
-const CONFIRMED_STATUSES = new Set([
-  "CONFIRMED",
-  "IN_PRODUCTION",
-  "READY_TO_SHIP",
-  "SHIPPED",
-  "DELIVERED",
-  "INVOICED",
-  "CLOSED",
-]);
+// OUTSTANDING_STATUSES, CONFIRMED_STATUSES, etc. are now imported from
+// src/lib/so-status.ts so Sales and Consignment Orders agree on the
+// definition. Previously each page had its own literal set and they
+// drifted (Sales' Outstanding included ON_HOLD, CO's didn't; Sales'
+// Completed was [CLOSED] only and showed 0 perpetually).
+// 2026-05-26 audit: see src/lib/so-status.ts for the canonical bucket rules.
 const ALL_STATUSES = [
   { value: "", label: "All Statuses" },
   { value: "DRAFT", label: "Draft" },
@@ -210,31 +193,7 @@ export default function SalesPage() {
   // reflect the whole dataset, not just the current paginated page.
   // "Confirmed" is anything that isn't DRAFT.
   const statsByStatus = statsResp?.byStatus ?? {};
-  const statsTotal = statsResp?.total ?? totalOrdersServer;
-  const sumStatuses = (statuses: string[]): number =>
-    statuses.reduce((n, s) => n + (statsByStatus[s] ?? 0), 0);
-  const draftCount = statsByStatus.DRAFT ?? 0;
-  const confirmedCount = Math.max(0, statsTotal - draftCount);
-  // Wei Siang 2026-05-16: Outstanding = goods not yet dispatched.
-  // Must match OUTSTANDING_STATUSES exactly (the count card and the
-  // filter were previously two different sets — fixed). Dispatched
-  // (SHIPPED) onward is excluded; ON_HOLD stays (still owed, paused).
-  const outstandingCount = sumStatuses([
-    "CONFIRMED",
-    "IN_PRODUCTION",
-    "READY_TO_SHIP",
-    "ON_HOLD",
-  ]);
-  // Pending Delivery = goods ready/in-transit but not yet marked DELIVERED.
-  const pendingDeliveryCount = sumStatuses(["READY_TO_SHIP", "SHIPPED"]);
-  // Completed = fully closed orders (paid + delivered + closed). DELIVERED
-  // and INVOICED still belong to Outstanding because the cycle isn't done.
-  const completedCount = sumStatuses(["CLOSED"]);
-  // 0134 — Service Order mode swaps the Revenue + Outstanding RM cards for
-  // count-based status buckets (SV is 0-amount by design, so RM cards are
-  // always 0). Re-uses the same /stats byStatus aggregate.
-  const inProductionCount = sumStatuses(["IN_PRODUCTION"]);
-  const deliveredCount = sumStatuses(["DELIVERED", "INVOICED"]);
+  const statsTotalRaw = statsResp?.total ?? totalOrdersServer;
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -359,16 +318,26 @@ export default function SalesPage() {
     );
   };
 
-  const filteredOrders = useMemo(() => {
+  // ── Filter application split in two ───────────────────────────────────
+  // `filteredOrdersByUserFilters` applies ALL user-driven filters (status,
+  // customer, dates, category, DD) but NOT the Draft/Confirmed tab. KPI
+  // cards (Total / Outstanding / Pending Delivery / Completed / Revenue)
+  // and tab badges read from THIS so the numbers respect the user's
+  // filter selection regardless of which tab is currently active.
+  //
+  // `filteredOrders` then layers the tab filter on top — that's what the
+  // list grid renders. Pre-2026-05-26 audit, the KPI cards instead read
+  // from /api/sales-orders/stats (which doesn't accept date/customer/cat
+  // params) → cards lied whenever any filter was set. See BUG-2026-05-26-
+  // 003.
+  const filteredOrdersByUserFilters = useMemo(() => {
     return orders.filter(o => {
-      if (tab === "DRAFT" && o.status !== "DRAFT") return false;
-      if (tab === "CONFIRMED" && o.status === "DRAFT") return false;
       if (filterStatus) {
         if (filterStatus === "OUTSTANDING") {
           if (!OUTSTANDING_STATUSES.has(o.status)) return false;
         } else if (filterStatus === "CONFIRMED") {
-          // Synthetic group — see CONFIRMED_STATUSES comment. Match the
-          // dropdown's "Confirmed (all)" semantics.
+          // Synthetic group — see CONFIRMED_STATUSES in src/lib/so-status.ts.
+          // Matches the dropdown's "Confirmed (all)" semantics.
           if (!CONFIRMED_STATUSES.has(o.status)) return false;
         } else if (o.status !== filterStatus) {
           return false;
@@ -397,7 +366,55 @@ export default function SalesPage() {
       }
       return true;
     });
-  }, [orders, tab, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+  }, [orders, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
+
+  const filteredOrders = useMemo(() => {
+    return filteredOrdersByUserFilters.filter(o => {
+      if (tab === "DRAFT" && o.status !== "DRAFT") return false;
+      if (tab === "CONFIRMED" && o.status === "DRAFT") return false;
+      return true;
+    });
+  }, [filteredOrdersByUserFilters, tab]);
+
+  // ── KPI counts ─────────────────────────────────────────────────────────
+  // When ANY filter is active, count from the filtered set so the cards
+  // match the list. Otherwise use the whole-org /stats aggregate (fast
+  // GROUP BY) so we don't iterate the full SO array on a cold view.
+  //
+  // The Sales page always fetches the WHOLE dataset (no pagination) the
+  // moment any filter is set — see `_filtersActive` ternary on the
+  // ordersResp fetch — so `filteredOrdersByUserFilters` is a complete
+  // server-side dataset under filter, NOT just the current page.
+  const kpiSource = useMemo(() => {
+    if (hasActiveFilters) {
+      const byStatus: Record<string, number> = {};
+      for (const o of filteredOrdersByUserFilters) {
+        byStatus[o.status] = (byStatus[o.status] ?? 0) + 1;
+      }
+      return {
+        total: filteredOrdersByUserFilters.length,
+        byStatus,
+      };
+    }
+    return { total: statsTotalRaw, byStatus: statsByStatus };
+  }, [hasActiveFilters, filteredOrdersByUserFilters, statsTotalRaw, statsByStatus]);
+
+  const statsTotal = kpiSource.total;
+  const draftCount = kpiSource.byStatus.DRAFT ?? 0;
+  const confirmedCount = Math.max(0, statsTotal - draftCount);
+  // Bucket math from src/lib/so-status.ts. Buckets are now mutually
+  // exclusive: every status maps to AT MOST one of Outstanding / Pending
+  // Delivery / Completed. Pre-fix Sales double-counted READY_TO_SHIP in
+  // both Outstanding AND Pending Delivery, and Completed = [CLOSED] only
+  // (perpetually 0 for this factory's INVOICED-not-CLOSED workflow).
+  const outstandingCount = sumByStatuses(kpiSource.byStatus, OUTSTANDING_STATUSES);
+  const pendingDeliveryCount = sumByStatuses(kpiSource.byStatus, PENDING_DELIVERY_STATUSES);
+  const completedCount = sumByStatuses(kpiSource.byStatus, COMPLETED_STATUSES);
+  // Service-order mode cards (Total / Outstanding / In Production /
+  // Pending Delivery / Delivered) re-use the same kpiSource so they
+  // respect filters the same way.
+  const inProductionCount = kpiSource.byStatus.IN_PRODUCTION ?? 0;
+  const deliveredCount = (kpiSource.byStatus.DELIVERED ?? 0) + (kpiSource.byStatus.INVOICED ?? 0);
 
   const exportCSV = () => {
     const headers = [

@@ -34,6 +34,78 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-26-004 — SO status cascade missing from invoice DRAFT→SENT, plus 83 historical DELIVERED DOs orphaned with their parent SOs stuck at READY_TO_SHIP
+
+**Status:** 🟢 Fixed (2026-05-26)
+**Category:** sales-orders
+
+**Symptom:** Wei Siang on /sales: Pending Delivery and Completed KPI cards
+stayed at 0 across every filter combo (even after the BUG-2026-05-26-003
+fix made KPIs respect the filter). Drill-down revealed the underlying
+data: 620 SOs total broken down as DRAFT 16 / IN_PRODUCTION 174 /
+**READY_TO_SHIP 425** / DELIVERED 1 / INVOICED 0 / CLOSED 0 — while the
+delivery_orders table had 83 DELIVERED rows and the invoices table had
+83 SENT rows. Goods physically moved, money physically billed, but the
+SO status never followed.
+
+**Root cause (two distinct gaps):**
+
+1. **Historical: 83 DELIVERED DOs predate the live cascade.** Either
+   imported via legacy script or flipped to DELIVERED via direct SQL,
+   bypassing the `buildDoDeliveredSoAndInvoice` helper that powers
+   PUT /api/delivery-orders/:id. Result: 83 DOs at DELIVERED, only 1
+   SO at DELIVERED — the cascade simply never ran on those.
+
+2. **Forward: invoice DRAFT → SENT never bumped the linked SO.** The
+   POST /api/invoices handler creates the invoice at DRAFT and flips
+   the DO to INVOICED in the same batch, but the PUT handler's
+   DRAFT→SENT transition only updates the invoice row + writes the
+   ledger; it does NOT touch sales_orders.status. So 83 SENT invoices
+   produced 0 SOs at INVOICED.
+
+3. (Related, smaller) `payments.ts:415` guard `so.status IN
+   ('DELIVERED','READY_TO_SHIP')` excluded SHIPPED — canonical path
+   is `READY_TO_SHIP → SHIPPED → DELIVERED → INVOICED → CLOSED`, so
+   SHIPPED SOs paying off an invoice silently failed to advance.
+
+**Fix:**
+- **Historical repair via existing endpoint**: ran
+  `POST /api/delivery-orders/backfill-delivered-cascade` (live, not
+  dry). Walked all 83 DELIVERED DOs through the canonical cascade
+  function — **285 SOs advanced from READY_TO_SHIP to DELIVERED**, 0
+  errors, 0 duplicate invoices created (the function self-skips DOs
+  whose invoice already exists).
+- **SQL one-shot** (run separately by operator in Supabase SQL editor)
+  to bump SOs whose invoice is already SENT/PARTIAL_PAID to INVOICED,
+  and SOs whose every invoice is PAID to CLOSED. Same idempotent
+  status-set guards as the live cascade.
+- `src/api/routes/invoices.ts` (~line 1599) — new cascade block fires
+  on DRAFT→SENT inside the same atomic batch as the invoice update.
+  Uses `resolveDoSalesOrderIds` so multi-SO delivery notes advance
+  every SO they touched. Status-set guard makes re-fires idempotent.
+- `src/api/routes/payments.ts` (~line 415) — guard now includes
+  SHIPPED alongside DELIVERED + READY_TO_SHIP.
+- Snapshot caches cleared after the backfill so the next page load
+  sees the new numbers.
+
+**Verify:**
+- Pre-backfill /api/sales-orders (paginated, bypass snapshot):
+  READY_TO_SHIP 425, DELIVERED 1.
+- Post-backfill, same query: READY_TO_SHIP 140, **DELIVERED 166**
+  (sample of 500/620).
+- Expected post-SQL-bump: ~83 SOs at INVOICED, ~286 at DELIVERED.
+- Create a fresh invoice + click Send: linked SO transitions to
+  INVOICED in the same operation (no separate refresh needed).
+
+**Followups:**
+- Add a nightly drift-check job that compares `sales_orders.status`
+  against the max(downstream state) and alerts on rows where SO <
+  downstream. This is at least the third cascade-drift incident this
+  module has shipped (BUG-001/002/004 lineage) — a passive guard would
+  catch the next one in hours, not weeks.
+
+---
+
 ## BUG-2026-05-26-003 — Sales/CO KPI cards lie under any filter; Invoices Outstanding RM/Collected MTD undercount past page 1; status buckets defined inconsistently across pages
 
 **Status:** 🟢 Fixed (2026-05-26)

@@ -412,7 +412,16 @@ app.post("/", async (c) => {
         .bind(...uniqueSOIds)
         .all<{ id: string; status: string }>();
       for (const so of soRows.results ?? []) {
-        if (so.status === "DELIVERED" || so.status === "READY_TO_SHIP") {
+        // 2026-05-26 audit fix — include SHIPPED. Canonical SO status
+        // path is READY_TO_SHIP → SHIPPED → DELIVERED → INVOICED →
+        // CLOSED. Previous guard excluded SHIPPED, so any SO that
+        // dispatched but hadn't yet been marked DELIVERED at the moment
+        // of payment silently failed to advance to INVOICED.
+        if (
+          so.status === "DELIVERED" ||
+          so.status === "SHIPPED" ||
+          so.status === "READY_TO_SHIP"
+        ) {
           statements.push(
             c.var.DB.prepare(
               "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",

@@ -1597,6 +1597,39 @@ app.put("/:id", async (c) => {
       statements.push(...cascadeStmts);
     }
 
+    // 2026-05-26 cascade fix (BUG-2026-05-26-004) — DRAFT → SENT bumps
+    // every linked SO from a pre-invoice status (DELIVERED / SHIPPED /
+    // READY_TO_SHIP / IN_PRODUCTION / CONFIRMED) to INVOICED. Pre-fix,
+    // sending an invoice updated only the invoice row + DO status, so a
+    // book with 83 SENT invoices showed 0 SOs at INVOICED (BUG-2026-05-
+    // 26-003 user-visible symptom: Completed KPI card stayed at 0
+    // forever). Mirrors the DO → DELIVERED cascade in
+    // delivery-orders.ts buildDoDeliveredSoAndInvoice — multi-SO aware
+    // via resolveDoSalesOrderIds, idempotent via the status-set guard
+    // (a re-fire on an already-INVOICED SO no-ops).
+    if (existing.status === "DRAFT" && nextStatus === "SENT") {
+      const { resolveDoSalesOrderIds } = await import("./delivery-orders");
+      const soIds = await resolveDoSalesOrderIds(
+        c.var.DB,
+        existing.deliveryOrderId ?? "",
+        existing.salesOrderId,
+      );
+      if (soIds.length > 0) {
+        const placeholders = soIds.map(() => "?").join(",");
+        statements.push(
+          c.var.DB
+            .prepare(
+              `UPDATE sales_orders
+                  SET status = 'INVOICED', updated_at = ?
+                WHERE id IN (${placeholders})
+                  AND status IN ('CONFIRMED','IN_PRODUCTION','READY_TO_SHIP',
+                                 'SHIPPED','DELIVERED')`,
+            )
+            .bind(now, ...soIds),
+        );
+      }
+    }
+
     // ------------------------------------------------------------------
     // Sprint 3 #2 — fold audit + ledger writes into the SAME batch as
     // the business mutation, instead of running them post-batch with a

@@ -656,28 +656,48 @@ export default function SalesPage() {
   // orders, so this sum is whole-dataset accurate. CS exclusion is
   // applied here too so a user filtering "All Statuses" still reads the
   // CS number, not raw-including-cancelled.
+  // Uses `filteredOrdersByUserFilters` (no tab filter) so the Revenue
+  // card matches the KPI count cards — both should reflect the
+  // user-selected filters regardless of whether Draft or Confirmed tab
+  // happens to be open.
   const filteredRevenue = useMemo(
     () =>
-      filteredOrders
+      filteredOrdersByUserFilters
         .filter((o) => CONFIRMED_STATUSES.has(o.status))
         .reduce((sum, o) => sum + o.totalSen, 0),
-    [filteredOrders],
+    [filteredOrdersByUserFilters],
   );
 
   // Wei Siang 2026-05-16: Delivered / Outstanding shown ITEM-level — a
   // partially-delivered SO counts only the items that actually went on a
-  // delivery note as Delivered, the rest stays Outstanding. Same resolver
-  // the Delivery side uses, so the headline reconciles to the cent (no
-  // more whole-SO-header over-count of partial deliveries). Other filters
-  // keep the header-total behaviour.
+  // delivery note as Delivered, the rest stays Outstanding. The /stats
+  // `deliveredItemsSen` + `outstandingItemsSen` are computed across the
+  // WHOLE org with no filter awareness — they are correct ONLY when
+  // status is the lone active filter.
+  //
+  // 2026-05-26 fix (Wei Siang follow-up): adding date / customer /
+  // category alongside Status=Outstanding/Delivered left the Revenue card
+  // stuck on the whole-org item-level number — same RM 286,763.75 across
+  // wildly different filter combos (51 orders vs 22 orders). The "items"
+  // path only fires when status is the ONLY filter; the moment any other
+  // filter is active we fall back to filteredRevenue so the number reacts
+  // to the filter. (Trade-off: partial-delivery item-level accuracy is
+  // lost for multi-filter views — the operator gets correct multi-filter
+  // math instead of a frozen item-level number.)
+  const hasFilterBeyondStatus = !!(
+    filterCustomer || filterDateFrom || filterDateTo ||
+    filterCategory || filterDDFrom || filterDDTo
+  );
   const displayRevenue =
-    filterStatus === "DELIVERED"
-      ? statsResp?.deliveredItemsSen ?? 0
-      : filterStatus === "OUTSTANDING"
-        ? statsResp?.outstandingItemsSen ?? 0
-        : hasActiveFilters
-          ? filteredRevenue
-          : totalRevenue;
+    !hasActiveFilters
+      ? totalRevenue
+      : hasFilterBeyondStatus
+        ? filteredRevenue
+        : filterStatus === "DELIVERED"
+          ? statsResp?.deliveredItemsSen ?? 0
+          : filterStatus === "OUTSTANDING"
+            ? statsResp?.outstandingItemsSen ?? 0
+            : filteredRevenue;
 
   // Quick date presets — see useUrlBatch jsdoc for why we can't just call
   // setFilterDateFrom + setFilterDateTo in sequence (React 18 batches the

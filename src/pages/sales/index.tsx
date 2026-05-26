@@ -693,36 +693,31 @@ export default function SalesPage() {
     [filteredOrdersByUserFilters],
   );
 
-  // Wei Siang 2026-05-16: Delivered / Outstanding shown ITEM-level — a
-  // partially-delivered SO counts only the items that actually went on a
-  // delivery note as Delivered, the rest stays Outstanding. The /stats
-  // `deliveredItemsSen` + `outstandingItemsSen` are computed across the
-  // WHOLE org with no filter awareness — they are correct ONLY when
-  // status is the lone active filter.
+  // Revenue (filtered) — SO HEADER total summed over the user-filtered
+  // set. Math stays internally consistent: per-customer Revenue figures
+  // sum to "All Customers" Revenue across any common filter, and per-
+  // status Revenue figures sum to "All Statuses" Revenue.
   //
-  // 2026-05-26 fix (Wei Siang follow-up): adding date / customer /
-  // category alongside Status=Outstanding/Delivered left the Revenue card
-  // stuck on the whole-org item-level number — same RM 286,763.75 across
-  // wildly different filter combos (51 orders vs 22 orders). The "items"
-  // path only fires when status is the ONLY filter; the moment any other
-  // filter is active we fall back to filteredRevenue so the number reacts
-  // to the filter. (Trade-off: partial-delivery item-level accuracy is
-  // lost for multi-filter views — the operator gets correct multi-filter
-  // math instead of a frozen item-level number.)
-  const hasFilterBeyondStatus = !!(
-    filterCustomer || filterDateFrom || filterDateTo ||
-    filterCategory || filterDDFrom || filterDDTo
-  );
-  const displayRevenue =
-    !hasActiveFilters
-      ? totalRevenue
-      : hasFilterBeyondStatus
-        ? filteredRevenue
-        : filterStatus === "DELIVERED"
-          ? statsResp?.deliveredItemsSen ?? 0
-          : filterStatus === "OUTSTANDING"
-            ? statsResp?.outstandingItemsSen ?? 0
-            : filteredRevenue;
+  // 2026-05-16 → 2026-05-26 history (Wei Siang feedback ladder):
+  //  • Originally used `statsResp.outstandingItemsSen` /
+  //    `deliveredItemsSen` when Status was Outstanding/Delivered to get
+  //    ITEM-level accuracy on partially-delivered SOs (an order with
+  //    only half its items shipped only counted the unshipped half as
+  //    outstanding).
+  //  • That number was a WHOLE-ORG aggregate from /stats — it didn't
+  //    accept date/customer/category. Adding any non-status filter left
+  //    the Revenue card stuck on the same number, so 2026-05-26 fix
+  //    switched to filteredRevenue when other filters were active.
+  //  • Wei Siang then noticed (per-customer revenue summed across
+  //    customers) ≠ (all-customers revenue) — because individual
+  //    customer views used SO header sums while All Customers still
+  //    used item-level. Same metric, two formulas — confusing.
+  //
+  // Final decision (2026-05-26 third pass): always SO header sum when
+  // any filter is active, whole-org csRevenue when no filter. Lose
+  // partial-delivery item-level accuracy as a deliberate trade so the
+  // numbers Wei Siang scans on his dashboard add up across slices.
+  const displayRevenue = hasActiveFilters ? filteredRevenue : totalRevenue;
 
   // Quick date presets — see useUrlBatch jsdoc for why we can't just call
   // setFilterDateFrom + setFilterDateTo in sequence (React 18 batches the

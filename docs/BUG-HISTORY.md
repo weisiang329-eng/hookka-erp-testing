@@ -34,6 +34,174 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-27-007 — /setup-2fa "Could not start setup" — missing TOTP columns on prod users table
+
+**Status:** 🟢 Fixed (2026-05-27)
+**Category:** auth-rbac
+
+**Symptom:** Wei Siang clicked Forgot Password Skip dialog → /setup-2fa. Page
+showed "Could not start setup. Try again." with no QR code rendered. POST
+/api/auth/totp/setup-start returned 500 with the opaque error message.
+
+**Root cause:** `migrations-postgres/0054_user_totp.sql` (adds `totp_secret`,
+`totp_enrolled_at`, `totp_recovery_hashes` columns to `users`) was authored
+when Phase C.6 TOTP was scoped but never applied to prod Supabase. The TOTP
+code (existing /enroll, new /setup-start) attempts `UPDATE users SET totpSecret
+= ?` which the SupabaseAdapter rewrites to `totp_secret = ?` — failing with
+`column "totp_secret" of relation "users" does not exist`. Silently broken
+since the file was created — nobody actually enrolled until now.
+
+**Fix:** Applied the missing migration via Supabase SQL editor:
+```sql
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enrolled_at TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_recovery_hashes TEXT;
+```
+Also added the row to `_migrations` so future migration runs skip it.
+
+**Diagnosis aid added:** temporarily exposed `err.message` in the 500
+response as `_debug` (commit f5f15853) so Wei Siang could read the actual
+Postgres error without a `wrangler tail` session. Restored to opaque
+response after fix verified.
+
+**Verified:** Live POST /api/auth/totp/setup-start now returns 200 with
+secret + qrCodeUrl. /setup-2fa renders the QR code.
+
+---
+
+## BUG-2026-05-27-006 — Brevo sender domain not on Resend free tier; brand-mismatched FROM addresses across 5 code paths
+
+**Status:** 🟢 Fixed (2026-05-27)
+**Category:** infrastructure
+
+**Symptom:** After migrating prod to `erp.hookka.com`, every outbound ERP
+email still arrived from `noreply@houzscentury.com` — wrong brand. Audit
+also found 4 hardcoded fallback strings + 1 missing type field that
+would have re-introduced the bug on any future env-var rotation.
+
+**Root cause:** Resend Free tier caps verified-domain count at 1, and the
+verified domain was `houzscentury.com` (set up before the Hookka cutover).
+Adding `hookka.com` required Resend Pro ($20/mo). Code-side, four
+fallback strings in `src/api/lib/email.ts`, `email-outbox.ts`,
+`routes/auth.ts`, `routes/users.ts` defaulted to the houzscentury address
+when RESEND_FROM_EMAIL was unset — and `worker.ts:383`'s processOutbox env
+cast omitted BREVO_API_KEY so future engineers would assume Resend-only.
+
+**Fix:** Migrated to Brevo (9k/mo, unlimited domains, free). Added
+`sendEmailViaBrevo` + `sendMail` wrapper (commit bcd29ce) — picks Brevo
+when BREVO_API_KEY is configured, falls back to Resend. Verified
+`hookka.com` in Brevo with TXT brevo-code + 2 DKIM CNAMEs + DMARC rua=.
+Replaced all 4 houzscentury fallbacks with `noreply@hookka.com` (commit
+38e7a5b9). Added BREVO_API_KEY to processOutbox env cast.
+
+**Verified:** `grep houzscentury src/api` returns zero results.
+`/api/auth/forgot-password` returns 200, queues a Brevo send.
+
+---
+
+## BUG-2026-05-27-005 — password_reset_tokens table column-naming mismatch (snake_case vs camelCase)
+
+**Status:** 🟢 Fixed (2026-05-27)
+**Category:** infrastructure
+
+**Symptom:** New `POST /api/auth/forgot-password` returned 500 with
+`column "created_at" does not exist`. The migration created the table
+fine but the very first INSERT attempt failed.
+
+**Root cause:** The 0084_password_reset_tokens.sql migration I wrote first
+used double-quoted camelCase columns (`"createdAt"`, `"expiresAt"`). But
+Hookka's `SupabaseAdapter` (src/api/lib/supabase-compat.ts) rewrites
+camelCase identifiers in worker SQL to snake_case before sending to
+Postgres — so the worker tried to INSERT `created_at` (snake) while the
+table actually had `"createdAt"` (camel, preserved by double quotes).
+Two conventions colliding.
+
+**Fix:** Dropped + recreated the table with snake_case columns
+(`expires_at`, `created_at`, `used_at`, `request_ip`, `request_ua`) to
+match every other Hookka table. Matches the SupabaseAdapter's expected
+post-rewrite shape.
+
+**Follow-up bug:** `requestIp` and `requestUa` are NOT in
+column-rename-map.json. Worker SQL `INSERT … requestIp …` would fold to
+lowercase `requestip` at Postgres — still mismatched (`request_ip` on
+table). Removed `requestIp` / `requestUa` from the INSERT (forensics
+fields, non-critical) rather than adding to rename map (commit 6973857).
+
+**Verified:** `POST /api/auth/forgot-password` returns 200, row written
+to `password_reset_tokens` with correct columns.
+
+---
+
+## BUG-2026-05-27-004 — CORS single-origin restriction blocks custom domain cutover
+
+**Status:** 🟢 Fixed (2026-05-27)
+**Category:** infrastructure
+
+**Symptom:** Plan was to switch prod from `hookka-erp-testing.pages.dev`
+to `erp.hookka.com` without breaking existing employees' bookmarks. But
+the original CORS middleware accepted exactly one origin (the `API_CORS_ORIGIN`
+env value) — meaning either old or new could work, not both. Big-bang
+cutover risk.
+
+**Root cause:** `src/api/worker.ts` CORS check: `if (origin === allowed)`.
+Single value. No way to allow multiple origins during a transition window.
+
+**Fix:** Reworked CORS to accept a comma-separated `API_CORS_ORIGIN` env
+var (commit 7575527). Trims whitespace, strips trailing slashes, drops
+empties, allowlists every entry. Set to
+`https://erp.hookka.com,https://hookka-erp-testing.pages.dev` so both
+domains work in parallel until the legacy URL is retired.
+
+**Verified:** Both `erp.hookka.com` and `hookka-erp-testing.pages.dev`
+load the ERP and pass CORS preflight for API calls.
+
+---
+
+## BUG-2026-05-27-003 — System Health Dashboard cache-hit ratio always 0 + no Slow SQL panel
+
+(Re-indexed; this was the previous BUG-001 entry — see below for full
+content. Renumbered to fit chronological order.)
+
+---
+
+## BUG-2026-05-27-002 — Weak password policy let SUPER_ADMIN reset to "hookka"
+
+**Status:** 🟢 Fixed (2026-05-27)
+**Category:** auth-rbac
+
+**Symptom:** Wei Siang got locked out, used SQL-backdoor temp password
+`HookkaReset2026!`, then changed it via Settings → Reset Password and
+chose a new value `hookka` — six characters, a dictionary word, the
+literal company name. The system accepted it. ERP holds customer pricing,
+salaries, financials — that password would not survive a brute-force
+attempt longer than 30 seconds.
+
+**Root cause:** Both `/change-password` and `/reset-password` validated
+only `newPassword.length < 6`. No complexity rule, no dictionary check,
+no rule against using the email local-part.
+
+**Fix:**
+- Added `src/api/lib/password-strength.ts` (commit b01ce0d, by Agent A):
+  validator + 200-entry common-passwords blocklist + email local-part
+  block + 0-4 strength score.
+- Added `<PasswordStrengthMeter>` React component for live FE feedback.
+- Wired the validator into `/change-password` and `/reset-password`
+  (commit 408c5f7) — strictly after old-password verification to avoid
+  enumeration leaks.
+- Added session revocation: every password change/reset now
+  `DELETE FROM user_sessions WHERE userId = ?` so a leaked credential
+  becomes useless the moment the rightful owner rotates.
+- 14 tests cover all rules + score boundaries.
+
+**Existing users not affected:** login still accepts any verified hash;
+new rules only apply when the user changes/resets their password. Backward
+compatible.
+
+**Verified:** Setting password "hookka" now returns 400
+"This password is too common — pick something less guessable".
+
+---
+
 ## BUG-2026-05-27-001 — /admin/health cache-hit-ratio always 0, plus no visibility into WHICH SQL statement is slow
 
 **Status:** 🟢 Fixed (2026-05-27)

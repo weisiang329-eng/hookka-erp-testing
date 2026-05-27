@@ -304,6 +304,199 @@ app.post("/login-verify", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Soft-enforcement 2FA setup flow (2026-05-27).
+//
+// These wrappers exist BECAUSE the original /enroll endpoint blocks re-running
+// when totpEnrolledAt is already set AND returns recovery codes (heavy ceremony).
+// For the soft-prompt setup screen we want a lightweight "show me a QR" flow
+// that the operator can hit even if they previously started but didn't finish.
+//
+// Schema note: there is NO `user_totp_secrets` table in this codebase. TOTP
+// state lives on the `users` table as totpSecret + totpEnrolledAt +
+// totpRecoveryHashes. The "pending vs enabled" distinction is encoded by
+// totpEnrolledAt being NULL (pending) vs ISO timestamp (enabled). No ALTER
+// is required.
+//
+// Audit actions: "totp.setup-start" and "totp-enabled" (chosen to match the
+// spec; complements the existing "totp.enroll" / "totp.enroll-start" actions
+// used by /enroll + /verify).
+// ---------------------------------------------------------------------------
+
+// ----- POST /api/auth/totp/setup-start -------------------------------------
+// Auth-required (passes through authMiddleware). Returns the otpauth URL,
+// the raw base32 secret, and a QR image URL the FE can render as an <img>.
+// Idempotent — re-running before /setup-confirm rotates the pending secret.
+// Once the user has already confirmed (totpEnrolledAt non-null), refuse so
+// they don't accidentally clobber their working secret without going through
+// /disable first.
+app.post("/setup-start", async (c) => {
+  const userId = ctxUserId(c);
+  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+
+  const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
+    .bind(userId)
+    .first<UserRow>();
+  if (!user) return c.json({ success: false, error: "User not found" }, 404);
+
+  // Already enrolled? Force the rotation path so the old secret doesn't
+  // silently survive. Matches /enroll's defensive behaviour.
+  if (user.totpEnrolledAt) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Two-factor sign-in is already on. Turn it off first before setting up again.",
+      },
+      409,
+    );
+  }
+
+  // Generate or rotate the pending secret. We overwrite any prior pending
+  // secret because the user may have abandoned the setup once and is now
+  // restarting it — no recovery codes are issued at this stage (the soft
+  // flow defers them to a future enhancement per spec).
+  const secret = generateSecret();
+  const otpauthUrl = enrollUrl(user.email, secret, TOTP_ISSUER);
+  // qrserver.com is a public QR image proxy — no API key, no SDK. The FE
+  // could compute this on its own but doing it server-side keeps the QR
+  // URL out of the browser's URL bar and lets us swap providers later.
+  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(otpauthUrl)}`;
+
+  // Persist the pending secret. totpEnrolledAt stays NULL — /setup-confirm
+  // flips it once the user proves they can produce a code.
+  try {
+    await c.var.DB.prepare(
+      "UPDATE users SET totpSecret = ?, totpEnrolledAt = NULL WHERE id = ?",
+    )
+      .bind(secret, userId)
+      .run();
+  } catch (err) {
+    console.warn(
+      "[auth-totp/setup-start] DB write failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json(
+      { success: false, error: "Could not start setup. Try again." },
+      500,
+    );
+  }
+
+  // Best-effort audit (failure must not block setup — that would lock the
+  // user out from finishing 2FA setup if the audit table is wedged).
+  try {
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: userId,
+      action: "totp.setup-start",
+    });
+  } catch {
+    /* swallow */
+  }
+
+  return c.json({
+    success: true,
+    secret,
+    otpauthUrl,
+    qrCodeUrl,
+  });
+});
+
+// ----- POST /api/auth/totp/setup-confirm -----------------------------------
+// Auth-required. Body { code }. Verifies the 6-digit TOTP matches the pending
+// secret, flips totpEnrolledAt = now, audit-logs "totp-enabled". On wrong
+// code returns 400 with a plain-English message so the FE can show it inline.
+app.post("/setup-confirm", async (c) => {
+  const userId = ctxUserId(c);
+  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+
+  const body = (await c.req.json().catch(() => ({}))) as { code?: string };
+  const code = (body.code || "").trim();
+  if (!/^\d{6}$/.test(code)) {
+    return c.json(
+      { success: false, error: "Wrong code, try again" },
+      400,
+    );
+  }
+
+  const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
+    .bind(userId)
+    .first<UserRow>();
+  if (!user || !user.totpSecret) {
+    return c.json(
+      {
+        success: false,
+        error: "Setup hasn't been started yet. Refresh and try again.",
+      },
+      400,
+    );
+  }
+
+  const ok = await verifyTotp(user.totpSecret, code, 1);
+  if (!ok) {
+    return c.json({ success: false, error: "Wrong code, try again" }, 400);
+  }
+
+  const nowIso = new Date().toISOString();
+  try {
+    await c.var.DB.prepare(
+      "UPDATE users SET totpEnrolledAt = ? WHERE id = ?",
+    )
+      .bind(nowIso, userId)
+      .run();
+  } catch (err) {
+    console.warn(
+      "[auth-totp/setup-confirm] DB write failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return c.json(
+      { success: false, error: "Could not save. Try again." },
+      500,
+    );
+  }
+
+  // Audit row uses the spec-mandated action name "totp-enabled" so dashboards
+  // / queries searching for "did this user finish setup?" find a single
+  // canonical event.
+  try {
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: userId,
+      action: "totp-enabled",
+      after: { enabledAt: nowIso },
+    });
+  } catch {
+    /* swallow */
+  }
+
+  return c.json({ success: true, enabledAt: nowIso });
+});
+
+// ----- POST /api/auth/totp/dismiss-prompt ----------------------------------
+// Auth-required. Body: {}. Writes an audit row "totp-dismissed" so the next
+// login check sees that the user just dismissed and skips the prompt for the
+// 24h cool-off window. Returns 200 even if the audit write fails — the user
+// shouldn't be stuck in a modal because of a journal hiccup.
+app.post("/dismiss-prompt", async (c) => {
+  const userId = ctxUserId(c);
+  if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
+
+  try {
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: userId,
+      action: "totp-dismissed",
+    });
+  } catch (err) {
+    console.warn(
+      "[auth-totp/dismiss-prompt] audit failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  return c.json({ success: true });
+});
+
 // ----- POST /api/auth/totp/disable -----------------------------------------
 // Auth-required + re-auth: body { password }. Nulls out the TOTP columns.
 app.post("/disable", async (c) => {

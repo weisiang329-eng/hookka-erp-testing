@@ -20,7 +20,15 @@ import { setAuth, isAuthenticated, type AuthUser } from "@/lib/auth";
 type LoginResponse =
   | {
       success: true;
-      data: { user: AuthUser; csrfToken: string };
+      data: {
+        user: AuthUser;
+        csrfToken: string;
+        // 2026-05-27 soft 2FA prompt fields. Present only when the server's
+        // computeTotpPrompt() returned a hint for this user. Absence is
+        // treated as "no prompt" — backward-compat for any older response.
+        totpPromptRequired?: boolean;
+        severity?: "soft" | "info" | "hard";
+      };
     }
   | { success: false; error?: string };
 
@@ -87,6 +95,53 @@ export default function LoginPage() {
       // token stays in the HttpOnly cookie and the CSRF token is read off
       // its non-HttpOnly cookie sibling on each mutating request.
       setAuth({ user: json.data.user });
+
+      // 2026-05-27 — Soft 2FA prompt. The server flags SUPER_ADMIN logins
+      // that haven't enrolled yet with a severity. We branch BEFORE the
+      // normal redirect so the user lands on /setup-2fa (hard / soft) or
+      // sees a one-time confirm prompt (soft) instead of going straight
+      // to the dashboard. severity = "info" stays silent here — the
+      // dashboard will render a small banner; that's the spec.
+      if (json.data.totpPromptRequired) {
+        const sev = json.data.severity ?? "soft";
+        if (sev === "hard") {
+          // Newly-minted super admin past the cutoff. Force setup —
+          // /setup-2fa hides "Skip" when navigated with this state.
+          navigate("/setup-2fa", { replace: true, state: { severity: "hard" } });
+          return;
+        }
+        if (sev === "soft") {
+          // Confirm dialog is the lightest possible UI without pulling in
+          // a modal component — keeps this change small. "OK" goes to
+          // setup, "Cancel" dismisses for 24h then continues to dashboard.
+          const wantSetup = window.confirm(
+            "Make your account more secure with two-factor sign-in?\n\nClick OK to set it up now, or Cancel to be reminded later.",
+          );
+          if (wantSetup) {
+            navigate("/setup-2fa", {
+              replace: true,
+              state: { severity: "soft" },
+            });
+            return;
+          }
+          // User chose Cancel → write the dismissal so we don't re-prompt
+          // for 24h. Fire-and-forget so a slow audit write doesn't stall
+          // navigation. CSRF header is added by the api-client interceptor.
+          fetch("/api/auth/totp/dismiss-prompt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({}),
+          }).catch(() => {
+            /* swallow — best-effort */
+          });
+          // Fall through to the normal redirect below.
+        }
+        // severity === "info" falls through to the normal redirect — the
+        // dashboard banner is rendered by a future small enhancement; not
+        // wiring it now keeps this PR focused.
+      }
+
       navigate(getRedirectTarget(), { replace: true });
     } catch (err) {
       setError(

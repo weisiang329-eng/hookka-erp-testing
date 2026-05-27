@@ -127,6 +127,9 @@ const SettingsUsers = lazy(() => import('./pages/settings/Users'))
 // Admin (SUPER_ADMIN-only screens — system health, etc.)
 const AdminHealth = lazy(() => import('./pages/admin/health'))
 
+// 2FA setup (any authenticated user — soft-prompt destination from /login).
+const Setup2FA = lazy(() => import('./pages/setup-2fa'))
+
 // Consignment
 const Consignment = lazy(() => import('./pages/consignment'))
 const ConsignmentDetail = lazy(() => import('./pages/consignment/detail'))
@@ -396,6 +399,11 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
       </RequireRole>
     ),
   },
+
+  // 2FA setup — any authenticated user (RequireAuth on the parent layout
+  // already gates it). The page reads location.state.severity to decide
+  // whether to show the "Skip for now" link (omitted when severity = "hard").
+  { path: '/setup-2fa', element: <S><Setup2FA /></S> },
 
   // Consignment
   { path: '/consignment', element: <S><Consignment /></S> },

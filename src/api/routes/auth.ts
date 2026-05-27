@@ -18,6 +18,7 @@
 // /me round-trip, but the token itself never touches localStorage.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
 import { validatePasswordStrength } from "../lib/password-strength";
@@ -203,6 +204,19 @@ app.post("/login", async (c) => {
     });
   }
 
+  // 2026-05-27 — Soft 2FA prompt for SUPER_ADMIN. Computed BEFORE we issue
+  // the session so the FE can decide whether to interrupt the dashboard
+  // navigation with a setup modal. Failures here MUST NOT block login —
+  // every branch is wrapped so a wedged audit table never locks anyone out.
+  // See computeTotpPrompt() below for the policy.
+  const totpPrompt = await computeTotpPrompt(c, user).catch((err) => {
+    console.warn(
+      "[auth/login] totp prompt compute failed (non-fatal):",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  });
+
   const token = crypto.randomUUID();
   const csrfToken = newCsrfToken();
   const now = new Date();
@@ -244,11 +258,107 @@ app.post("/login", async (c) => {
   // available via the non-HttpOnly cookie — we mirror it in the body so
   // tests / curl users can grab it without parsing Set-Cookie.
   issueSessionCookies(c, token, csrfToken);
+  // Soft 2FA prompt fields are folded into the existing data envelope so
+  // the FE can read response.data.totpPromptRequired / severity. When the
+  // helper returned null (computation failed) we omit both keys — the FE
+  // treats absence as "no prompt", matching pre-2FA behaviour.
   return c.json({
     success: true,
-    data: { user: publicUser(user), csrfToken },
+    data: {
+      user: publicUser(user),
+      csrfToken,
+      ...(totpPrompt
+        ? {
+            totpPromptRequired: true,
+            severity: totpPrompt.severity,
+          }
+        : {}),
+    },
   });
 });
+
+// ---------------------------------------------------------------------------
+// computeTotpPrompt — soft-enforcement 2FA policy for SUPER_ADMIN logins.
+//
+// Returns null when no prompt should be shown (non-admin role, already
+// enrolled, dismissed in last 24h, or the lookup failed).
+//
+// Severity ladder:
+//   • "hard" — SUPER_ADMIN created AFTER the cutoff (2026-05-28). No grace
+//     period; the FE must navigate to /setup-2fa and refuse to dismiss.
+//   • "soft" — Existing SUPER_ADMIN whose 14-day grace has elapsed AND who
+//     hasn't dismissed the prompt today. FE shows a modal with "Remind me
+//     later".
+//   • "info" — Existing SUPER_ADMIN still inside the 14-day grace window.
+//     FE renders a small banner only; no modal interruption.
+//
+// Lock-out safety: this only fires when totpEnrolledAt is NULL (user has
+// not yet set up 2FA). Once they do, the regular TOTP gate above handles
+// every subsequent login. There is no scenario where this helper can
+// prevent the password-only login from succeeding — it only annotates the
+// response with a hint.
+// ---------------------------------------------------------------------------
+const TOTP_HARD_ENFORCE_CUTOFF_MS = Date.parse("2026-05-28T00:00:00.000Z");
+const TOTP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
+const TOTP_DISMISS_COOLOFF_MS = 24 * 60 * 60 * 1000;
+
+async function computeTotpPrompt(
+  c: Context<Env>,
+  user: UserRow,
+): Promise<{ severity: "soft" | "info" | "hard" } | null> {
+  // Only SUPER_ADMIN gets the prompt for now. Other roles can opt-in
+  // manually via Settings → Security in a future enhancement.
+  if (user.role !== "SUPER_ADMIN") return null;
+  // Already enrolled → no prompt; the TOTP gate handles them.
+  if (user.totpEnrolledAt) return null;
+
+  // createdAt may be missing on legacy seed rows — treat missing as
+  // "ancient" so the grace clock has already elapsed.
+  const createdMs = user.createdAt ? Date.parse(user.createdAt) : 0;
+  const now = Date.now();
+
+  // Hard branch — new super admins minted after the cutoff get NO grace.
+  // Forces them to /setup-2fa on first login. Wei Siang's account predates
+  // the cutoff so this branch never fires for him.
+  if (Number.isFinite(createdMs) && createdMs >= TOTP_HARD_ENFORCE_CUTOFF_MS) {
+    return { severity: "hard" };
+  }
+
+  // Within the 14-day grace window → informational banner only.
+  const graceExpiresMs = createdMs + TOTP_GRACE_MS;
+  if (Number.isFinite(graceExpiresMs) && graceExpiresMs > now) {
+    return { severity: "info" };
+  }
+
+  // Grace expired. Check if the user dismissed the prompt in the last 24h —
+  // if so, give them the rest of the day off. Best-effort query; on error
+  // we err on the side of showing the prompt (more secure default than
+  // accidentally skipping it).
+  try {
+    const dismissedSinceIso = new Date(
+      now - TOTP_DISMISS_COOLOFF_MS,
+    ).toISOString();
+    const recent = await c.var.DB.prepare(
+      `SELECT ts FROM audit_events
+        WHERE resource = 'auth-totp'
+          AND resourceId = ?
+          AND action = 'totp-dismissed'
+          AND ts >= ?
+        ORDER BY ts DESC
+        LIMIT 1`,
+    )
+      .bind(user.id, dismissedSinceIso)
+      .first<{ ts: string }>();
+    if (recent) return null;
+  } catch (err) {
+    console.warn(
+      "[auth/login] dismiss-lookup failed (non-fatal):",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  return { severity: "soft" };
+}
 
 // ----- POST /api/auth/logout ----------------------------------------------
 // Deletes the caller's session AND purges the KV session cache so the token

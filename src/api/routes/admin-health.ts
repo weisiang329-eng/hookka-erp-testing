@@ -327,4 +327,255 @@ app.get("/kpis", async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Phase 2 — per-endpoint drill-down views. These let the operator answer
+// "which endpoint is slow / erroring" not just "is the system slow".
+//
+// All five queries below scan the same `req` rows in
+// hookka_erp_metrics. Schema reminder (per OBSERVABILITY.md):
+//   blob1 = "req"   (event-kind discriminator)
+//   blob2 = route   (e.g. /api/sales-orders)
+//   blob3 = HTTP status as string
+//   blob4 = traceparent
+//   double1 = total dur_ms
+//   double2 = db_dur_ms
+//   double3 = db op count
+//
+// Endpoint helper: shared env-read + fallback. Returns null when the
+// AE config is missing or any query throws — caller decides whether
+// to return an empty list or surface an error to the FE.
+// ---------------------------------------------------------------------------
+async function withAe<T>(
+  c: { env: unknown },
+  fn: (accountId: string, token: string) => Promise<T>,
+): Promise<T | null> {
+  const env = c.env as {
+    ERP_METRICS?: unknown;
+    CF_ACCOUNT_ID?: string;
+    AE_QUERY_TOKEN?: string;
+  };
+  if (!env.ERP_METRICS || !env.CF_ACCOUNT_ID || !env.AE_QUERY_TOKEN) {
+    return null;
+  }
+  try {
+    return await fn(env.CF_ACCOUNT_ID, env.AE_QUERY_TOKEN);
+  } catch (err) {
+    console.warn(
+      "[admin-health phase2] AE query failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+}
+
+// View 1 — Top N slowest endpoints (24h). Pulls raw rows per route
+// then computes P50/P95 in JS for each (same reason as the main
+// /kpis route: AE SQL doesn't support quantile()). Limits the per-route
+// fetch to top-traffic routes so we don't pull half the dataset for
+// rare endpoints.
+app.get("/by-endpoint", async (c) => {
+  const data = await withAe(c, async (accountId, token) => {
+    // First pass: count hits per route to rank traffic.
+    const sqlHits = `
+      SELECT blob2 AS route, count() AS n
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY
+      GROUP BY route
+      ORDER BY n DESC
+      LIMIT 20
+    `;
+    const hitsResp = await runAeSql(accountId, token, sqlHits);
+    const routes = (hitsResp.data ?? [])
+      .map((r) => ({
+        route: String((r as Record<string, unknown>).route ?? ""),
+        hits: Number((r as Record<string, unknown>).n) || 0,
+      }))
+      .filter((r) => r.route);
+    if (routes.length === 0) return [];
+
+    // Second pass: one query pulling double1 + double2 per row, all
+    // routes. We group in JS so we don't issue N queries.
+    const routeFilter = routes
+      .map((r) => `'${r.route.replace(/'/g, "''")}'`)
+      .join(",");
+    const sqlSamples = `
+      SELECT blob2 AS route, double1 AS dur, double2 AS dbDur
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND blob2 IN (${routeFilter})
+    `;
+    const samplesResp = await runAeSql(accountId, token, sqlSamples);
+    const perRoute = new Map<
+      string,
+      { dur: number[]; dbDur: number[] }
+    >();
+    for (const r of samplesResp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      if (!perRoute.has(route)) perRoute.set(route, { dur: [], dbDur: [] });
+      const bucket = perRoute.get(route)!;
+      const d = Number(row.dur);
+      const db = Number(row.dbDur);
+      if (Number.isFinite(d)) bucket.dur.push(d);
+      if (Number.isFinite(db)) bucket.dbDur.push(db);
+    }
+    const pickPct = (arr: number[], p: number): number => {
+      if (arr.length === 0) return 0;
+      const sorted = [...arr].sort((a, b) => a - b);
+      return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+    };
+    const avg = (arr: number[]): number =>
+      arr.length === 0 ? 0 : arr.reduce((s, v) => s + v, 0) / arr.length;
+    // Merge hits + percentiles. Sort by P95 desc so the slowest
+    // endpoints surface first.
+    const merged = routes.map((r) => {
+      const samples = perRoute.get(r.route) ?? { dur: [], dbDur: [] };
+      const p50 = Math.round(pickPct(samples.dur, 0.5));
+      const p95 = Math.round(pickPct(samples.dur, 0.95));
+      const avgDur = Math.round(avg(samples.dur));
+      const avgDb = Math.round(avg(samples.dbDur));
+      const dbPct =
+        avgDur > 0 ? Math.round((avgDb / avgDur) * 100) : 0;
+      return {
+        route: r.route,
+        hits: r.hits,
+        p50,
+        p95,
+        avgDur,
+        avgDb,
+        dbPct,
+      };
+    });
+    merged.sort((a, b) => b.p95 - a.p95);
+    return merged.slice(0, 10);
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+// View 2 — Error rate by endpoint (24h). 4xx + 5xx counts per route
+// so the operator sees which endpoint is throwing.
+app.get("/errors-by-endpoint", async (c) => {
+  const data = await withAe(c, async (accountId, token) => {
+    // Pull route + status. We bucket 4xx / 5xx in JS so we don't need
+    // CASE WHEN (AE SQL CASE syntax is finicky).
+    const sql = `
+      SELECT blob2 AS route, blob3 AS status, count() AS n
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND (blob3 LIKE '4%' OR blob3 LIKE '5%')
+      GROUP BY route, status
+      ORDER BY n DESC
+      LIMIT 200
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    const byRoute = new Map<
+      string,
+      { route: string; fourXX: number; fiveXX: number; total: number }
+    >();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      const status = String(row.status ?? "");
+      const n = Number(row.n) || 0;
+      if (!route) continue;
+      if (!byRoute.has(route))
+        byRoute.set(route, {
+          route,
+          fourXX: 0,
+          fiveXX: 0,
+          total: 0,
+        });
+      const bucket = byRoute.get(route)!;
+      if (status.startsWith("5")) bucket.fiveXX += n;
+      else if (status.startsWith("4")) bucket.fourXX += n;
+      bucket.total += n;
+    }
+    return [...byRoute.values()]
+      .sort((a, b) => b.fiveXX - a.fiveXX || b.fourXX - a.fourXX)
+      .slice(0, 15);
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+// View 3 (combined into View 1's `dbPct` field above — no separate
+// endpoint needed). Operator sees "DB time as % of total" in the
+// Top Slowest table.
+
+// View 4 — Hourly error spike chart (24h). 4xx + 5xx counts per hour.
+// Use this overlaid with deploy times to correlate "spike at 14:00"
+// with "deploy at 13:55 = regression".
+app.get("/errors-hourly", async (c) => {
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT
+        toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour,
+        blob3                                            AS status,
+        count()                                          AS n
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND (blob3 LIKE '4%' OR blob3 LIKE '5%')
+      GROUP BY hour, status
+      ORDER BY hour ASC
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    // Build 24-bucket arrays for 4xx and 5xx (newest = idx 23).
+    const fourXX = new Array(24).fill(0) as number[];
+    const fiveXX = new Array(24).fill(0) as number[];
+    const now = Date.now();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const hourStr = String(row.hour ?? "");
+      const status = String(row.status ?? "");
+      const n = Number(row.n) || 0;
+      const ts = Date.parse(hourStr);
+      if (Number.isNaN(ts)) continue;
+      const hoursAgo = Math.floor((now - ts) / 3600_000);
+      if (hoursAgo < 0 || hoursAgo > 23) continue;
+      const idx = 23 - hoursAgo;
+      if (status.startsWith("5")) fiveXX[idx] += n;
+      else if (status.startsWith("4")) fourXX[idx] += n;
+    }
+    return { fourXX, fiveXX };
+  });
+  return c.json({
+    success: true,
+    data: data ?? { fourXX: new Array(24).fill(0), fiveXX: new Array(24).fill(0) },
+  });
+});
+
+// View 5 — Long task details. Returns the top N slowest individual
+// requests in the last 24h with route, status, duration, db time, and
+// traceparent (so the operator can chase the slow ones in `wrangler
+// tail` logs).
+app.get("/long-tasks", async (c) => {
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route, blob3 AS status, blob4 AS trace,
+             double1 AS dur, double2 AS dbDur, timestamp
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND double1 >= 200
+      ORDER BY double1 DESC
+      LIMIT 50
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    return (resp.data ?? []).map((r) => {
+      const row = r as Record<string, unknown>;
+      return {
+        route: String(row.route ?? ""),
+        status: String(row.status ?? ""),
+        dur: Math.round(Number(row.dur) || 0),
+        dbDur: Math.round(Number(row.dbDur) || 0),
+        trace: String(row.trace ?? ""),
+        timestamp: String(row.timestamp ?? ""),
+      };
+    });
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
 export default app;

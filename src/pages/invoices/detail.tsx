@@ -26,11 +26,7 @@ import {
 // generateInvoicePdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually downloads.
 import type { Invoice } from "@/types";
-import { fetchJson } from "@/lib/fetch-json";
-import { mutationWithData } from "@/lib/schemas/common";
-import { InvoiceSchema } from "@/lib/schemas/invoice";
-
-const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -111,45 +107,66 @@ export default function InvoiceDetailPage() {
   const saveEditPrices = async () => {
     if (!invoice) return;
     setSavingPrices(true);
-    try {
-      const priceEdits = invoice.items.map((it) => {
-        const d = priceDraft[it.id] || {
-          base: "0",
-          divan: "0",
-          leg: "0",
-          special: "0",
-        };
-        return {
-          id: it.id,
-          baseSen: sen(d.base),
-          divanSen: sen(d.divan),
-          legSen: sen(d.leg),
-          specialSen: sen(d.special),
-        };
-      });
-      const data = await fetchJson(
-        `/api/invoices/${id}`,
-        InvoiceMutationSchema,
-        { method: "PUT", body: { priceEdits } },
-      );
-      if (data.success) {
-        if (id) invalidateCache(`/api/invoices/${id}`);
-        invalidateCache(`/api/invoices/${id}/print-extras`);
-        setEditingPrices(false);
-        refreshInvoice();
-        refreshExtras();
-        setToast("Invoice prices updated");
-      } else {
-        setToast(
-          (data as unknown as { error?: string }).error ||
-            "Could not update prices",
-        );
-      }
-    } catch (e) {
-      setToast(e instanceof Error ? e.message : "Could not update prices");
-    } finally {
-      setSavingPrices(false);
+    const priceEdits = invoice.items.map((it) => {
+      const d = priceDraft[it.id] || {
+        base: "0",
+        divan: "0",
+        leg: "0",
+        special: "0",
+      };
+      return {
+        id: it.id,
+        baseSen: sen(d.base),
+        divanSen: sen(d.divan),
+        legSen: sen(d.leg),
+        specialSen: sen(d.special),
+      };
+    });
+    // Expected new invoice total — sum of (base + divan + leg + special) × qty
+    // for each line. Backend recomputes the same way; comparing on totalAmount
+    // catches a stale-cache read that returned the pre-edit totals.
+    const expectedTotal = invoice.items.reduce((sum, it) => {
+      const e = priceEdits.find((p) => p.id === it.id);
+      const per = (e?.baseSen ?? 0) + (e?.divanSen ?? 0) + (e?.legSen ?? 0) + (e?.specialSen ?? 0);
+      return sum + per * (Number(it.quantity) || 0);
+    }, 0);
+    // 2026-05-27 verifiedSave migration. Money-touching write — confirm
+    // the new totalAmount actually persisted.
+    const result = await verifiedSave<Invoice>({
+      endpoint: `/api/invoices/${id}`,
+      method: "PUT",
+      body: { priceEdits },
+      readback: async () => {
+        const r = await fetch(`/api/invoices/${id}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: Invoice } | Invoice;
+        return (j as { data?: Invoice })?.data ?? (j as Invoice) ?? null;
+      },
+      expect: { totalAmount: expectedTotal },
+    });
+    if (result.ok) {
+      if (id) invalidateCache(`/api/invoices/${id}`);
+      invalidateCache(`/api/invoices/${id}/print-extras`);
+      setEditingPrices(false);
+      refreshInvoice();
+      refreshExtras();
+      setToast("Invoice prices updated");
+    } else if (result.reason === "mismatch") {
+      setToast(formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      setToast(parsedErr || `Could not update prices (HTTP ${result.status})`);
+    } else {
+      setToast(`Save failed: ${result.details}`);
     }
+    setSavingPrices(false);
   };
 
   // Payment form state
@@ -191,20 +208,40 @@ export default function InvoiceDetailPage() {
   const sendInvoice = async () => {
     if (!invoice) return;
     setUpdating(true);
-    try {
-      const data = await fetchJson(`/api/invoices/${id}`, InvoiceMutationSchema, {
-        method: "PUT",
-        body: { status: "SENT" },
-      });
-      if (data.success) {
-        // Only this invoice changed. Refresh the list too (status badge).
-        if (id) invalidateCache(`/api/invoices/${id}`);
-        refreshInvoice();
-        refreshAllInvoices();
-        setToast("Invoice sent successfully");
-      }
-    } catch {
-      // ignore — UI stays in current state
+    // 2026-05-27 verifiedSave migration. Sent-status drives downstream
+    // billing visibility; confirm the flip landed before showing green.
+    const result = await verifiedSave<Invoice>({
+      endpoint: `/api/invoices/${id}`,
+      method: "PUT",
+      body: { status: "SENT" },
+      readback: async () => {
+        const r = await fetch(`/api/invoices/${id}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: Invoice } | Invoice;
+        return (j as { data?: Invoice })?.data ?? (j as Invoice) ?? null;
+      },
+      expect: { status: "SENT" },
+    });
+    if (result.ok) {
+      // Only this invoice changed. Refresh the list too (status badge).
+      if (id) invalidateCache(`/api/invoices/${id}`);
+      refreshInvoice();
+      refreshAllInvoices();
+      setToast("Invoice sent successfully");
+    } else if (result.reason === "mismatch") {
+      setToast(formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      setToast(parsedErr || `Failed to send invoice (HTTP ${result.status})`);
+    } else {
+      setToast(`Save failed: ${result.details}`);
     }
     setUpdating(false);
   };
@@ -216,30 +253,51 @@ export default function InvoiceDetailPage() {
 
     setUpdating(true);
     const totalPaid = invoice.paidAmount + amountSen;
-    try {
-      const data = await fetchJson(`/api/invoices/${id}`, InvoiceMutationSchema, {
-        method: "PUT",
-        body: {
-          paidAmount: totalPaid,
-          paymentMethod,
-          paymentDate,
-          paymentReference,
-        },
-      });
-      if (data.success) {
-        // Recording payment can cascade to SO → CLOSED when all linked invoices
-        // are paid. Conservative: keep SO prefix. DO does not change on payment.
-        if (id) invalidateCache(`/api/invoices/${id}`);
-        invalidateCachePrefix("/api/sales-orders");
-        refreshInvoice();
-        refreshAllInvoices();
-        setShowPayment(false);
-        setPaymentAmount("");
-        setPaymentReference("");
-        setToast("Payment recorded successfully");
-      }
-    } catch {
-      // ignore
+    // 2026-05-27 verifiedSave migration. Payment record is money-touching
+    // — a false-green from a stale cache would leave bookkeeping out of
+    // sync. Read back and confirm paidAmount actually landed.
+    const result = await verifiedSave<Invoice>({
+      endpoint: `/api/invoices/${id}`,
+      method: "PUT",
+      body: {
+        paidAmount: totalPaid,
+        paymentMethod,
+        paymentDate,
+        paymentReference,
+      },
+      readback: async () => {
+        const r = await fetch(`/api/invoices/${id}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: Invoice } | Invoice;
+        return (j as { data?: Invoice })?.data ?? (j as Invoice) ?? null;
+      },
+      expect: { paidAmount: totalPaid },
+    });
+    if (result.ok) {
+      // Recording payment can cascade to SO → CLOSED when all linked invoices
+      // are paid. Conservative: keep SO prefix. DO does not change on payment.
+      if (id) invalidateCache(`/api/invoices/${id}`);
+      invalidateCachePrefix("/api/sales-orders");
+      refreshInvoice();
+      refreshAllInvoices();
+      setShowPayment(false);
+      setPaymentAmount("");
+      setPaymentReference("");
+      setToast("Payment recorded successfully");
+    } else if (result.reason === "mismatch") {
+      setToast(formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      setToast(parsedErr || `Failed to record payment (HTTP ${result.status})`);
+    } else {
+      setToast(`Save failed: ${result.details}`);
     }
     setUpdating(false);
   };

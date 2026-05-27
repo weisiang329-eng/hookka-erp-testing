@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { countPublicHolidaysInMonth } from "@/lib/labor-engine";
 import { useToast } from "@/components/ui/toast";
@@ -1507,20 +1508,48 @@ function EmployeeMasterTab({
   const handleUpdate = async () => {
     if (!editingId) return;
     setSaving(true);
-    try {
-      const payload =
-        editForm.position === "Operator Leader"
-          ? editForm
-          : { ...editForm, categories: [] };
-      await fetch(`/api/workers/${editingId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+    const payload =
+      editForm.position === "Operator Leader"
+        ? editForm
+        : { ...editForm, categories: [] };
+    // 2026-05-27 verifiedSave migration. Worker master-data drives
+    // payroll, statutory toggles, and OT — a stale-cache silent
+    // overwrite would mis-pay workers. Read back and confirm.
+    const result = await verifiedSave<Worker>({
+      endpoint: `/api/workers/${editingId}`,
+      method: "PUT",
+      body: payload,
+      readback: async () => {
+        const r = await fetch(`/api/workers/${editingId}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: Worker } | Worker;
+        return (j as { data?: Worker })?.data ?? (j as Worker) ?? null;
+      },
+      expect: {
+        empNo: editForm.empNo,
+        name: editForm.name,
+        position: editForm.position,
+        phone: editForm.phone,
+        status: editForm.status,
+      },
+    });
+    if (result.ok) {
       setEditingId(null);
       refreshWorkers();
-    } catch {
-      // handle error
+    } else if (result.reason === "mismatch") {
+      toast.error(formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      toast.error(parsedErr || `Failed to update worker (HTTP ${result.status})`);
+    } else {
+      toast.error(`Save failed: ${result.details}`);
     }
     setSaving(false);
   };

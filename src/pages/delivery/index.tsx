@@ -32,6 +32,7 @@ import PODDialog from "@/components/delivery/POD-dialog";
 import PrintDO from "@/components/delivery/print-do";
 import type { PrintDOData, PrintMode } from "@/components/delivery/print-do";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { mutationWithData, MutationResultSchema } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
 import { SalesOrderSchema } from "@/lib/schemas/sales-order";
@@ -1662,15 +1663,38 @@ export default function DeliveryPage() {
   const handleSubmitPOD = async (pod: ProofOfDelivery) => {
     if (!podDialog) return;
     try {
-      const data = await fetchJson(`/api/delivery-orders/${podDialog.id}`, DOMutationSchema, {
+      // 2026-05-27 verifiedSave migration. POD submit transitions DO to
+      // DELIVERED which cascades to SO + auto-invoice. Read back so a
+      // stale-snapshot 200 doesn't show green when the row didn't move.
+      const result = await verifiedSave<DeliveryOrder>({
+        endpoint: `/api/delivery-orders/${podDialog.id}`,
         method: "PUT",
         body: { status: "DELIVERED", proofOfDelivery: pod },
+        readback: async () => {
+          const r = await fetch(`/api/delivery-orders/${podDialog.id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+          return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+        },
+        expect: { status: "DELIVERED" },
       });
-      if (data.success) {
+      if (result.ok) {
         setPodDialog(null);
         fetchData();
+      } else if (result.reason === "mismatch") {
+        toast.error(formatMismatchError(result.diffs));
+      } else if (result.reason === "http") {
+        let parsedErr = result.body;
+        try {
+          const j = JSON.parse(result.body) as { error?: string };
+          if (j.error) parsedErr = j.error;
+        } catch { /* keep raw body */ }
+        toast.error(parsedErr || `Failed to mark delivered (HTTP ${result.status})`);
       } else {
-        toast.error(data.error || "Failed to mark delivered");
+        toast.error(`Save failed: ${result.details}`);
       }
     } catch (e) {
       if (e instanceof FetchJsonError) {
@@ -1806,43 +1830,73 @@ export default function DeliveryPage() {
       // step fills in vehicleNo/vehicleType/driverName/driverPhone from
       // the picked vehicle + person rows; providerId mirrors into the
       // legacy driverId column on delivery_orders for backwards-compat.
-      const data = await fetchJson(`/api/delivery-orders/${detailDO.id}`, DOMutationSchema, {
+      // 2026-05-27 verifiedSave migration. Driver / vehicle / address
+      // edits drive what the warehouse and the driver see — a stale-
+      // cache silent overwrite would send the wrong driver. Read back
+      // and confirm the header fields persisted (items rebuild server-
+      // side so we don't compare those).
+      const requestBody = {
+        providerId: editForm.driverId || null,
+        vehicleId: editForm.vehicleId || null,
+        driverId: editForm.driverPersonId || null,
+        deliveryAddress: editForm.deliveryAddress,
+        dropPoints: Number(editForm.dropPoints) || 1,
+        remarks: editForm.remarks,
+        contactPerson: editForm.contactPerson,
+        contactPhone: editForm.contactPhone,
+        deliveryDate: editForm.deliveryDate || "",
+        items: editItems.map((i) => ({
+          id: i.id,
+          productionOrderId: i.productionOrderId,
+          salesOrderNo: i.salesOrderNo,
+          poNo: i.poNo,
+          productCode: i.productCode,
+          productName: i.productName,
+          sizeLabel: i.sizeLabel,
+          fabricCode: i.fabricCode,
+          quantity: i.quantity,
+          itemM3: i.itemM3,
+          rackingNumber: i.rackingNumber,
+          packingStatus: "PACKED",
+        })),
+      };
+      const result = await verifiedSave<DeliveryOrder>({
+        endpoint: `/api/delivery-orders/${detailDO.id}`,
         method: "PUT",
-        body: {
-          providerId: editForm.driverId || null,
-          vehicleId: editForm.vehicleId || null,
-          driverId: editForm.driverPersonId || null,
+        body: requestBody,
+        readback: async () => {
+          const r = await fetch(`/api/delivery-orders/${detailDO.id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+          return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+        },
+        expect: {
           deliveryAddress: editForm.deliveryAddress,
-          dropPoints: Number(editForm.dropPoints) || 1,
-          remarks: editForm.remarks,
           contactPerson: editForm.contactPerson,
           contactPhone: editForm.contactPhone,
-          deliveryDate: editForm.deliveryDate || "",
-          items: editItems.map((i) => ({
-            id: i.id,
-            productionOrderId: i.productionOrderId,
-            salesOrderNo: i.salesOrderNo,
-            poNo: i.poNo,
-            productCode: i.productCode,
-            productName: i.productName,
-            sizeLabel: i.sizeLabel,
-            fabricCode: i.fabricCode,
-            quantity: i.quantity,
-            itemM3: i.itemM3,
-            rackingNumber: i.rackingNumber,
-            packingStatus: "PACKED",
-          })),
+          remarks: editForm.remarks,
         },
       });
-      if (data.success && data.data) {
+      if (result.ok) {
         setEditMode(false);
         setShowAddItemPanel(false);
-        // Update detailDO with new data
-        const updated = mapDOToRow(data.data as DeliveryOrder);
+        const updated = mapDOToRow(result.data);
         setDetailDO(updated);
         fetchData();
+      } else if (result.reason === "mismatch") {
+        toast.error(formatMismatchError(result.diffs));
+      } else if (result.reason === "http") {
+        let parsedErr = result.body;
+        try {
+          const j = JSON.parse(result.body) as { error?: string };
+          if (j.error) parsedErr = j.error;
+        } catch { /* keep raw body */ }
+        toast.error(parsedErr || `Failed to save changes (HTTP ${result.status})`);
       } else {
-        toast.error(data.error || "Failed to save changes");
+        toast.error(`Save failed: ${result.details}`);
       }
     } catch (e) {
       if (e instanceof FetchJsonError) {
@@ -2654,20 +2708,33 @@ export default function DeliveryPage() {
         label: "Mark Dispatched",
         icon: <Send className="h-3.5 w-3.5" />,
         action: async () => {
-          try {
-            const data = await fetchJson(`/api/delivery-orders/${row.id}`, DOMutationSchema, {
-              method: "PUT",
-              body: { status: "LOADED" },
-            });
-            if (!data.success) {
-              toast.error(data.error || "Failed to mark dispatched");
-            }
-          } catch (e) {
-            if (e instanceof FetchJsonError) {
-              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
-            } else {
-              toast.error("Failed to mark dispatched");
-            }
+          // 2026-05-27 verifiedSave migration — confirms the status flip
+          // landed before reporting success.
+          const result = await verifiedSave<DeliveryOrder>({
+            endpoint: `/api/delivery-orders/${row.id}`,
+            method: "PUT",
+            body: { status: "LOADED" },
+            readback: async () => {
+              const r = await fetch(`/api/delivery-orders/${row.id}?_v=${Date.now()}`, {
+                credentials: "include",
+                cache: "no-store",
+              });
+              if (!r.ok) return null;
+              const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+              return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+            },
+            expect: { status: "LOADED" },
+          });
+          if (!result.ok) {
+            if (result.reason === "mismatch") toast.error(formatMismatchError(result.diffs));
+            else if (result.reason === "http") {
+              let parsedErr = result.body;
+              try {
+                const j = JSON.parse(result.body) as { error?: string };
+                if (j.error) parsedErr = j.error;
+              } catch { /* keep raw body */ }
+              toast.error(parsedErr || `Failed to mark dispatched (HTTP ${result.status})`);
+            } else toast.error(`Save failed: ${result.details}`);
           }
           fetchData();
         },
@@ -2678,20 +2745,32 @@ export default function DeliveryPage() {
         icon: <Package className="h-3.5 w-3.5" />,
         action: async () => {
           if (!confirm("Reverse this DO back to Pending Dispatch?")) return;
-          try {
-            const data = await fetchJson(`/api/delivery-orders/${row.id}`, DOMutationSchema, {
-              method: "PUT",
-              body: { status: "DRAFT" },
-            });
-            if (!data.success) {
-              toast.error(data.error || "Failed to reverse");
-            }
-          } catch (e) {
-            if (e instanceof FetchJsonError) {
-              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
-            } else {
-              toast.error("Failed to reverse");
-            }
+          // 2026-05-27 verifiedSave migration.
+          const result = await verifiedSave<DeliveryOrder>({
+            endpoint: `/api/delivery-orders/${row.id}`,
+            method: "PUT",
+            body: { status: "DRAFT" },
+            readback: async () => {
+              const r = await fetch(`/api/delivery-orders/${row.id}?_v=${Date.now()}`, {
+                credentials: "include",
+                cache: "no-store",
+              });
+              if (!r.ok) return null;
+              const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+              return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+            },
+            expect: { status: "DRAFT" },
+          });
+          if (!result.ok) {
+            if (result.reason === "mismatch") toast.error(formatMismatchError(result.diffs));
+            else if (result.reason === "http") {
+              let parsedErr = result.body;
+              try {
+                const j = JSON.parse(result.body) as { error?: string };
+                if (j.error) parsedErr = j.error;
+              } catch { /* keep raw body */ }
+              toast.error(parsedErr || `Failed to reverse (HTTP ${result.status})`);
+            } else toast.error(`Save failed: ${result.details}`);
           }
           fetchData();
         },
@@ -2706,20 +2785,32 @@ export default function DeliveryPage() {
         label: "Mark Out for Delivery (In Transit)",
         icon: <Send className="h-3.5 w-3.5" />,
         action: async () => {
-          try {
-            const data = await fetchJson(`/api/delivery-orders/${row.id}`, DOMutationSchema, {
-              method: "PUT",
-              body: { status: "IN_TRANSIT" },
-            });
-            if (!data.success) {
-              toast.error(data.error || "Failed to mark in transit");
-            }
-          } catch (e) {
-            if (e instanceof FetchJsonError) {
-              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
-            } else {
-              toast.error("Failed to mark in transit");
-            }
+          // 2026-05-27 verifiedSave migration.
+          const result = await verifiedSave<DeliveryOrder>({
+            endpoint: `/api/delivery-orders/${row.id}`,
+            method: "PUT",
+            body: { status: "IN_TRANSIT" },
+            readback: async () => {
+              const r = await fetch(`/api/delivery-orders/${row.id}?_v=${Date.now()}`, {
+                credentials: "include",
+                cache: "no-store",
+              });
+              if (!r.ok) return null;
+              const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+              return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+            },
+            expect: { status: "IN_TRANSIT" },
+          });
+          if (!result.ok) {
+            if (result.reason === "mismatch") toast.error(formatMismatchError(result.diffs));
+            else if (result.reason === "http") {
+              let parsedErr = result.body;
+              try {
+                const j = JSON.parse(result.body) as { error?: string };
+                if (j.error) parsedErr = j.error;
+              } catch { /* keep raw body */ }
+              toast.error(parsedErr || `Failed to mark in transit (HTTP ${result.status})`);
+            } else toast.error(`Save failed: ${result.details}`);
           }
           fetchData();
         },
@@ -4130,23 +4221,36 @@ export default function DeliveryPage() {
                       <Button
                         variant="primary"
                         onClick={async () => {
-                          try {
-                            const data = await fetchJson(`/api/delivery-orders/${detailDO.id}`, DOMutationSchema, {
-                              method: "PUT",
-                              body: { status: "LOADED" },
-                            });
-                            if (data.success) {
-                              setDetailDO({ ...detailDO, status: "LOADED", dispatchDate: new Date().toISOString() });
-                              fetchData();
-                            } else {
-                              toast.error(data.error || "Failed to mark dispatched");
-                            }
-                          } catch (e) {
-                            if (e instanceof FetchJsonError) {
-                              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
-                            } else {
-                              toast.error("Failed to mark dispatched");
-                            }
+                          // 2026-05-27 verifiedSave migration.
+                          const result = await verifiedSave<DeliveryOrder>({
+                            endpoint: `/api/delivery-orders/${detailDO.id}`,
+                            method: "PUT",
+                            body: { status: "LOADED" },
+                            readback: async () => {
+                              const r = await fetch(`/api/delivery-orders/${detailDO.id}?_v=${Date.now()}`, {
+                                credentials: "include",
+                                cache: "no-store",
+                              });
+                              if (!r.ok) return null;
+                              const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+                              return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+                            },
+                            expect: { status: "LOADED" },
+                          });
+                          if (result.ok) {
+                            setDetailDO({ ...detailDO, status: "LOADED", dispatchDate: new Date().toISOString() });
+                            fetchData();
+                          } else if (result.reason === "mismatch") {
+                            toast.error(formatMismatchError(result.diffs));
+                          } else if (result.reason === "http") {
+                            let parsedErr = result.body;
+                            try {
+                              const j = JSON.parse(result.body) as { error?: string };
+                              if (j.error) parsedErr = j.error;
+                            } catch { /* keep raw body */ }
+                            toast.error(parsedErr || `Failed to mark dispatched (HTTP ${result.status})`);
+                          } else {
+                            toast.error(`Save failed: ${result.details}`);
                           }
                         }}
                       >

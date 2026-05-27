@@ -8,6 +8,7 @@ import { Plus, Trash2, Check, Calendar, History, Pencil } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
 import {
   EffectiveDateConfirmModal,
@@ -1173,13 +1174,32 @@ function MaintenanceView() {
         onConfirm={async () => {
           if (!pendingFabricTierChange) return;
           const { id, toTier } = pendingFabricTierChange;
-          const res = await fetch(`/api/fabric-tracking/${id}`, {
+          // 2026-05-27 verifiedSave migration. Tier flip changes per-meter
+          // pricing for every SO line that uses this fabric — confirm it
+          // landed before reporting success.
+          const result = await verifiedSave<{ id: string; priceTier?: string }>({
+            endpoint: `/api/fabric-tracking/${id}`,
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ priceTier: toTier }),
+            body: { priceTier: toTier },
+            readback: async () => {
+              const r = await fetch(`/api/fabric-tracking/${id}?_v=${Date.now()}`, {
+                credentials: "include",
+                cache: "no-store",
+              });
+              if (!r.ok) return null;
+              const j = (await r.json()) as { success?: boolean; data?: { id: string; priceTier?: string } } | { id: string; priceTier?: string };
+              return (j as { data?: { id: string; priceTier?: string } })?.data ?? (j as { id: string; priceTier?: string }) ?? null;
+            },
+            expect: { priceTier: toTier },
           });
-          if (!res.ok) {
-            throw new Error(`Failed to update fabric tier (HTTP ${res.status})`);
+          if (!result.ok) {
+            if (result.reason === "mismatch") {
+              throw new Error(formatMismatchError(result.diffs));
+            } else if (result.reason === "http") {
+              throw new Error(`Failed to update fabric tier (HTTP ${result.status})`);
+            } else {
+              throw new Error(`Save failed: ${result.details}`);
+            }
           }
           invalidateCachePrefix("/api/fabric-tracking");
           invalidateCachePrefix("/api/raw-materials");
@@ -1881,15 +1901,38 @@ export default function ProductsPage() {
   ) => {
     setVariantSaving(true);
     try {
-      const res = await fetch(`/api/products/${productId}`, {
+      // 2026-05-27 verifiedSave migration. Variant defaults pre-fill SO
+      // lines, so a stale-cache silent overwrite would let the operator
+      // think the defaults persisted when they didn't. Readback compares
+      // the product code (identity guard) — the nested defaultVariants
+      // shape is too varied for shallow equality.
+      const result = await verifiedSave<Product>({
+        endpoint: `/api/products/${productId}`,
         method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultVariants: defaults }),
+        body: { defaultVariants: defaults },
+        readback: async () => {
+          const r = await fetch(`/api/products/${productId}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: Product } | Product;
+          return (j as { data?: Product })?.data ?? (j as Product) ?? null;
+        },
+        expect: { id: productId },
       });
-      const json = (await res.json()) as { success?: boolean; error?: string };
-      if (!res.ok || !json.success) {
-        toast.error(`Save failed: ${json.error || res.statusText}`);
+      if (!result.ok) {
+        if (result.reason === "mismatch") toast.error(formatMismatchError(result.diffs));
+        else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try {
+            const j = JSON.parse(result.body) as { error?: string };
+            if (j.error) parsedErr = j.error;
+          } catch { /* keep raw body */ }
+          toast.error(parsedErr || `Save failed (HTTP ${result.status})`);
+        } else {
+          toast.error(`Save failed: ${result.details}`);
+        }
         return false;
       }
       // Patch local state — product row badge updates without a full refetch.
@@ -1900,9 +1943,6 @@ export default function ProductsPage() {
       );
       invalidateCachePrefix("/api/products");
       return true;
-    } catch (err) {
-      toast.error(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
-      return false;
     } finally {
       setVariantSaving(false);
     }

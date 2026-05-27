@@ -39,6 +39,7 @@ import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { getMilestoneHealth, MILESTONE_CHIP } from "./health";
@@ -497,25 +498,46 @@ export default function RDProjectDetailPage() {
     const nextStage = STAGES[currentIndex + 1];
     setAdvancing(true);
 
-    try {
-      const updatedMilestones = project.milestones.map((m) => {
-        if (m.stage === project.currentStage) {
-          return { ...m, actualDate: new Date().toISOString().slice(0, 10), approvedBy: "Current User" };
-        }
-        return m;
-      });
+    const updatedMilestones = project.milestones.map((m) => {
+      if (m.stage === project.currentStage) {
+        return { ...m, actualDate: new Date().toISOString().slice(0, 10), approvedBy: "Current User" };
+      }
+      return m;
+    });
 
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { currentStage: nextStage, milestones: updatedMilestones },
-      });
-      if (data.data) setProject(data.data as RDProject);
+    // 2026-05-27 verifiedSave migration. Stage advance is a gated workflow
+    // step — confirm the stage actually moved before reporting success.
+    const result = await verifiedSave<RDProject>({
+      endpoint: `/api/rd-projects/${id}`,
+      method: "PUT",
+      body: { currentStage: nextStage, milestones: updatedMilestones },
+      readback: async () => {
+        const r = await fetch(`/api/rd-projects/${id}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: RDProject } | RDProject;
+        return (j as { data?: RDProject })?.data ?? (j as RDProject) ?? null;
+      },
+      expect: { currentStage: nextStage },
+    });
+    if (result.ok) {
+      setProject(result.data);
       toast.success(`Advanced to ${getStageLabels(project.projectType)[nextStage]}`);
-    } catch {
-      toast.error("Failed to advance stage");
-    } finally {
-      setAdvancing(false);
+    } else if (result.reason === "mismatch") {
+      toast.error(formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      toast.error(parsedErr || `Failed to advance stage (HTTP ${result.status})`);
+    } else {
+      toast.error(`Failed to advance stage: ${result.details}`);
     }
+    setAdvancing(false);
   };
 
   // ─── Edit Project ───────────────────────────────────────────────────────
@@ -627,13 +649,44 @@ export default function RDProjectDetailPage() {
         payload.sourcePriceSen = null;
         payload.sourceNotes = null;
       }
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+      // 2026-05-27 verifiedSave migration. RD project edit is the master
+      // record — confirm key header fields landed.
+      const result = await verifiedSave<RDProject>({
+        endpoint: `/api/rd-projects/${id}`,
         method: "PUT",
         body: payload,
+        readback: async () => {
+          const r = await fetch(`/api/rd-projects/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: RDProject } | RDProject;
+          return (j as { data?: RDProject })?.data ?? (j as RDProject) ?? null;
+        },
+        expect: {
+          name: payload.name,
+          projectType: payload.projectType,
+          status: payload.status,
+          targetLaunchDate: payload.targetLaunchDate,
+        },
       });
-      if (data.data) setProject(data.data as RDProject);
-      setEditOpen(false);
-      toast.success("Project updated successfully");
+      if (result.ok) {
+        setProject(result.data);
+        setEditOpen(false);
+        toast.success("Project updated successfully");
+      } else if (result.reason === "mismatch") {
+        toast.error(formatMismatchError(result.diffs));
+      } else if (result.reason === "http") {
+        let parsedErr = result.body;
+        try {
+          const j = JSON.parse(result.body) as { error?: string };
+          if (j.error) parsedErr = j.error;
+        } catch { /* keep raw body */ }
+        toast.error(parsedErr || `Failed to update project (HTTP ${result.status})`);
+      } else {
+        toast.error(`Failed to update project: ${result.details}`);
+      }
     } catch {
       toast.error("Failed to update project");
     } finally {

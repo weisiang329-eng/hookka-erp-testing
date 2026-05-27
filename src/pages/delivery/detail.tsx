@@ -29,11 +29,8 @@ import PODDialog from "@/components/delivery/POD-dialog";
 import type { ProofOfDelivery } from "@/types";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
-import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
-import { mutationWithData } from "@/lib/schemas/common";
-import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
-
-const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
+import { FetchJsonError } from "@/lib/fetch-json";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -163,19 +160,49 @@ export default function DeliveryDetailPage() {
 
     setUpdating(true);
     try {
-      const data = await fetchJson(`/api/delivery-orders/${id}`, DOMutationSchema, {
+      // 2026-05-27 verifiedSave migration. Status advance is the highest-
+      // stakes DO write (gates billing + SO cascade). Read back the DO
+      // with a cache-bust and confirm the status flipped — if a stale
+      // snapshot served the pre-write payload, the operator sees
+      // "save did not take effect" instead of a false-green toast.
+      const result = await verifiedSave<DeliveryOrder>({
+        endpoint: `/api/delivery-orders/${id}`,
         method: "PUT",
         body: { status: target },
+        readback: async () => {
+          const r = await fetch(`/api/delivery-orders/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+          return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+        },
+        expect: { status: target },
       });
-      if (data.success && data.data) {
-        setOrder(data.data as DeliveryOrder);
-        // Only this DO changed. SO/PO prefix kept because a status
-        // advance can cascade (e.g. DELIVERED → linked SO → COMPLETED).
-        if (id) invalidateCache(`/api/delivery-orders/${id}`);
-        invalidateCachePrefix("/api/sales-orders");
-        invalidateCachePrefix("/api/production-orders");
+      if (!result.ok) {
+        if (result.reason === "mismatch") {
+          toast.error(formatMismatchError(result.diffs));
+        } else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try {
+            const j = JSON.parse(result.body) as { error?: string };
+            if (j.error) parsedErr = j.error;
+          } catch {
+            /* keep raw body */
+          }
+          toast.error(parsedErr || `Failed to advance status (HTTP ${result.status})`);
+        } else {
+          toast.error(`Save failed: ${result.details}`);
+        }
+        return;
       }
-      else toast.error(data.error || "Failed to advance status");
+      setOrder(result.data);
+      // Only this DO changed. SO/PO prefix kept because a status
+      // advance can cascade (e.g. DELIVERED → linked SO → COMPLETED).
+      if (id) invalidateCache(`/api/delivery-orders/${id}`);
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
     } catch (e) {
       if (e instanceof FetchJsonError) {
         const body = e.body as { error?: string } | undefined;
@@ -195,20 +222,48 @@ export default function DeliveryDetailPage() {
       // If order is already DELIVERED, just attach proof; otherwise transition.
       const body: Record<string, unknown> = { proofOfDelivery: pod };
       if (order.status !== "DELIVERED") body.status = "DELIVERED";
-      const data = await fetchJson(`/api/delivery-orders/${id}`, DOMutationSchema, {
+      const expectStatus = order.status !== "DELIVERED" ? "DELIVERED" : order.status;
+      // 2026-05-27 verifiedSave migration. POD attach gates final
+      // delivery + downstream invoicing — must confirm both the status
+      // and the proof actually landed (not just a green 200).
+      const result = await verifiedSave<DeliveryOrder>({
+        endpoint: `/api/delivery-orders/${id}`,
         method: "PUT",
         body,
+        readback: async () => {
+          const r = await fetch(`/api/delivery-orders/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+          return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+        },
+        expect: { status: expectStatus },
       });
-      if (data.success && data.data) {
-        setOrder(data.data as DeliveryOrder);
-        // POD save may also transition to DELIVERED which cascades to SO.
-        if (id) invalidateCache(`/api/delivery-orders/${id}`);
-        invalidateCachePrefix("/api/sales-orders");
-        invalidateCachePrefix("/api/production-orders");
-        setPodOpen(false);
-      } else {
-        toast.error(data.error || "Failed to save proof of delivery");
+      if (!result.ok) {
+        if (result.reason === "mismatch") {
+          toast.error(formatMismatchError(result.diffs));
+        } else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try {
+            const j = JSON.parse(result.body) as { error?: string };
+            if (j.error) parsedErr = j.error;
+          } catch {
+            /* keep raw body */
+          }
+          toast.error(parsedErr || `Failed to save proof of delivery (HTTP ${result.status})`);
+        } else {
+          toast.error(`Save failed: ${result.details}`);
+        }
+        return;
       }
+      setOrder(result.data);
+      // POD save may also transition to DELIVERED which cascades to SO.
+      if (id) invalidateCache(`/api/delivery-orders/${id}`);
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
+      setPodOpen(false);
     } catch (e) {
       if (e instanceof FetchJsonError) {
         const errBody = e.body as { error?: string } | undefined;
@@ -225,16 +280,44 @@ export default function DeliveryDetailPage() {
     if (!order) return;
     setUpdating(true);
     try {
-      const data = await fetchJson(`/api/delivery-orders/${id}`, DOMutationSchema, {
+      // 2026-05-27 verifiedSave migration. Lorry assignment is what the
+      // driver sees on the route sheet — a stale-cache false-success here
+      // sends the wrong driver. Read back + compare.
+      const result = await verifiedSave<DeliveryOrder>({
+        endpoint: `/api/delivery-orders/${id}`,
         method: "PUT",
         body: { lorryId },
+        readback: async () => {
+          const r = await fetch(`/api/delivery-orders/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+          return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+        },
+        expect: { lorryId },
       });
-      if (!data.success) throw new Error(data.error || "Failed to assign lorry");
-      if (data.data) {
-        setOrder(data.data as DeliveryOrder);
-        // Lorry assignment only affects this DO; no cascade. Per-id only.
-        if (id) invalidateCache(`/api/delivery-orders/${id}`);
+      if (!result.ok) {
+        if (result.reason === "mismatch") {
+          toast.error(formatMismatchError(result.diffs));
+        } else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try {
+            const j = JSON.parse(result.body) as { error?: string };
+            if (j.error) parsedErr = j.error;
+          } catch {
+            /* keep raw body */
+          }
+          toast.error(parsedErr || `Failed to assign lorry (HTTP ${result.status})`);
+        } else {
+          toast.error(`Failed to assign lorry: ${result.details}`);
+        }
+        return;
       }
+      setOrder(result.data);
+      // Lorry assignment only affects this DO; no cascade. Per-id only.
+      if (id) invalidateCache(`/api/delivery-orders/${id}`);
     } catch (err) {
       const detail = err instanceof Error ? err.message : "try again";
       toast.error(`Failed to assign lorry: ${detail}`);

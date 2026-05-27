@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -215,24 +216,48 @@ export default function MaintenancePage() {
     const form = e.currentTarget;
     const fd = new FormData(form);
     const body = {
-      name: fd.get("name"),
-      department: fd.get("department"),
-      type: fd.get("type"),
-      status: fd.get("status"),
+      name: String(fd.get("name") || ""),
+      department: String(fd.get("department") || ""),
+      type: String(fd.get("type") || ""),
+      status: String(fd.get("status") || ""),
       maintenanceCycleDays: Number(fd.get("maintenanceCycleDays")),
-      notes: fd.get("notes"),
+      notes: String(fd.get("notes") || ""),
     };
-    const res = await fetch(`/api/equipment/${showEditForm}`, {
+    // 2026-05-27 verifiedSave migration.
+    const result = await verifiedSave<Equipment>({
+      endpoint: `/api/equipment/${showEditForm}`,
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body,
+      readback: async () => {
+        const r = await fetch(`/api/equipment/${showEditForm}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: Equipment } | Equipment;
+        return (j as { data?: Equipment })?.data ?? (j as Equipment) ?? null;
+      },
+      expect: {
+        name: body.name,
+        status: body.status,
+      },
     });
-    const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
-    if (result.success) {
+    if (result.ok) {
       invalidateCachePrefix("/api/equipment");
       invalidateCachePrefix("/api/maintenance");
       refreshEq();
       setShowEditForm(null);
+    } else if (result.reason === "mismatch") {
+      alert(formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      alert(parsedErr || `Save failed (HTTP ${result.status})`);
+    } else {
+      alert(`Save failed: ${result.details}`);
     }
   }
 

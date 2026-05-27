@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import {
   Card,
   CardContent,
@@ -175,17 +176,39 @@ export default function UsersPage() {
     const next = !u.isActive;
     if (!next && !confirm(`Disable ${u.email}? Their sessions will be killed.`))
       return;
-    const res = await fetch(`/api/users/${u.id}`, {
+    // 2026-05-27 verifiedSave migration. Auth toggle drives login access —
+    // a stale-cache 200 that didn't actually disable the user is a real
+    // security smell. Readback fetches the users list and finds this row.
+    const result = await verifiedSave<UserRow>({
+      endpoint: `/api/users/${u.id}`,
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ isActive: next }),
+      body: { isActive: next },
+      readback: async () => {
+        const r = await fetch(`/api/users?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: UserRow[] };
+        const list = j?.data ?? [];
+        return list.find((row) => row.id === u.id) ?? null;
+      },
+      expect: { isActive: next },
     });
-    const json = (await res.json()) as ApiEnvelope;
-    if (json.success) {
+    if (result.ok) {
       showFlash("ok", next ? "User enabled" : "User disabled");
       fetchUsers();
+    } else if (result.reason === "mismatch") {
+      showFlash("err", formatMismatchError(result.diffs));
+    } else if (result.reason === "http") {
+      let parsedErr = result.body;
+      try {
+        const j = JSON.parse(result.body) as { error?: string };
+        if (j.error) parsedErr = j.error;
+      } catch { /* keep raw body */ }
+      showFlash("err", parsedErr || `Failed to update user (HTTP ${result.status})`);
     } else {
-      showFlash("err", json.error ?? "Failed to update user");
+      showFlash("err", `Save failed: ${result.details}`);
     }
   };
 

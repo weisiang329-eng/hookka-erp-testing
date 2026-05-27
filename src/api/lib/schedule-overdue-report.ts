@@ -166,24 +166,23 @@ export async function collectScheduleData(
 }
 
 // ─── OVERDUE ───────────────────────────────────────────────────────────────
-// Now sourced from production_orders directly (PO-level), not job_cards.
-// Each PO appears once. "Should have been delivered but isn't" =
-//   po.targetEndDate < today AND po.status NOT IN ('COMPLETED','CANCELLED').
+// SO-level. ONE row per SO that was promised but not yet delivered.
+// "Promised but not delivered" =
+//   so.customerDeliveryDate < today
+//   AND so.status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED')
+// Flat list (no grouping), sorted by days overdue desc (worst first).
 
 export interface OverdueRow {
-  productionOrderId: string;
-  poNo: string;
+  salesOrderId: string;
+  companySOId: string;
   customerName: string;
   customerState: string;
-  salesOrderNo: string;
-  productCode: string;
-  productName: string;
-  sizeLabel: string | null;
-  fabricCode: string | null;
-  quantity: number;
-  targetEndDate: string | null;
+  customerDeliveryDate: string;
+  hookkaExpectedDD: string | null;
   status: string;
-  currentDepartment: string;
+  itemCount: number;
+  totalQty: number;
+  totalSen: number;
   daysOverdue: number;
 }
 
@@ -191,110 +190,81 @@ export interface OverdueReport {
   date: string;
   generatedAtIso: string;
   totals: {
-    orderLines: number;
-    departments: number;
+    salesOrders: number;
+    units: number;
+    totalSen: number;
     worstDays: number;
-    quantity: number;
   };
-  byDepartment: Array<{
-    code: string;
-    name: string;
-    count: number;
-    quantity: number;
-    worstDays: number;
-    rows: OverdueRow[];
-  }>;
+  rows: OverdueRow[];
 }
 
 type OverdueRawRow = {
   id: string;
-  poNo: string | null;
+  companySOId: string | null;
   customerName: string | null;
   customerState: string | null;
-  salesOrderNo: string | null;
-  productCode: string | null;
-  productName: string | null;
-  sizeLabel: string | null;
-  fabricCode: string | null;
-  quantity: number | null;
-  targetEndDate: string | null;
+  customerDeliveryDate: string | null;
+  hookkaExpectedDD: string | null;
   status: string;
-  currentDepartment: string | null;
+  totalSen: number | null;
+  itemCount: number | null;
+  totalQty: number | null;
 };
 
 export async function collectOverdueData(
   db: DbLike,
   dateYmd: string,
 ): Promise<OverdueReport> {
+  // ONE row per SO. Items aggregated via correlated subqueries — fine at
+  // factory scale (a few hundred open SOs at most). status filter keeps
+  // out anything already in the customer's hands (DELIVERED/INVOICED/
+  // CLOSED) or torn up (CANCELLED).
   const sql = `
-    SELECT id, poNo, customerName, customerState, salesOrderNo,
-           productCode, productName, sizeLabel, fabricCode, quantity,
-           targetEndDate, status, currentDepartment
-      FROM production_orders
-     WHERE targetEndDate < ?
-       AND targetEndDate IS NOT NULL
-       AND status NOT IN ('COMPLETED','CANCELLED')
-     ORDER BY targetEndDate ASC, poNo`;
+    SELECT so.id, so.companySOId, so.customerName, so.customerState,
+           so.customerDeliveryDate, so.hookkaExpectedDD, so.status, so.totalSen,
+           (SELECT COUNT(*) FROM sales_order_items WHERE salesOrderId = so.id) AS itemCount,
+           (SELECT COALESCE(SUM(quantity), 0) FROM sales_order_items WHERE salesOrderId = so.id) AS totalQty
+      FROM sales_orders so
+     WHERE so.customerDeliveryDate < ?
+       AND so.customerDeliveryDate IS NOT NULL
+       AND so.customerDeliveryDate <> ''
+       AND so.status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED')
+     ORDER BY so.customerDeliveryDate ASC`;
   const res = await db.prepare(sql).bind(dateYmd).all<OverdueRawRow>();
   const today = new Date(dateYmd + "T00:00:00Z").getTime();
   const rows: OverdueRow[] = (res.results ?? []).map((r) => {
-    const due = r.targetEndDate
-      ? new Date(r.targetEndDate + "T00:00:00Z").getTime()
+    const dd = r.customerDeliveryDate ?? "";
+    const due = dd
+      ? new Date(dd.slice(0, 10) + "T00:00:00Z").getTime()
       : today;
     const days = Math.max(0, Math.floor((today - due) / 86400000));
     return {
-      productionOrderId: r.id,
-      poNo: r.poNo ?? "",
+      salesOrderId: r.id,
+      companySOId: r.companySOId ?? "",
       customerName: r.customerName ?? "",
       customerState: r.customerState ?? "",
-      salesOrderNo: r.salesOrderNo ?? "",
-      productCode: r.productCode ?? "",
-      productName: r.productName ?? "",
-      sizeLabel: r.sizeLabel,
-      fabricCode: r.fabricCode,
-      quantity: r.quantity ?? 0,
-      targetEndDate: r.targetEndDate,
+      customerDeliveryDate: dd.slice(0, 10),
+      hookkaExpectedDD: (r.hookkaExpectedDD ?? "").slice(0, 10) || null,
       status: r.status,
-      currentDepartment: r.currentDepartment ?? "—",
+      itemCount: Number(r.itemCount) || 0,
+      totalQty: Number(r.totalQty) || 0,
+      totalSen: Number(r.totalSen) || 0,
       daysOverdue: days,
     };
   });
-
-  const byDept = new Map<string, OverdueReport["byDepartment"][number]>();
-  for (const r of rows) {
-    const key = r.currentDepartment;
-    let cell = byDept.get(key);
-    if (!cell) {
-      cell = {
-        code: key,
-        name: key === "—" ? "Not started" : key,
-        count: 0,
-        quantity: 0,
-        worstDays: 0,
-        rows: [],
-      };
-      byDept.set(key, cell);
-    }
-    cell.count += 1;
-    cell.quantity += r.quantity;
-    if (r.daysOverdue > cell.worstDays) cell.worstDays = r.daysOverdue;
-    cell.rows.push(r);
-  }
-  const byDepartment = Array.from(byDept.values()).sort((a, b) => {
-    if (b.worstDays !== a.worstDays) return b.worstDays - a.worstDays;
-    return a.code.localeCompare(b.code);
-  });
+  // Worst delay first — operator sees the biggest fires on top.
+  rows.sort((a, b) => b.daysOverdue - a.daysOverdue);
 
   return {
     date: dateYmd,
     generatedAtIso: new Date().toISOString(),
     totals: {
-      orderLines: rows.length,
-      departments: byDepartment.length,
-      worstDays: rows.reduce((m, r) => Math.max(m, r.daysOverdue), 0),
-      quantity: rows.reduce((s, r) => s + r.quantity, 0),
+      salesOrders: rows.length,
+      units: rows.reduce((s, r) => s + r.totalQty, 0),
+      totalSen: rows.reduce((s, r) => s + r.totalSen, 0),
+      worstDays: rows.length > 0 ? rows[0].daysOverdue : 0,
     },
-    byDepartment,
+    rows,
   };
 }
 
@@ -361,7 +331,11 @@ const PAGE_CSS = `
     font-size: 9pt;
     line-height: 1.4;
   }
-  .page { max-width: 273mm; margin: 0 auto; }
+  /* Landscape A4 content area = 297mm − 2×12mm margin = 273mm. On screen
+     we mirror the print width so the operator can spot column overflow
+     before hitting Print. */
+  .page { max-width: 273mm; margin: 0 auto; padding: 14px 18px; }
+  @media screen and (min-width: 1100px) { body { background: #F4EFE3; } .page { background: #fff; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin: 14px auto 32px; } }
   h1 { font-size: 20pt; margin: 0 0 2px; font-weight: 700; letter-spacing: -0.4px; }
   h2 { font-size: 11pt; margin: 14px 0 5px; font-weight: 700; color: #6B5C32; letter-spacing: 1px; text-transform: uppercase; page-break-after: avoid; }
   .meta { font-size: 9pt; color: #6B7280; margin-bottom: 10px; }
@@ -470,92 +444,76 @@ export function renderScheduleHtml(data: ScheduleReport): string {
 </html>`;
 }
 
+function formatRM(sen: number): string {
+  if (!sen || sen === 0) return "—";
+  const rm = sen / 100;
+  return "RM " + rm.toLocaleString("en-MY", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 export function renderOverdueHtml(data: OverdueReport): string {
-  const { date, totals, byDepartment } = data;
+  const { date, totals, rows } = data;
   const longDate = formatDateLong(date);
 
+  // ONE row per SO. Department grouping dropped per Wei Siang's request —
+  // operator only cares about which Sales Orders are past their customer
+  // delivery date, not which dept currently holds them.
   const colWidths = `
     <colgroup>
-      <col style="width:8%"/>   <!-- PO No -->
-      <col style="width:8%"/>   <!-- SO -->
-      <col style="width:14%"/>  <!-- Customer -->
-      <col style="width:22%"/>  <!-- Product -->
-      <col style="width:6%"/>   <!-- Size -->
-      <col style="width:8%"/>   <!-- Fabric -->
-      <col style="width:5%"/>   <!-- Qty -->
-      <col style="width:10%"/>  <!-- Promise -->
-      <col style="width:9%"/>   <!-- Overdue days -->
-      <col style="width:10%"/>  <!-- Status -->
+      <col style="width:10%"/>  <!-- SO No -->
+      <col style="width:22%"/>  <!-- Customer (+ state) -->
+      <col style="width:12%"/>  <!-- Promise Date -->
+      <col style="width:8%"/>   <!-- Overdue days -->
+      <col style="width:7%"/>   <!-- Item count -->
+      <col style="width:7%"/>   <!-- Qty -->
+      <col style="width:18%"/>  <!-- Order value -->
+      <col style="width:16%"/>  <!-- Status -->
     </colgroup>`;
 
-  const deptSections = byDepartment
-    .map((d) => {
-      const rows = d.rows
-        .map((r) => {
-          const daysColor =
-            r.daysOverdue >= 14
-              ? "#B91C1C"
-              : r.daysOverdue >= 7
-                ? "#DC2626"
-                : r.daysOverdue >= 3
-                  ? "#A16207"
-                  : "#1F1D1B";
-          const status = `<span style="color:${statusColor(r.status)};font-weight:600;">${escapeHtml(r.status)}</span>`;
-          return `<tr>
-            <td>${escapeHtml(r.poNo)}</td>
-            <td>${escapeHtml(r.salesOrderNo)}</td>
-            <td>${escapeHtml(r.customerName)}${r.customerState ? `<br><span class="secondary">${escapeHtml(r.customerState)}</span>` : ""}</td>
-            <td>${escapeHtml(r.productCode)}<br><span class="secondary">${escapeHtml(r.productName)}</span></td>
-            <td>${escapeHtml(r.sizeLabel ?? "")}</td>
-            <td>${escapeHtml(r.fabricCode ?? "")}</td>
-            <td class="num" style="text-align:right;">${r.quantity}</td>
-            <td class="num">${escapeHtml(r.targetEndDate ?? "")}</td>
-            <td class="num" style="text-align:right;font-weight:700;color:${daysColor};">${r.daysOverdue}d</td>
-            <td>${status}</td>
-          </tr>`;
-        })
-        .join("");
-      const worstClr =
-        d.worstDays >= 14
-          ? "#FCA5A5"
-          : d.worstDays >= 7
-            ? "#FDBA74"
-            : d.worstDays >= 3
-              ? "#FCD34D"
-              : "#C5BEAE";
-      return `<div class="dept-card">
-        <div class="dept-head">
-          <span>${escapeHtml(d.name)}</span>
-          <span class="right">${d.count} orders · ${d.quantity} units · worst <span style="color:${worstClr};font-weight:700;">${d.worstDays}d</span></span>
-        </div>
-        <table class="data">
-          ${colWidths}
-          <thead><tr>
-            <th>PO No.</th>
-            <th>SO No.</th>
-            <th>Customer</th>
-            <th>Product</th>
-            <th>Size</th>
-            <th>Fabric</th>
-            <th style="text-align:right;">Qty</th>
-            <th>Promise</th>
-            <th style="text-align:right;">Overdue</th>
-            <th>Status</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>`;
+  const dataRows = rows
+    .map((r) => {
+      const daysColor =
+        r.daysOverdue >= 30
+          ? "#B91C1C"
+          : r.daysOverdue >= 14
+            ? "#DC2626"
+            : r.daysOverdue >= 7
+              ? "#EA580C"
+              : r.daysOverdue >= 3
+                ? "#A16207"
+                : "#1F1D1B";
+      const rowBg =
+        r.daysOverdue >= 30
+          ? "#FEF2F2"
+          : r.daysOverdue >= 14
+            ? "#FFF7ED"
+            : "transparent";
+      const status = `<span style="color:${statusColor(r.status)};font-weight:600;">${escapeHtml(r.status)}</span>`;
+      return `<tr style="background:${rowBg};">
+        <td><strong>${escapeHtml(r.companySOId || r.salesOrderId)}</strong></td>
+        <td>${escapeHtml(r.customerName)}${r.customerState ? ` <span class="secondary">· ${escapeHtml(r.customerState)}</span>` : ""}</td>
+        <td class="num">${escapeHtml(r.customerDeliveryDate)}</td>
+        <td class="num" style="text-align:right;font-weight:700;color:${daysColor};">${r.daysOverdue}d</td>
+        <td class="num" style="text-align:right;">${r.itemCount}</td>
+        <td class="num" style="text-align:right;">${r.totalQty}</td>
+        <td class="num" style="text-align:right;">${escapeHtml(formatRM(r.totalSen))}</td>
+        <td>${status}</td>
+      </tr>`;
     })
-    .join("\n");
+    .join("");
 
   const headerColor =
-    totals.worstDays >= 14
+    totals.worstDays >= 30
       ? "#B91C1C"
-      : totals.worstDays >= 7
+      : totals.worstDays >= 14
         ? "#DC2626"
-        : totals.worstDays >= 3
-          ? "#A16207"
-          : "#1F1D1B";
+        : totals.worstDays >= 7
+          ? "#EA580C"
+          : totals.worstDays >= 3
+            ? "#A16207"
+            : "#1F1D1B";
 
   return `<!doctype html>
 <html lang="en">
@@ -568,15 +526,30 @@ export function renderOverdueHtml(data: OverdueReport): string {
 <div class="print-bar no-print"><button onclick="window.print()">Print / Save as PDF</button></div>
 <div class="page">
   <h1>Overdue Report</h1>
-  <div class="meta">${escapeHtml(longDate)} &nbsp;·&nbsp; Hookka Manufacturing ERP &nbsp;·&nbsp; promised but not yet finished</div>
+  <div class="meta">${escapeHtml(longDate)} &nbsp;·&nbsp; Hookka Manufacturing ERP &nbsp;·&nbsp; sales orders past customer delivery date</div>
   <div class="summary">
-    <div class="cell"><div class="lbl">Overdue Orders</div><div class="val num">${totals.orderLines}</div><div class="sub">product lines past promise date</div></div>
-    <div class="cell"><div class="lbl">Units Affected</div><div class="val num">${totals.quantity}</div><div class="sub">total pieces</div></div>
-    <div class="cell"><div class="lbl">Worst Delay</div><div class="val num" style="color:${headerColor};">${totals.worstDays}d</div><div class="sub">single oldest item</div></div>
-    <div class="cell"><div class="lbl">Departments Stuck</div><div class="val num">${totals.departments}</div><div class="sub">where the items currently sit</div></div>
+    <div class="cell"><div class="lbl">Overdue SOs</div><div class="val num">${totals.salesOrders}</div><div class="sub">past customer delivery date</div></div>
+    <div class="cell"><div class="lbl">Units</div><div class="val num">${totals.units}</div><div class="sub">total pieces affected</div></div>
+    <div class="cell"><div class="lbl">Total Value</div><div class="val num">${escapeHtml(formatRM(totals.totalSen))}</div><div class="sub">money tied up in delays</div></div>
+    <div class="cell"><div class="lbl">Worst Delay</div><div class="val num" style="color:${headerColor};">${totals.worstDays}d</div><div class="sub">single oldest SO</div></div>
   </div>
-  ${deptSections || `<p style="text-align:center;padding:30px;color:#15803D;font-weight:600;">No overdue orders — every promise date is on schedule.</p>`}
-  <div class="footer">Generated ${escapeHtml(new Date(data.generatedAtIso).toLocaleString("en-GB", { timeZone: "Asia/Singapore" }))} SGT &nbsp;·&nbsp; one row = one ordered product line (PO), each shown once.</div>
+  ${rows.length === 0
+      ? `<p style="text-align:center;padding:30px;color:#15803D;font-weight:600;">No overdue sales orders — every customer delivery date is on schedule.</p>`
+      : `<table class="data">
+          ${colWidths}
+          <thead><tr>
+            <th>SO No.</th>
+            <th>Customer</th>
+            <th>Promise Date</th>
+            <th style="text-align:right;">Overdue</th>
+            <th style="text-align:right;">Items</th>
+            <th style="text-align:right;">Units</th>
+            <th style="text-align:right;">Value</th>
+            <th>Status</th>
+          </tr></thead>
+          <tbody>${dataRows}</tbody>
+        </table>`}
+  <div class="footer">Generated ${escapeHtml(new Date(data.generatedAtIso).toLocaleString("en-GB", { timeZone: "Asia/Singapore" }))} SGT &nbsp;·&nbsp; one row = one Sales Order whose customer delivery date has passed.</div>
 </div>
 </body>
 </html>`;
@@ -606,14 +579,22 @@ export function renderOverdueEmailText(data: OverdueReport): string {
   lines.push(`Overdue Report — ${formatDateLong(data.date)}`);
   lines.push("");
   lines.push(
-    `${data.totals.orderLines} overdue order lines · ${data.totals.quantity} units · worst ${data.totals.worstDays}d · stuck in ${data.totals.departments} departments`,
+    `${data.totals.salesOrders} overdue SOs · ${data.totals.units} units · worst ${data.totals.worstDays}d`,
   );
   lines.push("");
-  for (const d of data.byDepartment) {
-    lines.push(`${d.name}: ${d.count} orders · ${d.quantity} units · worst ${d.worstDays}d`);
+  for (const r of data.rows.slice(0, 15)) {
+    lines.push(
+      `${(r.companySOId || "").padEnd(14)} ${(r.customerName || "").slice(0, 24).padEnd(25)} promise=${r.customerDeliveryDate} overdue=${r.daysOverdue}d`,
+    );
   }
-  if (data.byDepartment.length === 0) {
-    lines.push("No overdue orders — every promise date is on schedule.");
+  if (data.rows.length === 0) {
+    lines.push(
+      "No overdue sales orders — every customer delivery date is on schedule.",
+    );
+  } else if (data.rows.length > 15) {
+    lines.push(
+      `... (${data.rows.length - 15} more, open the HTML attachment for the full list)`,
+    );
   }
   return lines.join("\n");
 }

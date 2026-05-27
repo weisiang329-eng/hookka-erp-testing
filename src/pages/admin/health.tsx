@@ -12,9 +12,10 @@
 // before the data fetch even starts. The endpoint enforces the same
 // role check server-side (defense-in-depth).
 // ---------------------------------------------------------------------------
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import {
   Activity,
   AlertTriangle,
@@ -22,6 +23,16 @@ import {
   Gauge,
   TrendingUp,
 } from "lucide-react";
+
+// Time-range selector — passed to every /api/admin/health/* endpoint
+// as ?range=. AE retention is 92 days so 30d is the practical max for
+// daily monitoring; 7d / 24h are the more common slices.
+type Range = "24h" | "7d" | "30d";
+const RANGE_LABEL: Record<Range, string> = {
+  "24h": "Last 24h",
+  "7d": "Last 7d",
+  "30d": "Last 30d",
+};
 
 // Shape returned by GET /api/admin/health/kpis. Keep this in sync with
 // src/api/routes/admin-health.ts.
@@ -184,27 +195,34 @@ function HourlyErrorChart({ data }: { data: HourlyErrors }) {
 }
 
 export default function AdminHealthPage() {
+  // Active time range. Defaulting to 24h matches the historical
+  // "Last 24 hours" copy + is the cheapest scan over AE.
+  const [range, setRange] = useState<Range>("24h");
+  const rangeQS = `?range=${range}`;
+
   const { data, loading, error } = useCachedJson<KpiPayload>(
-    "/api/admin/health/kpis",
+    `/api/admin/health/kpis${rangeQS}`,
     60,
   );
   // Phase 2 — 4 parallel fetches. Refreshed every 60s (same as main KPIs).
+  // Each query string carries the active range so all panels share the
+  // same window.
   const { data: byEndpointResp } = useCachedJson<{
     success: boolean;
     data: EndpointStats[];
-  }>("/api/admin/health/by-endpoint", 60);
+  }>(`/api/admin/health/by-endpoint${rangeQS}`, 60);
   const { data: errorsByResp } = useCachedJson<{
     success: boolean;
     data: ErrorRow[];
-  }>("/api/admin/health/errors-by-endpoint", 60);
+  }>(`/api/admin/health/errors-by-endpoint${rangeQS}`, 60);
   const { data: errorsHourlyResp } = useCachedJson<{
     success: boolean;
     data: HourlyErrors;
-  }>("/api/admin/health/errors-hourly", 60);
+  }>(`/api/admin/health/errors-hourly${rangeQS}`, 60);
   const { data: longTasksResp } = useCachedJson<{
     success: boolean;
     data: LongTaskRow[];
-  }>("/api/admin/health/long-tasks", 60);
+  }>(`/api/admin/health/long-tasks${rangeQS}`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -217,11 +235,29 @@ export default function AdminHealthPage() {
 
   return (
     <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-[#1F1D1B]">System Health</h1>
-        <p className="text-sm text-[#5A5550] mt-1">
-          Aggregate request timing + error counters from Cloudflare Analytics Engine. Last 24 hours.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-semibold text-[#1F1D1B]">System Health</h1>
+          <p className="text-sm text-[#5A5550] mt-1">
+            Aggregate request timing + error counters from Cloudflare Analytics Engine. {RANGE_LABEL[range]}.
+          </p>
+        </div>
+        {/* Range toggle — 24h / 7d / 30d. AE retention is 92 days so 30d
+            is comfortably within the window. All Phase 2 panels share
+            this state. */}
+        <div className="inline-flex rounded-md border border-[#E2DDD8] bg-white p-0.5">
+          {(["24h", "7d", "30d"] as const).map((r) => (
+            <Button
+              key={r}
+              variant={range === r ? "primary" : "ghost"}
+              size="sm"
+              onClick={() => setRange(r)}
+              className="px-3 h-7 text-xs"
+            >
+              {r}
+            </Button>
+          ))}
+        </div>
       </div>
 
       {kpis?._mock && (
@@ -271,13 +307,13 @@ export default function AdminHealthPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-sm font-medium text-[#1F1D1B]">
-                Hourly request volume (last 24h)
+                Hourly request volume ({RANGE_LABEL[range].toLowerCase()})
               </CardTitle>
             </CardHeader>
             <CardContent>
               <Sparkline data={kpis.sparkline} />
               <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
-                <span>24h ago</span>
+                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : "30d ago"}</span>
                 <span>now</span>
               </div>
             </CardContent>
@@ -292,7 +328,7 @@ export default function AdminHealthPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-sm font-medium text-[#1F1D1B]">
-                  Top 10 slowest endpoints (last 24h)
+                  Top 10 slowest endpoints ({RANGE_LABEL[range].toLowerCase()})
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -337,7 +373,7 @@ export default function AdminHealthPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-sm font-medium text-[#1F1D1B]">
-                  Errors by endpoint (last 24h)
+                  Errors by endpoint ({RANGE_LABEL[range].toLowerCase()})
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -374,13 +410,13 @@ export default function AdminHealthPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-sm font-medium text-[#1F1D1B]">
-                Hourly error rate (last 24h) — amber = 4xx, red = 5xx
+                Hourly error rate ({RANGE_LABEL[range].toLowerCase()}) — amber = 4xx, red = 5xx
               </CardTitle>
             </CardHeader>
             <CardContent>
               <HourlyErrorChart data={errorsHourly} />
               <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
-                <span>24h ago</span>
+                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : "30d ago"}</span>
                 <span>now</span>
               </div>
             </CardContent>

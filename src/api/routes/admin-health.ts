@@ -139,13 +139,55 @@ async function runAeSql(
 // Dataset name comes from wrangler.toml [[analytics_engine_datasets]]
 // `dataset = "hookka_erp_metrics"`. If you rename it there, update
 // here too — there's no binding-name-to-dataset-name lookup at runtime.
+// Range selector — operator picks 24h / 7d / 30d, every Phase 2
+// endpoint accepts ?range=24h|7d|30d.
+//   - WINDOW    → the AE SQL INTERVAL fragment.
+//   - BUCKETS   → how many time buckets the sparkline / hourly chart
+//                  splits the window into (24 for 24h, 7 for 7d, 30 for 30d).
+//   - BUCKET_SQL → the AE SQL toStartOfInterval argument for that bucket.
+//   - MS_PER_BUCKET → JS-side ms per bucket for `hoursAgo` math.
+type Range = "24h" | "7d" | "30d";
+function parseRange(raw: string | undefined): Range {
+  if (raw === "7d" || raw === "30d") return raw;
+  return "24h";
+}
+function rangeWindow(range: Range): {
+  WINDOW: string;
+  BUCKETS: number;
+  BUCKET_SQL: string;
+  MS_PER_BUCKET: number;
+} {
+  if (range === "30d") {
+    return {
+      WINDOW: "INTERVAL '30' DAY",
+      BUCKETS: 30,
+      BUCKET_SQL: "INTERVAL '1' DAY",
+      MS_PER_BUCKET: 86_400_000,
+    };
+  }
+  if (range === "7d") {
+    return {
+      WINDOW: "INTERVAL '7' DAY",
+      BUCKETS: 7,
+      BUCKET_SQL: "INTERVAL '1' DAY",
+      MS_PER_BUCKET: 86_400_000,
+    };
+  }
+  return {
+    WINDOW: "INTERVAL '1' DAY",
+    BUCKETS: 24,
+    BUCKET_SQL: "INTERVAL '1' HOUR",
+    MS_PER_BUCKET: 3_600_000,
+  };
+}
+
 async function liveKpis(
   accountId: string,
   token: string,
+  range: Range = "24h",
 ): Promise<Kpis> {
   const DATASET = "hookka_erp_metrics";
-  // 24-hour window. AE SQL supports INTERVAL strings.
-  const WINDOW = "INTERVAL '1' DAY";
+  const { WINDOW, BUCKETS, BUCKET_SQL, MS_PER_BUCKET } = rangeWindow(range);
 
   // 2026-05-27 hotfix: Cloudflare Analytics Engine SQL does NOT support
   // ClickHouse's `quantile(0.5)(...)` parameterised aggregation syntax
@@ -164,16 +206,16 @@ async function liveKpis(
     WHERE blob1 = 'req' AND timestamp > NOW() - ${WINDOW}
   `;
 
-  // Hourly request counts for the 24-bucket sparkline.
-  // toStartOfInterval + GROUP BY are confirmed working on AE SQL.
+  // Request-count sparkline. Bucket width = 1 hour for 24h range,
+  // 1 day for 7d / 30d ranges (so the bar count stays readable).
   const sqlSpark = `
     SELECT
-      toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour,
-      count()                                          AS n
+      toStartOfInterval(timestamp, ${BUCKET_SQL}) AS bucket,
+      count()                                     AS n
     FROM ${DATASET}
     WHERE blob1 = 'req' AND timestamp > NOW() - ${WINDOW}
-    GROUP BY hour
-    ORDER BY hour ASC
+    GROUP BY bucket
+    ORDER BY bucket ASC
   `;
 
   const [pctResp, sparkResp] = await Promise.all([
@@ -203,19 +245,24 @@ async function liveKpis(
   const p95 = Math.round(pick(0.95));
   const longTaskCount = samples.filter((v) => v >= 200).length;
 
-  // Build a 24-element sparkline keyed by hour-of-day. Missing hours
-  // (e.g. brand-new dataset with < 24h of writes) read as zero. We
-  // align oldest→newest so the chart reads left-to-right naturally.
-  const sparkline: number[] = new Array(24).fill(0);
+  // Build a BUCKETS-element sparkline. Missing buckets (e.g. brand-new
+  // dataset with < BUCKETS units of writes) read as zero. Oldest→newest
+  // so the chart reads left-to-right naturally. Same shape regardless
+  // of range — FE just renders BUCKETS bars without caring whether
+  // each is 1 hour or 1 day.
+  const sparkline: number[] = new Array(BUCKETS).fill(0);
   const now = Date.now();
   for (const row of sparkResp.data ?? []) {
-    const hourStr = String(row.hour ?? "");
-    const ts = Date.parse(hourStr);
+    const bucketStr = String(
+      (row as Record<string, unknown>).bucket ??
+        (row as Record<string, unknown>).hour ??
+        "",
+    );
+    const ts = Date.parse(bucketStr);
     if (Number.isNaN(ts)) continue;
-    // Hours-ago, clipped to [0,23].
-    const hoursAgo = Math.floor((now - ts) / 3600_000);
-    if (hoursAgo < 0 || hoursAgo > 23) continue;
-    const idx = 23 - hoursAgo;
+    const bucketsAgo = Math.floor((now - ts) / MS_PER_BUCKET);
+    if (bucketsAgo < 0 || bucketsAgo > BUCKETS - 1) continue;
+    const idx = BUCKETS - 1 - bucketsAgo;
     sparkline[idx] = Math.round(Number(row.n) || 0);
   }
 
@@ -312,7 +359,8 @@ app.get("/kpis", async (c) => {
   }
 
   try {
-    const data = await liveKpis(env.CF_ACCOUNT_ID, env.AE_QUERY_TOKEN);
+    const range = parseRange(c.req.query("range"));
+    const data = await liveKpis(env.CF_ACCOUNT_ID, env.AE_QUERY_TOKEN, range);
     return c.json({ success: true, data });
   } catch (err) {
     // Any error path — bad token, AE temporarily down, SQL syntax we
@@ -374,12 +422,13 @@ async function withAe<T>(
 // fetch to top-traffic routes so we don't pull half the dataset for
 // rare endpoints.
 app.get("/by-endpoint", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
   const data = await withAe(c, async (accountId, token) => {
     // First pass: count hits per route to rank traffic.
     const sqlHits = `
       SELECT blob2 AS route, count() AS n
       FROM hookka_erp_metrics
-      WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY
+      WHERE blob1 = 'req' AND timestamp > NOW() - ${WINDOW}
       GROUP BY route
       ORDER BY n DESC
       LIMIT 20
@@ -402,7 +451,7 @@ app.get("/by-endpoint", async (c) => {
       SELECT blob2 AS route, double1 AS dur, double2 AS dbDur
       FROM hookka_erp_metrics
       WHERE blob1 = 'req'
-        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND timestamp > NOW() - ${WINDOW}
         AND blob2 IN (${routeFilter})
     `;
     const samplesResp = await runAeSql(accountId, token, sqlSamples);
@@ -456,6 +505,7 @@ app.get("/by-endpoint", async (c) => {
 // View 2 — Error rate by endpoint (24h). 4xx + 5xx counts per route
 // so the operator sees which endpoint is throwing.
 app.get("/errors-by-endpoint", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
   const data = await withAe(c, async (accountId, token) => {
     // Pull route + status. We bucket 4xx / 5xx in JS so we don't need
     // CASE WHEN (AE SQL CASE syntax is finicky).
@@ -463,7 +513,7 @@ app.get("/errors-by-endpoint", async (c) => {
       SELECT blob2 AS route, blob3 AS status, count() AS n
       FROM hookka_erp_metrics
       WHERE blob1 = 'req'
-        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND timestamp > NOW() - ${WINDOW}
         AND (blob3 LIKE '4%' OR blob3 LIKE '5%')
       GROUP BY route, status
       ORDER BY n DESC
@@ -507,34 +557,36 @@ app.get("/errors-by-endpoint", async (c) => {
 // Use this overlaid with deploy times to correlate "spike at 14:00"
 // with "deploy at 13:55 = regression".
 app.get("/errors-hourly", async (c) => {
+  const { WINDOW, BUCKETS, BUCKET_SQL, MS_PER_BUCKET } = rangeWindow(
+    parseRange(c.req.query("range")),
+  );
   const data = await withAe(c, async (accountId, token) => {
     const sql = `
       SELECT
-        toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour,
-        blob3                                            AS status,
-        count()                                          AS n
+        toStartOfInterval(timestamp, ${BUCKET_SQL}) AS bucket,
+        blob3                                        AS status,
+        count()                                      AS n
       FROM hookka_erp_metrics
       WHERE blob1 = 'req'
-        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND timestamp > NOW() - ${WINDOW}
         AND (blob3 LIKE '4%' OR blob3 LIKE '5%')
-      GROUP BY hour, status
-      ORDER BY hour ASC
+      GROUP BY bucket, status
+      ORDER BY bucket ASC
     `;
     const resp = await runAeSql(accountId, token, sql);
-    // Build 24-bucket arrays for 4xx and 5xx (newest = idx 23).
-    const fourXX = new Array(24).fill(0) as number[];
-    const fiveXX = new Array(24).fill(0) as number[];
+    const fourXX = new Array(BUCKETS).fill(0) as number[];
+    const fiveXX = new Array(BUCKETS).fill(0) as number[];
     const now = Date.now();
     for (const r of resp.data ?? []) {
       const row = r as Record<string, unknown>;
-      const hourStr = String(row.hour ?? "");
+      const bucketStr = String(row.bucket ?? "");
       const status = String(row.status ?? "");
       const n = Number(row.n) || 0;
-      const ts = Date.parse(hourStr);
+      const ts = Date.parse(bucketStr);
       if (Number.isNaN(ts)) continue;
-      const hoursAgo = Math.floor((now - ts) / 3600_000);
-      if (hoursAgo < 0 || hoursAgo > 23) continue;
-      const idx = 23 - hoursAgo;
+      const bucketsAgo = Math.floor((now - ts) / MS_PER_BUCKET);
+      if (bucketsAgo < 0 || bucketsAgo > BUCKETS - 1) continue;
+      const idx = BUCKETS - 1 - bucketsAgo;
       if (status.startsWith("5")) fiveXX[idx] += n;
       else if (status.startsWith("4")) fourXX[idx] += n;
     }
@@ -542,7 +594,10 @@ app.get("/errors-hourly", async (c) => {
   });
   return c.json({
     success: true,
-    data: data ?? { fourXX: new Array(24).fill(0), fiveXX: new Array(24).fill(0) },
+    data: data ?? {
+      fourXX: new Array(BUCKETS).fill(0),
+      fiveXX: new Array(BUCKETS).fill(0),
+    },
   });
 });
 
@@ -551,13 +606,14 @@ app.get("/errors-hourly", async (c) => {
 // traceparent (so the operator can chase the slow ones in `wrangler
 // tail` logs).
 app.get("/long-tasks", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
   const data = await withAe(c, async (accountId, token) => {
     const sql = `
       SELECT blob2 AS route, blob3 AS status, blob4 AS trace,
              double1 AS dur, double2 AS dbDur, timestamp
       FROM hookka_erp_metrics
       WHERE blob1 = 'req'
-        AND timestamp > NOW() - INTERVAL '1' DAY
+        AND timestamp > NOW() - ${WINDOW}
         AND double1 >= 200
       ORDER BY double1 DESC
       LIMIT 50

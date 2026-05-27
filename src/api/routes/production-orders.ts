@@ -5875,6 +5875,82 @@ app.post("/bulk-patch", async (c) => {
     }),
   );
 
+  // ── Verify-readback (Wei Siang verifiedSave 2026-05-25 rule) ────────────
+  // After the PATCH loop succeeds for a row, the only thing that proves
+  // the write actually persisted is a fresh SELECT from job_cards. The
+  // batch Apply PIC silent-overwrite bug (BUG-2026-05-26-001) was
+  // exactly this: PATCH returned 200, FE flipped to green, then the
+  // post-snapshot refetch served pre-write data and the UI rolled
+  // back to old PIC. With this readback, success: true here only
+  // survives when the new value is what's actually in the DB.
+  //
+  // Heavy SELECT vs N+1: ONE query for every successful row in this
+  // batch, columns scoped to the patchable fields. At max 50 patches
+  // that's a single SELECT WHERE id IN (50 placeholders). Cheap.
+  const successfulPatches = patches.filter((p, i) => results[i].success);
+  if (successfulPatches.length > 0) {
+    const ids = successfulPatches.map((p) => p.jobCardId);
+    const placeholders = ids.map(() => "?").join(",");
+    const readbackRes = await c.var.DB
+      .prepare(
+        `SELECT id, status, dueDate, completedDate, pic1Id, pic1Name, pic2Id, pic2Name
+           FROM job_cards WHERE id IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .all<{
+        id: string;
+        status: string | null;
+        dueDate: string | null;
+        completedDate: string | null;
+        pic1Id: string | null;
+        pic1Name: string | null;
+        pic2Id: string | null;
+        pic2Name: string | null;
+      }>();
+    const byId = new Map(
+      (readbackRes.results ?? []).map((r) => [r.id, r] as const),
+    );
+    // null / undefined / "" all mean "empty" — same loose-equality rule as
+    // verified-save.ts so a backend that returns "" for cleared text
+    // matches a request that sent null.
+    const looseEq = (a: unknown, b: unknown): boolean => {
+      const norm = (v: unknown) =>
+        v === null || v === undefined || v === "" ? null : v;
+      return norm(a) === norm(b);
+    };
+    // Walk the original results array; flip success→false on any row
+    // whose readback doesn't match the requested fields.
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (!r.success) continue;
+      const req = patches[i];
+      const actual = byId.get(r.jobCardId);
+      if (!actual) {
+        results[i] = {
+          ...r,
+          success: false,
+          error: "job_card disappeared after write — possible delete race",
+        };
+        continue;
+      }
+      const diffs: string[] = [];
+      for (const [k, v] of Object.entries(req)) {
+        if (k === "poId" || k === "jobCardId" || k === "pic1Name" || k === "pic2Name") continue;
+        const actualVal = (actual as Record<string, unknown>)[k];
+        if (!looseEq(actualVal, v)) {
+          diffs.push(`${k}: tried ${JSON.stringify(v)}, db has ${JSON.stringify(actualVal)}`);
+        }
+      }
+      if (diffs.length > 0) {
+        results[i] = {
+          ...r,
+          success: false,
+          error: `verify-readback mismatch — ${diffs.join("; ")}`,
+        };
+      }
+    }
+  }
+
   return c.json({ success: true, results });
 });
 

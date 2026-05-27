@@ -372,12 +372,13 @@ app.post("/setup-start", async (c) => {
       .bind(secret, userId)
       .run();
   } catch (err) {
-    console.warn(
-      "[auth-totp/setup-start] DB write failed:",
-      err instanceof Error ? err.message : String(err),
-    );
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn("[auth-totp/setup-start] DB write failed:", msg);
+    // 2026-05-27 temporary debug — surface DB error to the client so we can
+    // diagnose the "Could not start setup" path Wei Siang hit. SUPER_ADMIN
+    // ergonomic only — once we know the cause, restore the opaque message.
     return c.json(
-      { success: false, error: "Could not start setup. Try again." },
+      { success: false, error: "Could not start setup. Try again.", _debug: msg },
       500,
     );
   }

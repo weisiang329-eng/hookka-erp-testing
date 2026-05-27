@@ -28,6 +28,14 @@ import {
   renderEfficiencyHtml,
   renderEfficiencyEmailText,
 } from "../lib/efficiency-report";
+import {
+  collectScheduleData,
+  renderScheduleHtml,
+  renderScheduleEmailText,
+  collectOverdueData,
+  renderOverdueHtml,
+  renderOverdueEmailText,
+} from "../lib/schedule-overdue-report";
 
 const app = new Hono<Env>();
 export default app;
@@ -48,9 +56,16 @@ function yesterdayYmdSgt(): string {
   return ymdInSgt(y);
 }
 
-function parseDateParam(q: string | undefined): string {
+function todayYmdSgt(): string {
+  return ymdInSgt(new Date());
+}
+
+function parseDateParam(
+  q: string | undefined,
+  fallback: () => string = yesterdayYmdSgt,
+): string {
   if (typeof q === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
-  return yesterdayYmdSgt();
+  return fallback();
 }
 
 // ---------------------------------------------------------------------------
@@ -148,28 +163,79 @@ app.get("/efficiency.json", async (c) => {
 app.post("/efficiency/send", async (c) => {
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
-  let body: { date?: string; to?: string | string[] } = {};
+  return c.json(await dispatchReport(c, "efficiency"));
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/schedule — today's production plan grouped by department.
+// ---------------------------------------------------------------------------
+
+app.get("/schedule", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
   try {
-    body = (await c.req.json().catch(() => ({}))) as typeof body;
-  } catch {
-    body = {};
+    const data = await collectScheduleData(c.var.DB, date);
+    return new Response(renderScheduleHtml(data), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (err) {
+    console.error("[reports/schedule] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
   }
-  const date = parseDateParam(body.date);
-  const overrideTo = Array.isArray(body.to)
-    ? body.to
-    : typeof body.to === "string"
-      ? body.to.split(",").map((s) => s.trim()).filter(Boolean)
-      : [];
-  const recipients =
-    overrideTo.length > 0 ? overrideTo : await resolveRecipients(c);
-  if (recipients.length === 0) {
-    return c.json(
-      { success: false, error: "no recipients configured" },
-      400,
-    );
+});
+
+app.get("/schedule.json", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
+  try {
+    const data = await collectScheduleData(c.var.DB, date);
+    return c.json({ success: true, data });
+  } catch (err) {
+    console.error("[reports/schedule.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
   }
-  const result = await runAndSendEfficiency(c, date, recipients);
-  return c.json(result);
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/overdue — currently overdue items grouped by department.
+// ---------------------------------------------------------------------------
+
+app.get("/overdue", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
+  try {
+    const data = await collectOverdueData(c.var.DB, date);
+    return new Response(renderOverdueHtml(data), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (err) {
+    console.error("[reports/overdue] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
+
+app.get("/overdue.json", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  const date = parseDateParam(c.req.query("date"), todayYmdSgt);
+  try {
+    const data = await collectOverdueData(c.var.DB, date);
+    return c.json({ success: true, data });
+  } catch (err) {
+    console.error("[reports/overdue.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -179,26 +245,43 @@ app.post("/efficiency/send", async (c) => {
 
 export const internal = new Hono<Env>();
 
-internal.post("/efficiency-trigger", async (c) => {
+type ReportKind = "efficiency" | "schedule" | "overdue";
+
+async function authCron(c: {
+  env: Env["Bindings"];
+  req: { header(name: string): string | undefined };
+  json: <T>(body: T, status?: number) => Response;
+}): Promise<Response | null> {
   const expected = c.env.CRON_SECRET;
   if (!expected || expected.length < 16) {
-    console.error(
-      "[reports/efficiency-trigger] CRON_SECRET unset or too short — refusing",
-    );
+    console.error("[reports/cron] CRON_SECRET unset or too short — refusing");
     return c.json({ ok: false, error: "service unavailable" }, 503);
   }
   const given = c.req.header("x-cron-secret") || "";
   if (!(await constantTimeEqual(given, expected))) {
     return c.json({ ok: false, error: "forbidden" }, 403);
   }
+  return null;
+}
 
+async function dispatchReport(
+  c: { env: Env["Bindings"]; var: Env["Variables"]; req: { json(): Promise<unknown> } },
+  kind: ReportKind,
+): Promise<{
+  ok: boolean;
+  date: string;
+  sent: number;
+  failed: number;
+  errors?: string[];
+}> {
   let body: { date?: string; to?: string | string[] } = {};
   try {
     body = (await c.req.json().catch(() => ({}))) as typeof body;
   } catch {
     body = {};
   }
-  const date = parseDateParam(body.date);
+  const fallback = kind === "efficiency" ? yesterdayYmdSgt : todayYmdSgt;
+  const date = parseDateParam(body.date, fallback);
   const overrideTo = Array.isArray(body.to)
     ? body.to
     : typeof body.to === "string"
@@ -207,21 +290,50 @@ internal.post("/efficiency-trigger", async (c) => {
   const recipients =
     overrideTo.length > 0 ? overrideTo : await resolveRecipients(c);
   if (recipients.length === 0) {
-    console.warn(
-      "[reports/efficiency-trigger] no recipients — skipping send",
-    );
-    return c.json({ ok: false, error: "no recipients" }, 200);
+    console.warn(`[reports/${kind}-trigger] no recipients — skipping send`);
+    return { ok: false, date, sent: 0, failed: 0, errors: ["no recipients"] };
   }
-  const result = await runAndSendEfficiency(c, date, recipients);
-  return c.json(result);
+  return runAndSendReport(c, kind, date, recipients);
+}
+
+internal.post("/efficiency-trigger", async (c) => {
+  const denied = await authCron(c);
+  if (denied) return denied;
+  return c.json(await dispatchReport(c, "efficiency"));
+});
+
+internal.post("/schedule-trigger", async (c) => {
+  const denied = await authCron(c);
+  if (denied) return denied;
+  return c.json(await dispatchReport(c, "schedule"));
+});
+
+internal.post("/overdue-trigger", async (c) => {
+  const denied = await authCron(c);
+  if (denied) return denied;
+  return c.json(await dispatchReport(c, "overdue"));
+});
+
+// Manual send-now endpoints for schedule + overdue (parallel to /efficiency/send).
+app.post("/schedule/send", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  return c.json(await dispatchReport(c, "schedule"));
+});
+app.post("/overdue/send", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "read");
+  if (denied) return denied;
+  return c.json(await dispatchReport(c, "overdue"));
 });
 
 // ---------------------------------------------------------------------------
 // Shared engine — collect data, render HTML + text, fan-out email via Brevo.
+// One switch on `kind` keeps the cron + manual-send paths DRY.
 // ---------------------------------------------------------------------------
 
-async function runAndSendEfficiency(
+async function runAndSendReport(
   c: { env: Env["Bindings"]; var: Env["Variables"] },
+  kind: ReportKind,
   date: string,
   recipients: string[],
 ): Promise<{
@@ -232,10 +344,27 @@ async function runAndSendEfficiency(
   errors?: string[];
 }> {
   const env = c.env as Env["Bindings"];
-  const data = await collectEfficiencyData(c.var.DB, date);
-  const html = renderEfficiencyHtml(data);
-  const text = renderEfficiencyEmailText(data);
-  const subject = `[Hookka] Daily Efficiency Report — ${date} (${data.totals.efficiencyPct}% overall)`;
+  let html: string;
+  let text: string;
+  let subject: string;
+
+  if (kind === "efficiency") {
+    const data = await collectEfficiencyData(c.var.DB, date);
+    html = renderEfficiencyHtml(data);
+    text = renderEfficiencyEmailText(data);
+    subject = `[Hookka] Daily Efficiency Report — ${date} (${data.totals.efficiencyPct}% overall)`;
+  } else if (kind === "schedule") {
+    const data = await collectScheduleData(c.var.DB, date);
+    html = renderScheduleHtml(data);
+    text = renderScheduleEmailText(data);
+    subject = `[Hookka] Production Schedule — ${date} (${data.totals.jobCards} JC · ${data.totals.quantity} units)`;
+  } else {
+    const data = await collectOverdueData(c.var.DB, date);
+    html = renderOverdueHtml(data);
+    text = renderOverdueEmailText(data);
+    subject = `[Hookka] Overdue Report — ${date} (${data.totals.jobCards} items · worst ${data.totals.worstDays}d)`;
+  }
+
   const from =
     env.RESEND_FROM_EMAIL ||
     "Hookka Manufacturing ERP <noreply@hookka.com>";
@@ -249,7 +378,7 @@ async function runAndSendEfficiency(
       failed += 1;
       errors.push(`${to}: ${r.error ?? "unknown"}`);
       console.warn(
-        `[reports/efficiency] send to ${to} failed: ${r.error ?? "unknown"}`,
+        `[reports/${kind}] send to ${to} failed: ${r.error ?? "unknown"}`,
       );
     }
   }

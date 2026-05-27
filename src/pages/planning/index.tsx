@@ -1587,6 +1587,33 @@ export default function PlanningPage() {
             Capacity management, scheduling & backward planning
           </p>
         </div>
+        <div className="flex items-center gap-2">
+          {/* A4-printable reports — open in new tab so the operator can hit
+              Cmd-P / Print to save PDF or send to paper. The cron sends the
+              same HTML at 8am SGT (schedule) and on-demand (overdue). */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              window.open("/api/reports/schedule", "_blank", "noopener");
+            }}
+            title="Open today's production schedule (A4 printable)"
+          >
+            <Calendar className="h-4 w-4 mr-1" />
+            Today's Schedule
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              window.open("/api/reports/overdue", "_blank", "noopener");
+            }}
+            title="Open overdue report (A4 printable)"
+          >
+            <AlertTriangle className="h-4 w-4 mr-1" />
+            Overdue Report
+          </Button>
+        </div>
       </div>
 
       {/* Tabs */}

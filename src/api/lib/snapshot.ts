@@ -197,13 +197,30 @@ export async function withSnapshot<T extends Record<string, unknown>>(
   orgId: string,
   computeFresh: () => Promise<T>,
   cacheKey: string = "",
+  // Optional Hono context — when supplied we emit cache.hit / cache.miss
+  // counters to Analytics Engine so the /admin/health dashboard can show
+  // a real cache hit ratio instead of the placeholder 0. Passing this is
+  // backwards-compatible (no-op when omitted).
+  c?: { env: unknown },
 ): Promise<T> {
   const [snap, currentMax] = await Promise.all([
     readSnapshot(db, config, orgId, cacheKey),
     getMaxSourceUpdatedAt(db, config),
   ]);
   if (isSnapshotFresh(snap, currentMax) && snap) {
+    if (c) {
+      try {
+        const { emitCounter } = await import("./observability");
+        emitCounter(c as never, "cache.hit", { resource: config.tableName });
+      } catch { /* swallow */ }
+    }
     return snap.data as T;
+  }
+  if (c) {
+    try {
+      const { emitCounter } = await import("./observability");
+      emitCounter(c as never, "cache.miss", { resource: config.tableName });
+    } catch { /* swallow */ }
   }
   const data = await computeFresh();
   try {

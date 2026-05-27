@@ -239,14 +239,51 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
 // Generic preserves the concrete DB type for the caller.  When `timer` is
 // supplied, every wrapped call accumulates its duration into it so
 // timingMiddleware can emit a Server-Timing `db` entry.
-export function instrumentD1<T extends object>(db: T, routeLabel: string, timer?: DbTimer): T {
+// Emit a slow-SQL event to AE so the dashboard can surface "which query
+// took >500ms" with route + sql snippet (no parameter values — those
+// can carry PII or huge JSON blobs and we don't have a budget for them).
+//
+// 2026-05-27 — added so the /admin/health Slow SQL panel has data.
+// Previously slow queries only hit `wrangler tail` via console.warn,
+// which only helped if the operator was actively watching logs.
+function emitSlowSql(
+  env: unknown,
+  route: string,
+  op: string,
+  sql: string,
+  durMs: number,
+  rowsRead?: number,
+): void {
+  const ae = getMetrics(env);
+  if (!ae) return;
+  // Strip parameter literals (?, ?, ?...) — sql.prepare already uses
+  // placeholders so the SQL text is parameterised. Truncate to 200 char
+  // blob budget. Collapse whitespace so the panel reads cleanly.
+  const sqlSnippet = sql.replace(/\s+/g, " ").trim().slice(0, 200);
+  try {
+    ae.writeDataPoint?.({
+      indexes: ["slow_sql"],
+      blobs: ["slow_sql", route, op, sqlSnippet],
+      doubles: [durMs, rowsRead ?? 0],
+    });
+  } catch {
+    /* swallow */
+  }
+}
+
+export function instrumentD1<T extends object>(
+  db: T,
+  routeLabel: string,
+  timer?: DbTimer,
+  env?: unknown,
+): T {
   return new Proxy(db, {
     get(target, prop, receiver) {
       const orig = Reflect.get(target, prop, receiver);
       if (prop === "prepare" && typeof orig === "function") {
         return (sql: string) => {
           const stmt = orig.call(target, sql);
-          return wrapStatement(stmt, sql, routeLabel, timer);
+          return wrapStatement(stmt, sql, routeLabel, timer, env);
         };
       }
       if (prop === "batch" && typeof orig === "function") {
@@ -262,6 +299,7 @@ export function instrumentD1<T extends object>(db: T, routeLabel: string, timer?
             console.warn(
               `[slow-query] route=${routeLabel} op=batch count=${statements.length} dur_ms=${dur}`,
             );
+            emitSlowSql(env, routeLabel, "batch", `batch:${statements.length}`, dur);
           }
           return res;
         };
@@ -271,14 +309,19 @@ export function instrumentD1<T extends object>(db: T, routeLabel: string, timer?
   }) as T;
 }
 
-function wrapStatement(stmt: object, sql: string, routeLabel: string, timer?: DbTimer): object {
+function wrapStatement(
+  stmt: object,
+  sql: string,
+  routeLabel: string,
+  timer?: DbTimer,
+  env?: unknown,
+): object {
   return new Proxy(stmt, {
     get(target, prop, receiver) {
       const orig = Reflect.get(target, prop, receiver);
-      // .bind(...) returns a new statement; keep wrapping (and keep threading
-      // the timer through so chained .bind(...).all() still accumulates).
       if (prop === "bind" && typeof orig === "function") {
-        return (...args: unknown[]) => wrapStatement(orig.apply(target, args), sql, routeLabel, timer);
+        return (...args: unknown[]) =>
+          wrapStatement(orig.apply(target, args), sql, routeLabel, timer, env);
       }
       if ((prop === "all" || prop === "first" || prop === "run" || prop === "raw") && typeof orig === "function") {
         return async (...args: unknown[]) => {
@@ -290,7 +333,6 @@ function wrapStatement(stmt: object, sql: string, routeLabel: string, timer?: Db
             timer.count += 1;
           }
           if (dur >= SLOW_QUERY_MS) {
-            // Meta.rows_read is available on D1Result; log if present.
             const meta = (res as { meta?: { rows_read?: number; rows_written?: number } } | undefined)?.meta;
             const rowsPart = meta?.rows_read != null ? ` rows_read=${meta.rows_read}` : "";
             const writePart = meta?.rows_written ? ` rows_written=${meta.rows_written}` : "";
@@ -298,6 +340,7 @@ function wrapStatement(stmt: object, sql: string, routeLabel: string, timer?: Db
             console.warn(
               `[slow-query] route=${routeLabel} op=${String(prop)} dur_ms=${dur}${rowsPart}${writePart} sql="${sqlSnippet}"`,
             );
+            emitSlowSql(env, routeLabel, String(prop), sql, dur, meta?.rows_read);
           }
           return res;
         };

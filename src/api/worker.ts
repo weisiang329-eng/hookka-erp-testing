@@ -246,7 +246,7 @@ app.use("/api/*", async (c, next) => {
   if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
   const adapter = new SupabaseAdapter(getSql(url)) as unknown as D1Database;
   const timer = c.get("dbTimer"); // set by timingMiddleware
-  c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname, timer));
+  c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname, timer, c.env));
   await next();
 });
 

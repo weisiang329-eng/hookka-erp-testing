@@ -930,6 +930,8 @@ app.get("/", async (c) => {
       },
       getOrgId(c),
       computeFullList,
+      "",
+      c, // emit cache.hit / cache.miss counters → real cacheHitRatio
     );
     return c.json(data);
   }
@@ -1109,6 +1111,8 @@ app.get("/stats", async (c) => {
     },
     orgId,
     compute,
+    "",
+    c,
   );
   return c.json({ success: true, ...data });
 });

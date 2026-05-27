@@ -188,6 +188,19 @@ type ErrorMessageRow = {
   n: number;
   trace: string;
 };
+// Slow SQL row — one entry per (route, op, sqlSnippet) tuple with the
+// captures rolled up. The operator reads this to answer "which exact
+// query is the bottleneck" — the route panel only tells you which
+// endpoint, this tells you which statement INSIDE that endpoint.
+type SlowSqlRow = {
+  route: string;
+  op: string;
+  sqlSnippet: string;
+  hits: number;
+  avgDur: number;
+  p95: number;
+  rowsRead: number;
+};
 
 // Plain-language hint per status code so the operator knows WHY each
 // code matters, not just the number. Sourced from the dashboard
@@ -293,6 +306,10 @@ export default function AdminHealthPage() {
     success: boolean;
     data: ErrorMessageRow[];
   }>(`/api/admin/health/error-messages${rangeQS}`, 60);
+  const { data: slowSqlResp } = useCachedJson<{
+    success: boolean;
+    data: SlowSqlRow[];
+  }>(`/api/admin/health/slow-sql${rangeQS}`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -309,6 +326,7 @@ export default function AdminHealthPage() {
   };
   const statusBreakdown = statusBreakdownResp?.data ?? [];
   const errorMessages = errorMessagesResp?.data ?? [];
+  const slowSql = slowSqlResp?.data ?? [];
 
   return (
     <div className="p-6 space-y-6">
@@ -583,6 +601,58 @@ export default function AdminHealthPage() {
                 <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : range === "30d" ? "30d ago" : "90d ago"}</span>
                 <span>now</span>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Slow SQL — the missing piece between "endpoint X is slow"
+              and "fix it". This panel surfaces which specific SQL
+              statement (within that endpoint) is the bottleneck.
+              Captured by emitSlowSql() in the D1 instrumentation wrapper
+              for any query >= 500ms. Aggregated by (route, op, snippet)
+              so repeated slow queries collapse to one row. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Slow SQL queries ({RANGE_LABEL[range].toLowerCase()}) — captures &gt;=500ms
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {slowSql.length === 0 ? (
+                <p className="text-xs text-[#4F7C3A]">
+                  No slow queries in this window. Healthy — every DB statement returned within 500ms.
+                </p>
+              ) : (
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Endpoint</th>
+                        <th className="py-1.5 font-medium">Op</th>
+                        <th className="py-1.5 font-medium">SQL</th>
+                        <th className="py-1.5 font-medium text-right">Hits</th>
+                        <th className="py-1.5 font-medium text-right">Avg</th>
+                        <th className="py-1.5 font-medium text-right">P95</th>
+                        <th className="py-1.5 font-medium text-right" title="Total rows read across all hits">Rows</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {slowSql.map((r, i) => (
+                        <tr key={i} className="border-b border-[#F5F2EE] align-top">
+                          <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[180px]" title={r.route}>{r.route || '—'}</td>
+                          <td className="py-1.5 text-[#5A5550]">{r.op}</td>
+                          <td className="py-1.5 font-mono text-[10px] text-[#5A5550] max-w-[420px]" title={r.sqlSnippet}>
+                            <span className="block truncate">{r.sqlSnippet || '(no snippet)'}</span>
+                          </td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.hits}</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.avgDur}ms</td>
+                          <td className={`py-1.5 text-right font-semibold ${r.p95 >= 2000 ? 'text-[#9A3A2D]' : r.p95 >= 1000 ? 'text-[#9C6F1E]' : 'text-[#5A5550]'}`}>{r.p95}ms</td>
+                          <td className="py-1.5 text-right text-[#8B8580]">{r.rowsRead || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </CardContent>
           </Card>
 

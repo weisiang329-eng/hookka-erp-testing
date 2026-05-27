@@ -278,13 +278,37 @@ async function liveKpis(
     sparkline[idx] = Math.round(Number(row.n) || 0);
   }
 
-  // Cache-hit ratio: not yet instrumented. Once we start emitting a
-  // `cache.hit` / `cache.miss` counter (via emitCounter), this becomes
-  //   hits / (hits + misses)
-  // For now, return 0 to signal "no data" rather than carry a
-  // misleading mock number into the live response. The frontend can
-  // grey it out — it's a small change to ui.
-  const cacheHitRatio = 0;
+  // Cache-hit ratio — emitCounter('cache.hit') and ('cache.miss') fire
+  // from src/api/lib/snapshot.ts withSnapshot when the wrapper has its
+  // `c` context plumbed through. As of 2026-05-27 sales-orders list +
+  // stats are wired; remaining snapshot callers will join over time
+  // (each just needs `c` passed as the 6th arg).
+  //
+  // ratio = hits / (hits + misses). Returns 0 when there's no data
+  // (binding cold-start, no traffic yet, or counters not wired).
+  let cacheHitRatio = 0;
+  try {
+    const sqlCache = `
+      SELECT blob1 AS kind, count() AS n
+      FROM ${DATASET}
+      WHERE (blob1 = 'cache.hit' OR blob1 = 'cache.miss')
+        AND timestamp > NOW() - ${WINDOW}
+      GROUP BY kind
+    `;
+    const cacheResp = await runAeSql(accountId, token, sqlCache);
+    let hits = 0;
+    let misses = 0;
+    for (const r of cacheResp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const n = Number(row.n) || 0;
+      if (row.kind === "cache.hit") hits = n;
+      else if (row.kind === "cache.miss") misses = n;
+    }
+    const total = hits + misses;
+    if (total > 0) cacheHitRatio = Math.round((hits / total) * 100) / 100;
+  } catch {
+    /* leave at 0 — non-fatal */
+  }
 
   return {
     p50,
@@ -802,6 +826,97 @@ app.get("/deploys", async (c) => {
     deploys.push({ id: env.CF_DEPLOYMENT_ID, at: env.DEPLOY_AT });
   }
   return c.json({ success: true, data: deploys });
+});
+
+// Slow SQL captures — the missing piece that translates "this endpoint
+// is slow" into "this specific SQL statement is slow". Backed by
+// emitSlowSql() in src/api/lib/observability.ts, which fires from the
+// D1 wrapper for any query taking >= SLOW_QUERY_MS (500ms).
+//
+// AE schema for slow_sql events (per emitSlowSql):
+//   blob1 = "slow_sql"   (event-kind discriminator)
+//   blob2 = route        (e.g. /api/sales-orders)
+//   blob3 = op           (all | first | run | batch | raw)
+//   blob4 = sqlSnippet   (first 200 chars of the SQL with whitespace collapsed)
+//   double1 = dur_ms
+//   double2 = rowsRead   (may be 0 if not reported by D1 driver)
+//
+// Aggregates by (route, op, sqlSnippet) so repeated slow queries collapse
+// into one row with hit count + avg/p95 duration. Operator scans this
+// list to know exactly which SQL statement is the bottleneck, then jumps
+// into the source file to add an index / refactor the query / wrap in a
+// snapshot. Sorted by P95 desc so the worst offenders surface first.
+app.get("/slow-sql", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             blob3 AS op,
+             blob4 AS sqlSnippet,
+             double1 AS dur,
+             double2 AS rowsRead
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'slow_sql'
+        AND timestamp > NOW() - ${WINDOW}
+      LIMIT 5000
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    // Group in JS so we can compute P95 + avg per (route, op, snippet).
+    // AE doesn't support quantile() so this is the same pattern used by
+    // every other percentile-returning endpoint above.
+    type Bucket = {
+      route: string;
+      op: string;
+      sqlSnippet: string;
+      samples: number[];
+      rowsRead: number;
+    };
+    const grouped = new Map<string, Bucket>();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      const op = String(row.op ?? "");
+      const snippet = String(row.sqlSnippet ?? "");
+      const dur = Number(row.dur);
+      const rows = Number(row.rowsRead) || 0;
+      const key = `${route}|${op}|${snippet}`;
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          route,
+          op,
+          sqlSnippet: snippet,
+          samples: [],
+          rowsRead: 0,
+        });
+      }
+      const g = grouped.get(key)!;
+      if (Number.isFinite(dur)) g.samples.push(dur);
+      g.rowsRead += rows;
+    }
+    const out = [...grouped.values()].map((g) => {
+      const sorted = [...g.samples].sort((a, b) => a - b);
+      const pick = (p: number): number =>
+        sorted.length === 0
+          ? 0
+          : sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+      const avg =
+        g.samples.length === 0
+          ? 0
+          : g.samples.reduce((s, v) => s + v, 0) / g.samples.length;
+      return {
+        route: g.route,
+        op: g.op,
+        sqlSnippet: g.sqlSnippet,
+        hits: g.samples.length,
+        avgDur: Math.round(avg),
+        p95: Math.round(pick(0.95)),
+        rowsRead: g.rowsRead,
+      };
+    });
+    out.sort((a, b) => b.p95 - a.p95 || b.hits - a.hits);
+    return out.slice(0, 30);
+  });
+  return c.json({ success: true, data: data ?? [] });
 });
 
 app.get("/long-tasks", async (c) => {

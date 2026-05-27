@@ -155,20 +155,34 @@ export function apiRateLimit(opts: ApiRateLimitOpts = {}): MiddlewareHandler<Env
     // Already over the cap? Refuse without incrementing further — no point
     // bumping a counter that's already past the line. retryAfterSec hints
     // the client when to back off.
+    //
+    // 2026-05-27 SOFT LAUNCH: per Wei Siang "最重要不影响现在的功能" the
+    // limiter ships in WARN-ONLY mode initially. We still log every breach
+    // so /admin/health surfaces who would have been throttled, but we let
+    // the request through. To flip to enforcement, set Cloudflare Pages
+    // env var `API_RATE_LIMIT_MODE = "enforce"`. Any other value (or
+    // unset) means warn-only.
     if (minuteCount >= perMinute || hourCount >= perHour) {
       const retryAfterSec = minuteCount >= perMinute ? 60 : 3600;
+      const mode = (c.env as { API_RATE_LIMIT_MODE?: string }).API_RATE_LIMIT_MODE;
+      const enforcing = mode === "enforce";
       console.warn(
-        `[api-rate-limit] 429 ident=${ident} path=${path} minute=${minuteCount}/${perMinute} hour=${hourCount}/${perHour}`,
+        `[api-rate-limit] ${enforcing ? "429" : "WOULD-429"} ident=${ident} path=${path} minute=${minuteCount}/${perMinute} hour=${hourCount}/${perHour}`,
       );
-      c.res.headers.set("Retry-After", String(retryAfterSec));
-      return c.json(
-        {
-          success: false,
-          error: "Too many requests. Try again in a minute.",
-          retryAfterSec,
-        },
-        429,
-      );
+      if (enforcing) {
+        c.res.headers.set("Retry-After", String(retryAfterSec));
+        return c.json(
+          {
+            success: false,
+            error: "Too many requests. Try again in a minute.",
+            retryAfterSec,
+          },
+          429,
+        );
+      }
+      // WARN-ONLY: fall through to next() without bumping (no point
+      // continuing to climb the counter past the line).
+      return next();
     }
 
     // Bump both counters. Best-effort writes — if KV fails the next request

@@ -18,7 +18,15 @@ export type RateLimitConfig = {
 
 // Default ceiling — well above any realistic single-user traffic on a small
 // shop (Hookka normal load is ~40-500 req per 24 hours per user).
-const DEFAULT: RateLimitConfig = { perMinute: 300, perHour: 5000 };
+//
+// 2026-05-27 — bumped from 300/5000 to 600/10000 per Wei Siang
+// "不要影响到现在的use". Heavy dashboards (e.g. /admin/health fires
+// 14 concurrent endpoints, and /production/orders triggers a fan-out of
+// SO + items + customer + payments + audit on each row click) can spike
+// over 300/min during routine browsing. 600/min is still 50x above
+// observed single-user 24h burst, but leaves headroom for dashboard
+// pages and double-tab workflows.
+const DEFAULT: RateLimitConfig = { perMinute: 600, perHour: 10000 };
 
 // Per-path overrides. Match is "starts-with" on the incoming pathname so we
 // can cover whole prefix families (e.g. "/api/upload" matches both

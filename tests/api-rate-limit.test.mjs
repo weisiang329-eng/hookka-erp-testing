@@ -89,7 +89,10 @@ function makeCtx({ path = "/api/customers", userId, ip = "1.2.3.4", kv } = {}) {
         return headers.get(name.toLowerCase()) ?? headers.get(name);
       },
     },
-    env: { SESSION_CACHE: kv },
+    // Tests assert enforcement semantics, so we explicitly enable enforce
+    // mode. Production ships in warn-only by default (no API_RATE_LIMIT_MODE
+    // env var → warn). Soft-launch lever per Wei Siang 2026-05-27.
+    env: { SESSION_CACHE: kv, API_RATE_LIMIT_MODE: "enforce" },
     get(name) {
       if (name === "userId") return userId;
       return undefined;
@@ -137,24 +140,45 @@ test("under the limit — middleware allows and increments", async () => {
   assert.equal(kv.store.get(hourKeys[0]), "1");
 });
 
-test("default ceiling — 300 OK calls, 301st returns 429", async () => {
+test("default ceiling (600/min) — at cap, next request returns 429 in enforce mode", async () => {
   const kv = makeKv();
   const mw = apiRateLimit();
-  // Pre-populate the minute bucket to 300 (right at the cap) so the next
-  // request is the one that should be refused.
+  // Pre-populate the minute bucket to the default cap so the next
+  // request is the one that should be refused. Default was bumped from
+  // 300 -> 600 on 2026-05-27 to give legitimate dashboard browsing
+  // more headroom while still catching abuse.
   const now = Date.now();
   const minuteBucket = Math.floor(now / 60_000);
   const hourBucket = Math.floor(now / 3_600_000);
-  kv.store.set(`apirl:u1:m:${minuteBucket}`, "300");
-  kv.store.set(`apirl:u1:h:${hourBucket}`, "300");
+  kv.store.set(`apirl:u1:m:${minuteBucket}`, "600");
+  kv.store.set(`apirl:u1:h:${hourBucket}`, "600");
   const ctx = makeCtx({ userId: "u1", kv });
   const { nextCalled, out } = await callMw(mw, ctx);
-  assert.equal(nextCalled, false, "next() should NOT run when over the cap");
+  assert.equal(nextCalled, false, "next() should NOT run when over the cap in enforce mode");
   assert.equal(out.status, 429);
   assert.equal(out.body.success, false);
   assert.match(out.body.error, /Too many requests/);
   assert.equal(out.body.retryAfterSec, 60);
   assert.equal(out._resHeaders.get("Retry-After"), "60");
+});
+
+test("warn-only mode — request over cap falls through to next() (default posture)", async () => {
+  // Production default: API_RATE_LIMIT_MODE unset → warn-only. The
+  // limiter still LOGS the breach but does NOT 429 the user. This is
+  // the soft-launch posture per Wei Siang 2026-05-27 "不影响现在的use".
+  const kv = makeKv();
+  const mw = apiRateLimit();
+  const now = Date.now();
+  const minuteBucket = Math.floor(now / 60_000);
+  const hourBucket = Math.floor(now / 3_600_000);
+  kv.store.set(`apirl:u1:m:${minuteBucket}`, "600");
+  kv.store.set(`apirl:u1:h:${hourBucket}`, "600");
+  const ctx = makeCtx({ userId: "u1", kv });
+  // Strip the test-default "enforce" flag to simulate prod defaults.
+  ctx.env.API_RATE_LIMIT_MODE = undefined;
+  const { nextCalled, out } = await callMw(mw, ctx);
+  assert.equal(nextCalled, true, "next() SHOULD run in warn-only mode even past the cap");
+  assert.equal(out, undefined, "no 429 response — request flows through");
 });
 
 test("exempt paths bypass limits even when over cap", async () => {
@@ -210,9 +234,9 @@ test("KV write throws — middleware still allows the request", async () => {
 test("different users tracked independently", async () => {
   const kv = makeKv();
   const mw = apiRateLimit();
-  // user1 starts at the cap — should 429
+  // user1 starts at the cap — should 429 (cap bumped to 600 on 2026-05-27)
   const minuteBucket = Math.floor(Date.now() / 60_000);
-  kv.store.set(`apirl:user1:m:${minuteBucket}`, "300");
+  kv.store.set(`apirl:user1:m:${minuteBucket}`, "600");
 
   const c1 = makeCtx({ userId: "user1", kv });
   const r1 = await callMw(mw, c1);
@@ -252,14 +276,14 @@ test("per-endpoint override — /api/auth/login tighter than default", async () 
   assert.equal(out.status, 429);
 });
 
-test("per-hour ceiling — 5000 trips even when minute count is low", async () => {
+test("per-hour ceiling (10000) trips even when minute count is low", async () => {
   const kv = makeKv();
   const mw = apiRateLimit();
   const now = Date.now();
   const minuteBucket = Math.floor(now / 60_000);
   const hourBucket = Math.floor(now / 3_600_000);
   kv.store.set(`apirl:u1:m:${minuteBucket}`, "5");
-  kv.store.set(`apirl:u1:h:${hourBucket}`, "5000");
+  kv.store.set(`apirl:u1:h:${hourBucket}`, "10000");
   const ctx = makeCtx({ userId: "u1", kv });
   const { nextCalled, out } = await callMw(mw, ctx);
   assert.equal(nextCalled, false);

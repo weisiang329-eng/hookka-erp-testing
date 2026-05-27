@@ -60,6 +60,31 @@ function todayYmdSgt(): string {
   return ymdInSgt(new Date());
 }
 
+// Add N days to a YYYY-MM-DD (positive or negative). YMD-only arithmetic —
+// avoids the +8h SGT shift drifting at month/year boundaries.
+function addDays(ymd: string, days: number): string {
+  const d = new Date(ymd + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Walk back from `fromYmd` (NOT inclusive) day-by-day until we find a YMD
+// that is neither Sunday nor in the public-holidays set. Used by the
+// efficiency cron so Monday 12pm sends Saturday's report (not Sunday's,
+// which would be empty). Bounded at 14 hops as a safety net — if Hookka
+// ever has 14 PHs in a row we have bigger problems.
+function previousWorkingDay(fromYmd: string, holidays: Set<string>): string {
+  let cur = fromYmd;
+  for (let i = 0; i < 14; i++) {
+    cur = addDays(cur, -1);
+    const dow = sgtDayOfWeek(cur);
+    if (dow === 0) continue; // Sunday
+    if (holidays.has(cur)) continue;
+    return cur;
+  }
+  return addDays(fromYmd, -1); // fall back to literal yesterday
+}
+
 function parseDateParam(
   q: string | undefined,
   fallback: () => string = yesterdayYmdSgt,
@@ -171,7 +196,17 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
 app.get("/efficiency", async (c) => {
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
-  const date = parseDateParam(c.req.query("date"));
+  // Default to the previous working day (skip Sunday + PH) so an operator
+  // who hits the URL on Monday morning gets Saturday's report, not
+  // Sunday's empty one. Explicit ?date= always wins.
+  const q = c.req.query("date");
+  let date: string;
+  if (typeof q === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q)) {
+    date = q;
+  } else {
+    const holidays = await loadPublicHolidays(c);
+    date = previousWorkingDay(todayYmdSgt(), holidays);
+  }
   try {
     const data = await collectEfficiencyData(c.var.DB, date);
     const html = renderEfficiencyHtml(data);
@@ -195,7 +230,14 @@ app.get("/efficiency", async (c) => {
 app.get("/efficiency.json", async (c) => {
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
-  const date = parseDateParam(c.req.query("date"));
+  const q = c.req.query("date");
+  let date: string;
+  if (typeof q === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q)) {
+    date = q;
+  } else {
+    const holidays = await loadPublicHolidays(c);
+    date = previousWorkingDay(todayYmdSgt(), holidays);
+  }
   try {
     const data = await collectEfficiencyData(c.var.DB, date);
     return c.json({ success: true, data });
@@ -330,8 +372,21 @@ async function dispatchReport(
   } catch {
     body = {};
   }
-  const fallback = kind === "efficiency" ? yesterdayYmdSgt : todayYmdSgt;
-  const date = parseDateParam(body.date, fallback);
+  // Date resolution:
+  //   - efficiency: previous working day (skip Sun + PH walking back from today).
+  //     Monday 12pm → Saturday's report (not Sunday's empty one).
+  //   - schedule / overdue: today (the cron only fires on working days, so
+  //     today is by construction a working day — see cronGate).
+  //   - body.date always wins as override (manual backfill).
+  let date: string;
+  if (typeof body.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.date)) {
+    date = body.date;
+  } else if (kind === "efficiency") {
+    const holidays = await loadPublicHolidays(c);
+    date = previousWorkingDay(todayYmdSgt(), holidays);
+  } else {
+    date = todayYmdSgt();
+  }
   const overrideTo = Array.isArray(body.to)
     ? body.to
     : typeof body.to === "string"

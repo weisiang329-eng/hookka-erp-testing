@@ -130,6 +130,7 @@ export async function collectScheduleData(
   const sql = `${RAW_SQL_BASE}
     WHERE jc.dueDate = ?
       AND jc.status IN ('WAITING','IN_PROGRESS','PAUSED','BLOCKED')
+      AND po.status NOT IN ('CANCELLED','COMPLETED')
     ORDER BY jc.departmentCode, po.poNo, jc.sequence`;
   const res = await db.prepare(sql).bind(dateYmd).all<RawRow>();
   const rows = (res.results ?? []).map(mapRow);

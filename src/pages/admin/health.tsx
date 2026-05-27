@@ -110,13 +110,110 @@ function KpiCard({
   );
 }
 
+// Phase 2 — per-endpoint drill-down view payloads. Each shape mirrors
+// the corresponding /api/admin/health/* endpoint.
+type EndpointStats = {
+  route: string;
+  hits: number;
+  p50: number;
+  p95: number;
+  avgDur: number;
+  avgDb: number;
+  dbPct: number;
+};
+type ErrorRow = {
+  route: string;
+  fourXX: number;
+  fiveXX: number;
+  total: number;
+};
+type HourlyErrors = { fourXX: number[]; fiveXX: number[] };
+type LongTaskRow = {
+  route: string;
+  status: string;
+  dur: number;
+  dbDur: number;
+  trace: string;
+  timestamp: string;
+};
+
+// Tiny stacked-bar chart for the hourly error overlay. 4xx grey, 5xx
+// red. Same SVG primitive idea as the sparkline — no recharts overhead.
+function HourlyErrorChart({ data }: { data: HourlyErrors }) {
+  const { fourXX, fiveXX } = data;
+  const w = 240;
+  const h = 60;
+  const max = Math.max(1, ...fourXX, ...fiveXX);
+  const barW = w / 24;
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className="w-full h-16"
+      preserveAspectRatio="none"
+      aria-label="24h error counts by hour"
+    >
+      {Array.from({ length: 24 }).map((_, i) => {
+        const fiveH = (fiveXX[i] / max) * h;
+        const fourH = (fourXX[i] / max) * h;
+        const x = i * barW;
+        return (
+          <g key={i}>
+            {fiveH > 0 && (
+              <rect
+                x={x + 1}
+                y={h - fiveH}
+                width={Math.max(0, barW - 2)}
+                height={fiveH}
+                fill="#9A3A2D"
+              />
+            )}
+            {fourH > 0 && (
+              <rect
+                x={x + 1}
+                y={h - fiveH - fourH}
+                width={Math.max(0, barW - 2)}
+                height={fourH}
+                fill="#9C6F1E"
+              />
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 export default function AdminHealthPage() {
   const { data, loading, error } = useCachedJson<KpiPayload>(
     "/api/admin/health/kpis",
     60,
   );
+  // Phase 2 — 4 parallel fetches. Refreshed every 60s (same as main KPIs).
+  const { data: byEndpointResp } = useCachedJson<{
+    success: boolean;
+    data: EndpointStats[];
+  }>("/api/admin/health/by-endpoint", 60);
+  const { data: errorsByResp } = useCachedJson<{
+    success: boolean;
+    data: ErrorRow[];
+  }>("/api/admin/health/errors-by-endpoint", 60);
+  const { data: errorsHourlyResp } = useCachedJson<{
+    success: boolean;
+    data: HourlyErrors;
+  }>("/api/admin/health/errors-hourly", 60);
+  const { data: longTasksResp } = useCachedJson<{
+    success: boolean;
+    data: LongTaskRow[];
+  }>("/api/admin/health/long-tasks", 60);
 
   const kpis = data?.data;
+  const byEndpoint = byEndpointResp?.data ?? [];
+  const errorsBy = errorsByResp?.data ?? [];
+  const errorsHourly = errorsHourlyResp?.data ?? {
+    fourXX: new Array(24).fill(0),
+    fiveXX: new Array(24).fill(0),
+  };
+  const longTasks = longTasksResp?.data ?? [];
 
   return (
     <div className="p-6 space-y-6">
@@ -183,6 +280,151 @@ export default function AdminHealthPage() {
                 <span>24h ago</span>
                 <span>now</span>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Phase 2 — drill-down views. Operator uses these to answer
+              "WHERE is the system slow / erroring" not just "is it slow". */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* Top 10 slowest endpoints. P95 sorted; dbPct shows whether
+                the slowness is DB-bound (=> tune DB / add cache) or
+                code-bound (=> profile the worker logic). */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Top 10 slowest endpoints (last 24h)
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {byEndpoint.length === 0 ? (
+                  <p className="text-xs text-[#8B8580]">
+                    No data yet — AE collects on every request, give it 30 min after first deploy.
+                  </p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Endpoint</th>
+                        <th className="py-1.5 font-medium text-right">Hits</th>
+                        <th className="py-1.5 font-medium text-right">P50</th>
+                        <th className="py-1.5 font-medium text-right">P95</th>
+                        <th className="py-1.5 font-medium text-right" title="% of total time that was DB query time">DB %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {byEndpoint.map((r) => (
+                        <tr key={r.route} className="border-b border-[#F5F2EE]">
+                          <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[220px]" title={r.route}>{r.route}</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.hits.toLocaleString()}</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.p50}ms</td>
+                          <td className={`py-1.5 text-right font-semibold ${r.p95 >= 500 ? 'text-[#9A3A2D]' : r.p95 >= 200 ? 'text-[#9C6F1E]' : 'text-[#4F7C3A]'}`}>
+                            {r.p95}ms
+                          </td>
+                          <td className={`py-1.5 text-right ${r.dbPct >= 70 ? 'text-[#9A3A2D] font-semibold' : 'text-[#5A5550]'}`} title={r.dbPct >= 70 ? 'DB is the bottleneck — optimise the query / add cache' : undefined}>
+                            {r.dbPct}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Errors by endpoint. 5xx red because those are server bugs
+                we own; 4xx amber because they're often expected (auth,
+                validation rejects). */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Errors by endpoint (last 24h)
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {errorsBy.length === 0 ? (
+                  <p className="text-xs text-[#4F7C3A]">No 4xx / 5xx errors in the last 24h. Healthy.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Endpoint</th>
+                        <th className="py-1.5 font-medium text-right">4xx</th>
+                        <th className="py-1.5 font-medium text-right">5xx</th>
+                        <th className="py-1.5 font-medium text-right">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {errorsBy.map((r) => (
+                        <tr key={r.route} className="border-b border-[#F5F2EE]">
+                          <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[220px]" title={r.route}>{r.route}</td>
+                          <td className="py-1.5 text-right text-[#9C6F1E]">{r.fourXX || ''}</td>
+                          <td className={`py-1.5 text-right ${r.fiveXX > 0 ? 'text-[#9A3A2D] font-semibold' : 'text-[#8B8580]'}`}>{r.fiveXX || ''}</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.total}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Hourly error spike chart. Compare with deploy timeline ("a
+              spike at 14:00 + a deploy at 13:55 = the smoking gun"). */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Hourly error rate (last 24h) — amber = 4xx, red = 5xx
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <HourlyErrorChart data={errorsHourly} />
+              <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
+                <span>24h ago</span>
+                <span>now</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Top 50 long tasks. trace lets the operator chase the
+              specific slow request in wrangler tail. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Long tasks (top 50 slowest requests, last 24h)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {longTasks.length === 0 ? (
+                <p className="text-xs text-[#4F7C3A]">No requests took 200ms+ in the last 24h.</p>
+              ) : (
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Time</th>
+                        <th className="py-1.5 font-medium">Endpoint</th>
+                        <th className="py-1.5 font-medium text-right">Status</th>
+                        <th className="py-1.5 font-medium text-right">Dur</th>
+                        <th className="py-1.5 font-medium text-right">DB</th>
+                        <th className="py-1.5 font-medium">Trace</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {longTasks.map((r, i) => (
+                        <tr key={i} className="border-b border-[#F5F2EE]">
+                          <td className="py-1.5 text-[#5A5550] whitespace-nowrap">{r.timestamp.slice(5, 16)}</td>
+                          <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[220px]" title={r.route}>{r.route}</td>
+                          <td className={`py-1.5 text-right ${r.status.startsWith('5') ? 'text-[#9A3A2D] font-semibold' : r.status.startsWith('4') ? 'text-[#9C6F1E]' : 'text-[#4F7C3A]'}`}>{r.status}</td>
+                          <td className={`py-1.5 text-right font-semibold ${r.dur >= 1000 ? 'text-[#9A3A2D]' : 'text-[#9C6F1E]'}`}>{r.dur}ms</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.dbDur}ms</td>
+                          <td className="py-1.5 font-mono text-[10px] text-[#8B8580] truncate max-w-[150px]" title={r.trace}>{r.trace ? r.trace.slice(3, 19) : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </CardContent>
           </Card>
         </>

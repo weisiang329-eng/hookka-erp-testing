@@ -235,7 +235,15 @@ ENVIRONMENT = "production"
 # CORS code parses the comma-separated list — see src/api/worker.ts.
 API_CORS_ORIGIN = "https://erp.hookka.com,https://hookka-erp-testing.pages.dev"
 APP_URL = "https://erp.hookka.com"
-RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@houzscentury.com>"
+# 2026-05-27 — Cut over from Resend (houzscentury.com) to Brevo (hookka.com).
+# Brevo Free tier supports the unlimited-domain need; Resend free was 1
+# domain only. The pluggable sender in src/api/lib/email.ts (sendMail)
+# auto-picks Brevo when BREVO_API_KEY is set (wrangler secret), falls back
+# to Resend otherwise. The FROM address below is read by every email
+# path (auth/forgot-password, supplier-PO, invite). Once Brevo finishes
+# its background domain authentication (~5-15 min from DNS-record-add,
+# can take up to 48h max), all outbound mail comes from @hookka.com.
+RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@hookka.com>"
 # Sentry — Cloudflare Workers DSN. DSNs are public-safe per Sentry docs:
 # they grant event-submission only, never data read access. Keeping the
 # value in [vars] (rather than `wrangler secret put`) means every deploy

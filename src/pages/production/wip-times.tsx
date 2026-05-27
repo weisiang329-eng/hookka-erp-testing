@@ -15,8 +15,9 @@ import { useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Clock, Download, AlertTriangle, Pencil, X } from "lucide-react";
+import { Clock, Download, Upload, AlertTriangle, Pencil, X, CheckCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { csrfHeaders } from "@/lib/csrf";
 import { DEPARTMENTS } from "./utils";
 import { useUrlState, useUrlStateBool } from "@/lib/use-url-state";
 import type * as XlsxNs from "xlsx";
@@ -155,6 +156,32 @@ export default function WipTimesPage() {
   const [editing, setEditing] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Import-from-Excel state. The flow is two-step:
+  //   1. Operator picks a file → we parse + POST dryRun → render `importPreview`
+  //   2. Operator clicks "Apply N changes" → we POST dryRun:false → toast result
+  // `importItems` holds the parsed rows so step 2 doesn't re-parse the file.
+  type ImportItem = { wipLabel: string; deptCode: string; minutes: number };
+  type ImportPreview = {
+    totalItems: number;
+    validItems: number;
+    applied: number;
+    skipped: number;
+    appliedBomCount: number;
+    itemErrors: { rowIdx: number; error: string }[];
+    perItem: Array<{
+      wipLabel: string;
+      deptCode: string;
+      minutes: number;
+      updatedBomCount: number;
+      updatedNodeCount: number;
+    }>;
+  };
+  const [importing, setImporting] = useState(false);
+  const [importItems, setImportItems] = useState<ImportItem[] | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importResult, setImportResult] = useState<ImportPreview | null>(null);
 
   const url = useMemo(() => {
     const params = new URLSearchParams();
@@ -308,6 +335,174 @@ export default function WipTimesPage() {
     } finally {
       setExporting(false);
     }
+  };
+
+  // -- Excel import ---------------------------------------------------------
+  //
+  // The operator workflow we're matching:
+  //   1. Hit Export Excel → edit the 'BOM Avg Minutes' column → save.
+  //   2. Hit Import Excel → pick the file.
+  //   3. See preview ("Will update X products in Y BOMs") → confirm.
+  //
+  // Parser rules (defensive):
+  //   - Header row is row 1. We find columns by name, NOT by position,
+  //     so the operator can reorder/hide columns in Excel without
+  //     breaking the import.
+  //   - Required headers: "WIP", "WIP Type Code", "Department",
+  //     "BOM Avg Minutes". The first three identify the row, the last
+  //     is the value to write.
+  //   - Department comes through as a human label ("Foam"). We map it
+  //     back to its code via DEPARTMENTS so the backend's deptCode
+  //     match still works.
+  //   - Rows where BOM Avg Minutes is blank or 0 are dropped (no
+  //     intent to change), so the import only writes the cells the
+  //     operator actually edited.
+  const DEPT_CODE_BY_LABEL = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of DEPARTMENTS) {
+      m.set(d.name.toLowerCase(), d.code);
+      m.set(d.code.toLowerCase(), d.code);
+    }
+    return m;
+  }, []);
+
+  const handleImportFile = async (file: File) => {
+    setImportError(null);
+    setImportPreview(null);
+    setImportResult(null);
+    setImporting(true);
+    try {
+      const XLSX: XLSXModule = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const sheetName = wb.SheetNames[0];
+      if (!sheetName) {
+        setImportError("Workbook has no sheets");
+        return;
+      }
+      const ws = wb.Sheets[sheetName];
+      const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 });
+      if (aoa.length < 2) {
+        setImportError("No data rows after the header");
+        return;
+      }
+      const headerRow = aoa[0] as unknown[];
+      const headers = headerRow.map((h) =>
+        typeof h === "string" ? h.trim().toLowerCase() : "",
+      );
+      const findCol = (...names: string[]): number => {
+        for (const n of names) {
+          const i = headers.indexOf(n.toLowerCase());
+          if (i >= 0) return i;
+        }
+        return -1;
+      };
+      const colWip = findCol("WIP");
+      const colDept = findCol("Department");
+      // colWipTypeCode is read from the export header but not used for
+      // matching — backend matches by (wipLabel, deptCode) already.
+      // Keeping the findCol call (commented out) as documentation of the
+      // exported columns the import contract is compatible with.
+      // const colWipTypeCode = findCol("WIP Type Code");
+      const colMinutes = findCol("BOM Avg Minutes", "BOM Minutes", "Minutes");
+      if (colWip < 0 || colDept < 0 || colMinutes < 0) {
+        setImportError(
+          `Missing required columns. Need "WIP", "Department", and "BOM Avg Minutes" — found ${headers.filter((h) => h).join(", ") || "no headers"}.`,
+        );
+        return;
+      }
+
+      const items: ImportItem[] = [];
+      const parseErrors: string[] = [];
+      for (let i = 1; i < aoa.length; i++) {
+        const row = aoa[i] as unknown[];
+        if (!row || row.length === 0) continue;
+        const wip = typeof row[colWip] === "string" ? (row[colWip] as string).trim() : "";
+        const deptRaw =
+          typeof row[colDept] === "string" ? (row[colDept] as string).trim() : "";
+        const minutesRaw = row[colMinutes];
+        // Blank/zero minutes = "no change intended" — skip.
+        const minutes =
+          typeof minutesRaw === "number"
+            ? minutesRaw
+            : Number(minutesRaw);
+        if (!wip) continue;
+        if (!Number.isFinite(minutes) || minutes <= 0) continue;
+        const deptCode = DEPT_CODE_BY_LABEL.get(deptRaw.toLowerCase());
+        if (!deptCode) {
+          parseErrors.push(
+            `Row ${i + 1}: unknown department "${deptRaw}" — must match one of ${DEPARTMENTS.map((d) => d.name).join(", ")}`,
+          );
+          continue;
+        }
+        items.push({ wipLabel: wip, deptCode, minutes });
+      }
+
+      if (items.length === 0) {
+        setImportError(
+          parseErrors.length > 0
+            ? `No valid rows. First parse errors: ${parseErrors.slice(0, 3).join("; ")}`
+            : "No rows with non-zero BOM Avg Minutes — fill in the column and try again.",
+        );
+        return;
+      }
+
+      // Dry-run preview — backend tells us how many BOMs / nodes would
+      // actually change. This is what the confirmation dialog shows.
+      const res = await fetch("/api/wip-times/bulk-import", {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ items, dryRun: true }),
+      });
+      const json = (await res.json()) as { success: boolean; error?: string } & ImportPreview;
+      if (!res.ok || !json.success) {
+        setImportError(json.error || `Preview failed (HTTP ${res.status})`);
+        return;
+      }
+      setImportItems(items);
+      setImportPreview(json);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleImportConfirm = async () => {
+    if (!importItems || importItems.length === 0 || importing) return;
+    setImporting(true);
+    setImportError(null);
+    try {
+      const res = await fetch("/api/wip-times/bulk-import", {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ items: importItems, dryRun: false }),
+      });
+      const json = (await res.json()) as { success: boolean; error?: string } & ImportPreview;
+      if (!res.ok || !json.success) {
+        setImportError(json.error || `Apply failed (HTTP ${res.status})`);
+        return;
+      }
+      setImportResult(json);
+      setImportPreview(null);
+      setImportItems(null);
+      // Invalidate the wip-times cache so the page reflects the new
+      // numbers without a manual refresh.
+      invalidateCachePrefix("/api/wip-times");
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const cancelImport = () => {
+    setImportItems(null);
+    setImportPreview(null);
+    setImportError(null);
+    setImportResult(null);
   };
 
   const columns: Column<WipTimeRow & { _key: string }>[] = useMemo(
@@ -484,16 +679,40 @@ export default function WipTimesPage() {
             WIPs where BOM hasn't set a time yet.
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleExport}
-          disabled={rows.length === 0 || exporting || loading}
-          className="shrink-0 mt-1"
-        >
-          <Download className="h-4 w-4 mr-1.5" />
-          {exporting ? "Exporting…" : "Export Excel"}
-        </Button>
+        <div className="flex items-center gap-2 shrink-0 mt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExport}
+            disabled={rows.length === 0 || exporting || loading}
+          >
+            <Download className="h-4 w-4 mr-1.5" />
+            {exporting ? "Exporting…" : "Export Excel"}
+          </Button>
+          <label
+            className={
+              "inline-flex items-center justify-center rounded-md border border-[#E2DDD8] bg-white px-3 h-9 text-sm font-medium cursor-pointer hover:bg-[#FAF8F5] " +
+              (importing ? "opacity-50 pointer-events-none" : "")
+            }
+            title="Edit BOM Avg Minutes in the exported Excel, then upload it back here to apply the changes."
+          >
+            <Upload className="h-4 w-4 mr-1.5" />
+            {importing ? "Importing…" : "Import Excel"}
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="sr-only"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                // Reset the input so picking the same file twice still
+                // fires onChange (useful when an edited file is re-saved
+                // under the same name).
+                e.target.value = "";
+                if (f) void handleImportFile(f);
+              }}
+            />
+          </label>
+        </div>
       </div>
 
       {/* Filter bar */}
@@ -806,6 +1025,120 @@ export default function WipTimesPage() {
           />
         </CardContent>
       </Card>
+
+      {/* Import preview / result / error overlay. Single dialog used by
+          all three states so the operator never sees a stale modal. */}
+      {(importPreview || importResult || importError) && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={cancelImport}
+        >
+          <div
+            className="w-full max-w-2xl bg-white rounded-lg shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-[#E2DDD8]">
+              <h2 className="font-semibold text-[#1F1D1B]">
+                {importResult
+                  ? "Import complete"
+                  : importError
+                    ? "Import failed"
+                    : "Confirm import"}
+              </h2>
+              <Button variant="ghost" size="sm" onClick={cancelImport}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="p-4 space-y-3 text-sm">
+              {importError && (
+                <p className="text-[#9A3A2D] bg-[#F9E1DA] p-3 rounded">
+                  {importError}
+                </p>
+              )}
+              {importPreview && !importResult && (
+                <>
+                  <p className="text-[#374151]">
+                    Reviewing your changes — nothing has been written yet.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="bg-[#FAF8F5] p-3 rounded">
+                      <div className="text-xs text-[#6B7280]">Rows in file</div>
+                      <div className="text-xl font-bold">{importPreview.totalItems}</div>
+                    </div>
+                    <div className="bg-[#FAF8F5] p-3 rounded">
+                      <div className="text-xs text-[#6B7280]">Valid rows</div>
+                      <div className="text-xl font-bold">{importPreview.validItems}</div>
+                    </div>
+                    <div className="bg-[#EEF3E4] p-3 rounded">
+                      <div className="text-xs text-[#6B7280]">WIPs that will change</div>
+                      <div className="text-xl font-bold text-[#4F7C3A]">
+                        {importPreview.applied}
+                      </div>
+                    </div>
+                    <div className="bg-[#FAF8F5] p-3 rounded">
+                      <div className="text-xs text-[#6B7280]">No-op (already at value)</div>
+                      <div className="text-xl font-bold text-[#6B7280]">
+                        {importPreview.skipped}
+                      </div>
+                    </div>
+                  </div>
+                  {importPreview.itemErrors.length > 0 && (
+                    <div className="bg-[#FAEFCB] p-3 rounded text-xs text-[#9C6F1E] max-h-32 overflow-auto">
+                      <div className="font-semibold mb-1">
+                        {importPreview.itemErrors.length} row(s) skipped due to errors:
+                      </div>
+                      {importPreview.itemErrors.slice(0, 10).map((e, i) => (
+                        <div key={i}>Row {e.rowIdx + 2}: {e.error}</div>
+                      ))}
+                      {importPreview.itemErrors.length > 10 && (
+                        <div>… +{importPreview.itemErrors.length - 10} more</div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              {importResult && (
+                <div className="space-y-2">
+                  <p className="text-[#4F7C3A] bg-[#EEF3E4] p-3 rounded flex items-center gap-2">
+                    <CheckCircle className="h-4 w-4 shrink-0" />
+                    Imported {importResult.applied} WIP change(s) into{" "}
+                    {importResult.appliedBomCount} BOM template(s).
+                  </p>
+                  {importResult.itemErrors.length > 0 && (
+                    <div className="bg-[#FAEFCB] p-3 rounded text-xs text-[#9C6F1E]">
+                      {importResult.itemErrors.length} row(s) reported errors — see browser console.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 p-4 border-t border-[#E2DDD8]">
+              {importPreview && !importResult && (
+                <>
+                  <Button variant="outline" size="sm" onClick={cancelImport}>
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={handleImportConfirm}
+                    disabled={importing || importPreview.applied === 0}
+                  >
+                    {importing
+                      ? "Applying…"
+                      : `Apply ${importPreview.applied} change${importPreview.applied === 1 ? "" : "s"}`}
+                  </Button>
+                </>
+              )}
+              {(importResult || (importError && !importPreview)) && (
+                <Button variant="primary" size="sm" onClick={cancelImport}>
+                  Close
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

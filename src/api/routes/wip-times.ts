@@ -542,4 +542,260 @@ app.put("/", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/wip-times/bulk-import — apply many (wipLabel × deptCode → minutes)
+// updates in one request.
+//
+// Operator workflow: hit "Export Excel" on the WIP Production Times page,
+// edit the 'BOM Avg Minutes' column in the spreadsheet, save, then "Import
+// Excel" → preview → apply. The FE parses the .xlsx itself (xlsx lib is
+// already in the bundle for the export side) and posts an array of
+// {wipLabel, deptCode, minutes} entries to this endpoint.
+//
+// Body: {
+//   items: Array<{ wipLabel: string, deptCode: string, minutes: number }>,
+//   dryRun?: boolean   // if true, returns the would-update counts WITHOUT
+//                       // touching the DB. The FE calls dryRun:true first
+//                       // and renders a preview; only on operator confirm
+//                       // does it call again with dryRun:false.
+// }
+//
+// Response: {
+//   success: true,
+//   mode: "dry-run" | "executed",
+//   totalItems, applied, skipped, errors,
+//   perItem: [{ wipLabel, deptCode, minutes, updatedBomCount, updatedNodeCount, error? }, …]
+// }
+//
+// Idempotent: re-running with the same items is a no-op (matching processes
+// already have those minutes, mutateMatchingNodes returns 0 changes). Same
+// permission gate as PUT (bom:update). Same minutes range guard (0-1440).
+// One UPDATE per affected bom_template per item — heavy on row count but
+// each statement is small. Sequential to keep the order predictable in the
+// per-item result list. For Hookka scale (~120 active BOM templates, ~150
+// rows per import) this completes in a couple seconds.
+// ---------------------------------------------------------------------------
+type BulkImportItem = {
+  wipLabel?: unknown;
+  deptCode?: unknown;
+  minutes?: unknown;
+};
+
+type BulkImportBody = {
+  items?: unknown;
+  dryRun?: unknown;
+};
+
+app.post("/bulk-import", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  let body: BulkImportBody;
+  try {
+    body = (await c.req.json()) as BulkImportBody;
+  } catch {
+    return c.json({ success: false, error: "invalid json" }, 400);
+  }
+  const dryRun = body.dryRun === true;
+  const rawItems = Array.isArray(body.items) ? body.items : null;
+  if (!rawItems) {
+    return c.json(
+      { success: false, error: "items must be an array" },
+      400,
+    );
+  }
+  if (rawItems.length === 0) {
+    return c.json(
+      { success: false, error: "items array is empty" },
+      400,
+    );
+  }
+  if (rawItems.length > 5000) {
+    return c.json(
+      { success: false, error: "max 5000 items per import" },
+      400,
+    );
+  }
+
+  // Validate every row up-front. We pre-flight so a bad row in the
+  // middle of the file doesn't half-apply the import.
+  type Parsed = { wipLabel: string; deptCode: string; minutes: number; rowIdx: number };
+  const parsed: Parsed[] = [];
+  const itemErrors: { rowIdx: number; error: string }[] = [];
+  for (let i = 0; i < rawItems.length; i++) {
+    const it = rawItems[i] as BulkImportItem;
+    const wipLabelRaw =
+      typeof it.wipLabel === "string" ? it.wipLabel.trim() : "";
+    const wipLabel = stripOrientationForMatch(wipLabelRaw);
+    const deptCode =
+      typeof it.deptCode === "string" ? it.deptCode.trim().toUpperCase() : "";
+    const minutesRaw = Number(it.minutes);
+    if (!wipLabel) {
+      itemErrors.push({ rowIdx: i, error: "wipLabel required" });
+      continue;
+    }
+    if (!deptCode) {
+      itemErrors.push({ rowIdx: i, error: "deptCode required" });
+      continue;
+    }
+    if (!Number.isFinite(minutesRaw) || minutesRaw < 0 || minutesRaw > 1440) {
+      itemErrors.push({
+        rowIdx: i,
+        error: "minutes must be 0–1440 (24h cap)",
+      });
+      continue;
+    }
+    parsed.push({
+      wipLabel,
+      deptCode,
+      minutes: Math.round(minutesRaw),
+      rowIdx: i,
+    });
+  }
+
+  if (parsed.length === 0) {
+    return c.json({
+      success: false,
+      error: "no valid rows after validation",
+      itemErrors,
+    });
+  }
+
+  // Pull every ACTIVE BOM in the org ONCE — same query the single PUT
+  // does, but we'll loop the matching pass over every parsed item to
+  // amortise the SELECT. The mutateMatchingNodes pass against the parsed
+  // tree is in-memory so it's cheap to repeat per item.
+  const result = await c.var.DB.prepare(
+    `SELECT
+       bt.id               AS "id",
+       bt.productCode      AS "productCode",
+       bt.baseModel        AS "baseModel",
+       bt.category         AS "category",
+       bt.wipComponents    AS "wipComponents",
+       p.defaultVariants   AS "defaultVariants",
+       p.sizeCode          AS "sizeCode",
+       p.sizeLabel         AS "sizeLabel"
+     FROM bom_templates bt
+     LEFT JOIN products p ON p.code = bt.productCode AND p.orgId = bt.orgId
+     WHERE bt.orgId = ? AND UPPER(bt.versionStatus) = 'ACTIVE'`,
+  )
+    .bind(orgId)
+    .all<BomRow & { id: string }>();
+  const bomRows = result.results ?? [];
+
+  // Parse each BOM tree once and cache the variant context. Each item's
+  // pass then walks the cached parsed structures in memory.
+  type BomCache = {
+    id: string;
+    tree: BomWipNode[];
+    ctx: BomVariantContext;
+    dirty: boolean;
+  };
+  const bomCache: BomCache[] = [];
+  for (const row of bomRows) {
+    if (!row.wipComponents) continue;
+    let tree: unknown;
+    try {
+      tree = JSON.parse(row.wipComponents);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(tree)) continue;
+    let defaults: DefaultVariantsBlob | null = null;
+    if (row.defaultVariants) {
+      try {
+        defaults = JSON.parse(row.defaultVariants) as DefaultVariantsBlob;
+      } catch {
+        defaults = null;
+      }
+    }
+    const ctx = buildVariantContext(
+      row.productCode,
+      row.baseModel,
+      row.sizeCode,
+      row.sizeLabel,
+      defaults,
+    );
+    bomCache.push({ id: row.id, tree: tree as BomWipNode[], ctx, dirty: false });
+  }
+
+  // Per-item update pass over the cache. We DON'T write until after the
+  // loop so dry-run and live runs share the same code path (and so a
+  // late error doesn't leave us half-applied).
+  const perItem: Array<{
+    wipLabel: string;
+    deptCode: string;
+    minutes: number;
+    updatedBomCount: number;
+    updatedNodeCount: number;
+  }> = [];
+  for (const item of parsed) {
+    let updatedBomCount = 0;
+    let updatedNodeCount = 0;
+    for (const bom of bomCache) {
+      const nodesUpdated = mutateMatchingNodes(
+        bom.tree,
+        bom.ctx,
+        item.wipLabel,
+        item.deptCode,
+        item.minutes,
+      );
+      if (nodesUpdated > 0) {
+        bom.dirty = true;
+        updatedBomCount++;
+        updatedNodeCount += nodesUpdated;
+      }
+    }
+    perItem.push({
+      wipLabel: item.wipLabel,
+      deptCode: item.deptCode,
+      minutes: item.minutes,
+      updatedBomCount,
+      updatedNodeCount,
+    });
+  }
+
+  // Write the dirty BOMs back, one row per UPDATE. Sequential to keep
+  // error reporting per-row simple and to avoid pile-up under load.
+  let appliedBomCount = 0;
+  if (!dryRun) {
+    for (const bom of bomCache) {
+      if (!bom.dirty) continue;
+      try {
+        await c.var.DB
+          .prepare(
+            `UPDATE bom_templates SET wipComponents = ? WHERE id = ? AND orgId = ?`,
+          )
+          .bind(JSON.stringify(bom.tree), bom.id, orgId)
+          .run();
+        appliedBomCount++;
+      } catch (e) {
+        // Don't abort the rest — record the write failure but keep going
+        // so an isolated row corruption doesn't lose every other update.
+        itemErrors.push({
+          rowIdx: -1,
+          error: `bom_template ${bom.id} write failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    }
+  }
+
+  const totalItems = rawItems.length;
+  const applied = perItem.filter((p) => p.updatedNodeCount > 0).length;
+  const skipped = perItem.length - applied;
+
+  return c.json({
+    success: true,
+    mode: dryRun ? "dry-run" : "executed",
+    totalItems,
+    validItems: parsed.length,
+    applied,
+    skipped,
+    appliedBomCount,
+    itemErrors,
+    perItem,
+  });
+});
+
 export default app;

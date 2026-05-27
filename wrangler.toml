@@ -224,8 +224,17 @@ dataset = "hookka_erp_metrics"
 #     JWT_SECRET                     — HMAC secret for OAuth CSRF state token
 [vars]
 ENVIRONMENT = "production"
-API_CORS_ORIGIN = "https://hookka-erp-testing.pages.dev"
-APP_URL = "https://hookka-erp-testing.pages.dev"
+# 2026-05-27 — Custom-domain cutover to erp.hookka.com. Multi-origin
+# allowlist so BOTH the new prod domain AND the legacy pages.dev URL
+# work in parallel. Once everyone (employees, integrations, bookmarks)
+# is on the new URL, we can drop hookka-erp-testing.pages.dev from
+# the list. The pages.dev URL itself never goes away — CF Pages
+# permanently serves it — so dropping it from CORS just means
+# browser-side fetches from that origin start failing CORS while
+# server-to-server traffic (cron, Apps Script webhook) keeps working.
+# CORS code parses the comma-separated list — see src/api/worker.ts.
+API_CORS_ORIGIN = "https://erp.hookka.com,https://hookka-erp-testing.pages.dev"
+APP_URL = "https://erp.hookka.com"
 RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@houzscentury.com>"
 # Sentry — Cloudflare Workers DSN. DSNs are public-safe per Sentry docs:
 # they grant event-submission only, never data read access. Keeping the

@@ -102,12 +102,14 @@ function wipTypePillClass(code: string): string {
   }
 }
 
+// 2026-05-27 Wei Siang: drop the "1h 30m" hours formatting — every WIP
+// time is stored, displayed, and edited as minutes. Mixing "h" and "m"
+// in one column makes the import parser ambiguous (is "1.5" hours or
+// minutes?) and the operator has to convert in their head when reading
+// the column. Minutes-only everywhere — typed, displayed, parsed.
 function fmtMinutes(min: number): string {
   if (min <= 0) return "—";
-  if (min < 60) return `${min}m`;
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  return `${min}m`;
 }
 
 // "Xm" when flat across products, "Xm – Yh Zm (avg Wm)" when minutes
@@ -411,25 +413,27 @@ export default function WipTimesPage() {
         return;
       }
 
-      // Parses "15m", "1h", "1h 30m", or a plain number into minutes.
-      // Operator-friendly so they can type "15m" in the BOM Time column
-      // exactly like the inline edit dialog displays it. Plain numeric
-      // strings are treated as minutes (matches the BOM Avg Minutes
-      // column semantics). Returns 0 if the input is empty or
-      // unparseable — calling code skips zero rows.
+      // Parses "15m" or a plain number into minutes. 2026-05-27 — Wei
+      // Siang locked the BOM time unit to minutes-only system-wide,
+      // so this parser only accepts:
+      //   • "15m"       (the canonical display format)
+      //   • "15"        (bare number — treated as minutes)
+      //   • 15          (numeric cell)
+      // Hours suffix "1h" / "1h 30m" returns -1 so the caller can
+      // surface an error to the operator instead of silently
+      // misinterpreting (1h → 1m would set a 60× too-small value).
+      // Returns 0 for empty/unparseable input — caller skips zero rows.
       const parseBomTime = (raw: unknown): number => {
         if (raw === null || raw === undefined) return 0;
         if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
         const s = String(raw).trim().toLowerCase();
         if (!s) return 0;
-        const hMatch = s.match(/(\d+(?:\.\d+)?)\s*h/);
-        const mMatch = s.match(/(\d+(?:\.\d+)?)\s*m/);
-        if (hMatch || mMatch) {
-          const hours = hMatch ? parseFloat(hMatch[1]) : 0;
-          const mins = mMatch ? parseFloat(mMatch[1]) : 0;
-          return Math.round(hours * 60 + mins);
-        }
-        // Bare number string like "15" → treat as minutes.
+        // Reject hours notation — explicit error rather than silent
+        // wrong-unit ingestion.
+        if (/\d\s*h\b/.test(s)) return -1;
+        const mMatch = s.match(/^(\d+(?:\.\d+)?)\s*m$/);
+        if (mMatch) return Math.round(parseFloat(mMatch[1]));
+        // Bare number like "15" → minutes.
         const n = Number(s);
         return Number.isFinite(n) ? Math.round(n) : 0;
       };
@@ -452,7 +456,14 @@ export default function WipTimesPage() {
           if (Number.isFinite(n) && n > 0) minutes = Math.round(n);
         }
         if (minutes <= 0 && colBomTime >= 0) {
-          minutes = parseBomTime(row[colBomTime]);
+          const parsed = parseBomTime(row[colBomTime]);
+          if (parsed === -1) {
+            parseErrors.push(
+              `Row ${i + 1}: BOM Time "${String(row[colBomTime])}" uses hours notation — use minutes only (e.g. "90m" not "1h 30m"). The whole system stores BOM time as minutes.`,
+            );
+            continue;
+          }
+          minutes = parsed;
         }
         if (!wip) continue;
         // Blank/zero minutes = "no change intended" — skip silently.
@@ -729,7 +740,7 @@ export default function WipTimesPage() {
               "inline-flex items-center justify-center rounded-md border border-[#E2DDD8] bg-white px-3 h-9 text-sm font-medium cursor-pointer hover:bg-[#FAF8F5] " +
               (importing ? "opacity-50 pointer-events-none" : "")
             }
-            title='Edit "BOM Avg Minutes" (a number) OR "BOM Time" (e.g. "15m", "1h 30m") in the exported Excel, then upload it back here to apply the changes.'
+            title='Edit "BOM Avg Minutes" (a number) OR "BOM Time" (e.g. "15m" — minutes only, hours format not accepted) in the exported Excel, then upload it back here to apply the changes.'
           >
             <Upload className="h-4 w-4 mr-1.5" />
             {importing ? "Importing…" : "Import Excel"}

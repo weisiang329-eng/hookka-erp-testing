@@ -157,11 +157,31 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
     try { c.set("traceparent", traceparent); } catch { /* ignore */ }
   }
 
-  await next();
+  // 2026-05-27 — capture thrown exceptions so the AE write below can
+  // store the error message. Without this, 5xx rows show up with no
+  // text and the operator has to wrangler-tail to find the actual
+  // stack. Captured message is truncated to 200 chars (column budget +
+  // PII safety — long stacks may include user-typed strings).
+  let errMsg = "";
+  let errCaught: unknown = null;
+  try {
+    await next();
+  } catch (err) {
+    errCaught = err;
+    errMsg = ((err instanceof Error ? err.message : String(err)) || "").slice(
+      0,
+      200,
+    );
+  }
   const dur = Date.now() - start;
   const path = new URL(c.req.url).pathname;
+  const method = c.req.method;
+  // If next() threw, Hono's onError will respond 500 later but c.res.status
+  // is still the default at this point. Treat any caught throw as 500 so
+  // the dashboard counts it correctly.
+  const responseStatus = errCaught ? 500 : c.res.status;
   const tpPart = traceparent ? ` traceparent=${traceparent}` : "";
-  const line = `[req] method=${c.req.method} path=${path} status=${c.res.status} dur_ms=${dur}${tpPart}`;
+  const line = `[req] method=${method} path=${path} status=${responseStatus} dur_ms=${dur}${tpPart}`;
   // P6.1 — sampling. Slow lines always emit. Normal lines emit at 1% in
   // prod, 100% otherwise. Gate on c.env.ENVIRONMENT (set in wrangler.toml).
   const envName = (c.env as { ENVIRONMENT?: string } | undefined)?.ENVIRONMENT;
@@ -184,23 +204,33 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   } catch { /* ignore */ }
 
   // P6.2 — Analytics Engine timing event (req).  No-op when binding absent.
+  // 2026-05-27: extended to capture HTTP method (blob5) + truncated
+  // error message (blob6). Operator can drill from "5xx spike on
+  // /api/sales-orders" to the actual error text without `wrangler tail`.
   const ae = getMetrics(c.env);
   if (ae) {
-    const status = c.res.status;
     try {
       ae.writeDataPoint?.({
-        indexes: [`req|${path}|${status}`],
-        blobs: ["req", path, String(status), traceparent],
+        indexes: [`req|${path}|${responseStatus}`],
+        blobs: [
+          "req",
+          path,
+          String(responseStatus),
+          traceparent,
+          method,
+          errMsg,
+        ],
         doubles: [dur, dbTimer.total, dbTimer.count],
       });
     } catch { /* swallow */ }
-    // P6.3 — auto-counters for 4xx / 5xx so the dashboard can chart error
-    // rate without inspecting every req row. Status < 400 is the happy
-    // path; 4xx and 5xx each get their own counter event so the query
-    // can `WHERE blob1 = 'req.5xx'` cheaply.
-    if (status >= 500) emitCounter(c, "req.5xx", { resource: path });
-    else if (status >= 400) emitCounter(c, "req.4xx", { resource: path });
+    if (responseStatus >= 500) emitCounter(c, "req.5xx", { resource: path });
+    else if (responseStatus >= 400)
+      emitCounter(c, "req.4xx", { resource: path });
   }
+
+  // Re-throw the captured error AFTER AE write so Hono's onError still
+  // converts it to a 500 response. The timing data is preserved.
+  if (errCaught) throw errCaught;
 }
 
 // Wrap a D1Database (or Postgres-compat SupabaseAdapter) so every

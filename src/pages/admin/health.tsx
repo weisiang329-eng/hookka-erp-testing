@@ -180,6 +180,31 @@ type LongTaskRow = {
   trace: string;
   timestamp: string;
 };
+type StatusBreakdownRow = { status: string; count: number };
+type ErrorMessageRow = {
+  route: string;
+  status: string;
+  errMsg: string;
+  n: number;
+  trace: string;
+};
+
+// Plain-language hint per status code so the operator knows WHY each
+// code matters, not just the number. Sourced from the dashboard
+// comments in admin-health.ts.
+const STATUS_HINT: Record<string, string> = {
+  "400": "Validation rejected (bad input)",
+  "401": "Auth token missing/expired",
+  "403": "Permission denied (RBAC)",
+  "404": "URL not found — possibly FE bug",
+  "409": "Conflict / version stale",
+  "422": "Validation reject (schema)",
+  "429": "Rate limit hit",
+  "500": "Internal server error (code bug)",
+  "502": "Upstream gateway down",
+  "503": "Service unavailable",
+  "504": "Gateway timeout (DB slow)",
+};
 
 // Tiny stacked-bar chart for the hourly error overlay. 4xx grey, 5xx
 // red. Same SVG primitive idea as the sparkline — no recharts overhead.
@@ -260,6 +285,14 @@ export default function AdminHealthPage() {
     success: boolean;
     data: DailyTrend;
   }>(`/api/admin/health/daily-trend${rangeQS}`, 60);
+  const { data: statusBreakdownResp } = useCachedJson<{
+    success: boolean;
+    data: StatusBreakdownRow[];
+  }>(`/api/admin/health/status-breakdown${rangeQS}`, 60);
+  const { data: errorMessagesResp } = useCachedJson<{
+    success: boolean;
+    data: ErrorMessageRow[];
+  }>(`/api/admin/health/error-messages${rangeQS}`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -274,6 +307,8 @@ export default function AdminHealthPage() {
     p95: new Array(24).fill(0),
     errors: new Array(24).fill(0),
   };
+  const statusBreakdown = statusBreakdownResp?.data ?? [];
+  const errorMessages = errorMessagesResp?.data ?? [];
 
   return (
     <div className="p-6 space-y-6">
@@ -460,6 +495,75 @@ export default function AdminHealthPage() {
                       ))}
                     </tbody>
                   </table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Status code breakdown + recent error messages.
+              Highest-ROI root-cause panels — they answer "WHY" rather
+              than just "WHERE". Status code hints translate raw codes
+              into plain-language explanations so the operator doesn't
+              need to memorise HTTP semantics. */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Status code breakdown ({RANGE_LABEL[range].toLowerCase()})
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {statusBreakdown.length === 0 ? (
+                  <p className="text-xs text-[#4F7C3A]">No 4xx / 5xx in this window. Healthy.</p>
+                ) : (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">Code</th>
+                        <th className="py-1.5 font-medium">Meaning</th>
+                        <th className="py-1.5 font-medium text-right">Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {statusBreakdown.map((r) => (
+                        <tr key={r.status} className="border-b border-[#F5F2EE]">
+                          <td className={`py-1.5 font-mono font-semibold ${r.status.startsWith('5') ? 'text-[#9A3A2D]' : 'text-[#9C6F1E]'}`}>{r.status}</td>
+                          <td className="py-1.5 text-[#5A5550]">{STATUS_HINT[r.status] ?? '—'}</td>
+                          <td className="py-1.5 text-right text-[#5A5550]">{r.count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  5xx error messages (top 20, {RANGE_LABEL[range].toLowerCase()})
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {errorMessages.length === 0 ? (
+                  <p className="text-xs text-[#4F7C3A]">No 5xx with captured error text. (Newly-deployed; older 5xx don't have error text stored.)</p>
+                ) : (
+                  <div className="overflow-y-auto max-h-72 -mx-2 px-2">
+                    {errorMessages.map((r, i) => (
+                      <div key={i} className="py-1.5 border-b border-[#F5F2EE] last:border-b-0">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-mono text-[11px] text-[#1F1D1B] truncate" title={r.route}>{r.route}</span>
+                          <span className="text-[10px] text-[#8B8580] shrink-0">×{r.n} · {r.status}</span>
+                        </div>
+                        <div className="text-[11px] text-[#9A3A2D] mt-0.5 font-mono break-all">{r.errMsg || '(no message)'}</div>
+                        {r.trace && (
+                          <div className="text-[10px] text-[#8B8580] mt-0.5 font-mono truncate" title={r.trace}>
+                            trace: {r.trace.slice(3, 19)}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </CardContent>
             </Card>

@@ -617,6 +617,86 @@ app.get("/errors-hourly", async (c) => {
 // requests in the last 24h with route, status, duration, db time, and
 // traceparent (so the operator can chase the slow ones in `wrangler
 // tail` logs).
+// Status code breakdown — instead of bucketing all 4xx + 5xx together,
+// surface each specific code (401 = token expired, 403 = RBAC, 404 =
+// FE bug fetching wrong URL, 422 = validation reject, 429 = rate limit,
+// 500 = server bug, etc). Each code maps to a different root cause.
+app.get("/status-breakdown", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob3 AS status, count() AS n
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - ${WINDOW}
+        AND (blob3 LIKE '4%' OR blob3 LIKE '5%')
+      GROUP BY status
+      ORDER BY n DESC
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    return (resp.data ?? []).map((r) => {
+      const row = r as Record<string, unknown>;
+      return {
+        status: String(row.status ?? ""),
+        count: Number(row.n) || 0,
+      };
+    });
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+// Error messages — for every 5xx + 4xx, what was the actual error
+// text? This is the highest-ROI root-cause signal. Without it the
+// operator sees "8 5xx errors on /api/sales-orders" and has no idea
+// whether it's a null deref bug, a DB connection failure, or a
+// validation bug. With it, they see the top error strings + a
+// representative trace ID per error so they can `wrangler tail
+// | grep <trace>` for the full stack.
+app.get("/error-messages", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             blob3 AS status,
+             blob6 AS errMsg,
+             blob4 AS trace,
+             count() AS n
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req'
+        AND timestamp > NOW() - ${WINDOW}
+        AND blob3 LIKE '5%'
+      GROUP BY route, status, errMsg, trace
+      ORDER BY n DESC
+      LIMIT 50
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    // Group by (route, errMsg) and keep one representative trace per group.
+    const grouped = new Map<
+      string,
+      { route: string; status: string; errMsg: string; n: number; trace: string }
+    >();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      const status = String(row.status ?? "");
+      const errMsg = String(row.errMsg ?? "");
+      const trace = String(row.trace ?? "");
+      const n = Number(row.n) || 0;
+      const key = `${route}|${errMsg}`;
+      if (!grouped.has(key)) {
+        grouped.set(key, { route, status, errMsg, n: 0, trace });
+      }
+      const g = grouped.get(key)!;
+      g.n += n;
+      if (!g.trace && trace) g.trace = trace;
+    }
+    return [...grouped.values()]
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 20);
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
 // Daily latency trend — one P50 + P95 point per day across the window.
 // Lets the operator see "Sep 5 was slow + Sep 10 was very slow" at a
 // glance instead of one aggregated number for the whole 90d.

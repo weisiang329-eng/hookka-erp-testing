@@ -313,6 +313,59 @@ function HourlyErrorChart({ data }: { data: HourlyErrors }) {
   );
 }
 
+// Section divider — visually groups related panels so the dashboard
+// reads as ordered sections rather than a wall of cards. Each section
+// has a single-word "what is this for" prefix and a one-line explainer
+// so a SUPER_ADMIN can scan top-to-bottom and know what each block is
+// answering.
+function SectionHeader({
+  title,
+  hint,
+}: {
+  title: string;
+  hint: string;
+}) {
+  return (
+    <div className="pt-2 pb-1 border-b border-[#E2DDD8]">
+      <h2 className="text-[15px] font-semibold text-[#1F1D1B]">{title}</h2>
+      <p className="text-[11px] text-[#8B8580] mt-0.5">{hint}</p>
+    </div>
+  );
+}
+
+// Health status banner. Computed from KPIs + counters; tells the
+// operator at a glance "is the system OK right now". Three tones:
+//   🟢 Healthy — nothing red, P95 < 500, no 5xx, FE errors low
+//   🟡 Investigate — some 4xx OR P95 500-1500ms OR moderate FE errors
+//   🔴 Critical — 5xx > 10 OR P95 > 2000ms OR many concurrent issues
+type HealthTone = "green" | "amber" | "red" | "loading";
+function HealthStatusCard({
+  tone,
+  label,
+  detail,
+}: {
+  tone: HealthTone;
+  label: string;
+  detail: string;
+}) {
+  const toneClasses: Record<HealthTone, string> = {
+    green: "border-[#B7D3A4] bg-[#F0F6EB] text-[#2F5C20]",
+    amber: "border-[#E6C490] bg-[#FBF1DC] text-[#7A5410]",
+    red: "border-[#E8AFA4] bg-[#FBE9E5] text-[#7E251A]",
+    loading: "border-[#E2DDD8] bg-[#FAF8F5] text-[#5A5550]",
+  };
+  const icon = tone === "green" ? "🟢" : tone === "amber" ? "🟡" : tone === "red" ? "🔴" : "⏳";
+  return (
+    <div className={`rounded-md border p-3 flex items-center gap-3 ${toneClasses[tone]}`}>
+      <span className="text-lg">{icon}</span>
+      <div className="flex-1">
+        <div className="text-sm font-semibold">{label}</div>
+        {detail && <div className="text-[11px] mt-0.5 opacity-90">{detail}</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminHealthPage() {
   // Active time range. Defaulting to 24h matches the historical
   // "Last 24 hours" copy + is the cheapest scan over AE.
@@ -385,11 +438,16 @@ export default function AdminHealthPage() {
     p95: new Array(24).fill(0),
     errors: new Array(24).fill(0),
   };
-  const statusBreakdown = statusBreakdownResp?.data ?? [];
-  const errorMessages = errorMessagesResp?.data ?? [];
-  const slowSql = slowSqlResp?.data ?? [];
-  const feErrors = feErrorsResp?.data ?? [];
-  const fePerf = fePerfResp?.data ?? [];
+  // useMemo on the ?? [] fallbacks so the empty-array literal doesn't
+  // change identity every render — the healthStatus / moduleOpenTimes
+  // memos below depend on these arrays and would otherwise re-compute
+  // on every parent render. Keeps the perf-monitoring page from being
+  // a memory churn source itself.
+  const statusBreakdown = useMemo(() => statusBreakdownResp?.data ?? [], [statusBreakdownResp]);
+  const errorMessages = useMemo(() => errorMessagesResp?.data ?? [], [errorMessagesResp]);
+  const slowSql = useMemo(() => slowSqlResp?.data ?? [], [slowSqlResp]);
+  const feErrors = useMemo(() => feErrorsResp?.data ?? [], [feErrorsResp]);
+  const fePerf = useMemo(() => fePerfResp?.data ?? [], [fePerfResp]);
   const auditFeed = auditFeedResp?.data ?? [];
   const auditSummary = auditFeedResp?.summary ?? { byAction: [], byResource: [] };
 
@@ -426,18 +484,71 @@ export default function AdminHealthPage() {
   // Recent entries — newest 20 (file is newest-first already, so just slice).
   const recentFixes = useMemo(() => bugHistory.slice(0, 20), [bugHistory]);
 
+  // Module open times — filters fePerf for the `nav` metric (which
+  // covers BOTH initial page load AND SPA route changes since the
+  // patched history.pushState emits the same metric). Sorted by P95
+  // descending so the slowest modules to open surface first. This is
+  // the panel that directly answers "when I click into DO / SO /
+  // Production etc, how long does it take" — exactly what Wei Siang
+  // asked for.
+  const moduleOpenTimes = useMemo(
+    () => fePerf.filter((p) => p.metric === "nav").sort((a, b) => b.p95 - a.p95).slice(0, 15),
+    [fePerf],
+  );
+
+  // Auto-computed health summary — single colored banner so the
+  // operator's first-glance answer is "is the system OK right now".
+  // Three thresholds based on rough Hookka-scale operator expectations
+  // (~40-500 req/24h, P95 typically 100-500ms when healthy).
+  const healthStatus = useMemo<{
+    tone: HealthTone;
+    label: string;
+    detail: string;
+  }>(() => {
+    if (!kpis) return { tone: "loading", label: "Loading…", detail: "" };
+    const issues: string[] = [];
+    if (kpis.p95 >= 1500) issues.push(`P95 latency ${kpis.p95}ms`);
+    if (kpis.longTaskCount > 500) issues.push(`${kpis.longTaskCount} long tasks`);
+    const fiveXX = statusBreakdown
+      .filter((s) => s.status.startsWith("5"))
+      .reduce((a, b) => a + b.count, 0);
+    if (fiveXX > 0) issues.push(`${fiveXX} server errors`);
+    const feErrCount = feErrors.reduce((a, b) => a + b.n, 0);
+    if (feErrCount > 10) issues.push(`${feErrCount} FE errors`);
+    if (issues.length === 0) {
+      return {
+        tone: "green",
+        label: "All systems normal",
+        detail: `P50 ${kpis.p50}ms · P95 ${kpis.p95}ms · Cache ${Math.round(kpis.cacheHitRatio * 100)}% · No 5xx`,
+      };
+    }
+    // Critical thresholds — any of these alone is enough to escalate.
+    const critical =
+      kpis.p95 >= 2000 ||
+      fiveXX > 10 ||
+      feErrCount > 50 ||
+      issues.length >= 3;
+    return {
+      tone: critical ? "red" : "amber",
+      label: critical ? "Critical — investigate now" : "Investigate",
+      detail: issues.join(" · "),
+    };
+  }, [kpis, statusBreakdown, feErrors]);
+
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+    <div className="p-6 space-y-5">
+      {/* Sticky header. Range toggle + title always visible while
+          scrolling — without this you had to scroll back up to switch
+          ranges every time. negative-margin trick stretches the bar
+          edge-to-edge inside the p-6 wrapper. */}
+      <div className="sticky top-0 z-20 -mx-6 px-6 py-3 bg-[#FAF8F5]/95 backdrop-blur border-b border-[#E2DDD8] flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-semibold text-[#1F1D1B]">System Health</h1>
-          <p className="text-sm text-[#5A5550] mt-1">
-            Aggregate request timing + error counters from Cloudflare Analytics Engine. {RANGE_LABEL[range]}.
+          <h1 className="text-xl font-semibold text-[#1F1D1B]">System Health</h1>
+          <p className="text-[11px] text-[#8B8580] mt-0.5">
+            {RANGE_LABEL[range]} · Cloudflare AE + Postgres
           </p>
         </div>
-        {/* Range toggle — 24h / 7d / 30d. AE retention is 92 days so 30d
-            is comfortably within the window. All Phase 2 panels share
-            this state. */}
+        {/* Range toggle. All panels share this state. */}
         <div className="inline-flex rounded-md border border-[#E2DDD8] bg-white p-0.5">
           {(["24h", "7d", "30d", "90d"] as const).map((r) => (
             <Button
@@ -452,6 +563,16 @@ export default function AdminHealthPage() {
           ))}
         </div>
       </div>
+
+      {/* Auto-computed health status — single colored banner that
+          summarises P95, server errors, FE errors, and long tasks into
+          one tone (green / amber / red). First thing the operator sees
+          after page load. */}
+      <HealthStatusCard
+        tone={healthStatus.tone}
+        label={healthStatus.label}
+        detail={healthStatus.detail}
+      />
 
       {kpis?._mock && (
         <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
@@ -474,6 +595,11 @@ export default function AdminHealthPage() {
 
       {kpis && (
         <>
+          {/* ────────── RIGHT NOW ────────── */}
+          <SectionHeader
+            title="Right Now"
+            hint="Headline numbers for the chosen window. P95 = the slowest 5% of requests; long tasks = requests >=200ms; cache hit ratio = snapshot reads served from cache."
+          />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <KpiCard label="p50 latency" value={kpis.p50} unit="ms" icon={Clock} />
             <KpiCard label="p75 latency" value={kpis.p75} unit="ms" icon={Clock} />
@@ -527,6 +653,53 @@ export default function AdminHealthPage() {
                 <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : range === "30d" ? "30d ago" : "90d ago"}</span>
                 <span>now</span>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* ────────── SPEED ────────── */}
+          <SectionHeader
+            title="Speed — where it's slow"
+            hint="Click into a module slow? → check Module Open Times. API slow? → check Top Endpoints + Slow SQL. UI freezing? → check Front-End perf."
+          />
+
+          {/* Module open times (SPA nav + initial loads). Filters
+              fePerf for metric=nav and sorts by P95. This is the
+              "when I open Sales / Production / Payroll how long does
+              it take" panel — directly answers the most-asked
+              operator question. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Module open times ({RANGE_LABEL[range].toLowerCase()}) — click-to-stable-frame per route
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {moduleOpenTimes.length === 0 ? (
+                <p className="text-xs text-[#8B8580]">
+                  No nav timing yet — RUM auto-records every initial page load + SPA route change. Give it a few visits after deploy.
+                </p>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                      <th className="py-1.5 font-medium">Route (module)</th>
+                      <th className="py-1.5 font-medium text-right">Opens</th>
+                      <th className="py-1.5 font-medium text-right">P50</th>
+                      <th className="py-1.5 font-medium text-right">P95</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {moduleOpenTimes.map((r, i) => (
+                      <tr key={i} className="border-b border-[#F5F2EE]">
+                        <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[280px]" title={r.route}>{r.route || '/'}</td>
+                        <td className="py-1.5 text-right text-[#5A5550]">{r.hits}</td>
+                        <td className="py-1.5 text-right text-[#5A5550]">{r.p50}ms</td>
+                        <td className={`py-1.5 text-right font-semibold ${r.p95 >= 2500 ? 'text-[#9A3A2D]' : r.p95 >= 1000 ? 'text-[#9C6F1E]' : 'text-[#4F7C3A]'}`}>{r.p95}ms</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </CardContent>
           </Card>
 
@@ -615,6 +788,12 @@ export default function AdminHealthPage() {
               </CardContent>
             </Card>
           </div>
+
+          {/* ────────── ERRORS ────────── */}
+          <SectionHeader
+            title="Errors — what's failing"
+            hint="Status codes tell you the family of problem; error messages tell you the exact cause. Front-End errors are what users see in the browser."
+          />
 
           {/* Status code breakdown + recent error messages.
               Highest-ROI root-cause panels — they answer "WHY" rather
@@ -841,6 +1020,12 @@ export default function AdminHealthPage() {
             </Card>
           </div>
 
+          {/* ────────── ACTIVITY ────────── */}
+          <SectionHeader
+            title="Activity — who did what"
+            hint="Every business mutation (confirm / create / update / delete) plus the slowest individual requests with their trace IDs for wrangler-tail drill-down."
+          />
+
           {/* Phase-7 audit feed. Surfaces every business mutation
               (SO confirmed, JC status updated, user role changed,
               etc.) so the operator can see at a glance "WHO did WHAT
@@ -917,6 +1102,12 @@ export default function AdminHealthPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* ────────── HISTORY ────────── */}
+          <SectionHeader
+            title="History — what we've fixed"
+            hint="docs/BUG-HISTORY.md surfaced live. Modules with high bug counts are pattern signals — fix the structure, not the next instance."
+          />
 
           {/* Past Fixes — surfaces docs/BUG-HISTORY.md on the dashboard
               so the operator sees pattern alongside current issues.

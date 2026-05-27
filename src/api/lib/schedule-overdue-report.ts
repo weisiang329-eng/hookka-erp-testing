@@ -166,10 +166,14 @@ export async function collectScheduleData(
 }
 
 // ─── OVERDUE ───────────────────────────────────────────────────────────────
-// SO-level. ONE row per SO that was promised but not yet delivered.
-// "Promised but not delivered" =
+// SO-level. ONE row per SO that was promised but isn't yet finished.
+// "Promised but not finished" =
 //   so.customerDeliveryDate < today
-//   AND so.status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED')
+//   AND so.status IN ('DRAFT','CONFIRMED','IN_PRODUCTION','ON_HOLD')
+// Excludes READY_TO_SHIP / SHIPPED / DELIVERED / INVOICED / CLOSED /
+// CANCELLED. Wei Siang's rule: "只看还没做完的" — once production has
+// signed off (READY_TO_SHIP) the overdue is a warehouse/delivery problem,
+// not a production problem, and this report is for the production team.
 // Flat list (no grouping), sorted by days overdue desc (worst first).
 
 export interface OverdueRow {
@@ -239,7 +243,7 @@ export async function collectOverdueData(
      WHERE customerDeliveryDate < ?
        AND customerDeliveryDate IS NOT NULL
        AND customerDeliveryDate <> ''
-       AND status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED')
+       AND status IN ('DRAFT','CONFIRMED','IN_PRODUCTION','ON_HOLD')
      ORDER BY customerDeliveryDate ASC`;
   const soRes = await db.prepare(soSql).bind(dateYmd).all<OverdueSoRawRow>();
   const sos = soRes.results ?? [];

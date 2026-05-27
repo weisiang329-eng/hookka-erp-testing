@@ -496,7 +496,7 @@ async function runAndSendReport(
     const data = await collectOverdueData(c.var.DB, date);
     html = renderOverdueHtml(data);
     text = renderOverdueEmailText(data);
-    subject = `[Hookka] Overdue Report — ${date} (${data.totals.jobCards} items · worst ${data.totals.worstDays}d)`;
+    subject = `[Hookka] Overdue Report — ${date} (${data.totals.orderLines} items · worst ${data.totals.worstDays}d)`;
   }
 
   const from =

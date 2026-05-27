@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-001 — scan-po.ts self-migration created phantom lowercase `ocrpromptrules` column on every cold start
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** infrastructure
+
+**Symptom:** Audit of the `customers` table after migration 0110 (which renamed
+`ocrpromptrules` → `ocr_prompt_rules`) found a duplicate empty `ocrpromptrules`
+column hanging off the schema. Operationally invisible — the worker writes
+flow through `column-rename-map.json` → `ocr_prompt_rules`, so the phantom
+just sat there. But every fresh isolate recreated it after a manual drop
+attempt, so the rot was self-healing in the wrong direction.
+
+**Root cause:** [src/api/routes/scan-po.ts:312](src/api/routes/scan-po.ts:312)
+had a `ensureScanPoColumns` self-migration block:
+
+```ts
+"ALTER TABLE customers ADD COLUMN IF NOT EXISTS ocrPromptRules TEXT"
+```
+
+Postgres lowercases unquoted identifiers, so the executed DDL was
+`ADD COLUMN IF NOT EXISTS ocrpromptrules TEXT`. Migration 0110 had renamed
+the original column to `ocr_prompt_rules`, so `IF NOT EXISTS` saw no column
+called `ocrpromptrules` and created a new empty one every time a fresh worker
+came online. The self-migration was a relic of the D1 → Postgres transition
+that should have been deleted when 0110 shipped.
+
+**Fix:**
+1. Delete the `ensureScanPoColumns` function from [scan-po.ts](src/api/routes/scan-po.ts:307)
+   and its 4 callers (the function did nothing useful since 0110).
+2. New migration [0138_drop_phantom_ocrpromptrules.sql](migrations-postgres/0138_drop_phantom_ocrpromptrules.sql):
+   `ALTER TABLE customers DROP COLUMN IF EXISTS ocrpromptrules;`
+
+**Verified:** Post-deploy, the phantom column is gone and no isolate
+re-creates it. The legitimate `ocr_prompt_rules` continues to work via the
+camelCase → snake_case rewrite in `column-rename-map.json`.
+
+---
+
 ## BUG-2026-05-27-007 — /setup-2fa "Could not start setup" — missing TOTP columns on prod users table
 
 **Status:** 🟢 Fixed (2026-05-27)

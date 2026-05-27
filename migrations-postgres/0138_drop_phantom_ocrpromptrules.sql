@@ -1,0 +1,32 @@
+-- ---------------------------------------------------------------------------
+-- 0138_drop_phantom_ocrpromptrules.sql — drop the phantom lowercase
+-- `ocrpromptrules` column on `customers` that scan-po.ts:312 was creating
+-- as a self-migration after every cold start.
+--
+-- BUG-2026-05-09-003 (per docs/BUG-HISTORY.md + bug_audit_known_issues memory):
+--
+--   Before 0110, the column was `ocrpromptrules` (lowercase, no underscore).
+--   Migration 0110 renamed it to the canonical `ocr_prompt_rules` and the
+--   column-rename-map.json was updated so all worker SQL routes the camelCase
+--   reads/writes (`ocrPromptRules`) through to `ocr_prompt_rules`.
+--
+--   scan-po.ts:312 had a leftover `ensureScanPoColumns` self-migration that
+--   ran on every fresh isolate:
+--     ALTER TABLE customers ADD COLUMN IF NOT EXISTS ocrPromptRules TEXT
+--   Postgres lowercases unquoted identifiers → effectively
+--     ALTER TABLE customers ADD COLUMN IF NOT EXISTS ocrpromptrules TEXT
+--   Since 0110 renamed the original column, IF NOT EXISTS sees no column
+--   called `ocrpromptrules`, so it CREATED A NEW EMPTY COLUMN every time a
+--   fresh worker came online. Result: a duplicate `ocrpromptrules TEXT NULL`
+--   column sitting alongside the live `ocr_prompt_rules`, unused but
+--   consuming schema space and confusing audits / tooling.
+--
+-- This migration drops the phantom column. The companion code change in the
+-- same commit deletes the `ensureScanPoColumns` self-migration entirely, so
+-- the phantom won't be re-created on the next isolate start.
+--
+-- IF EXISTS guard — if the phantom never got created on a fresh DB (or was
+-- already manually dropped), this is a no-op.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE customers DROP COLUMN IF EXISTS ocrpromptrules;

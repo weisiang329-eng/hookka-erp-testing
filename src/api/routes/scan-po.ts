@@ -304,27 +304,13 @@ function formatCatalog(c: Catalog): string {
   return lines.join("\n");
 }
 
-// Self-applying migration — adds the `ocrPromptRules` column to `customers`
-// the first time any /extract or /customer-rules call runs in a fresh
-// isolate. Mirrors the `ensurePendingMigrations` pattern in sales-orders.ts
-// so Supabase stays forward-compatible without a separate deploy step.
-let scanPoColumnsPromise: Promise<void> | null = null;
-function ensureScanPoColumns(db: DBLike): Promise<void> {
-  if (scanPoColumnsPromise) return scanPoColumnsPromise;
-  scanPoColumnsPromise = (async () => {
-    const stmts = [
-      "ALTER TABLE customers ADD COLUMN IF NOT EXISTS ocrPromptRules TEXT",
-    ];
-    for (const sql of stmts) {
-      try {
-        await db.prepare(sql).bind().run();
-      } catch {
-        // best-effort; column may already exist or DDL transiently rejected
-      }
-    }
-  })();
-  return scanPoColumnsPromise;
-}
+// 2026-05-28 — `ensureScanPoColumns` self-migration removed. Migration 0110
+// already renamed the legacy `ocrpromptrules` column to canonical snake_case
+// `ocr_prompt_rules`. The self-migration's ALTER ... ADD COLUMN IF NOT EXISTS
+// ocrPromptRules lowercased to `ocrpromptrules` on Postgres, which 0110 had
+// renamed away — so IF NOT EXISTS saw nothing and re-created a phantom empty
+// column on every cold start. Companion migration 0138_drop_phantom_*.sql
+// drops the phantom and this code path is gone. See BUG-HISTORY.
 
 // Per-customer rules are injected as a separate prompt block tagged with the
 // customer code. We render ALL customers' blocks (even empty ones) and tell
@@ -1154,7 +1140,7 @@ app.get("/catalog", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "create");
   if (denied) return denied;
   const orgId = getOrgId(c);
-  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+
   const catalog = await loadCatalog(c.var.DB as unknown as DBLike, orgId);
   return c.json({
     success: true,
@@ -1240,7 +1226,7 @@ app.post("/extract", async (c) => {
   const pdfBase64 = toBase64(arrayBuffer);
 
   const orgId = getOrgId(c);
-  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+
   const catalog = await loadCatalog(c.var.DB as unknown as DBLike, orgId);
   const catalogText = formatCatalog(catalog);
   const customerRulesText = formatCustomerRules(catalog);
@@ -1651,7 +1637,7 @@ app.patch("/samples/by-po/:poIdentifier", async (c) => {
 app.get("/customer-rules/:customerId", async (c) => {
   const denied = await requirePermission(c, "customers", "read");
   if (denied) return denied;
-  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+
   const customerId = c.req.param("customerId");
   const orgId = getOrgId(c);
   const row = await (c.var.DB as unknown as DBLike)
@@ -1677,7 +1663,7 @@ app.get("/customer-rules/:customerId", async (c) => {
 app.put("/customer-rules/:customerId", async (c) => {
   const denied = await requirePermission(c, "customers", "update");
   if (denied) return denied;
-  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+
   const customerId = c.req.param("customerId");
   const orgId = getOrgId(c);
 

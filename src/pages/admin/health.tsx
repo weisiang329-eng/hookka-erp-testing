@@ -225,6 +225,25 @@ const FE_METRIC_HINT: Record<string, string> = {
   ttfb: "Server response time",
   nav: "Full page load",
 };
+// Phase-7 audit feed — one row per business mutation (SO confirmed,
+// JC status changed, user role updated, etc.). The dashboard reads
+// the audit_events table directly so it shows the same data as the
+// per-record AuditHistoryPanel, just org-wide.
+type AuditFeedRow = {
+  id: string;
+  actorUserId: string | null;
+  actorUserName: string | null;
+  actorRole: string | null;
+  resource: string;
+  resourceId: string;
+  action: string;
+  source: string;
+  ts: string;
+};
+type AuditFeedSummary = {
+  byAction: Array<{ action: string; n: number }>;
+  byResource: Array<{ resource: string; n: number }>;
+};
 
 // Plain-language hint per status code so the operator knows WHY each
 // code matters, not just the number. Sourced from the dashboard
@@ -342,6 +361,11 @@ export default function AdminHealthPage() {
     success: boolean;
     data: FePerfRow[];
   }>(`/api/admin/health/fe-perf${rangeQS}`, 60);
+  const { data: auditFeedResp } = useCachedJson<{
+    success: boolean;
+    data: AuditFeedRow[];
+    summary: AuditFeedSummary;
+  }>(`/api/admin/health/audit-feed${rangeQS}&limit=100`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -361,6 +385,8 @@ export default function AdminHealthPage() {
   const slowSql = slowSqlResp?.data ?? [];
   const feErrors = feErrorsResp?.data ?? [];
   const fePerf = fePerfResp?.data ?? [];
+  const auditFeed = auditFeedResp?.data ?? [];
+  const auditSummary = auditFeedResp?.summary ?? { byAction: [], byResource: [] };
 
   return (
     <div className="p-6 space-y-6">
@@ -776,6 +802,83 @@ export default function AdminHealthPage() {
               </CardContent>
             </Card>
           </div>
+
+          {/* Phase-7 audit feed. Surfaces every business mutation
+              (SO confirmed, JC status updated, user role changed,
+              etc.) so the operator can see at a glance "WHO did WHAT
+              WHEN" without leaving the dashboard. Data comes from
+              the audit_events table in Postgres — same source the
+              per-record AuditHistoryPanel uses, just org-wide. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Audit feed ({RANGE_LABEL[range].toLowerCase()}) — recent business mutations
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {auditFeed.length === 0 ? (
+                <p className="text-xs text-[#8B8580]">
+                  No audit events in this window. (Audit capture runs on the top mutation paths — see audit.ts.)
+                </p>
+              ) : (
+                <>
+                  {/* Summary chips — top actions + top resources over the
+                      window. Useful for "what changed lately at a glance". */}
+                  <div className="flex flex-wrap gap-3 mb-3 text-[11px]">
+                    {auditSummary.byAction.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[#8B8580] font-medium">Top actions:</span>
+                        {auditSummary.byAction.map((s) => (
+                          <span key={s.action} className="px-1.5 py-0.5 rounded bg-[#F5F2EE] text-[#5A5550] font-mono">
+                            {s.action} ×{s.n}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {auditSummary.byResource.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[#8B8580] font-medium">Top resources:</span>
+                        {auditSummary.byResource.map((s) => (
+                          <span key={s.resource} className="px-1.5 py-0.5 rounded bg-[#F5F2EE] text-[#5A5550] font-mono">
+                            {s.resource} ×{s.n}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-white">
+                        <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                          <th className="py-1.5 font-medium">When</th>
+                          <th className="py-1.5 font-medium">Who</th>
+                          <th className="py-1.5 font-medium">Action</th>
+                          <th className="py-1.5 font-medium">Resource</th>
+                          <th className="py-1.5 font-medium">ID</th>
+                          <th className="py-1.5 font-medium">Source</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditFeed.map((r) => (
+                          <tr key={r.id} className="border-b border-[#F5F2EE]">
+                            <td className="py-1.5 text-[#5A5550] whitespace-nowrap">{r.ts.slice(5, 16).replace('T', ' ')}</td>
+                            <td className="py-1.5 text-[#1F1D1B]">
+                              <div>{r.actorUserName || '—'}</div>
+                              {r.actorRole && <div className="text-[10px] text-[#8B8580]">{r.actorRole}</div>}
+                            </td>
+                            <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B]">{r.action}</td>
+                            <td className="py-1.5 font-mono text-[11px] text-[#5A5550]">{r.resource}</td>
+                            <td className="py-1.5 font-mono text-[10px] text-[#8B8580] truncate max-w-[160px]" title={r.resourceId}>{r.resourceId}</td>
+                            <td className="py-1.5 text-[#8B8580]">{r.source}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
 
           {/* Top 50 long tasks. trace lets the operator chase the
               specific slow request in wrangler tail. */}

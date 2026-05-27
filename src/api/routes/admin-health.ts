@@ -39,6 +39,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -946,6 +947,118 @@ app.get("/long-tasks", async (c) => {
     });
   });
   return c.json({ success: true, data: data ?? [] });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 7 — Audit feed. Surfaces recent audit_events rows on the
+// /admin/health dashboard so the operator can answer "WHO did WHAT
+// WHEN" without leaving the page.
+//
+// Different from /api/audit-events (per-resource feed for AuditHistoryPanel
+// on detail pages). This endpoint is org-wide, time-windowed, and filters
+// by action+resource so the dashboard can show "20 invoice-voids in the
+// last 24h" or "5 user-role-changes this week".
+//
+// Reads from Postgres (audit_events table is the source of truth for
+// mutations), NOT Analytics Engine. AE captures performance + errors;
+// audit_events captures business actions. Distinct concerns.
+//
+// Required query: range=24h|7d|30d|90d (same window selector as the AE
+// panels). Optional: resource=X, action=Y (any subset; AND-combined).
+// ---------------------------------------------------------------------------
+app.get("/audit-feed", async (c) => {
+  const range = parseRange(c.req.query("range"));
+  // Map the range token to a SQL interval string. Postgres syntax —
+  // audit_events lives in Supabase, not AE. INTERVAL '24 hours' /
+  // '7 days' / '30 days' / '90 days'.
+  const pgInterval =
+    range === "90d"
+      ? "90 days"
+      : range === "30d"
+        ? "30 days"
+        : range === "7d"
+          ? "7 days"
+          : "24 hours";
+
+  // Optional filters. We accept literal strings and bind-parameter
+  // them rather than interpolating to keep SQL-injection off the table.
+  const resourceFilter = (c.req.query("resource") ?? "").trim();
+  const actionFilter = (c.req.query("action") ?? "").trim();
+  const limitRaw = Number.parseInt(c.req.query("limit") ?? "100", 10);
+  const limit = Math.min(500, Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 100));
+
+  let orgId: string;
+  try {
+    orgId = getOrgId(c);
+  } catch {
+    // Should never fire — admin-health is behind authMiddleware which
+    // populates orgId. Be defensive anyway.
+    return c.json({ success: true, data: [], summary: { byAction: [], byResource: [] } });
+  }
+
+  const params: unknown[] = [orgId];
+  let sql = `
+    SELECT id, actorUserId, actorUserName, actorRole,
+           resource, resourceId, action, source, ts
+      FROM audit_events
+     WHERE orgId = ?
+       AND ts > NOW() - INTERVAL '${pgInterval}'
+  `;
+  if (resourceFilter) {
+    sql += " AND resource = ?";
+    params.push(resourceFilter);
+  }
+  if (actionFilter) {
+    sql += " AND action = ?";
+    params.push(actionFilter);
+  }
+  sql += " ORDER BY ts DESC LIMIT ?";
+  params.push(limit);
+
+  type Row = {
+    id: string;
+    actorUserId: string | null;
+    actorUserName: string | null;
+    actorRole: string | null;
+    resource: string;
+    resourceId: string;
+    action: string;
+    source: string;
+    ts: string;
+  };
+  let rows: Row[] = [];
+  try {
+    const res = await c.var.DB
+      .prepare(sql)
+      .bind(...params)
+      .all<Row>();
+    rows = res.results ?? [];
+  } catch (err) {
+    console.warn("[admin-health] audit-feed query failed:", err);
+    return c.json({ success: true, data: [], summary: { byAction: [], byResource: [] } });
+  }
+
+  // Also compute per-action + per-resource summaries over the same
+  // window. Useful for the panel header ("123 events; top: update SO,
+  // create JC, delete worker").
+  const byAction = new Map<string, number>();
+  const byResource = new Map<string, number>();
+  for (const r of rows) {
+    byAction.set(r.action, (byAction.get(r.action) ?? 0) + 1);
+    byResource.set(r.resource, (byResource.get(r.resource) ?? 0) + 1);
+  }
+  const summary = {
+    byAction: [...byAction.entries()]
+      .map(([action, n]) => ({ action, n }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 8),
+    byResource: [...byResource.entries()]
+      .map(([resource, n]) => ({ resource, n }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 8),
+  };
+
+  return c.json({ success: true, data: rows, summary });
 });
 
 // ---------------------------------------------------------------------------

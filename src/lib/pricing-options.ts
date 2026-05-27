@@ -4,13 +4,13 @@
 //
 // Why this exists:
 // `src/lib/mock-data.ts` is a 326KB monolith that bundles type defs, ~50
-// seed arrays (used only by the legacy /api/routes-mock fallback), and a
-// handful of genuinely-needed pricing tables like `divanHeightOptions`.
-// Until Sprint 5, every page that needed even one constant pulled in the
-// whole mock-data chunk including thousands of seed rows the page never
-// touched. This module re-exports just the small, stable pricing/option
-// tables, with no transitive dependency on the seeds. `mock-data.ts`
-// re-exports from here for back-compat.
+// seed arrays (originally used by the deleted /api/routes-mock dev
+// fallback), and a handful of genuinely-needed pricing tables like
+// `divanHeightOptions`. Until Sprint 5, every page that needed even one
+// constant pulled in the whole mock-data chunk including thousands of
+// seed rows the page never touched. This module re-exports just the
+// small, stable pricing/option tables, with no transitive dependency on
+// the seeds. `mock-data.ts` re-exports from here for back-compat.
 //
 // Sprint 5, Goal 2 — see PROGRAM-EXECUTION.md.
 // ---------------------------------------------------------------------------

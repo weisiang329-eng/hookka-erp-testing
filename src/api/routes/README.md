@@ -30,9 +30,10 @@ exists in `wrangler.toml`. The legacy D1 binding was removed 2026-04-27
   authoring) → run `node scripts/d1-to-postgres.mjs` → apply via
   `npm run db:migrate:supabase`. See `migrations-postgres/README.md`.
 
-## Sibling: `routes-mock/`
+## Local dev
 
-Mock-data variants of these routes used by the local dev API server
-(`npm run api`, port 3001). They serve in-memory data from
-`src/lib/mock-data.ts` for quick frontend iteration without spinning up
-Wrangler. Production traffic never hits `routes-mock/`.
+`wrangler pages dev` (`npm run dev:worker`) is the backend for local
+development — it serves these real routes against Supabase Postgres via
+Hyperdrive, the same way prod does. The earlier `src/api/index.ts` +
+`src/api/routes-mock/` in-memory dev server was deleted in
+BUG-2026-05-28-003 (D1 → Postgres migration made it obsolete).

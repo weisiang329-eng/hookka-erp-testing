@@ -1,9 +1,9 @@
 // ============================================================
 // Worker portal — per-worker scoped endpoints under /api/worker/*.
 //
-// Replaces src/api/routes-mock/worker.ts (mock-data only, never reachable in
-// production) with a real D1 / Postgres-backed surface for the /worker mobile
-// portal.  Every endpoint is gated by X-Worker-Token via resolveWorkerToken
+// Postgres-backed surface for the /worker mobile portal. (The earlier
+// in-memory mock under src/api/routes-mock/ was deleted in BUG-2026-05-28-003.)
+// Every endpoint is gated by X-Worker-Token via resolveWorkerToken
 // (see worker-auth.ts) — a worker can only ever read/write their own data.
 //
 // Endpoints:

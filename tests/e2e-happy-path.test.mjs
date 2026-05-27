@@ -277,9 +277,8 @@ try {
 
 let workerApp;
 try {
-  // The worker module exports `default` as the Hono app and additionally
-  // calls serve() in src/api/index.ts (dev). worker.ts does NOT call serve
-  // — it's the Pages Functions handler. Import worker.ts.
+  // The worker module exports `default` as the Hono app. worker.ts does
+  // NOT call serve — it's the Pages Functions handler. Import worker.ts.
   const mod = await import(
     pathToFileURL(resolve(process.cwd(), "src/api/worker.ts")).href
   );

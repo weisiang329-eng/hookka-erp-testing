@@ -34,6 +34,39 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-003 — Dead `src/api/index.ts` + `src/api/routes-mock/*` invited "critical bug" misreads
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** infrastructure
+
+**Symptom:** Periodic audit agents kept reporting "consignment-orders not
+mounted" and "sales-orders using mock with no validation" by reading
+`src/api/index.ts` (the local-dev mock server). Trust-but-verify always
+showed prod runs `src/api/worker.ts` which mounts the real routes — so
+the agent reports were false positives every time, but the existence of
+the mock files invited the misread.
+
+**Root cause:** Local dev used to need an in-memory mock server because
+D1 ran nowhere outside Cloudflare. After the 2026-04-27 D1 → Postgres
+migration, `wrangler pages dev` runs the real worker against Supabase
+via Hyperdrive — no mock server needed. But `src/api/index.ts` (146
+lines) + `src/api/routes-mock/*` (56 files) sat in the tree as legacy
+clutter, with a `package.json` "api" script pointed at them.
+
+**Fix:** Delete the legacy infrastructure outright.
+- Removed `src/api/index.ts`.
+- Removed `src/api/routes-mock/` (all 56 files).
+- Removed the `"api": "npx tsx watch ... src/api/index.ts"` script from
+  `package.json`.
+- Updated stale references in `src/api/routes/README.md`,
+  `src/api/routes/worker.ts` comment header,
+  `src/lib/pricing-options.ts` comment, and `tests/e2e-happy-path.test.mjs`.
+
+Local dev = `npm run dev:worker` (wrangler pages dev) — same routes as
+prod, same Supabase backend.
+
+---
+
 ## BUG-2026-05-28-002 — SO header date changes did not cascade to JC dueDate / PO targetEndDate
 
 **Status:** 🟢 Fixed (2026-05-28)

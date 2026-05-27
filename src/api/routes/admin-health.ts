@@ -146,9 +146,9 @@ async function runAeSql(
 //                  splits the window into (24 for 24h, 7 for 7d, 30 for 30d).
 //   - BUCKET_SQL → the AE SQL toStartOfInterval argument for that bucket.
 //   - MS_PER_BUCKET → JS-side ms per bucket for `hoursAgo` math.
-type Range = "24h" | "7d" | "30d";
+type Range = "24h" | "7d" | "30d" | "90d";
 function parseRange(raw: string | undefined): Range {
-  if (raw === "7d" || raw === "30d") return raw;
+  if (raw === "7d" || raw === "30d" || raw === "90d") return raw;
   return "24h";
 }
 function rangeWindow(range: Range): {
@@ -157,6 +157,18 @@ function rangeWindow(range: Range): {
   BUCKET_SQL: string;
   MS_PER_BUCKET: number;
 } {
+  if (range === "90d") {
+    // Cloudflare Analytics Engine free-tier retention is 92 days, so 90
+    // is the practical max. Bucket size = 1 DAY so the chart stays
+    // readable; 90 bars is the upper end of what fits without horizontal
+    // scroll.
+    return {
+      WINDOW: "INTERVAL '90' DAY",
+      BUCKETS: 90,
+      BUCKET_SQL: "INTERVAL '1' DAY",
+      MS_PER_BUCKET: 86_400_000,
+    };
+  }
   if (range === "30d") {
     return {
       WINDOW: "INTERVAL '30' DAY",

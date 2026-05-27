@@ -27,11 +27,12 @@ import {
 // Time-range selector — passed to every /api/admin/health/* endpoint
 // as ?range=. AE retention is 92 days so 30d is the practical max for
 // daily monitoring; 7d / 24h are the more common slices.
-type Range = "24h" | "7d" | "30d";
+type Range = "24h" | "7d" | "30d" | "90d";
 const RANGE_LABEL: Record<Range, string> = {
   "24h": "Last 24h",
   "7d": "Last 7d",
   "30d": "Last 30d",
+  "90d": "Last 90d",
 };
 
 // Shape returned by GET /api/admin/health/kpis. Keep this in sync with
@@ -246,7 +247,7 @@ export default function AdminHealthPage() {
             is comfortably within the window. All Phase 2 panels share
             this state. */}
         <div className="inline-flex rounded-md border border-[#E2DDD8] bg-white p-0.5">
-          {(["24h", "7d", "30d"] as const).map((r) => (
+          {(["24h", "7d", "30d", "90d"] as const).map((r) => (
             <Button
               key={r}
               variant={range === r ? "primary" : "ghost"}
@@ -313,7 +314,7 @@ export default function AdminHealthPage() {
             <CardContent>
               <Sparkline data={kpis.sparkline} />
               <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
-                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : "30d ago"}</span>
+                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : range === "30d" ? "30d ago" : "90d ago"}</span>
                 <span>now</span>
               </div>
             </CardContent>
@@ -416,7 +417,7 @@ export default function AdminHealthPage() {
             <CardContent>
               <HourlyErrorChart data={errorsHourly} />
               <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
-                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : "30d ago"}</span>
+                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : range === "30d" ? "30d ago" : "90d ago"}</span>
                 <span>now</span>
               </div>
             </CardContent>

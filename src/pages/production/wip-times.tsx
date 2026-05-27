@@ -399,18 +399,40 @@ export default function WipTimesPage() {
       };
       const colWip = findCol("WIP");
       const colDept = findCol("Department");
-      // colWipTypeCode is read from the export header but not used for
-      // matching — backend matches by (wipLabel, deptCode) already.
-      // Keeping the findCol call (commented out) as documentation of the
-      // exported columns the import contract is compatible with.
-      // const colWipTypeCode = findCol("WIP Type Code");
       const colMinutes = findCol("BOM Avg Minutes", "BOM Minutes", "Minutes");
-      if (colWip < 0 || colDept < 0 || colMinutes < 0) {
+      const colBomTime = findCol("BOM Time", "Time");
+      // Either the numeric "BOM Avg Minutes" column OR the formatted
+      // "BOM Time" column must be present — operator typically edits
+      // whichever looks more natural to them (we accept both).
+      if (colWip < 0 || colDept < 0 || (colMinutes < 0 && colBomTime < 0)) {
         setImportError(
-          `Missing required columns. Need "WIP", "Department", and "BOM Avg Minutes" — found ${headers.filter((h) => h).join(", ") || "no headers"}.`,
+          `Missing required columns. Need "WIP", "Department", and one of "BOM Avg Minutes" (number) or "BOM Time" (e.g. "15m", "1h 30m"). Found: ${headers.filter((h) => h).join(", ") || "no headers"}.`,
         );
         return;
       }
+
+      // Parses "15m", "1h", "1h 30m", or a plain number into minutes.
+      // Operator-friendly so they can type "15m" in the BOM Time column
+      // exactly like the inline edit dialog displays it. Plain numeric
+      // strings are treated as minutes (matches the BOM Avg Minutes
+      // column semantics). Returns 0 if the input is empty or
+      // unparseable — calling code skips zero rows.
+      const parseBomTime = (raw: unknown): number => {
+        if (raw === null || raw === undefined) return 0;
+        if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+        const s = String(raw).trim().toLowerCase();
+        if (!s) return 0;
+        const hMatch = s.match(/(\d+(?:\.\d+)?)\s*h/);
+        const mMatch = s.match(/(\d+(?:\.\d+)?)\s*m/);
+        if (hMatch || mMatch) {
+          const hours = hMatch ? parseFloat(hMatch[1]) : 0;
+          const mins = mMatch ? parseFloat(mMatch[1]) : 0;
+          return Math.round(hours * 60 + mins);
+        }
+        // Bare number string like "15" → treat as minutes.
+        const n = Number(s);
+        return Number.isFinite(n) ? Math.round(n) : 0;
+      };
 
       const items: ImportItem[] = [];
       const parseErrors: string[] = [];
@@ -420,14 +442,27 @@ export default function WipTimesPage() {
         const wip = typeof row[colWip] === "string" ? (row[colWip] as string).trim() : "";
         const deptRaw =
           typeof row[colDept] === "string" ? (row[colDept] as string).trim() : "";
-        const minutesRaw = row[colMinutes];
-        // Blank/zero minutes = "no change intended" — skip.
-        const minutes =
-          typeof minutesRaw === "number"
-            ? minutesRaw
-            : Number(minutesRaw);
+        // Read both possible value columns. Prefer the numeric
+        // BOM Avg Minutes when it's > 0 (explicit operator intent);
+        // fall back to parsing the BOM Time string otherwise.
+        let minutes = 0;
+        if (colMinutes >= 0) {
+          const raw = row[colMinutes];
+          const n = typeof raw === "number" ? raw : Number(raw);
+          if (Number.isFinite(n) && n > 0) minutes = Math.round(n);
+        }
+        if (minutes <= 0 && colBomTime >= 0) {
+          minutes = parseBomTime(row[colBomTime]);
+        }
         if (!wip) continue;
+        // Blank/zero minutes = "no change intended" — skip silently.
         if (!Number.isFinite(minutes) || minutes <= 0) continue;
+        if (minutes > 1440) {
+          parseErrors.push(
+            `Row ${i + 1}: ${minutes} min exceeds 24h cap (1440) — please double-check.`,
+          );
+          continue;
+        }
         const deptCode = DEPT_CODE_BY_LABEL.get(deptRaw.toLowerCase());
         if (!deptCode) {
           parseErrors.push(
@@ -694,7 +729,7 @@ export default function WipTimesPage() {
               "inline-flex items-center justify-center rounded-md border border-[#E2DDD8] bg-white px-3 h-9 text-sm font-medium cursor-pointer hover:bg-[#FAF8F5] " +
               (importing ? "opacity-50 pointer-events-none" : "")
             }
-            title="Edit BOM Avg Minutes in the exported Excel, then upload it back here to apply the changes."
+            title='Edit "BOM Avg Minutes" (a number) OR "BOM Time" (e.g. "15m", "1h 30m") in the exported Excel, then upload it back here to apply the changes.'
           >
             <Upload className="h-4 w-4 mr-1.5" />
             {importing ? "Importing…" : "Import Excel"}

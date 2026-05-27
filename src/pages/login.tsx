@@ -425,7 +425,7 @@ export default function LoginPage() {
             />
 
             <div
-              className="mb-10 px-4 py-1.5 rounded-full"
+              className="px-4 py-1.5 rounded-full"
               style={{
                 border: "1px solid rgba(107,92,50,.4)",
                 color: "#8B7A4E",
@@ -436,47 +436,10 @@ export default function LoginPage() {
               INDUSTRY 4.0
             </div>
 
-            <div className="flex gap-10">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-white">156</div>
-                <div
-                  style={{
-                    color: "rgba(255,255,255,.3)",
-                    fontSize: "10px",
-                    letterSpacing: "0.05em",
-                  }}
-                  className="uppercase mt-1"
-                >
-                  Active PO
-                </div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-white">8</div>
-                <div
-                  style={{
-                    color: "rgba(255,255,255,.3)",
-                    fontSize: "10px",
-                    letterSpacing: "0.05em",
-                  }}
-                  className="uppercase mt-1"
-                >
-                  Departments
-                </div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-white">99.7%</div>
-                <div
-                  style={{
-                    color: "rgba(255,255,255,.3)",
-                    fontSize: "10px",
-                    letterSpacing: "0.05em",
-                  }}
-                  className="uppercase mt-1"
-                >
-                  Uptime
-                </div>
-              </div>
-            </div>
+            {/* Stats panel (156 ACTIVE PO / 8 DEPARTMENTS / 99.7% UPTIME)
+                removed 2026-05-27 per Wei Siang — they were hardcoded
+                placeholders, not live. Better to show nothing than
+                misleading numbers. */}
           </div>
 
           <div

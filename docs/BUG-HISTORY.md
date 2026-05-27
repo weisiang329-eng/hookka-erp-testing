@@ -34,6 +34,52 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-002 — SO header date changes did not cascade to JC dueDate / PO targetEndDate
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** sales-orders
+
+**Symptom:** Customer pushes their delivery date out by a week. Operator
+opens the SO in /sales/edit, changes `customerDeliveryDate`, saves. SO
+header updates, but the production schedule (job_cards.dueDate per dept)
+still shows the OLD date. Shop floor is misaligned — they see "due today"
+on the planning page while the customer is now expecting it next week.
+
+**Root cause:** sales-orders.ts PUT only re-cascades the date to child POs
+and JCs via the full-rebuild path (DELETE all child POs/JCs + recreate),
+which only fires when `itemsChanged && existing.status ∉ {DRAFT, PENDING}`.
+Header-only PUTs — including the path where the FE sends `body.items`
+unchanged from existing — did pick up the new dates **for the SO row**
+via the UPDATE statement, but the existing child production_orders rows
+kept their old targetEndDate, and the existing job_cards kept their old
+dueDate. The dates were computed once at confirm-time and never refreshed.
+
+**Fix:** Targeted in-place re-cascade (Option B from the
+bug_audit_known_issues memory). Added after the existing rebuild block in
+[sales-orders.ts](src/api/routes/sales-orders.ts):
+
+1. Detect if `customerDeliveryDate` or `hookkaExpectedDD` changed (compare
+   `existing.*` vs `merged.*`).
+2. Run only when no full rebuild fired AND status is past DRAFT/PENDING.
+3. Load child POs + JCs + lead-times + hookka-DD buffer in one batch.
+4. For each PO: new `targetEndDate` = explicit hookkaExpectedDD ||
+   (customerDeliveryDate − buffer[category]). UPDATE in place.
+5. For each JC (skipping any with `completedDate` set — re-dating
+   finished work is wrong): new `dueDate` = anchor − leadDays(category,
+   deptCode). UPDATE in place.
+
+Critically the path is in-place — PO IDs / JC IDs / pic1Id / pic2Id /
+completedDate / fg_units are all preserved. No FK churn to downstream
+delivery_order_items / printed paperwork.
+
+Failures are best-effort logged + swallowed — the header UPDATE has
+already committed, the cascade is a follow-up convenience.
+
+**Verified:** Type-clean; the re-cascade only fires when needed (gated by
+`headerDatesChanged && !shouldRebuild && status not in DRAFT/PENDING`).
+
+---
+
 ## BUG-2026-05-28-001 — scan-po.ts self-migration created phantom lowercase `ocrpromptrules` column on every cold start
 
 **Status:** 🟢 Fixed (2026-05-28)

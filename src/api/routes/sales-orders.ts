@@ -25,6 +25,8 @@ import {
   addDays,
   loadHookkaDDBuffer,
   hookkaDDBufferFor,
+  loadLeadTimes,
+  leadDaysFor,
 } from "../lib/lead-times";
 import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { resolveCustomerPriceAsOf } from "./customer-products";
@@ -3294,6 +3296,137 @@ app.put("/:id", async (c) => {
           ...built.statements,
         ]);
         createdProductionOrders = built.created;
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // BUG-2026-05-09-004 fix — targeted re-cascade on header date change.
+    //
+    // The rebuild block above DELETE+CREATEs everything when items
+    // changed; it picks up new dates as a side effect. But operator can
+    // also save a header-only PUT (status change, dates change) where
+    // `body.items` is omitted, so itemsChanged=false and the rebuild
+    // skips. Before this fix, JC dueDates and PO targetEndDates stayed
+    // frozen at confirm time even when the customer pushed the delivery
+    // date out by a week — shop floor saw stale dates on the schedule.
+    //
+    // Approach: in-place UPDATE (not destroy + recreate), so PO IDs / JC
+    // IDs / PIC assignments / completedDate stay intact. We only touch
+    // dueDate + targetEndDate. Skips any JC that's already completed —
+    // re-dating finished work is wrong and confusing.
+    //
+    // Runs ONLY when:
+    //   - rebuild did NOT fire (else dates are already fresh),
+    //   - customerDeliveryDate or hookkaExpectedDD actually changed,
+    //   - existing.status indicates POs exist (not DRAFT/PENDING).
+    // -------------------------------------------------------------------
+    const customerDDBefore = (existing.customerDeliveryDate ?? "").slice(0, 10);
+    const customerDDAfter = (merged.customerDeliveryDate ?? "").slice(0, 10);
+    const hookkaDDBefore = (existing.hookkaExpectedDD ?? "").slice(0, 10);
+    const hookkaDDAfter = (merged.hookkaExpectedDD ?? "").slice(0, 10);
+    const headerDatesChanged =
+      customerDDBefore !== customerDDAfter ||
+      hookkaDDBefore !== hookkaDDAfter;
+    const recascadeApplicable =
+      headerDatesChanged &&
+      !shouldRebuild &&
+      existing.status !== "DRAFT" &&
+      existing.status !== "PENDING" &&
+      existing.status !== "CANCELLED";
+
+    if (recascadeApplicable) {
+      try {
+        type PoLite = {
+          id: string;
+          itemCategory: string;
+        };
+        type JcLite = {
+          id: string;
+          productionOrderId: string;
+          departmentCode: string | null;
+          completedDate: string | null;
+        };
+        const [posRes, jcsRes, leadTimes, hookkaDDBuffer] = await Promise.all([
+          c.var.DB
+            .prepare(
+              `SELECT id, itemCategory FROM production_orders WHERE salesOrderId = ?`,
+            )
+            .bind(id)
+            .all<PoLite>(),
+          c.var.DB
+            .prepare(
+              `SELECT jc.id, jc.productionOrderId, jc.departmentCode, jc.completedDate
+                 FROM job_cards jc
+                 JOIN production_orders po ON po.id = jc.productionOrderId
+                WHERE po.salesOrderId = ?`,
+            )
+            .bind(id)
+            .all<JcLite>(),
+          loadLeadTimes(c.var.DB),
+          loadHookkaDDBuffer(c.var.DB),
+        ]);
+        const pos = posRes.results ?? [];
+        const jcs = jcsRes.results ?? [];
+        const anchorByPoId = new Map<string, string>();
+        const updateStmts: D1PreparedStatement[] = [];
+
+        for (const po of pos) {
+          const category = po.itemCategory || "BEDFRAME";
+          const buf = hookkaDDBufferFor(hookkaDDBuffer, category);
+          // Same anchor formula as production-builder.ts:488-494.
+          // explicit hookkaExpectedDD wins; else customerDD minus buffer.
+          const anchor = hookkaDDAfter
+            ? hookkaDDAfter
+            : customerDDAfter
+              ? addDays(customerDDAfter, -buf)
+              : "";
+          if (!anchor) continue;
+          anchorByPoId.set(po.id, anchor);
+          updateStmts.push(
+            c.var.DB
+              .prepare(
+                `UPDATE production_orders SET targetEndDate = ?, updated_at = ? WHERE id = ?`,
+              )
+              .bind(anchor, now, po.id),
+          );
+        }
+
+        const poCategoryById = new Map<string, string>();
+        for (const po of pos) poCategoryById.set(po.id, po.itemCategory || "BEDFRAME");
+
+        for (const jc of jcs) {
+          // Skip work that's already done — re-dating completed JCs is wrong.
+          if (jc.completedDate && jc.completedDate !== "") continue;
+          const anchor = anchorByPoId.get(jc.productionOrderId);
+          if (!anchor) continue;
+          const category = poCategoryById.get(jc.productionOrderId) || "BEDFRAME";
+          const deptCode = jc.departmentCode || "";
+          if (!deptCode) continue;
+          const leadDays = leadDaysFor(leadTimes, category, deptCode);
+          const newDueDate = addDays(anchor, -leadDays);
+          updateStmts.push(
+            c.var.DB
+              .prepare(
+                `UPDATE job_cards SET dueDate = ?, updated_at = ? WHERE id = ?`,
+              )
+              .bind(newDueDate, now, jc.id),
+          );
+        }
+
+        if (updateStmts.length > 0) {
+          await c.var.DB.batch(updateStmts);
+          console.log(
+            `[so-PUT ${id}] header-date re-cascade: ${pos.length} PO targetEndDate + ${updateStmts.length - pos.length} JC dueDate updated (new customerDD=${customerDDAfter} hookkaExpectedDD=${hookkaDDAfter})`,
+          );
+        }
+      } catch (err) {
+        // Best-effort — header save already committed, the cascade is a
+        // follow-up convenience. Surface in logs so we can chase any
+        // patterns of failure, but don't fail the PUT.
+        console.warn(
+          `[so-PUT ${id}] header-date re-cascade failed:`,
+          err instanceof Error ? err.message : err,
+        );
       }
     }
 

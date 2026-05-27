@@ -140,6 +140,38 @@ type ErrorRow = {
   total: number;
 };
 type HourlyErrors = { fourXX: number[]; fiveXX: number[] };
+type DailyTrend = { p50: number[]; p95: number[]; errors: number[] };
+
+// Multi-line latency trend — one P50 + P95 dot per bucket. Lets the
+// operator scan "Sep 5 was slow + Sep 10 was VERY slow" without
+// staring at a single aggregated number for the entire window.
+function DailyTrendChart({ data }: { data: DailyTrend }) {
+  const { p50, p95 } = data;
+  const w = 480;
+  const h = 100;
+  const max = Math.max(1, ...p50, ...p95);
+  const stepX = w / Math.max(1, p50.length - 1);
+  const line = (arr: number[]): string =>
+    arr
+      .map((v, i) => `${(i * stepX).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`)
+      .join(" ");
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className="w-full h-24"
+      preserveAspectRatio="none"
+      aria-label="Daily P50 + P95 latency trend"
+    >
+      {/* P50 line — lighter color, drawn under P95 */}
+      <polyline fill="none" stroke="#8B7A52" strokeWidth={1.5} points={line(p50)} />
+      {/* P95 line — darker / more prominent */}
+      <polyline fill="none" stroke="#9A3A2D" strokeWidth={1.5} points={line(p95)} />
+      {/* Inline legend at the top-right */}
+      <text x={w - 75} y={12} fontSize="9" fill="#8B7A52">— P50</text>
+      <text x={w - 35} y={12} fontSize="9" fill="#9A3A2D">— P95</text>
+    </svg>
+  );
+}
 type LongTaskRow = {
   route: string;
   status: string;
@@ -224,6 +256,10 @@ export default function AdminHealthPage() {
     success: boolean;
     data: LongTaskRow[];
   }>(`/api/admin/health/long-tasks${rangeQS}`, 60);
+  const { data: dailyTrendResp } = useCachedJson<{
+    success: boolean;
+    data: DailyTrend;
+  }>(`/api/admin/health/daily-trend${rangeQS}`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -233,6 +269,11 @@ export default function AdminHealthPage() {
     fiveXX: new Array(24).fill(0),
   };
   const longTasks = longTasksResp?.data ?? [];
+  const dailyTrend = dailyTrendResp?.data ?? {
+    p50: new Array(24).fill(0),
+    p95: new Array(24).fill(0),
+    errors: new Array(24).fill(0),
+  };
 
   return (
     <div className="p-6 space-y-6">
@@ -313,6 +354,24 @@ export default function AdminHealthPage() {
             </CardHeader>
             <CardContent>
               <Sparkline data={kpis.sparkline} />
+              <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
+                <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : range === "30d" ? "30d ago" : "90d ago"}</span>
+                <span>now</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Latency trend over the chosen window — one P50 + P95 dot
+              per bucket. Operator scans for spikes ("Sep 5 was bad")
+              rather than reading a single aggregated number. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Latency trend ({RANGE_LABEL[range].toLowerCase()}) — P50 + P95 per {range === "24h" ? "hour" : "day"}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <DailyTrendChart data={dailyTrend} />
               <div className="mt-1 flex justify-between text-[11px] text-[#8B8580]">
                 <span>{range === "24h" ? "24h ago" : range === "7d" ? "7d ago" : range === "30d" ? "30d ago" : "90d ago"}</span>
                 <span>now</span>

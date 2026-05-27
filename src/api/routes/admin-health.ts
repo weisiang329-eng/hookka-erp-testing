@@ -617,6 +617,75 @@ app.get("/errors-hourly", async (c) => {
 // requests in the last 24h with route, status, duration, db time, and
 // traceparent (so the operator can chase the slow ones in `wrangler
 // tail` logs).
+// Daily latency trend — one P50 + P95 point per day across the window.
+// Lets the operator see "Sep 5 was slow + Sep 10 was very slow" at a
+// glance instead of one aggregated number for the whole 90d.
+//
+// Workaround for AE SQL's no-quantile limitation: pull raw double1 + a
+// per-day truncated timestamp, then compute percentiles per day in JS.
+// Works for ~50K rows total comfortably. Beyond that we'd switch to a
+// pre-aggregated table.
+app.get("/daily-trend", async (c) => {
+  const { WINDOW, BUCKETS, BUCKET_SQL, MS_PER_BUCKET } = rangeWindow(
+    parseRange(c.req.query("range")),
+  );
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT toStartOfInterval(timestamp, ${BUCKET_SQL}) AS bucket,
+             double1                                      AS dur,
+             blob3                                        AS status
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'req' AND timestamp > NOW() - ${WINDOW}
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    // Group by bucket → percentiles + 5xx count in JS.
+    const buckets = new Map<
+      string,
+      { samples: number[]; fiveXX: number }
+    >();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const b = String(row.bucket ?? "");
+      const v = Number(row.dur);
+      const status = String(row.status ?? "");
+      if (!b) continue;
+      if (!buckets.has(b)) buckets.set(b, { samples: [], fiveXX: 0 });
+      const bucket = buckets.get(b)!;
+      if (Number.isFinite(v)) bucket.samples.push(v);
+      if (status.startsWith("5")) bucket.fiveXX++;
+    }
+    // Materialize BUCKETS-length arrays aligned oldest→newest.
+    const p50: number[] = new Array(BUCKETS).fill(0);
+    const p95: number[] = new Array(BUCKETS).fill(0);
+    const errors: number[] = new Array(BUCKETS).fill(0);
+    const now = Date.now();
+    for (const [bucketStr, b] of buckets) {
+      const ts = Date.parse(bucketStr);
+      if (Number.isNaN(ts)) continue;
+      const ago = Math.floor((now - ts) / MS_PER_BUCKET);
+      if (ago < 0 || ago > BUCKETS - 1) continue;
+      const idx = BUCKETS - 1 - ago;
+      const sorted = [...b.samples].sort((a, b2) => a - b2);
+      const pick = (p: number): number =>
+        sorted.length === 0
+          ? 0
+          : sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+      p50[idx] = Math.round(pick(0.5));
+      p95[idx] = Math.round(pick(0.95));
+      errors[idx] = b.fiveXX;
+    }
+    return { p50, p95, errors };
+  });
+  return c.json({
+    success: true,
+    data: data ?? {
+      p50: new Array(BUCKETS).fill(0),
+      p95: new Array(BUCKETS).fill(0),
+      errors: new Array(BUCKETS).fill(0),
+    },
+  });
+});
+
 app.get("/long-tasks", async (c) => {
   const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
   const data = await withAe(c, async (accountId, token) => {

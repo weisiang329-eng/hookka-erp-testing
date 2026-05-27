@@ -1062,6 +1062,208 @@ app.get("/audit-feed", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Security events feed — surfaces auth-related rows from audit_events on
+// the /admin/health dashboard. Different from /audit-feed (which is
+// org-wide business mutations); this view zooms in on actions an attacker
+// would touch: logins, login failures, password changes, password resets,
+// role changes, user create/delete.
+//
+// Why a separate endpoint rather than ?action=login on /audit-feed:
+//   • multiple actions/resources are in-scope (OR-combined) so a single
+//     ?action= can't express the filter set
+//   • we want server-side aggregates (failed logins per actor / IP, reset
+//     spikes per email) — the audit-feed only returns rows + simple counts
+//   • the panel needs both the recent events AND the aggregates in one
+//     fetch so the dashboard stays at one network call per panel
+//
+// In-scope action set:
+//   resource='auth'    → login, login.fail, logout, password-change,
+//                        password-reset-request, password-reset-complete
+//   resource='users'   → role-change, user-create, user-delete
+//
+// 2026-05-27: the audit-emitting code in auth.ts uses 'login.fail' (dotted)
+// for failed logins; the security-hardening spec calls it 'login-failed'.
+// We accept BOTH so the endpoint keeps working if either spelling lands.
+//
+// Best-effort failure model: any DB throw returns an empty result, never
+// 500. The security panel should NEVER cause the dashboard to crash —
+// that itself is a security-blindness risk.
+// ---------------------------------------------------------------------------
+app.get("/security-events", async (c) => {
+  const range = parseRange(c.req.query("range"));
+  const pgInterval =
+    range === "90d"
+      ? "90 days"
+      : range === "30d"
+        ? "30 days"
+        : range === "7d"
+          ? "7 days"
+          : "24 hours";
+
+  // Org-scope guard. Should always populate from authMiddleware but be
+  // defensive — the security panel is the last thing we want to silently
+  // cross orgs.
+  let orgId: string;
+  try {
+    orgId = getOrgId(c);
+  } catch {
+    return c.json({
+      success: true,
+      data: {
+        recentEvents: [],
+        failedLoginsByActor: [],
+        failedLoginsByIp: [],
+        passwordResetsByEmail: [],
+        summary: {
+          totalLogins: 0,
+          totalFailures: 0,
+          totalResets: 0,
+          totalRoleChanges: 0,
+        },
+      },
+    });
+  }
+
+  // Inline filter list — kept literal (no bind params) because every
+  // value is a static string we own. resource='auth' covers the
+  // login/logout/password family; resource='users' covers the
+  // membership lifecycle.
+  const inScope = `(
+    resource = 'auth'
+    OR action IN (
+      'login', 'login.fail', 'login-failed',
+      'password-change', 'password-reset-request',
+      'password-reset-complete', 'logout',
+      'role-change', 'user-create', 'user-delete'
+    )
+  )`;
+
+  type Row = {
+    id: string;
+    actorUserId: string | null;
+    actorUserName: string | null;
+    actorRole: string | null;
+    resource: string;
+    resourceId: string;
+    action: string;
+    source: string;
+    ipAddress: string | null;
+    ts: string;
+  };
+
+  // Single fetch of recent rows in the window, then bucket in JS for the
+  // aggregates. The window is bounded (24h..90d) and security volume is
+  // low, so one query + JS grouping is cheaper than 4 grouped queries.
+  let rows: Row[] = [];
+  try {
+    const sql = `
+      SELECT id, actorUserId, actorUserName, actorRole,
+             resource, resourceId, action, source, ipAddress, ts
+        FROM audit_events
+       WHERE orgId = ?
+         AND ts > NOW() - INTERVAL '${pgInterval}'
+         AND ${inScope}
+       ORDER BY ts DESC
+       LIMIT 2000
+    `;
+    const res = await c.var.DB
+      .prepare(sql)
+      .bind(orgId)
+      .all<Row>();
+    rows = res.results ?? [];
+  } catch (err) {
+    console.warn("[admin-health] security-events query failed:", err);
+    return c.json({
+      success: true,
+      data: {
+        recentEvents: [],
+        failedLoginsByActor: [],
+        failedLoginsByIp: [],
+        passwordResetsByEmail: [],
+        summary: {
+          totalLogins: 0,
+          totalFailures: 0,
+          totalResets: 0,
+          totalRoleChanges: 0,
+        },
+      },
+    });
+  }
+
+  // Bucket aggregates in JS. Failed-login pivots are the highest-signal
+  // panels — they answer "is one IP hammering us" and "is one account
+  // being targeted". Reset-by-email surfaces password-reset abuse
+  // (mass forgot-password against a single user).
+  const isFailedLogin = (a: string): boolean =>
+    a === "login.fail" || a === "login-failed";
+  const isReset = (a: string): boolean =>
+    a === "password-reset-request";
+
+  const failedByActor = new Map<string, number>();
+  const failedByIp = new Map<string, number>();
+  const resetsByEmail = new Map<string, number>();
+  let totalLogins = 0;
+  let totalFailures = 0;
+  let totalResets = 0;
+  let totalRoleChanges = 0;
+  for (const r of rows) {
+    if (r.action === "login") totalLogins++;
+    else if (isFailedLogin(r.action)) {
+      totalFailures++;
+      const actor = r.actorUserName || r.actorUserId || r.resourceId || "(unknown)";
+      failedByActor.set(actor, (failedByActor.get(actor) ?? 0) + 1);
+      const ip = r.ipAddress || "(no ip)";
+      failedByIp.set(ip, (failedByIp.get(ip) ?? 0) + 1);
+    } else if (isReset(r.action)) {
+      totalResets++;
+      // resourceId on password-reset-request is the userId of the
+      // target account (per auth.ts emitAudit call). We surface this
+      // as "by email" even though it's the userId — the panel maps it
+      // to a name via the row's actorUserName/resourceId when rendering.
+      const key = r.resourceId || "(unknown)";
+      resetsByEmail.set(key, (resetsByEmail.get(key) ?? 0) + 1);
+    } else if (r.action === "role-change") {
+      totalRoleChanges++;
+    }
+  }
+
+  // Sort + top-10 cap. Each shape stays distinct so the frontend types
+  // stay tight (no untyped k/v objects).
+  const sortDesc = (a: { n: number }, b: { n: number }): number => b.n - a.n;
+  const failedLoginsByActor = [...failedByActor.entries()]
+    .map(([actor, n]) => ({ actor, n }))
+    .sort(sortDesc)
+    .slice(0, 10);
+  const failedLoginsByIp = [...failedByIp.entries()]
+    .map(([ip, n]) => ({ ip, n }))
+    .sort(sortDesc)
+    .slice(0, 10);
+  const passwordResetsByEmail = [...resetsByEmail.entries()]
+    .map(([userId, n]) => ({ userId, n }))
+    .sort(sortDesc)
+    .slice(0, 10);
+
+  return c.json({
+    success: true,
+    data: {
+      // Trim to last 50 newest-first for the recent-events table. The
+      // 2000 fetch limit is for aggregate accuracy; the table doesn't
+      // need that many rows.
+      recentEvents: rows.slice(0, 50),
+      failedLoginsByActor,
+      failedLoginsByIp,
+      passwordResetsByEmail,
+      summary: {
+        totalLogins,
+        totalFailures,
+        totalResets,
+        totalRoleChanges,
+      },
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Phase 4 — Front-End RUM read endpoints. The /api/fe-rum/event sink
 // (src/api/routes/fe-rum.ts) collects events from the browser; these
 // endpoints surface them on the /admin/health dashboard.

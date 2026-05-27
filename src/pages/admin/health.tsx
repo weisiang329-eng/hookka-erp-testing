@@ -250,6 +250,38 @@ type AuditFeedSummary = {
   byResource: Array<{ resource: string; n: number }>;
 };
 
+// Security panel — surfaces auth-family rows from audit_events so the
+// operator can spot brute-force / abuse patterns without leaving the
+// dashboard. Same column-set as AuditFeedRow plus ipAddress. Bucket
+// shapes mirror the /security-events endpoint exactly.
+type SecurityEventRow = {
+  id: string;
+  actorUserId: string | null;
+  actorUserName: string | null;
+  actorRole: string | null;
+  resource: string;
+  resourceId: string;
+  action: string;
+  source: string;
+  ipAddress: string | null;
+  ts: string;
+};
+type SecurityEventsResponse = {
+  success: boolean;
+  data: {
+    recentEvents: SecurityEventRow[];
+    failedLoginsByActor: Array<{ actor: string; n: number }>;
+    failedLoginsByIp: Array<{ ip: string; n: number }>;
+    passwordResetsByEmail: Array<{ userId: string; n: number }>;
+    summary: {
+      totalLogins: number;
+      totalFailures: number;
+      totalResets: number;
+      totalRoleChanges: number;
+    };
+  };
+};
+
 // Plain-language hint per status code so the operator knows WHY each
 // code matters, not just the number. Sourced from the dashboard
 // comments in admin-health.ts.
@@ -424,6 +456,14 @@ export default function AdminHealthPage() {
     data: AuditFeedRow[];
     summary: AuditFeedSummary;
   }>(`/api/admin/health/audit-feed${rangeQS}&limit=100`, 60);
+  // Security panel — auth-family audit_events filtered + bucketed
+  // server-side. 60s cache matches the rest of the dashboard. If the
+  // endpoint throws, useCachedJson returns null and the panel just
+  // renders its empty state — never crashes the page.
+  const { data: securityEventsResp } = useCachedJson<SecurityEventsResponse>(
+    `/api/admin/health/security-events${rangeQS}`,
+    60,
+  );
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -450,6 +490,15 @@ export default function AdminHealthPage() {
   const fePerf = useMemo(() => fePerfResp?.data ?? [], [fePerfResp]);
   const auditFeed = auditFeedResp?.data ?? [];
   const auditSummary = auditFeedResp?.summary ?? { byAction: [], byResource: [] };
+  // Security feed defaults — all empty arrays so the panel renders its
+  // "no events" placeholder when the endpoint is fresh / unreachable.
+  const securityData = securityEventsResp?.data ?? {
+    recentEvents: [],
+    failedLoginsByActor: [],
+    failedLoginsByIp: [],
+    passwordResetsByEmail: [],
+    summary: { totalLogins: 0, totalFailures: 0, totalResets: 0, totalRoleChanges: 0 },
+  };
 
   // Past Fixes — lazy-load docs/BUG-HISTORY.md via Vite's ?raw import.
   // The markdown is ~250KB so we don't bloat the main chunk; the dynamic
@@ -1099,6 +1148,192 @@ export default function AdminHealthPage() {
                     </table>
                   </div>
                 </>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* ────────── SECURITY ────────── */}
+          <SectionHeader
+            title="Security — auth & access patterns"
+            hint="Logins, failed logins, password resets, role changes. If one IP or one user has many failures, that's a sign of brute-force or account takeover attempt."
+          />
+
+          {/* Summary chips — the headline numbers at the top of the
+              security block so the operator doesn't have to read three
+              cards to get the gist. totalFailures is the headline; a
+              zero here usually means the system is quiet. */}
+          <div className="flex flex-wrap gap-3 text-[11px]">
+            <span className="px-2 py-1 rounded bg-[#F5F2EE] text-[#5A5550]">
+              Successful logins <span className="font-semibold text-[#1F1D1B]">{securityData.summary.totalLogins}</span>
+            </span>
+            <span className={`px-2 py-1 rounded ${securityData.summary.totalFailures > 0 ? 'bg-[#FBE9E5] text-[#7E251A]' : 'bg-[#F5F2EE] text-[#5A5550]'}`}>
+              Failed logins <span className="font-semibold">{securityData.summary.totalFailures}</span>
+            </span>
+            <span className={`px-2 py-1 rounded ${securityData.summary.totalResets > 3 ? 'bg-[#FBF1DC] text-[#7A5410]' : 'bg-[#F5F2EE] text-[#5A5550]'}`}>
+              Password resets <span className="font-semibold">{securityData.summary.totalResets}</span>
+            </span>
+            <span className="px-2 py-1 rounded bg-[#F5F2EE] text-[#5A5550]">
+              Role changes <span className="font-semibold text-[#1F1D1B]">{securityData.summary.totalRoleChanges}</span>
+            </span>
+          </div>
+
+          {/* Three sub-cards in a 2-col grid; the recent-events card
+              spans both columns at the bottom because the table is
+              wider than a single-column slot. */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* Failed logins card — top 10 by IP + top 10 by actor. The
+                IP table is the brute-force signal (one IP slamming many
+                accounts); the actor table is the account-takeover
+                signal (many IPs trying one specific account). A row
+                with >=5 failures renders red. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Failed logins ({RANGE_LABEL[range].toLowerCase()})
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-[11px] text-[#8B8580] mb-3">
+                  If one IP or one user has many failures, that's a sign of brute-force.
+                </p>
+                {securityData.failedLoginsByIp.length === 0 && securityData.failedLoginsByActor.length === 0 ? (
+                  <p className="text-xs text-[#4F7C3A]">No failed logins in this window. Healthy.</p>
+                ) : (
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <div className="text-[11px] font-medium text-[#5A5550] mb-1">By IP address</div>
+                      {securityData.failedLoginsByIp.length === 0 ? (
+                        <p className="text-[11px] text-[#8B8580]">—</p>
+                      ) : (
+                        <div className="space-y-1">
+                          {securityData.failedLoginsByIp.map((r) => {
+                            const alert = r.n >= 5;
+                            return (
+                              <div key={r.ip} className="flex items-center gap-2 text-xs">
+                                <span className={`font-mono truncate flex-1 ${alert ? 'text-[#9A3A2D] font-semibold' : 'text-[#1F1D1B]'}`} title={r.ip}>
+                                  {r.ip}
+                                </span>
+                                <span className={`w-8 text-right ${alert ? 'text-[#9A3A2D] font-semibold' : 'text-[#5A5550]'}`}>{r.n}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-medium text-[#5A5550] mb-1">By user</div>
+                      {securityData.failedLoginsByActor.length === 0 ? (
+                        <p className="text-[11px] text-[#8B8580]">—</p>
+                      ) : (
+                        <div className="space-y-1">
+                          {securityData.failedLoginsByActor.map((r) => {
+                            const alert = r.n >= 5;
+                            return (
+                              <div key={r.actor} className="flex items-center gap-2 text-xs">
+                                <span className={`truncate flex-1 ${alert ? 'text-[#9A3A2D] font-semibold' : 'text-[#1F1D1B]'}`} title={r.actor}>
+                                  {r.actor}
+                                </span>
+                                <span className={`w-8 text-right ${alert ? 'text-[#9A3A2D] font-semibold' : 'text-[#5A5550]'}`}>{r.n}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Password resets card — top 10 by user. Numbers > 3 in
+                amber, > 10 in red. Amber = unusual; red = abuse. The
+                "userId" key is what audit_events stores for the target
+                account on a reset request (per emitAudit in auth.ts). */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Password resets ({RANGE_LABEL[range].toLowerCase()})
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-[11px] text-[#8B8580] mb-3">
+                  Many resets against one account can mean someone is poking the forgot-password flow.
+                </p>
+                {securityData.passwordResetsByEmail.length === 0 ? (
+                  <p className="text-xs text-[#4F7C3A]">No password reset requests in this window.</p>
+                ) : (
+                  <div className="space-y-1">
+                    {securityData.passwordResetsByEmail.map((r) => {
+                      const tone =
+                        r.n > 10
+                          ? "text-[#9A3A2D] font-semibold"
+                          : r.n > 3
+                            ? "text-[#9C6F1E] font-semibold"
+                            : "text-[#1F1D1B]";
+                      return (
+                        <div key={r.userId} className="flex items-center gap-2 text-xs">
+                          <span className="font-mono text-[11px] truncate flex-1 text-[#5A5550]" title={r.userId}>
+                            {r.userId}
+                          </span>
+                          <span className={`w-8 text-right ${tone}`}>{r.n}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Recent security events — scrollable list of the last 50
+              auth-family audit_events. Same row pattern as the Audit
+              Feed card (When / Who / Action / Resource / Source)
+              plus IP address so the operator can correlate a suspicious
+              action with the IP of origin. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Recent security events ({RANGE_LABEL[range].toLowerCase()}) — last 50
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {securityData.recentEvents.length === 0 ? (
+                <p className="text-xs text-[#8B8580]">
+                  No security events in this window. (Logins, password changes, role changes all land here.)
+                </p>
+              ) : (
+                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                        <th className="py-1.5 font-medium">When</th>
+                        <th className="py-1.5 font-medium">Who</th>
+                        <th className="py-1.5 font-medium">Action</th>
+                        <th className="py-1.5 font-medium">Resource</th>
+                        <th className="py-1.5 font-medium">IP</th>
+                        <th className="py-1.5 font-medium">Source</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {securityData.recentEvents.map((r) => {
+                        const isFail = r.action === "login.fail" || r.action === "login-failed";
+                        return (
+                          <tr key={r.id} className="border-b border-[#F5F2EE]">
+                            <td className="py-1.5 text-[#5A5550] whitespace-nowrap">{r.ts.slice(5, 16).replace('T', ' ')}</td>
+                            <td className="py-1.5 text-[#1F1D1B]">
+                              <div>{r.actorUserName || r.actorUserId || '—'}</div>
+                              {r.actorRole && <div className="text-[10px] text-[#8B8580]">{r.actorRole}</div>}
+                            </td>
+                            <td className={`py-1.5 font-mono text-[11px] ${isFail ? 'text-[#9A3A2D] font-semibold' : 'text-[#1F1D1B]'}`}>{r.action}</td>
+                            <td className="py-1.5 font-mono text-[11px] text-[#5A5550]">{r.resource}</td>
+                            <td className="py-1.5 font-mono text-[10px] text-[#8B8580] truncate max-w-[140px]" title={r.ipAddress ?? ''}>{r.ipAddress || '—'}</td>
+                            <td className="py-1.5 text-[#8B8580]">{r.source}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </CardContent>
           </Card>

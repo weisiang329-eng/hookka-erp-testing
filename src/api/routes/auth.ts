@@ -612,9 +612,10 @@ app.post("/forgot-password", async (c) => {
   // doesn't say "email sent" specifically — "if account exists, link
   // sent" — so the user knows to wait.
   try {
-    const { sendEmail } = await import("../lib/email");
+    const { sendMail } = await import("../lib/email");
     const env = c.env as unknown as {
       RESEND_API_KEY?: string;
+      BREVO_API_KEY?: string;
       RESEND_FROM_EMAIL?: string;
       APP_URL?: string;
     };
@@ -639,7 +640,9 @@ app.post("/forgot-password", async (c) => {
       `<p><a href="${resetUrl}" style="display:inline-block;background:#6B5C32;color:#fff;padding:10px 18px;text-decoration:none;border-radius:6px">Set a new password</a></p>` +
       `<p>Or copy this link into your browser (expires in 1 hour):<br/><code>${resetUrl}</code></p>` +
       `<p style="color:#5A5550;font-size:12px">If you didn't request this, you can safely ignore this email — your password won't change.</p>`;
-    const result = await sendEmail(env.RESEND_API_KEY, from, {
+    // Send through sendMail — picks Brevo when BREVO_API_KEY is set
+    // (the 2026-05-27 cutover provider for hookka.com), Resend otherwise.
+    const result = await sendMail(env, from, {
       to: email,
       subject,
       html,

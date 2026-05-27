@@ -38,6 +38,7 @@ export interface SendEmailResult {
 export async function notifySupplierPoSubmitted(
   env: {
     RESEND_API_KEY?: string;
+    BREVO_API_KEY?: string;
     RESEND_FROM_EMAIL?: string;
     APP_URL?: string;
   },
@@ -54,11 +55,11 @@ export async function notifySupplierPoSubmitted(
     );
     return { ok: false, error: "supplier has no email on file" };
   }
-  if (!env.RESEND_API_KEY) {
+  if (!env.RESEND_API_KEY && !env.BREVO_API_KEY) {
     console.log(
-      `[email] PO ${args.poNo}: skipped — RESEND_API_KEY not configured`,
+      `[email] PO ${args.poNo}: skipped — no email provider configured`,
     );
-    return { ok: false, error: "RESEND_API_KEY not configured" };
+    return { ok: false, error: "No email provider configured" };
   }
   const from =
     env.RESEND_FROM_EMAIL || "Hookka Manufacturing ERP <noreply@houzscentury.com>";
@@ -66,7 +67,10 @@ export async function notifySupplierPoSubmitted(
     poNo: args.poNo,
     supplierName: args.supplierName,
   });
-  const result = await sendEmail(env.RESEND_API_KEY, from, {
+  // Goes through sendMail (auto-picks Brevo if BREVO_API_KEY set, else
+  // falls back to Resend). Same SendEmailResult shape — supplier-PO flow
+  // is provider-agnostic.
+  const result = await sendMail(env, from, {
     to: supplierEmail,
     subject: tpl.subject,
     html: tpl.html,
@@ -126,6 +130,107 @@ export async function sendEmail(
       error: err instanceof Error ? err.message : "Unknown Resend error",
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Brevo (ex-Sendinblue) backend — added 2026-05-27 because Resend's free
+// tier caps at 1 verified domain, and we wanted hookka.com sending without
+// paying $20/mo for Resend Pro. Brevo's free tier:
+//   - 300 emails / day (9,000 / month) — plenty for an ERP doing password
+//     resets + supplier notifications.
+//   - Unlimited verified domains.
+//   - Same HTTP-based API shape — works under Workers without node:tls.
+//
+// API doc: https://developers.brevo.com/reference/sendtransacemail
+// Endpoint:  POST https://api.brevo.com/v3/smtp/email
+// Auth:      api-key: <BREVO_API_KEY> header
+// Body:
+//   {
+//     sender: { name, email },
+//     to: [{ email, name? }],
+//     subject, htmlContent, textContent
+//   }
+// Returns:  { messageId } on 201
+// ---------------------------------------------------------------------------
+
+// Parse a "Name <email@dom>" or bare-email string into Brevo's sender object.
+// Resend accepts the string form directly; Brevo wants name + email split.
+function parseFrom(fromStr: string): { name?: string; email: string } {
+  const m = fromStr.match(/^(.+?)\s*<([^>]+)>\s*$/);
+  if (m) return { name: m[1].trim(), email: m[2].trim() };
+  return { email: fromStr.trim() };
+}
+
+export async function sendEmailViaBrevo(
+  apiKey: string | undefined,
+  from: string,
+  args: SendEmailArgs,
+): Promise<SendEmailResult> {
+  if (!apiKey) {
+    return {
+      ok: false,
+      error: "BREVO_API_KEY not configured — email not sent",
+    };
+  }
+  try {
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "api-key": apiKey,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        sender: parseFrom(from),
+        to: [{ email: args.to }],
+        subject: args.subject,
+        htmlContent: args.html,
+        textContent: args.text ?? args.html.replace(/<[^>]+>/g, ""),
+      }),
+    });
+    const bodyText = await res.text();
+    if (!res.ok) {
+      return { ok: false, error: `${res.status}: ${bodyText}` };
+    }
+    let id: string | undefined;
+    try {
+      const parsed = JSON.parse(bodyText) as { messageId?: string };
+      id = parsed?.messageId;
+    } catch {
+      /* tolerate format drift */
+    }
+    return { ok: true, id };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Unknown Brevo error",
+    };
+  }
+}
+
+// Pluggable sender. Prefers Brevo when BREVO_API_KEY is configured (the
+// 2026-05-27 cutover target), falls back to Resend otherwise so existing
+// deployments keep working until the secret is rotated. Returns the same
+// SendEmailResult shape regardless of provider so callers stay agnostic.
+//
+// Migration plan: once BREVO_API_KEY is set on every environment and
+// hookka.com is verified at Brevo, RESEND_API_KEY can be removed (this
+// helper degrades gracefully — final fallback is `{ ok: false }`).
+export async function sendMail(
+  env: { RESEND_API_KEY?: string; BREVO_API_KEY?: string },
+  from: string,
+  args: SendEmailArgs,
+): Promise<SendEmailResult> {
+  if (env.BREVO_API_KEY) {
+    return sendEmailViaBrevo(env.BREVO_API_KEY, from, args);
+  }
+  if (env.RESEND_API_KEY) {
+    return sendEmail(env.RESEND_API_KEY, from, args);
+  }
+  return {
+    ok: false,
+    error: "No email provider configured (BREVO_API_KEY or RESEND_API_KEY)",
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
-import { inviteEmailTemplate, sendEmail } from "../lib/email";
+import { inviteEmailTemplate, sendMail } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
 
@@ -391,18 +391,19 @@ async function sendInviteEmail(
   // we surface verbatim — gives the admin actionable feedback.
   const env = c.env as {
     RESEND_API_KEY?: string;
+    BREVO_API_KEY?: string;
     RESEND_FROM_EMAIL?: string;
   };
-  if (!env.RESEND_API_KEY) {
+  if (!env.RESEND_API_KEY && !env.BREVO_API_KEY) {
     return {
       ok: false,
-      error: `Outbox enqueue failed (${enqueueError}) and RESEND_API_KEY is not configured for direct fallback.`,
+      error: `Outbox enqueue failed (${enqueueError}) and no email provider configured for direct fallback.`,
     };
   }
   const from =
     env.RESEND_FROM_EMAIL ||
     "Hookka Manufacturing ERP <noreply@houzscentury.com>";
-  const direct = await sendEmail(env.RESEND_API_KEY, from, {
+  const direct = await sendMail(env, from, {
     to: invite.email,
     subject: tpl.subject,
     html: tpl.html,

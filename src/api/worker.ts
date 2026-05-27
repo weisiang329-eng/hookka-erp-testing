@@ -539,6 +539,16 @@ app.onError((err, c) => {
   return c.json({ success: false, error: "Internal server error" }, 500);
 });
 
+// General API rate limit. Defense-in-depth on top of the per-login limiter:
+// even a valid Bearer token (or a stolen session) can't hammer the API.
+// Default ceiling is 300 req/min, 5000 req/hr per user — at least 10x above
+// any realistic single-operator burst, so normal use never trips a 429. Per-
+// endpoint overrides live in lib/api-rate-limit-config.ts. Wired AFTER
+// authMiddleware + tenantMiddleware so userId is available; falls back to
+// client IP for unauthenticated endpoints. KV failures fall through and
+// allow the request (we never lock real users out on a KV blip).
+app.use("/api/*", apiRateLimit({ exempt: ["/api/health", "/api/pg-ping"] }));
+
 // ---------------------------------------------------------------------------
 // Auth-gated routes (registered AFTER authMiddleware)
 // ---------------------------------------------------------------------------
@@ -633,6 +643,7 @@ import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
 import { reportWorkerError } from "./lib/monitoring";
+import { apiRateLimit } from "./lib/api-rate-limit";
 
 // Phase-5 imports — historically these were in-memory stubs, but every
 // route below has since been migrated to real D1 / Supabase persistence

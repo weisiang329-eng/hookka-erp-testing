@@ -217,6 +217,29 @@ async function liveKpis(
   };
 }
 
+// Temporary diagnostic — surfaces WHICH env var / binding is missing so
+// the operator can fix the right one. Returns true/false (never the
+// values themselves — tokens never appear in the response). Remove
+// after live data flows.
+app.get("/kpis-diag", async (c) => {
+  const env = c.env as unknown as {
+    ERP_METRICS?: unknown;
+    CF_ACCOUNT_ID?: string;
+    AE_QUERY_TOKEN?: string;
+  };
+  return c.json({
+    success: true,
+    diag: {
+      ERP_METRICS_bound: !!env.ERP_METRICS,
+      CF_ACCOUNT_ID_set: !!env.CF_ACCOUNT_ID,
+      CF_ACCOUNT_ID_len: (env.CF_ACCOUNT_ID || "").length,
+      AE_QUERY_TOKEN_set: !!env.AE_QUERY_TOKEN,
+      AE_QUERY_TOKEN_len: (env.AE_QUERY_TOKEN || "").length,
+      AE_QUERY_TOKEN_prefix: (env.AE_QUERY_TOKEN || "").slice(0, 4),
+    },
+  });
+});
+
 app.get("/kpis", async (c) => {
   const env = c.env as unknown as {
     ERP_METRICS?: unknown;

@@ -23,6 +23,7 @@ import {
 } from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
@@ -761,29 +762,61 @@ export default function EditSalesOrderPage() {
         void _drop;
         return rest;
       });
-      const res = await fetch(`/api/sales-orders/${id}`, {
+      // 2026-05-27 — verifiedSave migration. After the PUT, read back
+      // the SO with a cache-bust and compare key header fields (customer,
+      // PO/SO ids, dates) against what we just sent. If the readback
+      // returns the OLD values, the operator sees a clear "save did not
+      // take effect — try again" instead of a misleading green toast.
+      // Items aren't included in the compare because the backend may
+      // legitimately rewrite line numbers / IDs (rebuild semantics).
+      const requestBody = {
+        customerId, customerPOId, customerSOId, reference,
+        companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
+        items: itemsForServer,
+        ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
+      };
+      const result = await verifiedSave<SalesOrder>({
+        endpoint: `/api/sales-orders/${id}`,
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customerId, customerPOId, customerSOId, reference,
-          companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
-          items: itemsForServer,
-          // Forward the admin-issued override token (if any). The backend
-          // PUT verifies + atomically consumes it, then skips the Rule-3
-          // production_window pre-flight. Token is NOT included on
-          // refresh/back-navigation because location.state resets — that's
-          // the desired behavior (single-use semantics).
-          ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
-        }),
+        body: requestBody,
+        readback: async () => {
+          // Cache-bust query param so the FE/server caches don't serve
+          // stale state. Returns the SO envelope { success, data: SO }.
+          const r = await fetch(`/api/sales-orders/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: SalesOrder } | SalesOrder;
+          return (j as { data?: SalesOrder })?.data ?? (j as SalesOrder) ?? null;
+        },
+        expect: {
+          customerId,
+          customerPOId,
+          customerSOId,
+          reference,
+          companySODate,
+          customerDeliveryDate,
+          hookkaExpectedDD,
+          notes,
+        },
       });
-      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
       setSaving(false);
-      // res.ok guard — see create.tsx for why this matters. Without it a
-      // rejected PUT (401/500) was indistinguishable from success because
-      // the JSON parser accepts error bodies and we only looked at
-      // data.success.
-      if (!res.ok || !data.success) {
-        toast.error(data.error || `Failed to update order (HTTP ${res.status})`);
+      if (!result.ok) {
+        if (result.reason === "mismatch") {
+          toast.error(formatMismatchError(result.diffs));
+        } else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try {
+            const j = JSON.parse(result.body) as { error?: string };
+            if (j.error) parsedErr = j.error;
+          } catch {
+            /* keep raw body */
+          }
+          toast.error(parsedErr || `Failed to update order (HTTP ${result.status})`);
+        } else {
+          toast.error(`Save failed: ${result.details}`);
+        }
         return;
       }
       // Only this SO changed. The PO prefix stays because editing items can

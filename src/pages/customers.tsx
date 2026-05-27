@@ -8,6 +8,7 @@ import { useToast } from "@/components/ui/toast";
 import { formatCurrency, formatRM } from "@/lib/utils";
 import { parseDebtorCode } from "@/lib/debtor";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import type { Customer } from "@/types";
 // generateCustomerQuotationPdf is dynamic-imported at the click handler so
 // the 1MB jspdf vendor chunk only ships when the user actually exports.
@@ -3150,31 +3151,46 @@ export default function CustomersPage() {
   const persistCustomer = async (updated: Customer): Promise<boolean> => {
     const previousData = data;
     setData((prev) => prev.map((c) => c.id === updated.id ? updated : c));
-    try {
-      const res = await fetch(`/api/customers/${updated.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updated),
-      });
-      if (!res.ok) {
-        const body = (await res
-          .json()
-          .catch(() => ({}))) as { error?: string };
-        throw new Error(body?.error || `HTTP ${res.status}`);
-      }
-      // Only this customer changed — don't nuke the whole list cache. Hub
-      // add/edit/delete flows call persistCustomer multiple times in a row;
-      // per-id scoping keeps those flows cheap.
-      invalidateCache(`/api/customers/${updated.id}`);
-      return true;
-    } catch (err) {
-      // Roll back optimistic update.
+    // 2026-05-27 verifiedSave migration. Compares name + state on
+    // readback so a backend that silently dropped the change (stale
+    // cache / partial commit) flips us to error instead of green toast.
+    const result = await verifiedSave<Customer>({
+      endpoint: `/api/customers/${updated.id}`,
+      method: "PUT",
+      body: updated,
+      readback: async () => {
+        const r = await fetch(`/api/customers/${updated.id}?_v=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!r.ok) return null;
+        const j = (await r.json()) as { success?: boolean; data?: Customer } | Customer;
+        return (j as { data?: Customer })?.data ?? (j as Customer) ?? null;
+      },
+      expect: {
+        name: updated.name,
+        code: updated.code,
+        creditLimitSen: updated.creditLimitSen,
+        contactName: updated.contactName,
+        phone: updated.phone,
+      },
+    });
+    if (!result.ok) {
       setData(previousData);
-      const detail = err instanceof Error ? err.message : "try again";
-      toast.error(`Failed to save customer: ${detail}`);
-      console.error(err);
+      if (result.reason === "mismatch") {
+        toast.error(formatMismatchError(result.diffs));
+      } else if (result.reason === "http") {
+        let detail = result.body;
+        try { const j = JSON.parse(result.body) as { error?: string }; if (j.error) detail = j.error; } catch { /* keep raw */ }
+        toast.error(`Failed to save customer: ${detail || result.status}`);
+      } else {
+        toast.error(`Failed to save customer: ${result.details}`);
+      }
+      console.error("persistCustomer failed:", result);
       return false;
     }
+    invalidateCache(`/api/customers/${updated.id}`);
+    return true;
   };
 
   // ---------- Edit Customer ----------

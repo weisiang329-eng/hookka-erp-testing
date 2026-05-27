@@ -23,6 +23,7 @@ import {
 } from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
@@ -483,30 +484,44 @@ export default function EditSalesOrderPage() {
         void _drop;
         return rest;
       });
-      const res = await fetch(`/api/consignment-orders/${id}`, {
+      // 2026-05-27 verifiedSave migration (mirrors sales/edit.tsx).
+      const requestBody = {
+        customerId, customerPOId, customerCOId, reference,
+        companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
+        items: itemsForServer,
+        ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
+      };
+      const result = await verifiedSave<SalesOrder>({
+        endpoint: `/api/consignment-orders/${id}`,
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: requestBody,
+        readback: async () => {
+          const r = await fetch(`/api/consignment-orders/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: SalesOrder } | SalesOrder;
+          return (j as { data?: SalesOrder })?.data ?? (j as SalesOrder) ?? null;
+        },
+        expect: {
           customerId, customerPOId, customerCOId, reference,
           companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
-          items: itemsForServer,
-          // Forward the admin-issued override token (if any). Single-use,
-          // server consumes it atomically. See sales/edit.tsx for full notes.
-          ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
-        }),
+        },
       });
-      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
       setSaving(false);
-      // res.ok guard — see create.tsx for why this matters. Without it a
-      // rejected PUT (401/500) was indistinguishable from success because
-      // the JSON parser accepts error bodies and we only looked at
-      // data.success.
-      if (!res.ok || !data.success) {
-        toast.error(data.error || `Failed to update order (HTTP ${res.status})`);
+      if (!result.ok) {
+        if (result.reason === "mismatch") {
+          toast.error(formatMismatchError(result.diffs));
+        } else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try { const j = JSON.parse(result.body) as { error?: string }; if (j.error) parsedErr = j.error; } catch { /* keep raw */ }
+          toast.error(parsedErr || `Failed to update order (HTTP ${result.status})`);
+        } else {
+          toast.error(`Save failed: ${result.details}`);
+        }
         return;
       }
-      // Only this SO changed. The PO prefix stays because editing items can
-      // cascade to regenerating linked POs on the server.
       if (id) invalidateCache(`/api/consignment-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
       navigate(`/consignment/${id}`);

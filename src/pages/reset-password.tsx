@@ -11,6 +11,8 @@
 // ---------------------------------------------------------------------------
 import { useState, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import PasswordStrengthMeter from "@/components/PasswordStrengthMeter";
+import { validatePasswordStrength } from "@/api/lib/password-strength";
 
 export default function ResetPasswordPage() {
   const navigate = useNavigate();
@@ -25,11 +27,16 @@ export default function ResetPasswordPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const mismatch = pw && pw2 && pw !== pw2;
-  const tooShort = pw && pw.length < 6;
+  // Strength check is the gate now — the legacy `length < 6` rule is a
+  // strict subset of the new rules (12 chars + char types + dictionary).
+  // We evaluate only when the user has typed something so an empty field
+  // doesn't render an error banner before they've started.
+  const strength = pw ? validatePasswordStrength(pw) : null;
+  const weak = strength ? !strength.ok : false;
 
   async function handleSubmit(ev: React.FormEvent) {
     ev.preventDefault();
-    if (mismatch || tooShort || !pw) return;
+    if (mismatch || weak || !pw) return;
     setSubmitting(true);
     setErrorMsg(null);
     try {
@@ -112,7 +119,8 @@ export default function ResetPasswordPage() {
             Set a new password
           </h1>
           <p style={{ color: "rgba(255,255,255,.5)", fontSize: "13px" }}>
-            Choose something you'll remember — at least 6 characters.
+            Choose something you'll remember — at least 12 characters with
+            upper, lower, a number and a symbol.
           </p>
         </div>
 
@@ -173,19 +181,14 @@ export default function ResetPasswordPage() {
                 className="w-full px-3 py-2.5 rounded-md"
                 style={{
                   background: "rgba(20, 18, 15, 0.6)",
-                  border: "1px solid rgba(139, 122, 78, 0.35)",
+                  border: `1px solid ${weak ? "rgba(154, 58, 45, 0.6)" : "rgba(139, 122, 78, 0.35)"}`,
                   color: "#F4EFE3",
                   fontSize: "14px",
                 }}
               />
-              {tooShort && (
-                <p
-                  className="mt-1.5"
-                  style={{ color: "#E8AFA4", fontSize: "12px" }}
-                >
-                  At least 6 characters.
-                </p>
-              )}
+              {/* Live strength feedback + first-failing-rule message.
+                  Renders nothing while the field is empty. */}
+              <PasswordStrengthMeter password={pw} />
             </div>
             <div>
               <label
@@ -240,9 +243,7 @@ export default function ResetPasswordPage() {
 
             <button
               type="submit"
-              disabled={
-                submitting || !pw || !pw2 || !!mismatch || !!tooShort
-              }
+              disabled={submitting || !pw || !pw2 || !!mismatch || weak}
               className="w-full py-2.5 rounded-md"
               style={{
                 background:
@@ -251,9 +252,9 @@ export default function ResetPasswordPage() {
                 fontSize: "14px",
                 fontWeight: 600,
                 opacity:
-                  submitting || !pw || !pw2 || mismatch || tooShort ? 0.5 : 1,
+                  submitting || !pw || !pw2 || mismatch || weak ? 0.5 : 1,
                 cursor:
-                  submitting || !pw || !pw2 || mismatch || tooShort
+                  submitting || !pw || !pw2 || mismatch || weak
                     ? "not-allowed"
                     : "pointer",
                 border: "none",

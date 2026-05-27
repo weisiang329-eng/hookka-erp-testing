@@ -33,7 +33,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rememberMe, setRememberMe] = useState(false);
-  const [showForgotHelp, setShowForgotHelp] = useState(false);
 
   // Already signed-in? Jump straight to the dashboard.
   useEffect(() => {
@@ -289,37 +288,19 @@ export default function LoginPage() {
                     Remember me
                   </span>
                 </label>
+                {/* Self-service reset (added 2026-05-27). Navigates to
+                    /forgot-password which posts to /api/auth/forgot-password
+                    and emails a one-hour reset link. The old "ask a super
+                    admin" helper text was removed at the same time. */}
                 <button
                   type="button"
-                  onClick={() => setShowForgotHelp((v) => !v)}
+                  onClick={() => navigate("/forgot-password")}
                   className="hover:underline bg-transparent border-0 p-0 cursor-pointer"
                   style={{ color: "#8B7A4E", fontSize: "13px" }}
-                  aria-expanded={showForgotHelp}
                 >
                   Forgot Password?
                 </button>
               </div>
-
-              {showForgotHelp && (
-                <div
-                  className="rounded-md px-3 py-2.5 leading-relaxed"
-                  style={{
-                    background: "rgba(139, 122, 78, 0.12)",
-                    border: "1px solid rgba(139, 122, 78, 0.3)",
-                    color: "rgba(255,255,255,.75)",
-                    fontSize: "12.5px",
-                  }}
-                >
-                  This system has no self-service reset. Ask a super admin to
-                  reset your password from{" "}
-                  <span style={{ color: "#C9B97E", fontWeight: 500 }}>
-                    Settings → Users → Reset Password
-                  </span>
-                  . If you are the only super admin and have lost access,
-                  contact whoever manages the database to reset your hash
-                  directly.
-                </div>
-              )}
 
               {/* Sign In Button */}
               <button

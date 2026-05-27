@@ -468,6 +468,280 @@ app.post("/change-password", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Self-service password reset (forgot-password flow). 2026-05-27.
+//
+// Background: Hookka previously had no self-service reset — the login form
+// said "ask a super admin". Worked fine until Wei Siang (the only
+// SUPER_ADMIN) got locked out, and the only recovery was a manual SQL
+// UPDATE on users.passwordHash. This pair of endpoints fixes that.
+//
+//   POST /api/auth/forgot-password   { email }
+//     → Always returns 200. Body says "if account exists, email sent."
+//     → Internally: if email matches a users row, generate a 64-char
+//       random token (two crypto.randomUUID()s concatenated), INSERT
+//       into password_reset_tokens with expiresAt = now + 1h, send
+//       email via Resend with link APP_URL/reset-password?token=...
+//
+//   POST /api/auth/reset-password    { token, newPassword }
+//     → Validates token (exists, not used, not expired, email matches a
+//       real users row), hashes new password, UPDATEs users.passwordHash,
+//       marks token usedAt = now. Audit-logged.
+//
+// Security notes:
+//   - Email enumeration mitigated by always-200 from /forgot-password.
+//   - Rate limit: 1 reset request per email per 5 minutes (cheap query
+//     on idx_password_reset_tokens_email).
+//   - Tokens are single-use and 1-hour TTL.
+//   - On successful reset we DO NOT auto-login — caller has to log in
+//     fresh. Defends against the "stolen reset link" case (auto-login
+//     would create a session for the link holder, even though the
+//     account owner may not have requested the reset).
+// ---------------------------------------------------------------------------
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;  // 1 hour
+const RESET_REQUEST_COOLDOWN_MS = 5 * 60 * 1000;  // 5 minutes per email
+
+app.post("/forgot-password", async (c) => {
+  // Parse body — body might be malformed; we still respond 200 because
+  // the enumeration mitigation only works if EVERY input returns the
+  // same shape.
+  const body = await c.req.json().catch(() => ({}));
+  const email = String((body as { email?: unknown }).email ?? "")
+    .trim()
+    .toLowerCase();
+
+  // Generic success response. Same shape regardless of whether email
+  // exists or rate-limited — prevents account enumeration.
+  const respond = () =>
+    c.json({
+      success: true,
+      message:
+        "If an account with that email exists, a password reset link has been sent.",
+    });
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    // Garbage email — return generic success anyway, but don't waste
+    // a DB roundtrip / email send.
+    return respond();
+  }
+
+  // Rate-limit check. One reset request per email per 5 min.
+  const recent = await c.var.DB.prepare(
+    `SELECT createdAt FROM password_reset_tokens
+      WHERE email = ?
+      ORDER BY createdAt DESC
+      LIMIT 1`,
+  )
+    .bind(email)
+    .first<{ createdAt: string }>();
+  if (recent) {
+    const ageMs = Date.now() - Date.parse(recent.createdAt);
+    if (Number.isFinite(ageMs) && ageMs < RESET_REQUEST_COOLDOWN_MS) {
+      // Silently swallow — don't tell the caller "rate-limited", that
+      // leaks email existence too.
+      return respond();
+    }
+  }
+
+  // Look up user. If absent, return generic success (no email send).
+  const user = await c.var.DB.prepare(
+    "SELECT id, email, displayName FROM users WHERE email = ?",
+  )
+    .bind(email)
+    .first<{ id: string; email: string; displayName: string | null }>();
+  if (!user) {
+    return respond();
+  }
+
+  // Generate token. Two UUIDs concatenated (with dashes stripped) gives
+  // ~256 bits of entropy — overkill but cheap.
+  const token = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, "");
+  const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
+
+  await c.var.DB.prepare(
+    `INSERT INTO password_reset_tokens (token, email, expiresAt, requestIp, requestUa)
+     VALUES (?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      token,
+      email,
+      expiresAt,
+      clientIp(c) || null,
+      String(c.req.header("user-agent") ?? "").slice(0, 256) || null,
+    )
+    .run();
+
+  // Send email. Best-effort — if Resend is down or unconfigured, we
+  // still return 200 (the user can retry; if it's a config issue the
+  // admin sees the warning in wrangler tail). The success response
+  // doesn't say "email sent" specifically — "if account exists, link
+  // sent" — so the user knows to wait.
+  try {
+    const { sendEmail } = await import("../lib/email");
+    const env = c.env as unknown as {
+      RESEND_API_KEY?: string;
+      RESEND_FROM_EMAIL?: string;
+      APP_URL?: string;
+    };
+    const appUrl =
+      env.APP_URL || "https://erp.hookka.com";
+    const from =
+      env.RESEND_FROM_EMAIL ||
+      "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+    const resetUrl = `${appUrl}/reset-password?token=${encodeURIComponent(token)}`;
+    const displayName = user.displayName || email;
+    const subject = "Reset your Hookka ERP password";
+    const text =
+      `Hi ${displayName},\n\n` +
+      `Someone (probably you) requested a password reset for ${email}.\n\n` +
+      `Click this link to set a new password — it expires in 1 hour:\n\n` +
+      `${resetUrl}\n\n` +
+      `If you didn't request this, you can safely ignore this email — your password won't change.\n\n` +
+      `— Hookka Manufacturing ERP`;
+    const html =
+      `<p>Hi ${escapeHtml(displayName)},</p>` +
+      `<p>Someone (probably you) requested a password reset for <strong>${escapeHtml(email)}</strong>.</p>` +
+      `<p><a href="${resetUrl}" style="display:inline-block;background:#6B5C32;color:#fff;padding:10px 18px;text-decoration:none;border-radius:6px">Set a new password</a></p>` +
+      `<p>Or copy this link into your browser (expires in 1 hour):<br/><code>${resetUrl}</code></p>` +
+      `<p style="color:#5A5550;font-size:12px">If you didn't request this, you can safely ignore this email — your password won't change.</p>`;
+    const result = await sendEmail(env.RESEND_API_KEY, from, {
+      to: email,
+      subject,
+      html,
+      text,
+    });
+    if (!result.ok) {
+      console.warn(
+        `[auth/forgot-password] email send failed for ${email}: ${result.error}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "[auth/forgot-password] email path threw:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Audit (forensics: who requested a reset and from where).
+  await emitAudit(c, {
+    resource: "auth",
+    resourceId: user.id,
+    action: "password-reset-request",
+  });
+
+  return respond();
+});
+
+app.post("/reset-password", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const token = String((body as { token?: unknown }).token ?? "").trim();
+  const newPassword = String(
+    (body as { newPassword?: unknown }).newPassword ?? "",
+  );
+
+  if (!token) {
+    return c.json(
+      { success: false, error: "Reset token is required" },
+      400,
+    );
+  }
+  if (!newPassword || newPassword.length < 6) {
+    return c.json(
+      {
+        success: false,
+        error: "New password must be at least 6 characters",
+      },
+      400,
+    );
+  }
+
+  const row = await c.var.DB.prepare(
+    `SELECT token, email, expiresAt, usedAt
+       FROM password_reset_tokens
+      WHERE token = ?`,
+  )
+    .bind(token)
+    .first<{
+      token: string;
+      email: string;
+      expiresAt: string;
+      usedAt: string | null;
+    }>();
+  if (!row) {
+    return c.json(
+      { success: false, error: "Invalid or expired reset link" },
+      400,
+    );
+  }
+  if (row.usedAt) {
+    return c.json(
+      {
+        success: false,
+        error: "This reset link has already been used. Request a new one.",
+      },
+      410,
+    );
+  }
+  const expMs = Date.parse(row.expiresAt);
+  if (!Number.isFinite(expMs) || expMs < Date.now()) {
+    return c.json(
+      {
+        success: false,
+        error: "This reset link has expired. Request a new one.",
+      },
+      410,
+    );
+  }
+
+  const user = await c.var.DB.prepare(
+    "SELECT id FROM users WHERE email = ?",
+  )
+    .bind(row.email)
+    .first<{ id: string }>();
+  if (!user) {
+    // Edge case: account was deleted between request and reset.
+    return c.json(
+      { success: false, error: "Account no longer exists" },
+      404,
+    );
+  }
+
+  const newHash = await hashPassword(newPassword);
+  await c.var.DB.prepare(
+    "UPDATE users SET passwordHash = ? WHERE id = ?",
+  )
+    .bind(newHash, user.id)
+    .run();
+  await c.var.DB.prepare(
+    "UPDATE password_reset_tokens SET usedAt = ? WHERE token = ?",
+  )
+    .bind(new Date().toISOString(), token)
+    .run();
+
+  // Audit — action label is enough; we don't snapshot the new hash.
+  await emitAudit(c, {
+    resource: "auth",
+    resourceId: user.id,
+    action: "password-reset-complete",
+  });
+
+  return c.json({
+    success: true,
+    message: "Password updated. You can now log in with your new password.",
+  });
+});
+
+// Minimal HTML-escape used only by the forgot-password email template.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// ---------------------------------------------------------------------------
 // Invite acceptance flow — PUBLIC routes, exempted in auth-middleware.ts.
 //
 // GET /api/auth/invite/:token   → preflight (fetches the invite meta so the

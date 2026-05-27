@@ -14,6 +14,11 @@ const Track = lazy(() => import('./pages/track'))
 // Auth
 const Login = lazy(() => import('./pages/login'))
 const InviteAccept = lazy(() => import('./pages/InviteAccept'))
+// Self-service password reset (2026-05-27). Both pages are public — they
+// run before the user has any session. The token in the URL is the only
+// credential needed for /reset-password.
+const ForgotPassword = lazy(() => import('./pages/forgot-password'))
+const ResetPassword = lazy(() => import('./pages/reset-password'))
 
 // Worker Portal (mobile, shop floor — uses its own PIN token, not hookka_auth)
 const WorkerLogin = lazy(() => import('./pages/worker/login'))
@@ -56,6 +61,9 @@ export const router = createBrowserRouter([
 
   // Auth (standalone, no layout — PUBLIC)
   { path: '/login', element: <S><Login /></S> },
+  // Self-service password reset — PUBLIC (no session required, token is in URL)
+  { path: '/forgot-password', element: <S><ForgotPassword /></S> },
+  { path: '/reset-password', element: <S><ResetPassword /></S> },
 
   // Invite acceptance (standalone, no auth — the token IS the credential)
   { path: '/invite/:token', element: <S><InviteAccept /></S> },

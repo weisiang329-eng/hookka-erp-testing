@@ -29,6 +29,11 @@ export const PUBLIC_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/accept-invite",
+  // Self-service password reset (added 2026-05-27). Both endpoints
+  // are PUBLIC by definition — the caller has no session to present
+  // because they're trying to recover one.
+  "/api/auth/forgot-password",
+  "/api/auth/reset-password",
   // Phase C.6 — TOTP step-2 of password login. The caller already proved
   // possession of the password (got back { totpRequired: true, userId }) and
   // must now prove possession of the second factor. No bearer yet.

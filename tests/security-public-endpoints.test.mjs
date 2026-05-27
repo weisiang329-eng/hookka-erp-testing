@@ -33,6 +33,12 @@ const EXPECTED_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/accept-invite",
+  // Self-service password reset (2026-05-27). Both endpoints are PUBLIC
+  // because the caller has no session yet — they're recovering one. Email
+  // enumeration is mitigated in the handler (always 200 from forgot-password),
+  // and reset-password requires possession of the emailed token.
+  "/api/auth/forgot-password",
+  "/api/auth/reset-password",
   // Phase C.6 — TOTP step-2 of password login (no bearer yet).
   "/api/auth/totp/login-verify",
   "/api/health",

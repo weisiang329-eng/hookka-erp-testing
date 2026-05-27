@@ -1,0 +1,104 @@
+name: Daily Reports — Schedule / Efficiency / Overdue
+
+# Hits the three /api/internal/reports/*-trigger endpoints at fixed SGT
+# times. Times in cron syntax are UTC, so:
+#   08:00 SGT = 00:00 UTC  → schedule (today's plan, sent at start of day)
+#   12:00 SGT = 04:00 UTC  → efficiency (yesterday's work, summarised at noon)
+#   17:00 SGT = 09:00 UTC  → overdue (any delays as of end of day)
+#
+# Auth: each endpoint expects an x-cron-secret header. Shared secret lives in
+# repo secrets as CRON_SECRET and on Cloudflare Pages env as CRON_SECRET. The
+# Pages worker rejects with 503 if env var missing, 403 if header mismatches.
+#
+# Recipients: defaults to every active SUPER_ADMIN's email. To override, set
+# DAILY_REPORT_RECIPIENTS on the Pages worker (comma-separated).
+#
+# Manual trigger: workflow_dispatch lets the operator backfill any single
+# report on demand without waiting for the scheduled hour.
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 08:00 SGT — Production Schedule
+    - cron: '0 4 * * *'   # 12:00 SGT — Efficiency Report
+    - cron: '0 9 * * *'   # 17:00 SGT — Overdue Report
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'Which report to fire (defaults to all three)'
+        required: false
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - schedule
+          - efficiency
+          - overdue
+      date:
+        description: 'Optional date override (YYYY-MM-DD). Leave blank for default.'
+        required: false
+        type: string
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve which report(s) to send
+        id: which
+        env:
+          GH_EVENT: ${{ github.event_name }}
+          KIND_INPUT: ${{ inputs.kind }}
+          # Each scheduled run carries the cron expression in github.event.schedule
+          # — branch on that to pick the right endpoint.
+          CRON_EXPR: ${{ github.event.schedule }}
+        run: |
+          if [ "$GH_EVENT" = "workflow_dispatch" ]; then
+            case "${KIND_INPUT:-all}" in
+              schedule)   echo "kinds=schedule" >> "$GITHUB_OUTPUT" ;;
+              efficiency) echo "kinds=efficiency" >> "$GITHUB_OUTPUT" ;;
+              overdue)    echo "kinds=overdue" >> "$GITHUB_OUTPUT" ;;
+              *)          echo "kinds=schedule efficiency overdue" >> "$GITHUB_OUTPUT" ;;
+            esac
+          else
+            case "$CRON_EXPR" in
+              "0 0 * * *") echo "kinds=schedule"   >> "$GITHUB_OUTPUT" ;;
+              "0 4 * * *") echo "kinds=efficiency" >> "$GITHUB_OUTPUT" ;;
+              "0 9 * * *") echo "kinds=overdue"    >> "$GITHUB_OUTPUT" ;;
+              *)           echo "kinds=schedule efficiency overdue" >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+      - name: POST trigger endpoint(s)
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DATE_INPUT: ${{ inputs.date }}
+          KINDS: ${{ steps.which.outputs.kinds }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty"
+            exit 1
+          fi
+          BODY='{}'
+          if [ -n "$DATE_INPUT" ]; then
+            BODY="{\"date\":\"$DATE_INPUT\"}"
+          fi
+          fail=0
+          for kind in $KINDS; do
+            url="https://erp.hookka.com/api/internal/reports/${kind}-trigger"
+            echo "--- Firing $kind → $url"
+            response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+              --max-time 90 \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --header "x-cron-secret: $CRON_SECRET" \
+              --data "$BODY" \
+              "$url" || true)
+            status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+            body=$(echo "$response" | sed '$d')
+            echo "Status: $status"
+            echo "Body: $body"
+            if [ "$status" != "200" ]; then
+              echo "::error::$kind trigger failed with HTTP $status"
+              fail=1
+            fi
+          done
+          exit $fail

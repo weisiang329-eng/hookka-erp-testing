@@ -54,6 +54,10 @@ const EXPECTED_PREFIXES = [
   "/api/auth/invite/",
   // Phase B.3 — Google Workspace OAuth handshake (/start + /callback).
   "/api/auth/oauth/",
+  // 2026-05-27 — daily-report cron triggers. Handlers do their own
+  // CRON_SECRET check (constant-time SHA-256). External cron service can
+  // POST in at 12pm SGT without a dashboard session.
+  "/api/internal/reports/",
 ];
 
 test("public endpoint allowlist (exact paths) is locked in", () => {

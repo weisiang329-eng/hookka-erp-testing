@@ -84,6 +84,11 @@ export type Env = {
     GOOGLE_SHEETS_SA_KEY?: string;     // Full service-account JSON (stringified)
     SHEETS_SYNC_SECRET?: string;       // HMAC secret shared with Apps Script
     SHEETS_SPREADSHEET_ID?: string;    // Target spreadsheet id
+    // Daily reports — efficiency / schedule / overdue. Optional override:
+    // comma-separated list of email addresses that receive the cron-pushed
+    // reports. When unset, the worker queries users WHERE roleId='SUPER_ADMIN'
+    // and uses every active email. See src/api/routes/reports.ts.
+    DAILY_REPORT_RECIPIENTS?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -884,6 +889,14 @@ app.route("/api/service-orders", serviceOrders);
 // from /api/department-labor (no collision); see routes/department-performance.ts.
 app.route("/api/department-performance", departmentPerformance);
 app.route("/api/wip-times", wipTimes);
+
+// Daily reports (efficiency / schedule / overdue). The /api/reports/* paths
+// are session-gated like the rest of the dashboard. The /api/internal/reports/*
+// trigger endpoints are public-path + CRON_SECRET-gated so an external cron
+// service (cron-job.org / GitHub Action) can POST in at 12pm SGT etc.
+import reports, { internal as reportsInternal } from "./routes/reports";
+app.route("/api/reports", reports);
+app.route("/api/internal/reports", reportsInternal);
 
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every

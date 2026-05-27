@@ -227,17 +227,45 @@ app.get("/kpis-diag", async (c) => {
     CF_ACCOUNT_ID?: string;
     AE_QUERY_TOKEN?: string;
   };
-  return c.json({
-    success: true,
-    diag: {
-      ERP_METRICS_bound: !!env.ERP_METRICS,
-      CF_ACCOUNT_ID_set: !!env.CF_ACCOUNT_ID,
-      CF_ACCOUNT_ID_len: (env.CF_ACCOUNT_ID || "").length,
-      AE_QUERY_TOKEN_set: !!env.AE_QUERY_TOKEN,
-      AE_QUERY_TOKEN_len: (env.AE_QUERY_TOKEN || "").length,
-      AE_QUERY_TOKEN_prefix: (env.AE_QUERY_TOKEN || "").slice(0, 4),
-    },
-  });
+  const diag = {
+    ERP_METRICS_bound: !!env.ERP_METRICS,
+    CF_ACCOUNT_ID_set: !!env.CF_ACCOUNT_ID,
+    CF_ACCOUNT_ID_len: (env.CF_ACCOUNT_ID || "").length,
+    CF_ACCOUNT_ID_prefix: (env.CF_ACCOUNT_ID || "").slice(0, 6),
+    AE_QUERY_TOKEN_set: !!env.AE_QUERY_TOKEN,
+    AE_QUERY_TOKEN_len: (env.AE_QUERY_TOKEN || "").length,
+    AE_QUERY_TOKEN_prefix: (env.AE_QUERY_TOKEN || "").slice(0, 4),
+  };
+  // Try the actual AE SQL call and capture whatever the API says.
+  // The CF response body is the diagnostic. Never returns the token —
+  // only error / success status from CF.
+  let liveCall: Record<string, unknown> = { attempted: false };
+  if (env.CF_ACCOUNT_ID && env.AE_QUERY_TOKEN) {
+    try {
+      const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.AE_QUERY_TOKEN}`,
+          "Content-Type": "text/plain",
+        },
+        body: "SELECT count() AS n FROM hookka_erp_metrics WHERE timestamp > NOW() - INTERVAL '1' DAY",
+      });
+      const body = await res.text();
+      liveCall = {
+        attempted: true,
+        status: res.status,
+        ok: res.ok,
+        body_snippet: body.slice(0, 300),
+      };
+    } catch (e) {
+      liveCall = {
+        attempted: true,
+        thrown: e instanceof Error ? e.message : String(e),
+      };
+    }
+  }
+  return c.json({ success: true, diag, liveCall });
 });
 
 app.get("/kpis", async (c) => {

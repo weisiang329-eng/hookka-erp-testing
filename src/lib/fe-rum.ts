@@ -108,6 +108,102 @@ function observeMetric(
   }
 }
 
+// SPA navigation timing — fills the gap between initial-page-load
+// PerformanceTiming and per-component metrics. React Router uses
+// history.pushState() / popstate to swap routes without firing a real
+// navigation event, so the browser's `navigation` PerformanceObserver
+// only ever sees the FIRST page load. Every subsequent click between
+// modules (Sales → Production → Invoices → …) was invisible.
+//
+// Fix: patch pushState + replaceState + listen for popstate, mark t0
+// on every URL change, then measure t-to-idle via two
+// requestAnimationFrame chained with a 0ms setTimeout. Two rAFs let
+// React commit + paint; the setTimeout drains microtasks (state
+// updates that fire after paint). Far from perfect but a useful
+// "click to first stable frame" approximation, comparable across
+// routes.
+//
+// Emitted as a regular `fe_perf` event with metric=spa_nav so it
+// shows up in the existing /admin/health "Front-End perf" panel
+// alongside longtask / LCP / FCP. Operator scans by P95 to find slow
+// routes ("/payroll spa_nav P95 4800ms? something's wrong").
+let navStartMs: number | null = null;
+let navStartRoute = "/";
+function markNavStart(): void {
+  navStartMs = performance.now();
+  navStartRoute = currentRoute();
+}
+function flushNav(): void {
+  if (navStartMs == null) return;
+  const route = currentRoute();
+  // Only emit if the route actually changed — pushState with the same
+  // URL (filter/search state) is not a real navigation and would
+  // pollute the histogram.
+  if (route === navStartRoute) {
+    navStartMs = null;
+    return;
+  }
+  const start = navStartMs;
+  navStartMs = null;
+  // Wait for paint + microtask drain.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      // Module-init utility, not a React component — useTimeout doesn't apply.
+      // eslint-disable-next-line no-restricted-syntax
+      setTimeout(() => {
+        const duration = Math.round(performance.now() - start);
+        // Sanity bound — anything > 30s is a stuck tab / debugger
+        // pause, not a real measurement.
+        if (duration > 0 && duration < 30_000) {
+          pushEvent({
+            kind: "perf",
+            route,
+            metric: "nav", // reuse "nav" bucket so it groups in FE perf panel
+            value: duration,
+            ts: Date.now(),
+          });
+        }
+      }, 0);
+    });
+  });
+}
+function installSpaNavTiming(): void {
+  if (typeof window === "undefined") return;
+  // Patch history methods. Wrap so we don't break the React Router /
+  // history library that calls them; we only ADD instrumentation.
+  const _push = history.pushState.bind(history);
+  const _replace = history.replaceState.bind(history);
+  history.pushState = function (...args: Parameters<typeof history.pushState>) {
+    markNavStart();
+    const r = _push(...args);
+    // pushState updates location synchronously, so flushNav can read
+    // the new route immediately on the next microtask.
+    queueMicrotask(flushNav);
+    return r;
+  };
+  history.replaceState = function (
+    ...args: Parameters<typeof history.replaceState>
+  ) {
+    markNavStart();
+    const r = _replace(...args);
+    queueMicrotask(flushNav);
+    return r;
+  };
+  // Browser back/forward → popstate, route already changed when this
+  // fires so markNavStart sees the OLD route. We work around by
+  // capturing t0 BEFORE the browser updates location: the navigate
+  // listener (which fires before popstate) is `pagehide`/`unload` —
+  // neither is reliable for SPA back. Practical compromise: on
+  // popstate, mark start = now MINUS a small fudge factor for the
+  // browser's URL-swap work. Slightly under-counts back/forward but
+  // catches the slow rebound renders.
+  window.addEventListener("popstate", () => {
+    navStartMs = performance.now() - 1; // 1ms fudge
+    navStartRoute = "__popstate__"; // force flushNav to emit (different route)
+    queueMicrotask(flushNav);
+  });
+}
+
 /**
  * Initialise FE RUM. Idempotent — safe to call multiple times; second
  * call no-ops.
@@ -216,8 +312,17 @@ export function initFeRum(): void {
     };
   });
 
+  // SPA route-change timing. Patches history.pushState/replaceState +
+  // listens to popstate to measure "click to stable frame" duration.
+  // Emits as a regular fe_perf event so it surfaces in the existing
+  // "Front-End perf" panel under metric=nav (alongside the initial
+  // full-page-load nav timing).
+  installSpaNavTiming();
+
   // Periodic flush. Don't use setInterval inside a worker context —
-  // RUM is browser-only.
+  // RUM is browser-only. Module-init utility, not a React component
+  // — useInterval doesn't apply (and would require a host component).
+  // eslint-disable-next-line no-restricted-syntax
   flushTimer = setInterval(() => {
     void flush();
   }, FLUSH_INTERVAL_MS);

@@ -12,7 +12,7 @@
 // before the data fetch even starts. The endpoint enforces the same
 // role check server-side (defense-in-depth).
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,11 @@ import {
   Gauge,
   TrendingUp,
 } from "lucide-react";
+import {
+  parseBugHistory,
+  topCategories,
+  type BugEntry,
+} from "@/lib/bug-history-parser";
 
 // Time-range selector — passed to every /api/admin/health/* endpoint
 // as ?range=. AE retention is 92 days so 30d is the practical max for
@@ -387,6 +392,39 @@ export default function AdminHealthPage() {
   const fePerf = fePerfResp?.data ?? [];
   const auditFeed = auditFeedResp?.data ?? [];
   const auditSummary = auditFeedResp?.summary ?? { byAction: [], byResource: [] };
+
+  // Past Fixes — lazy-load docs/BUG-HISTORY.md via Vite's ?raw import.
+  // The markdown is ~250KB so we don't bloat the main chunk; the dynamic
+  // import keeps it out of the bundle until SUPER_ADMIN actually opens
+  // /admin/health. parseBugHistory drops the prose body (Symptom / Root
+  // cause / Fix) and keeps only the headline + category + status, which
+  // is all the dashboard panel needs.
+  const [bugHistory, setBugHistory] = useState<BugEntry[]>([]);
+  const [bugHistoryLoading, setBugHistoryLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    import("../../../docs/BUG-HISTORY.md?raw")
+      .then((mod) => {
+        if (!alive) return;
+        setBugHistory(parseBugHistory(mod.default));
+        setBugHistoryLoading(false);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setBugHistoryLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  // Top categories — derived deterministically from the parsed entries.
+  // useMemo so re-renders don't recompute when only KPI data changed.
+  const bugCategories = useMemo(
+    () => topCategories(bugHistory, 8),
+    [bugHistory],
+  );
+  // Recent entries — newest 20 (file is newest-first already, so just slice).
+  const recentFixes = useMemo(() => bugHistory.slice(0, 20), [bugHistory]);
 
   return (
     <div className="p-6 space-y-6">
@@ -879,6 +917,97 @@ export default function AdminHealthPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Past Fixes — surfaces docs/BUG-HISTORY.md on the dashboard
+              so the operator sees pattern alongside current issues.
+              Two sub-panels:
+                1. Top modules with bug counts — "sales-orders 23
+                   fixes" is the signal to rewrite that module, not
+                   keep patching.
+                2. Recent 20 fixes list — quick scan of "what did we
+                   fix lately" + jump to the full entry via GitHub
+                   anchor link.
+              Lazy-loaded so the markdown payload only hits
+              /admin/health sessions, not the main bundle. */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Past fixes — top modules by bug count
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {bugHistoryLoading ? (
+                  <p className="text-xs text-[#8B8580] animate-pulse">Loading bug history...</p>
+                ) : bugCategories.length === 0 ? (
+                  <p className="text-xs text-[#8B8580]">No bug history entries found.</p>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-[#8B8580] mb-2">
+                      High count = pattern. Modules with 10+ entries should be considered for a rewrite, not another patch.
+                    </p>
+                    <div className="space-y-1">
+                      {bugCategories.map((c) => {
+                        const max = bugCategories[0]?.n || 1;
+                        const pct = (c.n / max) * 100;
+                        const isHotSpot = c.n >= 10;
+                        return (
+                          <div key={c.category} className="flex items-center gap-2 text-xs">
+                            <span className={`font-mono truncate w-32 shrink-0 ${isHotSpot ? 'text-[#9A3A2D] font-semibold' : 'text-[#1F1D1B]'}`} title={c.category}>{c.category}</span>
+                            <div className="flex-1 bg-[#F5F2EE] rounded-sm h-4 overflow-hidden">
+                              <div
+                                className={`h-full ${isHotSpot ? 'bg-[#9A3A2D]' : c.n >= 5 ? 'bg-[#9C6F1E]' : 'bg-[#8B7A52]'}`}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className={`w-10 text-right ${isHotSpot ? 'text-[#9A3A2D] font-semibold' : 'text-[#5A5550]'}`}>{c.n}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-[#8B8580] mt-3">
+                      Total entries: {bugHistory.length}. Source: <a className="underline" href="https://github.com/weisiang329-eng/hookka-erp-testing/blob/main/docs/BUG-HISTORY.md" target="_blank" rel="noopener noreferrer">docs/BUG-HISTORY.md</a>
+                    </p>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Recent fixes (newest 20)
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {bugHistoryLoading ? (
+                  <p className="text-xs text-[#8B8580] animate-pulse">Loading...</p>
+                ) : recentFixes.length === 0 ? (
+                  <p className="text-xs text-[#8B8580]">No bug history entries found.</p>
+                ) : (
+                  <div className="overflow-y-auto max-h-80 -mx-2 px-2">
+                    {recentFixes.map((b) => (
+                      <a
+                        key={b.id}
+                        href={`https://github.com/weisiang329-eng/hookka-erp-testing/blob/main/docs/BUG-HISTORY.md#${b.id.toLowerCase()}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block py-1.5 border-b border-[#F5F2EE] last:border-b-0 hover:bg-[#FAF8F5] -mx-2 px-2"
+                      >
+                        <div className="flex items-baseline gap-1.5 text-[11px]">
+                          <span>{b.statusIcon}</span>
+                          <span className="font-mono text-[#1F1D1B]">{b.id}</span>
+                          {b.statusDate && <span className="text-[#8B8580]">{b.statusDate}</span>}
+                          <span className="ml-auto px-1 rounded bg-[#F5F2EE] text-[10px] text-[#5A5550] shrink-0">{b.category}</span>
+                        </div>
+                        <div className="text-[11px] text-[#1F1D1B] mt-0.5 line-clamp-2">{b.title}</div>
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
 
           {/* Top 50 long tasks. trace lets the operator chase the
               specific slow request in wrangler tail. */}

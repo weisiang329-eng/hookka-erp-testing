@@ -68,6 +68,56 @@ function parseDateParam(
   return fallback();
 }
 
+// Day-of-week 0..6 (Sun..Sat) for a YYYY-MM-DD string interpreted in SGT.
+// We compare the date as UTC-midnight which is fine because the YMD string
+// is already SGT-anchored (todayYmdSgt produces it that way).
+function sgtDayOfWeek(ymd: string): number {
+  const d = new Date(ymd + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return -1;
+  return d.getUTCDay(); // 0 = Sunday
+}
+
+// Read kv_config['public_holidays'] (JSON array of YYYY-MM-DD). Returns a Set
+// — same shape as payslips.ts / worker.ts already use. Cheap to call once
+// per cron fire (single SELECT + parse).
+async function loadPublicHolidays(c: {
+  var: Env["Variables"];
+}): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const row = await c.var.DB
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("public_holidays")
+      .first<{ value: string | null }>();
+    if (row?.value) {
+      const parsed = JSON.parse(row.value);
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) {
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+            out.add(d);
+          }
+        }
+      }
+    }
+  } catch {
+    /* malformed / missing — treat as no holidays */
+  }
+  return out;
+}
+
+// Returns null when SGT-today is a working day, or a reason string when it
+// is Sunday or a declared public holiday. Cron triggers skip on non-null;
+// manual /send paths bypass this check.
+async function nonWorkingDayReason(c: {
+  var: Env["Variables"];
+}): Promise<string | null> {
+  const today = todayYmdSgt();
+  if (sgtDayOfWeek(today) === 0) return `Sunday (${today})`;
+  const holidays = await loadPublicHolidays(c);
+  if (holidays.has(today)) return `public holiday (${today})`;
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Recipient resolution — DAILY_REPORT_RECIPIENTS env var (comma-separated)
 // takes precedence. Fallback: all SUPER_ADMIN users in the users table.
@@ -296,21 +346,50 @@ async function dispatchReport(
   return runAndSendReport(c, kind, date, recipients);
 }
 
+// Crons skip on Sundays + declared public holidays (kv_config['public_holidays']).
+// Wei Siang's rule: "8am / 12pm only on working days — if it's a non-working
+// day, don't send." Manual /send endpoints below intentionally bypass this so
+// an operator can pull a report mid-Sunday from the UI if they need it.
+async function cronGate(
+  c: {
+    env: Env["Bindings"];
+    var: Env["Variables"];
+    req: { header(n: string): string | undefined; json(): Promise<unknown> };
+    json: <T>(body: T, status?: number) => Response;
+  },
+  kind: ReportKind,
+): Promise<Response | null> {
+  const authDenied = await authCron(c);
+  if (authDenied) return authDenied;
+  const skip = await nonWorkingDayReason(c);
+  if (skip) {
+    console.log(`[reports/${kind}-trigger] skipping — ${skip}`);
+    return c.json({
+      ok: true,
+      skipped: true,
+      reason: skip,
+      sent: 0,
+      failed: 0,
+    });
+  }
+  return null;
+}
+
 internal.post("/efficiency-trigger", async (c) => {
-  const denied = await authCron(c);
-  if (denied) return denied;
+  const gated = await cronGate(c, "efficiency");
+  if (gated) return gated;
   return c.json(await dispatchReport(c, "efficiency"));
 });
 
 internal.post("/schedule-trigger", async (c) => {
-  const denied = await authCron(c);
-  if (denied) return denied;
+  const gated = await cronGate(c, "schedule");
+  if (gated) return gated;
   return c.json(await dispatchReport(c, "schedule"));
 });
 
 internal.post("/overdue-trigger", async (c) => {
-  const denied = await authCron(c);
-  if (denied) return denied;
+  const gated = await cronGate(c, "overdue");
+  if (gated) return gated;
   return c.json(await dispatchReport(c, "overdue"));
 });
 

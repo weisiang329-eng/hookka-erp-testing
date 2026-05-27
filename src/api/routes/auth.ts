@@ -733,7 +733,7 @@ app.post("/forgot-password", async (c) => {
       env.APP_URL || "https://erp.hookka.com";
     const from =
       env.RESEND_FROM_EMAIL ||
-      "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+      "Hookka Manufacturing ERP <noreply@hookka.com>";
     const resetUrl = `${appUrl}/reset-password?token=${encodeURIComponent(token)}`;
     const displayName = user.displayName || email;
     const subject = "Reset your Hookka ERP password";

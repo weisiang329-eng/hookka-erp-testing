@@ -402,7 +402,7 @@ async function sendInviteEmail(
   }
   const from =
     env.RESEND_FROM_EMAIL ||
-    "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+    "Hookka Manufacturing ERP <noreply@hookka.com>";
   const direct = await sendMail(env, from, {
     to: invite.email,
     subject: tpl.subject,

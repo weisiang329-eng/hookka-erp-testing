@@ -380,7 +380,13 @@ app.post("/api/internal/process-email-outbox", async (c) => {
     const { processOutbox } = await import("./lib/email-outbox");
     const result = await processOutbox(
       c.var.DB,
-      c.env as unknown as { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string },
+      // 2026-05-27 — include BREVO_API_KEY so processOutbox' sendMail()
+      // picks Brevo as the preferred provider (Hookka cutover from Resend).
+      c.env as unknown as {
+        RESEND_API_KEY?: string;
+        BREVO_API_KEY?: string;
+        RESEND_FROM_EMAIL?: string;
+      },
     );
     return c.json({ ok: true, ...result });
   } catch (e) {

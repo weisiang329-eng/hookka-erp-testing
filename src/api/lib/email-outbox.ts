@@ -147,7 +147,7 @@ export async function processOutbox(
   }
   const from =
     env.RESEND_FROM_EMAIL ||
-    "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+    "Hookka Manufacturing ERP <noreply@hookka.com>";
 
   // Columns are snake_case in DB (see migration 0081). Aliases pin the
   // result-set keys back to camelCase so OutboxRow stays readable; we can't

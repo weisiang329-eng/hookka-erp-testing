@@ -62,7 +62,7 @@ export async function notifySupplierPoSubmitted(
     return { ok: false, error: "No email provider configured" };
   }
   const from =
-    env.RESEND_FROM_EMAIL || "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+    env.RESEND_FROM_EMAIL || "Hookka Manufacturing ERP <noreply@hookka.com>";
   const tpl = supplierPoEmailTemplate({
     poNo: args.poNo,
     supplierName: args.supplierName,

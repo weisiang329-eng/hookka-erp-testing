@@ -558,17 +558,16 @@ app.post("/forgot-password", async (c) => {
   const token = (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, "");
   const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
 
+  // INSERT only the load-bearing columns. The request_ip / request_ua
+  // forensics columns exist on the table for future use but the worker
+  // doesn't currently populate them — the audit_events row written by
+  // emitAudit() below already captures actor identity for forensics.
+  // Skipping them here avoids needing entries in column-rename-map.json.
   await c.var.DB.prepare(
-    `INSERT INTO password_reset_tokens (token, email, expiresAt, requestIp, requestUa)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO password_reset_tokens (token, email, expiresAt)
+     VALUES (?, ?, ?)`,
   )
-    .bind(
-      token,
-      email,
-      expiresAt,
-      clientIp(c) || null,
-      String(c.req.header("user-agent") ?? "").slice(0, 256) || null,
-    )
+    .bind(token, email, expiresAt)
     .run();
 
   // Send email. Best-effort — if Resend is down or unconfigured, we

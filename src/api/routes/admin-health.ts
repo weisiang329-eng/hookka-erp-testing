@@ -236,36 +236,40 @@ app.get("/kpis-diag", async (c) => {
     AE_QUERY_TOKEN_len: (env.AE_QUERY_TOKEN || "").length,
     AE_QUERY_TOKEN_prefix: (env.AE_QUERY_TOKEN || "").slice(0, 4),
   };
-  // Try the actual AE SQL call and capture whatever the API says.
-  // The CF response body is the diagnostic. Never returns the token —
-  // only error / success status from CF.
-  let liveCall: Record<string, unknown> = { attempted: false };
+  // Run BOTH actual production queries (percentile + sparkline) so we
+  // see which one fails. Each gets full status + first chunk of body.
+  const queries: Record<string, string> = {
+    smoke: "SELECT count() AS n FROM hookka_erp_metrics WHERE timestamp > NOW() - INTERVAL '1' DAY",
+    pct: `SELECT quantile(0.50)(double1) AS p50, quantile(0.75)(double1) AS p75, quantile(0.95)(double1) AS p95, countIf(double1 >= 200) AS longTaskCount FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY`,
+    spark: `SELECT toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour, count() AS n FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY GROUP BY hour ORDER BY hour ASC`,
+  };
+  const liveCalls: Record<string, unknown> = {};
   if (env.CF_ACCOUNT_ID && env.AE_QUERY_TOKEN) {
-    try {
-      const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.AE_QUERY_TOKEN}`,
-          "Content-Type": "text/plain",
-        },
-        body: "SELECT count() AS n FROM hookka_erp_metrics WHERE timestamp > NOW() - INTERVAL '1' DAY",
-      });
-      const body = await res.text();
-      liveCall = {
-        attempted: true,
-        status: res.status,
-        ok: res.ok,
-        body_snippet: body.slice(0, 300),
-      };
-    } catch (e) {
-      liveCall = {
-        attempted: true,
-        thrown: e instanceof Error ? e.message : String(e),
-      };
+    const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`;
+    for (const [name, sql] of Object.entries(queries)) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.AE_QUERY_TOKEN}`,
+            "Content-Type": "text/plain",
+          },
+          body: sql,
+        });
+        const body = await res.text();
+        liveCalls[name] = {
+          status: res.status,
+          ok: res.ok,
+          body_snippet: body.slice(0, 400),
+        };
+      } catch (e) {
+        liveCalls[name] = {
+          thrown: e instanceof Error ? e.message : String(e),
+        };
+      }
     }
   }
-  return c.json({ success: true, diag, liveCall });
+  return c.json({ success: true, diag, liveCalls });
 });
 
 app.get("/kpis", async (c) => {

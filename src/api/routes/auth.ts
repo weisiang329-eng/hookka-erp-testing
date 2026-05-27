@@ -20,6 +20,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
+import { validatePasswordStrength } from "../lib/password-strength";
 import { emitCounter } from "../lib/observability";
 import {
   checkLoginRateLimit,
@@ -432,12 +433,6 @@ app.post("/change-password", async (c) => {
       400,
     );
   }
-  if (newPassword.length < 6) {
-    return c.json(
-      { success: false, error: "newPassword must be at least 6 characters" },
-      400,
-    );
-  }
 
   const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(userId)
@@ -450,10 +445,41 @@ app.post("/change-password", async (c) => {
     return c.json({ success: false, error: "Old password incorrect" }, 401);
   }
 
+  // Security hardening 2026-05-27 — replaces the legacy `length < 6` rule
+  // with a real strength gate (12+ chars, 4 char-classes, common-password
+  // dictionary, reject email local-part). See src/api/lib/password-strength.
+  // We check AFTER the old-password verification so an attacker probing
+  // weak-password rules can't enumerate via this endpoint.
+  const strength = validatePasswordStrength(newPassword, user.email);
+  if (!strength.ok) {
+    return c.json(
+      { success: false, error: strength.error ?? "Password too weak" },
+      400,
+    );
+  }
+
   const newHash = await hashPassword(newPassword);
   await c.var.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?")
     .bind(newHash, userId)
     .run();
+
+  // Security hardening — kill EVERY existing session for this user. If
+  // the old password was leaked (the reason they're rotating), any token
+  // issued under the old credential is also tainted. Logging back in with
+  // the new password mints a fresh session. The current request's session
+  // is included — the caller will be bounced to /login on next nav.
+  try {
+    await c.var.DB.prepare("DELETE FROM user_sessions WHERE userId = ?")
+      .bind(userId)
+      .run();
+  } catch (err) {
+    // Best-effort: if session revocation fails the password is still
+    // changed (the bigger win). Log and continue.
+    console.warn(
+      "[auth/change-password] session revoke failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   // Sprint 2 task 5 — audit password change. Snapshot is bare (the new
   // hash is sensitive and the old one is being rotated out), action label
@@ -502,6 +528,16 @@ const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;  // 1 hour
 const RESET_REQUEST_COOLDOWN_MS = 5 * 60 * 1000;  // 5 minutes per email
 
 app.post("/forgot-password", async (c) => {
+  // Security hardening 2026-05-27 — per-IP rate limit. The existing
+  // per-email cooldown (5 min) prevents email-resend abuse, but an
+  // attacker can rotate emails from one IP to enumerate / spam Resend
+  // credits. Cap a single IP at 20 forgot-password requests per 15 min.
+  // Returns the same generic 429-shape response we'd return for any
+  // rate limit; the response body matches checkLoginRateLimit's default.
+  const ipKey = `forgot-pw:${clientIp(c)}`;
+  const ipLimited = await checkLoginRateLimit(c, ipKey, 20, 900);
+  if (ipLimited) return ipLimited;
+
   // Parse body — body might be malformed; we still respond 200 because
   // the enumeration mitigation only works if EVERY input returns the
   // same shape.
@@ -644,12 +680,15 @@ app.post("/reset-password", async (c) => {
       400,
     );
   }
-  if (!newPassword || newPassword.length < 6) {
+  // Pre-flight: token must be present, password must be non-empty.
+  // Full strength validation (12+ chars + char classes + dictionary)
+  // runs AFTER the token + email lookup so we have the email to feed
+  // into the local-part check — keeps the strength rule one consistent
+  // spot. Empty-string guard here just avoids a noisy strength error
+  // when the user accidentally submits a blank form.
+  if (!newPassword) {
     return c.json(
-      {
-        success: false,
-        error: "New password must be at least 6 characters",
-      },
+      { success: false, error: "New password is required" },
       400,
     );
   }
@@ -705,6 +744,19 @@ app.post("/reset-password", async (c) => {
     );
   }
 
+  // Security hardening 2026-05-27 — full strength gate using the same
+  // validator that the FE meter calls. The email arg blocks the local-part
+  // from appearing in the password (e.g. "weisiang329-Strong!" would fail
+  // for weisiang329@gmail.com). Returns the FIRST failing rule as a
+  // plain-English message so the user can act on it.
+  const strength = validatePasswordStrength(newPassword, row.email);
+  if (!strength.ok) {
+    return c.json(
+      { success: false, error: strength.error ?? "Password too weak" },
+      400,
+    );
+  }
+
   const newHash = await hashPassword(newPassword);
   await c.var.DB.prepare(
     "UPDATE users SET passwordHash = ? WHERE id = ?",
@@ -716,6 +768,21 @@ app.post("/reset-password", async (c) => {
   )
     .bind(new Date().toISOString(), token)
     .run();
+
+  // Security hardening — kill EVERY active session for this user. The
+  // reason they're resetting is usually "I lost the old password" which
+  // means it might be in someone else's hands. Any token issued under
+  // the old credential is now invalid. User must log in fresh.
+  try {
+    await c.var.DB.prepare("DELETE FROM user_sessions WHERE userId = ?")
+      .bind(user.id)
+      .run();
+  } catch (err) {
+    console.warn(
+      "[auth/reset-password] session revoke failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   // Audit — action label is enough; we don't snapshot the new hash.
   await emitAudit(c, {

@@ -100,13 +100,30 @@ const app = new Hono<Env>();
 
 // CORS — allow the Pages origin + local Vite dev server. Override via
 // wrangler.toml [vars] API_CORS_ORIGIN for preview/prod.
+//
+// 2026-05-27 — Custom-domain transition (erp.hookka.com.my). The
+// allowlist now accepts a comma-separated list so we can serve BOTH
+// the new prod domain AND the old hookka-erp-testing.pages.dev URL
+// during the cutover window. Example wrangler.toml value:
+//
+//   API_CORS_ORIGIN = "https://erp.hookka.com.my,https://hookka-erp-testing.pages.dev"
+//
+// Trailing whitespace tolerated. Trailing slashes stripped. Empty
+// entries dropped. Once the cutover is verified live and the old
+// domain has had its grace period, simplify back to a single value.
 app.use(
   "*",
   cors({
     origin: (origin, c) => {
-      const allowed = c.env.API_CORS_ORIGIN || "http://localhost:3000";
-      // Accept the configured origin and the wrangler-dev default.
-      if (origin === allowed || origin === "http://localhost:8787") return origin;
+      const raw: string[] = (c.env.API_CORS_ORIGIN || "http://localhost:3000")
+        .split(",")
+        .map((s: string) => s.trim().replace(/\/+$/, ""))
+        .filter((s: string) => s.length > 0);
+      const incoming = (origin ?? "").replace(/\/+$/, "");
+      // Accept any configured origin and the wrangler-dev default.
+      if (raw.includes(incoming) || incoming === "http://localhost:8787") {
+        return origin;
+      }
       return null;
     },
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],

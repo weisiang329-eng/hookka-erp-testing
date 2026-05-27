@@ -4194,6 +4194,29 @@ function DepartmentPerformanceTab({
                 className="w-36 h-8 text-xs"
               />
             </div>
+            <div className="ml-auto flex items-center gap-2">
+              {/* Daily Efficiency Report — A4 print layout. Opens in a new
+                  tab where the operator can hit Cmd-P / Print to save as
+                  PDF or send to paper. Defaults to yesterday because the
+                  cron mails out yesterday's report at 12pm SGT and the
+                  button gives operator the same view on demand. */}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const ymd = dateTo || todayStr();
+                  window.open(
+                    `/api/reports/efficiency?date=${encodeURIComponent(ymd)}`,
+                    "_blank",
+                    "noopener",
+                  );
+                }}
+                title="Open A4-printable efficiency report in a new tab"
+              >
+                <Printer className="h-4 w-4 mr-1" />
+                Print Report
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>

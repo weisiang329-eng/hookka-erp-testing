@@ -62,6 +62,10 @@ const PUBLIC_PREFIXES = [
   // 302's to Google; /callback consumes Google's redirect, finds-or-links
   // the local user, and issues a session. Both are pre-auth by definition.
   "/api/auth/oauth/",
+  // 2026-05-27 — daily-report cron triggers. The endpoint itself does its
+  // own CRON_SECRET HMAC check (constant-time SHA-256) before doing any
+  // work. No session — external cron services can't carry one anyway.
+  "/api/internal/reports/",
 ];
 
 // Customer QR tracking lookup: only the single-unit GET is public. The list

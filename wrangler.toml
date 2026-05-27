@@ -244,6 +244,12 @@ APP_URL = "https://erp.hookka.com"
 # its background domain authentication (~5-15 min from DNS-record-add,
 # can take up to 48h max), all outbound mail comes from @hookka.com.
 RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@hookka.com>"
+# 2026-05-27 — Daily reports (efficiency / schedule / overdue). Comma-
+# separated list of recipients for cron-pushed reports. Leave unset to
+# auto-target every active SUPER_ADMIN user (the report code queries the
+# users table when this is empty). Set here to override (e.g. add a
+# distribution list address that isn't a dashboard user).
+# DAILY_REPORT_RECIPIENTS = "weisiang329@gmail.com"
 # Sentry — Cloudflare Workers DSN. DSNs are public-safe per Sentry docs:
 # they grant event-submission only, never data read access. Keeping the
 # value in [vars] (rather than `wrangler secret put`) means every deploy

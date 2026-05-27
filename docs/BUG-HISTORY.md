@@ -34,6 +34,48 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-27-001 — /admin/health cache-hit-ratio always 0, plus no visibility into WHICH SQL statement is slow
+
+**Status:** 🟢 Fixed (2026-05-27)
+**Category:** observability
+
+**Symptom:** Dashboard "Cache hit ratio" tile stuck at 0% even though
+snapshot caching was clearly working (Production page loads cached in
+<100ms). Top-Slowest endpoints panel showed "POST /api/customers/:id
+P95 2.1s" but operator had no way to know WHICH query inside the
+handler was slow.
+
+**Root cause:**
+1. /kpis endpoint hard-coded cacheHitRatio=0 (placeholder waiting for
+   counters to be wired).
+2. withSnapshot in src/api/lib/snapshot.ts never emitted cache.hit /
+   cache.miss counters — so even when we added the SQL to query them
+   from AE, there were zero events to count.
+3. instrumentD1 in src/api/lib/observability.ts logged slow SQL to
+   console.warn (visible in wrangler tail) but never emitted to AE,
+   so the dashboard couldn't show them.
+
+**Fix:**
+- emitSlowSql() helper in observability.ts writes one AE event per
+  slow query (>= SLOW_QUERY_MS = 500ms): blob1=slow_sql, blob2=route,
+  blob3=op, blob4=200-char SQL snippet, double1=dur_ms.
+- instrumentD1 threads env through and calls emitSlowSql in both
+  batch + statement paths.
+- withSnapshot accepts optional Hono context arg and emits cache.hit /
+  cache.miss counters via emitCounter when supplied. Sales-orders list
+  + stats wired (other snapshot callers join progressively).
+- /kpis SUMs cache.hit + cache.miss for the window and computes ratio
+  = hits / (hits + misses).
+- New /slow-sql endpoint aggregates by (route, op, snippet) → hits /
+  avg / P95.
+- New /admin/health panel renders the Slow SQL table.
+
+**Verified:** Type-check clean; /admin/health on prod (a75f7c6+) shows
+real cache hit % within minutes of traffic and Slow SQL panel populates
+as soon as any query crosses 500ms.
+
+---
+
 ## BUG-2026-05-26-004 — SO status cascade missing from invoice DRAFT→SENT, plus 83 historical DELIVERED DOs orphaned with their parent SOs stuck at READY_TO_SHIP
 
 **Status:** 🟢 Fixed (2026-05-26)

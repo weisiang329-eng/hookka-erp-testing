@@ -184,6 +184,9 @@ export interface OverdueRow {
   totalQty: number;
   totalSen: number;
   daysOverdue: number;
+  /** First 3 distinct product codes joined with " · ". Plus "+N more" tail
+   *  if there are more lines. Empty when the SO has zero items. */
+  productSummary: string;
 }
 
 export interface OverdueReport {
@@ -198,7 +201,7 @@ export interface OverdueReport {
   rows: OverdueRow[];
 }
 
-type OverdueRawRow = {
+type OverdueSoRawRow = {
   id: string;
   companySOId: string | null;
   customerName: string | null;
@@ -207,37 +210,91 @@ type OverdueRawRow = {
   hookkaExpectedDD: string | null;
   status: string;
   totalSen: number | null;
-  itemCount: number | null;
-  totalQty: number | null;
+};
+
+type OverdueItemRawRow = {
+  salesOrderId: string;
+  productCode: string | null;
+  productName: string | null;
+  quantity: number | null;
+  lineNo: number | null;
 };
 
 export async function collectOverdueData(
   db: DbLike,
   dateYmd: string,
 ): Promise<OverdueReport> {
-  // ONE row per SO. Items aggregated via correlated subqueries — fine at
-  // factory scale (a few hundred open SOs at most). status filter keeps
-  // out anything already in the customer's hands (DELIVERED/INVOICED/
-  // CLOSED) or torn up (CANCELLED).
-  const sql = `
-    SELECT so.id, so.companySOId, so.customerName, so.customerState,
-           so.customerDeliveryDate, so.hookkaExpectedDD, so.status, so.totalSen,
-           (SELECT COUNT(*) FROM sales_order_items WHERE salesOrderId = so.id) AS itemCount,
-           (SELECT COALESCE(SUM(quantity), 0) FROM sales_order_items WHERE salesOrderId = so.id) AS totalQty
-      FROM sales_orders so
-     WHERE so.customerDeliveryDate < ?
-       AND so.customerDeliveryDate IS NOT NULL
-       AND so.customerDeliveryDate <> ''
-       AND so.status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED')
-     ORDER BY so.customerDeliveryDate ASC`;
-  const res = await db.prepare(sql).bind(dateYmd).all<OverdueRawRow>();
+  // Two-step query — the earlier correlated-subquery approach returned 0
+  // items/qty in the deployed report because the column-rename adapter
+  // didn't rewrite `salesOrderId` inside the subquery. Two clean queries
+  // avoid that surprise:
+  //   1. Pull the SO headers that qualify as overdue.
+  //   2. Pull all items for those SOs in one batch (IN clause).
+  // Then aggregate in JS — small dataset (open SOs are O(hundreds), not
+  // thousands).
+  const soSql = `
+    SELECT id, companySOId, customerName, customerState,
+           customerDeliveryDate, hookkaExpectedDD, status, totalSen
+      FROM sales_orders
+     WHERE customerDeliveryDate < ?
+       AND customerDeliveryDate IS NOT NULL
+       AND customerDeliveryDate <> ''
+       AND status NOT IN ('DELIVERED','INVOICED','CLOSED','CANCELLED')
+     ORDER BY customerDeliveryDate ASC`;
+  const soRes = await db.prepare(soSql).bind(dateYmd).all<OverdueSoRawRow>();
+  const sos = soRes.results ?? [];
+
+  // Items per SO. Single IN-list query if any SOs matched.
+  const itemsBySoId = new Map<string, OverdueItemRawRow[]>();
+  if (sos.length > 0) {
+    const soIds = sos.map((s) => s.id);
+    const placeholders = soIds.map(() => "?").join(",");
+    const itemsRes = await db
+      .prepare(
+        `SELECT salesOrderId, productCode, productName, quantity, lineNo
+           FROM sales_order_items
+          WHERE salesOrderId IN (${placeholders})
+          ORDER BY salesOrderId, lineNo`,
+      )
+      .bind(...soIds)
+      .all<OverdueItemRawRow>();
+    for (const item of itemsRes.results ?? []) {
+      const arr = itemsBySoId.get(item.salesOrderId) ?? [];
+      arr.push(item);
+      itemsBySoId.set(item.salesOrderId, arr);
+    }
+  }
+
   const today = new Date(dateYmd + "T00:00:00Z").getTime();
-  const rows: OverdueRow[] = (res.results ?? []).map((r) => {
+  const rows: OverdueRow[] = sos.map((r) => {
     const dd = r.customerDeliveryDate ?? "";
     const due = dd
       ? new Date(dd.slice(0, 10) + "T00:00:00Z").getTime()
       : today;
     const days = Math.max(0, Math.floor((today - due) / 86400000));
+    const myItems = itemsBySoId.get(r.id) ?? [];
+    const itemCount = myItems.length;
+    const totalQty = myItems.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+
+    // Product summary — first 3 distinct codes, then "+N more". The
+    // operator usually only needs to glance at what's in the SO; the SO
+    // detail page is the click-through for the full list.
+    const distinctCodes: string[] = [];
+    const seen = new Set<string>();
+    for (const it of myItems) {
+      const code = (it.productCode ?? "").trim();
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      distinctCodes.push(code);
+    }
+    const SHOW = 3;
+    const head = distinctCodes.slice(0, SHOW).join(" · ");
+    const tail =
+      distinctCodes.length > SHOW
+        ? ` · +${distinctCodes.length - SHOW} more`
+        : "";
+    const productSummary = head + tail;
+
     return {
       salesOrderId: r.id,
       companySOId: r.companySOId ?? "",
@@ -246,10 +303,11 @@ export async function collectOverdueData(
       customerDeliveryDate: dd.slice(0, 10),
       hookkaExpectedDD: (r.hookkaExpectedDD ?? "").slice(0, 10) || null,
       status: r.status,
-      itemCount: Number(r.itemCount) || 0,
-      totalQty: Number(r.totalQty) || 0,
+      itemCount,
+      totalQty,
       totalSen: Number(r.totalSen) || 0,
       daysOverdue: days,
+      productSummary,
     };
   });
   // Worst delay first — operator sees the biggest fires on top.
@@ -465,17 +523,21 @@ export function renderOverdueHtml(data: OverdueReport): string {
 
   // ONE row per SO. Department grouping dropped per Wei Siang's request —
   // operator only cares about which Sales Orders are past their customer
-  // delivery date, not which dept currently holds them.
+  // delivery date, not which dept currently holds them. Two date columns
+  // surface BOTH the customer's requested date AND Hookka's internal
+  // target (which is typically earlier by the per-category buffer).
   const colWidths = `
     <colgroup>
-      <col style="width:10%"/>  <!-- SO No -->
-      <col style="width:22%"/>  <!-- Customer (+ state) -->
-      <col style="width:12%"/>  <!-- Promise Date -->
-      <col style="width:8%"/>   <!-- Overdue days -->
-      <col style="width:7%"/>   <!-- Item count -->
-      <col style="width:7%"/>   <!-- Qty -->
-      <col style="width:18%"/>  <!-- Order value -->
-      <col style="width:16%"/>  <!-- Status -->
+      <col style="width:9%"/>   <!-- SO No -->
+      <col style="width:14%"/>  <!-- Customer (+ state) -->
+      <col style="width:22%"/>  <!-- Products -->
+      <col style="width:5%"/>   <!-- Items -->
+      <col style="width:5%"/>   <!-- Qty -->
+      <col style="width:9%"/>   <!-- Customer DD -->
+      <col style="width:9%"/>   <!-- Hookka DD -->
+      <col style="width:7%"/>   <!-- Overdue days -->
+      <col style="width:10%"/>  <!-- Value -->
+      <col style="width:10%"/>  <!-- Status -->
     </colgroup>`;
 
   const dataRows = rows
@@ -500,10 +562,12 @@ export function renderOverdueHtml(data: OverdueReport): string {
       return `<tr style="background:${rowBg};">
         <td><strong>${escapeHtml(r.companySOId || r.salesOrderId)}</strong></td>
         <td>${escapeHtml(r.customerName)}${r.customerState ? ` <span class="secondary">· ${escapeHtml(r.customerState)}</span>` : ""}</td>
-        <td class="num">${escapeHtml(r.customerDeliveryDate)}</td>
-        <td class="num" style="text-align:right;font-weight:700;color:${daysColor};">${r.daysOverdue}d</td>
+        <td>${escapeHtml(r.productSummary || "—")}</td>
         <td class="num" style="text-align:right;">${r.itemCount}</td>
         <td class="num" style="text-align:right;">${r.totalQty}</td>
+        <td class="num">${escapeHtml(r.customerDeliveryDate)}</td>
+        <td class="num"><span class="secondary">${escapeHtml(r.hookkaExpectedDD ?? "—")}</span></td>
+        <td class="num" style="text-align:right;font-weight:700;color:${daysColor};">${r.daysOverdue}d</td>
         <td class="num" style="text-align:right;">${escapeHtml(formatRM(r.totalSen))}</td>
         <td>${status}</td>
       </tr>`;
@@ -546,16 +610,18 @@ export function renderOverdueHtml(data: OverdueReport): string {
           <thead><tr>
             <th>SO No.</th>
             <th>Customer</th>
-            <th>Promise Date</th>
-            <th style="text-align:right;">Overdue</th>
+            <th>Products</th>
             <th style="text-align:right;">Items</th>
             <th style="text-align:right;">Units</th>
+            <th>Customer DD</th>
+            <th>Our Target DD</th>
+            <th style="text-align:right;">Overdue</th>
             <th style="text-align:right;">Value</th>
             <th>Status</th>
           </tr></thead>
           <tbody>${dataRows}</tbody>
         </table>`}
-  <div class="footer">Generated ${escapeHtml(new Date(data.generatedAtIso).toLocaleString("en-GB", { timeZone: "Asia/Singapore" }))} SGT &nbsp;·&nbsp; one row = one Sales Order whose customer delivery date has passed.</div>
+  <div class="footer">Generated ${escapeHtml(new Date(data.generatedAtIso).toLocaleString("en-GB", { timeZone: "Asia/Singapore" }))} SGT &nbsp;·&nbsp; Customer DD = what the customer asked for &nbsp;·&nbsp; Our Target DD = Hookka's internal target (DD minus per-category buffer) &nbsp;·&nbsp; Overdue is measured against Customer DD.</div>
 </div>
 </body>
 </html>`;

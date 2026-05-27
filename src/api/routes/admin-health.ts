@@ -766,6 +766,44 @@ app.get("/daily-trend", async (c) => {
   });
 });
 
+// Deploy markers — list of recent deploy times so the FE can overlay
+// vertical lines on the Daily Trend / Hourly Error charts. The
+// operator sees "spike at 14:00 + a deploy 5min earlier = this deploy
+// broke prod".
+//
+// Source: this worker bundle ships with a CF_DEPLOYMENT_ID env var that
+// CF Pages injects per build. We can't read other deploys' IDs from
+// inside the runtime — what we CAN do is record THIS deploy's
+// timestamp once at cold-start and surface it. Across cold-starts you
+// get a series of deploy timestamps in AE itself (via the same
+// metrics pipeline — every deploy starts new workers which emit
+// req events with their own deploy hash).
+//
+// For now we keep this simple: read the CF_DEPLOYMENT_ID + DEPLOY_AT
+// env vars (set via wrangler in deploy.yml — operator can also
+// hand-bump for backfill). FE renders one marker per row.
+app.get("/deploys", async (c) => {
+  const env = c.env as {
+    CF_DEPLOYMENT_ID?: string;
+    DEPLOY_AT?: string;
+    DEPLOY_HISTORY?: string;
+  };
+  // Optional history blob — pipe-delimited "id1|iso1,id2|iso2,..." set
+  // via wrangler if the operator wants a longer window.
+  const deploys: Array<{ id: string; at: string }> = [];
+  if (env.DEPLOY_HISTORY) {
+    for (const pair of env.DEPLOY_HISTORY.split(",")) {
+      const [id, at] = pair.split("|");
+      if (id && at) deploys.push({ id: id.trim(), at: at.trim() });
+    }
+  }
+  // Always include the current deploy (latest).
+  if (env.CF_DEPLOYMENT_ID && env.DEPLOY_AT) {
+    deploys.push({ id: env.CF_DEPLOYMENT_ID, at: env.DEPLOY_AT });
+  }
+  return c.json({ success: true, data: deploys });
+});
+
 app.get("/long-tasks", async (c) => {
   const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
   const data = await withAe(c, async (accountId, token) => {

@@ -597,6 +597,9 @@ import maintenanceConfig from "./routes/maintenance-config";
 import admin from "./routes/admin";
 // Phase 6 / P6.4 — health KPI endpoint feeding /admin/health.
 import adminHealth from "./routes/admin-health";
+// Phase 6 Phase-4 — Front-End RUM event sink. Logged-in users POST
+// batched JS errors + Core Web Vitals here; worker forwards to AE.
+import feRum from "./routes/fe-rum";
 // Phase 6 — job_card_events audit log read endpoint.
 import jobCards from "./routes/job-cards";
 // Universal audit_events read endpoint — feeds AuditHistoryPanel on every
@@ -754,6 +757,9 @@ app.route("/api/maintenance-config", maintenanceConfig);
 // 404 the /health/* paths).
 app.route("/api/admin/health", adminHealth);
 app.route("/api/admin", admin);
+// Phase-4 FE RUM. Logged-in users POST batched events; data flows to AE
+// and surfaces on /admin/health via the fe-* endpoints in admin-health.ts.
+app.route("/api/fe-rum", feRum);
 // Phase 6 — job_card_events read surface. Only /:id/events for now;
 // future PATCH/DELETE audit screens can mount here.
 app.route("/api/job-cards", jobCards);

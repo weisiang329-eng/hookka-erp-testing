@@ -13,8 +13,13 @@ import './lib/api-client'
 // (See src/lib/monitoring.ts — the Sprint 5 facade. Don't add a second
 // eager Sentry.init here; it would double-initialise the SDK.)
 import { initMonitoring } from './lib/monitoring'
+// FE RUM — captures unhandled JS errors + Core Web Vitals + longtasks
+// and posts them to /api/fe-rum/event for the /admin/health dashboard.
+// Companion to backend observability in src/api/lib/observability.ts.
+import { initFeRum } from './lib/fe-rum'
 
 initMonitoring()
+initFeRum()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

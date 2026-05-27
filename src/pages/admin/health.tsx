@@ -201,6 +201,30 @@ type SlowSqlRow = {
   p95: number;
   rowsRead: number;
 };
+// Phase-4 FE RUM payloads. Errors aggregate top-N by message + stack;
+// perf aggregates per (route, metric) tuple with P50/P95.
+type FeErrorRow = {
+  route: string;
+  msg: string;
+  stack: string;
+  n: number;
+};
+type FePerfRow = {
+  route: string;
+  metric: string;
+  hits: number;
+  p50: number;
+  p95: number;
+};
+// Plain-language description per perf metric so the operator knows
+// what each number means.
+const FE_METRIC_HINT: Record<string, string> = {
+  longtask: "UI froze (main thread blocked >=50ms)",
+  lcp: "Largest paint — felt-load time",
+  fcp: "First paint — initial pixels",
+  ttfb: "Server response time",
+  nav: "Full page load",
+};
 
 // Plain-language hint per status code so the operator knows WHY each
 // code matters, not just the number. Sourced from the dashboard
@@ -310,6 +334,14 @@ export default function AdminHealthPage() {
     success: boolean;
     data: SlowSqlRow[];
   }>(`/api/admin/health/slow-sql${rangeQS}`, 60);
+  const { data: feErrorsResp } = useCachedJson<{
+    success: boolean;
+    data: FeErrorRow[];
+  }>(`/api/admin/health/fe-errors${rangeQS}`, 60);
+  const { data: fePerfResp } = useCachedJson<{
+    success: boolean;
+    data: FePerfRow[];
+  }>(`/api/admin/health/fe-perf${rangeQS}`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -327,6 +359,8 @@ export default function AdminHealthPage() {
   const statusBreakdown = statusBreakdownResp?.data ?? [];
   const errorMessages = errorMessagesResp?.data ?? [];
   const slowSql = slowSqlResp?.data ?? [];
+  const feErrors = feErrorsResp?.data ?? [];
+  const fePerf = fePerfResp?.data ?? [];
 
   return (
     <div className="p-6 space-y-6">
@@ -655,6 +689,93 @@ export default function AdminHealthPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Front-End RUM panels. Captures the half of "where it
+              cracks" that the backend never sees:
+                • FE errors: unhandled JS errors + promise rejections
+                  in the user's browser. The dashboard now sees what
+                  the user sees, not just what the server logged.
+                • FE perf: longtask (main-thread freezes), LCP/FCP
+                  (felt page-load time), TTFB (server response from
+                  the browser's perspective — includes network).
+              Captured by src/lib/fe-rum.ts in every browser tab and
+              posted to /api/fe-rum/event for AE ingestion. */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Front-End errors ({RANGE_LABEL[range].toLowerCase()}) — top 20 unhandled JS / promise rejections
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {feErrors.length === 0 ? (
+                  <p className="text-xs text-[#4F7C3A]">
+                    No FE errors in this window. Healthy — or RUM hasn't started collecting yet (give it 5 min after deploy).
+                  </p>
+                ) : (
+                  <div className="overflow-y-auto max-h-72 -mx-2 px-2">
+                    {feErrors.map((r, i) => (
+                      <div key={i} className="py-1.5 border-b border-[#F5F2EE] last:border-b-0">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="font-mono text-[11px] text-[#1F1D1B] truncate" title={r.route}>{r.route || '(unknown route)'}</span>
+                          <span className="text-[10px] text-[#8B8580] shrink-0">×{r.n}</span>
+                        </div>
+                        <div className="text-[11px] text-[#9A3A2D] mt-0.5 font-mono break-all">{r.msg || '(no message)'}</div>
+                        {r.stack && (
+                          <div className="text-[10px] text-[#8B8580] mt-0.5 font-mono truncate" title={r.stack}>
+                            {r.stack.slice(0, 100)}{r.stack.length > 100 ? '...' : ''}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                  Front-End perf ({RANGE_LABEL[range].toLowerCase()}) — longtask / LCP / FCP / TTFB / nav
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {fePerf.length === 0 ? (
+                  <p className="text-xs text-[#8B8580]">
+                    No FE perf samples yet. RUM auto-collects on every page load — give it 5 min after deploy.
+                  </p>
+                ) : (
+                  <div className="overflow-y-auto max-h-72 overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-white">
+                        <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                          <th className="py-1.5 font-medium">Metric</th>
+                          <th className="py-1.5 font-medium">Route</th>
+                          <th className="py-1.5 font-medium text-right">Hits</th>
+                          <th className="py-1.5 font-medium text-right">P50</th>
+                          <th className="py-1.5 font-medium text-right">P95</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {fePerf.map((r, i) => (
+                          <tr key={i} className="border-b border-[#F5F2EE] align-top">
+                            <td className="py-1.5 text-[#5A5550]" title={FE_METRIC_HINT[r.metric] ?? ''}>
+                              <div className="font-mono text-[11px] text-[#1F1D1B]">{r.metric}</div>
+                              <div className="text-[10px] text-[#8B8580]">{FE_METRIC_HINT[r.metric] ?? '—'}</div>
+                            </td>
+                            <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[180px]" title={r.route}>{r.route}</td>
+                            <td className="py-1.5 text-right text-[#5A5550]">{r.hits}</td>
+                            <td className="py-1.5 text-right text-[#5A5550]">{r.p50}ms</td>
+                            <td className={`py-1.5 text-right font-semibold ${r.p95 >= 2500 ? 'text-[#9A3A2D]' : r.p95 >= 1000 ? 'text-[#9C6F1E]' : 'text-[#4F7C3A]'}`}>{r.p95}ms</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
 
           {/* Top 50 long tasks. trace lets the operator chase the
               specific slow request in wrangler tail. */}

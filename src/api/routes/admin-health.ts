@@ -948,4 +948,125 @@ app.get("/long-tasks", async (c) => {
   return c.json({ success: true, data: data ?? [] });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 4 — Front-End RUM read endpoints. The /api/fe-rum/event sink
+// (src/api/routes/fe-rum.ts) collects events from the browser; these
+// endpoints surface them on the /admin/health dashboard.
+//
+// AE schema (per fe-rum.ts):
+//   Errors: blob1="fe_error", blob2=route, blob3=msg, blob4=stack, blob5=userId
+//   Perf:   blob1="fe_perf",  blob2=route, blob3=metric, double1=value_ms
+//
+// Why two separate endpoints rather than one combined: errors aggregate
+// by (route, msg) → top-N table; perf aggregates by (route, metric) →
+// P50/P95 per metric. Different rendering, different queries.
+// ---------------------------------------------------------------------------
+
+// Top FE error messages — aggregate by (route, msg). Operator sees
+// "TypeError: Cannot read 'x' of undefined" with hit count + a
+// representative stack head so they can pinpoint the bug.
+app.get("/fe-errors", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             blob3 AS msg,
+             blob4 AS stack,
+             count() AS n
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'fe_error'
+        AND timestamp > NOW() - ${WINDOW}
+      GROUP BY route, msg, stack
+      ORDER BY n DESC
+      LIMIT 50
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    // Collapse rows with same (route, msg) but different stack into a
+    // single entry (keep first stack as representative). Without this
+    // collapse, the same bug logged from two minified bundles would
+    // show twice.
+    const grouped = new Map<
+      string,
+      { route: string; msg: string; stack: string; n: number }
+    >();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      const msg = String(row.msg ?? "");
+      const stack = String(row.stack ?? "");
+      const n = Number(row.n) || 0;
+      const key = `${route}|${msg}`;
+      if (!grouped.has(key)) {
+        grouped.set(key, { route, msg, stack, n: 0 });
+      }
+      const g = grouped.get(key)!;
+      g.n += n;
+      if (!g.stack && stack) g.stack = stack;
+    }
+    return [...grouped.values()].sort((a, b) => b.n - a.n).slice(0, 20);
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
+// FE perf metrics — P50 / P95 per (route, metric). Operator sees
+// "longtask P95 = 480ms on /production/orders" → the production page
+// freezes the UI for nearly half a second. Same workaround as backend
+// percentiles: pull raw values, compute in JS.
+app.get("/fe-perf", async (c) => {
+  const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
+  const data = await withAe(c, async (accountId, token) => {
+    const sql = `
+      SELECT blob2 AS route,
+             blob3 AS metric,
+             double1 AS value
+      FROM hookka_erp_metrics
+      WHERE blob1 = 'fe_perf'
+        AND timestamp > NOW() - ${WINDOW}
+      LIMIT 50000
+    `;
+    const resp = await runAeSql(accountId, token, sql);
+    type Bucket = { route: string; metric: string; samples: number[] };
+    const grouped = new Map<string, Bucket>();
+    for (const r of resp.data ?? []) {
+      const row = r as Record<string, unknown>;
+      const route = String(row.route ?? "");
+      const metric = String(row.metric ?? "");
+      const v = Number(row.value);
+      const key = `${route}|${metric}`;
+      if (!grouped.has(key)) grouped.set(key, { route, metric, samples: [] });
+      if (Number.isFinite(v)) grouped.get(key)!.samples.push(v);
+    }
+    const out = [...grouped.values()].map((g) => {
+      const sorted = [...g.samples].sort((a, b) => a - b);
+      const pick = (p: number): number =>
+        sorted.length === 0
+          ? 0
+          : sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+      return {
+        route: g.route,
+        metric: g.metric,
+        hits: g.samples.length,
+        p50: Math.round(pick(0.5)),
+        p95: Math.round(pick(0.95)),
+      };
+    });
+    // Sort: longtask first (most actionable), then by P95 desc within
+    // each metric. Operator scans top to bottom; bad longtasks lead.
+    const metricOrder: Record<string, number> = {
+      longtask: 0,
+      lcp: 1,
+      fcp: 2,
+      ttfb: 3,
+      nav: 4,
+    };
+    out.sort((a, b) => {
+      const m = (metricOrder[a.metric] ?? 99) - (metricOrder[b.metric] ?? 99);
+      if (m !== 0) return m;
+      return b.p95 - a.p95;
+    });
+    return out.slice(0, 30);
+  });
+  return c.json({ success: true, data: data ?? [] });
+});
+
 export default app;

@@ -147,19 +147,25 @@ async function liveKpis(
   // 24-hour window. AE SQL supports INTERVAL strings.
   const WINDOW = "INTERVAL '1' DAY";
 
-  // (1) Latency percentiles + long-task count, all from one scan over
-  // `blob1 = 'req'` rows.
+  // 2026-05-27 hotfix: Cloudflare Analytics Engine SQL does NOT support
+  // ClickHouse's `quantile(0.5)(...)` parameterised aggregation syntax
+  // (returns "Input was invalid: unknown function call: QUANTILE").
+  // Workaround: pull raw `double1` values for the window and compute
+  // percentiles in JS. At Hookka's traffic (~40-500 req/24h) the
+  // payload is tiny; at higher scale we'd switch to a sample +
+  // sort-based approximate percentile, but 24h * 10k = 240k still
+  // streams fine through AE SQL.
+  //
+  // We also compute longTaskCount in JS over the same array (no need
+  // for the unsupported countIf either).
   const sqlPct = `
-    SELECT
-      quantile(0.50)(double1) AS p50,
-      quantile(0.75)(double1) AS p75,
-      quantile(0.95)(double1) AS p95,
-      countIf(double1 >= 200)  AS longTaskCount
+    SELECT double1
     FROM ${DATASET}
     WHERE blob1 = 'req' AND timestamp > NOW() - ${WINDOW}
   `;
 
-  // (2) Hourly request counts for the 24-bucket sparkline.
+  // Hourly request counts for the 24-bucket sparkline.
+  // toStartOfInterval + GROUP BY are confirmed working on AE SQL.
   const sqlSpark = `
     SELECT
       toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour,
@@ -175,11 +181,27 @@ async function liveKpis(
     runAeSql(accountId, token, sqlSpark),
   ]);
 
-  const pctRow = pctResp.data?.[0] ?? {};
-  const p50 = Math.round(Number(pctRow.p50) || 0);
-  const p75 = Math.round(Number(pctRow.p75) || 0);
-  const p95 = Math.round(Number(pctRow.p95) || 0);
-  const longTaskCount = Math.round(Number(pctRow.longTaskCount) || 0);
+  // JS-side percentile + long-task counts. Pull all double1 values,
+  // sort, and pick by index. Math.floor(N * p) is the standard "nearest
+  // rank" definition — close enough for dashboards.
+  const samples: number[] = [];
+  for (const row of pctResp.data ?? []) {
+    const v = Number((row as Record<string, unknown>).double1);
+    if (Number.isFinite(v)) samples.push(v);
+  }
+  samples.sort((a, b) => a - b);
+  const pick = (p: number): number => {
+    if (samples.length === 0) return 0;
+    const idx = Math.min(
+      samples.length - 1,
+      Math.floor(samples.length * p),
+    );
+    return samples[idx];
+  };
+  const p50 = Math.round(pick(0.5));
+  const p75 = Math.round(pick(0.75));
+  const p95 = Math.round(pick(0.95));
+  const longTaskCount = samples.filter((v) => v >= 200).length;
 
   // Build a 24-element sparkline keyed by hour-of-day. Missing hours
   // (e.g. brand-new dataset with < 24h of writes) read as zero. We

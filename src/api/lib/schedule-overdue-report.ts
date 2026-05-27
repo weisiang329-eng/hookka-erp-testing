@@ -344,8 +344,14 @@ const PAGE_CSS = `
   .summary .lbl { font-size: 7.5pt; text-transform: uppercase; letter-spacing: 1px; color: #6B5C32; }
   .summary .val { font-size: 17pt; font-weight: 700; margin-top: 0; line-height: 1.1; }
   .summary .sub { font-size: 8pt; color: #6B7280; margin-top: 2px; }
-  .dept-card { border: 1px solid #E5E1DC; border-radius: 4px; margin-bottom: 10px; page-break-inside: avoid; }
-  .dept-head { background: #1F1D1B; color: #fff; padding: 7px 12px; font-weight: 700; font-size: 10.5pt; display: flex; justify-content: space-between; align-items: center; }
+  /* Dept cards CAN split across pages — at 20-100 rows each they are
+     usually bigger than half an A4 sheet, so forcing them whole leaves a
+     huge gap on page 1 (first dept gets pushed to page 2). Rows
+     themselves stay atomic via tr page-break-inside:avoid below.
+     Header stays attached via page-break-after:avoid on dept-head. */
+  .dept-card { border: 1px solid #E5E1DC; border-radius: 4px; margin-bottom: 10px; }
+  tr { page-break-inside: avoid; }
+  .dept-head { background: #1F1D1B; color: #fff; padding: 7px 12px; font-weight: 700; font-size: 10.5pt; display: flex; justify-content: space-between; align-items: center; page-break-after: avoid; }
   .dept-head .right { font-weight: 400; font-size: 9pt; color: #C5BEAE; }
   table.data { width: 100%; border-collapse: collapse; table-layout: fixed; }
   table.data thead th { background: #F4EFE3; color: #1F1D1B; font-size: 8pt; font-weight: 700; padding: 5px 6px; text-align: left; letter-spacing: 0.3px; border-bottom: 1px solid #E5E1DC; white-space: nowrap; }

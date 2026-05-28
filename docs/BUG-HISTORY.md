@@ -60,18 +60,19 @@ downstream consumes; idempotent absolute SET; touches only wip_items, leaves
 job_cards/fg_units intact). Result: 122 rows updated, 207 zero-rows deleted,
 **drift 73 → 0**. Negatives 84 → 13, worst −30 → −4.
 
-**Residual 13 negatives — floored to 0 (operator chose accuracy now):** the 13
-remaining negatives (worst −4) were each traced to skipped-process cases — the
-upstream producer JC sits in WAITING/CANCELLED (not COMPLETED) while a
-downstream dept already consumed the component (e.g. `8" Divan- 5FT Foam` −4
-WEBBING CANCELLED+WAITING; `5531 Back Cushion KN390-14` −3 FAB_SEW
-CANCELLED+WAITING; several FOAM/FAB_SEW WAITING at −1..−3). Negative physical
-WIP is impossible and the parts were evidently produced (they got consumed),
-so per operator request the final state is `UPDATE wip_items SET stock_qty = 0
-WHERE stock_qty < 0` — **0 negatives, all stock ≥ 0** (84 → 0). The
-"待补工序" punch-list (which upstream JC is WAITING/CANCELLED per component) is
-preserved in this entry + the 2026-05-28 session transcript so the gap detail
-isn't lost.
+**Final state — accurate to the production orders, negatives kept (operator
+decision):** operator clarified "accurate" means the value the job cards
+actually compute, NOT a forced 0 — negatives are acceptable as the honest
+signal. So the final WIP = strict job-card computation (produced − consumed),
+**drift 0, total 1492**. 13 rows remain negative (worst −4) — each a
+skipped-process case where the upstream producer JC sits in WAITING/CANCELLED
+while a downstream dept already consumed (e.g. `8" Divan- 5FT Foam` −4 WEBBING
+CANCELLED+WAITING; `5531 Back Cushion KN390-14` −3 FAB_SEW CANCELLED+WAITING;
+several FOAM/FAB_SEW WAITING at −1..−3). These are left as the truthful
+"待补工序" signal — completing the stuck upstream JC fires the cascade `+qty`
+and the item self-corrects (root-fix-compatible; a forced 0 would have
+double-counted on later completion). NOTE: the brief floor-to-0 was reverted
+via a re-run of the rebuild.
 
 **Systemic root cause of the skipped-process (why WIP drifts negative at all):**
 the **upstream-sequence lock is DISABLED** (see BUG-2026-04-26-003) — operators

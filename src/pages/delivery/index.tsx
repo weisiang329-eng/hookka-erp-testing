@@ -1678,24 +1678,46 @@ export default function DeliveryPage() {
       const r = await fetch(`/api/packing-lists/${pl.id}`);
       const j = (await r.json().catch(() => ({}))) as {
         success?: boolean;
-        data?: { stops?: unknown[] };
+        data?: { orders?: { id: string }[] };
         error?: string;
       };
       if (!r.ok || !j.success || !j.data) {
         toast.error(j.error || "Failed to load packing list");
         return;
       }
-      const stops = (j.data.stops ?? []) as Parameters<
-        typeof import("@/lib/generate-packing-pdf").generateConsolidatedPackingListPdf
-      >[0];
-      if (stops.length === 0) {
+      const orders = j.data.orders ?? [];
+      if (orders.length === 0) {
         toast.error("This packing list has no delivery orders.");
         return;
       }
-      const { generateConsolidatedPackingListPdf } = await import(
-        "@/lib/generate-packing-pdf"
+      // Pull the same per-DO print-extras (customer PO/SO/Ref, bedframe
+      // dims, BOM piece breakdown) the single-DO print uses, so each DO in
+      // the packing list renders identically to its standalone DO.
+      const extrasById: Record<
+        string,
+        import("@/lib/generate-do-pdf").DOPrintExtras
+      > = {};
+      await Promise.all(
+        orders.map(async (o) => {
+          try {
+            const er = await fetch(
+              `/api/delivery-orders/${encodeURIComponent(o.id)}/print-extras`,
+            );
+            const ej = (await er.json()) as {
+              success?: boolean;
+              data?: import("@/lib/generate-do-pdf").DOPrintExtras;
+            };
+            if (ej?.success && ej.data) extrasById[o.id] = ej.data;
+          } catch {
+            /* graceful — DO still renders without extras */
+          }
+        }),
       );
-      generateConsolidatedPackingListPdf(stops);
+      const { generateConsolidatedDoPdf } = await import("@/lib/generate-do-pdf");
+      generateConsolidatedDoPdf(
+        orders as unknown as import("@/types").DeliveryOrder[],
+        extrasById,
+      );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate packing list");
     }

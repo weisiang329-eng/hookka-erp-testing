@@ -115,11 +115,13 @@ app.get("/:id", async (c) => {
     if (!pl) return c.json({ success: false, error: "Packing list not found." }, 404);
 
     const doIds = parseIds(pl.do_ids);
-    let stops: unknown[] = [];
+    // Full DO objects, shaped like the delivery-orders payload, so the
+    // frontend can render each one with the SAME canonical DO PDF.
+    let orders: unknown[] = [];
     if (doIds.length > 0) {
       const ph = doIds.map(() => "?").join(",");
       const doRes = await c.var.DB.prepare(
-        `SELECT id, doNo, customerName, customerState, hubName, deliveryAddress, contactPerson, contactPhone, deliveryDate, dispatchedAt, driverName, vehicleNo, totalM3
+        `SELECT id, doNo, customerName, customerPOId, customerState, hubName, deliveryAddress, contactPerson, contactPhone, deliveryDate, dispatchedAt, driverName, driverPhone, vehicleNo, vehicleType, lorryName, totalM3, totalItems
          FROM delivery_orders WHERE id IN (${ph}) AND orgId = ?`,
       )
         .bind(...doIds, orgId)
@@ -127,6 +129,7 @@ app.get("/:id", async (c) => {
           id: string;
           doNo: string;
           customerName: string | null;
+          customerPOId: string | null;
           customerState: string | null;
           hubName: string | null;
           deliveryAddress: string | null;
@@ -135,16 +138,23 @@ app.get("/:id", async (c) => {
           deliveryDate: string | null;
           dispatchedAt: string | null;
           driverName: string | null;
+          driverPhone: string | null;
           vehicleNo: string | null;
+          vehicleType: string | null;
+          lorryName: string | null;
           totalM3: number | string | null;
+          totalItems: number | null;
         }>();
       const itemsRes = await c.var.DB.prepare(
-        `SELECT deliveryOrderId, productCode, productName, sizeLabel, fabricCode, quantity, itemM3, rackingNumber
+        `SELECT id, deliveryOrderId, productionOrderId, poNo, productCode, productName, sizeLabel, fabricCode, quantity, itemM3, rackingNumber, salesOrderNo
          FROM delivery_order_items WHERE deliveryOrderId IN (${ph}) AND orgId = ?`,
       )
         .bind(...doIds, orgId)
         .all<{
+          id: string;
           deliveryOrderId: string;
+          productionOrderId: string | null;
+          poNo: string | null;
           productCode: string | null;
           productName: string | null;
           sizeLabel: string | null;
@@ -152,11 +162,15 @@ app.get("/:id", async (c) => {
           quantity: number | null;
           itemM3: number | string | null;
           rackingNumber: string | null;
+          salesOrderNo: string | null;
         }>();
       const byDo = new Map<string, unknown[]>();
       for (const it of itemsRes.results ?? []) {
         const arr = (byDo.get(it.deliveryOrderId) as unknown[]) ?? [];
         arr.push({
+          id: it.id,
+          productionOrderId: it.productionOrderId ?? "",
+          poNo: it.poNo ?? "",
           productCode: it.productCode ?? "",
           productName: it.productName ?? "",
           sizeLabel: it.sizeLabel ?? "",
@@ -164,31 +178,38 @@ app.get("/:id", async (c) => {
           quantity: Number(it.quantity ?? 0),
           itemM3: Number(it.itemM3 ?? 0),
           rackingNumber: it.rackingNumber ?? "",
+          salesOrderNo: it.salesOrderNo ?? "",
         });
         byDo.set(it.deliveryOrderId, arr);
       }
       // Preserve the operator's selection order.
       const orderIndex = new Map(doIds.map((d, i) => [d, i]));
-      stops = (doRes.results ?? [])
+      orders = (doRes.results ?? [])
         .sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0))
         .map((d) => ({
+          id: d.id,
           doNo: d.doNo,
           customerName: d.customerName ?? "",
+          customerPOId: d.customerPOId ?? "",
+          customerState: d.customerState ?? "",
           hubName: d.hubName ?? "",
-          hubState: d.customerState ?? "",
           deliveryAddress: d.deliveryAddress ?? "",
           contactPerson: d.contactPerson ?? "",
           contactPhone: d.contactPhone ?? "",
           deliveryDate: d.deliveryDate ?? "",
-          dispatchDate: d.dispatchedAt ?? "",
+          dispatchedAt: d.dispatchedAt ?? "",
           driverName: d.driverName ?? "",
+          driverPhone: d.driverPhone ?? "",
           vehicleNo: d.vehicleNo ?? "",
+          vehicleType: d.vehicleType ?? "",
+          lorryName: d.lorryName ?? "",
           totalM3: Number(d.totalM3 ?? 0),
+          totalItems: Number(d.totalItems ?? 0),
           items: byDo.get(d.id) ?? [],
         }));
     }
 
-    return c.json({ success: true, data: { ...rowToPackingList(pl), stops } });
+    return c.json({ success: true, data: { ...rowToPackingList(pl), orders } });
   } catch (e) {
     if (isMissingTable(e)) return c.json({ success: false, error: "Packing list storage is not set up yet." }, 503);
     throw e;

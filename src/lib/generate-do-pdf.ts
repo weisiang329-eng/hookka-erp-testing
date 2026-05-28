@@ -154,14 +154,20 @@ function describe(
 // UOM | Qty. Bedframes / sofas / accessories print as labelled sections.
 // Letterhead + reference block + column header repeat on every page.
 // ---------------------------------------------------------------------------
-export function generateDOPdf(
+// Draws ONE delivery order into an EXISTING jsPDF doc, starting on the
+// current page (the table paginates itself; the header reprints per page).
+// Footers + "Page X of Y" are NOT applied here — the caller runs
+// stampDoFooters() once after all DOs are drawn (so a multi-DO run numbers
+// the whole document, not each DO separately). The single-DO entry point
+// generateDOPdf() below wraps this.
+export function renderDoInto(
+  doc: jsPDF,
   order: DeliveryOrder,
   extras?: DOPrintExtras,
-  // "download" = save the file (default); "view" = open the document
-  // in the browser to read on screen (no download).
-  mode: "download" | "view" = "download",
+  // When set, prints a "PACKING LIST · STOP n / N" tag at the top so each
+  // DO in a consolidated packing list is numbered 1, 2, 3…
+  opts?: { seq?: number; total?: number },
 ) {
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const m = 14;
@@ -199,6 +205,18 @@ export function generateDOPdf(
   const drawHeader = () => {
     // --- B/W letterhead: logo left, company block beside, title right ---
     addHookkaLetterhead(doc, m, 12, 12);
+    // Consolidated packing list: tag each DO with its stop number (1, 2, 3…).
+    if (opts?.seq) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7);
+      doc.setTextColor(...FAINT);
+      doc.text(
+        `PACKING LIST · STOP ${opts.seq}${opts.total ? ` / ${opts.total}` : ""}`,
+        pageW - m,
+        9.5,
+        { align: "right" },
+      );
+    }
     const tx = m + 12 * (2038 / 907) + 5;
     doc.setTextColor(...INK);
     doc.setFont("helvetica", "bold");
@@ -463,15 +481,6 @@ export function generateDOPdf(
     },
   });
 
-  if (
-    typeof (doc as unknown as { putTotalPages?: unknown }).putTotalPages ===
-    "function"
-  ) {
-    (doc as unknown as { putTotalPages: (t: string) => void }).putTotalPages(
-      "{tp}",
-    );
-  }
-
   // The grand totals (sets / breakdown / pieces) live in the table's
   // own footer row now — no separate roll-up table.
   const afterY =
@@ -500,7 +509,18 @@ export function generateDOPdf(
   doc.text("Name / Date / Stamp", m, sy + 23.5);
   doc.text("Name / Date / Stamp", pageW - m - halfW, sy + 23.5);
 
-  // Footer note on every page.
+  // Footers + page numbering are applied once by stampDoFooters() after
+  // every DO is drawn — not here — so a multi-DO run numbers the whole
+  // document instead of restamping earlier DOs' pages.
+}
+
+// Stamps the per-page footer + "Page X of Y" across the WHOLE document.
+// Run exactly once, after all DO(s) have been rendered.
+export function stampDoFooters(doc: jsPDF) {
+  const m = 14;
+  const co = COMPANY.HOOKKA;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const pages = doc.getNumberOfPages();
   for (let p = 1; p <= pages; p++) {
     doc.setPage(p);
@@ -518,16 +538,27 @@ export function generateDOPdf(
     );
     doc.text(`Page ${p} of ${pages}`, pageW - m, fy, { align: "right" });
   }
+}
+
+// Single-DO entry point — unchanged behaviour for all existing call sites.
+export function generateDOPdf(
+  order: DeliveryOrder,
+  extras?: DOPrintExtras,
+  // "download" = save the file (default); "view" = open in the browser.
+  mode: "download" | "view" = "download",
+) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  renderDoInto(doc, order, extras);
+  stampDoFooters(doc);
 
   // order.doNo already carries the "DO-" prefix (e.g. "DO-2605-094"), so
-  // prepending another "DO-" produced "DO-DO-2605-094.pdf" (Wei Siang
-  // 2026-05-28). Use the doNo verbatim; only add the prefix for any legacy
-  // doNo that somehow lacks it.
+  // prepending another "DO-" produced "DO-DO-2605-094.pdf". Use it verbatim;
+  // only add the prefix for any legacy doNo that lacks it.
   const fileName = `${(order.doNo || "").startsWith("DO-") ? order.doNo : `DO-${order.doNo}`}.pdf`;
 
   if (mode === "view") {
-    // Open the document to read on screen — no download. Fall back to
-    // save() if the browser blocks the blob window (popup blocker).
+    // Open to read on screen — no download. Fall back to save() if the
+    // browser blocks the blob window (popup blocker).
     try {
       const url = doc.output("bloburl");
       const w = window.open(String(url), "_blank");
@@ -538,4 +569,23 @@ export function generateDOPdf(
     return;
   }
   doc.save(fileName);
+}
+
+// Consolidated packing list — EVERY selected DO rendered in the SAME DO
+// format, stacked into one document, each starting on its own page and
+// tagged STOP 1, STOP 2, STOP 3… The warehouse loads the whole truck from
+// this one document; each hub still has its own DO.
+export function generateConsolidatedDoPdf(
+  orders: DeliveryOrder[],
+  extrasById?: Record<string, DOPrintExtras>,
+) {
+  if (!orders || orders.length === 0) return;
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  orders.forEach((o, i) => {
+    if (i > 0) doc.addPage();
+    renderDoInto(doc, o, extrasById?.[o.id], { seq: i + 1, total: orders.length });
+  });
+  stampDoFooters(doc);
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  doc.save(`PackingList-Run-${stamp}-${orders.length}DO.pdf`);
 }

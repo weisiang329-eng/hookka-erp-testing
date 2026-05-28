@@ -350,6 +350,25 @@ function HourlyErrorChart({ data }: { data: HourlyErrors }) {
 // has a single-word "what is this for" prefix and a one-line explainer
 // so a SUPER_ADMIN can scan top-to-bottom and know what each block is
 // answering.
+// One GitHub Actions workflow run, as flattened by GET /github-runs.
+type GithubRun = {
+  id: number;
+  name: string;
+  title: string;
+  branch: string;
+  event: string;
+  status: string; // queued | in_progress | completed
+  conclusion: string | null; // success | failure | cancelled | timed_out | ...
+  url: string;
+  at: string;
+};
+type GithubRunsData = {
+  configured: boolean;
+  repo: string;
+  error?: string;
+  runs: GithubRun[];
+};
+
 function SectionHeader({
   title,
   hint,
@@ -464,6 +483,14 @@ export default function AdminHealthPage() {
     `/api/admin/health/security-events${rangeQS}`,
     60,
   );
+  // GitHub Actions / automation health. No range param — always the latest
+  // ~20 runs. Polled on a 60s cache like the rest of the dashboard. When the
+  // GITHUB_TOKEN secret is unset the payload is {configured:false} and the
+  // panel shows a connect hint instead of data.
+  const { data: githubRunsResp } = useCachedJson<{
+    success: boolean;
+    data: GithubRunsData;
+  }>(`/api/admin/health/github-runs`, 60);
 
   const kpis = data?.data;
   const byEndpoint = byEndpointResp?.data ?? [];
@@ -499,6 +526,23 @@ export default function AdminHealthPage() {
     passwordResetsByEmail: [],
     summary: { totalLogins: 0, totalFailures: 0, totalResets: 0, totalRoleChanges: 0 },
   };
+  // GitHub Actions automation health. A run is "failed" when it finished
+  // (status completed) with a non-success conclusion (failure/timed_out/
+  // startup_failure). Cancelled runs don't count as failures. We count only
+  // the latest run per workflow so a long-since-fixed failure doesn't keep
+  // the panel red forever.
+  const github = githubRunsResp?.data;
+  const githubRuns = useMemo(() => github?.runs ?? [], [github]);
+  const githubFailingWorkflows = useMemo(() => {
+    const latestByWorkflow = new Map<string, GithubRun>();
+    for (const r of githubRuns) {
+      if (!latestByWorkflow.has(r.name)) latestByWorkflow.set(r.name, r);
+    }
+    const failConclusions = new Set(["failure", "timed_out", "startup_failure"]);
+    return [...latestByWorkflow.values()].filter(
+      (r) => r.status === "completed" && failConclusions.has(r.conclusion ?? ""),
+    );
+  }, [githubRuns]);
 
   // Past Fixes — lazy-load docs/BUG-HISTORY.md via Vite's ?raw import.
   // The markdown is ~250KB so we don't bloat the main chunk; the dynamic
@@ -1334,6 +1378,122 @@ export default function AdminHealthPage() {
                     </tbody>
                   </table>
                 </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* ────────── AUTOMATION (CI) ────────── */}
+          <SectionHeader
+            title="Automation — GitHub Actions"
+            hint="Build, deploy, and baseline workflows. Failures show up here instead of emailing you on every run. Latest ~20 runs, refreshed every 60s."
+          />
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-medium text-[#1F1D1B]">
+                Recent automation runs
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {!github ? (
+                <p className="text-xs text-[#8B8580] animate-pulse">Loading automation status…</p>
+              ) : !github.configured ? (
+                <div className="rounded-md border border-[#E6C490] bg-[#FBF1DC] text-[#7A5410] p-3 text-[12px] leading-relaxed">
+                  <div className="font-semibold mb-1">Not connected yet</div>
+                  Add a read-only GitHub token to show CI failures here. In Cloudflare
+                  Pages → Settings → Environment variables, add a secret named{" "}
+                  <span className="font-mono">GITHUB_TOKEN</span> (a fine-grained token
+                  with <span className="font-mono">Actions: read-only</span> on{" "}
+                  <span className="font-mono">{github.repo}</span>), then redeploy.
+                </div>
+              ) : github.error ? (
+                <div className="rounded-md border border-[#E8AFA4] bg-[#FBE9E5] text-[#7E251A] p-3 text-[12px]">
+                  Couldn’t reach GitHub: <span className="font-mono">{github.error}</span>.
+                  Check the <span className="font-mono">GITHUB_TOKEN</span> secret has{" "}
+                  <span className="font-mono">Actions: read</span> on{" "}
+                  <span className="font-mono">{github.repo}</span>.
+                </div>
+              ) : githubRuns.length === 0 ? (
+                <p className="text-xs text-[#8B8580]">No workflow runs found for {github.repo}.</p>
+              ) : (
+                <>
+                  {githubFailingWorkflows.length > 0 ? (
+                    <div className="rounded-md border border-[#E8AFA4] bg-[#FBE9E5] text-[#7E251A] p-2.5 text-[12px] font-semibold mb-3">
+                      ⚠ {githubFailingWorkflows.length} automation
+                      {githubFailingWorkflows.length > 1 ? "s are" : " is"} currently failing:{" "}
+                      {githubFailingWorkflows.map((r) => r.name).join(", ")}
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-[#B7D3A4] bg-[#F0F6EB] text-[#2F5C20] p-2.5 text-[12px] font-semibold mb-3">
+                      ✓ All automations passing on their latest run
+                    </div>
+                  )}
+                  <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-white">
+                        <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                          <th className="py-1.5 font-medium">Workflow</th>
+                          <th className="py-1.5 font-medium">Branch</th>
+                          <th className="py-1.5 font-medium">Result</th>
+                          <th className="py-1.5 font-medium">When</th>
+                          <th className="py-1.5 font-medium">Link</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {githubRuns.map((r) => {
+                          const running = r.status !== "completed";
+                          const failed =
+                            r.status === "completed" &&
+                            ["failure", "timed_out", "startup_failure"].includes(
+                              r.conclusion ?? "",
+                            );
+                          const cancelled = r.conclusion === "cancelled";
+                          const icon = running ? "⏳" : failed ? "✗" : cancelled ? "⊘" : "✓";
+                          const resultClass = failed
+                            ? "text-[#9A3A2D] font-semibold"
+                            : running
+                              ? "text-[#9C6F1E]"
+                              : cancelled
+                                ? "text-[#8B8580]"
+                                : "text-[#4F7C3A]";
+                          const resultLabel = running
+                            ? r.status.replace("_", " ")
+                            : (r.conclusion ?? "—").replace("_", " ");
+                          return (
+                            <tr key={r.id} className="border-b border-[#F5F2EE]">
+                              <td className="py-1.5 text-[#1F1D1B] truncate max-w-[200px]" title={r.title || r.name}>
+                                {r.name}
+                              </td>
+                              <td className="py-1.5 font-mono text-[11px] text-[#5A5550] truncate max-w-[120px]" title={r.branch}>
+                                {r.branch || "—"}
+                              </td>
+                              <td className={`py-1.5 ${resultClass}`}>
+                                {icon} {resultLabel}
+                              </td>
+                              <td className="py-1.5 text-[#5A5550] whitespace-nowrap">
+                                {r.at ? r.at.slice(0, 16).replace("T", " ") : "—"}
+                              </td>
+                              <td className="py-1.5">
+                                {r.url ? (
+                                  <a
+                                    className="underline text-[#8B7A52] hover:text-[#1F1D1B]"
+                                    href={r.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    View
+                                  </a>
+                                ) : (
+                                  "—"
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>

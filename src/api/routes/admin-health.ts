@@ -829,6 +829,105 @@ app.get("/deploys", async (c) => {
   return c.json({ success: true, data: deploys });
 });
 
+// ---------------------------------------------------------------------------
+// GitHub Actions health — surface CI / automation failures on the dashboard
+// instead of emailing the owner on every failed run. We poll the GitHub REST
+// API for the most recent workflow runs on this repo and hand the frontend a
+// compact list it can highlight (failures in red). Pull-based by design:
+// nothing to configure on the GitHub side, just a read-only token in
+// Cloudflare.
+//
+// Auth: requires a fine-grained, READ-ONLY PAT in env.GITHUB_TOKEN
+// (Actions: read on this repo). When unset we return {configured:false} so the
+// panel renders a "not connected" hint rather than erroring.
+//
+// Repo: defaults to the known slug; override with env.GITHUB_REPO ("owner/repo").
+//
+// Failure isolation: any non-2xx / thrown error returns {configured:true,
+// error} with an empty runs[] — the dashboard must never hang or crash on a
+// GitHub hiccup. An 8s abort caps the wait.
+type GithubRunOut = {
+  id: number;
+  name: string;
+  title: string;
+  branch: string;
+  event: string;
+  status: string; // queued | in_progress | completed
+  conclusion: string | null; // success | failure | cancelled | timed_out | ...
+  url: string;
+  at: string;
+};
+app.get("/github-runs", async (c) => {
+  const env = c.env as { GITHUB_TOKEN?: string; GITHUB_REPO?: string };
+  const repo = (env.GITHUB_REPO || "weisiang329-eng/hookka-erp-testing").trim();
+  if (!env.GITHUB_TOKEN) {
+    return c.json({
+      success: true,
+      data: { configured: false, repo, runs: [] as GithubRunOut[] },
+    });
+  }
+  try {
+    const url = `https://api.github.com/repos/${repo}/actions/runs?per_page=20`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "hookka-erp-health",
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      return c.json({
+        success: true,
+        data: {
+          configured: true,
+          repo,
+          error: `GitHub API ${res.status}`,
+          runs: [] as GithubRunOut[],
+        },
+      });
+    }
+    const body = (await res.json()) as {
+      workflow_runs?: Array<{
+        id: number;
+        name?: string;
+        display_title?: string;
+        head_branch?: string;
+        event?: string;
+        status?: string;
+        conclusion?: string | null;
+        html_url?: string;
+        created_at?: string;
+        updated_at?: string;
+        run_started_at?: string;
+      }>;
+    };
+    const runs: GithubRunOut[] = (body.workflow_runs || []).map((r) => ({
+      id: r.id,
+      name: r.name || "(workflow)",
+      title: r.display_title || "",
+      branch: r.head_branch || "",
+      event: r.event || "",
+      status: r.status || "",
+      conclusion: r.conclusion ?? null,
+      url: r.html_url || "",
+      at: r.run_started_at || r.created_at || r.updated_at || "",
+    }));
+    return c.json({ success: true, data: { configured: true, repo, runs } });
+  } catch (e) {
+    return c.json({
+      success: true,
+      data: {
+        configured: true,
+        repo,
+        error: String((e as Error)?.message || e),
+        runs: [] as GithubRunOut[],
+      },
+    });
+  }
+});
+
 // Slow SQL captures — the missing piece that translates "this endpoint
 // is slow" into "this specific SQL statement is slow". Backed by
 // emitSlowSql() in src/api/lib/observability.ts, which fires from the

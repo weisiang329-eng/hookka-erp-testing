@@ -89,6 +89,16 @@ export type Env = {
     // reports. When unset, the worker queries users WHERE roleId='SUPER_ADMIN'
     // and uses every active email. See src/api/routes/reports.ts.
     DAILY_REPORT_RECIPIENTS?: string;
+    // GitHub Actions health — surfaces CI / automation failures on
+    // /admin/health instead of emailing the owner on every failure.
+    // GITHUB_TOKEN: a fine-grained, READ-ONLY PAT (Actions: read-only on this
+    // repo) set via `wrangler secret put GITHUB_TOKEN`. When unset, the
+    // dashboard panel shows a "not connected" note and nothing is fetched.
+    // GITHUB_REPO: optional "owner/repo" override (var, public); defaults to
+    // the known slug in admin-health.ts. See routes/admin-health.ts
+    // GET /github-runs.
+    GITHUB_TOKEN?: string;
+    GITHUB_REPO?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route

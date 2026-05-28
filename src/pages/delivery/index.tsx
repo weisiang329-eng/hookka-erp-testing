@@ -1519,11 +1519,27 @@ export default function DeliveryPage() {
       // user reported "Selected production orders span multiple customers
       // or states" toast even though only 1 row showed as selected — the
       // dialog snapshot was stale).
-      const poIds = readyPOs
-        .filter((po) => selectedReadyPOs.has(po.id))
-        .map((po) => po.id);
+      const selectedPOsForDO = readyPOs.filter((po) =>
+        selectedReadyPOs.has(po.id),
+      );
+      const poIds = selectedPOsForDO.map((po) => po.id);
       if (poIds.length === 0) {
         setCreateDODialog(null);
+        return;
+      }
+      // One DO = one customer ("DO 对标顾客"). Block a multi-customer selection
+      // up front with a clear message instead of letting the backend reject it
+      // with a 400. Mirrors the CUSTOMER-CONSISTENCY GUARD in the POST route.
+      const distinctCustomerIds = new Set(
+        selectedPOsForDO.map((po) => po.customerId).filter(Boolean),
+      );
+      if (distinctCustomerIds.size > 1) {
+        const names = Array.from(
+          new Set(selectedPOsForDO.map((po) => po.customerName).filter(Boolean)),
+        ).join(", ");
+        toast.error(
+          `A delivery order can only be for one customer. You picked ${distinctCustomerIds.size} (${names}). Create one DO per customer, or use Quick Dispatch which splits automatically.`,
+        );
         return;
       }
       const deliveryAddress =

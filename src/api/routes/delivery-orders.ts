@@ -1903,37 +1903,71 @@ app.post("/", async (c) => {
           409,
         );
       }
-      // Multi-SO is still allowed (operators consolidate several SOs of the
-      // SAME destination onto one truck) — the 2026-04-27 free-mix allowance
-      // stands for the SO / customer dimension.
+      // Multi-SO is still allowed ONLY within the same customer + same hub
+      // (operators consolidate several SOs of one customer going to one
+      // destination onto one truck). The two guards below reverse both
+      // dimensions of the 2026-04-27 free-mix allowance: a DO can no longer
+      // mix customers (CUSTOMER-CONSISTENCY) or hubs (HUB-CONSISTENCY).
       const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
       soIds.delete("");
 
-      // HUB-CONSISTENCY GUARD (Wei Siang 2026-05-28): but a single DO must
-      // deliver to ONE hub. Different hubs = physically different drop-off
-      // addresses, so they can't share one DO (the printed DO carries a
-      // single Deliver-To address — mixing hubs would ship some branches'
-      // goods to the wrong address). Look up the parent SOs' hubs; reject
-      // when the selection spans 2+ distinct non-null hubs. (Reverses the
-      // hub dimension of the 2026-04-27 free-mix allowance only.)
       if (soIds.size > 0) {
         const soIdArr = [...soIds];
         const ph = soIdArr.map(() => "?").join(",");
-        const hubRes = await c.var.DB.prepare(
-          `SELECT DISTINCT hubId, hubName FROM sales_orders
-             WHERE id IN (${ph}) AND hubId IS NOT NULL AND hubId <> ''`,
+        // One lookup feeds both guards — the parent SOs' customer + hub.
+        const soMetaRes = await c.var.DB.prepare(
+          `SELECT id, hubId, hubName, customerId, customerName
+             FROM sales_orders WHERE id IN (${ph})`,
         )
           .bind(...soIdArr)
-          .all<{ hubId: string; hubName: string | null }>();
-        const distinctHubs = hubRes.results ?? [];
-        if (distinctHubs.length > 1) {
-          const names = distinctHubs
-            .map((h) => h.hubName || h.hubId)
-            .join(", ");
+          .all<{
+            id: string;
+            hubId: string | null;
+            hubName: string | null;
+            customerId: string | null;
+            customerName: string | null;
+          }>();
+        const soMeta = soMetaRes.results ?? [];
+
+        // CUSTOMER-CONSISTENCY GUARD (Wei Siang 2026-05-28): a DO is keyed to
+        // ONE customer ("我们的 DO 是对标顾客的"). Reject a selection whose
+        // parent SOs span 2+ distinct customers — the operator must build one
+        // DO per customer (Quick Dispatch already auto-splits this way).
+        const custMap = new Map<string, string>();
+        for (const r of soMeta) {
+          if (r.customerId) {
+            custMap.set(r.customerId, r.customerName || r.customerId);
+          }
+        }
+        if (custMap.size > 1) {
+          const names = [...custMap.values()].join(", ");
           return c.json(
             {
               success: false,
-              error: `This delivery order mixes ${distinctHubs.length} delivery hubs (${names}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
+              error: `This delivery order mixes ${custMap.size} customers (${names}). A DO can only deliver for one customer — split into separate DOs, one per customer.`,
+            },
+            400,
+          );
+        }
+
+        // HUB-CONSISTENCY GUARD (Wei Siang 2026-05-28): a single DO must
+        // deliver to ONE hub. Different hubs = physically different drop-off
+        // addresses, so they can't share one DO (the printed DO carries a
+        // single Deliver-To address — mixing hubs would ship some branches'
+        // goods to the wrong address). Reject when the selection spans 2+
+        // distinct non-empty hubs.
+        const hubMap = new Map<string, string>();
+        for (const r of soMeta) {
+          if (r.hubId && r.hubId !== "") {
+            hubMap.set(r.hubId, r.hubName || r.hubId);
+          }
+        }
+        if (hubMap.size > 1) {
+          const names = [...hubMap.values()].join(", ");
+          return c.json(
+            {
+              success: false,
+              error: `This delivery order mixes ${hubMap.size} delivery hubs (${names}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
             },
             400,
           );

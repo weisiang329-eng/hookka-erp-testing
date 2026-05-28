@@ -34,6 +34,40 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-008 — DO could mix multiple customers ("DO 对标顾客的" violated)
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** delivery-orders
+
+**Symptom:** A single delivery order could be created spanning two different
+customers. Wei Siang: "不同顾客也不能开成一张 DO 啊，我们的 DO 是对标顾客的"
+— a DO is keyed to one customer, so mixing customers on one DO is wrong (it
+also produced the messy multi-drop "Drop 1 (CustA)… Drop 2 (CustB)…" address
+seen on DO-2605-096).
+
+**Root cause:** The 2026-04-27 free-mix allowance deliberately removed the
+multi-customer rejection so operators could consolidate SOs onto one truck.
+The 2026-05-28 hub guard reversed only the *hub* dimension; the *customer*
+dimension stayed free-mix. The Create-DO convert flow
+(`confirmCreateDO` in src/pages/delivery/index.tsx) posted ALL selected POs
+as ONE DO regardless of customer, and the POST route
+(src/api/routes/delivery-orders.ts) only guarded hubs. (Quick Dispatch was
+already correct — it splits one DO per customer.)
+
+**Fix:** Add a CUSTOMER-CONSISTENCY GUARD alongside the hub guard in the POST
+route — one `sales_orders` lookup now feeds both; reject (400) when the
+selection's parent SOs span 2+ distinct customers. Mirror it in the frontend
+convert dialog with an instant toast before the POST. Both reference the same
+"one DO per customer" rule and point the operator at Quick Dispatch (which
+auto-splits). Existing multi-customer DOs are untouched (guard is create-time
+only).
+
+**Verified:** Build + typecheck clean; selecting POs from 2 customers in the
+Create-DO dialog now blocks with a clear message; backend rejects the same
+case on a direct POST.
+
+---
+
 ## BUG-2026-05-28-007 — Packing-list manifest layout messy (repeated address, double "DO " prefix)
 
 **Status:** 🟢 Fixed (2026-05-28)

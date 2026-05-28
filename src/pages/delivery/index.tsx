@@ -3173,20 +3173,9 @@ export default function DeliveryPage() {
             Manage delivery orders, packing lists, and dispatch tracking
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {selectedIds.size > 0 && (
-            <>
-              {/* "Create as Packing List" lives in the grid card header now
-                  (right next to the row selection) so it's easy to find. */}
-              <Button variant="outline" onClick={handleMarkDispatched}>
-                <Send className="h-4 w-4" /> Mark Dispatched
-              </Button>
-              <Button variant="outline" onClick={handleMarkDelivered}>
-                <CheckCircle2 className="h-4 w-4" /> Mark Delivered
-              </Button>
-            </>
-          )}
-        </div>
+        {/* Selection actions (Create as Packing List / Mark Dispatched /
+            Mark Delivered) all live in the grid card header now, right next
+            to the row selection, so they're easy to find. */}
       </div>
 
       {/* Summary Cards */}
@@ -3411,13 +3400,21 @@ export default function DeliveryPage() {
                     selection so it's obvious (the old top-toolbar copy was far
                     from the grid and got missed). */}
                 {selectedIds.size > 0 && (
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={handlePrintPackingList}
-                  >
-                    <ClipboardList className="h-3.5 w-3.5" /> Create as Packing List ({selectedIds.size})
-                  </Button>
+                  <>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={handlePrintPackingList}
+                    >
+                      <ClipboardList className="h-3.5 w-3.5" /> Create as Packing List ({selectedIds.size})
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={handleMarkDispatched}>
+                      <Send className="h-3.5 w-3.5" /> Mark Dispatched
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={handleMarkDelivered}>
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Mark Delivered
+                    </Button>
+                  </>
                 )}
               </div>
             </div>

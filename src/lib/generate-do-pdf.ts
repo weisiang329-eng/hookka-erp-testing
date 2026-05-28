@@ -677,7 +677,6 @@ function renderPackingSummary(
   const totalDOs = list.length;
   const hubs = uniq(list.map((o) => o.hubName));
   const customers = uniq(list.map((o) => o.customerName));
-  const dropPoints = uniq(list.map((o) => o.deliveryAddress || o.hubName || o.doNo));
   const totalUnits = list.reduce(
     (s, o) => s + (o.items || []).reduce((q, it) => q + (Number(it.quantity) || 0), 0),
     0,
@@ -686,6 +685,37 @@ function renderPackingSummary(
     (s, o) => s + (Number((o as { totalM3?: number }).totalM3) || 0),
     0,
   );
+
+  // Group DOs into drops by delivery LOCATION: same customer + same hub = one
+  // drop (two/three DOs to the same place are still one stop). A new drop only
+  // when the customer differs, or the same customer ships to a different hub.
+  const dropGroups: {
+    customer: string;
+    hub: string;
+    state: string;
+    addresses: string[];
+    dos: typeof list;
+  }[] = [];
+  const dropIndex = new Map<string, number>();
+  for (const o of list) {
+    const key = `${(o.customerName || "").trim().toLowerCase()}::${(o.hubName || "").trim().toLowerCase()}`;
+    let idx = dropIndex.get(key);
+    if (idx === undefined) {
+      idx = dropGroups.length;
+      dropIndex.set(key, idx);
+      dropGroups.push({
+        customer: o.customerName || "-",
+        hub: o.hubName || "-",
+        state: o.customerState || "",
+        addresses: [],
+        dos: [],
+      });
+    }
+    const g = dropGroups[idx];
+    g.dos.push(o);
+    const a = (o.deliveryAddress || "").trim();
+    if (a && !g.addresses.includes(a)) g.addresses.push(a);
+  }
 
   let y = 38;
   const colW = (pageW - 2 * m) / 3;
@@ -698,8 +728,8 @@ function renderPackingSummary(
     doc.setTextColor(...INK);
     doc.text(val, x + 26, yy);
   };
-  kv("Stops / DOs:", String(totalDOs), m, y);
-  kv("Drop Points:", String(dropPoints.length), m + colW, y);
+  kv("Drops:", String(dropGroups.length), m, y);
+  kv("DOs:", String(totalDOs), m + colW, y);
   kv("Total Units:", String(totalUnits), m + colW * 2, y);
   y += 6;
   kv("Hubs:", String(hubs.length), m, y);
@@ -747,113 +777,138 @@ function renderPackingSummary(
   );
   y += 14;
 
-  // --- Per-drop sections: each drop shows its destination (clean, full-width
-  // address) and the items going to it, so the loader sees what goes where. ---
-  list.forEach((o, i) => {
-    const items = o.items || [];
-    const exDo = extrasById?.[o.id];
-    const { map: dropMap, pcs: dropPcs } = tallyComponents(items, exDo);
-    const dropBreakdown = formatComponents(dropMap);
+  // --- Per-DROP (location) sections. One drop = one delivery location; the
+  // DOs going there are listed under it, with a single drop total. ---
+  dropGroups.forEach((g, gi) => {
+    // Component total across every DO at this location.
+    const gMap = new Map<string, number>();
+    let gPcs = 0;
+    for (const o of g.dos) {
+      const { map, pcs } = tallyComponents(o.items || [], extrasById?.[o.id]);
+      for (const [k, v] of map) gMap.set(k, (gMap.get(k) || 0) + v);
+      gPcs += pcs;
+    }
+    const gBreakdown = formatComponents(gMap);
 
-    // Keep a drop's header + first rows together — break to a new page if tight.
-    if (y > pageH - 48) {
+    if (y > pageH - 52) {
       doc.addPage();
       y = 18;
     }
 
-    // Drop header bar: Drop # · DO No.  |  Customer — Hub
-    doc.setFillColor(245, 245, 245);
-    doc.rect(m, y, pageW - 2 * m, 7, "F");
+    // Drop header bar: DROP n · Customer — Hub   |   N DO(s)
+    doc.setFillColor(238, 238, 238);
+    doc.rect(m, y, pageW - 2 * m, 8, "F");
     doc.setTextColor(...INK);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(9);
-    doc.text(`DROP ${i + 1}  ·  ${o.doNo}`, m + 2, y + 4.8);
+    doc.setFontSize(9.5);
     doc.text(
-      `${o.customerName || "-"}  —  ${o.hubName || "-"}${o.customerState ? ` (${o.customerState})` : ""}`,
-      pageW - m - 2,
-      y + 4.8,
+      `DROP ${gi + 1}  ·  ${g.customer}  —  ${g.hub}${g.state ? ` (${g.state})` : ""}`,
+      m + 2.5,
+      y + 5.4,
+    );
+    doc.setFontSize(8);
+    doc.text(
+      `${g.dos.length} DO${g.dos.length === 1 ? "" : "s"}`,
+      pageW - m - 2.5,
+      y + 5.4,
       { align: "right" },
     );
     y += 11;
 
-    // Deliver-to address — full width, wraps cleanly (no cramming).
+    // Deliver-to address(es) for this location — full width.
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7.5);
     doc.setTextColor(...FAINT);
     const addr = doc.splitTextToSize(
-      `Deliver to: ${(o.deliveryAddress || "").trim() || "-"}`,
+      `Deliver to: ${g.addresses.join("   |   ") || "-"}`,
       pageW - 2 * m,
     );
     doc.text(addr, m, y);
-    y += addr.length * 3.8 + 1.5;
+    y += addr.length * 3.8 + 2;
 
-    // Items in this DO.
-    autoTable(doc, {
-      startY: y,
-      margin: { left: m, right: m },
-      head: [
-        [
-          { content: "#", styles: { halign: "center" } },
-          "Order (PO / SO / Ref)",
-          "Description",
-          "Quantity",
-          { content: "Total", styles: { halign: "right" } },
+    // Each DO at this drop.
+    g.dos.forEach((o) => {
+      const items = o.items || [];
+      const exDo = extrasById?.[o.id];
+
+      if (y > pageH - 28) {
+        doc.addPage();
+        y = 18;
+      }
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      doc.setTextColor(...INK);
+      doc.text(`DO ${o.doNo}`, m, y + 1);
+      y += 3;
+
+      autoTable(doc, {
+        startY: y,
+        margin: { left: m, right: m },
+        head: [
+          [
+            { content: "#", styles: { halign: "center" } },
+            "Order (PO / SO / Ref)",
+            "Description",
+            "Quantity",
+            { content: "Total", styles: { halign: "right" } },
+          ],
         ],
-      ],
-      body: items.map((it, k) => {
-        const ex = exDo?.items?.[it.id];
-        const po = (ex?.customerPOId || "").trim();
-        const so = (ex?.customerSO || exDo?.customerSO || "").trim();
-        const ref = (ex?.customerRef || exDo?.customerRef || "").trim();
-        const fp = fmtPieces(ex?.pieces);
-        // Two lines: product code on top, name (already carries the size) +
-        // fabric below — readable instead of one crammed line.
-        const desc = `${it.productCode || "-"}\n${it.productName || "-"}${it.fabricCode ? `   ·   ${it.fabricCode}` : ""}`;
-        return [
-          String(k + 1),
-          `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,
-          desc,
-          fp.text || String(it.quantity ?? 0),
-          String(fp.total || it.quantity || 0),
-        ];
-      }) as RowInput[],
-      foot: [
-        [
-          { content: `Drop total:  ${dropBreakdown}`, colSpan: 4, styles: { halign: "right" } },
-          { content: `${dropPcs} pcs`, styles: { halign: "right" } },
-        ],
-      ],
-      theme: "plain",
-      styles: {
-        font: "helvetica",
-        fontSize: 7.5,
-        cellPadding: { top: 1.2, bottom: 1.2, left: 1.8, right: 1.8 },
-        textColor: INK,
-        valign: "top",
-      },
-      headStyles: {
-        fontStyle: "bold",
-        fontSize: 7,
-        lineWidth: { top: 0, bottom: 0.4, left: 0, right: 0 },
-        lineColor: RULE,
-      },
-      footStyles: {
-        fontStyle: "bold",
-        fontSize: 7,
-        lineWidth: { top: 0.4, bottom: 0, left: 0, right: 0 },
-        lineColor: RULE,
-      },
-      columnStyles: {
-        0: { cellWidth: 9, halign: "center" },
-        1: { cellWidth: 30, fontSize: 6.5 },
-        2: { cellWidth: "auto" },
-        3: { cellWidth: 34 },
-        4: { cellWidth: 14, halign: "right" },
-      },
-      rowPageBreak: "avoid",
+        body: items.map((it, k) => {
+          const ex = exDo?.items?.[it.id];
+          const po = (ex?.customerPOId || "").trim();
+          const so = (ex?.customerSO || exDo?.customerSO || "").trim();
+          const ref = (ex?.customerRef || exDo?.customerRef || "").trim();
+          const fp = fmtPieces(ex?.pieces);
+          const desc = `${it.productCode || "-"}\n${it.productName || "-"}${it.fabricCode ? `   ·   ${it.fabricCode}` : ""}`;
+          return [
+            String(k + 1),
+            `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,
+            desc,
+            fp.text || String(it.quantity ?? 0),
+            String(fp.total || it.quantity || 0),
+          ];
+        }) as RowInput[],
+        theme: "plain",
+        styles: {
+          font: "helvetica",
+          fontSize: 7.5,
+          cellPadding: { top: 1.2, bottom: 1.2, left: 1.8, right: 1.8 },
+          textColor: INK,
+          valign: "top",
+        },
+        headStyles: {
+          fontStyle: "bold",
+          fontSize: 7,
+          lineWidth: { top: 0, bottom: 0.4, left: 0, right: 0 },
+          lineColor: RULE,
+        },
+        columnStyles: {
+          0: { cellWidth: 9, halign: "center" },
+          1: { cellWidth: 30, fontSize: 6.5 },
+          2: { cellWidth: "auto" },
+          3: { cellWidth: 34 },
+          4: { cellWidth: 14, halign: "right" },
+        },
+        rowPageBreak: "avoid",
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      y = ((doc as any).lastAutoTable?.finalY ?? y) + 4;
     });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    y = ((doc as any).lastAutoTable?.finalY ?? y) + 7;
+
+    // Drop total across all DOs at this location.
+    doc.setDrawColor(...RULE);
+    doc.setLineWidth(0.4);
+    doc.line(m, y, pageW - m, y);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(...INK);
+    doc.text(
+      `Drop total:  ${gBreakdown}   ·   ${gPcs} pcs`,
+      pageW - m,
+      y + 4.8,
+      { align: "right" },
+    );
+    y += 11;
   });
 
   if (y < pageH - 12) {

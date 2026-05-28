@@ -34,6 +34,76 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-007 — Packing-list manifest layout messy (repeated address, double "DO " prefix)
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** delivery-orders
+
+**Symptom:** The consolidated packing-list manifest cover looked cluttered
+("很乱"): a drop's deliver-to line repeated the same address several times;
+DO numbers printed as "DO DO-2605-096" (double prefix); and the headline
+summary duplicated the hub info as both a count ("Hubs: 1") and a names
+line.
+
+**Root cause:** In `renderPackingSummary` (`src/lib/generate-do-pdf.ts`),
+the drop group collected a de-duped `addresses[]` then joined them with
+`" | "` at the drop level — but multiple DOs to the same location carry the
+same address string, so the join still read as one address echoed across
+the row width. DO headers were drawn as `` `DO ${o.doNo}` `` while `doNo`
+already carries the "DO-" prefix. The summary used a 3-column grid that
+needed two rows, the second of which restated hub/customer counts already
+implied by the names line.
+
+**Fix:** Drop the drop-level `addresses[]` entirely; print each DO's own
+`Deliver to: {o.deliveryAddress}` line under its DO number. Render the DO
+header as plain `o.doNo` (no extra "DO "). Collapse the summary to a single
+4-column row (Drops / DOs / Units / Total M³) plus one names line. Commit
+`46f19051`.
+
+**Verified:** Regenerated a multi-DO packing list — address shows once per
+DO, "DO-2605-096" prints once, summary is a single clean row.
+
+---
+
+## BUG-2026-05-28-006 — Packing-list route read snake_case keys; adapter returns camelCase
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** delivery-orders
+
+**Symptom:** Three failures on the new Packing List feature, all from the
+same root cause:
+1. Creating a second packing list threw `Cannot read properties of
+   undefined (reading 'replace')` (the next-number generator).
+2. The Packing List tab rendered blank rows (no number, no counts).
+3. Printing a saved packing list said "no delivery orders" even though
+   the record had DOs.
+
+**Root cause:** `SupabaseAdapter` returns query RESULT rows with
+**camelCase** keys (it only rewrites snake_case in the SQL it sends, via
+column-rename-map.json). `src/api/routes/packing-lists.ts` read the result
+rows with snake_case keys — `res.packing_no`, `row.do_ids`,
+`r.stop_count`, `r.total_units`, `r.created_at` — which were all
+`undefined`. `genNextPackingNo` then called `.replace()` on `undefined`
+(failure 1); the list mapper emitted blanks (failure 2); and GET /:id read
+`pl.do_ids` as `undefined`, so the PDF saw zero DOs (failure 3).
+
+**Fix:** Switch every `packing_lists` result read in
+`src/api/routes/packing-lists.ts` to camelCase — `packingNo`, `doIds`,
+`stopCount`, `totalUnits`, `totalM3`, `createdAt`. Writes stay snake_case
+(INSERT column list passes through verbatim). Same rule the existing
+delivery-orders queries already follow (read `doNo`, `totalItems`, etc.).
+
+**Verified:** Created two packing lists back-to-back — no `.replace` crash;
+both rows render with number + counts; View/Print both load the DOs and
+produce the manifest.
+
+**Lesson:** For any NEW table on SupabaseAdapter — write snake_case columns
++ snake_case SQL, but READ every result field as camelCase. Diagnosed from
+symptoms alone (console only showed slow-fetch warnings, no stack for the
+blank rows).
+
+---
+
 ## BUG-2026-05-28-005 — `_headers` no-cache scoped to `/` only — SPA routes cached stale index.html
 
 **Status:** 🟢 Fixed (2026-05-28)

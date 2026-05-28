@@ -60,22 +60,29 @@ downstream consumes; idempotent absolute SET; touches only wip_items, leaves
 job_cards/fg_units intact). Result: 122 rows updated, 207 zero-rows deleted,
 **drift 73 → 0**. Negatives 84 → 13, worst −30 → −4.
 
-**Residual 13 negatives — kept as a to-fix list (not floored):** the 13
+**Residual 13 negatives — floored to 0 (operator chose accuracy now):** the 13
 remaining negatives (worst −4) were each traced to skipped-process cases — the
 upstream producer JC sits in WAITING/CANCELLED (not COMPLETED) while a
-downstream dept already consumed the component. Examples: `8" Divan- 5FT Foam`
-−4 (WEBBING CANCELLED + WAITING), `5531 Back Cushion KN390-14` −3 (FAB_SEW
-CANCELLED + WAITING), several FOAM/FAB_SEW WAITING ones at −1..−3. They were
-BRIEFLY floored to 0, then **restored to true job-card values** (re-ran the
-rebuild) per operator request — the honest signal is more useful than a clean
-0, AND it is root-fix-compatible: completing the stuck upstream JC fires the
-cascade `+qty` and nets the item to 0, whereas a floored 0 would double-count.
-Verdict: negatives 84 → 13 (true gaps), worst −30 → −4. The 13 are now a
-"待补工序 / un-recorded process" punch-list:
-  • WAITING → if the work was actually done, mark the JC complete → WIP
-    auto-corrects.
-  • CANCELLED-but-consumed (Divan 5FT Foam, Cushion KN390-14) → investigate:
-    downstream consumed a component recorded as cancelled.
+downstream dept already consumed the component (e.g. `8" Divan- 5FT Foam` −4
+WEBBING CANCELLED+WAITING; `5531 Back Cushion KN390-14` −3 FAB_SEW
+CANCELLED+WAITING; several FOAM/FAB_SEW WAITING at −1..−3). Negative physical
+WIP is impossible and the parts were evidently produced (they got consumed),
+so per operator request the final state is `UPDATE wip_items SET stock_qty = 0
+WHERE stock_qty < 0` — **0 negatives, all stock ≥ 0** (84 → 0). The
+"待补工序" punch-list (which upstream JC is WAITING/CANCELLED per component) is
+preserved in this entry + the 2026-05-28 session transcript so the gap detail
+isn't lost.
+
+**Systemic root cause of the skipped-process (why WIP drifts negative at all):**
+the **upstream-sequence lock is DISABLED** (see BUG-2026-04-26-003) — operators
+can mark a downstream dept (e.g. UPHOLSTERY) COMPLETED while upstream (FOAM/
+WEBBING/FAB_SEW) is still WAITING, so the cascade records the consume with no
+matching produce → negative. The lock was turned off 2026-04-26 because the old
+wipKey+sequence predicate didn't model the BOM's parallel branches (FAB chain
+vs WOOD chain, converging only at UPHOLSTERY) and falsely 409'd legit edits.
+**Permanent prevention (deferred, owner to schedule):** re-enable a
+BOM-tree-aware sequence lock so downstream can't complete before its true
+upstream, without false-blocking parallel branches.
 
 **Permanent fix (pending, #76):** pass `options.orgId` from the
 import-completion callers so the `wip_cascade_log` dedupe applies to

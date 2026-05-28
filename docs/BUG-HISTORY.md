@@ -60,15 +60,21 @@ downstream consumes; idempotent absolute SET; touches only wip_items, leaves
 job_cards/fg_units intact). Result: 122 rows updated, 207 zero-rows deleted,
 **drift 73 → 0**. Negatives 84 → 13, worst −30 → −4.
 
-**Residual (not a bug):** 13 small negatives (worst −4) remain — these reflect
-the genuine job-card state (a downstream dept consumed a component whose
-upstream producer JC was never marked complete). They're an honest
-missing-production signal, not corrupt math.
+**Residual negatives zeroed (operator-confirmed):** the 13 remaining negatives
+(worst −4) were each traced to skipped-process cases — the upstream producer
+JC sat in WAITING/CANCELLED (not COMPLETED) while a downstream dept had already
+consumed the component (e.g. `1013-(K) HB 24" Webbing` had 2 WEBBING JCs still
+WAITING; `5531 Back Cushion KN390-14` had 2 FAB_SEW JCs CANCELLED). Negative
+physical WIP is impossible, so per operator confirmation these were floored:
+`UPDATE wip_items SET stock_qty = 0 WHERE stock_qty < 0` (the codebase's
+sanctioned clamp, import-completion.ts:4467). Result: **negatives 84 → 13 → 0**;
+all WIP stock now ≥ 0. Caveat: a future physical count may raise specific items
+above 0 if stock genuinely remains — adjust up from the count.
 
 **Permanent fix (pending, #76):** pass `options.orgId` from the
 import-completion callers so the `wip_cascade_log` dedupe applies to
-backfills too, preventing re-inflation. Verified: re-query shows total = 1492
-(job-card truth), drift 0.
+backfills too, preventing re-inflation. Verified live: 0 negative rows,
+total 1515.
 
 ---
 

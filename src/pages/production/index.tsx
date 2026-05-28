@@ -2610,31 +2610,26 @@ export default function ProductionPage({
     );
   };
 
-  // Due Date binding (Wei Siang 2026-05-28): editing one JC's Due Date in
-  // a dept view snaps EVERY sibling JC of the SAME SO in the SAME department
-  // to the same date. An SO split into N qty=1 product lines has N JCs per
-  // dept; the operator wants to schedule the whole SO's framing (or foam,
-  // etc.) for one day in a single edit instead of N clicks. Siblings are
-  // found within the current deptRows (already filtered to activeTab, so
-  // same-dept is implicit) by matching the parent doc id (SO, or CO for
-  // CO-origin rows). Each sibling goes through the same patchJobCard queue
-  // so the optimistic update + draft-debounce + rollback all apply per JC.
+  // Due Date binding (Wei Siang 2026-05-28, corrected): the binding key is
+  // the SOID = the line-suffixed production-order id (row.poId / row.soId),
+  // NOT the parent sales order. One SO with 4 items = 4 SOIDs, each with
+  // its OWN due date. Within ONE department, the WIP job cards of the SAME
+  // SOID must share a due date (a single item-line can fan into multiple
+  // WIP pieces in one dept — base frame + armrest etc.). Different SOIDs
+  // and different departments stay independent.
+  //
+  // deptRows is already filtered to the active dept, so grouping by poId
+  // gives exactly "same SOID + same department". Each sibling goes through
+  // the patchJobCard queue (optimistic update + draft-debounce + rollback
+  // per JC).
   const applyDueDateBound = (row: DeptRow, v: string) => {
-    const parentId = row.salesOrderId || row.consignmentOrderId || "";
-    // Without a parent id we can't group — just patch the one row.
-    if (!parentId) {
-      patchJobCard(row.poId, row.jobCardId, { dueDate: v });
-      return;
-    }
-    const siblings = deptRows.filter(
-      (r) => (r.salesOrderId || r.consignmentOrderId || "") === parentId,
-    );
+    const siblings = deptRows.filter((r) => r.poId === row.poId);
     for (const sib of siblings) {
       patchJobCard(sib.poId, sib.jobCardId, { dueDate: v });
     }
     if (siblings.length > 1) {
       toast.success(
-        `Due date applied to ${siblings.length} ${activeTab.replace(/_/g, " ")} job cards of ${row.salesOrderNo || row.soId}`,
+        `Due date applied to ${siblings.length} ${activeTab.replace(/_/g, " ")} WIP cards of ${row.soId}`,
       );
     }
   };

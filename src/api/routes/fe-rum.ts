@@ -6,9 +6,12 @@
 // reads them back via the GET /api/admin/health/fe-* endpoints in
 // admin-health.ts.
 //
-// Mounted at /api/fe-rum (worker.ts). Sits BEHIND authMiddleware so
-// only logged-in sessions can emit — public traffic never reaches it.
-// We don't gate on SUPER_ADMIN because every user emits.
+// Mounted at /api/fe-rum (worker.ts). PUBLIC path (auth-middleware
+// PUBLIC_PATHS, 2026-05-28): beacons fire even when the session is expired
+// or still resolving, so gating on auth just produced 401 floods and dropped
+// the error data we want. Soft-auth still attaches userId when a valid
+// session is present; anonymous beacons record with empty userId. The
+// MAX_EVENTS_PER_BATCH cap below is the abuse guard for the open endpoint.
 //
 // AE schema (matches the consumer queries in admin-health.ts):
 //

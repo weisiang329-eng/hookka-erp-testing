@@ -143,9 +143,38 @@ type ErrorRow = {
   fourXX: number;
   fiveXX: number;
   total: number;
+  lastSeen?: string; // ISO — most recent error of any status on this route
+  last5xxAt?: string; // ISO — most recent 5xx specifically ("" if none)
 };
 type HourlyErrors = { fourXX: number[]; fiveXX: number[] };
 type DailyTrend = { p50: number[]; p95: number[]; errors: number[] };
+
+// Analytics Engine returns timestamps as "YYYY-MM-DD HH:MM:SS" in UTC with no
+// zone marker. new Date() would misread that as LOCAL time (off by the
+// browser's offset). Normalize to ISO-UTC before parsing so "how long ago" is
+// accurate — that accuracy is the whole point of the recency signal.
+function parseAeTs(s?: string): number {
+  if (!s) return NaN;
+  let v = s.trim();
+  if (!v.includes("T")) v = v.replace(" ", "T");
+  if (!/[zZ]$|[+-]\d\d:?\d\d$/.test(v)) v += "Z";
+  return new Date(v).getTime();
+}
+// Relative "time ago" + a `recent` flag (within the last hour). `recent` is
+// the signal that tells a LIVE problem apart from a stale one still sitting
+// inside the rolling window — so an error that last fired 23h ago reads
+// "23h ago" (probably already fixed) instead of looking like an active outage.
+function timeAgo(iso?: string): { label: string; recent: boolean } {
+  const t = parseAeTs(iso);
+  if (!Number.isFinite(t)) return { label: "—", recent: false };
+  const diffMs = Date.now() - t;
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return { label: "just now", recent: true };
+  if (min < 60) return { label: `${min}m ago`, recent: true };
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return { label: `${hr}h ago`, recent: false };
+  return { label: `${Math.floor(hr / 24)}d ago`, recent: false };
+}
 
 // Multi-line latency trend — one P50 + P95 dot per bucket. Lets the
 // operator scan "Sep 5 was slow + Sep 10 was VERY slow" without
@@ -857,26 +886,42 @@ export default function AdminHealthPage() {
                 {errorsBy.length === 0 ? (
                   <p className="text-xs text-[#4F7C3A]">No 4xx / 5xx errors in the last 24h. Healthy.</p>
                 ) : (
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
-                        <th className="py-1.5 font-medium">Endpoint</th>
-                        <th className="py-1.5 font-medium text-right">4xx</th>
-                        <th className="py-1.5 font-medium text-right">5xx</th>
-                        <th className="py-1.5 font-medium text-right">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {errorsBy.map((r) => (
-                        <tr key={r.route} className="border-b border-[#F5F2EE]">
-                          <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[220px]" title={r.route}>{r.route}</td>
-                          <td className="py-1.5 text-right text-[#9C6F1E]">{r.fourXX || ''}</td>
-                          <td className={`py-1.5 text-right ${r.fiveXX > 0 ? 'text-[#9A3A2D] font-semibold' : 'text-[#8B8580]'}`}>{r.fiveXX || ''}</td>
-                          <td className="py-1.5 text-right text-[#5A5550]">{r.total}</td>
+                  <>
+                    <p className="text-[11px] text-[#8B8580] mb-2">
+                      <span className="text-[#9A3A2D] font-medium">Live</span> = errored within the last hour (worth acting on now).
+                      An old "Last seen" (hours/days ago) usually means it was already fixed — just still inside the window.
+                    </p>
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-left text-[#8B8580] border-b border-[#E2DDD8]">
+                          <th className="py-1.5 font-medium">Endpoint</th>
+                          <th className="py-1.5 font-medium text-right">4xx</th>
+                          <th className="py-1.5 font-medium text-right">5xx</th>
+                          <th className="py-1.5 font-medium text-right">Total</th>
+                          <th className="py-1.5 font-medium text-right">Last seen</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {errorsBy.map((r) => {
+                          // For the recency badge, prefer the most recent 5xx
+                          // (the bugs we own); fall back to any error.
+                          const seen = timeAgo(r.last5xxAt || r.lastSeen);
+                          const liveServerErr = r.fiveXX > 0 && timeAgo(r.last5xxAt).recent;
+                          return (
+                            <tr key={r.route} className="border-b border-[#F5F2EE]">
+                              <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[200px]" title={r.route}>{r.route}</td>
+                              <td className="py-1.5 text-right text-[#9C6F1E]">{r.fourXX || ''}</td>
+                              <td className={`py-1.5 text-right ${liveServerErr ? 'text-[#9A3A2D] font-semibold' : r.fiveXX > 0 ? 'text-[#9C6F1E]' : 'text-[#8B8580]'}`}>{r.fiveXX || ''}</td>
+                              <td className="py-1.5 text-right text-[#5A5550]">{r.total}</td>
+                              <td className={`py-1.5 text-right whitespace-nowrap ${seen.recent ? 'text-[#9A3A2D] font-semibold' : 'text-[#8B8580]'}`}>
+                                {seen.recent ? `⚠ ${seen.label}` : seen.label}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </>
                 )}
               </CardContent>
             </Card>

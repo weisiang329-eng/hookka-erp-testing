@@ -544,10 +544,14 @@ app.get("/by-endpoint", async (c) => {
 app.get("/errors-by-endpoint", async (c) => {
   const { WINDOW } = rangeWindow(parseRange(c.req.query("range")));
   const data = await withAe(c, async (accountId, token) => {
-    // Pull route + status. We bucket 4xx / 5xx in JS so we don't need
-    // CASE WHEN (AE SQL CASE syntax is finicky).
+    // Pull route + status + the most-recent occurrence. We bucket 4xx / 5xx
+    // in JS so we don't need CASE WHEN (AE SQL CASE syntax is finicky).
+    // MAX(timestamp) lets the dashboard tell "errored 23h ago (probably
+    // already fixed)" apart from "errored 2 min ago (live)" — the recency
+    // signal that stops a stale burst inside the rolling window from looking
+    // like an active outage.
     const sql = `
-      SELECT blob2 AS route, blob3 AS status, count() AS n
+      SELECT blob2 AS route, blob3 AS status, count() AS n, MAX(timestamp) AS lastTs
       FROM hookka_erp_metrics
       WHERE blob1 = 'req'
         AND timestamp > NOW() - ${WINDOW}
@@ -559,13 +563,21 @@ app.get("/errors-by-endpoint", async (c) => {
     const resp = await runAeSql(accountId, token, sql);
     const byRoute = new Map<
       string,
-      { route: string; fourXX: number; fiveXX: number; total: number }
+      {
+        route: string;
+        fourXX: number;
+        fiveXX: number;
+        total: number;
+        lastSeen: string; // most recent error of ANY status (ISO)
+        last5xxAt: string; // most recent 5xx specifically (ISO; "" if none)
+      }
     >();
     for (const r of resp.data ?? []) {
       const row = r as Record<string, unknown>;
       const route = String(row.route ?? "");
       const status = String(row.status ?? "");
       const n = Number(row.n) || 0;
+      const lastTs = String(row.lastTs ?? "");
       if (!route) continue;
       if (!byRoute.has(route))
         byRoute.set(route, {
@@ -573,11 +585,16 @@ app.get("/errors-by-endpoint", async (c) => {
           fourXX: 0,
           fiveXX: 0,
           total: 0,
+          lastSeen: "",
+          last5xxAt: "",
         });
       const bucket = byRoute.get(route)!;
-      if (status.startsWith("5")) bucket.fiveXX += n;
-      else if (status.startsWith("4")) bucket.fourXX += n;
+      if (status.startsWith("5")) {
+        bucket.fiveXX += n;
+        if (lastTs > bucket.last5xxAt) bucket.last5xxAt = lastTs;
+      } else if (status.startsWith("4")) bucket.fourXX += n;
       bucket.total += n;
+      if (lastTs > bucket.lastSeen) bucket.lastSeen = lastTs;
     }
     return [...byRoute.values()]
       .sort((a, b) => b.fiveXX - a.fiveXX || b.fourXX - a.fourXX)

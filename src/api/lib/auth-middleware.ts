@@ -43,6 +43,15 @@ export const PUBLIC_PATHS = [
   // is already logged in). They flow through the normal cookie/bearer
   // check below.
   "/api/health",
+  // Front-End RUM telemetry sink. Fire-and-forget error/perf beacons from
+  // the browser — they fire on page load, longtasks, and unhandled errors,
+  // INCLUDING when the session has expired or hasn't resolved yet, which was
+  // generating a flood of 401s (and silently dropping the very error data we
+  // want to see). Made public 2026-05-28 so beacons always land. Soft-auth
+  // still sets userId when a valid session is present (attribution preserved);
+  // anonymous beacons record with empty userId. Abuse-capped at 50 events
+  // per batch in the handler (routes/fe-rum.ts).
+  "/api/fe-rum/event",
   // Google Sheets onEdit webhook. Apps Script can't carry the dashboard JWT,
   // so auth boils down to the HMAC signature (SHEETS_SYNC_SECRET) + 5-minute
   // timestamp window inside the handler. See docs/SHEETS-SYNC.md.

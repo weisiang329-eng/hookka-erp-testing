@@ -42,6 +42,11 @@ const EXPECTED_PATHS = [
   // Phase C.6 — TOTP step-2 of password login (no bearer yet).
   "/api/auth/totp/login-verify",
   "/api/health",
+  // Front-End RUM telemetry sink (2026-05-28). Beacons fire even when the
+  // session is expired/unresolved, so gating produced 401 floods and dropped
+  // the error data. Read-only side effect: writes one Analytics Engine point
+  // per event, capped at 50/batch in the handler. No DB, no sensitive action.
+  "/api/fe-rum/event",
   // Google Sheets onEdit webhook — Apps Script can't carry the dashboard
   // JWT, so authentication is HMAC (SHEETS_SYNC_SECRET) + 5-minute
   // timestamp window enforced inside the handler. See docs/SHEETS-SYNC.md.

@@ -451,6 +451,12 @@ export default function DeliveryPage() {
   const [printDialog, setPrintDialog] = useState<DeliveryOrderRow[] | null>(null);
   const [plRemarks, setPlRemarks] = useState("");
   const [plCreating, setPlCreating] = useState(false);
+  // When set, the packing-list dialog is in EDIT mode (re-assign driver/lorry/
+  // provider on an existing list) rather than CREATE mode. pendingDriverName
+  // pre-selects the Driver dropdown once that provider's drivers load — the DO
+  // only stores the driver's NAME, not the person id, so we re-match by name.
+  const [editingPL, setEditingPL] = useState<PackingListRecord | null>(null);
+  const [pendingDriverName, setPendingDriverName] = useState("");
   // Truck assignment for the packing list: 3PL provider → lorry + driver.
   // On Create these are written onto every DO in the run (overwrite), so each
   // hub's DO carries the right driver + lorry. plProviderId holds the 3PL
@@ -1164,6 +1170,16 @@ export default function DeliveryPage() {
     };
   }, [plProviderId]);
 
+  // Edit mode: a DO stores only the driver's NAME, not the person id, so once
+  // the chosen provider's drivers have loaded we re-select the person whose
+  // name matches — pre-filling the Driver dropdown on Edit.
+  useEffect(() => {
+    if (!pendingDriverName || plDialogDrivers.length === 0) return;
+    const match = plDialogDrivers.find((d) => d.name === pendingDriverName);
+    if (match) setPlDriverPersonId(match.id);
+    setPendingDriverName("");
+  }, [plDialogDrivers, pendingDriverName]);
+
   useEffect(() => {
     const pid = editForm.driverId;
     if (!pid) {
@@ -1858,6 +1874,103 @@ export default function DeliveryPage() {
       refreshPLs();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to delete packing list");
+    }
+  };
+
+  // Open the packing-list dialog in EDIT mode to re-assign the driver / lorry /
+  // 3PL provider. The carrier is stamped identically on every DO in the run,
+  // so we read it off the first DO to pre-fill the pickers. On a DO the
+  // driverId column holds the 3PL PROVIDER id and vehicleId the lorry; the
+  // driver person id isn't stored (only driverName), so we stash the name in
+  // pendingDriverName and re-match it once that provider's drivers load.
+  const handleEditPackingList = async (pl: PackingListRecord) => {
+    try {
+      const r = await fetch(`/api/packing-lists/${pl.id}`);
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: {
+          orders?: Array<{
+            id: string;
+            doNo: string;
+            customerName?: string;
+            hubName?: string;
+            driverId?: string | null;
+            vehicleId?: string | null;
+            driverName?: string | null;
+          }>;
+        };
+        error?: string;
+      };
+      if (!r.ok || !j.success || !j.data) {
+        toast.error(j.error || "Failed to load packing list");
+        return;
+      }
+      const orders = j.data.orders ?? [];
+      if (orders.length === 0) {
+        toast.error("This packing list has no delivery orders.");
+        return;
+      }
+      const first = orders[0];
+      setPlProviderId(first.driverId || "");
+      setPlVehicleId(first.vehicleId || "");
+      setPlDriverPersonId("");
+      setPendingDriverName(first.driverName || "");
+      setPlRemarks(pl.remarks || "");
+      setPrintDialog(orders as unknown as DeliveryOrderRow[]);
+      setEditingPL(pl);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to load packing list");
+    }
+  };
+
+  // Save an EDIT — re-stamp the chosen driver / lorry / provider onto every DO
+  // in the list (overwrite, same path as Create). Carrier lives on the DOs, so
+  // there is no packing_lists row to update here.
+  const handleConfirmEditPackingList = async () => {
+    const dos = printDialog;
+    const pl = editingPL;
+    if (!dos || !pl) {
+      setPrintDialog(null);
+      setEditingPL(null);
+      return;
+    }
+    setPlCreating(true);
+    try {
+      const truckBody = {
+        providerId: plProviderId || null,
+        vehicleId: plVehicleId || null,
+        driverId: plDriverPersonId || null,
+      };
+      const failed: string[] = [];
+      for (const d of dos) {
+        try {
+          const tr = await fetch(`/api/delivery-orders/${d.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(truckBody),
+          });
+          if (!tr.ok) failed.push(d.doNo);
+        } catch {
+          failed.push(d.doNo);
+        }
+      }
+      if (failed.length) {
+        toast.error(
+          `Saved, but driver/lorry didn't update on ${failed.length} DO(s): ${failed.slice(0, 3).join(", ")}`,
+        );
+      } else {
+        toast.success(`Packing list ${pl.packingNo} updated`);
+      }
+      invalidateCachePrefix("/api/delivery-orders");
+      refreshDOs();
+      invalidateCachePrefix("/api/packing-lists");
+      refreshPLs();
+      setPrintDialog(null);
+      setEditingPL(null);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update packing list");
+    } finally {
+      setPlCreating(false);
     }
   };
 
@@ -3541,6 +3654,13 @@ export default function DeliveryPage() {
                             <Button
                               variant="outline"
                               size="sm"
+                              onClick={() => void handleEditPackingList(pl)}
+                            >
+                              <Pencil className="h-3.5 w-3.5" /> Edit
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
                               onClick={() => void handlePrintPackingListRecord(pl, "view")}
                             >
                               <Eye className="h-3.5 w-3.5" /> View
@@ -3852,13 +3972,16 @@ export default function DeliveryPage() {
       {/* ---------- Create Packing List Dialog ---------- */}
       {printDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => !plCreating && setPrintDialog(null)} />
+          <div className="absolute inset-0 bg-black/40" onClick={() => { if (!plCreating) { setPrintDialog(null); setEditingPL(null); } }} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-[#E2DDD8]">
             <div className="px-6 py-4 border-b border-[#E2DDD8]">
-              <h2 className="text-lg font-bold text-[#1F1D1B]">Create Packing List</h2>
+              <h2 className="text-lg font-bold text-[#1F1D1B]">
+                {editingPL ? `Edit Packing List ${editingPL.packingNo}` : "Create Packing List"}
+              </h2>
               <p className="text-xs text-[#6B7280]">
-                Groups these {printDialog.length} delivery order{printDialog.length === 1 ? "" : "s"} into
-                one saved packing list. Print it from the Packing List tab.
+                {editingPL
+                  ? `Re-assign the driver, lorry & 3PL provider for these ${printDialog.length} delivery order${printDialog.length === 1 ? "" : "s"}. The change is saved onto every DO in the list.`
+                  : `Groups these ${printDialog.length} delivery order${printDialog.length === 1 ? "" : "s"} into one saved packing list. Print it from the Packing List tab.`}
               </p>
             </div>
             <div className="px-6 py-5 space-y-3">
@@ -3941,26 +4064,38 @@ export default function DeliveryPage() {
                 </div>
               </div>
 
-              <div>
-                <label className="text-xs text-[#6B7280] font-medium">Remarks (optional)</label>
-                <input
-                  type="text"
-                  value={plRemarks}
-                  onChange={(e) => setPlRemarks(e.target.value)}
-                  placeholder="e.g. Lorry A — morning run"
-                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                />
-              </div>
+              {!editingPL && (
+                <div>
+                  <label className="text-xs text-[#6B7280] font-medium">Remarks (optional)</label>
+                  <input
+                    type="text"
+                    value={plRemarks}
+                    onChange={(e) => setPlRemarks(e.target.value)}
+                    placeholder="e.g. Lorry A — morning run"
+                    className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                  />
+                </div>
+              )}
             </div>
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
-              <Button variant="outline" onClick={() => setPrintDialog(null)} disabled={plCreating}>Cancel</Button>
-              <Button variant="primary" onClick={handleConfirmCreatePackingList} disabled={plCreating}>
-                {plCreating ? (
-                  <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
-                ) : (
-                  <><ClipboardList className="h-4 w-4" /> Create Packing List</>
-                )}
-              </Button>
+              <Button variant="outline" onClick={() => { setPrintDialog(null); setEditingPL(null); }} disabled={plCreating}>Cancel</Button>
+              {editingPL ? (
+                <Button variant="primary" onClick={handleConfirmEditPackingList} disabled={plCreating}>
+                  {plCreating ? (
+                    <><RefreshCw className="h-4 w-4 animate-spin" /> Saving...</>
+                  ) : (
+                    <><Pencil className="h-4 w-4" /> Save Changes</>
+                  )}
+                </Button>
+              ) : (
+                <Button variant="primary" onClick={handleConfirmCreatePackingList} disabled={plCreating}>
+                  {plCreating ? (
+                    <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
+                  ) : (
+                    <><ClipboardList className="h-4 w-4" /> Create Packing List</>
+                  )}
+                </Button>
+              )}
             </div>
           </div>
         </div>

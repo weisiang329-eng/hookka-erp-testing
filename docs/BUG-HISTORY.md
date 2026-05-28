@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-011 — WIP stock inflated/negative (84 negative rows) from cascade replays
+
+**Status:** 🟢 Fixed (2026-05-28) — data reconciled; durable guard still pending (#76)
+**Category:** inventory-cascade
+
+**Symptom:** Wei Siang: "inventory WIP 入库出库好像有问题 quantity不对". Live prod
+check found `wip_items` had **84 rows with negative stock_qty** (worst −30:
+`8" Divan- 5FT Foam`; `8" Divan- 6FT Foam` −22), spread across FOAM / WEBBING /
+WOOD_CUT / FRAMING. Total stock 1565 vs job-card truth 1492 → **+73 inflated**.
+
+**Root cause:** `wip_items` is the only cascade target without an enforced
+idempotency key. The `wip_cascade_log` claim-ticket guard
+(`applyWipInventoryChange`, production-orders.ts:2063) is opt-in via
+`options.orgId`; the live PATCH/SCAN callers pass it, but the **4
+import/backfill callers in import-completion.ts (lines 592, 1440, 1807, 2681)
+pass no orgId**, so re-running an import or backfill during the migration
+replays the consume/decrement → double-counts → drives stock negative. The
+consume side also has no MAX(0) floor (by design, to surface skipped depts).
+
+**Fix (data):** Backed up `wip_items` → `wip_items_backup_20260528`, then ran
+the purpose-built `POST /api/import/rebuild-wip-from-jcs` (recomputes every
+stock_qty from the job_cards chain = producer COMPLETED/TRANSFERRED adds minus
+downstream consumes; idempotent absolute SET; touches only wip_items, leaves
+job_cards/fg_units intact). Result: 122 rows updated, 207 zero-rows deleted,
+**drift 73 → 0**. Negatives 84 → 13, worst −30 → −4.
+
+**Residual (not a bug):** 13 small negatives (worst −4) remain — these reflect
+the genuine job-card state (a downstream dept consumed a component whose
+upstream producer JC was never marked complete). They're an honest
+missing-production signal, not corrupt math.
+
+**Permanent fix (pending, #76):** pass `options.orgId` from the
+import-completion callers so the `wip_cascade_log` dedupe applies to
+backfills too, preventing re-inflation. Verified: re-query shows total = 1492
+(job-card truth), drift 0.
+
+---
+
 ## BUG-2026-05-28-010 — /admin/health couldn't tell a stale error burst from a live one
 
 **Status:** 🟢 Fixed (2026-05-28)

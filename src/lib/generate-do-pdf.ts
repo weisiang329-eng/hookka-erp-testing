@@ -71,7 +71,12 @@ function fmtPieces(pieces?: string | null): { text: string; total: number } {
   // the count for 2+ ("2 1A(LHF)", "2 DIVAN"). `total` still sums the
   // underlying counts so the Total Qty column is unaffected.
   return {
-    text: parsed.map((x) => (x.n === 1 ? x.lab : `${x.n} ${x.lab}`)).join("  +  "),
+    // Drop the leading "1" ONLY for labels that start with a digit (sofa
+    // variants like 1A / 2A / 2S) — there "1 1A(LHF)" reads as "11A". For
+    // HB / DIVAN etc. keep the count, so "1 HB" stays "1 HB" (Wei Siang).
+    text: parsed
+      .map((x) => (x.n === 1 && /^\d/.test(x.lab) ? x.lab : `${x.n} ${x.lab}`))
+      .join("  +  "),
     total,
   };
 }
@@ -579,6 +584,7 @@ function renderPackingSummary(
   doc: jsPDF,
   orders: DeliveryOrder[],
   packingNo?: string,
+  extrasById?: Record<string, DOPrintExtras>,
 ) {
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -674,11 +680,62 @@ function renderPackingSummary(
   doc.text(custLine, m, y);
   y += custLine.length * 3.8 + 4;
 
+  // --- Container component total: how many Headboards / Divans / Sofas are in
+  // the WHOLE truck (summed from each item's BOM pieces), so the loader can
+  // tally the entire container. ---
+  const compTotals = new Map<string, number>();
+  let containerPcs = 0;
+  for (const o of list) {
+    const ex = extrasById?.[o.id];
+    for (const it of o.items || []) {
+      const pcs = ex?.items?.[it.id]?.pieces;
+      const fp = fmtPieces(pcs);
+      containerPcs += fp.total || Number(it.quantity) || 0;
+      if (pcs) {
+        for (const part of String(pcs).split(" + ")) {
+          const mm = part.trim().match(/^(\d+)\s+(.+)$/);
+          if (!mm) continue;
+          const raw = mm[2].trim().toUpperCase();
+          const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
+          compTotals.set(lab, (compTotals.get(lab) || 0) + Number(mm[1]));
+        }
+      } else {
+        compTotals.set("ITEM", (compTotals.get("ITEM") || 0) + (Number(it.quantity) || 0));
+      }
+    }
+  }
+  const compRank = (l: string) =>
+    l === "HB" ? 0 : l === "DIVAN" ? 1 : l === "SOFA" ? 2 : 3;
+  const containerBreakdown =
+    Array.from(compTotals.entries())
+      .sort((a, b) => compRank(a[0]) - compRank(b[0]))
+      .map(([l, n]) => `${n} ${l}`)
+      .join("   +   ") || "-";
+
+  doc.setFillColor(238, 238, 238);
+  doc.rect(m, y, pageW - 2 * m, 9, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(...INK);
+  doc.text("CONTAINER TOTAL", m + 2.5, y + 5.7);
+  doc.setFontSize(9.5);
+  doc.text(
+    `${containerBreakdown}   ·   ${containerPcs} pcs`,
+    pageW - m - 2.5,
+    y + 5.7,
+    { align: "right" },
+  );
+  y += 14;
+
   // --- Per-drop sections: each drop shows its destination (clean, full-width
   // address) and the items going to it, so the loader sees what goes where. ---
   list.forEach((o, i) => {
     const items = o.items || [];
-    const units = items.reduce((q, it) => q + (Number(it.quantity) || 0), 0);
+    const exDo = extrasById?.[o.id];
+    const dropPcs = items.reduce((s, it) => {
+      const fp = fmtPieces(exDo?.items?.[it.id]?.pieces);
+      return s + (fp.total || Number(it.quantity) || 0);
+    }, 0);
 
     // Keep a drop's header + first rows together — break to a new page if tight.
     if (y > pageH - 48) {
@@ -719,25 +776,38 @@ function renderPackingSummary(
       head: [
         [
           { content: "#", styles: { halign: "center" } },
-          "Product Code",
+          "Order (PO / SO / Ref)",
           "Description",
-          "Size",
-          "Fabric",
-          { content: "Qty", styles: { halign: "right" } },
+          "Quantity",
+          { content: "Total", styles: { halign: "right" } },
         ],
       ],
-      body: items.map((it, k) => [
-        String(k + 1),
-        it.productCode || "-",
-        it.productName || "-",
-        it.sizeLabel || "-",
-        it.fabricCode || "-",
-        String(it.quantity ?? 0),
-      ]) as RowInput[],
+      body: items.map((it, k) => {
+        const ex = exDo?.items?.[it.id];
+        const po = (ex?.customerPOId || "").trim();
+        const so = (ex?.customerSO || exDo?.customerSO || "").trim();
+        const ref = (ex?.customerRef || exDo?.customerRef || "").trim();
+        const fp = fmtPieces(ex?.pieces);
+        const desc = [
+          it.productCode || "",
+          it.productName || "",
+          it.sizeLabel ? `(${it.sizeLabel})` : "",
+          it.fabricCode ? `· ${it.fabricCode}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return [
+          String(k + 1),
+          `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,
+          desc,
+          fp.text || String(it.quantity ?? 0),
+          String(fp.total || it.quantity || 0),
+        ];
+      }) as RowInput[],
       foot: [
         [
-          { content: `${items.length} line(s)`, colSpan: 5, styles: { halign: "right" } },
-          { content: `${units}`, styles: { halign: "right" } },
+          { content: `${items.length} line(s)`, colSpan: 4, styles: { halign: "right" } },
+          { content: `${dropPcs} pcs`, styles: { halign: "right" } },
         ],
       ],
       theme: "plain",
@@ -761,12 +831,11 @@ function renderPackingSummary(
         lineColor: RULE,
       },
       columnStyles: {
-        0: { cellWidth: 10, halign: "center" },
-        1: { cellWidth: 28, fontStyle: "bold" },
+        0: { cellWidth: 9, halign: "center" },
+        1: { cellWidth: 30, fontSize: 6.5 },
         2: { cellWidth: "auto" },
-        3: { cellWidth: 22 },
-        4: { cellWidth: 24 },
-        5: { cellWidth: 14, halign: "right" },
+        3: { cellWidth: 34 },
+        4: { cellWidth: 14, halign: "right" },
       },
       rowPageBreak: "avoid",
     });
@@ -800,7 +869,7 @@ export function generateConsolidatedDoPdf(
 ) {
   if (!orders || orders.length === 0) return;
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-  renderPackingSummary(doc, orders, packingNo);
+  renderPackingSummary(doc, orders, packingNo, extrasById);
   orders.forEach((o, i) => {
     doc.addPage();
     renderDoInto(doc, o, extrasById?.[o.id], { seq: i + 1, total: orders.length });

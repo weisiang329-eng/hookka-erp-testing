@@ -229,6 +229,7 @@ interface PackingListStop {
   contactPerson?: string;
   contactPhone?: string;
   deliveryDate?: string;
+  dispatchDate?: string | null;
   driverName?: string;
   vehicleNo?: string;
   totalM3?: number;
@@ -275,10 +276,11 @@ export function generateConsolidatedPackingListPdf(stops: PackingListStop[]) {
     0,
   );
   const totalM3 = ordered.reduce((s, st) => s + (st.totalM3 || 0), 0);
-  const distinctHubs = uniqueNonEmpty(
-    ordered.map((st) => st.hubName || st.deliveryAddress || st.customerName),
-  ).length;
-  const runDate = summarise(ordered.map((st) => st.deliveryDate));
+  // Each DO is now hub-restricted, so one DO = one delivery stop.
+  const totalStops = totalDOs;
+  const runDate = summarise(
+    ordered.map((st) => st.deliveryDate || st.dispatchDate || ""),
+  );
   const runVehicle = summarise(ordered.map((st) => st.vehicleNo));
   const runDriver = summarise(ordered.map((st) => st.driverName));
 
@@ -297,7 +299,7 @@ export function generateConsolidatedPackingListPdf(stops: PackingListStop[]) {
   doc.setFontSize(11);
   doc.setFont("helvetica", "bold");
   doc.setTextColor(0, 0, 0);
-  doc.text(`${totalDOs} DO  /  ${distinctHubs} Stops`, pageW - margin, 12, {
+  doc.text(`${totalStops} Stops`, pageW - margin, 12, {
     align: "right",
   });
   doc.setFontSize(8);
@@ -332,7 +334,7 @@ export function generateConsolidatedPackingListPdf(stops: PackingListStop[]) {
   kv("Vehicle:", runVehicle, col1, infoY, 22);
   kv("Driver:", runDriver, col2, infoY, 22);
   kv("Total Units:", String(totalUnits), col3, infoY, 24);
-  kv("Stops:", String(distinctHubs), col1, infoY2, 22);
+  kv("Stops:", String(totalStops), col1, infoY2, 22);
   kv("Line Items:", String(totalItems), col2, infoY2, 22);
   kv("Total M³:", totalM3.toFixed(2), col3, infoY2, 24);
 
@@ -389,7 +391,7 @@ export function generateConsolidatedPackingListPdf(stops: PackingListStop[]) {
       item.fabricCode || "-",
       String(item.quantity ?? 0),
       item.rackingNumber || "-",
-      "☐",
+      "", // checkbox drawn in didDrawCell (font has no ballot-box glyph)
     ]);
 
     autoTable(doc, {
@@ -427,6 +429,18 @@ export function generateConsolidatedPackingListPdf(stops: PackingListStop[]) {
         textColor: [0, 0, 0],
         fontStyle: "bold",
         fontSize: 8,
+      },
+      // Draw an empty square in the Loaded column (jsPDF's standard font has
+      // no ballot-box glyph, so the unicode char renders as garbage).
+      didDrawCell: (data) => {
+        if (data.section === "body" && data.column.index === 7) {
+          const s = 4;
+          const cx = data.cell.x + data.cell.width / 2;
+          const cy = data.cell.y + data.cell.height / 2;
+          doc.setDrawColor(120, 120, 120);
+          doc.setLineWidth(0.3);
+          doc.rect(cx - s / 2, cy - s / 2, s, s, "S");
+        }
       },
     });
 

@@ -15,6 +15,7 @@ import {
   Send,
   CheckCircle2,
   FileText,
+  ClipboardList,
   Eye,
   Printer,
   ReceiptText,
@@ -123,6 +124,21 @@ type DeliveryOrderRow = {
   contactPhone: string;
   deliveryDate: string;
   remarks: string;
+};
+
+// A saved packing list (one truck run grouping several DOs). Mirrors the
+// /api/packing-lists response shape.
+type PackingListRecord = {
+  id: string;
+  packingNo: string;
+  status: string;
+  doIds: string[];
+  stopCount: number;
+  totalUnits: number;
+  totalM3: number;
+  remarks: string;
+  createdAt: string | null;
+  createdBy: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -258,6 +274,7 @@ const ALL_TABS = [
   { key: "pending_dispatch", label: "Pending Dispatch" },
   { key: "dispatched", label: "Dispatched" },
   { key: "delivered", label: "Delivered" },
+  { key: "packing_list", label: "Packing List" },
 ] as const;
 
 // Which DO statuses map to which tab (only for DO-based tabs).
@@ -432,6 +449,8 @@ export default function DeliveryPage() {
   // Each drop point = one customer hub destination
   const [createDODrops, setCreateDODrops] = useState<{ customerId: string; customerName: string; hubId: string; address: string; contactName: string; contactPhone: string; poIds: string[] }[]>([]);
   const [printDialog, setPrintDialog] = useState<DeliveryOrderRow[] | null>(null);
+  const [plRemarks, setPlRemarks] = useState("");
+  const [plCreating, setPlCreating] = useState(false);
   const [invoiceDialog, setInvoiceDialog] = useState<DeliveryOrderRow | null>(null);
   const [podDialog, setPodDialog] = useState<DeliveryOrderRow | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
@@ -620,6 +639,11 @@ export default function DeliveryPage() {
   // edited there.
   const { data: prodRaw, loading: prodLoading, refresh: refreshProducts } =
     useCachedJson<{ success?: boolean; data?: { code: string; unitM3: number }[] }>("/api/products");
+  // Saved packing lists (one per truck run, grouping several DOs). Populates
+  // the "Packing List" tab. Defaults to empty if the endpoint/table isn't
+  // ready so it never blocks the delivery page.
+  const { data: plRaw, refresh: refreshPLs } =
+    useCachedJson<{ success?: boolean; data?: PackingListRecord[] }>("/api/packing-lists");
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/delivery-orders");
@@ -627,6 +651,7 @@ export default function DeliveryPage() {
     invalidateCachePrefix("/api/sales-orders");
     invalidateCachePrefix("/api/customers");
     invalidateCachePrefix("/api/products");
+    invalidateCachePrefix("/api/packing-lists");
     refreshDOs();
     refreshDOStats();
     refreshPOs();
@@ -634,7 +659,14 @@ export default function DeliveryPage() {
     refreshPoVals();
     refreshCustomers();
     refreshProducts();
-  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshPoVals, refreshCustomers, refreshProducts]);
+    refreshPLs();
+  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshPoVals, refreshCustomers, refreshProducts, refreshPLs]);
+
+  // Packing list records, mirrored from the SWR fetch.
+  const packingLists: PackingListRecord[] = useMemo(
+    () => (plRaw?.success && Array.isArray(plRaw.data) ? plRaw.data : []),
+    [plRaw],
+  );
 
   // Lookup map from productCode → unitM3, rebuilt whenever /api/products
   // resolves. Used by mapPO to stamp each Planning row with its product's
@@ -1590,10 +1622,106 @@ export default function DeliveryPage() {
     }
   };
 
+  // Opens the "Create Packing List" confirm dialog from the multi-selected DOs.
   const handlePrintPackingList = () => {
     if (selectedIds.size === 0) return;
     const selected = deliveryOrders.filter((d) => selectedIds.has(d.id));
+    setPlRemarks("");
     setPrintDialog(selected);
+  };
+
+  // Saves the selected DOs as a new packing list (POST), then jumps to the
+  // Packing List tab where the operator prints it.
+  const handleConfirmCreatePackingList = async () => {
+    const dos = printDialog;
+    if (!dos || dos.length === 0) {
+      setPrintDialog(null);
+      return;
+    }
+    setPlCreating(true);
+    try {
+      const r = await fetch("/api/packing-lists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          doIds: dos.map((d) => d.id),
+          remarks: plRemarks.trim() || undefined,
+        }),
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: PackingListRecord;
+        error?: string;
+      };
+      if (!r.ok || !j.success) {
+        toast.error(j.error || "Failed to create packing list");
+        return;
+      }
+      toast.success(`Packing list ${j.data?.packingNo ?? ""} created`);
+      setPrintDialog(null);
+      setPlRemarks("");
+      setSelectedIds(new Set());
+      invalidateCachePrefix("/api/packing-lists");
+      refreshPLs();
+      setActiveTab("packing_list");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to create packing list");
+    } finally {
+      setPlCreating(false);
+    }
+  };
+
+  // Print a saved packing list — fetch its assembled stops from the backend
+  // (works regardless of which DOs are on the current page) and render the PDF.
+  const handlePrintPackingListRecord = async (pl: PackingListRecord) => {
+    try {
+      const r = await fetch(`/api/packing-lists/${pl.id}`);
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: { stops?: unknown[] };
+        error?: string;
+      };
+      if (!r.ok || !j.success || !j.data) {
+        toast.error(j.error || "Failed to load packing list");
+        return;
+      }
+      const stops = (j.data.stops ?? []) as Parameters<
+        typeof import("@/lib/generate-packing-pdf").generateConsolidatedPackingListPdf
+      >[0];
+      if (stops.length === 0) {
+        toast.error("This packing list has no delivery orders.");
+        return;
+      }
+      const { generateConsolidatedPackingListPdf } = await import(
+        "@/lib/generate-packing-pdf"
+      );
+      generateConsolidatedPackingListPdf(stops);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to generate packing list");
+    }
+  };
+
+  // Delete a saved packing list (frees its DOs to be grouped again).
+  const handleDeletePackingList = async (pl: PackingListRecord) => {
+    if (
+      !confirm(
+        `Delete packing list ${pl.packingNo}? Its ${pl.stopCount} delivery order(s) will be freed to add to another list. This does not delete the DOs.`,
+      )
+    )
+      return;
+    try {
+      const r = await fetch(`/api/packing-lists/${pl.id}`, { method: "DELETE" });
+      const j = (await r.json().catch(() => ({}))) as { success?: boolean; error?: string };
+      if (!r.ok || !j.success) {
+        toast.error(j.error || "Failed to delete packing list");
+        return;
+      }
+      toast.success(`Packing list ${pl.packingNo} deleted`);
+      invalidateCachePrefix("/api/packing-lists");
+      refreshPLs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to delete packing list");
+    }
   };
 
   // Wei Siang 2026-05-16: bulk Mark Dispatched / Mark Delivered run
@@ -2847,6 +2975,7 @@ export default function DeliveryPage() {
     pending_dispatch: pendingDispatchCount,
     dispatched: dispatchedCount,
     delivered: uniqueDOsByStatus.delivered,
+    packing_list: packingLists.length,
   };
 
   // ---------- Tab RM value (Sales Figure in every bucket) ----------
@@ -2903,7 +3032,7 @@ export default function DeliveryPage() {
           {selectedIds.size > 0 && (
             <>
               <Button variant="outline" onClick={handlePrintPackingList}>
-                <Printer className="h-4 w-4" /> Print Packing List
+                <ClipboardList className="h-4 w-4" /> Create as Packing List
               </Button>
               <Button variant="outline" onClick={handleMarkDispatched}>
                 <Send className="h-4 w-4" /> Mark Dispatched
@@ -3108,8 +3237,8 @@ export default function DeliveryPage() {
         </Card>
       )}
 
-      {/* ---- DO-based tabs: Pending Dispatch / Dispatched / Delivered / Invoice ---- */}
-      {!PO_TABS.has(activeTab) && (
+      {/* ---- DO-based tabs: Pending Dispatch / Dispatched / Delivered ---- */}
+      {!PO_TABS.has(activeTab) && activeTab !== "packing_list" && (
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
@@ -3188,6 +3317,93 @@ export default function DeliveryPage() {
                 </Button>
               </div>
             </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ---- Packing List Tab ---- */}
+      {activeTab === "packing_list" && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <ClipboardList className="h-5 w-5 text-[#6B5C32]" /> Packing Lists
+              </CardTitle>
+              <span className="text-xs text-[#6B7280]">
+                One saved sheet per truck run, grouped by hub. Print to load the truck.
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {packingLists.length === 0 ? (
+              <div className="py-12 text-center text-sm text-[#6B7280]">
+                No packing lists yet. Go to{" "}
+                <span className="font-medium">Pending Dispatch</span>, tick the DOs
+                going on one truck, then click{" "}
+                <span className="font-medium">Create as Packing List</span>.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] text-left text-xs text-[#6B7280]">
+                      <th className="py-2 px-3 font-medium">Packing No</th>
+                      <th className="py-2 px-3 font-medium text-center">Stops</th>
+                      <th className="py-2 px-3 font-medium text-center">Units</th>
+                      <th className="py-2 px-3 font-medium text-right">Total M³</th>
+                      <th className="py-2 px-3 font-medium">Created</th>
+                      <th className="py-2 px-3 font-medium">Remarks</th>
+                      <th className="py-2 px-3 font-medium text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {packingLists.map((pl) => (
+                      <tr
+                        key={pl.id}
+                        className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]"
+                      >
+                        <td className="py-2.5 px-3 font-mono font-medium text-[#1F1D1B]">
+                          {pl.packingNo}
+                        </td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">
+                          {pl.stopCount}
+                        </td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">
+                          {pl.totalUnits}
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">
+                          {pl.totalM3.toFixed(2)}
+                        </td>
+                        <td className="py-2.5 px-3 text-[#6B7280]">
+                          {pl.createdAt ? formatDate(pl.createdAt) : "-"}
+                        </td>
+                        <td className="py-2.5 px-3 text-[#6B7280]">
+                          {pl.remarks || "-"}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <div className="flex items-center justify-end gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handlePrintPackingListRecord(pl)}
+                            >
+                              <Printer className="h-3.5 w-3.5" /> Print
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleDeletePackingList(pl)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -3470,52 +3686,46 @@ export default function DeliveryPage() {
         </div>
       )}
 
-      {/* ---------- Print Packing List Dialog ---------- */}
+      {/* ---------- Create Packing List Dialog ---------- */}
       {printDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setPrintDialog(null)} />
+          <div className="absolute inset-0 bg-black/40" onClick={() => !plCreating && setPrintDialog(null)} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-[#E2DDD8]">
             <div className="px-6 py-4 border-b border-[#E2DDD8]">
-              <h2 className="text-lg font-bold text-[#1F1D1B]">Print Packing List</h2>
+              <h2 className="text-lg font-bold text-[#1F1D1B]">Create Packing List</h2>
+              <p className="text-xs text-[#6B7280]">
+                Groups these {printDialog.length} delivery order{printDialog.length === 1 ? "" : "s"} into
+                one saved packing list. Print it from the Packing List tab.
+              </p>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <p className="text-xs text-[#6B7280]">
-                One consolidated loading sheet (grouped by hub) will be generated
-                for these {printDialog.length} delivery order{printDialog.length === 1 ? "" : "s"}:
-              </p>
-              <div className="space-y-1">
+              <div className="space-y-1 max-h-56 overflow-y-auto">
                 {printDialog.map((d) => (
                   <div key={d.id} className="flex items-center justify-between text-sm bg-[#FAF9F7] rounded-lg px-3 py-2">
                     <span className="font-mono font-medium text-[#1F1D1B]">{d.doNo}</span>
-                    <span className="text-[#6B7280]">{d.customerName}</span>
+                    <span className="text-[#6B7280]">{d.customerName}{d.hubName ? ` · ${d.hubName}` : ""}</span>
                   </div>
                 ))}
               </div>
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Remarks (optional)</label>
+                <input
+                  type="text"
+                  value={plRemarks}
+                  onChange={(e) => setPlRemarks(e.target.value)}
+                  placeholder="e.g. Lorry A — morning run"
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                />
+              </div>
             </div>
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
-              <Button variant="outline" onClick={() => setPrintDialog(null)}>Cancel</Button>
-              <Button
-                variant="primary"
-                onClick={async () => {
-                  const dos = printDialog;
-                  if (!dos || dos.length === 0) {
-                    setPrintDialog(null);
-                    return;
-                  }
-                  try {
-                    const { generateConsolidatedPackingListPdf } = await import(
-                      "@/lib/generate-packing-pdf"
-                    );
-                    generateConsolidatedPackingListPdf(dos);
-                  } catch (e) {
-                    toast.error(
-                      e instanceof Error ? e.message : "Failed to generate packing list",
-                    );
-                  }
-                  setPrintDialog(null);
-                }}
-              >
-                <Printer className="h-4 w-4" /> Print
+              <Button variant="outline" onClick={() => setPrintDialog(null)} disabled={plCreating}>Cancel</Button>
+              <Button variant="primary" onClick={handleConfirmCreatePackingList} disabled={plCreating}>
+                {plCreating ? (
+                  <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
+                ) : (
+                  <><ClipboardList className="h-4 w-4" /> Create Packing List</>
+                )}
               </Button>
             </div>
           </div>

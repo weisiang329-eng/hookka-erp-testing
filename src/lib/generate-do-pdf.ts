@@ -693,7 +693,6 @@ function renderPackingSummary(
     customer: string;
     hub: string;
     state: string;
-    addresses: string[];
     dos: typeof list;
   }[] = [];
   const dropIndex = new Map<string, number>();
@@ -707,18 +706,14 @@ function renderPackingSummary(
         customer: o.customerName || "-",
         hub: o.hubName || "-",
         state: o.customerState || "",
-        addresses: [],
         dos: [],
       });
     }
-    const g = dropGroups[idx];
-    g.dos.push(o);
-    const a = (o.deliveryAddress || "").trim();
-    if (a && !g.addresses.includes(a)) g.addresses.push(a);
+    dropGroups[idx].dos.push(o);
   }
 
   let y = 38;
-  const colW = (pageW - 2 * m) / 3;
+  const colW = (pageW - 2 * m) / 4;
   const kv = (label: string, val: string, x: number, yy: number) => {
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
@@ -726,29 +721,25 @@ function renderPackingSummary(
     doc.text(label, x, yy);
     doc.setFont("helvetica", "bold");
     doc.setTextColor(...INK);
-    doc.text(val, x + 26, yy);
+    doc.text(val, x + 23, yy);
   };
+  // One clean row of the four headline numbers, then a names line — no more
+  // duplicated "Hubs: 1 / Hubs: Houzs KL" clutter.
   kv("Drops:", String(dropGroups.length), m, y);
   kv("DOs:", String(totalDOs), m + colW, y);
-  kv("Total Units:", String(totalUnits), m + colW * 2, y);
-  y += 6;
-  kv("Hubs:", String(hubs.length), m, y);
-  kv("Customers:", String(customers.length), m + colW, y);
-  kv("Total M³:", totalM3.toFixed(2), m + colW * 2, y);
-  y += 6;
+  kv("Units:", String(totalUnits), m + colW * 2, y);
+  kv("Total M³:", totalM3.toFixed(2), m + colW * 3, y);
+  y += 7;
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(7.5);
   doc.setTextColor(...FAINT);
-  const hubLine = doc.splitTextToSize(`Hubs: ${hubs.join("  ·  ") || "-"}`, pageW - 2 * m);
-  doc.text(hubLine, m, y);
-  y += hubLine.length * 3.8 + 1;
-  const custLine = doc.splitTextToSize(
-    `Customers: ${customers.join("  ·  ") || "-"}`,
+  const namesLine = doc.splitTextToSize(
+    `Hubs: ${hubs.join(", ") || "-"}      Customers: ${customers.join(", ") || "-"}`,
     pageW - 2 * m,
   );
-  doc.text(custLine, m, y);
-  y += custLine.length * 3.8 + 4;
+  doc.text(namesLine, m, y);
+  y += namesLine.length * 3.8 + 4;
 
   // --- Container component total: how many Headboards / Divans / Sofas are in
   // the WHOLE truck (summed from each item's BOM pieces), so the loader can
@@ -815,31 +806,32 @@ function renderPackingSummary(
     );
     y += 11;
 
-    // Deliver-to address(es) for this location — full width.
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(7.5);
-    doc.setTextColor(...FAINT);
-    const addr = doc.splitTextToSize(
-      `Deliver to: ${g.addresses.join("   |   ") || "-"}`,
-      pageW - 2 * m,
-    );
-    doc.text(addr, m, y);
-    y += addr.length * 3.8 + 2;
-
-    // Each DO at this drop.
+    // Each DO at this drop, with its own deliver-to address.
     g.dos.forEach((o) => {
       const items = o.items || [];
       const exDo = extrasById?.[o.id];
 
-      if (y > pageH - 28) {
+      if (y > pageH - 34) {
         doc.addPage();
         y = 18;
       }
+      // DO number (doNo already carries the "DO-" prefix — don't double it).
       doc.setFont("helvetica", "bold");
       doc.setFontSize(8);
       doc.setTextColor(...INK);
-      doc.text(`DO ${o.doNo}`, m, y + 1);
-      y += 3;
+      doc.text(o.doNo, m, y + 1);
+      y += 4;
+
+      // This DO's deliver-to address.
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+      doc.setTextColor(...FAINT);
+      const addr = doc.splitTextToSize(
+        `Deliver to: ${(o.deliveryAddress || "").trim() || "-"}`,
+        pageW - 2 * m,
+      );
+      doc.text(addr, m, y);
+      y += addr.length * 3.6 + 1.5;
 
       autoTable(doc, {
         startY: y,

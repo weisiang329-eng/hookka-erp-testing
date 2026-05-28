@@ -3008,8 +3008,11 @@ export default function ProductionPage({
       width: "110px",
       sortable: true,
       defaultHidden: isTablet,
+      // Match the default date-cell styling (tabular-nums, inherited font
+      // size) so the column lines up with the neighbouring Due / Completion
+      // dates instead of rendering smaller + grey + baseline-shifted.
       render: (_v, row) => (
-        <span className="text-[11px] text-[#6B7280] tabular-nums">
+        <span className="tabular-nums">
           {row.customerDeliveryDate ? fmtShortDate(row.customerDeliveryDate) : "—"}
         </span>
       ),
@@ -3022,7 +3025,7 @@ export default function ProductionPage({
       sortable: true,
       defaultHidden: isTablet,
       render: (_v, row) => (
-        <span className="text-[11px] text-[#6B7280] tabular-nums">
+        <span className="tabular-nums">
           {row.hookkaExpectedDD ? fmtShortDate(row.hookkaExpectedDD) : "—"}
         </span>
       ),

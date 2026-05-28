@@ -35,7 +35,6 @@ concurrency:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   refresh:
@@ -66,9 +65,7 @@ jobs:
       - name: Regenerate baseline
         run: node scripts/check-bundle-size.mjs --write-baseline
 
-      - name: Open PR if baseline changed
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Commit baseline to main if changed
         run: |
           # Detect a real diff. Exit 0 with no commit if nothing changed.
           if git diff --quiet -- .bundle-baseline.json; then
@@ -76,7 +73,7 @@ jobs:
             exit 0
           fi
 
-          echo "[bundle-baseline] diff detected, opening PR"
+          echo "[bundle-baseline] diff detected, committing to main"
           git diff --stat -- .bundle-baseline.json
 
           # GitHub Actions bot identity — the commit shows up under that
@@ -85,23 +82,26 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-          # Branch protection on main blocks direct pushes (and there's
-          # no good reason to bypass it for an automation commit). Open
-          # a PR instead. The branch name is stable so successive runs
-          # update the same PR rather than spawning duplicates.
-          BRANCH="bot/bundle-baseline"
-          git checkout -b "$BRANCH"
           git add .bundle-baseline.json
           git commit -m "chore: auto-regen bundle baseline [skip ci]"
-          git push -f origin "$BRANCH"
 
-          # Open PR if one isn't already open for this branch.
-          if ! gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -q OPEN; then
-            gh pr create \
-              --base main \
-              --head "$BRANCH" \
-              --title "chore: auto-regen bundle baseline" \
-              --body "Auto-regenerated bundle baseline from a clean Linux CI build. Merge when convenient — keeps the bundle-size gate's reference snapshot in sync. [skip ci]"
-          else
-            echo "[bundle-baseline] PR already open — branch updated, no new PR created"
-          fi
+          # Main branch protection was removed (2026-05), so the baseline
+          # commits straight back to main instead of opening a PR. The old
+          # PR path failed on every run ("GitHub Actions is not permitted
+          # to create pull requests" — a repo setting), which emailed the
+          # owner a failure notice each push. Pushing GITHUB_TOKEN commits
+          # does NOT re-trigger workflows, and the [skip ci] marker is a
+          # second guard, so there's no deploy loop. Rebase-retry handles a
+          # concurrent push landing first. Never exit non-zero — a transient
+          # race must not spam failure notifications.
+          for i in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "[bundle-baseline] pushed to main"
+              exit 0
+            fi
+            echo "[bundle-baseline] push rejected — rebasing onto origin/main (attempt $i)"
+            git fetch origin main || true
+            git rebase origin/main || { git rebase --abort || true; break; }
+          done
+          echo "[bundle-baseline] could not push this run — next push will refresh it"
+          exit 0

@@ -81,6 +81,46 @@ function fmtPieces(pieces?: string | null): { text: string; total: number } {
   };
 }
 
+// Tally a set of items into a component map (HB / DIVAN / SOFA / ITEM) from
+// their BOM pieces, plus the total piece count. Used for the per-drop and the
+// whole-container component subtotals on the packing-list manifest, so the
+// loader can count "how many headboards / divans / sofas" at each level.
+function tallyComponents(
+  items: { id?: string; quantity?: number }[],
+  ex?: DOPrintExtras,
+): { map: Map<string, number>; pcs: number } {
+  const map = new Map<string, number>();
+  let pcs = 0;
+  for (const it of items) {
+    const pieces = ex?.items?.[it.id ?? ""]?.pieces;
+    const fp = fmtPieces(pieces);
+    pcs += fp.total || Number(it.quantity) || 0;
+    if (pieces) {
+      for (const part of String(pieces).split(" + ")) {
+        const mm = part.trim().match(/^(\d+)\s+(.+)$/);
+        if (!mm) continue;
+        const raw = mm[2].trim().toUpperCase();
+        const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
+        map.set(lab, (map.get(lab) || 0) + Number(mm[1]));
+      }
+    } else {
+      map.set("ITEM", (map.get("ITEM") || 0) + (Number(it.quantity) || 0));
+    }
+  }
+  return { map, pcs };
+}
+
+function formatComponents(map: Map<string, number>): string {
+  const rank = (l: string) =>
+    l === "HB" ? 0 : l === "DIVAN" ? 1 : l === "SOFA" ? 2 : 3;
+  return (
+    Array.from(map.entries())
+      .sort((a, b) => rank(a[0]) - rank(b[0]))
+      .map(([l, n]) => `${n} ${l}`)
+      .join("  +  ") || "-"
+  );
+}
+
 // Print order: bedframes first, then the sofa block, then accessories
 // (always travel WITH the sofas), then service items grouped at the end.
 const catRank = (cat?: string | null): number => {
@@ -683,34 +723,14 @@ function renderPackingSummary(
   // --- Container component total: how many Headboards / Divans / Sofas are in
   // the WHOLE truck (summed from each item's BOM pieces), so the loader can
   // tally the entire container. ---
-  const compTotals = new Map<string, number>();
+  const containerMap = new Map<string, number>();
   let containerPcs = 0;
   for (const o of list) {
-    const ex = extrasById?.[o.id];
-    for (const it of o.items || []) {
-      const pcs = ex?.items?.[it.id]?.pieces;
-      const fp = fmtPieces(pcs);
-      containerPcs += fp.total || Number(it.quantity) || 0;
-      if (pcs) {
-        for (const part of String(pcs).split(" + ")) {
-          const mm = part.trim().match(/^(\d+)\s+(.+)$/);
-          if (!mm) continue;
-          const raw = mm[2].trim().toUpperCase();
-          const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
-          compTotals.set(lab, (compTotals.get(lab) || 0) + Number(mm[1]));
-        }
-      } else {
-        compTotals.set("ITEM", (compTotals.get("ITEM") || 0) + (Number(it.quantity) || 0));
-      }
-    }
+    const { map, pcs } = tallyComponents(o.items || [], extrasById?.[o.id]);
+    for (const [k, v] of map) containerMap.set(k, (containerMap.get(k) || 0) + v);
+    containerPcs += pcs;
   }
-  const compRank = (l: string) =>
-    l === "HB" ? 0 : l === "DIVAN" ? 1 : l === "SOFA" ? 2 : 3;
-  const containerBreakdown =
-    Array.from(compTotals.entries())
-      .sort((a, b) => compRank(a[0]) - compRank(b[0]))
-      .map(([l, n]) => `${n} ${l}`)
-      .join("   +   ") || "-";
+  const containerBreakdown = formatComponents(containerMap);
 
   doc.setFillColor(238, 238, 238);
   doc.rect(m, y, pageW - 2 * m, 9, "F");
@@ -732,10 +752,8 @@ function renderPackingSummary(
   list.forEach((o, i) => {
     const items = o.items || [];
     const exDo = extrasById?.[o.id];
-    const dropPcs = items.reduce((s, it) => {
-      const fp = fmtPieces(exDo?.items?.[it.id]?.pieces);
-      return s + (fp.total || Number(it.quantity) || 0);
-    }, 0);
+    const { map: dropMap, pcs: dropPcs } = tallyComponents(items, exDo);
+    const dropBreakdown = formatComponents(dropMap);
 
     // Keep a drop's header + first rows together — break to a new page if tight.
     if (y > pageH - 48) {
@@ -806,7 +824,7 @@ function renderPackingSummary(
       }) as RowInput[],
       foot: [
         [
-          { content: `${items.length} line(s)`, colSpan: 4, styles: { halign: "right" } },
+          { content: `Drop total:  ${dropBreakdown}`, colSpan: 4, styles: { halign: "right" } },
           { content: `${dropPcs} pcs`, styles: { halign: "right" } },
         ],
       ],

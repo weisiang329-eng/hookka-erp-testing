@@ -806,14 +806,9 @@ function renderPackingSummary(
         const so = (ex?.customerSO || exDo?.customerSO || "").trim();
         const ref = (ex?.customerRef || exDo?.customerRef || "").trim();
         const fp = fmtPieces(ex?.pieces);
-        const desc = [
-          it.productCode || "",
-          it.productName || "",
-          it.sizeLabel ? `(${it.sizeLabel})` : "",
-          it.fabricCode ? `· ${it.fabricCode}` : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
+        // Two lines: product code on top, name (already carries the size) +
+        // fabric below — readable instead of one crammed line.
+        const desc = `${it.productCode || "-"}\n${it.productName || "-"}${it.fabricCode ? `   ·   ${it.fabricCode}` : ""}`;
         return [
           String(k + 1),
           `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,

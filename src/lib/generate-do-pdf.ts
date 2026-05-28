@@ -581,6 +581,7 @@ function renderPackingSummary(
   packingNo?: string,
 ) {
   const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
   const m = 14;
   const co = COMPANY.HOOKKA;
   const list = orders as (DeliveryOrder & {
@@ -673,80 +674,116 @@ function renderPackingSummary(
   doc.text(custLine, m, y);
   y += custLine.length * 3.8 + 4;
 
-  // --- Manifest table (one row per DO) ---
-  autoTable(doc, {
-    startY: y,
-    margin: { left: m, right: m },
-    head: [
-      [
-        { content: "Drop", styles: { halign: "center" } },
-        "DO No.",
-        "Customer / Hub",
-        "Deliver To",
-        { content: "Lines", styles: { halign: "right" } },
-        { content: "Units", styles: { halign: "right" } },
+  // --- Per-drop sections: each drop shows its destination (clean, full-width
+  // address) and the items going to it, so the loader sees what goes where. ---
+  list.forEach((o, i) => {
+    const items = o.items || [];
+    const units = items.reduce((q, it) => q + (Number(it.quantity) || 0), 0);
+
+    // Keep a drop's header + first rows together — break to a new page if tight.
+    if (y > pageH - 48) {
+      doc.addPage();
+      y = 18;
+    }
+
+    // Drop header bar: Drop # · DO No.  |  Customer — Hub
+    doc.setFillColor(245, 245, 245);
+    doc.rect(m, y, pageW - 2 * m, 7, "F");
+    doc.setTextColor(...INK);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.text(`DROP ${i + 1}  ·  ${o.doNo}`, m + 2, y + 4.8);
+    doc.text(
+      `${o.customerName || "-"}  —  ${o.hubName || "-"}${o.customerState ? ` (${o.customerState})` : ""}`,
+      pageW - m - 2,
+      y + 4.8,
+      { align: "right" },
+    );
+    y += 11;
+
+    // Deliver-to address — full width, wraps cleanly (no cramming).
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...FAINT);
+    const addr = doc.splitTextToSize(
+      `Deliver to: ${(o.deliveryAddress || "").trim() || "-"}`,
+      pageW - 2 * m,
+    );
+    doc.text(addr, m, y);
+    y += addr.length * 3.8 + 1.5;
+
+    // Items in this DO.
+    autoTable(doc, {
+      startY: y,
+      margin: { left: m, right: m },
+      head: [
+        [
+          { content: "#", styles: { halign: "center" } },
+          "Product Code",
+          "Description",
+          "Size",
+          "Fabric",
+          { content: "Qty", styles: { halign: "right" } },
+        ],
       ],
-    ],
-    body: list.map((o, i) => {
-      const units = (o.items || []).reduce(
-        (q, it) => q + (Number(it.quantity) || 0),
-        0,
-      );
-      const custHub = `${o.customerName || "-"}\n${o.hubName || "-"}${o.customerState ? ` (${o.customerState})` : ""}`;
-      const addr = (o.deliveryAddress || "").trim() || "-";
-      return [
-        String(i + 1),
-        o.doNo,
-        custHub,
-        addr,
-        String((o.items || []).length),
-        String(units),
-      ];
-    }) as RowInput[],
-    theme: "plain",
-    styles: {
-      font: "helvetica",
-      fontSize: 8,
-      cellPadding: { top: 2, bottom: 2, left: 1.8, right: 1.8 },
-      textColor: INK,
-      valign: "top",
-    },
-    headStyles: {
-      fontStyle: "bold",
-      fontSize: 7.5,
-      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
-      lineColor: RULE,
-    },
-    columnStyles: {
-      0: { cellWidth: 12, halign: "center" },
-      1: { cellWidth: 26, fontStyle: "bold" },
-      2: { cellWidth: 46 },
-      3: { cellWidth: "auto", fontSize: 7 },
-      4: { cellWidth: 14, halign: "right" },
-      5: { cellWidth: 14, halign: "right" },
-    },
-    didDrawCell: (data) => {
-      if (data.section === "body" && data.column.index === 5) {
-        const yy = data.cell.y + data.cell.height;
-        doc.setDrawColor(...HAIR);
-        doc.setLineWidth(0.1);
-        doc.setLineDashPattern([0.7, 0.7], 0);
-        doc.line(m, yy, pageW - m, yy);
-        doc.setLineDashPattern([], 0);
-      }
-    },
+      body: items.map((it, k) => [
+        String(k + 1),
+        it.productCode || "-",
+        it.productName || "-",
+        it.sizeLabel || "-",
+        it.fabricCode || "-",
+        String(it.quantity ?? 0),
+      ]) as RowInput[],
+      foot: [
+        [
+          { content: `${items.length} line(s)`, colSpan: 5, styles: { halign: "right" } },
+          { content: `${units}`, styles: { halign: "right" } },
+        ],
+      ],
+      theme: "plain",
+      styles: {
+        font: "helvetica",
+        fontSize: 7.5,
+        cellPadding: { top: 1.2, bottom: 1.2, left: 1.8, right: 1.8 },
+        textColor: INK,
+        valign: "top",
+      },
+      headStyles: {
+        fontStyle: "bold",
+        fontSize: 7,
+        lineWidth: { top: 0, bottom: 0.4, left: 0, right: 0 },
+        lineColor: RULE,
+      },
+      footStyles: {
+        fontStyle: "bold",
+        fontSize: 7,
+        lineWidth: { top: 0.4, bottom: 0, left: 0, right: 0 },
+        lineColor: RULE,
+      },
+      columnStyles: {
+        0: { cellWidth: 10, halign: "center" },
+        1: { cellWidth: 28, fontStyle: "bold" },
+        2: { cellWidth: "auto" },
+        3: { cellWidth: 22 },
+        4: { cellWidth: 24 },
+        5: { cellWidth: 14, halign: "right" },
+      },
+      rowPageBreak: "avoid",
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    y = ((doc as any).lastAutoTable?.finalY ?? y) + 7;
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const afterY = (doc as any).lastAutoTable?.finalY ?? y;
-  doc.setFont("helvetica", "italic");
-  doc.setFontSize(7);
-  doc.setTextColor(...FAINT);
-  doc.text(
-    "Each delivery order's full details follow on its own page (STOP 1, 2, 3…).",
-    m,
-    afterY + 6,
-  );
+  if (y < pageH - 12) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(7);
+    doc.setTextColor(...FAINT);
+    doc.text(
+      "Each delivery order's full DO follows on its own page (STOP 1, 2, 3…).",
+      m,
+      y + 1,
+    );
+  }
 }
 
 // Consolidated packing list — a manifest cover page (run summary + DO list),

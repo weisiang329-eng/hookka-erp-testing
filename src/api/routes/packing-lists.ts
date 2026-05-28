@@ -19,18 +19,22 @@ import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
+// NOTE: the SupabaseAdapter rewrites SQL identifiers to snake_case on the way
+// IN, and returns result rows with camelCase keys on the way OUT (same as the
+// delivery-orders route, which reads row.doNo / row.totalItems). So columns are
+// snake_case in the SQL strings below, but every result is read as camelCase.
 type PackingListRow = {
   id: string;
-  packing_no: string;
+  packingNo: string;
   status: string;
-  do_ids: string;
-  stop_count: number;
-  total_units: number;
-  total_m3: number | string;
+  doIds: string;
+  stopCount: number;
+  totalUnits: number;
+  totalM3: number | string;
   remarks: string | null;
-  created_at: string | null;
-  created_by: string | null;
-  org_id: string;
+  createdAt: string | null;
+  createdBy: string | null;
+  orgId: string;
 };
 
 function parseIds(raw: string | null): string[] {
@@ -46,15 +50,15 @@ function parseIds(raw: string | null): string[] {
 function rowToPackingList(r: PackingListRow) {
   return {
     id: r.id,
-    packingNo: r.packing_no,
+    packingNo: r.packingNo,
     status: r.status,
-    doIds: parseIds(r.do_ids),
-    stopCount: r.stop_count ?? 0,
-    totalUnits: r.total_units ?? 0,
-    totalM3: Number(r.total_m3 ?? 0),
+    doIds: parseIds(r.doIds),
+    stopCount: r.stopCount ?? 0,
+    totalUnits: r.totalUnits ?? 0,
+    totalM3: Number(r.totalM3 ?? 0),
     remarks: r.remarks ?? "",
-    createdAt: r.created_at,
-    createdBy: r.created_by,
+    createdAt: r.createdAt,
+    createdBy: r.createdBy,
   };
 }
 
@@ -72,9 +76,9 @@ async function genNextPackingNo(db: D1Database, orgId: string): Promise<string> 
       "SELECT packing_no FROM packing_lists WHERE org_id = ? AND packing_no LIKE ? ORDER BY packing_no DESC LIMIT 1",
     )
     .bind(orgId, `${prefix}%`)
-    .first<{ packing_no: string }>();
-  if (!res) return `${prefix}001`;
-  const seq = parseInt(res.packing_no.replace(prefix, ""), 10);
+    .first<{ packingNo: string }>();
+  if (!res || !res.packingNo) return `${prefix}001`;
+  const seq = parseInt(res.packingNo.replace(prefix, ""), 10);
   if (!Number.isFinite(seq)) return `${prefix}001`;
   return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
@@ -114,7 +118,7 @@ app.get("/:id", async (c) => {
       .first<PackingListRow>();
     if (!pl) return c.json({ success: false, error: "Packing list not found." }, 404);
 
-    const doIds = parseIds(pl.do_ids);
+    const doIds = parseIds(pl.doIds);
     // Full DO objects, shaped like the delivery-orders payload, so the
     // frontend can render each one with the SAME canonical DO PDF.
     let orders: unknown[] = [];
@@ -250,10 +254,10 @@ app.post("/", async (c) => {
       "SELECT packing_no, do_ids FROM packing_lists WHERE org_id = ?",
     )
       .bind(orgId)
-      .all<{ packing_no: string; do_ids: string }>();
+      .all<{ packingNo: string; doIds: string }>();
     const usedBy = new Map<string, string>(); // doId -> packingNo
     for (const row of existing.results ?? []) {
-      for (const did of parseIds(row.do_ids)) usedBy.set(did, row.packing_no);
+      for (const did of parseIds(row.doIds)) usedBy.set(did, row.packingNo);
     }
     const conflictIds = doIds.filter((d) => usedBy.has(d));
     if (conflictIds.length > 0) {

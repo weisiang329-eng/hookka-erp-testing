@@ -1808,6 +1808,7 @@ export default function DeliveryPage() {
         orders as unknown as import("@/types").DeliveryOrder[],
         extrasById,
         mode,
+        pl.packingNo,
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate packing list");

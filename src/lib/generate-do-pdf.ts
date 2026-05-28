@@ -575,13 +575,18 @@ export function generateDOPdf(
 // loader sees the whole run at a glance — how many DOs, which hubs +
 // customers, how many drop points, and the DO numbers (with line/unit
 // counts). The per-DO details follow on their own pages.
-function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
+function renderPackingSummary(
+  doc: jsPDF,
+  orders: DeliveryOrder[],
+  packingNo?: string,
+) {
   const pageW = doc.internal.pageSize.getWidth();
   const m = 14;
   const co = COMPANY.HOOKKA;
   const list = orders as (DeliveryOrder & {
     hubName?: string;
     customerState?: string;
+    deliveryAddress?: string;
   })[];
 
   // --- Header ---
@@ -600,12 +605,20 @@ function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
   doc.setTextColor(...INK);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(17);
-  doc.text("PACKING LIST", pageW - m, 17, { align: "right" });
+  doc.text("PACKING LIST", pageW - m, 15, { align: "right" });
+  if (packingNo) {
+    doc.setFontSize(11);
+    doc.text(`No. ${packingNo}`, pageW - m, 21, { align: "right" });
+  }
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
+  doc.setFontSize(7.5);
   doc.setTextColor(...FAINT);
-  doc.text("Delivery Run Manifest", pageW - m, 23, { align: "right" });
-  doc.text(fmtDate(new Date().toISOString()), pageW - m, 27.5, { align: "right" });
+  doc.text(
+    `Delivery Run Manifest  ·  ${fmtDate(new Date().toISOString())}`,
+    pageW - m,
+    packingNo ? 26 : 21,
+    { align: "right" },
+  );
 
   doc.setDrawColor(...RULE);
   doc.setLineWidth(0.5);
@@ -666,10 +679,10 @@ function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
     margin: { left: m, right: m },
     head: [
       [
-        { content: "Stop", styles: { halign: "center" } },
+        { content: "Drop", styles: { halign: "center" } },
         "DO No.",
-        "Customer",
-        "Hub / Destination",
+        "Customer / Hub",
+        "Deliver To",
         { content: "Lines", styles: { halign: "right" } },
         { content: "Units", styles: { halign: "right" } },
       ],
@@ -679,12 +692,13 @@ function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
         (q, it) => q + (Number(it.quantity) || 0),
         0,
       );
-      const hub = `${o.hubName || o.customerName || "-"}${o.customerState ? ` (${o.customerState})` : ""}`;
+      const custHub = `${o.customerName || "-"}\n${o.hubName || "-"}${o.customerState ? ` (${o.customerState})` : ""}`;
+      const addr = (o.deliveryAddress || "").trim() || "-";
       return [
         String(i + 1),
         o.doNo,
-        o.customerName || "-",
-        hub,
+        custHub,
+        addr,
         String((o.items || []).length),
         String(units),
       ];
@@ -693,7 +707,7 @@ function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
     styles: {
       font: "helvetica",
       fontSize: 8,
-      cellPadding: { top: 1.6, bottom: 1.6, left: 1.8, right: 1.8 },
+      cellPadding: { top: 2, bottom: 2, left: 1.8, right: 1.8 },
       textColor: INK,
       valign: "top",
     },
@@ -704,12 +718,12 @@ function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
       lineColor: RULE,
     },
     columnStyles: {
-      0: { cellWidth: 14, halign: "center" },
-      1: { cellWidth: 30, fontStyle: "bold" },
-      2: { cellWidth: 42 },
-      3: { cellWidth: "auto" },
-      4: { cellWidth: 16, halign: "right" },
-      5: { cellWidth: 16, halign: "right" },
+      0: { cellWidth: 12, halign: "center" },
+      1: { cellWidth: 26, fontStyle: "bold" },
+      2: { cellWidth: 46 },
+      3: { cellWidth: "auto", fontSize: 7 },
+      4: { cellWidth: 14, halign: "right" },
+      5: { cellWidth: 14, halign: "right" },
     },
     didDrawCell: (data) => {
       if (data.section === "body" && data.column.index === 5) {
@@ -745,17 +759,20 @@ export function generateConsolidatedDoPdf(
   // "download" = save the file (default); "view" = open on screen to read
   // first, no download.
   mode: "download" | "view" = "download",
+  packingNo?: string,
 ) {
   if (!orders || orders.length === 0) return;
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-  renderPackingSummary(doc, orders);
+  renderPackingSummary(doc, orders, packingNo);
   orders.forEach((o, i) => {
     doc.addPage();
     renderDoInto(doc, o, extrasById?.[o.id], { seq: i + 1, total: orders.length });
   });
   stampDoFooters(doc);
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const fileName = `PackingList-Run-${stamp}-${orders.length}DO.pdf`;
+  const fileName = packingNo
+    ? `PackingList-${packingNo}.pdf`
+    : `PackingList-Run-${stamp}-${orders.length}DO.pdf`;
   if (mode === "view") {
     // Open to read on screen — no download. Fall back to save() if the
     // browser blocks the blob window (popup blocker).

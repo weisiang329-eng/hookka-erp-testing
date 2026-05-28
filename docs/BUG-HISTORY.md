@@ -1,4 +1,3 @@
-<!-- deploy-pipeline-test 2026-05-28 (will be reverted) -->
 # Bug History
 
 Living log of bugs we've identified, diagnosed, and fixed in Hookka ERP.

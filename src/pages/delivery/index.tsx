@@ -3128,9 +3128,8 @@ export default function DeliveryPage() {
         <div className="flex items-center gap-2">
           {selectedIds.size > 0 && (
             <>
-              <Button variant="outline" onClick={handlePrintPackingList}>
-                <ClipboardList className="h-4 w-4" /> Create as Packing List
-              </Button>
+              {/* "Create as Packing List" lives in the grid card header now
+                  (right next to the row selection) so it's easy to find. */}
               <Button variant="outline" onClick={handleMarkDispatched}>
                 <Send className="h-4 w-4" /> Mark Dispatched
               </Button>
@@ -3368,6 +3367,18 @@ export default function DeliveryPage() {
                       {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select all"}
                     </span>
                   </div>
+                )}
+                {/* Primary action once DOs are ticked — sits right next to the
+                    selection so it's obvious (the old top-toolbar copy was far
+                    from the grid and got missed). */}
+                {selectedIds.size > 0 && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={handlePrintPackingList}
+                  >
+                    <ClipboardList className="h-3.5 w-3.5" /> Create as Packing List ({selectedIds.size})
+                  </Button>
                 )}
               </div>
             </div>

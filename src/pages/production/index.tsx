@@ -3007,6 +3007,7 @@ export default function ProductionPage({
       type: "date",
       width: "110px",
       sortable: true,
+      align: "center",
       defaultHidden: isTablet,
       // Match the default date-cell styling (tabular-nums, inherited font
       // size) so the column lines up with the neighbouring Due / Completion
@@ -3023,6 +3024,7 @@ export default function ProductionPage({
       type: "date",
       width: "120px",
       sortable: true,
+      align: "center",
       defaultHidden: isTablet,
       render: (_v, row) => (
         <span className="tabular-nums">

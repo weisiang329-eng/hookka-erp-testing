@@ -1757,9 +1757,13 @@ export default function DeliveryPage() {
     }
   };
 
-  // Print a saved packing list — fetch its assembled stops from the backend
-  // (works regardless of which DOs are on the current page) and render the PDF.
-  const handlePrintPackingListRecord = async (pl: PackingListRecord) => {
+  // Render a saved packing list — fetch its DOs from the backend (works
+  // regardless of which DOs are on the current page). mode="view" opens it on
+  // screen to read first; mode="download" saves the PDF.
+  const handlePrintPackingListRecord = async (
+    pl: PackingListRecord,
+    mode: "download" | "view" = "download",
+  ) => {
     try {
       const r = await fetch(`/api/packing-lists/${pl.id}`);
       const j = (await r.json().catch(() => ({}))) as {
@@ -1803,6 +1807,7 @@ export default function DeliveryPage() {
       generateConsolidatedDoPdf(
         orders as unknown as import("@/types").DeliveryOrder[],
         extrasById,
+        mode,
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate packing list");
@@ -3527,7 +3532,14 @@ export default function DeliveryPage() {
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => void handlePrintPackingListRecord(pl)}
+                              onClick={() => void handlePrintPackingListRecord(pl, "view")}
+                            >
+                              <Eye className="h-3.5 w-3.5" /> View
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handlePrintPackingListRecord(pl, "download")}
                             >
                               <Printer className="h-3.5 w-3.5" /> Print
                             </Button>

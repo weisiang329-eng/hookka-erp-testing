@@ -742,6 +742,9 @@ function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
 export function generateConsolidatedDoPdf(
   orders: DeliveryOrder[],
   extrasById?: Record<string, DOPrintExtras>,
+  // "download" = save the file (default); "view" = open on screen to read
+  // first, no download.
+  mode: "download" | "view" = "download",
 ) {
   if (!orders || orders.length === 0) return;
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
@@ -752,5 +755,18 @@ export function generateConsolidatedDoPdf(
   });
   stampDoFooters(doc);
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  doc.save(`PackingList-Run-${stamp}-${orders.length}DO.pdf`);
+  const fileName = `PackingList-Run-${stamp}-${orders.length}DO.pdf`;
+  if (mode === "view") {
+    // Open to read on screen — no download. Fall back to save() if the
+    // browser blocks the blob window (popup blocker).
+    try {
+      const url = doc.output("bloburl");
+      const w = window.open(String(url), "_blank");
+      if (!w) doc.save(fileName);
+    } catch {
+      doc.save(fileName);
+    }
+    return;
+  }
+  doc.save(fileName);
 }

@@ -34,6 +34,42 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-005 — `_headers` no-cache scoped to `/` only — SPA routes cached stale index.html
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** infrastructure
+
+**Symptom:** Even after the BUG-004 crossorigin fix deployed, the app kept
+rendering unstyled ("又来" — came back again) on erp.hookka.com/dashboard.
+A hard refresh fixed it each time, but it recurred on the next normal load.
+
+**Root cause:** `public/_headers` set `Cache-Control: no-cache, no-store,
+must-revalidate` on exactly two paths: `/` and `/index.html`. But every SPA
+route — `/dashboard`, `/production/fab-cut`, `/sales/:id`, etc. — is served
+the index.html BODY by Cloudflare Pages' SPA fallback while the URL stays
+the route path. Those route URLs match NEITHER `/` NOR `/index.html`, so
+their HTML responses fell through to Cloudflare's default cacheability and
+got cached by the browser. The cached `/dashboard` HTML kept referencing the
+OLD fingerprinted asset names; after a deploy rotated the CSS/JS hash, the
+old assets either 404'd (ChunkLoadError) or — combined with BUG-004's
+opaque crossorigin cache — loaded but didn't apply → unstyled page. This is
+why BUG-004's fix "worked" only after a manual hard refresh and then
+relapsed: the entry HTML for the route was never revalidated.
+
+**Fix:** Change the no-cache rule scope from `/` to `/*` in
+`public/_headers` so EVERY route's HTML is always revalidated. The more
+specific `/assets/*` immutable rule still wins for fingerprinted assets
+(Cloudflare applies the most-specific path's Cache-Control). Now a deploy's
+new index.html (with new asset refs) is always fetched on the next
+navigation — no hard refresh, no stale-chunk, no unstyled relapse.
+
+**Why BUG-004 + BUG-005 together:** 004 (crossorigin) made the stale cache
+*unrecoverable without hard refresh*; 005 (`/` scope) is *why the stale
+cache existed for SPA routes at all*. Both shipped — 004 stops opaque-cache
+poisoning, 005 stops the stale-HTML caching that fed it.
+
+---
+
 ## BUG-2026-05-28-004 — Whole app renders unstyled (crossorigin + stale opaque CSS cache)
 
 **Status:** 🟢 Fixed (2026-05-28)

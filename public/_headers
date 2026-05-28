@@ -9,20 +9,26 @@
 # hashed assets aggressively (their filename changes on every deploy so
 # "immutable" is safe — different content = different URL).
 
-# Never cache the HTML entry point — always re-fetch to get latest chunk refs
-/
-  Cache-Control: no-cache, no-store, must-revalidate
-  Pragma: no-cache
-  Expires: 0
-
-/index.html
+# Never cache the HTML entry point — always re-fetch to get latest chunk refs.
+#
+# IMPORTANT (BUG-2026-05-28-005): this MUST be `/*`, not `/`. Every SPA route
+# (/dashboard, /production/fab-cut, /sales/:id, …) is served the index.html
+# body by Cloudflare's SPA fallback, but the URL is the route path — so a rule
+# scoped to `/` or `/index.html` never matches them and those HTML responses
+# fell back to Cloudflare's default cacheability. Browsers then cached
+# /dashboard's HTML, kept pointing at OLD hashed asset names, and after a
+# deploy that rotated the CSS/JS hash the page rendered fully unstyled /
+# ChunkLoadError. `/*` covers every route; the more-specific `/assets/*` rule
+# below overrides Cache-Control back to immutable for fingerprinted assets.
+/*
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
   Expires: 0
 
 # Hashed assets (Vite fingerprints every chunk + stylesheet) — safe to cache
 # forever. `immutable` tells the browser it won't change, skip conditional
-# revalidation. One-year max-age.
+# revalidation. One-year max-age. More specific than `/*` above, so this
+# Cache-Control wins for /assets/* requests.
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 

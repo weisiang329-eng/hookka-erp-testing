@@ -2610,10 +2610,37 @@ export default function ProductionPage({
     );
   };
 
-  const renderDueCell = (row: DeptRow) =>
-    renderDateCell(row, "dueDate", row.dueDate, (v) =>
-      patchJobCard(row.poId, row.jobCardId, { dueDate: v }),
+  // Due Date binding (Wei Siang 2026-05-28): editing one JC's Due Date in
+  // a dept view snaps EVERY sibling JC of the SAME SO in the SAME department
+  // to the same date. An SO split into N qty=1 product lines has N JCs per
+  // dept; the operator wants to schedule the whole SO's framing (or foam,
+  // etc.) for one day in a single edit instead of N clicks. Siblings are
+  // found within the current deptRows (already filtered to activeTab, so
+  // same-dept is implicit) by matching the parent doc id (SO, or CO for
+  // CO-origin rows). Each sibling goes through the same patchJobCard queue
+  // so the optimistic update + draft-debounce + rollback all apply per JC.
+  const applyDueDateBound = (row: DeptRow, v: string) => {
+    const parentId = row.salesOrderId || row.consignmentOrderId || "";
+    // Without a parent id we can't group — just patch the one row.
+    if (!parentId) {
+      patchJobCard(row.poId, row.jobCardId, { dueDate: v });
+      return;
+    }
+    const siblings = deptRows.filter(
+      (r) => (r.salesOrderId || r.consignmentOrderId || "") === parentId,
     );
+    for (const sib of siblings) {
+      patchJobCard(sib.poId, sib.jobCardId, { dueDate: v });
+    }
+    if (siblings.length > 1) {
+      toast.success(
+        `Due date applied to ${siblings.length} ${activeTab.replace(/_/g, " ")} job cards of ${row.salesOrderNo || row.soId}`,
+      );
+    }
+  };
+
+  const renderDueCell = (row: DeptRow) =>
+    renderDateCell(row, "dueDate", row.dueDate, (v) => applyDueDateBound(row, v));
 
   // Clickable completion date cell. Shows the stamped date in a cyan
   // pill when present, or a subtle "— Set —" placeholder when empty. The

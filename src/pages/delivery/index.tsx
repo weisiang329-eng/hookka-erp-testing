@@ -451,6 +451,15 @@ export default function DeliveryPage() {
   const [printDialog, setPrintDialog] = useState<DeliveryOrderRow[] | null>(null);
   const [plRemarks, setPlRemarks] = useState("");
   const [plCreating, setPlCreating] = useState(false);
+  // Truck assignment for the packing list: 3PL provider → lorry + driver.
+  // On Create these are written onto every DO in the run (overwrite), so each
+  // hub's DO carries the right driver + lorry. plProviderId holds the 3PL
+  // company id (mirrors the Create-DO form's legacy `driverId` slot).
+  const [plProviderId, setPlProviderId] = useState("");
+  const [plVehicleId, setPlVehicleId] = useState("");
+  const [plDriverPersonId, setPlDriverPersonId] = useState("");
+  const [plDialogVehicles, setPlDialogVehicles] = useState<ThreePLVehicle[]>([]);
+  const [plDialogDrivers, setPlDialogDrivers] = useState<ThreePLDriverPerson[]>([]);
   const [invoiceDialog, setInvoiceDialog] = useState<DeliveryOrderRow | null>(null);
   const [podDialog, setPodDialog] = useState<DeliveryOrderRow | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
@@ -1112,6 +1121,37 @@ export default function DeliveryPage() {
     };
   }, [createDOForm.driverId]);
 
+  // Same vehicle + driver fetch for the Create Packing List dialog's truck
+  // pickers, scoped to the chosen 3PL provider.
+  useEffect(() => {
+    const pid = plProviderId;
+    if (!pid) {
+      setPlDialogVehicles([]);
+      setPlDialogDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      fetch(`/api/three-pl-vehicles?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLVehicle[] }>,
+      ),
+      fetch(`/api/three-pl-drivers?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLDriverPerson[] }>,
+      ),
+    ])
+      .then(([vRes, dRes]) => {
+        if (cancelled) return;
+        if (vRes?.success && Array.isArray(vRes.data)) setPlDialogVehicles(vRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) setPlDialogDrivers(dRes.data);
+      })
+      .catch(() => {
+        /* swallow */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [plProviderId]);
+
   useEffect(() => {
     const pid = editForm.driverId;
     if (!pid) {
@@ -1627,6 +1667,9 @@ export default function DeliveryPage() {
     if (selectedIds.size === 0) return;
     const selected = deliveryOrders.filter((d) => selectedIds.has(d.id));
     setPlRemarks("");
+    setPlProviderId("");
+    setPlVehicleId("");
+    setPlDriverPersonId("");
     setPrintDialog(selected);
   };
 
@@ -1657,6 +1700,38 @@ export default function DeliveryPage() {
         toast.error(j.error || "Failed to create packing list");
         return;
       }
+
+      // Stamp the chosen lorry + driver onto every DO in the run (overwrite),
+      // reusing the DO edit path so driver/vehicle names denormalize the same
+      // way. Sequential to avoid hammering the heavy DO write path.
+      if (plProviderId || plVehicleId || plDriverPersonId) {
+        const truckBody = {
+          providerId: plProviderId || null,
+          vehicleId: plVehicleId || null,
+          driverId: plDriverPersonId || null,
+        };
+        const failed: string[] = [];
+        for (const d of dos) {
+          try {
+            const tr = await fetch(`/api/delivery-orders/${d.id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(truckBody),
+            });
+            if (!tr.ok) failed.push(d.doNo);
+          } catch {
+            failed.push(d.doNo);
+          }
+        }
+        if (failed.length) {
+          toast.error(
+            `Packing list created, but driver/lorry didn't save on ${failed.length} DO(s): ${failed.slice(0, 3).join(", ")}`,
+          );
+        }
+        invalidateCachePrefix("/api/delivery-orders");
+        refreshDOs();
+      }
+
       toast.success(`Packing list ${j.data?.packingNo ?? ""} created`);
       setPrintDialog(null);
       setPlRemarks("");
@@ -3721,7 +3796,7 @@ export default function DeliveryPage() {
               </p>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <div className="space-y-1 max-h-56 overflow-y-auto">
+              <div className="space-y-1 max-h-40 overflow-y-auto">
                 {printDialog.map((d) => (
                   <div key={d.id} className="flex items-center justify-between text-sm bg-[#FAF9F7] rounded-lg px-3 py-2">
                     <span className="font-mono font-medium text-[#1F1D1B]">{d.doNo}</span>
@@ -3729,6 +3804,77 @@ export default function DeliveryPage() {
                   </div>
                 ))}
               </div>
+
+              {/* Assign the truck for this run — written onto every DO above. */}
+              <div className="border-t border-[#E2DDD8] pt-3 space-y-3">
+                <p className="text-xs font-medium text-[#1F1D1B]">
+                  Assign driver &amp; lorry{" "}
+                  <span className="font-normal text-[#9CA3AF]">
+                    — saved onto all {printDialog.length} DO{printDialog.length === 1 ? "" : "s"}
+                  </span>
+                </p>
+                <div>
+                  <label className="text-xs text-[#6B7280] font-medium">3PL Provider</label>
+                  <select
+                    value={plProviderId}
+                    onChange={(e) => {
+                      setPlProviderId(e.target.value);
+                      setPlVehicleId("");
+                      setPlDriverPersonId("");
+                    }}
+                    className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                  >
+                    <option value="">— Select 3PL Provider —</option>
+                    {providers
+                      .filter((p) => p.status === "ACTIVE")
+                      .map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-[#6B7280] font-medium">Lorry</label>
+                    <select
+                      value={plVehicleId}
+                      onChange={(e) => setPlVehicleId(e.target.value)}
+                      disabled={!plProviderId}
+                      className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                    >
+                      <option value="">{plProviderId ? "— Select —" : "Pick provider first"}</option>
+                      {plDialogVehicles
+                        .filter((v) => v.status === "ACTIVE")
+                        .map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.plateNo} — {v.vehicleType || "—"}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[#6B7280] font-medium">Driver</label>
+                    <select
+                      value={plDriverPersonId}
+                      onChange={(e) => setPlDriverPersonId(e.target.value)}
+                      disabled={!plProviderId}
+                      className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                    >
+                      <option value="">{plProviderId ? "— Select —" : "Pick provider first"}</option>
+                      {plDialogDrivers
+                        .filter((d) => d.status === "ACTIVE")
+                        .map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                            {d.phone ? ` — ${d.phone}` : ""}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               <div>
                 <label className="text-xs text-[#6B7280] font-medium">Remarks (optional)</label>
                 <input

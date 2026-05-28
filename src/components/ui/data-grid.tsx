@@ -776,8 +776,35 @@ function ColumnFilterDropdown<T>({
                         }}
                         onChange={(e) => setRaws(yr.raws, e.target.checked)}
                       />
-                      <span className="font-semibold flex-1">{yr.yr}</span>
-                      <span className="text-[10px] text-[#AAA]">{yr.count}</span>
+                      {/* Click the label (fills the row) to expand/collapse,
+                          not just the tiny +/− button. Checkbox keeps its own
+                          click. Wei Siang 2026-05-28. */}
+                      <span
+                        className="font-semibold flex-1 cursor-pointer"
+                        onClick={() =>
+                          setExpY((p) => {
+                            const n = new Set(p);
+                            if (n.has(yr.yr)) n.delete(yr.yr);
+                            else n.add(yr.yr);
+                            return n;
+                          })
+                        }
+                      >
+                        {yr.yr}
+                      </span>
+                      <span
+                        className="text-[10px] text-[#AAA] cursor-pointer"
+                        onClick={() =>
+                          setExpY((p) => {
+                            const n = new Set(p);
+                            if (n.has(yr.yr)) n.delete(yr.yr);
+                            else n.add(yr.yr);
+                            return n;
+                          })
+                        }
+                      >
+                        {yr.count}
+                      </span>
                     </div>
                     {yOpen &&
                       Array.from(yr.mons.values())
@@ -823,10 +850,30 @@ function ColumnFilterDropdown<T>({
                                     setRaws(mn.raws, e.target.checked)
                                   }
                                 />
-                                <span className="flex-1">
+                                <span
+                                  className="flex-1 cursor-pointer"
+                                  onClick={() =>
+                                    setExpM((p) => {
+                                      const n = new Set(p);
+                                      if (n.has(mKey)) n.delete(mKey);
+                                      else n.add(mKey);
+                                      return n;
+                                    })
+                                  }
+                                >
                                   {MONTHS[mn.mon]}
                                 </span>
-                                <span className="text-[10px] text-[#AAA]">
+                                <span
+                                  className="text-[10px] text-[#AAA] cursor-pointer"
+                                  onClick={() =>
+                                    setExpM((p) => {
+                                      const n = new Set(p);
+                                      if (n.has(mKey)) n.delete(mKey);
+                                      else n.add(mKey);
+                                      return n;
+                                    })
+                                  }
+                                >
                                   {mn.count}
                                 </span>
                               </div>

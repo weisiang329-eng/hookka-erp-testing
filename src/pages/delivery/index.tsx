@@ -98,6 +98,7 @@ type DeliveryOrderRow = {
   customerName: string;
   hubBranch: string;    // customerState (legacy fallback — kept for old DOs that have customerState set but no hubId)
   hubState: string;     // delivery_hubs.state resolved via hubId on the API; preferred display in the State column when present
+  hubName: string;      // delivery_hubs.name resolved via hubId on the API; used as the destination title on the consolidated packing list
   itemCount: number;    // number of items in this DO
   totalM3: number;
   valueSen: number;     // Sales Figure — linked SO line value (server-derived; delivery_orders has no monetary column)
@@ -208,6 +209,7 @@ function mapDOToRow(
     customerName: d.customerName || "",
     hubBranch: d.customerState || "",
     hubState: ((d as Record<string, unknown>).hubState as string) || "",
+    hubName: ((d as Record<string, unknown>).hubName as string) || "",
     itemCount: items.length,
     totalM3: d.totalM3 ?? 0,
     valueSen: d.valueSen ?? 0,
@@ -3477,7 +3479,10 @@ export default function DeliveryPage() {
               <h2 className="text-lg font-bold text-[#1F1D1B]">Print Packing List</h2>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <p className="text-xs text-[#6B7280]">Generating packing list for:</p>
+              <p className="text-xs text-[#6B7280]">
+                One consolidated loading sheet (grouped by hub) will be generated
+                for these {printDialog.length} delivery order{printDialog.length === 1 ? "" : "s"}:
+              </p>
               <div className="space-y-1">
                 {printDialog.map((d) => (
                   <div key={d.id} className="flex items-center justify-between text-sm bg-[#FAF9F7] rounded-lg px-3 py-2">
@@ -3489,7 +3494,27 @@ export default function DeliveryPage() {
             </div>
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
               <Button variant="outline" onClick={() => setPrintDialog(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => { setPrintDialog(null); }}>
+              <Button
+                variant="primary"
+                onClick={async () => {
+                  const dos = printDialog;
+                  if (!dos || dos.length === 0) {
+                    setPrintDialog(null);
+                    return;
+                  }
+                  try {
+                    const { generateConsolidatedPackingListPdf } = await import(
+                      "@/lib/generate-packing-pdf"
+                    );
+                    generateConsolidatedPackingListPdf(dos);
+                  } catch (e) {
+                    toast.error(
+                      e instanceof Error ? e.message : "Failed to generate packing list",
+                    );
+                  }
+                  setPrintDialog(null);
+                }}
+              >
                 <Printer className="h-4 w-4" /> Print
               </Button>
             </div>

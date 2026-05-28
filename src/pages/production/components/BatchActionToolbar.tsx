@@ -22,6 +22,10 @@ import { X, Calendar, CalendarClock, User, FolderPlus, Trash2 } from "lucide-rea
 
 export type BatchActionToolbarProps = {
   count: number;
+  // Sum of Prod Time (min) across the selected rows. Shown next to the count
+  // so the operator can see the total time budget of their selection while
+  // planning (Wei Siang 2026-05-28).
+  prodTimeTotalMin?: number;
   onClear: () => void;
   onApplyDate: () => void;
   // Wei Siang 2026-05-13: batch Due Date editing — sits next to Apply Date
@@ -38,6 +42,7 @@ export type BatchActionToolbarProps = {
 
 export function BatchActionToolbar({
   count,
+  prodTimeTotalMin = 0,
   onClear,
   onApplyDate,
   onApplyDueDate,
@@ -46,11 +51,21 @@ export function BatchActionToolbar({
   onRemoveFromFolder,
 }: BatchActionToolbarProps) {
   if (count === 0) return null;
+  const hrs = (prodTimeTotalMin / 60).toFixed(1);
   return (
     <div className="sticky bottom-3 left-3 right-3 z-30 flex items-center gap-2 rounded-md border border-[#C9A227] bg-[#FFF8E6] px-3 py-2 shadow-md">
       <div className="text-[12px] font-semibold text-[#5A4500]">
         {count} job card{count === 1 ? "" : "s"} selected
       </div>
+      {prodTimeTotalMin > 0 && (
+        <div className="text-[12px] text-[#5A4500] tabular-nums border-l border-[#E0C766] pl-2">
+          Prod Time:{" "}
+          <span className="font-semibold">
+            {prodTimeTotalMin.toLocaleString()} min
+          </span>
+          <span className="text-[#9C7A1E] ml-1">({hrs} h)</span>
+        </div>
+      )}
       <div className="flex-1" />
       <Button size="sm" variant="outline" onClick={onApplyDueDate} title="Set the due (schedule) date on every selected row">
         <CalendarClock className="h-3.5 w-3.5 mr-1" /> Apply Due Date

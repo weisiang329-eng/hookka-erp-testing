@@ -1138,7 +1138,7 @@ export default function ProductionPage({
   // patch endpoint or the production-folders endpoint. Per Wei Siang's
   // 2026-05-12 ask: multi-select rows → batch Apply Date / Apply PIC /
   // Save into a Folder so paper-schedule sheets are easy to find again.
-  type DeptRowLite = { id: string; poId: string; jobCardId: string };
+  type DeptRowLite = { id: string; poId: string; jobCardId: string; prodTime: number };
   const [selectedDeptRows, setSelectedDeptRows] = useState<DeptRowLite[]>([]);
   const [batchDateOpen, setBatchDateOpen] = useState(false);
   const [batchDueDateOpen, setBatchDueDateOpen] = useState(false);
@@ -5341,7 +5341,12 @@ export default function ProductionPage({
             selectable
             onSelectionChange={(rows: DeptRow[]) =>
               setSelectedDeptRows(
-                rows.map((r) => ({ id: r.id, poId: r.poId, jobCardId: r.jobCardId })),
+                rows.map((r) => ({
+                  id: r.id,
+                  poId: r.poId,
+                  jobCardId: r.jobCardId,
+                  prodTime: Number(r.prodTime) || 0,
+                })),
               )
             }
             // Hide already-completed / transferred dept cards by default
@@ -5412,6 +5417,7 @@ export default function ProductionPage({
               operator has multi-selected rows. */}
           <BatchActionToolbar
             count={selectedDeptRows.length}
+            prodTimeTotalMin={selectedDeptRows.reduce((s, r) => s + (Number(r.prodTime) || 0), 0)}
             onClear={() => setSelectedDeptRows([])}
             onApplyDate={() => setBatchDateOpen(true)}
             onApplyDueDate={() => setBatchDueDateOpen(true)}

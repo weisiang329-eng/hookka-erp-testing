@@ -34,6 +34,62 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-010 — /admin/health couldn't tell a stale error burst from a live one
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** infrastructure
+
+**Symptom:** During a live health-check, the "Errors by endpoint" panel showed
+`/api/auth/totp/setup-start` with 6× 5xx — looking like an active outage. It
+was actually the pre-fix burst from BUG-2026-05-27-007 (fixed the day before),
+still inside the rolling 24h window. The panel only showed 24h totals, so a
+long-resolved burst was indistinguishable from something failing right now.
+
+**Root cause:** `/api/admin/health/errors-by-endpoint` aggregated counts over
+the window with no recency dimension. No way to see *when* the most recent
+error on a route happened.
+
+**Fix:** Add `MAX(timestamp)` to the AE query → per-route `lastSeen` +
+`last5xxAt`. Frontend renders a "Last seen" column: errors within the last
+hour show red "⚠ Nm ago" (live, act now); older ones show muted "23h ago /
+2d ago" (probably already fixed). UTC-correct timestamp parsing
+(`parseAeTs`) so the relative time is accurate (AE returns naive-UTC
+"YYYY-MM-DD HH:MM:SS"). Commit `4f5d033f`.
+
+**Verified:** Live — totp setup-start now reads "23h ago" (grey/stale), not a
+red alarm.
+
+---
+
+## BUG-2026-05-28-009 — FE RUM telemetry sink behind auth → 401 floods, dropped error data
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** infrastructure
+
+**Symptom:** `/api/fe-rum/event` logged ~210 4xx/day (the bulk of all 401s).
+The front-end RUM reporter (JS errors + perf beacons) fires on page load,
+longtasks, and unhandled errors — including when the session is expired or
+hasn't resolved yet. Those beacons hit `authMiddleware`, got 401'd, and the
+error data they carried (the very thing /admin/health exists to surface) was
+silently dropped.
+
+**Root cause:** the route sat behind `authMiddleware` ("only logged-in
+sessions can emit"), but telemetry beacons legitimately fire from
+unauthenticated browser states.
+
+**Fix:** Add `/api/fe-rum/event` to `PUBLIC_PATHS` (auth-middleware.ts). The
+middleware's soft-auth still attaches `userId` when a valid session is
+present (attribution preserved); anonymous beacons record with empty userId.
+The handler's 50-events/batch cap is the abuse guard for the now-open
+endpoint. Updated `tests/security-public-endpoints.test.mjs` (the exact-match
+public-endpoint allowlist guard) to include it with justification. Commit
+`4f5d033f`.
+
+**Verified:** Live — unauthenticated POST to /api/fe-rum/event now returns
+200 (was 401). Existing 401 backlog ages out of the 24h window.
+
+---
+
 ## BUG-2026-05-28-008 — DO could mix multiple customers ("DO 对标顾客的" violated)
 
 **Status:** 🟢 Fixed (2026-05-28)

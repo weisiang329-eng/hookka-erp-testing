@@ -385,6 +385,70 @@ export default function SalesOrderDetailPage() {
     }
   }, [id, overrideModal.reason, navigate, toast, refreshEligibility, basePath]);
 
+  // Per-PO Hold / Resume / Cancel — operator action on a single Linked
+  // Production Order. Used to handle the "duplicate items" case where some
+  // POs in an SO are completed but the customer changes their mind on the
+  // rest. Completed POs are untouchable (server returns 409); only
+  // PENDING / IN_PROGRESS / ON_HOLD POs accept an action.
+  const [poActionBusyId, setPoActionBusyId] = useState<string | null>(null);
+  const handlePoAction = useCallback(
+    async (poId: string, action: "hold" | "resume" | "cancel") => {
+      let reason = "";
+      // Cancel + Hold ask for a reason. Resume doesn't (it's a recovery action).
+      if (action === "cancel" || action === "hold") {
+        const promptMsg =
+          action === "cancel"
+            ? "Reason for cancelling this production order? (will be logged)"
+            : "Reason for holding this production order? (will be logged)";
+        const input = window.prompt(promptMsg, "");
+        if (input == null) return; // operator hit Cancel on the prompt
+        reason = input.trim();
+        if (reason.length < 3) {
+          toast.warning("Please provide a reason (3+ characters).");
+          return;
+        }
+        if (action === "cancel") {
+          const ok = window.confirm(
+            "Cancel this PO?\n\nAll non-completed job cards under it will also be cancelled. Completed work stays intact (it's already real product).\n\nProceed?",
+          );
+          if (!ok) return;
+        }
+      }
+      setPoActionBusyId(poId);
+      try {
+        const res = await fetch(`/api/production-orders/${poId}/${action}`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+          status?: string;
+          jcCascadeCount?: number;
+        };
+        if (!res.ok || !j.success) {
+          toast.error(j.error ?? `Failed to ${action} (HTTP ${res.status})`);
+          return;
+        }
+        const cascadeNote =
+          action === "cancel" && (j.jcCascadeCount ?? 0) > 0
+            ? ` · ${j.jcCascadeCount} job card(s) cancelled too`
+            : "";
+        toast.success(`PO ${action}d → ${j.status}${cascadeNote}`);
+        fetchOrder();
+      } catch (e) {
+        toast.error(
+          e instanceof Error ? e.message : `Network error — PO ${action} failed`,
+        );
+      } finally {
+        setPoActionBusyId(null);
+      }
+    },
+    [fetchOrder, toast],
+  );
+
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
     setUpdating(true);
@@ -1118,12 +1182,47 @@ export default function SalesOrderDetailPage() {
                       </td>
                       <td className="px-3 py-3"><Badge variant="status" status={po.status} /></td>
                       <td className="px-3 py-3">
-                        <Button
-                          variant="ghost" size="sm"
-                          onClick={() => navigate(`/production/${po.id}`)}
-                        >
-                          View
-                        </Button>
+                        <div className="flex items-center gap-1 justify-end">
+                          {/* Hold — only PENDING / IN_PROGRESS. ON_HOLD POs
+                              show Resume instead. COMPLETED / CANCELLED show
+                              nothing actionable. */}
+                          {(po.status === "PENDING" || po.status === "IN_PROGRESS") && (
+                            <Button
+                              variant="ghost" size="sm"
+                              disabled={poActionBusyId === po.id}
+                              onClick={() => handlePoAction(po.id, "hold")}
+                              title="Pause this PO (production stops; can resume later)"
+                            >
+                              <PauseCircle className="h-4 w-4 text-[#A16207]" />
+                            </Button>
+                          )}
+                          {po.status === "ON_HOLD" && (
+                            <Button
+                              variant="ghost" size="sm"
+                              disabled={poActionBusyId === po.id}
+                              onClick={() => handlePoAction(po.id, "resume")}
+                              title="Resume this PO back to PENDING"
+                            >
+                              <PlayCircle className="h-4 w-4 text-[#15803D]" />
+                            </Button>
+                          )}
+                          {(po.status === "PENDING" || po.status === "IN_PROGRESS" || po.status === "ON_HOLD") && (
+                            <Button
+                              variant="ghost" size="sm"
+                              disabled={poActionBusyId === po.id}
+                              onClick={() => handlePoAction(po.id, "cancel")}
+                              title="Cancel this PO (also cancels its non-completed job cards)"
+                            >
+                              <XCircle className="h-4 w-4 text-[#B91C1C]" />
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost" size="sm"
+                            onClick={() => navigate(`/production/${po.id}`)}
+                          >
+                            View
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}

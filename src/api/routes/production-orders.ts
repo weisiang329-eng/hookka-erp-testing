@@ -39,6 +39,7 @@ import {
 } from "../lib/fabric-usage";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
@@ -5969,6 +5970,175 @@ app.patch("/:id", async (c) => {
   if (denied) return denied;
   await ensurePendingMigrations(c.var.DB);
   return applyPoUpdate(c, c.req.param("id"));
+});
+
+// ---------------------------------------------------------------------------
+// Per-PO Hold / Resume / Cancel — let the operator pause or kill ONE PO
+// (one product line of an SO) without rebuilding the whole SO.
+//
+// Wei Siang's use case: an SO is split into many qty=1 POs (SOFA rule).
+// Some POs are completed, others are still pending. The customer changes
+// their mind and only wants part of the order. The operator needs to
+// hold or cancel the still-pending ones, leaving the completed ones
+// alone (they're real finished goods — see BUG-2026-05-28-004 memory).
+//
+// Rules:
+//   HOLD   — only PENDING / IN_PROGRESS POs may be held. JCs are NOT
+//            touched (the PATCH guards block writes against ON_HOLD POs
+//            so JCs are passively frozen and resume cleanly).
+//   RESUME — only ON_HOLD POs may resume. Flips back to PENDING; JCs
+//            stay where they were.
+//   CANCEL — only non-terminal POs may be cancelled (NOT COMPLETED,
+//            NOT CANCELLED). All JCs under the PO that aren't
+//            COMPLETED/TRANSFERRED flip to CANCELLED. Completed JCs
+//            stay COMPLETED — re-dating finished work is wrong and
+//            would orphan fg_units + cost_ledger entries.
+// ---------------------------------------------------------------------------
+
+async function applyPoStatusChange(
+  c: Context<Env>,
+  id: string,
+  next: "ON_HOLD" | "PENDING" | "CANCELLED",
+): Promise<Response> {
+  const db = c.var.DB;
+  const existing = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(id)
+    .first<ProductionOrderRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "Production order not found" }, 404);
+  }
+
+  const body = (await c.req.json().catch(() => ({}))) as { reason?: unknown };
+  const reason =
+    typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "";
+
+  // Gate the transition against the current status.
+  const from = existing.status;
+  if (next === "ON_HOLD") {
+    if (from !== "PENDING" && from !== "IN_PROGRESS") {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot hold a ${from} production order. Only PENDING or IN_PROGRESS POs can be held.`,
+        },
+        409,
+      );
+    }
+  } else if (next === "PENDING") {
+    if (from !== "ON_HOLD") {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot resume a ${from} production order. Only ON_HOLD POs can be resumed.`,
+        },
+        409,
+      );
+    }
+  } else if (next === "CANCELLED") {
+    if (from === "COMPLETED" || from === "CANCELLED") {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot cancel a ${from} production order. Completed work is locked; if you need to back out a completed PO, contact admin.`,
+        },
+        409,
+      );
+    }
+  }
+
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+
+  statements.push(
+    db
+      .prepare(
+        `UPDATE production_orders SET status = ?, updated_at = ? WHERE id = ?`,
+      )
+      .bind(next, now, id),
+  );
+
+  // CANCEL also cascades down: any non-terminal JC under this PO becomes
+  // CANCELLED. Completed/transferred JCs stay — they represent real
+  // production output (cost_ledger / fg_units already posted).
+  let jcCascadeCount = 0;
+  if (next === "CANCELLED") {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE job_cards SET status = 'CANCELLED', updated_at = ?
+             WHERE productionOrderId = ?
+               AND status NOT IN ('COMPLETED', 'TRANSFERRED')`,
+        )
+        .bind(now, id),
+    );
+    // Count for response transparency (best-effort — small overhead).
+    try {
+      const r = await db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM job_cards
+             WHERE productionOrderId = ?
+               AND status NOT IN ('COMPLETED', 'TRANSFERRED', 'CANCELLED')`,
+        )
+        .bind(id)
+        .first<{ c: number }>();
+      jcCascadeCount = Number(r?.c ?? 0);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  await db.batch(statements);
+
+  // Audit trail — single row capturing the before/after PO snapshot plus
+  // the operator-supplied reason. Forensic queries can trace any PO that
+  // suddenly went ON_HOLD / CANCELLED to who pressed the button and why.
+  try {
+    await emitAudit(c, {
+      resource: "production-orders",
+      resourceId: id,
+      action:
+        next === "ON_HOLD"
+          ? "hold"
+          : next === "PENDING"
+            ? "resume"
+            : "cancel",
+      before: { status: from },
+      after: { status: next, reason, jcCascadeCount },
+    });
+  } catch {
+    /* audit best-effort, don't fail the action */
+  }
+
+  return c.json({
+    success: true,
+    id,
+    status: next,
+    previousStatus: from,
+    jcCascadeCount,
+    reason,
+  });
+}
+
+app.post("/:id/hold", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+  return applyPoStatusChange(c, c.req.param("id"), "ON_HOLD");
+});
+
+app.post("/:id/resume", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+  return applyPoStatusChange(c, c.req.param("id"), "PENDING");
+});
+
+app.post("/:id/cancel", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+  return applyPoStatusChange(c, c.req.param("id"), "CANCELLED");
 });
 
 export default app;

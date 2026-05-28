@@ -65,8 +65,13 @@ function fmtPieces(pieces?: string | null): { text: string; total: number } {
     return u === "HB" ? 0 : u === "DIVAN" ? 1 : 2;
   };
   parsed.sort((a, b) => rank(a.lab) - rank(b.lab));
+  // Drop the leading count when it's exactly 1 — Wei Siang 2026-05-28: a
+  // sofa variant label already starts with a digit ("1A(LHF)"), so "1
+  // 1A(LHF)" read like "11A". Show just "1A(LHF)" for single pieces; keep
+  // the count for 2+ ("2 1A(LHF)", "2 DIVAN"). `total` still sums the
+  // underlying counts so the Total Qty column is unaffected.
   return {
-    text: parsed.map((x) => `${x.n} ${x.lab}`).join("  +  "),
+    text: parsed.map((x) => (x.n === 1 ? x.lab : `${x.n} ${x.lab}`)).join("  +  "),
     total,
   };
 }

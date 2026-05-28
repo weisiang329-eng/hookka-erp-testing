@@ -851,7 +851,18 @@ function renderPackingSummary(
           const so = (ex?.customerSO || exDo?.customerSO || "").trim();
           const ref = (ex?.customerRef || exDo?.customerRef || "").trim();
           const fp = fmtPieces(ex?.pieces);
-          const desc = `${it.productCode || "-"}\n${it.productName || "-"}${it.fabricCode ? `   ·   ${it.fabricCode}` : ""}`;
+          // Full DO-style description (code / name+size / build spec:
+          // fabric · DIVAN · LEG · GAP · T.Heights · specials) — identical to
+          // the real DO line so the manifest matches the DO it stands in for.
+          const desc = describe(
+            {
+              productCode: it.productCode || "",
+              productName: it.productName || "",
+              fabricCode: it.fabricCode || "",
+              sizeLabel: it.sizeLabel || "",
+            },
+            ex,
+          );
           return [
             String(k + 1),
             `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,

@@ -1903,13 +1903,43 @@ app.post("/", async (c) => {
           409,
         );
       }
-      // No customer/state/SO restriction (2026-04-27 user request) —
-      // operators can mix any POs onto one DO regardless of destination.
-      // The page UI groups by customer for readability but doesn't enforce
-      // grouping; that's the operator's call (one DO might genuinely cover
-      // multiple drops on a single truck trip).
+      // Multi-SO is still allowed (operators consolidate several SOs of the
+      // SAME destination onto one truck) — the 2026-04-27 free-mix allowance
+      // stands for the SO / customer dimension.
       const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
       soIds.delete("");
+
+      // HUB-CONSISTENCY GUARD (Wei Siang 2026-05-28): but a single DO must
+      // deliver to ONE hub. Different hubs = physically different drop-off
+      // addresses, so they can't share one DO (the printed DO carries a
+      // single Deliver-To address — mixing hubs would ship some branches'
+      // goods to the wrong address). Look up the parent SOs' hubs; reject
+      // when the selection spans 2+ distinct non-null hubs. (Reverses the
+      // hub dimension of the 2026-04-27 free-mix allowance only.)
+      if (soIds.size > 0) {
+        const soIdArr = [...soIds];
+        const ph = soIdArr.map(() => "?").join(",");
+        const hubRes = await c.var.DB.prepare(
+          `SELECT DISTINCT hubId, hubName FROM sales_orders
+             WHERE id IN (${ph}) AND hubId IS NOT NULL AND hubId <> ''`,
+        )
+          .bind(...soIdArr)
+          .all<{ hubId: string; hubName: string | null }>();
+        const distinctHubs = hubRes.results ?? [];
+        if (distinctHubs.length > 1) {
+          const names = distinctHubs
+            .map((h) => h.hubName || h.hubId)
+            .join(", ");
+          return c.json(
+            {
+              success: false,
+              error: `This delivery order mixes ${distinctHubs.length} delivery hubs (${names}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
+            },
+            400,
+          );
+        }
+      }
+
       // Pick a representative salesOrderId for the legacy single-SO
       // cascade fields (sales_orders.hookkaDeliveryOrder etc.). When the
       // DO genuinely spans multiple SOs, leave salesOrderId NULL — the

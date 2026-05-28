@@ -1420,12 +1420,13 @@ export default function DeliveryPage() {
   };
 
   const toggleSelectAll = () => {
-    // Skip DOs already in a packing list — they can't be re-grouped.
-    const selectable = filteredOrders.filter((d) => !doPackingMap.has(d.id));
-    if (selectedIds.size >= selectable.length && selectable.length > 0) {
+    // Select all (incl. DOs already in a packing list) so the whole truck can
+    // be Marked Dispatched/Delivered together. "Create as Packing List" skips
+    // already-grouped DOs itself.
+    if (selectedIds.size === filteredOrders.length) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(selectable.map((d) => d.id)));
+      setSelectedIds(new Set(filteredOrders.map((d) => d.id)));
     }
   };
 
@@ -1676,12 +1677,18 @@ export default function DeliveryPage() {
   // Opens the "Create Packing List" confirm dialog from the multi-selected DOs.
   const handlePrintPackingList = () => {
     if (selectedIds.size === 0) return;
-    const selected = deliveryOrders.filter((d) => selectedIds.has(d.id));
+    const all = deliveryOrders.filter((d) => selectedIds.has(d.id));
+    // Skip DOs already in another packing list — a DO belongs to one list.
+    const fresh = all.filter((d) => !doPackingMap.has(d.id));
+    if (fresh.length === 0) {
+      toast.error("All selected delivery orders are already in a packing list.");
+      return;
+    }
     setPlRemarks("");
     setPlProviderId("");
     setPlVehicleId("");
     setPlDriverPersonId("");
-    setPrintDialog(selected);
+    setPrintDialog(fresh);
   };
 
   // Saves the selected DOs as a new packing list (POST), then jumps to the
@@ -2675,23 +2682,15 @@ export default function DeliveryPage() {
         align: "center",
         render: (_value, row) => {
           const inPL = doPackingMap.get(row.id);
-          if (inPL) {
-            // Already grouped into a packing list — show ticked + locked so
-            // the operator sees it's handled and can't re-add it.
-            return (
-              <input
-                type="checkbox"
-                checked
-                disabled
-                title={`Already in ${inPL}`}
-                className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32] cursor-not-allowed opacity-60"
-              />
-            );
-          }
+          // Stays selectable even when already in a packing list — the
+          // operator still needs to select it for Mark Dispatched / Delivered.
+          // The green PL badge column flags membership; "Create as Packing
+          // List" skips already-grouped DOs so they're never double-added.
           return (
             <input
               type="checkbox"
               checked={selectedIds.has(row.id)}
+              title={inPL ? `Already in ${inPL}` : undefined}
               onChange={(e) => {
                 e.stopPropagation();
                 toggleSelect(row.id);
@@ -3384,11 +3383,7 @@ export default function DeliveryPage() {
                   <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
-                      checked={
-                        selectedIds.size > 0 &&
-                        selectedIds.size ===
-                          filteredOrders.filter((d) => !doPackingMap.has(d.id)).length
-                      }
+                      checked={selectedIds.size === filteredOrders.length && filteredOrders.length > 0}
                       onChange={toggleSelectAll}
                       className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
                     />

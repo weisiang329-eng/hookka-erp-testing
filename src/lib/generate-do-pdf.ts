@@ -514,17 +514,23 @@ export function generateDOPdf(
     doc.text(`Page ${p} of ${pages}`, pageW - m, fy, { align: "right" });
   }
 
+  // order.doNo already carries the "DO-" prefix (e.g. "DO-2605-094"), so
+  // prepending another "DO-" produced "DO-DO-2605-094.pdf" (Wei Siang
+  // 2026-05-28). Use the doNo verbatim; only add the prefix for any legacy
+  // doNo that somehow lacks it.
+  const fileName = `${(order.doNo || "").startsWith("DO-") ? order.doNo : `DO-${order.doNo}`}.pdf`;
+
   if (mode === "view") {
     // Open the document to read on screen — no download. Fall back to
     // save() if the browser blocks the blob window (popup blocker).
     try {
       const url = doc.output("bloburl");
       const w = window.open(String(url), "_blank");
-      if (!w) doc.save(`DO-${order.doNo}.pdf`);
+      if (!w) doc.save(fileName);
     } catch {
-      doc.save(`DO-${order.doNo}.pdf`);
+      doc.save(fileName);
     }
     return;
   }
-  doc.save(`DO-${order.doNo}.pdf`);
+  doc.save(fileName);
 }

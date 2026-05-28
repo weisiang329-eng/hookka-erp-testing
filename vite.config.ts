@@ -1,7 +1,36 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
+
+// ───────────────────────────────────────────────────────────────────────────
+// stripCrossorigin — remove the `crossorigin` attribute Vite stamps onto every
+// emitted <script type=module> + <link rel=stylesheet/modulepreload> in
+// index.html.
+//
+// Why: our assets are SAME-ORIGIN (erp.hookka.com page loads
+// erp.hookka.com/assets/*), so crossorigin is unnecessary. But it forces the
+// browser into CORS mode for those requests, and during the 2026-05-27
+// custom-domain cutover there was a window where /assets/* lacked an
+// Access-Control-Allow-Origin header. Browsers that loaded the page in that
+// window cached an OPAQUE (CORS-failed) copy of the CSS/JS. Even after the
+// ACAO:* header was restored, those browsers keep serving the stale opaque
+// cache for the crossorigin request → the stylesheet loads (200) but the
+// browser refuses to apply it → fully-unstyled page (BUG-2026-05-28-004).
+//
+// Removing crossorigin makes the browser fetch same-origin assets in plain
+// no-cors mode, which can never enter the opaque-cache failure state. Costs
+// nothing (subresource integrity isn't used here).
+// ───────────────────────────────────────────────────────────────────────────
+function stripCrossorigin(): Plugin {
+  return {
+    name: 'strip-crossorigin',
+    enforce: 'post',
+    transformIndexHtml(html) {
+      return html.replace(/\s+crossorigin(?:=["'][^"']*["'])?/g, '')
+    },
+  }
+}
 
 // Plain HTTP dev server. Live-camera scanning (getUserMedia) is gated by
 // the browser to HTTPS or localhost — on LAN phones it fails silently.
@@ -16,7 +45,7 @@ export default defineConfig({
   define: {
     __BUILD_ID__: JSON.stringify(Date.now().toString(36)),
   },
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), stripCrossorigin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

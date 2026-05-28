@@ -34,6 +34,50 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-28-004 — Whole app renders unstyled (crossorigin + stale opaque CSS cache)
+
+**Status:** 🟢 Fixed (2026-05-28)
+**Category:** infrastructure
+
+**Symptom:** Wei Siang opened erp.hookka.com/dashboard and the entire app
+rendered as raw unstyled HTML — nav links stacked vertically, black text,
+no layout. Reproduced in a fresh Chrome MCP tab.
+
+**Diagnosis (live, via Chrome MCP):**
+- The CSS bundle `/assets/index-*.css` returned 200 with valid Tailwind
+  v4 content (96 KB) and `Access-Control-Allow-Origin: *`.
+- Yet `.flex` computed to `display:block` and `.hidden` to `display:block`
+  — Tailwind utilities were NOT applying. `document.styleSheets` reported
+  the Tailwind sheet's `cssRules` as cross-origin-blocked even though it's
+  same-origin.
+- Re-injecting the exact same CSS URL via a `<link>` WITHOUT the
+  `crossorigin` attribute → `.flex` immediately computed to `flex`. That
+  isolated the cause to the `crossorigin="anonymous"` attribute Vite stamps
+  on every emitted `<script type=module>` + `<link>`.
+
+**Root cause:** During the 2026-05-27 custom-domain cutover to
+erp.hookka.com there was a window where `/assets/*` was served WITHOUT an
+ACAO header. Browsers that loaded the page in that window cached an OPAQUE
+(CORS-failed) copy of the CSS/JS keyed on the crossorigin request. After
+the ACAO:* header was restored at the edge, those browsers kept serving
+the stale opaque cache → the stylesheet loads (200) but the browser
+refuses to apply it → fully-unstyled page. Assets are same-origin, so the
+`crossorigin` attribute was never needed in the first place.
+
+**Fix:** New Vite plugin `stripCrossorigin` (vite.config.ts) removes the
+`crossorigin` attribute from all emitted `<script>` / `<link>` tags via
+`transformIndexHtml`. Verified the built `dist/index.html` has 0
+occurrences of `crossorigin`. Same-origin assets now load in plain no-cors
+mode which can never enter the opaque-cache failure state. The rebuild
+also rotated the asset hashes, which busts every stale cached copy on the
+next deploy.
+
+**Immediate user recovery:** hard refresh (Ctrl+Shift+R) bypasses the
+stale cache and restores styling instantly — used while the permanent fix
+deployed.
+
+---
+
 ## BUG-2026-05-28-003 — Dead `src/api/index.ts` + `src/api/routes-mock/*` invited "critical bug" misreads
 
 **Status:** 🟢 Fixed (2026-05-28)

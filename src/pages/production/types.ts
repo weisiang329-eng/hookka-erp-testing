@@ -164,6 +164,12 @@ export type DeptRow = {
   prodTime: number;     // per-jc production minutes (merged sum on FAB_CUT rows)
   rack: string;         // Packing dept — assigned rack location ("Rack 3")
   dueDate: string;
+  // Planning aids (2026-05-28) — batch-joined from the parent SO. The
+  // customer's requested delivery date + Hookka's internal expected DD.
+  // Read-only columns; "" for CO-origin rows. Help the operator schedule
+  // dueDate without overshooting the promise.
+  customerDeliveryDate: string;
+  hookkaExpectedDD: string;
   completedDate: string;
   // Per-piece progress for the Completion column. piecesTotal floors
   // at 1 (single-piece JCs); piecesDone is 0 until at least one piece

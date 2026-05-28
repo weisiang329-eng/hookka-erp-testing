@@ -475,6 +475,11 @@ export const buildBaseRows = (
           (((jc as JobCard & { wipQty?: number }).wipQty ?? 1) || 1),
         rack: (jc as JobCard & { rackingNumber?: string }).rackingNumber || "",
         dueDate: jc.dueDate || "",
+        // Planning aids (2026-05-28) — from the parent SO via attachCustomerSO.
+        customerDeliveryDate:
+          (o as { customerDeliveryDate?: string }).customerDeliveryDate || "",
+        hookkaExpectedDD:
+          (o as { hookkaExpectedDD?: string }).hookkaExpectedDD || "",
         completedDate: jc.completedDate || "",
         // Surface per-piece progress so renderCompletionCell can show
         // "X/Y" when a multi-piece JC is partially scanned. Floor

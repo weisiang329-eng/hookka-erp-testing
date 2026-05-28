@@ -498,6 +498,12 @@ type MinimalPOOut = {
   customerSO: string;
   customerName: string;
   customerState: string;
+  // Planning aid (2026-05-28) — batch-joined by attachCustomerSO from
+  // sales_orders. Customer's requested delivery date + Hookka's internal
+  // target. "" for CO-origin POs. Read by the dept sheet's Customer DD /
+  // Our Expected DD columns.
+  customerDeliveryDate: string;
+  hookkaExpectedDD: string;
   productId: string;
   productCode: string;
   productName: string;
@@ -757,6 +763,9 @@ function rowToMinimalPO(
     customerPOId: row.customerPOId ?? "",
     customerReference: row.customerReference ?? "",
     customerSO: "",
+    // Filled by attachCustomerSO at the route boundary (batch-join).
+    customerDeliveryDate: "",
+    hookkaExpectedDD: "",
     customerName: row.customerName ?? "",
     customerState: row.customerState ?? "",
     productId: row.productId ?? "",
@@ -1131,6 +1140,13 @@ async function attachCustomerSO(
     salesOrderId: string;
     consignmentOrderId: string;
     customerSO: string;
+    // 2026-05-28: planning aid — surface the customer's requested delivery
+    // date + Hookka's internal expected DD on the production sheet so the
+    // operator can plan against the real promise without flipping to the SO.
+    // Same batch-join as customerSO (zero extra round-trip, just 2 more cols).
+    // CO-origin POs leave these "" (consignment has no customer DD concept).
+    customerDeliveryDate?: string;
+    hookkaExpectedDD?: string;
   }>,
 ): Promise<void> {
   if (pos.length === 0) return;
@@ -1142,6 +1158,12 @@ async function attachCustomerSO(
   );
   const soMap = new Map<string, string>();
   const coMap = new Map<string, string>();
+  // SO id → { customerDeliveryDate, hookkaExpectedDD }. Populated from the
+  // same SO chunk query below (no extra round-trip).
+  const soDatesMap = new Map<
+    string,
+    { customerDeliveryDate: string; hookkaExpectedDD: string }
+  >();
   // Chunk well under the bound-variable ceiling.
   const CHUNK = 200;
   // Perf 2026-05-22 — fire every SO chunk + CO chunk query as ONE parallel
@@ -1162,10 +1184,15 @@ async function attachCustomerSO(
       soChunks.map((slice) =>
         db
           .prepare(
-            `SELECT id, customerSOId FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
+            `SELECT id, customerSOId, customerDeliveryDate, hookkaExpectedDD FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
           )
           .bind(...slice)
-          .all<{ id: string; customerSOId: string | null }>(),
+          .all<{
+            id: string;
+            customerSOId: string | null;
+            customerDeliveryDate: string | null;
+            hookkaExpectedDD: string | null;
+          }>(),
       ),
     ),
     Promise.all(
@@ -1180,7 +1207,13 @@ async function attachCustomerSO(
     ),
   ]);
   for (const res of soResults) {
-    for (const r of res.results ?? []) soMap.set(r.id, r.customerSOId || "");
+    for (const r of res.results ?? []) {
+      soMap.set(r.id, r.customerSOId || "");
+      soDatesMap.set(r.id, {
+        customerDeliveryDate: (r.customerDeliveryDate || "").slice(0, 10),
+        hookkaExpectedDD: (r.hookkaExpectedDD || "").slice(0, 10),
+      });
+    }
   }
   for (const res of coResults) {
     for (const r of res.results ?? []) coMap.set(r.id, r.customerCOId || "");
@@ -1188,6 +1221,9 @@ async function attachCustomerSO(
   for (const p of pos) {
     p.customerSO =
       soMap.get(p.salesOrderId) || coMap.get(p.consignmentOrderId) || "";
+    const dates = soDatesMap.get(p.salesOrderId);
+    p.customerDeliveryDate = dates?.customerDeliveryDate || "";
+    p.hookkaExpectedDD = dates?.hookkaExpectedDD || "";
   }
 }
 

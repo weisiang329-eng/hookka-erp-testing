@@ -2975,6 +2975,36 @@ export default function ProductionPage({
       sortable: true,
       render: (_v, row) => renderDueCell(row),
     },
+    // Planning aids (2026-05-28) — read-only. Customer DD = what the
+    // customer asked for; Our Expected DD = Hookka's internal target.
+    // Helps the operator schedule the editable Due column without
+    // overshooting the promise. Default-hidden on tablet to save width.
+    {
+      key: "customerDeliveryDate",
+      label: "Customer DD",
+      type: "date",
+      width: "110px",
+      sortable: true,
+      defaultHidden: isTablet,
+      render: (_v, row) => (
+        <span className="text-[11px] text-[#6B7280] tabular-nums">
+          {row.customerDeliveryDate ? fmtShortDate(row.customerDeliveryDate) : "—"}
+        </span>
+      ),
+    },
+    {
+      key: "hookkaExpectedDD",
+      label: "Our Expected DD",
+      type: "date",
+      width: "120px",
+      sortable: true,
+      defaultHidden: isTablet,
+      render: (_v, row) => (
+        <span className="text-[11px] text-[#6B7280] tabular-nums">
+          {row.hookkaExpectedDD ? fmtShortDate(row.hookkaExpectedDD) : "—"}
+        </span>
+      ),
+    },
     {
       key: "completedDate",
       label: "Completion",

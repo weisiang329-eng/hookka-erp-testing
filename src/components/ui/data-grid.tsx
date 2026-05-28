@@ -335,7 +335,14 @@ function ColumnFilterDropdown<T>({
   anchorRect: { left: number; top: number };
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [tab, setTab] = useState<"values" | "text">("values");
+  // Date columns default to the "Date Filters" (range picker) tab — the
+  // Values year-rollup tree (e.g. "2026 (492)") is useless for dates since
+  // every distinct day is its own leaf. Non-date columns still default to
+  // the Values checkbox list. Wei Siang 2026-05-28. (setTab still lets the
+  // operator switch to Values on a date column if they really want to.)
+  const [tab, setTab] = useState<"values" | "text">(
+    columnType === "date" ? "text" : "values",
+  );
   const [search, setSearch] = useState("");
   const [localText, setLocalText] = useState(textFilter.replace(/^[a-z_]+:/, ""));
   const [localTextMode, setLocalTextMode] = useState<string>(() => {

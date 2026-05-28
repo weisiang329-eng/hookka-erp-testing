@@ -571,18 +571,183 @@ export function generateDOPdf(
   doc.save(fileName);
 }
 
-// Consolidated packing list — EVERY selected DO rendered in the SAME DO
-// format, stacked into one document, each starting on its own page and
-// tagged STOP 1, STOP 2, STOP 3… The warehouse loads the whole truck from
-// this one document; each hub still has its own DO.
+// Cover page for the consolidated packing list: a manifest so the driver/
+// loader sees the whole run at a glance — how many DOs, which hubs +
+// customers, how many drop points, and the DO numbers (with line/unit
+// counts). The per-DO details follow on their own pages.
+function renderPackingSummary(doc: jsPDF, orders: DeliveryOrder[]) {
+  const pageW = doc.internal.pageSize.getWidth();
+  const m = 14;
+  const co = COMPANY.HOOKKA;
+  const list = orders as (DeliveryOrder & {
+    hubName?: string;
+    customerState?: string;
+  })[];
+
+  // --- Header ---
+  addHookkaLetterhead(doc, m, 12, 12);
+  const tx = m + 12 * (2038 / 907) + 5;
+  doc.setTextColor(...INK);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(13);
+  doc.text(co.name, tx, 16);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6.8);
+  doc.setTextColor(...FAINT);
+  doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
+  doc.text(co.address, tx, 24);
+
+  doc.setTextColor(...INK);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(17);
+  doc.text("PACKING LIST", pageW - m, 17, { align: "right" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(...FAINT);
+  doc.text("Delivery Run Manifest", pageW - m, 23, { align: "right" });
+  doc.text(fmtDate(new Date().toISOString()), pageW - m, 27.5, { align: "right" });
+
+  doc.setDrawColor(...RULE);
+  doc.setLineWidth(0.5);
+  doc.line(m, 31, pageW - m, 31);
+
+  // --- Run totals ---
+  const uniq = (vals: (string | undefined)[]) =>
+    Array.from(new Set(vals.map((v) => (v || "").trim()).filter(Boolean)));
+  const totalDOs = list.length;
+  const hubs = uniq(list.map((o) => o.hubName));
+  const customers = uniq(list.map((o) => o.customerName));
+  const dropPoints = uniq(list.map((o) => o.deliveryAddress || o.hubName || o.doNo));
+  const totalUnits = list.reduce(
+    (s, o) => s + (o.items || []).reduce((q, it) => q + (Number(it.quantity) || 0), 0),
+    0,
+  );
+  const totalM3 = list.reduce(
+    (s, o) => s + (Number((o as { totalM3?: number }).totalM3) || 0),
+    0,
+  );
+
+  let y = 38;
+  const colW = (pageW - 2 * m) / 3;
+  const kv = (label: string, val: string, x: number, yy: number) => {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(...FAINT);
+    doc.text(label, x, yy);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(...INK);
+    doc.text(val, x + 26, yy);
+  };
+  kv("Stops / DOs:", String(totalDOs), m, y);
+  kv("Drop Points:", String(dropPoints.length), m + colW, y);
+  kv("Total Units:", String(totalUnits), m + colW * 2, y);
+  y += 6;
+  kv("Hubs:", String(hubs.length), m, y);
+  kv("Customers:", String(customers.length), m + colW, y);
+  kv("Total M³:", totalM3.toFixed(2), m + colW * 2, y);
+  y += 6;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.5);
+  doc.setTextColor(...FAINT);
+  const hubLine = doc.splitTextToSize(`Hubs: ${hubs.join("  ·  ") || "-"}`, pageW - 2 * m);
+  doc.text(hubLine, m, y);
+  y += hubLine.length * 3.8 + 1;
+  const custLine = doc.splitTextToSize(
+    `Customers: ${customers.join("  ·  ") || "-"}`,
+    pageW - 2 * m,
+  );
+  doc.text(custLine, m, y);
+  y += custLine.length * 3.8 + 4;
+
+  // --- Manifest table (one row per DO) ---
+  autoTable(doc, {
+    startY: y,
+    margin: { left: m, right: m },
+    head: [
+      [
+        { content: "Stop", styles: { halign: "center" } },
+        "DO No.",
+        "Customer",
+        "Hub / Destination",
+        { content: "Lines", styles: { halign: "right" } },
+        { content: "Units", styles: { halign: "right" } },
+      ],
+    ],
+    body: list.map((o, i) => {
+      const units = (o.items || []).reduce(
+        (q, it) => q + (Number(it.quantity) || 0),
+        0,
+      );
+      const hub = `${o.hubName || o.customerName || "-"}${o.customerState ? ` (${o.customerState})` : ""}`;
+      return [
+        String(i + 1),
+        o.doNo,
+        o.customerName || "-",
+        hub,
+        String((o.items || []).length),
+        String(units),
+      ];
+    }) as RowInput[],
+    theme: "plain",
+    styles: {
+      font: "helvetica",
+      fontSize: 8,
+      cellPadding: { top: 1.6, bottom: 1.6, left: 1.8, right: 1.8 },
+      textColor: INK,
+      valign: "top",
+    },
+    headStyles: {
+      fontStyle: "bold",
+      fontSize: 7.5,
+      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
+      lineColor: RULE,
+    },
+    columnStyles: {
+      0: { cellWidth: 14, halign: "center" },
+      1: { cellWidth: 30, fontStyle: "bold" },
+      2: { cellWidth: 42 },
+      3: { cellWidth: "auto" },
+      4: { cellWidth: 16, halign: "right" },
+      5: { cellWidth: 16, halign: "right" },
+    },
+    didDrawCell: (data) => {
+      if (data.section === "body" && data.column.index === 5) {
+        const yy = data.cell.y + data.cell.height;
+        doc.setDrawColor(...HAIR);
+        doc.setLineWidth(0.1);
+        doc.setLineDashPattern([0.7, 0.7], 0);
+        doc.line(m, yy, pageW - m, yy);
+        doc.setLineDashPattern([], 0);
+      }
+    },
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const afterY = (doc as any).lastAutoTable?.finalY ?? y;
+  doc.setFont("helvetica", "italic");
+  doc.setFontSize(7);
+  doc.setTextColor(...FAINT);
+  doc.text(
+    "Each delivery order's full details follow on its own page (STOP 1, 2, 3…).",
+    m,
+    afterY + 6,
+  );
+}
+
+// Consolidated packing list — a manifest cover page (run summary + DO list),
+// then EVERY selected DO rendered in the SAME DO format, each on its own page
+// tagged STOP 1, STOP 2, STOP 3… The warehouse loads the whole truck from this
+// one document; each hub still has its own DO.
 export function generateConsolidatedDoPdf(
   orders: DeliveryOrder[],
   extrasById?: Record<string, DOPrintExtras>,
 ) {
   if (!orders || orders.length === 0) return;
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  renderPackingSummary(doc, orders);
   orders.forEach((o, i) => {
-    if (i > 0) doc.addPage();
+    doc.addPage();
     renderDoInto(doc, o, extrasById?.[o.id], { seq: i + 1, total: orders.length });
   });
   stampDoFooters(doc);

@@ -677,6 +677,18 @@ export default function DeliveryPage() {
     [plRaw],
   );
 
+  // Which packing list each DO already belongs to (doId → packingNo). Used to
+  // mark already-grouped DOs on the grid (ticked + locked) so the operator
+  // doesn't try to add them to another list and hit the "already in PL-xxx"
+  // error.
+  const doPackingMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const pl of packingLists) {
+      for (const did of pl.doIds || []) m.set(did, pl.packingNo);
+    }
+    return m;
+  }, [packingLists]);
+
   // Lookup map from productCode → unitM3, rebuilt whenever /api/products
   // resolves. Used by mapPO to stamp each Planning row with its product's
   // unit volume.
@@ -1408,10 +1420,12 @@ export default function DeliveryPage() {
   };
 
   const toggleSelectAll = () => {
-    if (selectedIds.size === filteredOrders.length) {
+    // Skip DOs already in a packing list — they can't be re-grouped.
+    const selectable = filteredOrders.filter((d) => !doPackingMap.has(d.id));
+    if (selectedIds.size >= selectable.length && selectable.length > 0) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(filteredOrders.map((d) => d.id)));
+      setSelectedIds(new Set(selectable.map((d) => d.id)));
     }
   };
 
@@ -1461,12 +1475,9 @@ export default function DeliveryPage() {
   // items get added afterwards from Edit mode's Add-Item panel. Distinct
   // from openCreateDODialog by the "manual" sentinel so the same dialog
   // body can render either flow without duplicating markup.
-  const openManualCreateDODialog = () => {
-    setCreateDODrops([]);
-    setCreateDOForm({ driverId: "", vehicleId: "", driverPersonId: "", remarks: "", deliveryDate: "" });
-    setManualCustomerId("");
-    setCreateDODialog("manual");
-  };
+  // Manual "+ Create DO" entry point removed 2026-05-28 (Wei Siang) — DOs are
+  // created from the Pending Delivery convert flow. The shared Create Delivery
+  // Order dialog stays for that convert flow.
 
   const confirmCreateDO = async () => {
     if (!createDODialog) return;
@@ -2656,17 +2667,49 @@ export default function DeliveryPage() {
         label: "",
         width: "40px",
         align: "center",
-        render: (_value, row) => (
-          <input
-            type="checkbox"
-            checked={selectedIds.has(row.id)}
-            onChange={(e) => {
-              e.stopPropagation();
-              toggleSelect(row.id);
-            }}
-            className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
-          />
-        ),
+        render: (_value, row) => {
+          const inPL = doPackingMap.get(row.id);
+          if (inPL) {
+            // Already grouped into a packing list — show ticked + locked so
+            // the operator sees it's handled and can't re-add it.
+            return (
+              <input
+                type="checkbox"
+                checked
+                disabled
+                title={`Already in ${inPL}`}
+                className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32] cursor-not-allowed opacity-60"
+              />
+            );
+          }
+          return (
+            <input
+              type="checkbox"
+              checked={selectedIds.has(row.id)}
+              onChange={(e) => {
+                e.stopPropagation();
+                toggleSelect(row.id);
+              }}
+              className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
+            />
+          );
+        },
+      },
+      {
+        key: "_packingList",
+        label: "Packing List",
+        width: "110px",
+        align: "center",
+        render: (_value, row) => {
+          const inPL = doPackingMap.get(row.id);
+          return inPL ? (
+            <span className="inline-flex items-center rounded-full bg-[#EEF3E4] px-2 py-0.5 text-[11px] font-medium text-[#4F7C3A]">
+              {inPL}
+            </span>
+          ) : (
+            <span className="text-[#C9C2BA]">—</span>
+          );
+        },
       },
       {
         key: "_view",
@@ -2907,7 +2950,7 @@ export default function DeliveryPage() {
         ),
       },
     ],
-    [selectedIds, providers]
+    [selectedIds, providers, doPackingMap]
   );
 
   // ---------- Context menu ----------
@@ -3342,24 +3385,15 @@ export default function DeliveryPage() {
                 <Truck className="h-5 w-5 text-[#6B5C32]" /> Delivery Orders
               </CardTitle>
               <div className="flex items-center gap-3">
-                {/* Manual create — only meaningful on Pending Dispatch.
-                    Dispatched / Delivered / Invoice tabs already represent
-                    DOs that have moved past creation, so the entry point
-                    would be confusing there. */}
-                {activeTab === "pending_dispatch" && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={openManualCreateDODialog}
-                  >
-                    <Plus className="h-3.5 w-3.5" /> Create DO
-                  </Button>
-                )}
                 {filteredOrders.length > 0 && (
                   <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
-                      checked={selectedIds.size === filteredOrders.length && filteredOrders.length > 0}
+                      checked={
+                        selectedIds.size > 0 &&
+                        selectedIds.size ===
+                          filteredOrders.filter((d) => !doPackingMap.has(d.id)).length
+                      }
                       onChange={toggleSelectAll}
                       className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
                     />

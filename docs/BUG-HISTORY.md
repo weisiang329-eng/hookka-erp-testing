@@ -60,16 +60,22 @@ downstream consumes; idempotent absolute SET; touches only wip_items, leaves
 job_cards/fg_units intact). Result: 122 rows updated, 207 zero-rows deleted,
 **drift 73 → 0**. Negatives 84 → 13, worst −30 → −4.
 
-**Residual negatives zeroed (operator-confirmed):** the 13 remaining negatives
-(worst −4) were each traced to skipped-process cases — the upstream producer
-JC sat in WAITING/CANCELLED (not COMPLETED) while a downstream dept had already
-consumed the component (e.g. `1013-(K) HB 24" Webbing` had 2 WEBBING JCs still
-WAITING; `5531 Back Cushion KN390-14` had 2 FAB_SEW JCs CANCELLED). Negative
-physical WIP is impossible, so per operator confirmation these were floored:
-`UPDATE wip_items SET stock_qty = 0 WHERE stock_qty < 0` (the codebase's
-sanctioned clamp, import-completion.ts:4467). Result: **negatives 84 → 13 → 0**;
-all WIP stock now ≥ 0. Caveat: a future physical count may raise specific items
-above 0 if stock genuinely remains — adjust up from the count.
+**Residual 13 negatives — kept as a to-fix list (not floored):** the 13
+remaining negatives (worst −4) were each traced to skipped-process cases — the
+upstream producer JC sits in WAITING/CANCELLED (not COMPLETED) while a
+downstream dept already consumed the component. Examples: `8" Divan- 5FT Foam`
+−4 (WEBBING CANCELLED + WAITING), `5531 Back Cushion KN390-14` −3 (FAB_SEW
+CANCELLED + WAITING), several FOAM/FAB_SEW WAITING ones at −1..−3. They were
+BRIEFLY floored to 0, then **restored to true job-card values** (re-ran the
+rebuild) per operator request — the honest signal is more useful than a clean
+0, AND it is root-fix-compatible: completing the stuck upstream JC fires the
+cascade `+qty` and nets the item to 0, whereas a floored 0 would double-count.
+Verdict: negatives 84 → 13 (true gaps), worst −30 → −4. The 13 are now a
+"待补工序 / un-recorded process" punch-list:
+  • WAITING → if the work was actually done, mark the JC complete → WIP
+    auto-corrects.
+  • CANCELLED-but-consumed (Divan 5FT Foam, Cushion KN390-14) → investigate:
+    downstream consumed a component recorded as cancelled.
 
 **Permanent fix (pending, #76):** pass `options.orgId` from the
 import-completion callers so the `wip_cascade_log` dedupe applies to

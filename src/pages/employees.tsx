@@ -4159,7 +4159,7 @@ function DepartmentPerformanceTab({
                 <option value="">All departments</option>
                 {orderedDepts.map((d) => (
                   <option key={d.code} value={d.code}>
-                    {d.code} - {d.name}
+                    {d.name}
                   </option>
                 ))}
               </select>

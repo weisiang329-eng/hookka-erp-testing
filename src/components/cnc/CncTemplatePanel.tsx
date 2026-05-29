@@ -7,9 +7,11 @@
 // Reused inside the Products detail/expanded row so the operator can grab the
 // cutting file for the BUYI E-DIGIT cutter without leaving the product page.
 // ---------------------------------------------------------------------------
-import { useMemo } from "react";
-import { useCachedJson } from "@/lib/cached-fetch";
-import { Scissors } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { Scissors, Upload, Loader2 } from "lucide-react";
+import { useToast } from "@/components/ui/toast";
+import { uploadCncFiles } from "@/lib/cnc-import";
 
 // Mirror the shape returned by GET /api/cnc-templates.
 export type CncTemplate = {
@@ -74,7 +76,36 @@ export function CncTemplatePanel({
   const url = productCode
     ? `/api/cnc-templates?productCode=${encodeURIComponent(productCode)}`
     : null;
-  const { data, loading } = useCachedJson<CncTemplatesResponse>(url);
+  const { data, loading, refresh } = useCachedJson<CncTemplatesResponse>(url);
+
+  const { toast } = useToast();
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Bulk-upload cutting files for THIS product. The server still parses the
+  // productCode out of each filename, so even files dropped here are filed
+  // under the code in their name (usually this product's). Refresh the panel
+  // list afterwards.
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const files = Array.from(input.files || []);
+    input.value = ""; // allow re-selecting the same files later
+    if (files.length === 0) return;
+
+    setUploading(true);
+    try {
+      const msg = await uploadCncFiles(files);
+      toast.success(msg);
+      // Refresh this panel and the full library list (both cache keys).
+      if (url) invalidateCache(url);
+      invalidateCachePrefix("/api/cnc-templates");
+      refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const templates = useMemo(() => {
     const list = Array.isArray(data?.data) ? data!.data! : [];
@@ -89,6 +120,33 @@ export function CncTemplatePanel({
       <div className="flex items-center gap-2 mb-2">
         <Scissors className="h-4 w-4 text-[#6B5C32]" strokeWidth={1.75} />
         <h4 className="text-sm font-semibold text-[#374151]">CNC Cutting Template</h4>
+
+        {/* Bulk upload for this product. Opens a hidden multi-file picker. */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            fileInputRef.current?.click();
+          }}
+          disabled={uploading}
+          className="ml-auto inline-flex items-center gap-1 rounded-md border border-[#A8CAD2] bg-[#E0EDF0] px-2 py-0.5 text-[11px] font-medium text-[#3E6570] hover:bg-[#D2E4E8] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {uploading ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Upload className="h-3 w-3" />
+          )}
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".dgt,.prj,.emf"
+          multiple
+          className="hidden"
+          onClick={(e) => e.stopPropagation()}
+          onChange={handleUpload}
+        />
       </div>
 
       {loading && templates.length === 0 ? (

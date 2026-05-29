@@ -7,11 +7,13 @@
 // real download URL). Client-side search filters the loaded list by
 // productCode / displayName / pieceLabel.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useMemo, useRef, useState } from "react";
+import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { SkeletonTable } from "@/components/ui/skeleton";
-import { Scissors, Search } from "lucide-react";
+import { Scissors, Search, Upload, Loader2 } from "lucide-react";
+import { useToast } from "@/components/ui/toast";
+import { uploadCncFiles } from "@/lib/cnc-import";
 import type { CncTemplate } from "@/components/cnc/CncTemplatePanel";
 
 type CncTemplatesResponse = { success?: boolean; data?: CncTemplate[] };
@@ -42,8 +44,36 @@ function FileButton({
 
 export default function CncTemplatesPage() {
   const [query, setQuery] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast } = useToast();
 
-  const { data, loading } = useCachedJson<CncTemplatesResponse>("/api/cnc-templates");
+  const { data, loading, refresh } = useCachedJson<CncTemplatesResponse>(
+    "/api/cnc-templates",
+  );
+
+  // Bulk-upload chosen files, then refresh the library list. The server parses
+  // each filename into product/size/width/piece — the operator just picks the
+  // .dgt/.prj/.emf files.
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const files = Array.from(input.files || []);
+    input.value = ""; // allow re-selecting the same files later
+    if (files.length === 0) return;
+
+    setUploading(true);
+    try {
+      const msg = await uploadCncFiles(files);
+      toast.success(msg);
+      // Drop the cached list so the new rows show immediately, then refetch.
+      invalidateCache("/api/cnc-templates");
+      refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const templates = useMemo(
     () => (Array.isArray(data?.data) ? data!.data! : []),
@@ -85,15 +115,40 @@ export default function CncTemplatesPage() {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="relative max-w-sm">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9CA3AF]" />
+      {/* Search + Upload */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="relative max-w-sm flex-1 min-w-[200px]">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9CA3AF]" />
+          <input
+            type="text"
+            placeholder="Search by product code, name, or piece…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="w-full rounded-md border border-[#E2DDD8] bg-white pl-8 pr-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+          />
+        </div>
+
+        {/* Bulk upload: opens a hidden multi-file picker (.dgt/.prj/.emf). */}
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="inline-flex items-center gap-2 rounded-md bg-[#6B5C32] px-3 py-2 text-sm font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+        >
+          {uploading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Upload className="h-4 w-4" />
+          )}
+          {uploading ? "Uploading…" : "Upload files"}
+        </button>
         <input
-          type="text"
-          placeholder="Search by product code, name, or piece…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="w-full rounded-md border border-[#E2DDD8] bg-white pl-8 pr-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+          ref={fileInputRef}
+          type="file"
+          accept=".dgt,.prj,.emf"
+          multiple
+          className="hidden"
+          onChange={handleUpload}
         />
       </div>
 

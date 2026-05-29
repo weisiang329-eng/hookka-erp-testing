@@ -108,6 +108,149 @@ function genId(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Filename parsing for the BULK import endpoint.
+//
+// Files arrive named by a BUYI cutter naming convention that the operator
+// types by hand, so it's loose and inconsistent. We parse the base filename
+// (extension stripped) into the structured columns best-effort. The parser
+// NEVER throws — when a token can't be classified it lands in pieceLabel, and
+// the worst case falls back to productCode='' + pieceLabel=base so the row is
+// still importable and editable later.
+//
+// Worked examples (base → parsed fields):
+//   "1007 5 FT 20' dgt"  → code 1007, size 5FT,   width 20',  piece ""
+//   "2041 6FT 24''"      → code 2041, size 6FT,   width 24'', piece ""
+//   "5535 ARM"           → code 5535, size "",    width "",   piece ARM
+//   "5535 CUSHION 30'"   → code 5535, size "",    width 30',  piece CUSHION
+//   "1013-1"             → code 1013, size "",    width "",   piece 1
+// ---------------------------------------------------------------------------
+
+// File extensions we accept. Anything else is ignored by the importer.
+const IMPORT_EXTS = new Set(["dgt", "prj", "emf"]);
+
+// Recognised "piece" words from the cutter convention. Matched case-insensitively.
+const PIECE_WORDS = new Set([
+  "ARM",
+  "TANGAN",
+  "CUSHION",
+  "DIVAN",
+  "2S",
+  "3S",
+  "1S",
+  "NA",
+  "HB",
+]);
+
+type ParsedTemplateName = {
+  productCode: string;
+  sizeLabel: string;
+  fabricWidth: string;
+  pieceLabel: string;
+};
+
+// Split "name.ext" into [base, ext-lowercased]. A filename with no dot returns
+// an empty extension. Path separators are stripped first (defence in depth —
+// the caller already takes the basename).
+function splitNameExt(filename: string): { base: string; ext: string } {
+  const name = safeBasename(filename);
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return { base: name, ext: "" };
+  return { base: name.slice(0, dot), ext: name.slice(dot + 1).toLowerCase() };
+}
+
+// Remove a trailing literal "dgt" word from a base (e.g. "1007 5 FT 20' dgt").
+// Some operators append the kind to the name; it isn't part of the identity.
+function stripTrailingDgtWord(base: string): string {
+  return base.replace(/[\s_-]+dgt\s*$/i, "").trim();
+}
+
+// A token looks like a fabric width when it's digits followed by one or two
+// inch marks: 20', 24'', 30'. (NOT a foot size — those carry an explicit FT.)
+function isWidthToken(tok: string): boolean {
+  return /^\d+\s*''?'?$/.test(tok) && /['']/.test(tok);
+}
+
+// A token looks like a foot size when it's a number followed by FT: 5FT, 3.5FT.
+function isSizeToken(tok: string): boolean {
+  return /^\d+(\.\d+)?\s*FT$/i.test(tok);
+}
+
+// Normalise a foot-size token to the compact "5FT" / "3.5FT" form.
+function normalizeSizeToken(tok: string): string {
+  const m = tok.match(/^(\d+(?:\.\d+)?)\s*FT$/i);
+  return m ? `${m[1]}FT` : tok;
+}
+
+// Parse a base filename into structured fields. Tolerant + never throws.
+function parseTemplateName(rawBase: string): ParsedTemplateName {
+  const base = stripTrailingDgtWord(rawBase);
+  const result: ParsedTemplateName = {
+    productCode: "",
+    sizeLabel: "",
+    fabricWidth: "",
+    pieceLabel: "",
+  };
+  try {
+    if (!base) return result;
+
+    // productCode = leading token: digits, optionally a trailing letter and/or
+    // a parenthesised group (e.g. "1007", "315A", "BO315(2)"), up to the first
+    // space or '-'. We anchor on the start of the string.
+    const codeMatch = base.match(/^([A-Za-z]*\d+[A-Za-z]?(?:\([^)]*\))?)/);
+    if (codeMatch) result.productCode = codeMatch[1];
+
+    // Remainder after the productCode, split on spaces, '-', and underscores
+    // into candidate tokens. The leading separator (space or '-') is consumed.
+    const rest = base.slice(result.productCode.length).replace(/^[\s_-]+/, "");
+    const tokens = rest.split(/[\s_]+/).flatMap((t) => t.split("-")).filter(Boolean);
+
+    const leftovers: string[] = [];
+    // Foot sizes can arrive as two tokens ("5" then "FT") — fold a bare number
+    // followed by a standalone "FT" back together before classifying.
+    const merged: string[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const cur = tokens[i];
+      const next = tokens[i + 1];
+      if (/^\d+(\.\d+)?$/.test(cur) && next && /^FT$/i.test(next)) {
+        merged.push(`${cur}${next}`);
+        i++; // consume the FT token
+      } else {
+        merged.push(cur);
+      }
+    }
+
+    for (const tok of merged) {
+      if (!result.sizeLabel && isSizeToken(tok)) {
+        result.sizeLabel = normalizeSizeToken(tok);
+      } else if (!result.fabricWidth && isWidthToken(tok)) {
+        result.fabricWidth = tok.replace(/\s+/g, "");
+      } else if (!result.pieceLabel && PIECE_WORDS.has(tok.toUpperCase())) {
+        result.pieceLabel = tok.toUpperCase();
+      } else {
+        leftovers.push(tok);
+      }
+    }
+
+    // Any non-size/non-width token that wasn't a recognised piece word still
+    // carries meaning (e.g. "1" in "1013-1", or an unlisted piece name). Fold
+    // the leftovers into pieceLabel if we don't already have one.
+    if (!result.pieceLabel && leftovers.length > 0) {
+      result.pieceLabel = leftovers.join(" ");
+    }
+
+    // Last-resort guard: if we couldn't even find a productCode, keep the whole
+    // base as the pieceLabel so the row is still meaningful and editable.
+    if (!result.productCode && !result.pieceLabel) {
+      result.pieceLabel = base;
+    }
+  } catch {
+    // Defensive: never let a weird filename break the whole import batch.
+    return { productCode: "", sizeLabel: "", fabricWidth: "", pieceLabel: base };
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // GET / — list templates. Optional ?q= (case-insensitive on product_code /
 // display_name / piece_label) and ?productCode= exact filter. Ordered by
 // product_code, size_label.
@@ -362,6 +505,231 @@ app.post("/", async (c) => {
     return c.json(
       { success: false, error: err instanceof Error ? err.message : "Create failed." },
       400,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /import — BULK upload. multipart/form-data with one or more files under
+// the repeated field name `files` (accept .dgt / .prj / .emf only). The server
+// PARSES each filename into productCode / sizeLabel / fabricWidth / pieceLabel
+// (see parseTemplateName), GROUPS files that share the same
+// (productCode, base-without-trailing-"dgt") into ONE row, and UPSERTs:
+//   * existing row with the same (product_code, display_name) → update its
+//     dgt_key/prj_key/emf_key + size_bytes (re-uploading any kind replaces it)
+//   * otherwise → insert a new row
+// Returns { success, imported: <rows>, files: <accepted files>, rows: [...] }.
+// ---------------------------------------------------------------------------
+app.post("/import", async (c) => {
+  const denied = await requirePermission(c, "products", "create");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+
+  let form: FormData;
+  try {
+    form = await c.req.formData();
+  } catch {
+    return c.json({ success: false, error: "Invalid multipart body." }, 400);
+  }
+
+  // Collect every uploaded file under the repeated `files` field.
+  const incoming = form
+    .getAll("files")
+    .filter((v): v is File => v instanceof File && v.size > 0);
+  if (incoming.length === 0) {
+    return c.json({ success: false, error: "No files were uploaded." }, 400);
+  }
+
+  // Group files by (productCode + display identity). The display identity is
+  // the base filename with any trailing "dgt" word stripped, so the .dgt/.prj/
+  // .emf trio that share a base collapse into one row.
+  type Group = {
+    parsed: ParsedTemplateName;
+    displayName: string;
+    files: Partial<Record<FileKind, File>>;
+  };
+  const groups = new Map<string, Group>();
+  let acceptedFiles = 0;
+
+  for (const file of incoming) {
+    const { base, ext } = splitNameExt(file.name);
+    if (!IMPORT_EXTS.has(ext)) continue; // ignore non-cutter extensions
+    const kind = ext as FileKind;
+    const identity = stripTrailingDgtWord(base);
+    const parsed = parseTemplateName(base);
+    // displayName is the base verbatim (sans trailing "dgt"), so the trio
+    // shares one display name and one row.
+    const displayName = identity || base;
+    const groupKey = `${parsed.productCode}|${displayName.toLowerCase()}`;
+
+    let g = groups.get(groupKey);
+    if (!g) {
+      g = { parsed, displayName, files: {} };
+      groups.set(groupKey, g);
+    }
+    // Last one wins if the same kind appears twice in the batch.
+    g.files[kind] = file;
+    acceptedFiles++;
+  }
+
+  if (groups.size === 0) {
+    return c.json(
+      {
+        success: false,
+        error: "No .dgt / .prj / .emf files found in the upload.",
+      },
+      400,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const outRows: ReturnType<typeof rowToCncTemplate>[] = [];
+  const uploaded: string[] = []; // track for best-effort cleanup on failure
+
+  try {
+    for (const g of groups.values()) {
+      const productCode = g.parsed.productCode;
+      const displayName = g.displayName;
+
+      // Upload each provided kind under the existing key scheme:
+      // cnc-templates/<productCode>/<displayName>.<ext>
+      const keyBase = `cnc-templates/${productCode}/${safeBasename(displayName)}`;
+      const newKeys: Partial<Record<FileKind, string>> = {};
+      let batchBytes = 0;
+      for (const kind of FILE_KINDS) {
+        const f = g.files[kind];
+        if (!f) continue;
+        const key = `${keyBase}.${kind}`;
+        const ct = f.type || "application/octet-stream";
+        await putFile(c.env, DEFAULT_BUCKET, key, await f.arrayBuffer(), ct);
+        newKeys[kind] = key;
+        batchBytes += f.size;
+        uploaded.push(key);
+      }
+
+      // Look for an existing row with the same (product_code, display_name).
+      const existing = await c.var.DB.prepare(
+        `SELECT ${SELECT_COLS} FROM cnc_templates
+           WHERE org_id = ? AND product_code = ? AND display_name = ?`,
+      )
+        .bind(orgId, productCode, displayName)
+        .first<CncTemplateRow>();
+
+      let rowId: string;
+      if (existing) {
+        // UPDATE: only overwrite the key columns for kinds we actually
+        // re-uploaded; keep any previously-stored keys for the other kinds.
+        rowId = existing.id;
+        const finalKeys: Record<FileKind, string> = {
+          dgt: newKeys.dgt ?? existing.dgtKey ?? "",
+          prj: newKeys.prj ?? existing.prjKey ?? "",
+          emf: newKeys.emf ?? existing.emfKey ?? "",
+        };
+        await c.var.DB.prepare(
+          `UPDATE cnc_templates
+             SET dgt_key = ?, prj_key = ?, emf_key = ?,
+                 size_label = ?, fabric_width = ?, piece_label = ?,
+                 size_bytes = ?, updated_at = ?
+           WHERE id = ? AND org_id = ?`,
+        )
+          .bind(
+            finalKeys.dgt,
+            finalKeys.prj,
+            finalKeys.emf,
+            // Fill blanks from the parse, but don't clobber existing values.
+            existing.sizeLabel || g.parsed.sizeLabel,
+            existing.fabricWidth || g.parsed.fabricWidth,
+            existing.pieceLabel || g.parsed.pieceLabel,
+            batchBytes,
+            now,
+            rowId,
+            orgId,
+          )
+          .run();
+      } else {
+        // INSERT a new row.
+        rowId = genId();
+        await c.var.DB.prepare(
+          `INSERT INTO cnc_templates
+             (id, org_id, product_code, size_label, fabric_width, piece_label,
+              display_name, folder, dgt_key, prj_key, emf_key, drive_folder_id,
+              size_bytes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(
+            rowId,
+            orgId,
+            productCode,
+            g.parsed.sizeLabel,
+            g.parsed.fabricWidth,
+            g.parsed.pieceLabel,
+            displayName,
+            "",
+            newKeys.dgt ?? "",
+            newKeys.prj ?? "",
+            newKeys.emf ?? "",
+            "",
+            batchBytes,
+            now,
+            now,
+          )
+          .run();
+      }
+
+      const saved = await c.var.DB.prepare(
+        `SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ? AND org_id = ?`,
+      )
+        .bind(rowId, orgId)
+        .first<CncTemplateRow>();
+      if (saved) outRows.push(rowToCncTemplate(saved));
+
+      await emitAudit(c, {
+        resource: "cnc-templates",
+        resourceId: rowId,
+        action: existing ? "update" : "create",
+        after: {
+          productCode,
+          displayName,
+          sizeLabel: g.parsed.sizeLabel,
+          fabricWidth: g.parsed.fabricWidth,
+          pieceLabel: g.parsed.pieceLabel,
+          sizeBytes: batchBytes,
+          source: "import",
+        },
+      }).catch(() => {});
+    }
+
+    return c.json({
+      success: true,
+      imported: outRows.length,
+      files: acceptedFiles,
+      rows: outRows,
+    });
+  } catch (err) {
+    if (err instanceof SupabaseStorageNotConfiguredError) {
+      return c.json({ success: false, error: "File storage unavailable." }, 503);
+    }
+    if (isMissingTable(err)) {
+      return c.json(
+        {
+          success: false,
+          error: "CNC template storage is not set up yet. Apply migration 0140.",
+        },
+        503,
+      );
+    }
+    // Best-effort cleanup of objects uploaded before the failure.
+    for (const key of uploaded) {
+      try {
+        await deleteFile(c.env, DEFAULT_BUCKET, key);
+      } catch {
+        // Already gone / transient — a sweeper will catch the orphan.
+      }
+    }
+    console.error("[cnc-templates/import] bulk import failed:", err);
+    return c.json(
+      { success: false, error: err instanceof Error ? err.message : "Import failed." },
+      500,
     );
   }
 });

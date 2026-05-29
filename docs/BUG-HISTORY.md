@@ -34,6 +34,32 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-005 — Linked Production Orders: COMPLETED PO shows stale mid-stream department (e.g. "WEBBING")
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang on a Sales Order detail page: a production order that is
+fully COMPLETED still showed a "Current Dept" of a mid-stream station (e.g.
+WEBBING) in the Linked Production Orders panel — looked like the order was stuck
+even though every job card was done.
+
+**Root cause:** `production_orders.current_department` is a denormalized pointer
+that only advances as job cards move; it is not reset/cleared when the order
+finishes, so it drifts and can freeze on whatever station it last pointed at.
+The Status column was already correct (COMPLETED); only the Current Dept text was
+stale. (We verified one example, `pord-so-a9b63f21-01`: status COMPLETED, all job
+cards COMPLETED, but `current_department` = WEBBING.)
+
+**Fix (display-only, low risk):** `src/pages/sales/detail.tsx` — the Current Dept
+cell now renders `"Done"` when `po.status === "COMPLETED"`, otherwise the
+formatted department as before. No data/backend change; the drift in
+`current_department` itself is left untouched (root-cause cleanup deferred).
+
+**Verified:** `tsc --noEmit` + `eslint` clean; live-verified on prod.
+
+---
+
 ## FEATURE-2026-05-29-001 — User-resizable table columns (drag to resize, persisted)
 
 **Status:** 🟢 Shipped (2026-05-29)

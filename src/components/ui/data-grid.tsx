@@ -1494,25 +1494,26 @@ export function DataGrid<T extends Record<string, any>>({
     return new Set();
   });
   // ── Column widths (user-resizable) ──
-  // Same two-tier persistence as visibility/order: personal
-  // `datagrid-colw-${gridId}-${userKey()}` wins, else org-default, else the
-  // column def's own `width`. Map of colKey -> css width string (e.g. "140px").
+  // Persisted per-user. Unlike visibility/order (gridId-only), widths also
+  // persist on grids WITHOUT a gridId by falling back to a key derived from
+  // the column set — so "remember my widths" works everywhere. personal
+  // `datagrid-colw-${widthStoreId}-${userKey()}` wins, else org-default, else
+  // the column def's own `width`. Map of colKey -> css width (e.g. "140px").
+  const widthStoreId = gridId || `auto:${columns.map(c => c.key).join(",")}`;
   const [colWidths, setColWidths] = useState<Record<string, string>>(() => {
-    if (gridId && typeof window !== "undefined") {
+    if (typeof window !== "undefined") {
       try {
-        const personal = localStorage.getItem(`datagrid-colw-${gridId}-${userKey()}`);
+        const personal = localStorage.getItem(`datagrid-colw-${widthStoreId}-${userKey()}`);
         if (personal) return JSON.parse(personal);
-        const orgDefault = localStorage.getItem(`datagrid-colw-${gridId}-org-default`);
+        const orgDefault = localStorage.getItem(`datagrid-colw-${widthStoreId}-org-default`);
         if (orgDefault) return JSON.parse(orgDefault);
       } catch { /* ignore */ }
     }
     return {};
   });
   const persistColWidths = useCallback((w: Record<string, string>) => {
-    if (gridId) {
-      try { localStorage.setItem(`datagrid-colw-${gridId}-${userKey()}`, JSON.stringify(w)); } catch { /* ignore */ }
-    }
-  }, [gridId]);
+    try { localStorage.setItem(`datagrid-colw-${widthStoreId}-${userKey()}`, JSON.stringify(w)); } catch { /* ignore */ }
+  }, [widthStoreId]);
   // Double-click the handle → drop the override (back to the column's default).
   const resetColumnWidth = useCallback((key: string) => {
     setColWidths(prev => {

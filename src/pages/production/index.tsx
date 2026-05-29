@@ -6033,7 +6033,12 @@ export default function ProductionPage({
         ) : (
           <div
             ref={overviewBodyRef}
-            className="overflow-y-auto"
+            // overflow-x-hidden: the body only scrolls VERTICALLY. Horizontal
+            // scrolling is owned by the outer wrapper (which keeps header +
+            // rows aligned). Without this the body grew its own, unsynced
+            // horizontal scrollbar from the vertical scrollbar's gutter —
+            // two left/right scrollbars. — Wei Siang 2026-05-29
+            className="overflow-y-auto overflow-x-hidden"
             style={{ maxHeight: "calc(100vh - 320px)", minWidth: overviewMinWidth }}
           >
           <div

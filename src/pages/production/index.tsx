@@ -1,4 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition } from "react";
+import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
@@ -113,6 +114,33 @@ function OverviewHeader({
   const isSorted = sort?.key === sortKey;
   const dir = isSorted ? sort?.dir : null;
   const open = openFilterCol === filterCol;
+  // Portal the filter popover to <body> with fixed positioning anchored to the
+  // funnel button. Required because the matrix now lives inside a horizontal
+  // scroll container — an in-flow absolute popover would be clipped by that
+  // overflow box. Re-anchors on scroll/resize so it tracks the button.
+  const filterBtnRef = useRef<HTMLButtonElement>(null);
+  const [popPos, setPopPos] = useState<{ top: number; left: number } | null>(null);
+  /* eslint-disable react-hooks/set-state-in-effect -- measure-then-position a
+     portaled popover before paint; synchronous setState inside useLayoutEffect
+     is the intended pattern for anchoring an element to a measured DOM rect. */
+  useLayoutEffect(() => {
+    if (!open) { setPopPos(null); return; }
+    const place = () => {
+      const r = filterBtnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const PANEL_W = 200;
+      const left = Math.max(8, Math.min(r.right - PANEL_W, window.innerWidth - PANEL_W - 8));
+      setPopPos({ top: r.bottom + 4, left });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   return (
     <div
       className={`relative px-1.5 py-2.5 ${align === "center" ? "text-center" : "text-left"} ${border ? "border-l border-[#E6E0D9]" : ""}`}
@@ -131,6 +159,7 @@ function OverviewHeader({
           </span>
         </button>
         <button
+          ref={filterBtnRef}
           type="button"
           className="relative h-4 w-4 flex items-center justify-center rounded hover:bg-[#E6E0D9] cursor-pointer flex-shrink-0"
           onClick={(e) => {
@@ -147,21 +176,24 @@ function OverviewHeader({
           )}
         </button>
       </div>
-      {open && (
+      {open && popPos && createPortal(
         <>
-          {/* Outside-click + esc capture overlay so the popover dismisses
-              cleanly without trapping clicks anywhere else. */}
+          {/* Outside-click capture overlay so the popover dismisses cleanly.
+              Portaled to <body> (with the panel) so the horizontal-scroll
+              container around the matrix can't clip it. */}
           <div
-            className="fixed inset-0 z-30"
+            className="fixed inset-0 z-[60]"
             onClick={() => setOpenFilterCol(null)}
           />
           <div
-            className="absolute top-full left-0 mt-1 z-40 bg-white border border-[#E6E0D9] rounded-md shadow-lg p-3 min-w-[180px] normal-case tracking-normal text-[12px] font-normal text-[#1F1D1B]"
+            className="fixed z-[61] bg-white border border-[#E6E0D9] rounded-md shadow-lg p-3 min-w-[180px] normal-case tracking-normal text-[12px] font-normal text-[#1F1D1B]"
+            style={{ top: popPos.top, left: popPos.left }}
             onClick={(e) => e.stopPropagation()}
           >
             {renderFilter()}
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );
@@ -5735,10 +5767,15 @@ export default function ProductionPage({
             </button>
           </div>
         )}
+        {/* Widen dept columns + scroll the whole matrix left/right as one unit.
+            Header and body share minWidth:1684 so they scroll together; the
+            column filter popovers are portaled to <body> so this overflow box
+            can't clip them. — Wei Siang 2026-05-29 */}
+        <div className="overflow-x-auto">
         {/* Header row */}
         <div
           className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9] relative z-20"
-          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
+          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(108px,1fr))", minWidth: 1684 }}
         >
           <OverviewHeader
             label="SO ID"
@@ -5911,7 +5948,7 @@ export default function ProductionPage({
           <div
             ref={overviewBodyRef}
             className="overflow-y-auto"
-            style={{ maxHeight: "calc(100vh - 320px)" }}
+            style={{ maxHeight: "calc(100vh - 320px)", minWidth: 1684 }}
           >
           <div
             style={{
@@ -5950,7 +5987,8 @@ export default function ProductionPage({
               data-index={virtualRow.index}
               className={`grid items-stretch border-b border-[#F0EBE3] cursor-pointer ${rowCls}`}
               style={{
-                gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(0,1fr))",
+                gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(108px,1fr))",
+                minWidth: 1684,
                 position: "absolute",
                 top: 0,
                 left: 0,
@@ -6100,6 +6138,7 @@ export default function ProductionPage({
           </div>
           </div>
         )}
+        </div>{/* /overflow-x-auto matrix scroll wrapper */}
 
         {/* Footer */}
         <div className="px-4 py-2 bg-[#FAF8F4] border-t border-[#E6E0D9] text-[10px] text-[#8A7F73] flex items-center justify-between">

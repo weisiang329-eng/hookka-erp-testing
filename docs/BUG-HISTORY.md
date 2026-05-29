@@ -34,6 +34,36 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-004 — Production Overview matrix: dept column headers truncated to "F.."
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang: "这个还在 compact 着?". On the Production → Overview matrix
+the 8 department columns (Fab Cut … Packing) were squished so the headers showed
+only "F.. / W.. / U.. / P..", impossible to tell apart.
+
+**Root cause:** the matrix grid used `repeat(8, minmax(0,1fr))` for the dept
+columns, so they shrank to share leftover width and the header label
+(+ sort/filter icons) ellipsised to one letter. The matrix had no horizontal
+scroll, so on a <~1700px screen everything compressed.
+
+**Fix (per Wei Siang: widen + scroll, not abbreviate):**
+- dept columns `minmax(0,1fr)` → `minmax(108px,1fr)` (full names fit).
+- wrapped the header + virtualized body in a single `overflow-x-auto` container
+  with a shared `minWidth: 1684` so they scroll left/right together (one
+  scrollbar, header stays aligned with rows); flexes to full width on wide
+  screens, scrolls on narrow.
+- the per-column filter popovers (`OverviewHeader`) were `absolute` and would be
+  clipped by the new scroll box, so they're now portaled to `<body>` with fixed
+  positioning anchored to the funnel button (re-anchors on scroll/resize).
+
+**Verified:** `tsc` + `eslint` clean; live-verified on prod — full dept names
+visible, matrix scrolls left/right, filter dropdowns open un-clipped while
+scrolled, vertical scroll + sort still work.
+
+---
+
 ## BUG-2026-05-29-003 — Sofa lines printed a bogus "T.Heights" on DO / packing list / invoice
 
 **Status:** 🟢 Fixed (2026-05-29)

@@ -350,6 +350,57 @@ function parseDate(s: string): Date {
   return new Date(y, m - 1, d);
 }
 
+// Working-day helpers — a "working day" is Mon–Sat AND not a public
+// holiday. Public holidays come from kv_config['public_holidays']
+// (the list maintained on the Employees → Public Holidays panel).
+// Sundays were already excluded everywhere; Wei Siang 2026-05-29 asked
+// that public holidays (e.g. 2026-05-27 Wesak) also drop out of the
+// capacity averages so a 0-production holiday doesn't deflate the
+// daily-capacity number. Centralised here so every capacity window
+// (rolling avg, drilldown, loading chart, scope) shares one rule.
+// `guard` caps the walk-back so a malformed holiday list can never spin.
+function recentWorkingDays(count: number, holidays: Set<string>): string[] {
+  const days: string[] = [];
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  cursor.setDate(cursor.getDate() - 1); // exclude today (completions logged after the fact)
+  let guard = 0;
+  while (days.length < count && guard < count * 10 + 60) {
+    guard++;
+    const iso = fmtISO(cursor);
+    if (cursor.getDay() !== 0 && !holidays.has(iso)) days.unshift(iso);
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return days;
+}
+
+function upcomingWorkingDays(count: number, holidays: Set<string>): string[] {
+  const days: string[] = [];
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0); // include today (its bar is the plan, not production)
+  let guard = 0;
+  while (days.length < count && guard < count * 10 + 60) {
+    guard++;
+    const iso = fmtISO(cursor);
+    if (cursor.getDay() !== 0 && !holidays.has(iso)) days.push(iso);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return days;
+}
+
+function countWorkingDays(from: Date, to: Date, holidays: Set<string>): number {
+  let n = 0;
+  const d = new Date(from);
+  d.setHours(0, 0, 0, 0);
+  const end = new Date(to);
+  end.setHours(0, 0, 0, 0);
+  while (d <= end) {
+    if (d.getDay() !== 0 && !holidays.has(fmtISO(d))) n++;
+    d.setDate(d.getDate() + 1);
+  }
+  return n;
+}
+
 function utilizationColor(pct: number): { bar: string; text: string; bg: string } {
   if (pct > 90) return { bar: "bg-[#9A3A2D]", text: "text-[#9A3A2D]", bg: "bg-[#F9E1DA]" };
   if (pct >= 70) return { bar: "bg-[#9C6F1E]", text: "text-[#9C6F1E]", bg: "bg-[#FAEFCB]" };
@@ -386,6 +437,22 @@ export default function PlanningPage() {
   }>("/api/departments");
   const orders: ProductionOrder[] = useMemo(() => ordersResp?.data ?? [], [ordersResp]);
   const workers: Worker[] = useMemo(() => workersResp?.data ?? [], [workersResp]);
+
+  // Public holidays (kv_config['public_holidays'], maintained on the
+  // Employees → Public Holidays panel). Excluded from every capacity
+  // working-day window below so a 0-production holiday doesn't deflate
+  // the daily-capacity average. — Wei Siang 2026-05-29
+  const { data: holidaysResp } = useCachedJson<{ data?: unknown }>("/api/kv-config/public_holidays");
+  const publicHolidaySet = useMemo(() => {
+    const s = new Set<string>();
+    const arr = holidaysResp?.data;
+    if (Array.isArray(arr)) {
+      for (const d of arr) {
+        if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) s.add(d);
+      }
+    }
+    return s;
+  }, [holidaysResp]);
   // Production-only dept list, sorted by sequence. Falls back to the
   // hardcoded DEPARTMENTS list while /api/departments is still loading
   // so first paint doesn't flash an empty Capacity Loading tab.
@@ -710,18 +777,16 @@ export default function PlanningPage() {
       monday.setDate(now.getDate() + mondayOffset);
       const saturday = new Date(monday);
       saturday.setDate(monday.getDate() + 5);
-      return { from: fmtISO(monday), to: fmtISO(saturday), workingDays: 6, label: "This Week" };
+      // Working days = Mon-Sat minus any public holiday in the week.
+      return { from: fmtISO(monday), to: fmtISO(saturday), workingDays: countWorkingDays(monday, saturday, publicHolidaySet), label: "This Week" };
     }
     // Monthly: 1st → end of current calendar month.
     const first = new Date(now.getFullYear(), now.getMonth(), 1);
     const last = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-    // Count working days (Mon-Sat) in the month.
-    let wd = 0;
-    for (let d = new Date(first); d <= last; d.setDate(d.getDate() + 1)) {
-      if (d.getDay() !== 0) wd++;
-    }
+    // Count working days (Mon-Sat, minus public holidays) in the month.
+    const wd = countWorkingDays(first, last, publicHolidaySet);
     return { from: fmtISO(first), to: fmtISO(last), workingDays: wd, label: "This Month" };
-  }, [capacityScope, today]);
+  }, [capacityScope, today, publicHolidaySet]);
 
   // ── Capacity data ──
   // Wei Siang 2026-05-15 spec rewrite:
@@ -740,29 +805,13 @@ export default function PlanningPage() {
   //   getDeptEfficiency()) so it's excluded from active load and
   //   included in the 14-day actual-production rolling avg.
   const capacityData = useMemo(() => {
-    // Wei Siang 2026-05-15: rolling window is the N most-recent
-    // working days (Mon-Sat, skip Sundays) — matches the drilldown's
-    // lastWorkingDaysInWindow so both surfaces see the same
-    // denominator. Previously the KPI used N calendar days while
-    // the drilldown used working days, which let Sunday completions
-    // drift between the two surfaces.
-    const rollingWindowDays: string[] = [];
-    {
-      const cursor = new Date();
-      cursor.setHours(0, 0, 0, 0);
-      // Wei Siang 2026-05-16: EXCLUDE today. Completion dates are
-      // recorded after the fact, so today always reads ~0 and would
-      // deflate the rolling average. Window = N most-recent COMPLETE
-      // working days ending YESTERDAY (matches the loading chart's
-      // "Past Production ends yesterday").
-      cursor.setDate(cursor.getDate() - 1);
-      while (rollingWindowDays.length < ROLLING_WINDOW_DAYS) {
-        if (cursor.getDay() !== 0) {
-          rollingWindowDays.push(fmtISO(cursor));
-        }
-        cursor.setDate(cursor.getDate() - 1);
-      }
-    }
+    // Rolling window = the N most-recent working days (Mon-Sat, EXCLUDING
+    // Sundays AND public holidays), ending YESTERDAY. Today is excluded
+    // because completions are recorded after the fact (today reads ~0 and
+    // would deflate the average). Public-holiday exclusion (Wei Siang
+    // 2026-05-29) stops a 0-production holiday from dragging the average
+    // down. Shared with the drilldown + loading chart via recentWorkingDays.
+    const rollingWindowDays = recentWorkingDays(ROLLING_WINDOW_DAYS, publicHolidaySet);
     const rollingWindowSet = new Set(rollingWindowDays);
     const scopeTo = scopeRange.to;
     const scopeDays = Math.max(scopeRange.workingDays, 1);
@@ -874,7 +923,7 @@ export default function PlanningPage() {
         scopeCapacity,
       };
     });
-  }, [orders, workers, today, scopeRange]);
+  }, [orders, workers, scopeRange, publicHolidaySet]);
 
   const totalCapacity = capacityData.reduce((s, d) => s + d.dailyCapacity, 0);
   const totalScopeCapacity = capacityData.reduce((s, d) => s + d.scopeCapacity, 0);
@@ -919,33 +968,14 @@ export default function PlanningPage() {
     //   Past Production = N working days ending YESTERDAY
     //   Planned Capacity = TODAY + next (M-1) working days
     // So today's bar shows today's dueDate-scheduled plan.
-    const pastDays: string[] = [];
-    {
-      const cursor = new Date();
-      cursor.setHours(0, 0, 0, 0);
-      cursor.setDate(cursor.getDate() - 1); // start at yesterday
-      while (pastDays.length < LOADING_CHART_PAST_DAYS) {
-        if (cursor.getDay() !== 0) {
-          pastDays.unshift(fmtISO(cursor));
-        }
-        cursor.setDate(cursor.getDate() - 1);
-      }
-    }
+    // Both windows skip Sundays AND public holidays (no production /
+    // no capacity on those days). — Wei Siang 2026-05-29
+    const pastDays = recentWorkingDays(LOADING_CHART_PAST_DAYS, publicHolidaySet);
     const pastDayIndex = new Set(pastDays);
 
     // Future M working days starting TODAY (today included — its bar
     // is the plan, not the not-yet-recorded production).
-    const futureDays: string[] = [];
-    {
-      const cursor = new Date();
-      cursor.setHours(0, 0, 0, 0);
-      while (futureDays.length < LOADING_CHART_FUTURE_DAYS) {
-        if (cursor.getDay() !== 0) {
-          futureDays.push(fmtISO(cursor));
-        }
-        cursor.setDate(cursor.getDate() + 1);
-      }
-    }
+    const futureDays = upcomingWorkingDays(LOADING_CHART_FUTURE_DAYS, publicHolidaySet);
     const futureDayIndex = new Set(futureDays);
 
     // Pre-bucket two ways: (dept, dueDate) for future load, and
@@ -1095,7 +1125,7 @@ export default function PlanningPage() {
         futureAvgPct,
       };
     });
-  }, [orders, capacityData, productionDepartments, loadingCategoryFilter]);
+  }, [orders, capacityData, productionDepartments, loadingCategoryFilter, publicHolidaySet]);
 
   // ── Master Tracker computed values ──
   const deptEfficiency = useMemo(
@@ -1225,19 +1255,10 @@ export default function PlanningPage() {
   // recorded same-day (would read ~0 and deflate the average). Window
   // size driven by ROLLING_WINDOW_DAYS so this matches capacityData's
   // rolling-window set exactly.
-  const rollingWindowDates = useMemo(() => {
-    const days: string[] = [];
-    const cursor = new Date();
-    cursor.setHours(0, 0, 0, 0);
-    cursor.setDate(cursor.getDate() - 1); // exclude today
-    while (days.length < ROLLING_WINDOW_DAYS) {
-      if (cursor.getDay() !== 0) {
-        days.unshift(fmtISO(cursor));
-      }
-      cursor.setDate(cursor.getDate() - 1);
-    }
-    return days;
-  }, []);
+  const rollingWindowDates = useMemo(
+    () => recentWorkingDays(ROLLING_WINDOW_DAYS, publicHolidaySet),
+    [publicHolidaySet],
+  );
 
   // Per-day total completed minutes (sum across all production depts,
   // both categories). Matches the same formula capacityData uses for
@@ -2871,7 +2892,7 @@ function DrilldownModal(props: {
 
   if (level.kind === "capacity-14d") {
     title = `Daily Capacity — Past ${ROLLING_WINDOW_DAYS} Working Days`;
-    subtitle = `Average: ${formatHours(totalCapacity)}/day across all production depts`;
+    subtitle = `Average: ${formatHours(totalCapacity)}/day across all production depts · working days only (excludes Sundays & public holidays)`;
     const maxMin = Math.max(1, ...Array.from(capacityByDay.values()));
     body = (
       <table className="w-full text-sm">

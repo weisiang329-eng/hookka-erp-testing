@@ -73,7 +73,7 @@ app.get("/", async (c) => {
     }
   }
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v17:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v18:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -100,14 +100,43 @@ app.get("/", async (c) => {
       return fmtISO(d);
     })();
 
-    // 7 most-recent COMPLETE working days (Mon-Sat), ending YESTERDAY —
-    // same window the Planning page uses for Daily Capacity.
+    // Public holidays (kv_config['public_holidays'], maintained on the
+    // Employees → Public Holidays panel). Excluded from the working-day
+    // window below so a 0-production holiday doesn't deflate the daily-
+    // capacity average. Mirrors the Planning page. — Wei Siang 2026-05-29
+    const holidaySet = new Set<string>();
+    {
+      const hrow = await db
+        .prepare("SELECT value FROM kv_config WHERE key = ?")
+        .bind("public_holidays")
+        .first<{ value: string }>();
+      if (hrow?.value) {
+        try {
+          const arr = JSON.parse(hrow.value);
+          if (Array.isArray(arr)) {
+            for (const d of arr) {
+              if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) holidaySet.add(d);
+            }
+          }
+        } catch {
+          // Malformed list → behave as before (Sundays-only exclusion).
+        }
+      }
+    }
+
+    // 7 most-recent COMPLETE working days (Mon-Sat, EXCLUDING Sundays AND
+    // public holidays), ending YESTERDAY — same window the Planning page
+    // uses for Daily Capacity. `guard` caps the walk-back so a malformed
+    // holiday list can never spin.
     const windowDays: string[] = [];
     {
       const cur = new Date(today);
       cur.setDate(cur.getDate() - 1);
-      while (windowDays.length < 7) {
-        if (cur.getDay() !== 0) windowDays.push(fmtISO(cur));
+      let guard = 0;
+      while (windowDays.length < 7 && guard < 130) {
+        guard++;
+        const iso = fmtISO(cur);
+        if (cur.getDay() !== 0 && !holidaySet.has(iso)) windowDays.push(iso);
         cur.setDate(cur.getDate() - 1);
       }
     }

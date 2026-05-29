@@ -34,6 +34,43 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-001 — Daily Capacity average deflated by public holidays
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** planning-capacity
+
+**Symptom:** Wei Siang: the Planning → "Daily Capacity — Past 7 Working Days"
+average (and the per-dept capacity figures driven off it) read low. The 7-day
+window included 2026-05-27 (Wesak, a public holiday) as a 0-production working
+day, dragging the mean down. Sundays were already excluded; public holidays
+were not.
+
+**Root cause:** every rolling capacity window skipped Sundays (`getDay() !== 0`)
+but never consulted the public-holiday list. Public holidays live in
+`kv_config['public_holidays']` (maintained on Employees → Public Holidays; live
+value `["2026-05-01","2026-05-27","2026-06-01"]`). A 0-production holiday inside
+the window both occupied a slot and divided into the fixed `/7` denominator, so
+the average came out low.
+
+**Fix:** centralised the working-day window into `recentWorkingDays` /
+`upcomingWorkingDays` / `countWorkingDays` helpers that exclude Sundays AND
+public holidays, and routed every capacity window through them:
+- `src/pages/planning/index.tsx` — `capacityData` rolling window,
+  `rollingWindowDates` (drilldown modal date list), Capacity Loading past+future
+  windows, and `scopeRange` weekly/monthly working-day counts. New
+  `publicHolidaySet` sourced from `/api/kv-config/public_holidays`; modal
+  subtitle now states "working days only (excludes Sundays & public holidays)".
+- `src/api/routes/dashboard-overview.ts` — server-side Daily Capacity drilldown
+  window now reads `kv_config['public_holidays']` and skips them; overview
+  cache key bumped `v17`→`v18`. (Dashboard snapshot refreshes on next rebuild.)
+
+**Verified:** deterministic sim (today=2026-05-29 + live holiday list) → window
+shifts from `[05-21..05-28 incl 05-27]` to
+`[05-20,05-21,05-22,05-23,05-25,05-26,05-28]` (05-27 dropped, 05-20 pulled in),
+lifting the average. `tsc -b` + `eslint` clean. Live-verified on prod after deploy.
+
+---
+
 ## BUG-2026-05-28-011 — WIP stock inflated/negative (84 negative rows) from cascade replays
 
 **Status:** 🟢 Fixed (2026-05-28) — data reconciled; durable guard still pending (#76)

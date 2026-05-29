@@ -611,6 +611,19 @@ export function Sidebar({
                       <button
                         onMouseEnter={() => prefetchRoute(item.href)}
                         onClick={() => {
+                          // Icons-only rail (auto-collapsed on tablet/phone):
+                          // children NEVER render while collapsed and there's
+                          // no flyout, so the parent was a dead button — you
+                          // could not reach Production's department pages on a
+                          // touch device (Wei Siang 2026-05-29: "电话打不开
+                          // production"). Open the full sidebar and expand this
+                          // menu so the departments become tappable, same as
+                          // desktop.
+                          if (collapsed) {
+                            onToggleCollapsed();
+                            setExpandedMenus((prev) => new Set(prev).add(item.name));
+                            return;
+                          }
                           const next = new Set(expandedMenus);
                           if (isExpanded) next.delete(item.name);
                           else next.add(item.name);

@@ -34,6 +34,73 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-007 — Mobile/tablet: Production (and other parent menus) unreachable in collapsed sidebar
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang on a tablet: tapping the **Production** icon did nothing —
+the department pages (Overview, Fab Cut, Fab Sew, Foam, Wood Cut, Framing,
+Webbing, Upholstery, Packing) could not be reached at all. Same for any other
+parent menu with children (e.g. Consignment).
+
+**Root cause:** `DashboardLayout` auto-collapses the sidebar to the icons-only
+rail on portrait OR ≤768px viewports (`src/layouts/DashboardLayout.tsx`). In the
+collapsed rail, a parent-with-children nav item (`src/components/layout/sidebar.tsx`)
+renders as a `<button>` whose children only mount `if (isExpanded && !collapsed)`
+— i.e. NEVER while collapsed — and there is no hover/tap flyout. The button's
+onClick only toggled a hidden `expandedMenus` state, so on a touch device it was
+a dead button: no navigation, no submenu.
+
+**Fix:** When the rail is collapsed, tapping a parent now opens the full sidebar
+(`onToggleCollapsed()`) AND expands that menu, so the children render exactly as
+they do on desktop and become tappable. Minimal change scoped to the
+`collapsed` branch — desktop expanded behaviour untouched. Fixes every
+parent-with-children menu (Production, Consignment) uniformly.
+
+**Verified:** `tsc --noEmit` clean; eslint clean (1 pre-existing unrelated
+warning). Live verification on prod at iPad-portrait width pending deploy.
+
+---
+
+## BUG-2026-05-29-006 — Document Relationship: consolidated DO never drawn + fabricated Invoice/Payment nodes
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** ui-frontend
+
+**Symptom:** On a Sales Order detail page, the Document Relationship diagram
+showed no Delivery Order node for SOs shipped on a CONSOLIDATED DO (one DO, many
+SOs) — e.g. SO-2605-253 / DO-2605-097. The Invoice and AR Payment nodes were
+also fake: built from SO status alone (`INV-<so>`, `AR-<so>`), not linked to any
+real record.
+
+**Root cause:** The diagram drew the DO node only when
+`sales_orders.hookkaDeliveryOrder` was stamped. The consolidated-DO create path
+leaves `delivery_orders.salesOrderId` NULL (the link lives per-item on
+`delivery_order_items.salesOrderNo`) and never backfills each SO's
+`hookkaDeliveryOrder`, so the field stays empty and no DO node renders. Invoice /
+Payment were never queried at all.
+
+**Fix:** `GET /api/sales-orders/:id` now resolves the actual downstream documents
+and returns them (`linkedDOs`, `linkedInvoices`, `linkedPayments`):
+- DOs: `delivery_orders.salesOrderId = id` OR `delivery_order_items.salesOrderNo
+  = companySOId` (so consolidated DOs connect)
+- Invoices: by `salesOrderId`/`companySOId` OR `deliveryOrderId` in the SO's DOs
+  (consolidated invoices anchor to the first SO only)
+- Payments: `payment_records` whose `allocations` JSON references those invoices
+
+The diagram renders real nodes (real doc numbers + statuses; DO shown with the
+friendly Delivery-page label). Read-only; no write path or schema change. The
+denormalized `hookkaDeliveryOrder` drift is left untouched (diagram no longer
+depends on it).
+
+**Verified:** `tsc --noEmit` + eslint clean. Live-verified on prod: SO-2605-253
+now shows the DO-2605-097 (Pending Dispatch) node even though the SO's stored
+`hookkaDeliveryOrder` is still empty (proving the real reverse-lookup path);
+Invoice/Payment correctly absent because the DO is not yet dispatched.
+
+---
+
 ## BUG-2026-05-29-005 — Linked Production Orders: COMPLETED PO shows stale mid-stream department (e.g. "WEBBING")
 
 **Status:** 🟢 Fixed (2026-05-29)

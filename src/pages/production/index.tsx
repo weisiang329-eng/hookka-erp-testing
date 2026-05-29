@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useDeferredValue, useMemo, useRef, useTransition, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
@@ -80,6 +80,19 @@ type OverviewSortKey =
   | "FRAMING" | "WEBBING" | "UPHOLSTERY" | "PACKING";
 type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 
+// ----- Overview matrix: user-resizable column widths -----
+// Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
+// reset. Widths persist per-browser in localStorage. Shared with every header
+// cell via context so we don't thread two callbacks through 15 call sites.
+const OVERVIEW_FIXED_COLS = ["soId", "product", "customer", "customerPO", "specialOrder", "qty", "due"] as const;
+const OVERVIEW_COL_KEYS: string[] = [...OVERVIEW_FIXED_COLS, ...DEPARTMENTS.map((d) => d.code)];
+const OVERVIEW_DEFAULT_WIDTHS: Record<string, number> = {
+  soId: 120, product: 220, customer: 110, customerPO: 120, specialOrder: 130, qty: 50, due: 70,
+  FAB_CUT: 108, FAB_SEW: 108, FOAM: 108, WOOD_CUT: 108, FRAMING: 108, WEBBING: 108, UPHOLSTERY: 108, PACKING: 108,
+};
+const OVERVIEW_COLW_STORAGE = "prod-overview-colwidths-v1";
+const OverviewResizeCtx = createContext<{ start: (e: React.MouseEvent, key: string) => void; reset: (key: string) => void } | null>(null);
+
 // ----- Overview header cell — sort indicator + filter popover trigger -----
 //
 // Memoized internally via the shallow comparison of the props the cell
@@ -114,6 +127,7 @@ function OverviewHeader({
   const isSorted = sort?.key === sortKey;
   const dir = isSorted ? sort?.dir : null;
   const open = openFilterCol === filterCol;
+  const overviewResize = useContext(OverviewResizeCtx);
   // Portal the filter popover to <body> with fixed positioning anchored to the
   // funnel button. Required because the matrix now lives inside a horizontal
   // scroll container — an in-flow absolute popover would be clipped by that
@@ -143,6 +157,7 @@ function OverviewHeader({
   /* eslint-enable react-hooks/set-state-in-effect */
   return (
     <div
+      data-ovh
       className={`relative px-1.5 py-2.5 ${align === "center" ? "text-center" : "text-left"} ${border ? "border-l border-[#E6E0D9]" : ""}`}
     >
       <div className={`flex items-center gap-1 ${align === "center" ? "justify-center" : ""}`}>
@@ -194,6 +209,17 @@ function OverviewHeader({
           </div>
         </>,
         document.body,
+      )}
+      {overviewResize && (
+        <span
+          role="separator"
+          aria-orientation="vertical"
+          title="Drag to resize · double-click to reset"
+          onMouseDown={(e) => overviewResize.start(e, filterCol)}
+          onDoubleClick={(e) => { e.stopPropagation(); overviewResize.reset(filterCol); }}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize select-none hover:bg-[#6B5C32]/40 z-10"
+        />
       )}
     </div>
   );
@@ -1032,6 +1058,65 @@ export default function ProductionPage({
   const [overviewSort, setOverviewSort] = useState<OverviewSort>(initialOverviewState.sort);
   const [overviewFilters, setOverviewFilters] = useState<OverviewFilters>(initialOverviewState.filters);
   const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);
+
+  // ── Overview matrix: user-resizable column widths ──
+  // colKey -> px. Empty = use OVERVIEW_DEFAULT_WIDTHS. Persisted per-browser.
+  const [overviewColWidths, setOverviewColWidths] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem(OVERVIEW_COLW_STORAGE);
+      if (raw) return JSON.parse(raw) as Record<string, number>;
+    } catch { /* ignore */ }
+    return {};
+  });
+  const overviewColW = useCallback(
+    (key: string) => overviewColWidths[key] ?? OVERVIEW_DEFAULT_WIDTHS[key] ?? 100,
+    [overviewColWidths],
+  );
+  const overviewTemplate = useMemo(
+    () => OVERVIEW_COL_KEYS.map((k) => `${overviewColW(k)}px`).join(" "),
+    [overviewColW],
+  );
+  const overviewMinWidth = useMemo(
+    () => OVERVIEW_COL_KEYS.reduce((s, k) => s + overviewColW(k), 0),
+    [overviewColW],
+  );
+  const resetOverviewWidth = useCallback((key: string) => {
+    setOverviewColWidths((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      try { localStorage.setItem(OVERVIEW_COLW_STORAGE, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+  const startOverviewResize = useCallback((e: React.MouseEvent, key: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const cell = (e.currentTarget as HTMLElement).closest("[data-ovh]") as HTMLElement | null;
+    const startX = e.clientX;
+    const startW = cell ? cell.getBoundingClientRect().width : (OVERVIEW_DEFAULT_WIDTHS[key] ?? 100);
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(48, Math.round(startW + (ev.clientX - startX)));
+      setOverviewColWidths((prev) => (prev[key] === w ? prev : { ...prev, [key]: w }));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      setOverviewColWidths((prev) => {
+        try { localStorage.setItem(OVERVIEW_COLW_STORAGE, JSON.stringify(prev)); } catch { /* ignore */ }
+        return prev;
+      });
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+  const overviewResizeValue = useMemo(
+    () => ({ start: startOverviewResize, reset: resetOverviewWidth }),
+    [startOverviewResize, resetOverviewWidth],
+  );
+
   // Cell flash map — `${jcId}|${dept}` → "ok"|"err"; "${poId}|DUE" for the
   // PO-level due-date column. Tracked separately from optimistic UI so the
   // tint can fade independently of the data update.
@@ -5771,11 +5856,12 @@ export default function ProductionPage({
             Header and body share minWidth:1684 so they scroll together; the
             column filter popovers are portaled to <body> so this overflow box
             can't clip them. — Wei Siang 2026-05-29 */}
+        <OverviewResizeCtx.Provider value={overviewResizeValue}>
         <div className="overflow-x-auto">
         {/* Header row */}
         <div
           className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9] relative z-20"
-          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(108px,1fr))", minWidth: 1684 }}
+          style={{ gridTemplateColumns: overviewTemplate, minWidth: overviewMinWidth }}
         >
           <OverviewHeader
             label="SO ID"
@@ -5948,7 +6034,7 @@ export default function ProductionPage({
           <div
             ref={overviewBodyRef}
             className="overflow-y-auto"
-            style={{ maxHeight: "calc(100vh - 320px)", minWidth: 1684 }}
+            style={{ maxHeight: "calc(100vh - 320px)", minWidth: overviewMinWidth }}
           >
           <div
             style={{
@@ -5987,8 +6073,8 @@ export default function ProductionPage({
               data-index={virtualRow.index}
               className={`grid items-stretch border-b border-[#F0EBE3] cursor-pointer ${rowCls}`}
               style={{
-                gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 120px 130px 50px 70px repeat(8,minmax(108px,1fr))",
-                minWidth: 1684,
+                gridTemplateColumns: overviewTemplate,
+                minWidth: overviewMinWidth,
                 position: "absolute",
                 top: 0,
                 left: 0,
@@ -6139,6 +6225,7 @@ export default function ProductionPage({
           </div>
         )}
         </div>{/* /overflow-x-auto matrix scroll wrapper */}
+        </OverviewResizeCtx.Provider>
 
         {/* Footer */}
         <div className="px-4 py-2 bg-[#FAF8F4] border-t border-[#E6E0D9] text-[10px] text-[#8A7F73] flex items-center justify-between">

@@ -34,6 +34,36 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-05-29-001 — User-resizable table columns (drag to resize, persisted)
+
+**Status:** 🟢 Shipped (2026-05-29)
+**Category:** ui-frontend
+
+**Ask:** Wei Siang: dept columns felt "太大了" after the widen — wanted to
+adjust column widths himself, across the whole system.
+
+**What shipped:**
+- **Shared `DataGrid`** (`src/components/ui/data-grid.tsx`) — every column header
+  gets a drag handle on its right edge; drag to resize, double-click to reset.
+  Widths persist per-user per `gridId` in `localStorage` (`datagrid-colw-*`),
+  mirroring the existing two-tier visibility/order persistence. Applied as
+  width+minWidth on the `<colgroup><col>` (no `table-layout` change, so default
+  behaviour is unchanged until a user drags). Covers most tables system-wide
+  (products, procurement, service orders, inventory adjustments, per-department
+  production tabs, etc.).
+- **Production Overview matrix** (`src/pages/production/index.tsx`, bespoke CSS
+  grid) — same drag-to-resize handle on all 15 header cells via a small
+  `OverviewResizeCtx`. Widths drive `gridTemplateColumns` + `minWidth` for the
+  header and every virtualized row, persisted in `localStorage`
+  (`prod-overview-colwidths-v1`). Default dept width 108px; user can shrink/grow
+  and it sticks.
+
+**Verified:** `tsc -b` + `eslint` clean; live-verified on prod — drag resizes,
+persists across reload, double-click resets; header/rows stay aligned; filter
+popovers (portaled) still open un-clipped.
+
+---
+
 ## BUG-2026-05-29-004 — Production Overview matrix: dept column headers truncated to "F.."
 
 **Status:** 🟢 Fixed (2026-05-29)

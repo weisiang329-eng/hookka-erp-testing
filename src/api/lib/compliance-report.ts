@@ -94,6 +94,45 @@ export interface PoNotReceivedRow {
   daysOpen: number;
 }
 
+// v2 — production out-of-sequence: a later step is done while an earlier step
+// in the SAME (production order, branch) is still unfinished.
+export interface ProcessSkipRow {
+  productionOrderId: string;
+  poNo: string;
+  companySOId: string;
+  salesOrderId: string;
+  productName: string;
+  doneDept: string;
+  doneDeptCompletedDate: string;
+  blockedByDept: string;
+  blockedByStatus: string;
+}
+
+// v2 — a product step in active production with no standard WIP time set.
+export interface MissingWipTimeRow {
+  productCode: string;
+  productName: string;
+  departmentCode: string;
+  examplePoNo: string;
+}
+
+// v2 — a product in active production with no active BOM template.
+export interface IncompleteBomRow {
+  productCode: string;
+  productName: string;
+  reason: string;
+}
+
+// v2 — an R&D project that looks stalled (overdue launch, or on hold).
+export interface RdStalledRow {
+  id: string;
+  name: string;
+  status: string;
+  currentStage: string;
+  targetLaunchDate: string;
+  daysOverdue: number;
+}
+
 export interface ComplianceCounts {
   total: number;
   doPendingDispatch: number;
@@ -104,6 +143,10 @@ export interface ComplianceCounts {
   overdueOrders: number;
   poNotReceived: number;
   lowEfficiencyWorkers: number;
+  processSkips: number;
+  missingWipTimes: number;
+  incompleteBoms: number;
+  rdStalled: number;
 }
 
 export interface ComplianceGroups {
@@ -115,6 +158,10 @@ export interface ComplianceGroups {
   overdueOrders: OverdueRow[];
   poNotReceived: PoNotReceivedRow[];
   lowEfficiencyWorkers: WorkerSummary[];
+  processSkips: ProcessSkipRow[];
+  missingWipTimes: MissingWipTimeRow[];
+  incompleteBoms: IncompleteBomRow[];
+  rdStalled: RdStalledRow[];
 }
 
 export interface ComplianceData {
@@ -388,9 +435,13 @@ async function checkSoNoInvoice(
   try {
     const soRes = await db
       .prepare(
+        // Only DELIVERED — a delivered order with no invoice is a real billing
+        // gap. CLOSED orders are already done/paid; including them flooded the
+        // list with linkage false-positives (invoice anchored to the combined
+        // DO / lead SO), so they're excluded (Wei Siang 2026-05-29).
         `SELECT id, companySOId, customerName, status
            FROM sales_orders
-          WHERE status IN ('DELIVERED','CLOSED')
+          WHERE status = 'DELIVERED'
           ORDER BY companySOId ASC`,
       )
       .bind()
@@ -615,6 +666,339 @@ async function checkLowEfficiencyWorkers(
   }
 }
 
+// ─── v2 checks ─────────────────────────────────────────────────────────────
+
+// "Done" job-card statuses (the step is finished for that department). Verified
+// against job-cards.ts (worker-prod summary), production-orders.ts (anchor /
+// transfer logic) and jobcard-sync.ts: COMPLETED + TRANSFERRED both mean done.
+const JC_DONE_STATUSES = new Set(["COMPLETED", "TRANSFERRED"]);
+
+// 9. Production out-of-sequence (process skips). Within each production order,
+//    group its job cards by branchKey (so the parallel fabric branch and wood
+//    branch never cross-contaminate). Within each (productionOrderId, branchKey)
+//    group, sort by sequence and flag any DONE card that has an EARLIER-sequence
+//    card in the same group that is NOT done. We only look at production orders
+//    that are not fully finished (status NOT IN COMPLETED/CANCELLED) to bound
+//    the set. One row per (PO, doneDept) violation.
+async function checkProcessSkips(db: DbLike): Promise<ProcessSkipRow[]> {
+  try {
+    // Active production orders — bound the set + carry display/link fields.
+    const poRes = await db
+      .prepare(
+        `SELECT id, poNo, companySOId, salesOrderId, productName, status
+           FROM production_orders
+          WHERE status NOT IN ('COMPLETED','CANCELLED')`,
+      )
+      .bind()
+      .all<{
+        id: string;
+        poNo: string | null;
+        companySOId: string | null;
+        salesOrderId: string | null;
+        productName: string | null;
+        status: string;
+      }>();
+    const pos = poRes.results ?? [];
+    if (pos.length === 0) return [];
+
+    const poById = new Map<
+      string,
+      {
+        poNo: string;
+        companySOId: string;
+        salesOrderId: string;
+        productName: string;
+      }
+    >();
+    for (const p of pos) {
+      poById.set(p.id, {
+        poNo: p.poNo ?? "",
+        companySOId: p.companySOId ?? "",
+        salesOrderId: p.salesOrderId ?? "",
+        productName: p.productName ?? "",
+      });
+    }
+
+    // Job cards for those POs (one IN-list query). job_cards has no poNo /
+    // productName — those come from production_orders (verified in
+    // job-cards.ts, which LEFT JOINs production_orders for poNo).
+    const poIds = [...poById.keys()];
+    const ph = poIds.map(() => "?").join(",");
+    const jcRes = await db
+      .prepare(
+        `SELECT productionOrderId, departmentCode, sequence, branchKey,
+                status, completedDate
+           FROM job_cards
+          WHERE productionOrderId IN (${ph})`,
+      )
+      .bind(...poIds)
+      .all<{
+        productionOrderId: string | null;
+        departmentCode: string | null;
+        sequence: number | null;
+        branchKey: string | null;
+        status: string | null;
+        completedDate: string | null;
+      }>();
+    const jcs = jcRes.results ?? [];
+    if (jcs.length === 0) return [];
+
+    // Group by (productionOrderId, branchKey ?? "").
+    const groups = new Map<
+      string,
+      Array<{
+        productionOrderId: string;
+        departmentCode: string;
+        sequence: number;
+        status: string;
+        completedDate: string;
+      }>
+    >();
+    for (const jc of jcs) {
+      const poId = jc.productionOrderId;
+      if (!poId) continue;
+      const key = `${poId}|${jc.branchKey ?? ""}`;
+      const arr = groups.get(key) ?? [];
+      arr.push({
+        productionOrderId: poId,
+        departmentCode: jc.departmentCode ?? "",
+        sequence: jc.sequence ?? 0,
+        status: jc.status ?? "",
+        completedDate: jc.completedDate ?? "",
+      });
+      groups.set(key, arr);
+    }
+
+    const rows: ProcessSkipRow[] = [];
+    for (const arr of groups.values()) {
+      // Sort by sequence ascending so "earlier" = lower index.
+      arr.sort((a, b) => a.sequence - b.sequence);
+      for (let i = 0; i < arr.length; i++) {
+        const card = arr[i];
+        if (!JC_DONE_STATUSES.has(card.status)) continue;
+        // Find an earlier-sequence card (strictly smaller sequence) in the same
+        // group that is NOT done. Use the most-upstream such gap for the label.
+        let blockedBy: { departmentCode: string; status: string } | null = null;
+        for (let j = 0; j < i; j++) {
+          const earlier = arr[j];
+          if (earlier.sequence >= card.sequence) continue;
+          if (!JC_DONE_STATUSES.has(earlier.status)) {
+            blockedBy = {
+              departmentCode: earlier.departmentCode,
+              status: earlier.status,
+            };
+            break; // first (most-upstream) gap is enough
+          }
+        }
+        if (!blockedBy) continue;
+        const meta = poById.get(card.productionOrderId);
+        if (!meta) continue;
+        rows.push({
+          productionOrderId: card.productionOrderId,
+          poNo: meta.poNo,
+          companySOId: meta.companySOId,
+          salesOrderId: meta.salesOrderId,
+          productName: meta.productName,
+          doneDept: card.departmentCode,
+          doneDeptCompletedDate: (card.completedDate ?? "").slice(0, 10),
+          blockedByDept: blockedBy.departmentCode,
+          blockedByStatus: blockedBy.status,
+        });
+      }
+    }
+    return rows;
+  } catch (err) {
+    console.error("[compliance] processSkips failed:", err);
+    return [];
+  }
+}
+
+// 10a. Missing WIP times — distinct (productCode, productName, departmentCode)
+//      among job cards on ACTIVE production orders where estMinutes is null/0,
+//      i.e. the product is in production but has no standard time for that step.
+//      productCode/productName come from production_orders (job_cards carries
+//      neither — verified in production-builder.ts INSERT + job-cards.ts join).
+async function checkMissingWipTimes(db: DbLike): Promise<MissingWipTimeRow[]> {
+  try {
+    const poRes = await db
+      .prepare(
+        `SELECT id, poNo, productCode, productName
+           FROM production_orders
+          WHERE status NOT IN ('COMPLETED','CANCELLED')`,
+      )
+      .bind()
+      .all<{
+        id: string;
+        poNo: string | null;
+        productCode: string | null;
+        productName: string | null;
+      }>();
+    const pos = poRes.results ?? [];
+    if (pos.length === 0) return [];
+
+    const poById = new Map<
+      string,
+      { poNo: string; productCode: string; productName: string }
+    >();
+    for (const p of pos) {
+      poById.set(p.id, {
+        poNo: p.poNo ?? "",
+        productCode: p.productCode ?? "",
+        productName: p.productName ?? "",
+      });
+    }
+
+    const poIds = [...poById.keys()];
+    const ph = poIds.map(() => "?").join(",");
+    const jcRes = await db
+      .prepare(
+        `SELECT productionOrderId, departmentCode, estMinutes
+           FROM job_cards
+          WHERE productionOrderId IN (${ph})
+            AND (estMinutes IS NULL OR estMinutes = 0)`,
+      )
+      .bind(...poIds)
+      .all<{
+        productionOrderId: string | null;
+        departmentCode: string | null;
+        estMinutes: number | null;
+      }>();
+    const jcs = jcRes.results ?? [];
+    if (jcs.length === 0) return [];
+
+    // Distinct on (productCode, departmentCode); keep first example PO.
+    const seen = new Map<string, MissingWipTimeRow>();
+    for (const jc of jcs) {
+      const poId = jc.productionOrderId;
+      if (!poId) continue;
+      const meta = poById.get(poId);
+      if (!meta) continue;
+      const dept = jc.departmentCode ?? "";
+      const key = `${meta.productCode}|${dept}`;
+      if (seen.has(key)) continue;
+      seen.set(key, {
+        productCode: meta.productCode,
+        productName: meta.productName,
+        departmentCode: dept,
+        examplePoNo: meta.poNo,
+      });
+    }
+    return [...seen.values()];
+  } catch (err) {
+    console.error("[compliance] missingWipTimes failed:", err);
+    return [];
+  }
+}
+
+// 10b. Incomplete BOMs — products referenced by ACTIVE production orders that
+//      have NO active BOM template. The BOM table is bom_templates, keyed by
+//      productCode with versionStatus ('ACTIVE'/'DRAFT'/'OBSOLETE') — verified
+//      in bom.ts. There is no per-product "isDefault" flag, so "incomplete" is
+//      read as: an active product with no ACTIVE bom_templates row at all.
+async function checkIncompleteBoms(db: DbLike): Promise<IncompleteBomRow[]> {
+  try {
+    const poRes = await db
+      .prepare(
+        `SELECT DISTINCT productCode, productName
+           FROM production_orders
+          WHERE status NOT IN ('COMPLETED','CANCELLED')
+            AND productCode IS NOT NULL
+            AND productCode <> ''`,
+      )
+      .bind()
+      .all<{ productCode: string | null; productName: string | null }>();
+    const products = (poRes.results ?? []).filter(
+      (p) => !isEmpty(p.productCode),
+    );
+    if (products.length === 0) return [];
+
+    // Collapse to distinct productCodes (first name wins for display).
+    const nameByCode = new Map<string, string>();
+    for (const p of products) {
+      const code = p.productCode as string;
+      if (!nameByCode.has(code)) nameByCode.set(code, p.productName ?? "");
+    }
+    const codes = [...nameByCode.keys()];
+
+    // productCodes that DO have an active BOM template.
+    const withBom = new Set<string>();
+    const ph = codes.map(() => "?").join(",");
+    const bomRes = await db
+      .prepare(
+        `SELECT DISTINCT productCode FROM bom_templates
+          WHERE productCode IN (${ph})
+            AND UPPER(COALESCE(versionStatus, '')) = 'ACTIVE'`,
+      )
+      .bind(...codes)
+      .all<{ productCode: string | null }>();
+    for (const r of bomRes.results ?? []) {
+      if (r.productCode) withBom.add(r.productCode);
+    }
+
+    return codes
+      .filter((code) => !withBom.has(code))
+      .map((code) => ({
+        productCode: code,
+        productName: nameByCode.get(code) ?? "",
+        reason: "No active BOM template",
+      }));
+  } catch (err) {
+    console.error("[compliance] incompleteBoms failed:", err);
+    return [];
+  }
+}
+
+// 11. R&D projects stalled. rd_projects has no last-activity timestamp (known
+//     gap), so this is state-based/approximate: ACTIVE with a targetLaunchDate
+//     in the past, OR ON_HOLD. rd_projects columns verified in rd-projects.ts
+//     (id, code, name, currentStage, targetLaunchDate, status). Detail route
+//     is /rd/:id (dashboard-routes.tsx).
+async function checkRdStalled(
+  db: DbLike,
+  todayYmd: string,
+): Promise<RdStalledRow[]> {
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, name, status, currentStage, targetLaunchDate
+           FROM rd_projects
+          WHERE status = 'ON_HOLD'
+             OR (status = 'ACTIVE'
+                 AND targetLaunchDate IS NOT NULL
+                 AND targetLaunchDate <> ''
+                 AND targetLaunchDate < ?)
+          ORDER BY targetLaunchDate ASC`,
+      )
+      .bind(todayYmd)
+      .all<{
+        id: string;
+        name: string | null;
+        status: string | null;
+        currentStage: string | null;
+        targetLaunchDate: string | null;
+      }>();
+    return (res.results ?? []).map((r) => {
+      const overdue =
+        r.status === "ACTIVE" &&
+        !isEmpty(r.targetLaunchDate) &&
+        String(r.targetLaunchDate).slice(0, 10) < todayYmd
+          ? daysBetween(r.targetLaunchDate, todayYmd)
+          : 0;
+      return {
+        id: r.id,
+        name: r.name ?? "",
+        status: r.status ?? "",
+        currentStage: r.currentStage ?? "",
+        targetLaunchDate: (r.targetLaunchDate ?? "").slice(0, 10),
+        daysOverdue: overdue,
+      };
+    });
+  } catch (err) {
+    console.error("[compliance] rdStalled failed:", err);
+    return [];
+  }
+}
+
 // ─── Top-level collector ───────────────────────────────────────────────────
 
 export async function collectComplianceData(
@@ -630,6 +1014,10 @@ export async function collectComplianceData(
     overdueOrders,
     poNotReceived,
     lowEfficiencyWorkers,
+    processSkips,
+    missingWipTimes,
+    incompleteBoms,
+    rdStalled,
   ] = await Promise.all([
     checkDoPendingDispatch(db, todayYmd),
     checkDoNotDelivered(db, todayYmd),
@@ -639,6 +1027,10 @@ export async function collectComplianceData(
     checkOverdueOrders(db, todayYmd),
     checkPoNotReceived(db, todayYmd),
     checkLowEfficiencyWorkers(db, todayYmd),
+    checkProcessSkips(db),
+    checkMissingWipTimes(db),
+    checkIncompleteBoms(db),
+    checkRdStalled(db, todayYmd),
   ]);
 
   const counts: ComplianceCounts = {
@@ -650,6 +1042,10 @@ export async function collectComplianceData(
     overdueOrders: overdueOrders.length,
     poNotReceived: poNotReceived.length,
     lowEfficiencyWorkers: lowEfficiencyWorkers.length,
+    processSkips: processSkips.length,
+    missingWipTimes: missingWipTimes.length,
+    incompleteBoms: incompleteBoms.length,
+    rdStalled: rdStalled.length,
     total:
       doPendingDispatch.length +
       doNotDelivered.length +
@@ -658,7 +1054,11 @@ export async function collectComplianceData(
       soNoInvoice.length +
       overdueOrders.length +
       poNotReceived.length +
-      lowEfficiencyWorkers.length,
+      lowEfficiencyWorkers.length +
+      processSkips.length +
+      missingWipTimes.length +
+      incompleteBoms.length +
+      rdStalled.length,
   };
 
   return {
@@ -674,6 +1074,10 @@ export async function collectComplianceData(
       overdueOrders,
       poNotReceived,
       lowEfficiencyWorkers,
+      processSkips,
+      missingWipTimes,
+      incompleteBoms,
+      rdStalled,
     },
   };
 }

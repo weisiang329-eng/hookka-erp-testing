@@ -63,9 +63,15 @@ stuck / nobody's producing — across delivery, orders, procurement, and people.
 - **Dashboard card** (`dashboard-b/index.tsx`) — independent fetch showing total
   issue count + top-category breakdown, linking to the full page.
 
-**Deferred to v2:** production process-skipping (out-of-sequence JC completion),
-incomplete-BOM / missing-WIP-time gaps, R&D stall (needs a last-activity
-timestamp the rd_projects table lacks).
+**v2 (2026-05-29, same day) added 5 more checks:** production process-skipping
+(within-(PO,branchKey) out-of-sequence done-card detection — parallel
+fabric/wood branches grouped separately so they never cross-trigger);
+missing-WIP-time (active-PO job cards with estMinutes 0/null); incomplete-BOM
+(active-PO products with no ACTIVE `bom_templates` row); R&D stalled
+(`rd_projects` ON_HOLD, or ACTIVE past targetLaunchDate — approximate, the table
+lacks a last-activity timestamp). Also TIGHTENED SO-without-invoice to DELIVERED
+only (dropped CLOSED, which flooded the list with consolidated-invoice linkage
+false-positives — prod showed 165, mostly noise).
 
 **Verified:** `tsc --noEmit` + eslint clean. Live verification on prod pending
 deploy.

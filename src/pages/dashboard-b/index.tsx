@@ -222,6 +222,10 @@ type ComplianceResp = {
       overdueOrders: number;
       poNotReceived: number;
       lowEfficiencyWorkers: number;
+      processSkips: number;
+      missingWipTimes: number;
+      incompleteBoms: number;
+      rdStalled: number;
     };
   };
 };
@@ -1000,6 +1004,10 @@ export default function DashboardBPage() {
                     ["SO no DO", compCounts.soNoDo],
                     ["PO not received", compCounts.poNotReceived],
                     ["Low efficiency", compCounts.lowEfficiencyWorkers],
+                    ["Process skips", compCounts.processSkips],
+                    ["Missing WIP times", compCounts.missingWipTimes],
+                    ["Incomplete BOMs", compCounts.incompleteBoms],
+                    ["R&D stalled", compCounts.rdStalled],
                   ] as const
                 )
                   .filter(([, n]) => n > 0)

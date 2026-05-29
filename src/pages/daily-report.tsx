@@ -25,6 +25,10 @@ import {
   Users,
   CheckCircle2,
   ArrowUpRight,
+  GitBranch,
+  Timer,
+  Layers,
+  FlaskConical,
 } from "lucide-react";
 
 // ── API response types (mirror src/api/lib/compliance-report.ts) ────────────
@@ -90,6 +94,36 @@ interface WorkerRow {
   workingMinutes: number;
   productionMinutes: number;
 }
+interface ProcessSkipRow {
+  productionOrderId: string;
+  poNo: string;
+  companySOId: string;
+  salesOrderId: string;
+  productName: string;
+  doneDept: string;
+  doneDeptCompletedDate: string;
+  blockedByDept: string;
+  blockedByStatus: string;
+}
+interface MissingWipTimeRow {
+  productCode: string;
+  productName: string;
+  departmentCode: string;
+  examplePoNo: string;
+}
+interface IncompleteBomRow {
+  productCode: string;
+  productName: string;
+  reason: string;
+}
+interface RdStalledRow {
+  id: string;
+  name: string;
+  status: string;
+  currentStage: string;
+  targetLaunchDate: string;
+  daysOverdue: number;
+}
 
 interface ComplianceData {
   generatedAtIso: string;
@@ -104,6 +138,10 @@ interface ComplianceData {
     overdueOrders: number;
     poNotReceived: number;
     lowEfficiencyWorkers: number;
+    processSkips: number;
+    missingWipTimes: number;
+    incompleteBoms: number;
+    rdStalled: number;
   };
   groups: {
     doPendingDispatch: DoPendingDispatchRow[];
@@ -114,6 +152,10 @@ interface ComplianceData {
     overdueOrders: OverdueRow[];
     poNotReceived: PoNotReceivedRow[];
     lowEfficiencyWorkers: WorkerRow[];
+    processSkips: ProcessSkipRow[];
+    missingWipTimes: MissingWipTimeRow[];
+    incompleteBoms: IncompleteBomRow[];
+    rdStalled: RdStalledRow[];
   };
 }
 type ComplianceResp = { success?: boolean; data?: ComplianceData };
@@ -427,6 +469,26 @@ export default function DailyReportPage() {
           label="Low-Efficiency Workers"
           value={counts.lowEfficiencyWorkers}
           icon={Users}
+        />
+        <CountTile
+          label="Process Skips"
+          value={counts.processSkips}
+          icon={GitBranch}
+        />
+        <CountTile
+          label="Missing WIP Times"
+          value={counts.missingWipTimes}
+          icon={Timer}
+        />
+        <CountTile
+          label="Incomplete BOMs"
+          value={counts.incompleteBoms}
+          icon={Layers}
+        />
+        <CountTile
+          label="R&D Stalled"
+          value={counts.rdStalled}
+          icon={FlaskConical}
         />
       </div>
 
@@ -772,6 +834,177 @@ export default function DailyReportPage() {
                       <Td right>{r.jobsCompleted}</Td>
                       <Td right>
                         <EffBadge pct={r.efficiencyPct} />
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+
+        {/* Process skips — production out-of-sequence */}
+        <Section
+          title="Production Out of Sequence"
+          subtitle="A later step is finished while an earlier step in the same branch is not — check the order of work."
+          count={counts.processSkips}
+          icon={GitBranch}
+        >
+          {groups.processSkips.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <Th>SO / PO No.</Th>
+                    <Th>Product</Th>
+                    <Th>Finished Step</Th>
+                    <Th>Finished On</Th>
+                    <Th>Still Waiting On</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.processSkips.map((r) => (
+                    <tr
+                      key={r.productionOrderId + r.doneDept}
+                      className="border-b border-[#F0ECE6]"
+                    >
+                      <Td strong>
+                        <RecordLink
+                          to={r.salesOrderId ? `/sales/${r.salesOrderId}` : "/production"}
+                          label={r.companySOId || r.poNo || "—"}
+                        />
+                      </Td>
+                      <Td>{r.productName || "—"}</Td>
+                      <Td>{r.doneDept || "—"}</Td>
+                      <Td>{formatDate(r.doneDeptCompletedDate)}</Td>
+                      <Td>
+                        {r.blockedByDept || "—"}
+                        {r.blockedByStatus ? (
+                          <span className="ml-1 text-[11px] text-[#9CA3AF]">
+                            ({r.blockedByStatus})
+                          </span>
+                        ) : null}
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+
+        {/* BOM / WIP gaps — missing WIP times + incomplete BOMs */}
+        <Section
+          title="Missing WIP Times"
+          subtitle="Products in production with no standard time set for a step — workers and scheduling have nothing to plan against."
+          count={counts.missingWipTimes}
+          icon={Timer}
+        >
+          {groups.missingWipTimes.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <Th>Product Code</Th>
+                    <Th>Product</Th>
+                    <Th>Step</Th>
+                    <Th>Example PO</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.missingWipTimes.map((r) => (
+                    <tr
+                      key={r.productCode + r.departmentCode}
+                      className="border-b border-[#F0ECE6]"
+                    >
+                      <Td strong>
+                        <RecordLink to="/products" label={r.productCode || "—"} />
+                      </Td>
+                      <Td>{r.productName || "—"}</Td>
+                      <Td>{r.departmentCode || "—"}</Td>
+                      <Td>{r.examplePoNo || "—"}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+
+        <Section
+          title="Incomplete BOMs"
+          subtitle="Products in production with no active bill of materials — costing and material planning cannot run."
+          count={counts.incompleteBoms}
+          icon={Layers}
+        >
+          {groups.incompleteBoms.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <Th>Product Code</Th>
+                    <Th>Product</Th>
+                    <Th>Issue</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.incompleteBoms.map((r) => (
+                    <tr key={r.productCode} className="border-b border-[#F0ECE6]">
+                      <Td strong>
+                        <RecordLink to="/products" label={r.productCode || "—"} />
+                      </Td>
+                      <Td>{r.productName || "—"}</Td>
+                      <Td>{r.reason || "—"}</Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+
+        {/* R&D stalled */}
+        <Section
+          title="R&D Projects Stalled"
+          subtitle="Active projects past their target launch date, or projects on hold — they need a push or a decision."
+          count={counts.rdStalled}
+          icon={FlaskConical}
+        >
+          {groups.rdStalled.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <Th>Project</Th>
+                    <Th>Stage</Th>
+                    <Th>Status</Th>
+                    <Th>Target Launch</Th>
+                    <Th right>Overdue</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.rdStalled.map((r) => (
+                    <tr key={r.id} className="border-b border-[#F0ECE6]">
+                      <Td strong>
+                        <RecordLink to={`/rd/${r.id}`} label={r.name || "—"} />
+                      </Td>
+                      <Td>{r.currentStage || "—"}</Td>
+                      <Td>
+                        <Badge variant="status" status={r.status} />
+                      </Td>
+                      <Td>
+                        {r.targetLaunchDate ? formatDate(r.targetLaunchDate) : "—"}
+                      </Td>
+                      <Td right>
+                        {r.daysOverdue > 0 ? <DaysBadge days={r.daysOverdue} /> : "—"}
                       </Td>
                     </tr>
                   ))}

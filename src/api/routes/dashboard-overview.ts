@@ -73,7 +73,7 @@ app.get("/", async (c) => {
     }
   }
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v18:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v19:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1021,6 +1021,103 @@ app.get("/", async (c) => {
       productionSen: prodRevMap.get(month) ?? 0,
     }));
 
+    // ── Weekly Revenue (last 12 weeks) — same three lenses as
+    // monthlyRevenue but bucketed by ISO week (Monday start). Additive
+    // queries so the monthly cards above stay untouched. The three SO /
+    // Invoice / Production revenue definitions mirror the monthly ones
+    // exactly so the two views reconcile. — Wei Siang 2026-05-29.
+    const [soWeekRes, invWeekRes, prodWeekRes] = await Promise.all([
+      db
+        .prepare(
+          `SELECT to_char(date_trunc('week', companySODate::date), 'YYYY-MM-DD') AS "yw",
+                  COALESCE(SUM(totalSen),0) AS "revenueSen"
+             FROM sales_orders
+            WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')
+              AND companySODate IS NOT NULL
+              AND companySODate::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')
+            GROUP BY 1`,
+        )
+        .bind(orgId)
+        .all<{ yw: string | null; revenueSen: number }>(),
+      db
+        .prepare(
+          `SELECT to_char(date_trunc('week', invoiceDate::date), 'YYYY-MM-DD') AS "yw",
+                  COALESCE(SUM(totalSen),0) AS "revenueSen"
+             FROM invoices
+            WHERE orgId = ? AND status != 'CANCELLED' AND invoiceDate IS NOT NULL
+              AND invoiceDate::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')
+            GROUP BY 1`,
+        )
+        .bind(orgId)
+        .all<{ yw: string | null; revenueSen: number }>(),
+      db
+        .prepare(
+          `WITH per_po AS (
+             SELECT productionOrderId,
+                    MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN completedDate END) AS unit_completed_at
+               FROM job_cards
+              WHERE departmentCode = 'UPHOLSTERY'
+              GROUP BY productionOrderId
+             HAVING COUNT(*) > 0
+                AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                                  AND completedDate IS NOT NULL
+                             THEN 1 ELSE 0 END) = COUNT(*)
+           )
+           SELECT to_char(date_trunc('week', per_po.unit_completed_at::date), 'YYYY-MM-DD') AS "yw",
+                  COALESCE(SUM(
+                    COALESCE(
+                      soi.unitPriceSen,
+                      coi.unitPriceSen,
+                      (SELECT COALESCE(p.basePriceSen, p.price1Sen)
+                         FROM products p
+                        WHERE p.code = po.productCode
+                        ORDER BY p.basePriceSen DESC NULLS LAST, p.id
+                        LIMIT 1),
+                      0
+                    ) * po.quantity
+                  ),0) AS "revenueSen"
+             FROM per_po
+             JOIN production_orders po ON po.id = per_po.productionOrderId
+             LEFT JOIN sales_order_items soi
+                    ON soi.salesOrderId = po.salesOrderId AND soi.lineNo = po.lineNo
+             LEFT JOIN consignment_order_items coi
+                    ON coi.consignmentOrderId = po.consignmentOrderId AND coi.lineNo = po.lineNo
+            WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
+              AND per_po.unit_completed_at IS NOT NULL
+              AND per_po.unit_completed_at::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')
+            GROUP BY 1`,
+        )
+        .all<{ yw: string | null; revenueSen: number }>(),
+    ]);
+    const soRevWeekMap = new Map<string, number>();
+    for (const r of soWeekRes.results ?? []) if (r.yw) soRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
+    const invRevWeekMap = new Map<string, number>();
+    for (const r of invWeekRes.results ?? []) if (r.yw) invRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
+    const prodRevWeekMap = new Map<string, number>();
+    for (const r of prodWeekRes.results ?? []) if (r.yw) prodRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
+    // 12 Monday-anchored week starts ending the current week (UTC; matches
+    // Postgres date_trunc('week', …) which is Monday-based).
+    const weekStarts: string[] = (() => {
+      const out: string[] = [];
+      const mon = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+      const dow = mon.getUTCDay(); // 0=Sun..6=Sat
+      mon.setUTCDate(mon.getUTCDate() + (dow === 0 ? -6 : 1 - dow)); // this week's Monday
+      for (let i = 11; i >= 0; i--) {
+        const d = new Date(mon);
+        d.setUTCDate(d.getUTCDate() - i * 7);
+        out.push(d.toISOString().slice(0, 10));
+      }
+      return out;
+    })();
+    const weeklyRevenue = weekStarts.map((week) => ({
+      week,
+      salesOrderSen: soRevWeekMap.get(week) ?? 0,
+      invoiceSen: invRevWeekMap.get(week) ?? 0,
+      productionSen: prodRevWeekMap.get(week) ?? 0,
+    }));
+
     // ---- Top sellers ----
     type SellerRow = {
       productCode: string;
@@ -1353,6 +1450,7 @@ app.get("/", async (c) => {
       monthlySales,
       monthlySalesByCustomer,
       monthlyRevenue,
+      weeklyRevenue,
       period,
       salesMonths,
       employee: {

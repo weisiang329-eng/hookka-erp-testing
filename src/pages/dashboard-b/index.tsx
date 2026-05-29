@@ -168,6 +168,12 @@ type Overview = {
     invoiceSen: number;
     productionSen: number;
   }[];
+  weeklyRevenue?: {
+    week: string; // ISO week-start date "YYYY-MM-DD" (Monday)
+    salesOrderSen: number;
+    invoiceSen: number;
+    productionSen: number;
+  }[];
   employee?: { activeHeadcount: number };
 };
 type PODeliveryShape = PipelinePO & {
@@ -787,15 +793,18 @@ export default function DashboardBPage() {
   const months = ov.salesMonths ?? [];
 
   const rev = useMemo(() => ov.monthlyRevenue ?? [], [ov.monthlyRevenue]);
+  // The Revenue trend chart is now weekly (last 12 weeks). KPI sparklines /
+  // deltas below stay month-over-month off `rev`. — Wei Siang 2026-05-29.
+  const weekRev = useMemo(() => ov.weeklyRevenue ?? [], [ov.weeklyRevenue]);
   const revChart = useMemo(
     () =>
-      rev.map((r) => ({
-        m: r.month.slice(2),
+      weekRev.map((r) => ({
+        m: r.week.slice(5), // "MM-DD" of the week start
         "Sales Orders": Math.round(r.salesOrderSen / 100),
         Invoices: Math.round(r.invoiceSen / 100),
         Production: Math.round(r.productionSen / 100),
       })),
-    [rev],
+    [weekRev],
   );
   const soSpark = useMemo(() => rev.map((r) => r.salesOrderSen), [rev]);
   const delSpark = useMemo(() => rev.map((r) => r.productionSen), [rev]);
@@ -928,7 +937,7 @@ export default function DashboardBPage() {
         <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">
             <SectionTitle
-              title="Revenue — last 12 months"
+              title="Revenue — last 12 weeks"
               sub="Sales Orders · Invoices · Production · click a legend to toggle"
               right={
                 <div className="flex gap-3 text-xs">

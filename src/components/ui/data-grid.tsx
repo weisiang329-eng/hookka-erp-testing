@@ -1493,6 +1493,60 @@ export function DataGrid<T extends Record<string, any>>({
     }
     return new Set();
   });
+  // ── Column widths (user-resizable) ──
+  // Same two-tier persistence as visibility/order: personal
+  // `datagrid-colw-${gridId}-${userKey()}` wins, else org-default, else the
+  // column def's own `width`. Map of colKey -> css width string (e.g. "140px").
+  const [colWidths, setColWidths] = useState<Record<string, string>>(() => {
+    if (gridId && typeof window !== "undefined") {
+      try {
+        const personal = localStorage.getItem(`datagrid-colw-${gridId}-${userKey()}`);
+        if (personal) return JSON.parse(personal);
+        const orgDefault = localStorage.getItem(`datagrid-colw-${gridId}-org-default`);
+        if (orgDefault) return JSON.parse(orgDefault);
+      } catch { /* ignore */ }
+    }
+    return {};
+  });
+  const persistColWidths = useCallback((w: Record<string, string>) => {
+    if (gridId) {
+      try { localStorage.setItem(`datagrid-colw-${gridId}-${userKey()}`, JSON.stringify(w)); } catch { /* ignore */ }
+    }
+  }, [gridId]);
+  // Double-click the handle → drop the override (back to the column's default).
+  const resetColumnWidth = useCallback((key: string) => {
+    setColWidths(prev => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      persistColWidths(next);
+      return next;
+    });
+  }, [persistColWidths]);
+  // Drag the right-edge handle to resize. Min 48px so a column can't vanish.
+  // We update state on each move (virtualized rows keep this cheap) and persist
+  // once on mouseup.
+  const startColumnResize = useCallback((e: React.MouseEvent, key: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.currentTarget as HTMLElement).closest("th");
+    const startX = e.clientX;
+    const startW = th ? th.getBoundingClientRect().width : 120;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(48, Math.round(startW + (ev.clientX - startX)));
+      setColWidths(prev => (prev[key] === `${w}px` ? prev : { ...prev, [key]: `${w}px` }));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+      setColWidths(prev => { persistColWidths(prev); return prev; });
+    };
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [persistColWidths]);
+
   const [showCustomizer, setShowCustomizer] = useState(false);
 
   const toggleColumn = useCallback((key: string) => {
@@ -2492,12 +2546,15 @@ export function DataGrid<T extends Record<string, any>>({
         >
           <colgroup>
             {selectable && <col style={{ width: "32px" }} />}
-            {visibleColumns.map(col => (
-              <col
-                key={col.key}
-                style={col.width ? { width: col.width, minWidth: col.width } : undefined}
-              />
-            ))}
+            {visibleColumns.map(col => {
+              const w = colWidths[col.key] || col.width;
+              return (
+                <col
+                  key={col.key}
+                  style={w ? { width: w, minWidth: w } : undefined}
+                />
+              );
+            })}
             {/* Kebab column — renders only when contextMenuItems is set
                 so list pages without row actions stay unchanged. */}
             {hasContextMenu && <col style={{ width: "40px" }} />}
@@ -2594,6 +2651,18 @@ export function DataGrid<T extends Record<string, any>>({
                         ▼
                       </button>
                     </span>
+                    {/* Drag-to-resize handle on the column's right edge.
+                        Persists per gridId (datagrid-colw-*); double-click
+                        resets to the column's default width. */}
+                    <span
+                      role="separator"
+                      aria-orientation="vertical"
+                      title="Drag to resize · double-click to reset"
+                      onMouseDown={(e) => startColumnResize(e, col.key)}
+                      onDoubleClick={(e) => { e.stopPropagation(); resetColumnWidth(col.key); }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize select-none hover:bg-[#6B5C32]/40 z-30"
+                    />
                   </th>
                 );
               })}

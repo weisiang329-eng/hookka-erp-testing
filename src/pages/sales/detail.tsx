@@ -1168,7 +1168,7 @@ export default function SalesOrderDetailPage() {
                         <p className="text-xs text-[#9CA3AF]">{po.productCode}</p>
                       </td>
                       <td className="px-3 py-3 text-right font-medium">{po.quantity}</td>
-                      <td className="px-3 py-3 text-[#4B5563]">{(po.currentDepartment || "—").replace(/_/g, " ")}</td>
+                      <td className="px-3 py-3 text-[#4B5563]">{po.status === "COMPLETED" ? "Done" : (po.currentDepartment || "—").replace(/_/g, " ")}</td>
                       <td className="px-3 py-3">
                         <div className="flex items-center gap-2">
                           <div className="flex-1 bg-[#E2DDD8] rounded-full h-2 max-w-[120px]">

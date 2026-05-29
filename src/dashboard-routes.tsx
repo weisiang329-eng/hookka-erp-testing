@@ -85,6 +85,10 @@ const BOM = lazy(() => import('./pages/bom'))
 const Products = lazy(() => import('./pages/products'))
 const ProductBOM = lazy(() => import('./pages/products/bom'))
 
+// CNC Cutting Templates — fabric-cutting file library for the BUYI E-DIGIT
+// cutter, grouped by product code.
+const CncTemplates = lazy(() => import('./pages/cnc-templates'))
+
 // Single-page modules
 const Customers = lazy(() => import('./pages/customers'))
 const Employees = lazy(() => import('./pages/employees'))
@@ -326,6 +330,9 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/products', element: <S><Products /></S> },
   { path: '/products/:id/bom', element: <S><ProductBOM /></S> },
 
+  // CNC Cutting Templates — fabric-cutting file library (BUYI E-DIGIT cutter).
+  { path: '/cnc-templates', element: <S><CncTemplates /></S> },
+
   // Single-page modules
   { path: '/customers', element: <S><Customers /></S> },
   { path: '/employees', element: <S><Employees /></S> },
@@ -470,6 +477,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/planning': () => import('./pages/planning'),
   '/planning/mrp': () => import('./pages/planning/mrp'),
   '/products': () => import('./pages/products'),
+  '/cnc-templates': () => import('./pages/cnc-templates'),
   '/bom': () => import('./pages/bom'),
   '/bom/wip-times': () => import('./pages/production/wip-times'),
   '/maintenance/sofa-combos': () => import('./pages/maintenance/sofa-combos'),

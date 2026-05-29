@@ -607,6 +607,7 @@ import eInvoices from "./routes/e-invoices";
 import threeWayMatch from "./routes/three-way-match";
 import deliveryOrders from "./routes/delivery-orders";
 import packingLists from "./routes/packing-lists";
+import cncTemplates from "./routes/cnc-templates";
 import invoices from "./routes/invoices";
 import payments from "./routes/payments";
 // Phase 4 — production / inventory / supplier
@@ -749,6 +750,7 @@ app.route("/api/e-invoices", eInvoices);
 app.route("/api/three-way-match", threeWayMatch);
 app.route("/api/delivery-orders", deliveryOrders);
 app.route("/api/packing-lists", packingLists);
+app.route("/api/cnc-templates", cncTemplates);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);
 // Phase 4

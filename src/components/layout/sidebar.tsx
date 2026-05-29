@@ -44,6 +44,7 @@ import {
   Clock,
   FolderOpen,
   ClipboardCheck,
+  Scissors,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -117,6 +118,8 @@ const navigationGroups: NavGroup[] = [
     label: "PRODUCTS & BOM",
     items: [
       { name: "Products", href: "/products", icon: Boxes },
+      // CNC fabric-cutting template library for the BUYI E-DIGIT cutter.
+      { name: "CNC Templates", href: "/cnc-templates", icon: Scissors },
       { name: "BOM", href: "/bom", icon: Layers },
       // WIP catalog — dedup'd per (wipLabel × dept) view of every WIP that's
       // ever run, with avg production time. Reference for planners.

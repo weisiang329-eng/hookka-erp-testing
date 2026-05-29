@@ -261,7 +261,7 @@ SENTRY_DSN = "https://9ad06534a79eed8df457becbe2a2244f@o4511302465814528.ingest.
 # Not a secret. The matching service_role key is set via
 # `wrangler secret put SUPABASE_SERVICE_KEY` and never appears here.
 # Leave this blank in dev / local — the helper degrades to 503 cleanly.
-# SUPABASE_PROJECT_REF = "your-project-ref"
+SUPABASE_PROJECT_REF = "vpwdqtsxexpiqxzweivd"
 # Uncomment + fill once the Google Cloud Console step is done. Empty values
 # keep the OAuth route returning 503 (fails closed, see auth-oauth.ts).
 # OAUTH_GOOGLE_CLIENT_ID = ""

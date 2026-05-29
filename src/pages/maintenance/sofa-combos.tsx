@@ -697,13 +697,18 @@ function ComboCard({
             return (
               <div
                 key={h}
-                className="rounded border border-[#E2DDD8] bg-[#FAF9F7] px-1 py-1.5"
+                className="rounded border border-[#E2DDD8] bg-[#FAF9F7] px-0.5 py-1.5"
               >
                 <div className="text-[10px] uppercase tracking-wide text-[#9CA3AF]">
                   {h}
                 </div>
-                <div className="text-xs font-medium text-[#1F1D1B]">
-                  {typeof sen === "number" ? formatCurrency(sen) : "—"}
+                {/* text-[10px] + tabular-nums keeps "RM 2,640.00" inside the
+                    narrow 1/5 cell. Intl currency uses a non-breaking space
+                    between "RM" and the amount, which forced one long line
+                    that overflowed the cell border — swap it for a normal
+                    space so it wraps gracefully instead of spilling. */}
+                <div className="text-[10px] font-medium text-[#1F1D1B] tabular-nums leading-tight">
+                  {typeof sen === "number" ? formatCurrency(sen).replace(new RegExp(String.fromCharCode(160), "g"), " ") : "—"}
                 </div>
               </div>
             );

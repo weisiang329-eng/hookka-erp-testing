@@ -34,6 +34,35 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-002 — Sofa Combo Pricing card: prices overflow their cells ("歪了")
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang: "价格歪了". On the Sofa Combo Pricing page
+(/maintenance/sofa-combos) the per-size price cells (24/28/30/32/35) showed the
+price text spilling outside the bordered box and running into the neighbouring
+cell — only cells with an actual price; empty "—" cells looked fine.
+
+**Root cause:** the price grid is `grid-cols-5` in a narrow card (3-up on
+desktop) → each cell is ~60px inner. `formatCurrency` uses
+`Intl.NumberFormat`, which puts a **non-breaking space** (U+00A0) between "RM"
+and the amount. The NBSP prevented the string from wrapping, so "RM 2,640.00"
+stayed one ~68px line and overflowed the ~58px content box (measured live:
+scrollWidth 68 vs clientWidth 58).
+
+**Fix (sofa-combos.tsx price cell only):** price text `text-xs`→`text-[10px]`
++ `tabular-nums leading-tight`; cell padding `px-1`→`px-0.5`; and swap the NBSP
+for a normal space (`replace(new RegExp(String.fromCharCode(160),"g")," ")`,
+ASCII-only to satisfy `no-irregular-whitespace`) so it wraps gracefully (RM /
+amount) instead of spilling on the tightest cards. Products master price grid
+checked — different layout, not affected.
+
+**Verified:** measured the overflow live first; `tsc` + `eslint` clean;
+live-verified on prod after deploy.
+
+---
+
 ## BUG-2026-05-29-001 — Daily Capacity average deflated by public holidays
 
 **Status:** 🟢 Fixed (2026-05-29)

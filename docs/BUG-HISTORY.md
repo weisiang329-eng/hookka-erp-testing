@@ -34,6 +34,67 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-05-30-002 — Product master: editable Fabric Usage (m) column
+
+**Status:** 🟢 Shipped (2026-05-30)
+**Category:** ui-frontend
+
+**Ask:** Wei Siang: "product usage 还没 complete" — the `products.fabricUsage`
+field (meters of fabric per unit) existed end-to-end (GET returns it, PUT saves
+it) but had **no input cell** in the UI, so it was never filled in.
+
+**What shipped:** Made the existing read-only "Fabric" column on the Products
+table inline-editable (relabeled "Fabric (m)"), mirroring the adjacent M³
+inline-editor exactly — click → numeric input → Enter/blur saves via the
+existing `PUT /api/products/:id` with `{ fabricUsage }`, optimistic update +
+cache invalidation. Shows a display-only fabric-width hint by category
+(BEDFRAME → 142cm, SOFA → 149cm) so the operator knows which width the meters
+assume. Source of the number = BUYI nesting output, entered manually (we
+established the .dgt files can't be reverse-engineered into trustworthy usage).
+No migration (column already existed); no storage key needed.
+
+**Verified:** `tsc --noEmit` + eslint clean; live-verified on prod.
+
+---
+
+## FEATURE-2026-05-30-001 — CNC fabric-cutting template library (shell)
+
+**Status:** 🟡 Shipped (shell) — file storage pending SUPABASE_SERVICE_KEY (2026-05-30)
+**Category:** delivery-orders
+
+**Ask:** Surface the BUYI E-DIGIT CNC fabric-cutting templates (`.dgt`/`.prj`/
+`.emf`, ~49 files in Drive) inside the ERP — a library page + a per-product
+panel — and host the files in the system.
+
+**What shipped (code, degrades gracefully):**
+- `migrations-postgres/0140_cnc_templates.sql` — `cnc_templates` table
+  (productCode, sizeLabel, fabricWidth, pieceLabel, displayName, folder, 3 file
+  keys, etc.).
+- `src/api/routes/cnc-templates.ts` (mounted `/api/cnc-templates`) — list/search,
+  get, signed-download per file kind (dgt/prj/emf), upload (multipart), delete.
+  Reuses the existing `supabase-storage.ts` helper; returns 503 when storage
+  unconfigured and degrades (isMissingTable guard) before the migration is
+  applied — never 500s.
+- `src/pages/cnc-templates.tsx` — library page (`/cnc-templates`, sidebar nav),
+  grouped by product, per-file download buttons.
+- `src/components/cnc/CncTemplatePanel.tsx` — per-product cutting-template panel,
+  wired onto the product detail row.
+- `wrangler.toml` — set public `SUPABASE_PROJECT_REF`.
+
+**Pending to go fully live (gated on Wei Siang):** set `SUPABASE_SERVICE_KEY`
+secret + create the `hookka-files` bucket, then apply migration 0140 + import
+the 49 Drive files. Until then the page shows empty / "no template" (no errors).
+
+**Note:** the `.dgt` are proprietary BUYI binaries — we can store/serve them but
+NOT reliably extract fabric usage / nesting from them (verified by parsing; the
+70cm width vs 142cm fabric showed our reads were single-piece, not the nested
+marker). Fabric usage is captured manually instead (FEATURE-2026-05-30-002).
+
+**Verified:** `tsc --noEmit` + eslint clean (whole-repo). Live verification of
+the file flow pending the storage key.
+
+---
+
 ## FEATURE-2026-05-29-002 — Daily Report (factory process / SOP-compliance watch)
 
 **Status:** 🟢 Shipped (2026-05-29)

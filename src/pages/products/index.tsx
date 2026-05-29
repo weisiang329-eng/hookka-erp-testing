@@ -20,6 +20,17 @@ import {
   MaintenanceItemHistoryDialog,
   type PricedItemKey,
 } from "./MaintenanceItemHistoryDialog";
+import { CncTemplatePanel } from "@/components/cnc/CncTemplatePanel";
+
+// Derive the bare product code for the CNC template lookup. SKU codes look
+// like "1013-(K)" / "1013 King" — the cutting templates are keyed by the
+// leading code token (e.g. "1013"), so strip the variant suffix at the first
+// space or "-(".
+function baseProductCode(code: string): string {
+  const raw = String(code ?? "").trim();
+  if (!raw) return raw;
+  return raw.split(/\s|-\(/)[0].trim();
+}
 
 // Keys whose entries carry a priceSen field (and therefore have a
 // per-row history dialog). Non-priced keys like gaps / sofaSizes don't
@@ -64,6 +75,13 @@ const SOFA_TIERS: { value: SofaTier; label: string }[] = [
 // (Price 2) before the matrix existed. Pin the default here so the read path
 // stays in one place — every height/tier comparison runs through this helper.
 const entryTier = (t: SofaTier | undefined): SofaTier => t ?? "PRICE_2";
+
+// Fabric roll width by product category, shown next to the Fabric (m) cell as
+// display-only context so the operator knows which width the meters assume.
+// Bedframe fabric comes off a 142cm roll; sofa fabric off a 149cm roll.
+// Other categories have no fixed width, so no hint is shown. Not stored.
+const fabricWidthHint = (category: string): string | null =>
+  category === "BEDFRAME" ? "142cm" : category === "SOFA" ? "149cm" : null;
 
 type DeptWorkingTime = {
   departmentCode: string;
@@ -1530,6 +1548,10 @@ export default function ProductsPage() {
   const [priceInput, setPriceInput] = useState("");
   const [editingM3, setEditingM3] = useState<string | null>(null);
   const [m3Input, setM3Input] = useState("");
+  // Fabric Usage (meters of fabric per unit). Inline-editable exactly like
+  // Unit M3 — click-to-edit, save on Enter/blur via PUT /api/products/:id.
+  const [editingFabricUsage, setEditingFabricUsage] = useState<string | null>(null);
+  const [fabricUsageInput, setFabricUsageInput] = useState("");
   const [editingPrice1, setEditingPrice1] = useState<string | null>(null);
   const [price1Input, setPrice1Input] = useState("");
   const [importing, setImporting] = useState(false);
@@ -2229,7 +2251,7 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-right`}>32</div>
                         <div className={`${thCls} text-right`}>35</div>
                         <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
-                        <div className={`${thCls} text-right`}>Fabric</div>
+                        <div className={`${thCls} text-right`}>Fabric (m)</div>
                         <div className={`${thCls} text-right`}>Total Min</div>
                         <div className={`${thCls} text-center`}>Variants</div>
                       </>
@@ -2237,7 +2259,7 @@ export default function ProductsPage() {
                       <>
                         <div className={`${thCls} text-right`}>Base Price</div>
                         <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
-                        <div className={`${thCls} text-right`}>Fabric</div>
+                        <div className={`${thCls} text-right`}>Fabric (m)</div>
                       </>
                     ) : (
                       <>
@@ -2246,7 +2268,7 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-right`}>Price 2</div>
                         <div className={`${thCls} text-right`}>Price 1</div>
                         <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
-                        <div className={`${thCls} text-right`}>Fabric</div>
+                        <div className={`${thCls} text-right`}>Fabric (m)</div>
                         <div className={`${thCls} text-right`}>Total Min</div>
                         <div className={`${thCls} text-center`}>Variants</div>
                       </>
@@ -2568,8 +2590,51 @@ export default function ProductsPage() {
                             <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
                               {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
                             </div>
-                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                              {(cfg?.fabricUsage ?? p.fabricUsage)} m
+                            {/* Fabric (m) - editable, mirrors Unit M3 */}
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {editingFabricUsage === p.id ? (
+                                <input
+                                  autoFocus
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
+                                  value={fabricUsageInput}
+                                  onChange={(e) => setFabricUsageInput(e.target.value)}
+                                  onBlur={() => {
+                                    const val = parseFloat(fabricUsageInput || "0") || 0;
+                                    setEditingFabricUsage(null);
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, fabricUsage: val } : pr));
+                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
+                                      method: "PUT",
+                                      body: { fabricUsage: val },
+                                    }).then((data) => {
+                                      if (data.success && data.data) {
+                                        invalidateCachePrefix("/api/products");
+                                        invalidateCachePrefix("/api/bom");
+                                        invalidateCachePrefix("/api/bom-master-templates");
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
+                                      }
+                                    }).catch(() => {});
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingFabricUsage(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.1"
+                                  min="0"
+                                />
+                              ) : (
+                                <div className="flex items-baseline justify-end gap-1">
+                                  <button
+                                    onClick={() => { setEditingFabricUsage(p.id); setFabricUsageInput(String((cfg?.fabricUsage ?? p.fabricUsage) || 0)); }}
+                                    className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
+                                  >
+                                    {(cfg?.fabricUsage ?? p.fabricUsage) || 0} m
+                                  </button>
+                                  {fabricWidthHint(p.category) && (
+                                    <span className="text-[10px] text-[#9CA3AF]">· {fabricWidthHint(p.category)}</span>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           </>
                         ) : (
@@ -2614,8 +2679,51 @@ export default function ProductsPage() {
                                 </button>
                               )}
                             </div>
-                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                              {(cfg?.fabricUsage ?? p.fabricUsage)} m
+                            {/* Fabric (m) - editable, mirrors Unit M3 */}
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {editingFabricUsage === p.id ? (
+                                <input
+                                  autoFocus
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
+                                  value={fabricUsageInput}
+                                  onChange={(e) => setFabricUsageInput(e.target.value)}
+                                  onBlur={() => {
+                                    const val = parseFloat(fabricUsageInput || "0") || 0;
+                                    setEditingFabricUsage(null);
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, fabricUsage: val } : pr));
+                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
+                                      method: "PUT",
+                                      body: { fabricUsage: val },
+                                    }).then((data) => {
+                                      if (data.success && data.data) {
+                                        invalidateCachePrefix("/api/products");
+                                        invalidateCachePrefix("/api/bom");
+                                        invalidateCachePrefix("/api/bom-master-templates");
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
+                                      }
+                                    }).catch(() => {});
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingFabricUsage(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.1"
+                                  min="0"
+                                />
+                              ) : (
+                                <div className="flex items-baseline justify-end gap-1">
+                                  <button
+                                    onClick={() => { setEditingFabricUsage(p.id); setFabricUsageInput(String((cfg?.fabricUsage ?? p.fabricUsage) || 0)); }}
+                                    className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
+                                  >
+                                    {(cfg?.fabricUsage ?? p.fabricUsage) || 0} m
+                                  </button>
+                                  {fabricWidthHint(p.category) && (
+                                    <span className="text-[10px] text-[#9CA3AF]">· {fabricWidthHint(p.category)}</span>
+                                  )}
+                                </div>
+                              )}
                             </div>
                             <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827] whitespace-nowrap">
                               {totalMin} min
@@ -2727,6 +2835,15 @@ export default function ProductsPage() {
 
                           {/* Customer Assignments */}
                           <CustomerAssignmentsSection productId={p.id} active={isExpanded} />
+
+                          {/* CNC Cutting Template — fabric-cutting files for
+                              the BUYI E-DIGIT cutter, keyed by the bare
+                              product code (variant suffix stripped) and
+                              narrowed by this SKU's size. */}
+                          <CncTemplatePanel
+                            productCode={baseProductCode(p.code)}
+                            size={p.sizeLabel}
+                          />
                         </div>
                       )}
                     </td>

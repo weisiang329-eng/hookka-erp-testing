@@ -9,6 +9,7 @@
 // the /dashboard-b route line, and the sidebar line to remove it.
 // ===========================================================================
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/utils";
 import { Skeleton, SkeletonDashboard } from "@/components/ui/skeleton";
@@ -40,6 +41,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Scissors,
+  ClipboardCheck,
 } from "lucide-react";
 
 // ---------- API response types (mirror /dashboard) ----------
@@ -204,6 +206,24 @@ type WheSummaryResp = {
 };
 type WorkersResp = {
   data?: { id: string; name: string; departmentCode?: string; status?: string }[];
+};
+// Daily Report (process / SOP exceptions) summary — independent fetch, shown
+// as its own card. Mirrors src/api/lib/compliance-report.ts counts.
+type ComplianceResp = {
+  success?: boolean;
+  data?: {
+    counts: {
+      total: number;
+      doPendingDispatch: number;
+      doNotDelivered: number;
+      doNotInvoiced: number;
+      soNoDo: number;
+      soNoInvoice: number;
+      overdueOrders: number;
+      poNotReceived: number;
+      lowEfficiencyWorkers: number;
+    };
+  };
 };
 
 const PROD_DEPTS = new Set([
@@ -713,6 +733,11 @@ export default function DashboardBPage() {
   );
   const { data: workersRaw, loading: workersL } =
     useCachedJson<WorkersResp>("/api/workers");
+  // Daily Report summary — independent fetch (own loading state), so it paints
+  // the instant its data lands without blocking the rest of the dashboard.
+  const { data: compRaw, loading: compL } =
+    useCachedJson<ComplianceResp>("/api/reports/compliance.json");
+  const compCounts = compRaw?.data?.counts;
 
   // Progressive render — the page used to block on ALL nine fetches before
   // painting anything. Now it gates only on the overview fetch, which is
@@ -931,6 +956,74 @@ export default function DashboardBPage() {
           loading={pendingL}
         />
       </div>
+
+      {/* Daily Report — process / SOP exceptions summary. Independent fetch;
+          links to the full /daily-report page. */}
+      <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
+        <CardContent className="p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <div className="rounded-xl bg-[#F5F2ED] p-3">
+                <ClipboardCheck className="h-6 w-6 text-[#6B5C32]" />
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">
+                  Daily Report
+                </p>
+                {compL && !compCounts ? (
+                  <Skeleton height={30} width={64} className="mt-1" />
+                ) : (
+                  <p
+                    className={`mt-0.5 text-3xl font-[800] tabular-nums leading-none ${
+                      (compCounts?.total ?? 0) === 0
+                        ? "text-[#15803D]"
+                        : "text-[#1F1D1B]"
+                    }`}
+                  >
+                    {compCounts?.total ?? 0}
+                  </p>
+                )}
+                <p className="text-xs text-[#9CA3AF] mt-1">
+                  {(compCounts?.total ?? 0) === 0
+                    ? "All clear — nothing flagged today"
+                    : "process & SOP exceptions to action today"}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {compCounts &&
+                (
+                  [
+                    ["Overdue", compCounts.overdueOrders],
+                    ["DO not invoiced", compCounts.doNotInvoiced],
+                    ["SO no DO", compCounts.soNoDo],
+                    ["PO not received", compCounts.poNotReceived],
+                    ["Low efficiency", compCounts.lowEfficiencyWorkers],
+                  ] as const
+                )
+                  .filter(([, n]) => n > 0)
+                  .slice(0, 4)
+                  .map(([label, n]) => (
+                    <span
+                      key={label}
+                      className="inline-flex items-center gap-1 rounded-full border border-[#FCA5A5] bg-[#FEE2E2] px-2.5 py-1 text-[11px] font-semibold text-[#B91C1C]"
+                    >
+                      {label}
+                      <span className="tabular-nums">{n}</span>
+                    </span>
+                  ))}
+              <Link
+                to="/daily-report"
+                className="inline-flex items-center gap-1 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#4D4224]"
+              >
+                View Daily Report
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              </Link>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Revenue + Plant load */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

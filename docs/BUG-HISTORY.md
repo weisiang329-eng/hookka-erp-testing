@@ -34,6 +34,44 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEATURE-2026-05-29-002 — Daily Report (factory process / SOP-compliance watch)
+
+**Status:** 🟢 Shipped (2026-05-29)
+**Category:** ui-frontend
+
+**Ask:** Wei Siang wanted a daily "newspaper"-style report (NOT the notification
+list) that, opened each morning, instantly shows what's not following SOP / is
+stuck / nobody's producing — across delivery, orders, procurement, and people.
+
+**What shipped (v1):**
+- **Backend** `src/api/lib/compliance-report.ts` — `collectComplianceData(db, today)`
+  runs 8 checks, each in its own try/catch (one broken check can't 500 the
+  report): DO stuck in Pending Dispatch >1d; DO dispatched >1d not delivered;
+  DO delivered >1d not invoiced; confirmed/ready SO with no DO (handles
+  consolidated DOs via `delivery_order_items.salesOrderNo`); delivered/closed SO
+  with no invoice; overdue orders (reuses `collectOverdueData`); PO open >14d
+  with no received GRN nor purchase invoice; low-efficiency workers (reuses
+  `collectEfficiencyData`, <60% present workers). Thresholds: DO stages 1d,
+  PO 14d. No orgId filter (matches existing reports).
+- **Endpoint** `GET /api/reports/compliance.json` (`reports.ts`), gated on
+  `sales-orders:read`.
+- **Page** `src/pages/daily-report.tsx` — newspaper-style: a count strip + one
+  section card per check with compact tables, day/efficiency badges, links to
+  the source record, and per-section "all clear" empty states. English-only,
+  no DataGrid (kept the fragile component out).
+- **Nav + route** — sidebar "Daily Report" (OVERVIEW group) + `/daily-report`.
+- **Dashboard card** (`dashboard-b/index.tsx`) — independent fetch showing total
+  issue count + top-category breakdown, linking to the full page.
+
+**Deferred to v2:** production process-skipping (out-of-sequence JC completion),
+incomplete-BOM / missing-WIP-time gaps, R&D stall (needs a last-activity
+timestamp the rd_projects table lacks).
+
+**Verified:** `tsc --noEmit` + eslint clean. Live verification on prod pending
+deploy.
+
+---
+
 ## BUG-2026-05-29-008 — DO list search can't find a DO by its SO number (Sales Orders column not searchable + tab-scoped)
 
 **Status:** 🟢 Fixed (2026-05-29)

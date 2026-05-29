@@ -36,6 +36,7 @@ import {
   renderOverdueHtml,
   renderOverdueEmailText,
 } from "../lib/schedule-overdue-report";
+import { collectComplianceData } from "../lib/compliance-report";
 
 const app = new Hono<Env>();
 export default app;
@@ -326,6 +327,24 @@ app.get("/overdue.json", async (c) => {
     return c.json({ success: true, data });
   } catch (err) {
     console.error("[reports/overdue.json] failed:", err);
+    return c.json({ success: false, error: "report generation failed" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/compliance.json — Daily Report. Process / SOP exceptions
+// across the order → delivery → invoice + procurement chains, plus overdue
+// orders and low-efficiency workers. JSON only (no HTML / email / cron for v1).
+// ---------------------------------------------------------------------------
+
+app.get("/compliance.json", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  try {
+    const data = await collectComplianceData(c.var.DB, todayYmdSgt());
+    return c.json({ success: true, data });
+  } catch (err) {
+    console.error("[reports/compliance.json] failed:", err);
     return c.json({ success: false, error: "report generation failed" }, 500);
   }
 });

@@ -220,7 +220,18 @@ export default function SalesOrderDetailPage() {
   // differ.
   const mode = useSOMode();
   const basePath = soBasePath(mode);
-  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
+  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{
+    success?: boolean;
+    data?: SalesOrder;
+    lockReason?: string | null;
+    linkedPOs?: LinkedPO[];
+    statusHistory?: StatusChange[];
+    priceOverrides?: PriceOverrideRecord[];
+    // Real downstream documents resolved server-side (handles consolidated DOs).
+    linkedDOs?: { id: string; doNo: string; status: string }[];
+    linkedInvoices?: { id: string; invoiceNo: string; status: string; totalSen: number; paidAmount: number; paymentDate: string | null }[];
+    linkedPayments?: { id: string; receiptNumber: string; date: string; amount: number; status: string }[];
+  }>(id ? `/api/sales-orders/${id}` : null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
@@ -275,6 +286,19 @@ export default function SalesOrderDetailPage() {
   );
   const overrideHistory: PriceOverrideRecord[] = useMemo(
     () => (orderResp?.success ? orderResp.priceOverrides ?? [] : []),
+    [orderResp],
+  );
+  // Real downstream documents for the Document Relationship diagram.
+  const linkedDOs = useMemo(
+    () => (orderResp?.success ? orderResp.linkedDOs ?? [] : []),
+    [orderResp],
+  );
+  const linkedInvoices = useMemo(
+    () => (orderResp?.success ? orderResp.linkedInvoices ?? [] : []),
+    [orderResp],
+  );
+  const linkedPayments = useMemo(
+    () => (orderResp?.success ? orderResp.linkedPayments ?? [] : []),
     [orderResp],
   );
 
@@ -1385,6 +1409,16 @@ export default function SalesOrderDetailPage() {
       <DocumentFlowDiagram
         title={`Document Relationship — ${order.companySOId}`}
         salesFlow={(() => {
+          // DB stores DO status as internal codes; show the same friendly
+          // labels the Delivery page uses (DRAFT = "Pending Dispatch", etc.).
+          const doStatusLabel: Record<string, string> = {
+            DRAFT: "Pending Dispatch",
+            LOADED: "Dispatched",
+            IN_TRANSIT: "In Transit",
+            DELIVERED: "Delivered",
+            INVOICED: "Invoiced",
+            CLOSED: "Closed",
+          };
           const nodes: DocNode[] = [
             {
               type: "SO",
@@ -1395,34 +1429,35 @@ export default function SalesOrderDetailPage() {
               href: `/sales/${order.id}`,
             },
           ];
-          // If DO exists
-          if (order.hookkaDeliveryOrder) {
+          // Real delivery order(s) this SO shipped on — resolved server-side
+          // so consolidated DOs (one DO, many SOs) connect too.
+          for (const d of linkedDOs) {
             nodes.push({
               type: "DO",
               label: "Delivery Order",
-              docNo: order.hookkaDeliveryOrder,
-              status: ["DELIVERED", "INVOICED", "CLOSED"].includes(order.status) ? "DELIVERED" : "PENDING",
+              docNo: d.doNo,
+              status: doStatusLabel[d.status] ?? d.status,
               href: `/delivery`,
             });
           }
-          // Invoice (generated after delivery)
-          if (["INVOICED", "CLOSED"].includes(order.status)) {
+          // Real invoice(s) raised for this SO.
+          for (const inv of linkedInvoices) {
             nodes.push({
               type: "INVOICE",
               label: "Invoice",
-              docNo: `INV-${order.companySOId.replace("SO-", "")}`,
-              status: order.status === "CLOSED" ? "PAID" : "UNPAID",
+              docNo: inv.invoiceNo,
+              status: inv.status,
               href: `/invoices`,
             });
           }
-          // AR Payment (when closed)
-          if (order.status === "CLOSED") {
+          // Real payment receipt(s) collected against those invoices.
+          for (const p of linkedPayments) {
             nodes.push({
               type: "AR_PAYMENT",
               label: "AR Payment",
-              docNo: `AR-${order.companySOId.replace("SO-", "")}`,
-              status: "RECEIVED",
-              href: `/accounting`,
+              docNo: p.receiptNumber,
+              status: p.status,
+              href: `/invoices/payments`,
             });
           }
           return nodes;

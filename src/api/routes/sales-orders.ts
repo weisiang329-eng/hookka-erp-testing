@@ -2415,6 +2415,105 @@ app.get("/:id", async (c) => {
   // COMPLETED — cancel that PO to unlock"). Same query the PUT guard
   // runs; cheap (single index lookup on production_orders).
   const lockReason = await checkSalesOrderLocked(c.var.DB, id);
+
+  // ---- Document-chain linkage (real records, not fabricated) -------------
+  // The Document Relationship diagram needs the ACTUAL downstream documents
+  // for this SO: the delivery order(s) it shipped on, the invoice(s) raised,
+  // and the payment receipt(s) collected. We resolve them by real keys so a
+  // CONSOLIDATED DO — where delivery_orders.salesOrderId is NULL and the link
+  // lives per-item on delivery_order_items.salesOrderNo = companySOId — also
+  // connects. (Previously the diagram only drew a DO when the SO's
+  // hookkaDeliveryOrder field was stamped, which the consolidated-DO create
+  // path skips, and faked the Invoice/Payment nodes from SO status alone.)
+  const companySOId = so.companySOId ?? "";
+  const dosRes = await c.var.DB.prepare(
+    `SELECT DISTINCT d.id, d.doNo, d.status
+       FROM delivery_orders d
+      WHERE d.salesOrderId = ?
+         OR d.id IN (
+              SELECT di.deliveryOrderId
+                FROM delivery_order_items di
+               WHERE di.salesOrderNo = ?
+            )
+      ORDER BY d.doNo`,
+  )
+    .bind(id, companySOId)
+    .all<{ id: string; doNo: string | null; status: string | null }>();
+  const linkedDOs = (dosRes.results ?? []).map((d) => ({
+    id: d.id,
+    doNo: d.doNo ?? "",
+    status: d.status ?? "",
+  }));
+  const doIds = linkedDOs.map((d) => d.id);
+
+  // Invoices: by SO link OR by any of this SO's DOs. A consolidated invoice
+  // anchors its salesOrderId/companySOId to the FIRST SO in the DO, so a
+  // non-anchor SO is only reachable via deliveryOrderId.
+  const invWhere = ["i.salesOrderId = ?", "i.companySOId = ?"];
+  const invParams: unknown[] = [id, companySOId];
+  if (doIds.length > 0) {
+    invWhere.push(`i.deliveryOrderId IN (${doIds.map(() => "?").join(",")})`);
+    invParams.push(...doIds);
+  }
+  const invRes = await c.var.DB.prepare(
+    `SELECT DISTINCT i.id, i.invoiceNo, i.status, i.totalSen, i.paidAmount,
+            i.paymentDate
+       FROM invoices i
+      WHERE ${invWhere.join(" OR ")}
+      ORDER BY i.invoiceNo`,
+  )
+    .bind(...invParams)
+    .all<{
+      id: string;
+      invoiceNo: string | null;
+      status: string | null;
+      totalSen: number | null;
+      paidAmount: number | null;
+      paymentDate: string | null;
+    }>();
+  const linkedInvoices = (invRes.results ?? []).map((i) => ({
+    id: i.id,
+    invoiceNo: i.invoiceNo ?? "",
+    status: i.status ?? "",
+    totalSen: i.totalSen ?? 0,
+    paidAmount: i.paidAmount ?? 0,
+    paymentDate: i.paymentDate ?? null,
+  }));
+
+  // Payments: payment_records.allocations is JSON TEXT holding {invoiceId}.
+  // Substring match per invoice id (same rough match the payments list uses).
+  let linkedPayments: Array<{
+    id: string;
+    receiptNumber: string;
+    date: string;
+    amount: number;
+    status: string;
+  }> = [];
+  const invIds = linkedInvoices.map((i) => i.id);
+  if (invIds.length > 0) {
+    const payRes = await c.var.DB.prepare(
+      `SELECT DISTINCT id, receiptNumber, date, amount, status
+         FROM payment_records
+        WHERE ${invIds.map(() => "allocations LIKE ?").join(" OR ")}
+        ORDER BY date`,
+    )
+      .bind(...invIds.map((iid) => `%"invoiceId":"${iid}"%`))
+      .all<{
+        id: string;
+        receiptNumber: string | null;
+        date: string | null;
+        amount: number | null;
+        status: string | null;
+      }>();
+    linkedPayments = (payRes.results ?? []).map((p) => ({
+      id: p.id,
+      receiptNumber: p.receiptNumber ?? "",
+      date: p.date ?? "",
+      amount: p.amount ?? 0,
+      status: p.status ?? "",
+    }));
+  }
+
   return c.json({
     success: true,
     data: rowToSO(so, itemsRes.results ?? []),
@@ -2432,6 +2531,9 @@ app.get("/:id", async (c) => {
     })),
     statusHistory: (statusRes.results ?? []).map(rowToStatusChange),
     priceOverrides: (overridesRes.results ?? []).map(rowToPriceOverride),
+    linkedDOs,
+    linkedInvoices,
+    linkedPayments,
   });
 });
 

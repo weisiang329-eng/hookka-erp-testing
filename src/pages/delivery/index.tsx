@@ -95,6 +95,13 @@ type DeliveryOrderRow = {
   customerRef: string;
   customerSO: string;
   salesOrderId: string;
+  // Distinct SO numbers this DO covers (from items), deduped + comma-joined.
+  // Kept as a scalar field — NOT just computed inside the column render — so
+  // the grid's global search + sort can match on it. Without this, searching
+  // an SO number never hit the "Sales Orders" column (Wei Siang 2026-05-29:
+  // searching "098" missed DO-2605-039 which clearly lists SO-2604-098,
+  // because the search reads row.salesOrderNos which didn't exist).
+  salesOrderNos: string;
   customerId: string;
   customerName: string;
   hubBranch: string;    // customerState (legacy fallback — kept for old DOs that have customerState set but no hubId)
@@ -221,6 +228,9 @@ function mapDOToRow(
     customerRef: _aggr((v) => v.reference),
     customerSO: _aggr((v) => v.customerSO),
     salesOrderId: d.salesOrderId || "",
+    // Same distinct set the "Sales Orders" column renders — exposed as a
+    // scalar so global search/sort can match SO numbers (see type comment).
+    salesOrderNos: _soNos.join(", "),
     customerId: d.customerId || "",
     customerName: d.customerName || "",
     hubBranch: d.customerState || "",
@@ -590,6 +600,11 @@ export default function DeliveryPage() {
   // set fits on page 1 so search works normally.
   const PAGE_SIZE = 200;
   const [page, setPage] = useUrlStateNumber("page", 1);
+  // Mirrors the DO grid's global search box (fed via DataGrid onSearchChange).
+  // Drives cross-status search: while non-empty, filteredOrders spans every
+  // status instead of just the active tab, so a DO is findable regardless of
+  // which stage/tab it sits on.
+  const [doGridSearch, setDoGridSearch] = useState("");
 
   // ---------- Fetch ----------
   const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
@@ -1375,8 +1390,15 @@ export default function DeliveryPage() {
   const filteredOrders = useMemo(() => {
     const statuses = TAB_DO_STATUSES[activeTab];
     if (!statuses) return []; // PO-based tab — no DO rows
+    // Cross-status search (Wei Siang 2026-05-29): while the user is typing in
+    // the grid search box, span EVERY status so a DO is findable no matter
+    // which stage/tab it's on — searching an SO number must surface its DO
+    // even if that DO sits on another tab. The DataGrid then narrows these by
+    // the search term. Empty search keeps the normal tab-scoped view.
+    // (Covers the loaded page — newest 200 DOs across all statuses.)
+    if (doGridSearch.trim()) return deliveryOrders;
     return deliveryOrders.filter((d) => statuses.includes(d.status));
-  }, [deliveryOrders, activeTab]);
+  }, [deliveryOrders, activeTab, doGridSearch]);
 
   // ---------- Summary counts (unique DOs, not rows) ----------
   // Read from /api/delivery-orders/stats so counts reflect the whole
@@ -3555,6 +3577,7 @@ export default function DeliveryPage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No delivery orders found."
               onDoubleClick={(row) => setDetailDO(row)}
+              onSearchChange={setDoGridSearch}
               contextMenuItems={getContextMenuItems}
             />
 

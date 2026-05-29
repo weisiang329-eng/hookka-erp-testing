@@ -34,6 +34,43 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-008 — DO list search can't find a DO by its SO number (Sales Orders column not searchable + tab-scoped)
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** delivery-orders
+
+**Symptom:** Wei Siang searched "098" on the Delivery Orders grid. DO-2605-039
+clearly lists `SO-2604-098` in its Sales Orders column, but the search did NOT
+return it (instead it surfaced 5 unrelated DOs that happened to match "098" in a
+customer-reference column).
+
+**Root cause (two layers):**
+1. The "Sales Orders" column (`key: "salesOrderNos"`) had no backing scalar
+   field on the row — it computed its display inside the column `render` from
+   `row.items`. The DataGrid's global search matches via
+   `getNestedValue(row, col.key)`, i.e. `row.salesOrderNos`, which was
+   `undefined` → the column contributed nothing to search, so SO numbers were
+   never matchable.
+2. Search was tab-scoped: the grid filtered `deliveryOrders` to the active
+   tab's statuses before searching, so a DO in another stage/tab couldn't be
+   found even if it matched.
+
+**Fix (`src/pages/delivery/index.tsx`):**
+1. Added a scalar `salesOrderNos` field to `DeliveryOrderRow`, populated in
+   `mapDOToRow` from the existing deduped `_soNos` (`_soNos.join(", ")`) — the
+   same set the column renders. Now global search + sort match SO numbers.
+2. Cross-status search: a `doGridSearch` mirror (fed by the DataGrid
+   `onSearchChange`) makes `filteredOrders` span EVERY status while the search
+   box is non-empty, so a DO is findable regardless of which tab it's on. Empty
+   search keeps the normal tab-scoped view. Covers the loaded page (newest 200
+   DOs across all statuses); the grid has no `defaultExcludedValues`, so no
+   status is hidden during search.
+
+**Verified:** `tsc --noEmit` clean; eslint clean (pre-existing warnings only).
+Live verification on prod (search "098" → DO-2605-039 appears) pending deploy.
+
+---
+
 ## BUG-2026-05-29-007 — Mobile/tablet: Production (and other parent menus) unreachable in collapsed sidebar
 
 **Status:** 🟢 Fixed (2026-05-29)

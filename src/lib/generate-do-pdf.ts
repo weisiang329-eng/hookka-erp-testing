@@ -181,10 +181,12 @@ function describe(
     if (th) spec.push(`T.Heights ${th}`);
   } else {
     // sofa / accessory — label the seat size so a bare "28" reads as
-    // the sofa size, then any leg / total height it has.
+    // the sofa size, then leg height. NO T.Heights here: total height is a
+    // bedframe-only concept (divan + gap + leg); a sofa doesn't have one, so
+    // a stray totalHeightInches must not print on sofa lines.
+    // — Wei Siang 2026-05-29
     if (it.sizeLabel) spec.push(`Size: ${it.sizeLabel}`);
     if (lg) spec.push(`${lg} LEG`);
-    if (th) spec.push(`T.Heights ${th}`);
   }
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());

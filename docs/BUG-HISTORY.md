@@ -34,6 +34,36 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-29-003 — Sofa lines printed a bogus "T.Heights" on DO / packing list / invoice
+
+**Status:** 🟢 Fixed (2026-05-29)
+**Category:** ui-frontend
+
+**Symptom:** Wei Siang: "sofa 没有 total heights的". On the packing-list / DO PDF,
+sofa lines printed `T.Heights 6"` in the build-spec — but a sofa has no total
+height (the 6" was just echoing the leg height). Total Height is a bedframe-only
+measurement (divan + gap + leg).
+
+**Root cause:** the shared `describe()` spec-builder has a bedframe branch and a
+sofa/accessory branch. BOTH branches pushed `T.Heights ${th}` when
+`totalHeightInches` was set, so any stray total-height value leaked onto sofa
+lines. Same duplicated builder exists in the invoice PDF; the invoice detail
+screen built the spec ungated by category too.
+
+**Fix:** drop `T.Heights` from the sofa/accessory branch everywhere it composes
+a per-item build spec:
+- `src/lib/generate-do-pdf.ts` (DO + packing-list manifest) — sofa branch no
+  longer pushes T.Heights.
+- `src/lib/generate-invoice-pdf.ts` (invoice PDF) — same.
+- `src/pages/invoices/detail.tsx` (invoice detail screen) — has no itemCategory
+  field, so gated T.Heights on `divanHeightInches` presence (total height only
+  makes sense with a divan ⇒ bedframe). Bedframe lines still print T.Heights.
+
+**Verified:** `tsc -b` + `eslint` clean; live-verified the packing-list PDF after
+deploy (sofa line no longer shows T.Heights; bedframe lines unchanged).
+
+---
+
 ## BUG-2026-05-29-002 — Sofa Combo Pricing card: prices overflow their cells ("歪了")
 
 **Status:** 🟢 Fixed (2026-05-29)

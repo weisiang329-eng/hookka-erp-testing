@@ -619,7 +619,10 @@ export default function InvoiceDetailPage() {
                               ? `DIVAN ${ex.divanHeightInches}"${ex.legHeightInches ? ` + ${ex.legHeightInches}" LEG` : ""}`
                               : "",
                             ex.gapInches ? `GAP ${ex.gapInches}"` : "",
-                            ex.totalHeightInches
+                            // T.Heights is bedframe-only (divan + gap + leg);
+                            // a sofa has no total height, so only show it when
+                            // the row actually has a divan. — Wei Siang 2026-05-29
+                            ex.totalHeightInches && ex.divanHeightInches
                               ? `T.Heights ${ex.totalHeightInches}"`
                               : "",
                             (ex.specialOrder || "").trim(),

@@ -137,9 +137,11 @@ function describe(
     if (gp) spec.push(`GAP ${gp}`);
     if (th) spec.push(`T.Heights ${th}`);
   } else {
+    // sofa / accessory: no T.Heights — total height is a bedframe-only
+    // concept (divan + gap + leg). A stray value must not print on sofas.
+    // — Wei Siang 2026-05-29
     if (it.sizeLabel) spec.push(`Size: ${it.sizeLabel}`);
     if (lg) spec.push(`${lg} LEG`);
-    if (th) spec.push(`T.Heights ${th}`);
   }
   if (ex?.specialOrder && String(ex.specialOrder).trim())
     spec.push(String(ex.specialOrder).trim());

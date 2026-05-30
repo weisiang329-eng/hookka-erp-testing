@@ -29,6 +29,7 @@
 // ---------------------------------------------------------------------------
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
 
 // Let tsx strip types so we can import the live .ts modules. Guarded because
 // `node --import tsx/esm` may have already registered it.
@@ -450,6 +451,42 @@ function sleep(ms) {
 }
 
 // ---------------------------------------------------------------------------
+// Resolve the Anthropic key WITHOUT ever printing it. Order:
+//   1. process.env.ANTHROPIC_API_KEY (your shell)
+//   2. a local .dev.vars file (the same wrangler-style secrets file local dev
+//      uses) in the worktree or the main repo root.
+// The value is read straight into the API call — it is never logged.
+// ---------------------------------------------------------------------------
+function resolveApiKey() {
+  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+  const candidates = [
+    ".dev.vars",
+    "../../../.dev.vars",
+    "C:/Users/User/hookka-erp-testing/.dev.vars",
+  ];
+  for (const p of candidates) {
+    try {
+      if (!existsSync(p)) continue;
+      for (const raw of readFileSync(p, "utf8").split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line.startsWith("ANTHROPIC_API_KEY=")) continue;
+        let v = line.slice("ANTHROPIC_API_KEY=".length).trim();
+        if (
+          (v.startsWith('"') && v.endsWith('"')) ||
+          (v.startsWith("'") && v.endsWith("'"))
+        ) {
+          v = v.slice(1, -1);
+        }
+        if (v) return v;
+      }
+    } catch {
+      // Unreadable file — fall through to the next candidate.
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Score one result against its bank entry.
 // ---------------------------------------------------------------------------
 function score(entry, result) {
@@ -569,13 +606,16 @@ async function main() {
     return;
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = resolveApiKey();
   if (!apiKey) {
     console.error(
-      "ERROR: ANTHROPIC_API_KEY is not set in your environment.\n" +
-        "  PowerShell:  $env:ANTHROPIC_API_KEY = \"sk-ant-...\"\n" +
-        "  bash/zsh:    export ANTHROPIC_API_KEY=\"sk-ant-...\"\n" +
-        "Then re-run. (The key stays in YOUR shell — this script never stores it.)",
+      "ERROR: no Anthropic key found.\n" +
+        "  Option 1 — put it in your shell:\n" +
+        '    PowerShell:  $env:ANTHROPIC_API_KEY = "sk-ant-..."\n' +
+        '    bash/zsh:    export ANTHROPIC_API_KEY="sk-ant-..."\n' +
+        "  Option 2 — add a line to a .dev.vars file in the repo root:\n" +
+        "    ANTHROPIC_API_KEY=sk-ant-...\n" +
+        "Then re-run. (The key stays on your machine — this script never logs or stores it.)",
     );
     process.exit(1);
   }

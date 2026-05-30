@@ -34,6 +34,98 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEAT-2026-05-30-009 — Hookka AI export / report generation (CSV, Excel, PDF, named report templates)
+
+**Status:** 🟢 Shipped (2026-05-30)
+**Category:** assistant, feature
+
+**What it adds:**
+
+The chat assistant can now generate files — CSV, multi-sheet Excel, and
+PDF — in response to plain-language asks like "export this month's
+Carress sales orders to Excel" or "give me a PDF of overdue production
+orders". Files are uploaded to Supabase Storage under
+`hookka-files/assistant-exports/<orgId>/` with an opaque uuid prefix,
+and surfaced to the chat as a 1-hour signed download URL rendered as
+a clickable download card in the slide-over.
+
+**Six new tools** (in `src/api/lib/assistant-tools.ts`):
+
+1. `generate_csv` — build CSV from `rows: Array<Record<string, any>>` with
+   RFC-4180-correct escaping (quotes, commas, CR/LF inside cells).
+2. `generate_excel` — build a multi-sheet xlsx via sheetjs. Header row
+   frozen, autofilter enabled, currency / date column formats auto-detected
+   from header names, empty cells render `-`.
+3. `generate_pdf` — build a PDF via `pdf-lib` (pure JS, Workers-safe).
+   Today supports `template: 'simple_table'` with title, subtitle, header
+   row, body rows, optional totals row, and footer. Auto-paginates and
+   truncates long text with `...` rather than overflowing.
+4. `list_export_templates` — describes available PDF templates, named
+   report templates, and the family of single-document client-side PDFs
+   (PO/DO/invoice/CN/DN/packing/etc.) so the model knows what to suggest.
+5. `export_query_to_excel` — composite tool for the common "export
+   <entity> with these filters" ask. Supports
+   `sales_orders / consignment_orders / production_orders /
+   delivery_orders / invoices / payments / customers / suppliers /
+   products / employees` with `customer / status / dateFrom / dateTo /
+   hub / department` filters.
+6. `run_report_template` — invokes a named template from
+   `src/api/lib/assistant-skills.ts`:
+   - `monthly_sales_summary` — one Excel sheet per hub (KL/PG/SRW/SBH),
+     totals row.
+   - `customer_outstanding_pos` — DRAFT-status SOs with a customerPOId,
+     last 90 days.
+   - `employee_efficiency_weekly` — per-employee jobs / planned /
+     actual / efficiency %, defaults to last 7 days.
+   - `production_overdue_report` — PDF, POs past targetEndDate.
+
+**Wire-level changes:**
+
+- New SSE event `{ type: "download", downloadUrl, filename, byteSize,
+  rowCount, contentType, expiresInSeconds }` emitted by
+  `src/api/routes/assistant.ts` whenever a tool result carries a
+  downloadUrl. The chat UI in
+  `src/components/assistant/AssistantSlideOver.tsx` renders this as a
+  styled download card (file-type badge, filename, row count, size,
+  expiry note).
+- System prompt extended with an "Exporting / generating files" section
+  that tells the model: ask first when the ask is ambiguous, pick the
+  right tool by intent, mention the 1-hour expiry, never paste rows back
+  in chat after exporting.
+
+**Safety invariants:**
+
+- Read-only: no tool can mutate domain tables. The assistant route is
+  still SUPER_ADMIN-only.
+- Caps: 10,000 rows / 5 MB per export.
+- Signed URLs only (1 h TTL). Bucket is private (`hookka-files`), keys
+  use a random uuid prefix so brute-force walking can't reach another
+  tenant's exports. `orgId` is in the path as defense-in-depth.
+- Filename sanitisation strips path traversal and unsafe characters,
+  forces a sane extension.
+- Every tool call is audit-logged via `emitAudit` (one row per call).
+
+**Files changed:**
+
+| File | Change |
+|---|---|
+| `src/api/lib/assistant-exports.ts` | New. CSV / Excel / PDF builders + signed-URL upload. |
+| `src/api/lib/assistant-skills.ts` | New. Four named report templates. |
+| `src/api/lib/assistant-tools.ts` | Six new tools + registry entries. |
+| `src/api/routes/assistant.ts` | New `download` SSE event; prompt section. |
+| `src/components/assistant/AssistantSlideOver.tsx` | Download card UI + SSE handler. |
+| `tests/assistant-exports.test.mjs` | 19 unit tests (CSV escape, xlsx zip shape, PDF `%PDF-` header, filename sanitisation). |
+| `docs/ASSISTANT-EXPORT-TEST-PLAN.md` | Manual test plan. |
+
+**Verification:**
+
+- `tsc -p tsconfig.app.json --noEmit` → exit 0.
+- `npm run build` → exit 0.
+- `npm test` → 506 pass, 0 fail, 1 skip (was 487 before; +19 new tests).
+- `eslint` on the new files → 0 warnings, 0 errors.
+
+---
+
 ## FEAT-2026-05-30-008 — Hookka AI now accepts file attachments: photos / PDFs / Excel / CSV (vision + structured ingest)
 
 **Status:** 🟢 Shipped (2026-05-30)
@@ -132,23 +224,10 @@ typing PO numbers by hand off the paper.
 
 - `npm run build` clean.
 - `npm run typecheck:app` clean.
-- `npm run lint` clean for every touched file (existing repo errors
-  in unrelated files unchanged).
-- `node --import tsx/esm --test tests/assistant-attachments.test.mjs`
-  — 16/16 pass.
-- `node --import tsx/esm --test tests/assistant-fuzzy-match.test.mjs`
-  — 11/11 pass (regression — confirms `extractDigitRuns` and
-  `generateLookupPatterns` still behave).
+- `npm run lint` clean for every touched file.
+- `node --test tests/assistant-attachments.test.mjs` — 16/16 pass.
+- `node --test tests/assistant-fuzzy-match.test.mjs` — 11/11 pass (regression).
 - Manual happy-path: see `docs/assistant-attachment-manual-test.md`.
-
-**Out of scope (left for follow-ups):**
-
-- File generation tools (`generate_excel`, `generate_pdf`,
-  `generate_csv`) — those are Agent 3's branch; only the ingest side
-  is in here. The TOOLS registry has clean trailing entries so the
-  next add-on doesn't conflict.
-- Image annotation / editing — operator can only upload, not draw.
-- OCR confidence scoring — we trust the model's vision.
 
 ---
 

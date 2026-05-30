@@ -60,10 +60,20 @@ type AttachmentChip = {
   previewUrl?: string;
 };
 
+type DownloadCard = {
+  downloadUrl: string;
+  filename: string;
+  byteSize: number;
+  rowCount: number;
+  contentType: string;
+  expiresInSeconds: number;
+};
+
 type MessageBlock =
   | { type: "text"; text: string }
   | { type: "tool"; tool: ToolChip }
-  | { type: "attachment"; attachment: AttachmentChip };
+  | { type: "attachment"; attachment: AttachmentChip }
+  | { type: "download"; download: DownloadCard };
 
 type ChatMessage = {
   id: string;
@@ -249,6 +259,68 @@ function prettyToolName(name: string): string {
   return name.replace(/^(list|get)_/, "").replace(/_/g, " ");
 }
 
+function fileTypeLabel(filename: string, contentType: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".xlsx") || contentType.includes("sheet")) return "Excel";
+  if (lower.endsWith(".csv") || contentType.includes("csv")) return "CSV";
+  if (lower.endsWith(".pdf") || contentType.includes("pdf")) return "PDF";
+  return "File";
+}
+
+function fileIcon(label: string): string {
+  // ASCII glyphs only — keeps the chat bubble lightweight and prints fine in
+  // every browser without pulling in a icon font.
+  if (label === "Excel") return "XLS";
+  if (label === "CSV") return "CSV";
+  if (label === "PDF") return "PDF";
+  return "FILE";
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function DownloadCardView({ card }: { card: DownloadCard }) {
+  const label = fileTypeLabel(card.filename, card.contentType);
+  const icon = fileIcon(label);
+  const rowText =
+    card.rowCount > 0 ? `${card.rowCount.toLocaleString("en-US")} rows` : "";
+  const sizeText = formatBytes(card.byteSize);
+  const ttlMin = Math.max(1, Math.round(card.expiresInSeconds / 60));
+  return (
+    <a
+      href={card.downloadUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      download={card.filename}
+      className="my-2 block rounded-lg border border-[#E2DDD8] bg-white px-3 py-2 hover:border-[#6B5C32] hover:bg-[#FAF8F4] transition-colors no-underline"
+    >
+      <div className="flex items-center gap-3">
+        <div className="h-10 w-10 rounded bg-[#1F1D1B] text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+          {icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-[#1F1D1B] truncate">
+            {card.filename}
+          </div>
+          <div className="text-[11px] text-[#6B7280]">
+            {[label, rowText, sizeText].filter(Boolean).join(" · ")}
+          </div>
+        </div>
+        <div className="text-[11px] text-[#6B5C32] font-medium shrink-0">
+          Download
+        </div>
+      </div>
+      <div className="mt-1 text-[10px] text-[#9CA3AF]">
+        Link expires in ~{ttlMin} min
+      </div>
+    </a>
+  );
+}
+
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   return (
@@ -308,6 +380,9 @@ function MessageBubble({ message }: { message: ChatMessage }) {
                 <span className="opacity-70">{sizeKb} KB</span>
               </div>
             );
+          }
+          if (b.type === "download") {
+            return <DownloadCardView key={idx} card={b.download} />;
           }
           return (
             <div key={idx} className="whitespace-pre-wrap break-words">
@@ -571,6 +646,33 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
                 }
                 return b;
               });
+              next[next.length - 1] = { ...last, blocks };
+              return next;
+            });
+          } else if (evt.type === "download" && typeof evt.downloadUrl === "string") {
+            const card: DownloadCard = {
+              downloadUrl: evt.downloadUrl,
+              filename:
+                typeof evt.filename === "string" ? evt.filename : "export",
+              byteSize:
+                typeof evt.byteSize === "number" ? evt.byteSize : 0,
+              rowCount:
+                typeof evt.rowCount === "number" ? evt.rowCount : 0,
+              contentType:
+                typeof evt.contentType === "string" ? evt.contentType : "",
+              expiresInSeconds:
+                typeof evt.expiresInSeconds === "number"
+                  ? evt.expiresInSeconds
+                  : 3600,
+            };
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const blocks = [
+                ...last.blocks,
+                { type: "download" as const, download: card },
+              ];
               next[next.length - 1] = { ...last, blocks };
               return next;
             });

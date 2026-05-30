@@ -2222,7 +2222,7 @@ const smart_lookup: ToolDefinition = {
       selectClause: string,
       orderBy: string,
     ) => {
-      const orClause = columns.map((col) => `${col} ILIKE ANY (?)`).join(" OR ");
+      const orClause = columns.map((col) => `${col} ILIKE ANY (?::text[])`).join(" OR ");
       const where = customerHintLike
         ? `orgId = ? AND (${orClause}) AND LOWER(COALESCE(customerName, '')) LIKE ?`
         : `orgId = ? AND (${orClause})`;
@@ -2436,8 +2436,8 @@ const lookupCustomerPo: ToolDefinition = {
 
     const buildSql = (table: string, fields: string, dateCol: string) => {
       const where = customerHintLike
-        ? `orgId = ? AND customerPOId ILIKE ANY (?) AND LOWER(COALESCE(customerName, '')) LIKE ?`
-        : `orgId = ? AND customerPOId ILIKE ANY (?)`;
+        ? `orgId = ? AND customerPOId ILIKE ANY (?::text[]) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+        : `orgId = ? AND customerPOId ILIKE ANY (?::text[])`;
       return `SELECT ${fields} FROM ${table} WHERE ${where} ORDER BY ${dateCol} DESC LIMIT 20`;
     };
 
@@ -2486,8 +2486,8 @@ const lookupCustomerPo: ToolDefinition = {
 
     // Also try consignment_orders.customerCOId — separate column name.
     const coWhere = customerHintLike
-      ? `orgId = ? AND customerCOId ILIKE ANY (?) AND LOWER(COALESCE(customerName, '')) LIKE ?`
-      : `orgId = ? AND customerCOId ILIKE ANY (?)`;
+      ? `orgId = ? AND customerCOId ILIKE ANY (?::text[]) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+      : `orgId = ? AND customerCOId ILIKE ANY (?::text[])`;
     const coParams: unknown[] = [orgId, patterns];
     if (customerHintLike) coParams.push(customerHintLike);
     const coRows = await c.var.DB.prepare(

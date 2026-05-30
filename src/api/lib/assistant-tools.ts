@@ -2222,12 +2222,24 @@ const smart_lookup: ToolDefinition = {
       selectClause: string,
       orderBy: string,
     ) => {
-      const orClause = columns.map((col) => `${col} ILIKE ANY (?::text[])`).join(" OR ");
+      // Cross-product: every column ILIKE every pattern. Pattern count is
+      // bounded (~10) and column count is small (~4) so 40 ORs is fine.
+      // We use a plain OR chain instead of `ILIKE ANY (?::text[])` because
+      // postgres.js + transaction-pooler + prepare:false has trouble
+      // binding text[] params via the D1-shaped adapter — silently returns
+      // zero rows where a normal OR chain works fine.
+      const orParts: string[] = [];
+      const params: unknown[] = [orgId];
+      for (const col of columns) {
+        for (const pat of patterns) {
+          orParts.push(`${col} ILIKE ?`);
+          params.push(pat);
+        }
+      }
+      const orClause = orParts.join(" OR ");
       const where = customerHintLike
         ? `orgId = ? AND (${orClause}) AND LOWER(COALESCE(customerName, '')) LIKE ?`
         : `orgId = ? AND (${orClause})`;
-      const params: unknown[] = [orgId];
-      for (const _col of columns) params.push(patterns);
       if (customerHintLike) params.push(customerHintLike);
 
       const sql = `SELECT ${selectClause} FROM ${table} WHERE ${where} ORDER BY ${orderBy} LIMIT ${limit}`;
@@ -2235,8 +2247,6 @@ const smart_lookup: ToolDefinition = {
         const rows = await c.var.DB.prepare(sql).bind(...params).all<Record<string, unknown>>();
         return rows.results ?? [];
       } catch (err) {
-        // ILIKE ANY is supported on PG but if the adapter trips, fall
-        // back to an OR-chain. Don't kill the whole tool.
         const msg = err instanceof Error ? err.message : String(err);
         return { _error: msg } as unknown as Record<string, unknown>[];
       }
@@ -2434,15 +2444,18 @@ const lookupCustomerPo: ToolDefinition = {
     const patterns = generateLookupPatterns(raw, yymm);
     const customerHintLike = customerHint ? `%${customerHint.toLowerCase()}%` : null;
 
+    // OR-chain (one ILIKE ? per pattern) — avoids postgres.js text[] bind
+    // issues via the D1-shaped adapter.
+    const customerPoOrParts = patterns.map(() => `customerPOId ILIKE ?`).join(" OR ");
     const buildSql = (table: string, fields: string, dateCol: string) => {
       const where = customerHintLike
-        ? `orgId = ? AND customerPOId ILIKE ANY (?::text[]) AND LOWER(COALESCE(customerName, '')) LIKE ?`
-        : `orgId = ? AND customerPOId ILIKE ANY (?::text[])`;
+        ? `orgId = ? AND (${customerPoOrParts}) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+        : `orgId = ? AND (${customerPoOrParts})`;
       return `SELECT ${fields} FROM ${table} WHERE ${where} ORDER BY ${dateCol} DESC LIMIT 20`;
     };
 
     const bindFor = (): unknown[] => {
-      const p: unknown[] = [orgId, patterns];
+      const p: unknown[] = [orgId, ...patterns];
       if (customerHintLike) p.push(customerHintLike);
       return p;
     };
@@ -2485,10 +2498,11 @@ const lookupCustomerPo: ToolDefinition = {
     ]);
 
     // Also try consignment_orders.customerCOId — separate column name.
+    const customerCoOrParts = patterns.map(() => `customerCOId ILIKE ?`).join(" OR ");
     const coWhere = customerHintLike
-      ? `orgId = ? AND customerCOId ILIKE ANY (?::text[]) AND LOWER(COALESCE(customerName, '')) LIKE ?`
-      : `orgId = ? AND customerCOId ILIKE ANY (?::text[])`;
-    const coParams: unknown[] = [orgId, patterns];
+      ? `orgId = ? AND (${customerCoOrParts}) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+      : `orgId = ? AND (${customerCoOrParts})`;
+    const coParams: unknown[] = [orgId, ...patterns];
     if (customerHintLike) coParams.push(customerHintLike);
     const coRows = await c.var.DB.prepare(
       `SELECT id, companyCOId, customerCOId, customerName, status, totalSen FROM consignment_orders WHERE ${coWhere} ORDER BY created_at DESC LIMIT 20`,

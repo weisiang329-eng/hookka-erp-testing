@@ -1117,7 +1117,7 @@ app.post("/:id/override-edit-lock", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const [row, items] = await Promise.all([
+  const [row, items, cnsRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
       .bind(id)
       .first<ConsignmentOrderRow>(),
@@ -1126,6 +1126,22 @@ app.get("/:id", async (c) => {
     )
       .bind(id)
       .all<ConsignmentOrderItemRow>(),
+    // Linked Consignment Notes — used by the FE hub-edit gate so the
+    // operator can see whether the hub is still editable (no dispatched CN)
+    // before clicking the Edit pencil. Mirrors the SO route's linkedDOs.
+    c.var.DB.prepare(
+      `SELECT id, noteNumber, status, dispatchedAt
+         FROM consignment_notes
+        WHERE consignmentOrderId = ?
+        ORDER BY noteNumber`,
+    )
+      .bind(id)
+      .all<{
+        id: string;
+        noteNumber: string | null;
+        status: string | null;
+        dispatchedAt: string | null;
+      }>(),
   ]);
   if (!row) {
     return c.json(
@@ -1137,10 +1153,17 @@ app.get("/:id", async (c) => {
   // disable inputs + render a banner when locked (PO COMPLETED or
   // CN already created).
   const lockReason = await checkConsignmentOrderLocked(c.var.DB, id);
+  const linkedCNs = (cnsRes.results ?? []).map((cn) => ({
+    id: cn.id,
+    noteNumber: cn.noteNumber ?? "",
+    status: cn.status ?? "",
+    dispatchedAt: cn.dispatchedAt ?? null,
+  }));
   return c.json({
     success: true,
     data: rowToCO(row, items.results ?? []),
     lockReason,
+    linkedCNs,
   });
 });
 
@@ -1889,6 +1912,153 @@ app.post("/:id/cancel", async (c) => {
       poNos: cascade.poNos,
     },
   });
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/consignment-orders/:id/hub — change the delivery hub for a CO.
+//
+// Same rule as the SO variant: hub is editable until the goods have
+// physically left the warehouse. For CO, "shipped" means at least one
+// linked Consignment Note has moved past ACTIVE (i.e. PARTIALLY_SOLD /
+// FULLY_SOLD / RETURNED / CLOSED — or dispatched_at is stamped).
+//
+// :id may be the CO's UUID PK or the user-visible companyCOId code
+// (CO-2605-NNN). Body: { hubId: string, reason?: string }.
+// ---------------------------------------------------------------------------
+app.patch("/:id/hub", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+  const idParam = c.req.param("id");
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const newHubId = typeof body.hubId === "string" ? body.hubId.trim() : "";
+    const reason =
+      typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!newHubId) {
+      return c.json({ success: false, error: "hubId is required" }, 400);
+    }
+
+    // 1. Resolve the CO by either UUID PK or companyCOId.
+    const co = await c.var.DB
+      .prepare(
+        `SELECT * FROM consignment_orders
+          WHERE id = ?
+             OR companyCOId ILIKE ?
+          LIMIT 1`,
+      )
+      .bind(idParam, idParam)
+      .first<ConsignmentOrderRow>();
+    if (!co) {
+      return c.json(
+        { success: false, error: "Consignment order not found" },
+        404,
+      );
+    }
+
+    // 2. Resolve the new hub.
+    const hub = await c.var.DB
+      .prepare(
+        "SELECT id, shortName, state, customerId FROM delivery_hubs WHERE id = ?",
+      )
+      .bind(newHubId)
+      .first<{
+        id: string;
+        shortName: string;
+        state: string | null;
+        customerId: string;
+      }>();
+    if (!hub) {
+      return c.json({ success: false, error: "Hub not found" }, 404);
+    }
+
+    // 3. Hub must belong to the same customer.
+    if (hub.customerId !== co.customerId) {
+      return c.json(
+        {
+          success: false,
+          error: "Hub does not belong to this customer",
+        },
+        400,
+      );
+    }
+
+    // 4. Shipment-state guard. A CO ships via consignment_notes (CN).
+    //    CN status starts at ACTIVE (pending dispatch) and flips to
+    //    PARTIALLY_SOLD on the first Mark Dispatched click. Any CN
+    //    past ACTIVE OR with dispatched_at stamped means the goods
+    //    have left the warehouse and the hub is frozen.
+    const shippedCnRes = await c.var.DB
+      .prepare(
+        `SELECT noteNumber, status
+           FROM consignment_notes
+          WHERE consignmentOrderId = ?
+            AND (status <> 'ACTIVE' OR dispatchedAt IS NOT NULL)
+          ORDER BY noteNumber
+          LIMIT 1`,
+      )
+      .bind(co.id)
+      .first<{ noteNumber: string | null; status: string | null }>();
+    if (shippedCnRes) {
+      return c.json(
+        {
+          success: false,
+          code: "HUB_LOCKED_SHIPPED",
+          error: `Hub cannot be changed once goods have left the hub. CN ${shippedCnRes.noteNumber ?? "(unknown)"} is already in ${shippedCnRes.status ?? "(unknown)"}.`,
+          blockingDoNo: shippedCnRes.noteNumber ?? "",
+          blockingDoStatus: shippedCnRes.status ?? "",
+        },
+        409,
+      );
+    }
+
+    // 5. Apply the update.
+    const now = new Date().toISOString();
+    const beforeSnap = { hubId: co.hubId, hubName: co.hubName };
+    const afterSnap: Record<string, unknown> = {
+      hubId: hub.id,
+      hubName: hub.shortName,
+    };
+    if (reason) afterSnap.reason = reason;
+
+    await c.var.DB
+      .prepare(
+        `UPDATE consignment_orders
+            SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .bind(hub.id, hub.shortName, hub.state ?? co.customerState ?? null, now, co.id)
+      .run();
+
+    // 6. Audit.
+    await emitAudit(c, {
+      resource: "consignment-orders",
+      resourceId: co.id,
+      action: "hub-change",
+      before: beforeSnap,
+      after: afterSnap,
+    });
+
+    // 7. Return refreshed CO header.
+    const updated = await c.var.DB
+      .prepare("SELECT * FROM consignment_orders WHERE id = ?")
+      .bind(co.id)
+      .first<ConsignmentOrderRow>();
+    return c.json({
+      success: true,
+      data: updated ? rowToCO(updated, []) : null,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      "[PATCH /api/consignment-orders/:id/hub] failed:",
+      msg,
+      err,
+    );
+    return c.json(
+      { success: false, error: msg || "Internal error updating hub" },
+      500,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

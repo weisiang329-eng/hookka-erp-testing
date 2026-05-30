@@ -10,12 +10,13 @@ import {
   ArrowLeft, Trash2, Download, Edit, Copy,
   CheckCircle2, Truck, FileText, XCircle, PauseCircle, PlayCircle, X,
   Factory, Clock, DollarSign, AlertTriangle, ChevronDown, ChevronUp,
-  Wrench,
+  Wrench, Pencil,
 } from "lucide-react";
 // 0074 refactor: top-level entry is now Service Cases (parent). Cases can
 // spawn 0+ Service Orders for the rework/swap/repair flow. presetSourceType
 // pinned to 'CO' here.
 import { CreateServiceCaseModal } from "@/pages/service-cases";
+import { HubEditModal } from "@/components/orders/HubEditModal";
 // generateCOPdf is dynamic-imported at the click handler so the 1MB jspdf
 // vendor chunk only ships when the user actually prints.
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
@@ -175,7 +176,17 @@ export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/consignment-orders/${id}` : null);
+  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{
+    success?: boolean;
+    data?: SalesOrder;
+    lockReason?: string | null;
+    linkedPOs?: LinkedPO[];
+    statusHistory?: StatusChange[];
+    priceOverrides?: PriceOverrideRecord[];
+    // Linked Consignment Notes — used by the hub-edit gate to detect
+    // whether any dispatched CN has frozen the hub. Mirrors SO linkedDOs.
+    linkedCNs?: { id: string; noteNumber: string; status: string; dispatchedAt: string | null }[];
+  }>(id ? `/api/consignment-orders/${id}` : null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
@@ -227,6 +238,11 @@ export default function SalesOrderDetailPage() {
     error: string | null;
   }>({ open: false, reason: "", submitting: false, error: null });
 
+  // Hub-edit modal state. Same rule as SO: hub stays editable until the
+  // first CN moves past ACTIVE (i.e. PARTIALLY_SOLD or FULLY_SOLD), or any
+  // CN has dispatchedAt stamped. Backend re-validates on PATCH.
+  const [hubModalOpen, setHubModalOpen] = useState(false);
+
   const fetchOrder = useCallback(() => {
     // Only this SO changed — per-id invalidation, not list prefix.
     if (id) invalidateCache(`/api/consignment-orders/${id}`);
@@ -252,6 +268,28 @@ export default function SalesOrderDetailPage() {
     () => (orderResp?.success ? orderResp.priceOverrides ?? [] : []),
     [orderResp],
   );
+  const linkedCNs = useMemo(
+    () => (orderResp?.success ? orderResp.linkedCNs ?? [] : []),
+    [orderResp],
+  );
+
+  // CN "shipped" gate — must match the backend in
+  // src/api/routes/consignment-orders.ts PATCH /:id/hub. ACTIVE is the
+  // only pre-dispatch state; any CN past it OR with dispatchedAt stamped
+  // means goods have left the warehouse and the hub is frozen.
+  const dispatchedCN = useMemo(
+    () =>
+      linkedCNs.find(
+        (cn) =>
+          ((cn.status || "").toUpperCase() !== "ACTIVE") ||
+          !!cn.dispatchedAt,
+      ),
+    [linkedCNs],
+  );
+  const shipmentLocked = !!dispatchedCN;
+  const shipmentLockReason = dispatchedCN
+    ? `Hub locked: CN ${dispatchedCN.noteNumber} already ${dispatchedCN.status || "dispatched"}.`
+    : "";
 
   // Fetch customer so we can resolve the hub shortName for the Delivery Hub field
   const { data: customerResp } = useCachedJson<{ success?: boolean; data?: Customer }>(order?.customerId ? `/api/customers/${order.customerId}` : null);
@@ -914,6 +952,19 @@ export default function SalesOrderDetailPage() {
         />
       )}
 
+      <HubEditModal
+        open={hubModalOpen}
+        endpoint={`/api/consignment-orders/${order.id}/hub`}
+        currentHubId={(order as SalesOrder & { hubId?: string }).hubId}
+        hubs={customer?.deliveryHubs ?? []}
+        onClose={() => setHubModalOpen(false)}
+        onSaved={(newHubName) => {
+          setHubModalOpen(false);
+          toast.success(`Hub updated to ${newHubName}`);
+          fetchOrder();
+        }}
+      />
+
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader className="pb-3"><CardTitle>Order Information</CardTitle></CardHeader>
@@ -922,11 +973,27 @@ export default function SalesOrderDetailPage() {
               <div><p className="text-xs text-[#9CA3AF]">Customer</p><p className="font-medium">{order.customerName}</p></div>
               <div>
                 <p className="text-xs text-[#9CA3AF]">Delivery Hub</p>
-                <p className="font-medium">
-                  {customer?.deliveryHubs?.find(h => h.id === (order as SalesOrder & { hubId?: string }).hubId)?.shortName
-                    || ((order as SalesOrder & { hubId?: string }).hubId ? "Hub assigned" : "—")}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="font-medium">
+                    {customer?.deliveryHubs?.find(h => h.id === (order as SalesOrder & { hubId?: string }).hubId)?.shortName
+                      || ((order as SalesOrder & { hubId?: string }).hubId ? "Hub assigned" : "—")}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setHubModalOpen(true)}
+                    disabled={shipmentLocked}
+                    title={shipmentLocked ? shipmentLockReason : "Change delivery hub"}
+                    className="text-[#9CA3AF] hover:text-[#6B5C32] disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                </div>
                 <p className="text-xs text-[#9CA3AF]">{order.customerState || "—"}</p>
+                <p className="text-[10px] text-[#9CA3AF] mt-1">
+                  {shipmentLocked
+                    ? shipmentLockReason
+                    : "Editable until goods leave the warehouse."}
+                </p>
               </div>
               <div><p className="text-xs text-[#9CA3AF]">Customer PO</p><p className="font-medium doc-number">{order.customerPOId || "-"}</p></div>
               <div><p className="text-xs text-[#9CA3AF]">Customer SO</p><p className="font-medium doc-number">{order.customerCOId || "-"}</p></div>

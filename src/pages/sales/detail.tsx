@@ -10,7 +10,7 @@ import {
   ArrowLeft, Trash2, Download, Edit, Copy,
   CheckCircle2, Truck, FileText, XCircle, PauseCircle, PlayCircle, X,
   Factory, Clock, DollarSign, AlertTriangle, ChevronDown, ChevronUp,
-  Wrench,
+  Wrench, Pencil,
 } from "lucide-react";
 // Phase 3 — Service Orders. Opens a modal pre-filled with this SO's
 // header info so the user can spawn a Service Case directly from the SO
@@ -18,6 +18,7 @@ import {
 // 0074 refactor: top-level entry is now Service Cases (parent). Cases can
 // spawn 0+ Service Orders for the rework/swap/repair flow.
 import { CreateServiceCaseModal } from "@/pages/service-cases";
+import { HubEditModal } from "@/components/orders/HubEditModal";
 // generateSOPdf is dynamic-imported at the click handler so the 1MB jspdf
 // vendor chunk only ships when the user actually prints.
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
@@ -346,6 +347,27 @@ export default function SalesOrderDetailPage() {
     submitting: boolean;
     error: string | null;
   }>({ open: false, reason: "", submitting: false, error: null });
+
+  // Hub-edit modal state. Wei Siang's rule: hub is editable until any
+  // linked DO has been LOADED (or beyond). Operators (e.g. Violet) often
+  // pick the wrong hub (PG vs KL on Houzs Century) — this lets them fix
+  // it in-place without raw SQL. The shipment lock is computed below.
+  const [hubModalOpen, setHubModalOpen] = useState(false);
+
+  // SHIPPED-DO set must match the backend guard in
+  // src/api/routes/sales-orders.ts PATCH /:id/hub. DRAFT is the only
+  // pre-shipment state; everything past it means goods left the warehouse.
+  const shippedDo = useMemo(() => {
+    return linkedDOs.find((d) =>
+      ["LOADED", "IN_TRANSIT", "DELIVERED", "INVOICED"].includes(
+        (d.status || "").toUpperCase(),
+      ),
+    );
+  }, [linkedDOs]);
+  const shipmentLocked = !!shippedDo;
+  const shipmentLockReason = shippedDo
+    ? `Hub locked: DO ${shippedDo.doNo} already ${shippedDo.status}.`
+    : "";
 
   const submitOverride = useCallback(async () => {
     if (!id) return;
@@ -1089,6 +1111,19 @@ export default function SalesOrderDetailPage() {
         />
       )}
 
+      <HubEditModal
+        open={hubModalOpen}
+        endpoint={`/api/sales-orders/${order.id}/hub`}
+        currentHubId={(order as SalesOrder & { hubId?: string }).hubId}
+        hubs={customer?.deliveryHubs ?? []}
+        onClose={() => setHubModalOpen(false)}
+        onSaved={(newHubName) => {
+          setHubModalOpen(false);
+          toast.success(`Hub updated to ${newHubName}`);
+          fetchOrder();
+        }}
+      />
+
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader className="pb-3"><CardTitle>Order Information</CardTitle></CardHeader>
@@ -1097,11 +1132,27 @@ export default function SalesOrderDetailPage() {
               <div><p className="text-xs text-[#9CA3AF]">Customer</p><p className="font-medium">{order.customerName}</p></div>
               <div>
                 <p className="text-xs text-[#9CA3AF]">Delivery Hub</p>
-                <p className="font-medium">
-                  {customer?.deliveryHubs?.find(h => h.id === (order as SalesOrder & { hubId?: string }).hubId)?.shortName
-                    || ((order as SalesOrder & { hubId?: string }).hubId ? "Hub assigned" : "—")}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="font-medium">
+                    {customer?.deliveryHubs?.find(h => h.id === (order as SalesOrder & { hubId?: string }).hubId)?.shortName
+                      || ((order as SalesOrder & { hubId?: string }).hubId ? "Hub assigned" : "—")}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setHubModalOpen(true)}
+                    disabled={shipmentLocked}
+                    title={shipmentLocked ? shipmentLockReason : "Change delivery hub"}
+                    className="text-[#9CA3AF] hover:text-[#6B5C32] disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                </div>
                 <p className="text-xs text-[#9CA3AF]">{order.customerState || "—"}</p>
+                <p className="text-[10px] text-[#9CA3AF] mt-1">
+                  {shipmentLocked
+                    ? shipmentLockReason
+                    : "Editable until goods leave the warehouse."}
+                </p>
               </div>
               <div>
                 <p className="text-xs text-[#9CA3AF]">Customer PO</p>

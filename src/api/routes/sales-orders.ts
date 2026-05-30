@@ -3560,6 +3560,163 @@ app.put("/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/sales-orders/:id/hub — change the delivery hub for an SO.
+//
+// Wei Siang's rule: "as long as not yet shipped, hub can be edited."
+// Operators (e.g. Violet) routinely misclick PG vs KL hub on the same
+// customer (Houzs Century has both). This endpoint lets them fix it
+// in-place — but only while every linked DO is still DRAFT. Once any
+// DO has been LOADED / IN_TRANSIT / DELIVERED / INVOICED the goods
+// have physically left the warehouse and the hub is frozen.
+//
+// :id may be either the SO's UUID PK or the user-visible companySOId
+// code (e.g. SO-2605-051). We probe both — operators paste the code
+// from a printed SO sheet, not the UUID.
+//
+// Body: { hubId: string, reason?: string }
+//
+// Audit: every successful change writes one audit_events row with
+// action='hub-change', before={hubId,hubName}, after={hubId,hubName,reason?}.
+// ---------------------------------------------------------------------------
+app.patch("/:id/hub", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const idParam = c.req.param("id");
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const newHubId = typeof body.hubId === "string" ? body.hubId.trim() : "";
+    const reason =
+      typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!newHubId) {
+      return c.json({ success: false, error: "hubId is required" }, 400);
+    }
+
+    // 1. Resolve the SO by either UUID PK or companySOId (case-insensitive).
+    const so = await c.var.DB
+      .prepare(
+        `SELECT * FROM sales_orders
+          WHERE id = ?
+             OR companySOId ILIKE ?
+          LIMIT 1`,
+      )
+      .bind(idParam, idParam)
+      .first<SalesOrderRow>();
+    if (!so) {
+      return c.json({ success: false, error: "Sales order not found" }, 404);
+    }
+
+    // 2. Resolve the new hub.
+    const hub = await c.var.DB
+      .prepare(
+        "SELECT id, shortName, state, customerId FROM delivery_hubs WHERE id = ?",
+      )
+      .bind(newHubId)
+      .first<{
+        id: string;
+        shortName: string;
+        state: string | null;
+        customerId: string;
+      }>();
+    if (!hub) {
+      return c.json({ success: false, error: "Hub not found" }, 404);
+    }
+
+    // 3. Hub must belong to the same customer as the SO.
+    if (hub.customerId !== so.customerId) {
+      return c.json(
+        {
+          success: false,
+          error: "Hub does not belong to this customer",
+        },
+        400,
+      );
+    }
+
+    // 4. Shipment-state guard. Mirrors the same SHIPPED-DO set used by
+    //    dashboard-overview + do-value (LOADED / IN_TRANSIT / DELIVERED /
+    //    INVOICED — DRAFT is the only "still in warehouse" state). Walk
+    //    BOTH the direct FK (delivery_orders.salesOrderId) AND the
+    //    per-item join (delivery_order_items.salesOrderNo = companySOId)
+    //    so a consolidated DO catches the lock too.
+    const companySOId = so.companySOId ?? "";
+    const shippedDoRes = await c.var.DB
+      .prepare(
+        `SELECT DISTINCT d.doNo, d.status
+           FROM delivery_orders d
+          WHERE d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+            AND (
+                  d.salesOrderId = ?
+               OR d.id IN (
+                    SELECT di.deliveryOrderId
+                      FROM delivery_order_items di
+                     WHERE di.salesOrderNo = ?
+                  )
+                )
+          ORDER BY d.doNo
+          LIMIT 1`,
+      )
+      .bind(so.id, companySOId)
+      .first<{ doNo: string | null; status: string | null }>();
+    if (shippedDoRes) {
+      return c.json(
+        {
+          success: false,
+          code: "HUB_LOCKED_SHIPPED",
+          error: `Hub cannot be changed once goods have left the hub. DO ${shippedDoRes.doNo ?? "(unknown)"} is already in ${shippedDoRes.status ?? "(unknown)"}.`,
+          blockingDoNo: shippedDoRes.doNo ?? "",
+          blockingDoStatus: shippedDoRes.status ?? "",
+        },
+        409,
+      );
+    }
+
+    // 5. Apply the update.
+    const now = new Date().toISOString();
+    const beforeSnap = { hubId: so.hubId, hubName: so.hubName };
+    const afterSnap: Record<string, unknown> = {
+      hubId: hub.id,
+      hubName: hub.shortName,
+    };
+    if (reason) afterSnap.reason = reason;
+
+    await c.var.DB
+      .prepare(
+        `UPDATE sales_orders
+            SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .bind(hub.id, hub.shortName, hub.state ?? so.customerState ?? null, now, so.id)
+      .run();
+
+    // 6. Audit.
+    await emitAudit(c, {
+      resource: "sales-orders",
+      resourceId: so.id,
+      action: "hub-change",
+      before: beforeSnap,
+      after: afterSnap,
+    });
+
+    // 7. Return refreshed SO header (caller will refresh full detail).
+    const updated = await c.var.DB
+      .prepare("SELECT * FROM sales_orders WHERE id = ?")
+      .bind(so.id)
+      .first<SalesOrderRow>();
+    return c.json({
+      success: true,
+      data: updated ? rowToSO(updated, []) : null,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[PATCH /api/sales-orders/:id/hub] failed:", msg, err);
+    return c.json(
+      { success: false, error: msg || "Internal error updating hub" },
+      500,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /api/sales-orders/:id — cascades to items via FK
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {

@@ -34,6 +34,112 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-30-007 — Hookka AI said "not found" on operator shorthand like "PO9003" / "PO 9003 houzs" because customerPOId was never searched
+
+**Status:** 🟢 Fixed (2026-05-30)
+**Category:** ui-frontend, assistant
+
+**Symptom:**
+
+Wei Siang typed `PO9003` into the AI assistant expecting it to find the
+Houzs Century Customer PO `PO-009003` sitting on the related Sales Order.
+The assistant replied "not found" and stopped. Same for `PO 9003`,
+`PO9003 houzs`, `houzs 9003`, and bare `9003`. Operator was forced to
+walk the sidebar to find the SO by hand.
+
+The reason this hurt: two different things are called "PO" in Hookka:
+
+- **Internal Production Order** — `production_orders.poNo`, shape `PO-YYMM-NNN` (e.g. `PO-2605-012`).
+- **Customer PO** — sent by Houzs/Carress/The Conts, stored on
+  `sales_orders.customerPOId` (+ denormalised to
+  `production_orders.customerPOId` / `delivery_orders.customerPOId`),
+  shape `PO-NNNNNN` (6-digit, e.g. `PO-009003`).
+
+The model knew the first shape, didn't know the second existed, and the
+existing `search_anything` tool didn't even scan the column the customer
+PO lives in.
+
+**Root cause:**
+
+Three compounding gaps:
+
+1. **`search_anything` had no coverage of customer-PO fields.** It only
+   searched `companySOId`, `customerSOId`, `companyCOId`, `doNo`,
+   `invoiceNo` — never `customerPOId` on sales_orders /
+   production_orders / delivery_orders, never `customerCOId` on
+   consignment_orders. The Houzs PO format `PO-NNNNNN` only lives in
+   these unsearched columns.
+
+2. **No format-aware fuzzy matcher.** "PO9003" needs to be tried as
+   `PO-9003`, `PO-09003`, `PO-009003` (Houzs zero-pad widths) AND as
+   `PO-2605-9003` (internal shape). The old tools required the operator
+   to type the exact stored string.
+
+3. **System prompt told the model to STOP on first failed lookup.** The
+   "Stopping rule (CRITICAL)" section literally said
+   `if a dedicated lookup tool returns empty, STOP… reply 'I couldn't
+   find [X]. Could you double-check the number?'`. So even when the
+   operator gave a clear hint like "houzs 9003", the model dutifully
+   refused to ask "could this be a Customer PO from Houzs?" and just
+   gave up.
+
+**Fix:**
+
+1. **System prompt rewrite** (`src/api/routes/assistant.ts`,
+   `SYSTEM_PROMPT`): replaced the "STOP on not-found" rule with explicit
+   ASK-CLARIFYING-QUESTION behavior. Baked in the Hookka cheat sheet
+   (customers, hubs, the two PO formats, cascade chain, identifier
+   table). The model is now explicitly told: when the operator types
+   "PO9003" call `smart_lookup` first, then either confirm a single
+   match with disambiguating context or list candidates and ASK which
+   one. Never reply "not found" without first calling `smart_lookup`
+   and asking a clarifying question. Commit `98a4fb5c`.
+
+2. **New `smart_lookup` tool** (`src/api/lib/assistant-tools.ts`):
+   - Extracts the longest digit run from a free-text query
+     (`extractDigitRuns`).
+   - Generates ~10 ILIKE patterns covering Houzs widths
+     (`PO-9003` / `PO-09003` / `PO-009003`), internal shapes
+     (`PO-YYMM-NNN` / `SO-YYMM-NNN` / `CO-YYMM-NNN` / `DO-YYMM-NNN` /
+     `INV-YYMM-NNN`), and the raw substring (`generateLookupPatterns`).
+   - Scans every entity where a document number could live, including
+     `sales_orders.customerPOId`, `production_orders.customerPOId`,
+     `delivery_orders.customerPOId`, `consignment_orders.customerCOId`.
+   - Returns matches grouped by entity type with disambiguating
+     context (customer, status, dates, amounts) plus an explicit
+     `askClarifyingQuestion` hint when totalMatches === 0.
+
+3. **New `lookup_customer_po` tool**: tighter helper that ONLY scans
+   the customer-supplied PO columns. Use when the operator's context
+   already establishes "this is a Customer PO".
+
+4. **Extended `search_anything`** to also scan `customerPOId`,
+   `customerSOId`, `customerCOId` so existing call sites pick up the
+   fix without further plumbing.
+
+5. **Pure helpers exported + unit-tested** in
+   `tests/assistant-fuzzy-match.test.mjs` (11 tests covering the seven
+   canonical operator inputs).
+
+6. **MAX_ITERATIONS bumped 6 → 8** in `assistant.ts` so the model has
+   room for `smart_lookup` + a clarifying question + a follow-up
+   specific tool call within the same question budget.
+
+**File / line refs:**
+- `src/api/routes/assistant.ts:50` (MAX_ITERATIONS), `:53` (SYSTEM_PROMPT rewrite)
+- `src/api/lib/assistant-tools.ts:2055` (smart_lookup), `:~2380` (lookup_customer_po), `:2592` (search_anything extension)
+- `src/api/lib/assistant-tools.ts:4188-4189` (TOOLS registration)
+- `tests/assistant-fuzzy-match.test.mjs` (regression unit tests)
+
+**Verification:**
+- TypeScript `tsc --noEmit` clean.
+- ESLint clean.
+- `node --test tests/assistant-fuzzy-match.test.mjs` — 11/11 pass.
+- Existing `tests/audit.test.mjs` + `tests/authz.test.mjs` still 12/12 pass.
+- Live regression against prod assistant: pending operator confirmation post-deploy.
+
+---
+
 ## BUG-2026-05-30-006 — production_orders.customer_state + credit/debit-notes contact block stayed stale after hub-edit cascade
 
 **Status:** 🟢 Fixed (2026-05-30)

@@ -4672,6 +4672,570 @@ const explainFeature: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// Export / report generation (CSV, Excel, PDF, named templates)
+//
+// Stays in this file (not split) so the existing TOOLS registry covers the
+// whole assistant surface. The heavy lifting lives in
+// `assistant-exports.ts` (file builders) and `assistant-skills.ts` (named
+// report templates). All exports go to Supabase Storage under
+// `assistant-exports/<orgId>/...` and surface as 1-hour signed URLs.
+// ---------------------------------------------------------------------------
+import {
+  buildCsv,
+  buildExcelWorkbook,
+  buildSimpleTablePdf,
+  uploadExportAndSign,
+  CONTENT_TYPES,
+  MAX_EXPORT_ROWS,
+  type ExcelSheet,
+  type ExportResult,
+} from "./assistant-exports";
+import {
+  REPORT_TEMPLATES,
+  getReportTemplate,
+  listReportTemplates,
+} from "./assistant-skills";
+
+function asRowArray(v: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(v)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const item of v) {
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      out.push(item as Record<string, unknown>);
+    }
+  }
+  return out;
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => (typeof x === "string" ? x : String(x ?? "")));
+}
+
+function clampExportRows<T>(rows: T[]): T[] {
+  if (rows.length <= MAX_EXPORT_ROWS) return rows;
+  return rows.slice(0, MAX_EXPORT_ROWS);
+}
+
+function exportResultPayload(
+  res: ExportResult & { previewSummary?: string },
+): Record<string, unknown> {
+  return {
+    ok: true,
+    downloadUrl: res.downloadUrl,
+    filename: res.filename,
+    byteSize: res.byteSize,
+    rowCount: res.rowCount,
+    contentType: res.contentType,
+    previewSummary: res.previewSummary,
+    expiresInSeconds: 3600,
+  };
+}
+
+const generateCsvTool: ToolDefinition = {
+  schema: {
+    name: "generate_csv",
+    description:
+      "Build a CSV file from an array of row objects and upload it to Hookka storage. Returns a 1-hour signed download URL. Use this when the user wants raw tabular data they'll open in Excel / Numbers / a script.",
+    input_schema: {
+      type: "object",
+      properties: {
+        rows: {
+          type: "array",
+          description:
+            "Array of objects. Keys become CSV columns (first-seen order). Values can be strings, numbers, booleans. Max 10,000 rows.",
+          items: { type: "object" },
+        },
+        filename: {
+          type: "string",
+          description: "Suggested filename, e.g. 'carress-may-sales.csv'.",
+        },
+      },
+      required: ["rows", "filename"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const rows = clampExportRows(asRowArray(args.rows));
+    if (rows.length === 0) {
+      return { ok: false, error: "rows is empty — nothing to export." };
+    }
+    const filename = strOrNull(args.filename) ?? "export.csv";
+    const csv = buildCsv(rows);
+    const bytes = new TextEncoder().encode(csv);
+    const uploaded = await uploadExportAndSign(
+      c.env,
+      orgId,
+      filename,
+      bytes,
+      CONTENT_TYPES.csv,
+    );
+    uploaded.rowCount = rows.length;
+    return exportResultPayload(uploaded);
+  },
+};
+
+const generateExcelTool: ToolDefinition = {
+  schema: {
+    name: "generate_excel",
+    description:
+      "Build a multi-sheet Excel workbook from sheets[]. Header row is frozen, autofilter enabled. Numeric columns whose header name looks like money (rm/sen/amount/total/...) format as '$#,##0.00'; date-like columns format as 'yyyy-mm-dd'; empty cells render as '-' instead of 0. Returns a 1-hour signed download URL.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sheets: {
+          type: "array",
+          description:
+            "One or more sheets. Each has { name, rows: [{...}], columns?: string[] }. Max 10,000 rows total across all sheets.",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              rows: { type: "array", items: { type: "object" } },
+              columns: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional explicit column order.",
+              },
+            },
+          },
+        },
+        filename: {
+          type: "string",
+          description: "Suggested filename, e.g. 'monthly-sales.xlsx'.",
+        },
+      },
+      required: ["sheets", "filename"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const sheetsRaw = Array.isArray(args.sheets) ? args.sheets : [];
+    const sheets: ExcelSheet[] = [];
+    let totalRows = 0;
+    for (const s of sheetsRaw) {
+      if (!s || typeof s !== "object") continue;
+      const obj = s as Record<string, unknown>;
+      const rows = clampExportRows(asRowArray(obj.rows));
+      totalRows += rows.length;
+      if (totalRows > MAX_EXPORT_ROWS) {
+        return {
+          ok: false,
+          error: `Total row count across sheets exceeds ${MAX_EXPORT_ROWS}. Narrow filters or split into multiple exports.`,
+        };
+      }
+      const name = typeof obj.name === "string" && obj.name.trim() ? obj.name : "Sheet";
+      const columns =
+        Array.isArray(obj.columns) && obj.columns.length > 0
+          ? asStringArray(obj.columns)
+          : undefined;
+      sheets.push({ name, rows, columns });
+    }
+    if (sheets.length === 0) {
+      return { ok: false, error: "sheets must contain at least one sheet." };
+    }
+    const filename = strOrNull(args.filename) ?? "export.xlsx";
+    const bytes = buildExcelWorkbook(sheets);
+    const uploaded = await uploadExportAndSign(
+      c.env,
+      orgId,
+      filename,
+      bytes,
+      CONTENT_TYPES.xlsx,
+    );
+    uploaded.rowCount = totalRows;
+    return exportResultPayload(uploaded);
+  },
+};
+
+const generatePdfTool: ToolDefinition = {
+  schema: {
+    name: "generate_pdf",
+    description:
+      "Build a formatted PDF document. Today supports template 'simple_table' — a clean A4 page with title, subtitle, header row, body rows, optional totals row, and footer. Use this for printable summaries. For raw data, prefer generate_excel or generate_csv.",
+    input_schema: {
+      type: "object",
+      properties: {
+        template: {
+          type: "string",
+          description:
+            "Currently 'simple_table' is supported. Future templates will be listed by list_export_templates.",
+        },
+        data: {
+          type: "object",
+          description:
+            "For simple_table: { title: string, subtitle?: string, columns: string[], rows: string[][], totals?: string[], footer?: string }.",
+        },
+        filename: { type: "string", description: "Suggested filename." },
+      },
+      required: ["template", "data", "filename"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const template = strOrNull(args.template) ?? "simple_table";
+    if (template !== "simple_table") {
+      return {
+        ok: false,
+        error: `Unknown PDF template '${template}'. Call list_export_templates to see what's available.`,
+      };
+    }
+    const data = (args.data ?? {}) as Record<string, unknown>;
+    const title = strOrNull(data.title) ?? "Report";
+    const subtitle = strOrNull(data.subtitle) ?? undefined;
+    const columns = asStringArray(data.columns);
+    const rawRows = Array.isArray(data.rows) ? data.rows : [];
+    const rows: string[][] = clampExportRows(
+      rawRows.map((r) => asStringArray(r)),
+    );
+    if (columns.length === 0) {
+      return { ok: false, error: "data.columns is required for simple_table." };
+    }
+    const totals =
+      Array.isArray(data.totals) && data.totals.length > 0
+        ? asStringArray(data.totals)
+        : undefined;
+    const footer = strOrNull(data.footer) ?? undefined;
+    const bytes = await buildSimpleTablePdf({
+      title,
+      subtitle,
+      columns,
+      rows,
+      totals,
+      footer,
+    });
+    const filename = strOrNull(args.filename) ?? "report.pdf";
+    const uploaded = await uploadExportAndSign(
+      c.env,
+      orgId,
+      filename,
+      bytes,
+      CONTENT_TYPES.pdf,
+    );
+    uploaded.rowCount = rows.length;
+    return exportResultPayload(uploaded);
+  },
+};
+
+const listExportTemplatesTool: ToolDefinition = {
+  schema: {
+    name: "list_export_templates",
+    description:
+      "List available PDF templates and named report templates the assistant can run. Use this when the user asks 'what reports can you make?' or before calling run_report_template.",
+    input_schema: { type: "object", properties: {} },
+  },
+  execute: async () => {
+    return {
+      ok: true,
+      pdfTemplates: [
+        {
+          name: "simple_table",
+          description:
+            "Generic A4 PDF with title, subtitle, header row, body rows, optional totals row. Use via generate_pdf.",
+        },
+      ],
+      // Named domain-specific templates with built-in queries.
+      reportTemplates: listReportTemplates(),
+      // Heads-up to the model: there's also a family of client-side
+      // generators (PO/DO/invoice/credit-note/packing-list/etc.) that the
+      // operator can trigger from the relevant entity page in the ERP.
+      // The assistant can't invoke those directly today — point the user
+      // there if they ask for a single-document PDF.
+      clientSidePdfs: [
+        "purchase order PDF (Purchasing → PO detail → Print)",
+        "delivery order PDF (Sales → DO detail → Print)",
+        "invoice PDF (Finance → Invoice detail → Print)",
+        "credit note / debit note PDF (Finance → Notes → Print)",
+        "packing list PDF (Sales → DO detail → Packing tab)",
+        "sales order / consignment order PDF (Sales → SO/CO detail → Print)",
+        "customer quotation PDF (Sales → Quotation → Print)",
+        "payslip PDF (HR → Payroll → Print)",
+        "statement of account PDF (Finance → Customer → Statement)",
+        "GRN PDF (Purchasing → GRN → Print)",
+        "sticker / QR PDF (Inventory → FG → Stickers)",
+      ],
+    };
+  },
+};
+
+// Entities supported by export_query_to_excel — keep this list small and
+// curated so the model gets predictable behaviour. For anything else, the
+// operator can use run_select_query → generate_excel.
+const EXPORT_ENTITIES = [
+  "sales_orders",
+  "consignment_orders",
+  "production_orders",
+  "delivery_orders",
+  "invoices",
+  "payments",
+  "customers",
+  "suppliers",
+  "products",
+  "employees",
+] as const;
+type ExportEntity = (typeof EXPORT_ENTITIES)[number];
+
+const exportQueryToExcelTool: ToolDefinition = {
+  schema: {
+    name: "export_query_to_excel",
+    description:
+      "Run a curated query against one of the canonical entities and dump it to Excel in a single call. Supports filters that vary by entity (e.g. customer/status/dateFrom/dateTo for sales_orders). Use this for natural-language asks like 'export Carress SOs from this month'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        entity: {
+          type: "string",
+          description: `One of: ${EXPORT_ENTITIES.join(", ")}.`,
+        },
+        filters: {
+          type: "object",
+          description:
+            "Per-entity filter bag. Supported keys: customer (partial match), status, dateFrom/dateTo (YYYY-MM-DD on created_at), hub (KL/PG/SRW/SBH), department.",
+        },
+        columns: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional column order — defaults to a sensible per-entity set.",
+        },
+        filename: { type: "string", description: "Suggested filename." },
+      },
+      required: ["entity", "filename"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const entity = strOrNull(args.entity) as ExportEntity | null;
+    if (!entity || !(EXPORT_ENTITIES as readonly string[]).includes(entity)) {
+      return {
+        ok: false,
+        error: `entity must be one of: ${EXPORT_ENTITIES.join(", ")}.`,
+      };
+    }
+    const filters = (args.filters ?? {}) as Record<string, unknown>;
+    const filename = strOrNull(args.filename) ?? `${entity}.xlsx`;
+    const requestedColumns =
+      Array.isArray(args.columns) && args.columns.length > 0
+        ? asStringArray(args.columns)
+        : undefined;
+
+    const rows = await runEntityExportQuery(c, orgId, entity, filters);
+    if (rows.length === 0) {
+      return {
+        ok: true,
+        downloadUrl: "",
+        filename,
+        byteSize: 0,
+        rowCount: 0,
+        previewSummary:
+          "Query returned no rows — nothing to export. Loosen filters or check entity/customer spelling.",
+      };
+    }
+    const sheets: ExcelSheet[] = [
+      { name: entity, rows: clampExportRows(rows), columns: requestedColumns },
+    ];
+    const bytes = buildExcelWorkbook(sheets);
+    const uploaded = await uploadExportAndSign(
+      c.env,
+      orgId,
+      filename,
+      bytes,
+      CONTENT_TYPES.xlsx,
+    );
+    uploaded.rowCount = rows.length;
+    return exportResultPayload({
+      ...uploaded,
+      previewSummary: `Exported ${rows.length} ${entity} row(s).`,
+    });
+  },
+};
+
+const runReportTemplateTool: ToolDefinition = {
+  schema: {
+    name: "run_report_template",
+    description:
+      "Run a named report template and produce a finished file. Call list_export_templates first to see what's available and what each template's params are.",
+    input_schema: {
+      type: "object",
+      properties: {
+        template: {
+          type: "string",
+          description: `Template name. One of: ${REPORT_TEMPLATES.map((t) => t.name).join(", ")}.`,
+        },
+        params: {
+          type: "object",
+          description:
+            "Template-specific parameters. See list_export_templates → paramHints.",
+        },
+      },
+      required: ["template"],
+    },
+  },
+  execute: async (c, args) => {
+    const name = strOrNull(args.template);
+    if (!name) {
+      return { ok: false, error: "template name is required." };
+    }
+    const tpl = getReportTemplate(name);
+    if (!tpl) {
+      const known = REPORT_TEMPLATES.map((t) => t.name).join(", ");
+      return {
+        ok: false,
+        error: `Unknown template '${name}'. Known: ${known}. Call list_export_templates for full details.`,
+      };
+    }
+    const params = (args.params ?? {}) as Record<string, unknown>;
+    const result = await tpl.execute(c, params);
+    return exportResultPayload(result);
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Per-entity query helper for export_query_to_excel
+// ---------------------------------------------------------------------------
+
+async function runEntityExportQuery(
+  c: Context<Env>,
+  orgId: string,
+  entity: ExportEntity,
+  filters: Record<string, unknown>,
+): Promise<Array<Record<string, unknown>>> {
+  const wheres: string[] = ["orgId = ?"];
+  const params: unknown[] = [orgId];
+
+  const customer = strOrNull(filters.customer);
+  if (customer) {
+    // Most entities have customerName denormalised; suppliers/products/employees
+    // don't, so guard per entity.
+    if (
+      entity === "sales_orders" ||
+      entity === "consignment_orders" ||
+      entity === "production_orders" ||
+      entity === "delivery_orders" ||
+      entity === "invoices" ||
+      entity === "payments" ||
+      entity === "customers"
+    ) {
+      const col = entity === "customers" ? "name" : "customerName";
+      wheres.push(`LOWER(${col}) LIKE ?`);
+      params.push(`%${customer.toLowerCase()}%`);
+    }
+  }
+  const status = strOrNull(filters.status);
+  if (status && entity !== "customers" && entity !== "suppliers" && entity !== "employees") {
+    wheres.push("UPPER(status) = ?");
+    params.push(status.toUpperCase());
+  }
+  const dateFrom = ymdOrNull(filters.dateFrom);
+  if (dateFrom) {
+    wheres.push("created_at >= ?");
+    params.push(dateFrom);
+  }
+  const dateTo = ymdOrNull(filters.dateTo);
+  if (dateTo) {
+    wheres.push("created_at <= ?");
+    params.push(`${dateTo} 23:59:59`);
+  }
+  const hub = strOrNull(filters.hub);
+  if (hub && (entity === "sales_orders" || entity === "consignment_orders" || entity === "delivery_orders" || entity === "production_orders" || entity === "invoices")) {
+    wheres.push("UPPER(hub) = ?");
+    params.push(hub.toUpperCase());
+  }
+  const department = strOrNull(filters.department);
+  if (department && entity === "employees") {
+    wheres.push("UPPER(departmentCode) = ?");
+    params.push(department.toUpperCase());
+  }
+
+  const whereSql = wheres.join(" AND ");
+  let sql: string;
+  switch (entity) {
+    case "sales_orders":
+      sql = `SELECT companySOId AS soId, customerName, customerPOId AS customerPO,
+                    status, hub, totalSen, customerDeliveryDate, created_at AS createdAt
+             FROM sales_orders WHERE ${whereSql}
+             ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "consignment_orders":
+      sql = `SELECT companyCOId AS coId, customerName, customerCOId AS customerPO,
+                    status, hub, totalSen, created_at AS createdAt
+             FROM consignment_orders WHERE ${whereSql}
+             ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "production_orders":
+      sql = `SELECT poNo, salesOrderNo AS soId, customerName, productCode, productName,
+                    status, currentDepartment, progress, startDate, targetEndDate
+             FROM production_orders WHERE ${whereSql}
+             ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "delivery_orders":
+      sql = `SELECT doNo, customerName, customerPOId AS customerPO, status, hub,
+                    totalSen, deliveryDate, created_at AS createdAt
+             FROM delivery_orders WHERE ${whereSql}
+             ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "invoices":
+      sql = `SELECT invoiceNo, customerName, status, totalSen, paidAmount,
+                    dueDate, issueDate, created_at AS createdAt
+             FROM invoices WHERE ${whereSql}
+             ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "payments":
+      sql = `SELECT id, paymentNo, customerName, status, amountSen, paymentDate,
+                    method, created_at AS createdAt
+             FROM payments WHERE ${whereSql}
+             ORDER BY created_at DESC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "customers":
+      sql = `SELECT id, code, name, contactPerson, phone, email, hub, status
+             FROM customers WHERE ${whereSql}
+             ORDER BY name ASC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "suppliers":
+      sql = `SELECT id, code, name, contactPerson, phone, email, status
+             FROM suppliers WHERE ${whereSql}
+             ORDER BY name ASC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "products":
+      sql = `SELECT id, code, name, category, status, created_at AS createdAt
+             FROM products WHERE ${whereSql}
+             ORDER BY code ASC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    case "employees":
+      sql = `SELECT id, empNo, name, departmentCode, role, status
+             FROM workers WHERE ${whereSql}
+             ORDER BY name ASC LIMIT ${MAX_EXPORT_ROWS}`;
+      break;
+    default:
+      return [];
+  }
+
+  try {
+    const r = await c.var.DB.prepare(sql).bind(...params).all<Record<string, unknown>>();
+    const raw = r.results ?? [];
+    // Convert any *Sen / *_sen field to RM-style number for readability.
+    return raw.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (
+          /Sen$/.test(k) &&
+          typeof v === "number" &&
+          Number.isFinite(v)
+        ) {
+          const baseName = k.replace(/Sen$/, "RM");
+          out[baseName] = Math.round(v) / 100;
+        } else {
+          out[k] = v;
+        }
+      }
+      return out;
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Entity query failed for ${entity}: ${msg.slice(0, 200)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -4740,6 +5304,13 @@ export const TOOLS: ToolDefinition[] = [
   // v1.5 — system / help
   listAuditEvents,
   explainFeature,
+  // v1.6 — export / report generation (CSV, Excel, PDF, named templates)
+  generateCsvTool,
+  generateExcelTool,
+  generatePdfTool,
+  listExportTemplatesTool,
+  exportQueryToExcelTool,
+  runReportTemplateTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

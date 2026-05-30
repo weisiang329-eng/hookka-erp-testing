@@ -25,6 +25,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import type { AnthropicTool } from "./anthropic-client";
 import { getOrgId } from "./tenant";
+import { emitAudit } from "./audit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1300,11 +1301,2737 @@ const getDashboardStats: ToolDefinition = {
   },
 };
 
+// ===========================================================================
+// v1.5 — Cross-module + module-coverage tools.
+//
+// Everything below is additive. None of the v1 tool functions above were
+// renamed or modified; the new entries are added to the TOOLS registry.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Cross-module — trace_order
+// ---------------------------------------------------------------------------
+
+const traceOrder: ToolDefinition = {
+  schema: {
+    name: "trace_order",
+    description:
+      "Trace the full cascade chain for any document. Given a SO/CO/PO/DO/INVOICE id (internal or human code), returns the linked upstream + downstream documents: SO/CO → production_orders → job_cards → delivery_orders → invoices → payments. Use for 'where is SO-X' or 'what's the status of PO-Y' style questions.",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          description: "One of: SO, CO, PO, DO, INVOICE.",
+        },
+        id: { type: "string", description: "Internal id OR human code (SO-2605-253, PO-..., DO-..., INV-...)." },
+      },
+      required: ["type", "id"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const lookup = strOrNull(args.id);
+    const type = String(args.type ?? "").toUpperCase();
+    if (!lookup) return { error: "id is required" };
+
+    // Resolve starting SO and/or CO id(s) from the entry point.
+    let soId: string | null = null;
+    let coId: string | null = null;
+
+    if (type === "SO") {
+      const r = await c.var.DB
+        .prepare(
+          "SELECT id FROM sales_orders WHERE orgId = ? AND (id = ? OR companySOId = ?) LIMIT 1",
+        )
+        .bind(orgId, lookup, lookup)
+        .first<{ id: string }>();
+      if (!r) return { error: `Sales order not found: ${lookup}` };
+      soId = r.id;
+    } else if (type === "CO") {
+      const r = await c.var.DB
+        .prepare(
+          "SELECT id FROM consignment_orders WHERE orgId = ? AND (id = ? OR companyCOId = ?) LIMIT 1",
+        )
+        .bind(orgId, lookup, lookup)
+        .first<{ id: string }>();
+      if (!r) return { error: `Consignment order not found: ${lookup}` };
+      coId = r.id;
+    } else if (type === "PO") {
+      const r = await c.var.DB
+        .prepare(
+          "SELECT id, salesOrderId, consignmentOrderId FROM production_orders WHERE orgId = ? AND (id = ? OR poNo = ?) LIMIT 1",
+        )
+        .bind(orgId, lookup, lookup)
+        .first<{ id: string; salesOrderId: string | null; consignmentOrderId: string | null }>();
+      if (!r) return { error: `Production order not found: ${lookup}` };
+      soId = r.salesOrderId ?? null;
+      coId = r.consignmentOrderId ?? null;
+    } else if (type === "DO") {
+      const r = await c.var.DB
+        .prepare(
+          "SELECT id, salesOrderId FROM delivery_orders WHERE orgId = ? AND (id = ? OR doNo = ?) LIMIT 1",
+        )
+        .bind(orgId, lookup, lookup)
+        .first<{ id: string; salesOrderId: string | null }>();
+      if (!r) return { error: `Delivery order not found: ${lookup}` };
+      soId = r.salesOrderId ?? null;
+    } else if (type === "INVOICE") {
+      const r = await c.var.DB
+        .prepare(
+          "SELECT id, salesOrderId FROM invoices WHERE orgId = ? AND (id = ? OR invoiceNumber = ?) LIMIT 1",
+        )
+        .bind(orgId, lookup, lookup)
+        .first<{ id: string; salesOrderId: string | null }>();
+      if (!r) return { error: `Invoice not found: ${lookup}` };
+      soId = r.salesOrderId ?? null;
+    } else {
+      return { error: `Unknown type: ${type}. Use SO, CO, PO, DO, or INVOICE.` };
+    }
+
+    if (!soId && !coId) {
+      return {
+        type,
+        lookup,
+        note: "No upstream sales/consignment order linked.",
+      };
+    }
+
+    // Resolve SO + CO headers, then everything downstream.
+    const [so, co] = await Promise.all([
+      soId
+        ? c.var.DB
+            .prepare(
+              `SELECT id, companySOId, customerName, status, totalSen,
+                      customerDeliveryDate, hookkaExpectedDD, created_at AS createdAt
+               FROM sales_orders WHERE id = ? LIMIT 1`,
+            )
+            .bind(soId)
+            .first<{
+              id: string;
+              companySOId: string | null;
+              customerName: string | null;
+              status: string | null;
+              totalSen: number | null;
+              customerDeliveryDate: string | null;
+              hookkaExpectedDD: string | null;
+              createdAt: string | null;
+            }>()
+        : Promise.resolve(null),
+      coId
+        ? c.var.DB
+            .prepare(
+              `SELECT id, companyCOId, customerName, status, totalSen, created_at AS createdAt
+               FROM consignment_orders WHERE id = ? LIMIT 1`,
+            )
+            .bind(coId)
+            .first<{
+              id: string;
+              companyCOId: string | null;
+              customerName: string | null;
+              status: string | null;
+              totalSen: number | null;
+              createdAt: string | null;
+            }>()
+        : Promise.resolve(null),
+    ]);
+
+    const pos = await c.var.DB
+      .prepare(
+        `SELECT id, poNo, status, productCode, productName, quantity, currentDepartment,
+                progress, startDate, targetEndDate, completedDate
+         FROM production_orders
+         WHERE orgId = ?
+           AND (salesOrderId = ? OR consignmentOrderId = ?)
+         ORDER BY poNo
+         LIMIT 100`,
+      )
+      .bind(orgId, soId ?? "", coId ?? "")
+      .all<{
+        id: string;
+        poNo: string | null;
+        status: string | null;
+        productCode: string | null;
+        productName: string | null;
+        quantity: number | null;
+        currentDepartment: string | null;
+        progress: number | null;
+        startDate: string | null;
+        targetEndDate: string | null;
+        completedDate: string | null;
+      }>();
+    const poList = pos.results ?? [];
+    const poIds = poList.map((p) => p.id);
+
+    // Job cards for these POs.
+    let jcs: Array<{
+      id: string;
+      productionOrderId: string;
+      departmentCode: string | null;
+      departmentName: string | null;
+      status: string | null;
+      wipLabel: string | null;
+      wipQty: number | null;
+      dueDate: string | null;
+      completedDate: string | null;
+    }> = [];
+    if (poIds.length) {
+      const placeholders = poIds.map(() => "?").join(",");
+      const rows = await c.var.DB
+        .prepare(
+          `SELECT id, productionOrderId, departmentCode, departmentName, status,
+                  wipLabel, wipQty, dueDate, completedDate
+           FROM job_cards
+           WHERE productionOrderId IN (${placeholders})
+           ORDER BY productionOrderId, sequence
+           LIMIT 100`,
+        )
+        .bind(...poIds)
+        .all<{
+          id: string;
+          productionOrderId: string;
+          departmentCode: string | null;
+          departmentName: string | null;
+          status: string | null;
+          wipLabel: string | null;
+          wipQty: number | null;
+          dueDate: string | null;
+          completedDate: string | null;
+        }>();
+      jcs = rows.results ?? [];
+    }
+
+    // DOs and invoices linked to this SO.
+    const [dos, invs] = await Promise.all([
+      soId
+        ? c.var.DB
+            .prepare(
+              `SELECT id, doNo, status, deliveryDate, totalItems
+               FROM delivery_orders WHERE orgId = ? AND salesOrderId = ?
+               ORDER BY created_at DESC LIMIT 50`,
+            )
+            .bind(orgId, soId)
+            .all<{
+              id: string;
+              doNo: string | null;
+              status: string | null;
+              deliveryDate: string | null;
+              totalItems: number | null;
+            }>()
+        : Promise.resolve({ results: [] }),
+      soId
+        ? c.var.DB
+            .prepare(
+              `SELECT id, invoiceNumber, status, totalSen,
+                      COALESCE(paidAmount, 0) AS paidAmount, invoiceDate, dueDate
+               FROM invoices WHERE orgId = ? AND salesOrderId = ?
+               ORDER BY invoiceDate DESC LIMIT 50`,
+            )
+            .bind(orgId, soId)
+            .all<{
+              id: string;
+              invoiceNumber: string | null;
+              status: string | null;
+              totalSen: number | null;
+              paidAmount: number | null;
+              invoiceDate: string | null;
+              dueDate: string | null;
+            }>()
+        : Promise.resolve({ results: [] }),
+    ]);
+
+    // Payments via allocations table — best-effort: scan invoice_payments by invoiceId.
+    let payments: Array<{
+      id: string;
+      invoiceId: string | null;
+      date: string | null;
+      amountRM: string;
+      method: string | null;
+    }> = [];
+    const invIds = (invs.results ?? []).map((i) => i.id);
+    if (invIds.length) {
+      const placeholders = invIds.map(() => "?").join(",");
+      try {
+        const pays = await c.var.DB
+          .prepare(
+            `SELECT id, invoiceId, date, amountSen, method
+             FROM invoice_payments
+             WHERE invoiceId IN (${placeholders})
+             ORDER BY date DESC
+             LIMIT 50`,
+          )
+          .bind(...invIds)
+          .all<{
+            id: string;
+            invoiceId: string | null;
+            date: string | null;
+            amountSen: number | null;
+            method: string | null;
+          }>();
+        payments = (pays.results ?? []).map((p) => ({
+          id: p.id,
+          invoiceId: p.invoiceId,
+          date: p.date,
+          amountRM: senToRM(p.amountSen),
+          method: p.method,
+        }));
+      } catch {
+        // invoice_payments may not be populated — silent fallback.
+      }
+    }
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: lookup,
+      action: "trace_order",
+      after: { type, lookup, soId, coId, poCount: poList.length },
+      source: "ui",
+    });
+
+    return {
+      type,
+      lookup,
+      salesOrder: so
+        ? {
+            id: so.id,
+            companySOId: so.companySOId ?? "",
+            customerName: so.customerName ?? "",
+            status: so.status ?? "",
+            totalRM: senToRM(so.totalSen),
+            customerDeliveryDate: so.customerDeliveryDate ?? "",
+            hookkaExpectedDD: so.hookkaExpectedDD ?? "",
+            createdAt: so.createdAt ?? "",
+          }
+        : null,
+      consignmentOrder: co
+        ? {
+            id: co.id,
+            companyCOId: co.companyCOId ?? "",
+            customerName: co.customerName ?? "",
+            status: co.status ?? "",
+            totalRM: senToRM(co.totalSen),
+            createdAt: co.createdAt ?? "",
+          }
+        : null,
+      productionOrders: poList.map((p) => ({
+        id: p.id,
+        poNo: p.poNo ?? "",
+        status: p.status ?? "",
+        productCode: p.productCode ?? "",
+        productName: p.productName ?? "",
+        quantity: p.quantity ?? 0,
+        currentDepartment: p.currentDepartment ?? "",
+        progress: p.progress ?? 0,
+        startDate: p.startDate ?? "",
+        targetEndDate: p.targetEndDate ?? "",
+        completedDate: p.completedDate ?? "",
+        jobCards: jcs
+          .filter((j) => j.productionOrderId === p.id)
+          .map((j) => ({
+            id: j.id,
+            department: j.departmentCode ?? j.departmentName ?? "",
+            status: j.status ?? "",
+            wipLabel: j.wipLabel ?? "",
+            wipQty: j.wipQty ?? 0,
+            dueDate: j.dueDate ?? "",
+            completedDate: j.completedDate ?? "",
+          })),
+      })),
+      deliveryOrders: (dos.results ?? []).map((d) => ({
+        id: d.id,
+        doNo: d.doNo ?? "",
+        status: d.status ?? "",
+        deliveryDate: d.deliveryDate ?? "",
+        totalItems: d.totalItems ?? 0,
+      })),
+      invoices: (invs.results ?? []).map((i) => ({
+        id: i.id,
+        invoiceNumber: i.invoiceNumber ?? "",
+        status: i.status ?? "",
+        totalRM: senToRM(i.totalSen),
+        paidRM: senToRM(i.paidAmount),
+        invoiceDate: i.invoiceDate ?? "",
+        dueDate: i.dueDate ?? "",
+      })),
+      payments,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cross-module — get_customer_360
+// ---------------------------------------------------------------------------
+
+const getCustomer360: ToolDefinition = {
+  schema: {
+    name: "get_customer_360",
+    description:
+      "Aggregated view of one customer: header info, last 10 SOs, last 10 COs, total spent (last 12 months), outstanding AR, AR aging buckets (0-30/31-60/61-90/90+), and last payment date.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customerId: { type: "string", description: "Internal customer id." },
+        customerName: { type: "string", description: "Partial customer name." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const id = strOrNull(args.customerId);
+    const name = strOrNull(args.customerName);
+    if (!id && !name) return { error: "Provide either customerId or customerName" };
+
+    const cust = id
+      ? await c.var.DB
+          .prepare(
+            `SELECT id, code, name, ssmNo, creditTerms, creditLimitSen,
+                    COALESCE(outstandingSen, 0) AS outstandingSen,
+                    contactName, phone, email, isActive
+             FROM customers WHERE orgId = ? AND (id = ? OR code = ?) LIMIT 1`,
+          )
+          .bind(orgId, id, id)
+          .first<{
+            id: string;
+            code: string | null;
+            name: string | null;
+            ssmNo: string | null;
+            creditTerms: string | null;
+            creditLimitSen: number | null;
+            outstandingSen: number | null;
+            contactName: string | null;
+            phone: string | null;
+            email: string | null;
+            isActive: number | boolean | null;
+          }>()
+      : await c.var.DB
+          .prepare(
+            `SELECT id, code, name, ssmNo, creditTerms, creditLimitSen,
+                    COALESCE(outstandingSen, 0) AS outstandingSen,
+                    contactName, phone, email, isActive
+             FROM customers WHERE orgId = ? AND LOWER(name) LIKE ? ORDER BY name LIMIT 1`,
+          )
+          .bind(orgId, `%${(name ?? "").toLowerCase()}%`)
+          .first<{
+            id: string;
+            code: string | null;
+            name: string | null;
+            ssmNo: string | null;
+            creditTerms: string | null;
+            creditLimitSen: number | null;
+            outstandingSen: number | null;
+            contactName: string | null;
+            phone: string | null;
+            email: string | null;
+            isActive: number | boolean | null;
+          }>();
+
+    if (!cust) return { error: "Customer not found" };
+
+    const today = new Date();
+    const yearAgo = new Date(today);
+    yearAgo.setFullYear(today.getFullYear() - 1);
+    const yearAgoStr = yearAgo.toISOString().slice(0, 10);
+    const todayStr = today.toISOString().slice(0, 10);
+
+    const [sos, cos, spent, aging, lastPay] = await Promise.all([
+      c.var.DB
+        .prepare(
+          `SELECT id, companySOId, status, totalSen, created_at AS createdAt
+           FROM sales_orders WHERE orgId = ? AND customerId = ?
+           ORDER BY created_at DESC LIMIT 10`,
+        )
+        .bind(orgId, cust.id)
+        .all<{
+          id: string;
+          companySOId: string | null;
+          status: string | null;
+          totalSen: number | null;
+          createdAt: string | null;
+        }>(),
+      c.var.DB
+        .prepare(
+          `SELECT id, companyCOId, status, totalSen, created_at AS createdAt
+           FROM consignment_orders WHERE orgId = ? AND customerId = ?
+           ORDER BY created_at DESC LIMIT 10`,
+        )
+        .bind(orgId, cust.id)
+        .all<{
+          id: string;
+          companyCOId: string | null;
+          status: string | null;
+          totalSen: number | null;
+          createdAt: string | null;
+        }>(),
+      c.var.DB
+        .prepare(
+          `SELECT COALESCE(SUM(totalSen), 0) AS totalSen, COUNT(*) AS n
+           FROM invoices
+           WHERE orgId = ? AND customerId = ?
+             AND UPPER(status) <> 'VOID'
+             AND invoiceDate >= ?`,
+        )
+        .bind(orgId, cust.id, yearAgoStr)
+        .first<{ totalSen: number; n: number }>(),
+      c.var.DB
+        .prepare(
+          `SELECT id, invoiceNumber, totalSen, COALESCE(paidAmount, 0) AS paidAmount,
+                  invoiceDate, dueDate
+           FROM invoices
+           WHERE orgId = ? AND customerId = ?
+             AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL')
+             AND totalSen > COALESCE(paidAmount, 0)
+           ORDER BY dueDate ASC LIMIT 200`,
+        )
+        .bind(orgId, cust.id)
+        .all<{
+          id: string;
+          invoiceNumber: string | null;
+          totalSen: number | null;
+          paidAmount: number | null;
+          invoiceDate: string | null;
+          dueDate: string | null;
+        }>(),
+      c.var.DB
+        .prepare(
+          `SELECT date, amount, method FROM payment_records
+           WHERE orgId = ? AND customerId = ?
+           ORDER BY date DESC LIMIT 1`,
+        )
+        .bind(orgId, cust.id)
+        .first<{ date: string | null; amount: number | null; method: string | null }>(),
+    ]);
+
+    // Aging buckets.
+    let b0_30 = 0, b31_60 = 0, b61_90 = 0, b90p = 0;
+    for (const r of aging.results ?? []) {
+      const out = (r.totalSen ?? 0) - (r.paidAmount ?? 0);
+      if (out <= 0) continue;
+      const due = r.dueDate ?? r.invoiceDate ?? todayStr;
+      const days = Math.floor(
+        (today.getTime() - new Date(due).getTime()) / (1000 * 60 * 60 * 24),
+      );
+      if (days <= 30) b0_30 += out;
+      else if (days <= 60) b31_60 += out;
+      else if (days <= 90) b61_90 += out;
+      else b90p += out;
+    }
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: cust.id,
+      action: "get_customer_360",
+      after: { customerId: cust.id },
+      source: "ui",
+    });
+
+    return {
+      customer: {
+        id: cust.id,
+        code: cust.code ?? "",
+        name: cust.name ?? "",
+        ssmNo: cust.ssmNo ?? "",
+        creditTerms: cust.creditTerms ?? "",
+        creditLimitRM: senToRM(cust.creditLimitSen),
+        outstandingRM: senToRM(cust.outstandingSen),
+        contactName: cust.contactName ?? "",
+        phone: cust.phone ?? "",
+        email: cust.email ?? "",
+        isActive: Boolean(cust.isActive),
+      },
+      last12Months: {
+        invoiceCount: spent?.n ?? 0,
+        totalRM: senToRM(spent?.totalSen ?? 0),
+      },
+      arAging: {
+        b0_30RM: senToRM(b0_30),
+        b31_60RM: senToRM(b31_60),
+        b61_90RM: senToRM(b61_90),
+        b90plusRM: senToRM(b90p),
+        totalOutstandingRM: senToRM(b0_30 + b31_60 + b61_90 + b90p),
+      },
+      lastPayment: lastPay
+        ? {
+            date: lastPay.date ?? "",
+            amountRM: senToRM(lastPay.amount),
+            method: lastPay.method ?? "",
+          }
+        : null,
+      recentSalesOrders: (sos.results ?? []).map((r) => ({
+        id: r.id,
+        companySOId: r.companySOId ?? "",
+        status: r.status ?? "",
+        totalRM: senToRM(r.totalSen),
+        createdAt: r.createdAt ?? "",
+      })),
+      recentConsignmentOrders: (cos.results ?? []).map((r) => ({
+        id: r.id,
+        companyCOId: r.companyCOId ?? "",
+        status: r.status ?? "",
+        totalRM: senToRM(r.totalSen),
+        createdAt: r.createdAt ?? "",
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cross-module — get_product_360
+// ---------------------------------------------------------------------------
+
+const getProduct360: ToolDefinition = {
+  schema: {
+    name: "get_product_360",
+    description:
+      "Product 360 view: product header, BOM, current WIP count, FG units in stock, last 6mo order volume (units + count), and top 5 customers buying it.",
+    input_schema: {
+      type: "object",
+      properties: {
+        productCode: { type: "string", description: "Product code (e.g. '1003-(K)')." },
+      },
+      required: ["productCode"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const code = strOrNull(args.productCode);
+    if (!code) return { error: "productCode is required" };
+
+    const p = await c.var.DB
+      .prepare(
+        `SELECT id, code, name, category, sizeLabel, description, basePriceSen,
+                costPriceSen, fabricUsage, productionTimeMinutes, status
+         FROM products WHERE orgId = ? AND code = ? LIMIT 1`,
+      )
+      .bind(orgId, code)
+      .first<{
+        id: string;
+        code: string | null;
+        name: string | null;
+        category: string | null;
+        sizeLabel: string | null;
+        description: string | null;
+        basePriceSen: number | null;
+        costPriceSen: number | null;
+        fabricUsage: number | null;
+        productionTimeMinutes: number | null;
+        status: string | null;
+      }>();
+    if (!p) return { error: `Product not found: ${code}` };
+
+    const sixAgo = new Date();
+    sixAgo.setMonth(sixAgo.getMonth() - 6);
+    const sixAgoStr = sixAgo.toISOString().slice(0, 10);
+
+    const [bom, wip, fg, vol, topCust] = await Promise.all([
+      c.var.DB
+        .prepare(
+          `SELECT materialCode, materialName, quantity, unit
+           FROM bom_components WHERE productId = ? ORDER BY id LIMIT 100`,
+        )
+        .bind(p.id)
+        .all<{
+          materialCode: string | null;
+          materialName: string | null;
+          quantity: number | null;
+          unit: string | null;
+        }>(),
+      c.var.DB
+        .prepare(
+          `SELECT COALESCE(SUM(stockQty), 0) AS qty
+           FROM wip_items WHERE orgId = ? AND relatedProduct = ?`,
+        )
+        .bind(orgId, code)
+        .first<{ qty: number }>(),
+      c.var.DB
+        .prepare(
+          `SELECT COUNT(*) AS n
+           FROM fg_units WHERE orgId = ? AND productCode = ?
+             AND UPPER(status) IN ('PACKED','LOADED','READY','IN_STOCK')`,
+        )
+        .bind(orgId, code)
+        .first<{ n: number }>(),
+      c.var.DB
+        .prepare(
+          `SELECT COUNT(DISTINCT soi.salesOrderId) AS orderCount,
+                  COALESCE(SUM(soi.quantity), 0) AS unitCount
+           FROM sales_order_items soi
+           JOIN sales_orders so ON so.id = soi.salesOrderId
+           WHERE so.orgId = ? AND soi.productCode = ?
+             AND so.created_at >= ?`,
+        )
+        .bind(orgId, code, sixAgoStr)
+        .first<{ orderCount: number; unitCount: number }>(),
+      c.var.DB
+        .prepare(
+          `SELECT so.customerName AS customerName, COALESCE(SUM(soi.quantity), 0) AS units
+           FROM sales_order_items soi
+           JOIN sales_orders so ON so.id = soi.salesOrderId
+           WHERE so.orgId = ? AND soi.productCode = ?
+             AND so.created_at >= ?
+           GROUP BY so.customerName
+           ORDER BY units DESC
+           LIMIT 5`,
+        )
+        .bind(orgId, code, sixAgoStr)
+        .all<{ customerName: string | null; units: number }>(),
+    ]);
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: p.id,
+      action: "get_product_360",
+      after: { productCode: code },
+      source: "ui",
+    });
+
+    return {
+      product: {
+        id: p.id,
+        code: p.code ?? "",
+        name: p.name ?? "",
+        category: p.category ?? "",
+        sizeLabel: p.sizeLabel ?? "",
+        description: p.description ?? "",
+        basePriceRM: senToRM(p.basePriceSen),
+        costPriceRM: senToRM(p.costPriceSen),
+        fabricUsage: p.fabricUsage ?? 0,
+        productionTimeMinutes: p.productionTimeMinutes ?? 0,
+        status: p.status ?? "",
+      },
+      bom: (bom.results ?? []).map((r) => ({
+        materialCode: r.materialCode ?? "",
+        materialName: r.materialName ?? "",
+        quantity: r.quantity ?? 0,
+        unit: r.unit ?? "",
+      })),
+      wipUnits: wip?.qty ?? 0,
+      fgUnitsInStock: fg?.n ?? 0,
+      last6Months: {
+        orderCount: vol?.orderCount ?? 0,
+        unitsSold: vol?.unitCount ?? 0,
+      },
+      top5Customers: (topCust.results ?? []).map((r) => ({
+        customerName: r.customerName ?? "",
+        units: Number(r.units ?? 0),
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cross-module — search_anything
+// ---------------------------------------------------------------------------
+
+const searchAnything: ToolDefinition = {
+  schema: {
+    name: "search_anything",
+    description:
+      "Fuzzy search across SO numbers, CO numbers, DO numbers, invoice numbers, customer names, supplier names, and product codes. Returns up to 20 matches per type. Use as a first step when the user mentions a name or code without specifying what kind of document.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search string." },
+        limit: { type: "number", description: "Max per type (1-20, default 5)." },
+      },
+      required: ["query"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const q = strOrNull(args.query);
+    if (!q) return { error: "query is required" };
+    const limit = Math.min(20, Math.max(1, Number(args.limit) || 5));
+    const like = `%${q.toLowerCase()}%`;
+
+    const [sos, cos, dos, invs, custs, sups, prods] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT id, companySOId, customerName, status FROM sales_orders
+         WHERE orgId = ? AND (LOWER(companySOId) LIKE ? OR LOWER(customerSOId) LIKE ?)
+         ORDER BY created_at DESC LIMIT ?`,
+      ).bind(orgId, like, like, limit).all<{ id: string; companySOId: string | null; customerName: string | null; status: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, companyCOId, customerName, status FROM consignment_orders
+         WHERE orgId = ? AND LOWER(companyCOId) LIKE ?
+         ORDER BY created_at DESC LIMIT ?`,
+      ).bind(orgId, like, limit).all<{ id: string; companyCOId: string | null; customerName: string | null; status: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, doNo, customerName, status FROM delivery_orders
+         WHERE orgId = ? AND LOWER(doNo) LIKE ?
+         ORDER BY created_at DESC LIMIT ?`,
+      ).bind(orgId, like, limit).all<{ id: string; doNo: string | null; customerName: string | null; status: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, invoiceNumber, customerName, status FROM invoices
+         WHERE orgId = ? AND LOWER(invoiceNumber) LIKE ?
+         ORDER BY invoiceDate DESC LIMIT ?`,
+      ).bind(orgId, like, limit).all<{ id: string; invoiceNumber: string | null; customerName: string | null; status: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, code, name FROM customers
+         WHERE orgId = ? AND (LOWER(code) LIKE ? OR LOWER(name) LIKE ?)
+         ORDER BY name LIMIT ?`,
+      ).bind(orgId, like, like, limit).all<{ id: string; code: string | null; name: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, code, name FROM suppliers
+         WHERE orgId = ? AND (LOWER(code) LIKE ? OR LOWER(name) LIKE ?)
+         ORDER BY name LIMIT ?`,
+      ).bind(orgId, like, like, limit).all<{ id: string; code: string | null; name: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, code, name FROM products
+         WHERE orgId = ? AND (LOWER(code) LIKE ? OR LOWER(name) LIKE ?)
+         ORDER BY code LIMIT ?`,
+      ).bind(orgId, like, like, limit).all<{ id: string; code: string | null; name: string | null }>(),
+    ]);
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: q.slice(0, 100),
+      action: "search_anything",
+      after: { query: q },
+      source: "ui",
+    });
+
+    return {
+      query: q,
+      salesOrders: (sos.results ?? []).map((r) => ({ id: r.id, label: r.companySOId ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
+      consignmentOrders: (cos.results ?? []).map((r) => ({ id: r.id, label: r.companyCOId ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
+      deliveryOrders: (dos.results ?? []).map((r) => ({ id: r.id, label: r.doNo ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
+      invoices: (invs.results ?? []).map((r) => ({ id: r.id, label: r.invoiceNumber ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
+      customers: (custs.results ?? []).map((r) => ({ id: r.id, code: r.code ?? "", name: r.name ?? "" })),
+      suppliers: (sups.results ?? []).map((r) => ({ id: r.id, code: r.code ?? "", name: r.name ?? "" })),
+      products: (prods.results ?? []).map((r) => ({ id: r.id, code: r.code ?? "", name: r.name ?? "" })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cross-module — run_select_query (generic read-only SQL fallback)
+// ---------------------------------------------------------------------------
+
+const FORBIDDEN_SQL_KEYWORDS = [
+  "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE",
+  "GRANT", "REVOKE", "COPY", "CALL", "EXECUTE", "DO",
+  "PG_SLEEP", "PG_READ_FILE", "PG_LS_DIR", "LO_IMPORT", "LO_EXPORT",
+];
+
+function checkSqlSafety(rawSql: string): { ok: true } | { ok: false; error: string } {
+  if (!rawSql || typeof rawSql !== "string") return { ok: false, error: "sql is required" };
+  const s = rawSql.trim();
+  if (!s) return { ok: false, error: "sql is required" };
+  const upper = s.toUpperCase();
+  if (!(upper.startsWith("SELECT") || upper.startsWith("WITH"))) {
+    return { ok: false, error: "Only SELECT (or WITH...SELECT) queries are allowed." };
+  }
+  // Reject stacked queries: a `;` followed by any non-whitespace.
+  if (/;\s*\S/.test(s)) {
+    return { ok: false, error: "Stacked queries are not allowed." };
+  }
+  // Word-boundary forbidden keyword check.
+  for (const kw of FORBIDDEN_SQL_KEYWORDS) {
+    const re = new RegExp(`\\b${kw}\\b`, "i");
+    if (re.test(s)) {
+      return { ok: false, error: `Disallowed keyword: ${kw}` };
+    }
+  }
+  return { ok: true };
+}
+
+const runSelectQuery: ToolDefinition = {
+  schema: {
+    name: "run_select_query",
+    description:
+      "Run an ad-hoc read-only SELECT query against the live database. Use ONLY when no other tool fits. Tables are camelCase-rewritten-to-snake_case (e.g. `sales_orders.customer_so_id`). The query must start with SELECT or WITH, must contain no INSERT/UPDATE/DELETE/DDL keywords, no stacked queries. Result is capped to 100 rows. Returns rows as a JSON array under `results`.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sql: { type: "string", description: "Single SELECT statement." },
+      },
+      required: ["sql"],
+    },
+  },
+  execute: async (c, args) => {
+    const sql = typeof args.sql === "string" ? args.sql : "";
+    const safety = checkSqlSafety(sql);
+    if (!safety.ok) return { error: safety.error };
+
+    // Wrap with LIMIT 100 unless a top-level LIMIT already present. Detect a
+    // top-level LIMIT by checking the LAST 80 chars (LIMIT clauses are
+    // always near the end). Conservative — false negatives lead to a
+    // sub-wrap, still safe.
+    const tail = sql.slice(-80).toUpperCase();
+    const hasLimit = /\bLIMIT\s+\d+\b/.test(tail);
+    const trimmed = sql.trim().replace(/;\s*$/, "");
+    const wrapped = hasLimit ? trimmed : `SELECT * FROM (${trimmed}) AS _sub LIMIT 100`;
+
+    await emitAudit(c, {
+      resource: "assistant-sql",
+      resourceId: "ad-hoc",
+      action: "run_select_query",
+      after: { sql: sql.slice(0, 1000) },
+      source: "ui",
+    });
+
+    try {
+      const rows = await c.var.DB.prepare(wrapped).all<Record<string, unknown>>();
+      const results = rows.results ?? [];
+      return {
+        rowCount: results.length,
+        results: results.slice(0, 100),
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Query failed: ${msg.slice(0, 300)}` };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Sales — get_so_missing_data
+// ---------------------------------------------------------------------------
+
+const getSoMissingData: ToolDefinition = {
+  schema: {
+    name: "get_so_missing_data",
+    description:
+      "Return a checklist of required SO fields that are blank: fabric, gap, divan height, leg height, special instructions, delivery date — plus per-line missing data. Use when the operator asks 'what's missing on SO-X' before confirming it.",
+    input_schema: {
+      type: "object",
+      properties: {
+        soId: { type: "string", description: "Internal SO id or companySOId." },
+      },
+      required: ["soId"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const lookup = strOrNull(args.soId);
+    if (!lookup) return { error: "soId is required" };
+
+    const so = await c.var.DB
+      .prepare(
+        `SELECT id, companySOId, customerDeliveryDate, hookkaExpectedDD, customerPO, notes
+         FROM sales_orders WHERE orgId = ? AND (id = ? OR companySOId = ?) LIMIT 1`,
+      )
+      .bind(orgId, lookup, lookup)
+      .first<{
+        id: string;
+        companySOId: string | null;
+        customerDeliveryDate: string | null;
+        hookkaExpectedDD: string | null;
+        customerPO: string | null;
+        notes: string | null;
+      }>();
+    if (!so) return { error: `SO not found: ${lookup}` };
+
+    const items = await c.var.DB
+      .prepare(
+        `SELECT id, lineNo, productCode, itemCategory, sizeLabel, fabricCode,
+                gapInches, divanHeightInches, legHeightInches, specialOrder
+         FROM sales_order_items WHERE salesOrderId = ? ORDER BY lineNo LIMIT 100`,
+      )
+      .bind(so.id)
+      .all<{
+        id: string;
+        lineNo: number | null;
+        productCode: string | null;
+        itemCategory: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        gapInches: number | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        specialOrder: string | null;
+      }>();
+
+    const headerMissing: string[] = [];
+    if (!so.customerDeliveryDate) headerMissing.push("customerDeliveryDate");
+    if (!so.hookkaExpectedDD) headerMissing.push("hookkaExpectedDD");
+
+    const lineIssues = (items.results ?? []).map((it) => {
+      const missing: string[] = [];
+      const cat = (it.itemCategory ?? "").toUpperCase();
+      if (cat !== "ACCESSORY" && !it.fabricCode) missing.push("fabricCode");
+      if (cat === "SOFA" && (it.gapInches == null)) missing.push("gapInches");
+      if (cat === "BEDFRAME" && (it.divanHeightInches == null)) missing.push("divanHeightInches");
+      if (cat === "BEDFRAME" && (it.legHeightInches == null)) missing.push("legHeightInches");
+      return {
+        lineNo: it.lineNo ?? 0,
+        productCode: it.productCode ?? "",
+        sizeLabel: it.sizeLabel ?? "",
+        missing,
+      };
+    });
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: so.id,
+      action: "get_so_missing_data",
+      after: { soId: so.id },
+      source: "ui",
+    });
+
+    return {
+      soId: so.id,
+      companySOId: so.companySOId ?? "",
+      headerMissing,
+      itemIssues: lineIssues.filter((l) => l.missing.length > 0),
+      allItems: lineIssues,
+      totalIssues: headerMissing.length + lineIssues.reduce((a, l) => a + l.missing.length, 0),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Production — list_production_orders, get_production_order
+// ---------------------------------------------------------------------------
+
+const listProductionOrders: ToolDefinition = {
+  schema: {
+    name: "list_production_orders",
+    description: "List production orders (POs), most recent first. Filter by status, date range (startDate), or current department.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "PENDING, IN_PROGRESS, COMPLETED, ON_HOLD, CANCELLED, PAUSED." },
+        dateFrom: { type: "string", description: "YYYY-MM-DD lower bound on startDate." },
+        dateTo: { type: "string", description: "YYYY-MM-DD upper bound on startDate." },
+        department: { type: "string", description: "Department code filter on currentDepartment (e.g. SEW, PACK)." },
+        limit: { type: "number", description: "Max rows (1-100, default 25)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres: string[] = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const status = strOrNull(args.status);
+    if (status) { wheres.push("UPPER(status) = ?"); params.push(status.toUpperCase()); }
+    const dept = strOrNull(args.department);
+    if (dept) { wheres.push("UPPER(currentDepartment) = ?"); params.push(dept.toUpperCase()); }
+    const dateFrom = ymdOrNull(args.dateFrom);
+    if (dateFrom) { wheres.push("startDate >= ?"); params.push(dateFrom); }
+    const dateTo = ymdOrNull(args.dateTo);
+    if (dateTo) { wheres.push("startDate <= ?"); params.push(dateTo); }
+
+    const limit = clampLimit(args.limit, 25);
+    const sql = `SELECT id, poNo, salesOrderNo, companySOId, companyCOId, customerName,
+                        productCode, productName, quantity, status, currentDepartment,
+                        progress, startDate, targetEndDate, completedDate
+                 FROM production_orders WHERE ${wheres.join(" AND ")}
+                 ORDER BY created_at DESC LIMIT ${limit}`;
+    const rows = await c.var.DB.prepare(sql).bind(...params).all<{
+      id: string; poNo: string; salesOrderNo: string | null; companySOId: string | null; companyCOId: string | null;
+      customerName: string | null; productCode: string | null; productName: string | null; quantity: number;
+      status: string; currentDepartment: string | null; progress: number;
+      startDate: string | null; targetEndDate: string | null; completedDate: string | null;
+    }>();
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_production_orders", action: "list_production_orders", after: filterArgsForAudit(args), source: "ui" });
+
+    return {
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        id: r.id, poNo: r.poNo, salesOrderNo: r.salesOrderNo ?? "",
+        companySOId: r.companySOId ?? "", companyCOId: r.companyCOId ?? "",
+        customerName: r.customerName ?? "", productCode: r.productCode ?? "",
+        productName: r.productName ?? "", quantity: r.quantity, status: r.status,
+        currentDepartment: r.currentDepartment ?? "", progress: r.progress,
+        startDate: r.startDate ?? "", targetEndDate: r.targetEndDate ?? "",
+        completedDate: r.completedDate ?? "",
+      })),
+    };
+  },
+};
+
+const getProductionOrder: ToolDefinition = {
+  schema: {
+    name: "get_production_order",
+    description: "Get a production order in full: header, job_cards by department, plus linked SO/CO and any linked DO.",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Internal id or poNo." } },
+      required: ["id"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const lookup = strOrNull(args.id);
+    if (!lookup) return { error: "id is required" };
+
+    const po = await c.var.DB
+      .prepare(
+        `SELECT id, poNo, salesOrderId, salesOrderNo, consignmentOrderId, companySOId, companyCOId,
+                customerName, productCode, productName, itemCategory, sizeLabel, fabricCode,
+                quantity, gapInches, divanHeightInches, legHeightInches, specialOrder, notes,
+                status, currentDepartment, progress, startDate, targetEndDate, completedDate
+         FROM production_orders WHERE orgId = ? AND (id = ? OR poNo = ?) LIMIT 1`,
+      )
+      .bind(orgId, lookup, lookup)
+      .first<{
+        id: string; poNo: string; salesOrderId: string | null; salesOrderNo: string | null;
+        consignmentOrderId: string | null; companySOId: string | null; companyCOId: string | null;
+        customerName: string | null; productCode: string | null; productName: string | null;
+        itemCategory: string | null; sizeLabel: string | null; fabricCode: string | null;
+        quantity: number; gapInches: number | null; divanHeightInches: number | null;
+        legHeightInches: number | null; specialOrder: string | null; notes: string | null;
+        status: string; currentDepartment: string | null; progress: number;
+        startDate: string | null; targetEndDate: string | null; completedDate: string | null;
+      }>();
+    if (!po) return { error: `PO not found: ${lookup}` };
+
+    const [jcs, dos] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT id, departmentCode, departmentName, sequence, status, wipLabel, wipQty,
+                dueDate, completedDate, pic1Name, pic2Name, estMinutes, actualMinutes
+         FROM job_cards WHERE productionOrderId = ? ORDER BY sequence LIMIT 100`,
+      ).bind(po.id).all<{
+        id: string; departmentCode: string | null; departmentName: string | null;
+        sequence: number; status: string; wipLabel: string | null; wipQty: number | null;
+        dueDate: string | null; completedDate: string | null;
+        pic1Name: string | null; pic2Name: string | null;
+        estMinutes: number; actualMinutes: number | null;
+      }>(),
+      po.salesOrderId
+        ? c.var.DB.prepare(
+            `SELECT id, doNo, status, deliveryDate FROM delivery_orders WHERE salesOrderId = ? ORDER BY created_at DESC LIMIT 25`,
+          ).bind(po.salesOrderId).all<{
+            id: string; doNo: string | null; status: string | null; deliveryDate: string | null;
+          }>()
+        : Promise.resolve({ results: [] }),
+    ]);
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: po.id, action: "get_production_order", after: { poId: po.id }, source: "ui" });
+
+    return {
+      id: po.id, poNo: po.poNo, salesOrderId: po.salesOrderId ?? "", salesOrderNo: po.salesOrderNo ?? "",
+      consignmentOrderId: po.consignmentOrderId ?? "", companySOId: po.companySOId ?? "",
+      companyCOId: po.companyCOId ?? "", customerName: po.customerName ?? "",
+      productCode: po.productCode ?? "", productName: po.productName ?? "",
+      itemCategory: po.itemCategory ?? "", sizeLabel: po.sizeLabel ?? "",
+      fabricCode: po.fabricCode ?? "", quantity: po.quantity, gapInches: po.gapInches,
+      divanHeightInches: po.divanHeightInches, legHeightInches: po.legHeightInches,
+      specialOrder: po.specialOrder ?? "", notes: po.notes ?? "", status: po.status,
+      currentDepartment: po.currentDepartment ?? "", progress: po.progress,
+      startDate: po.startDate ?? "", targetEndDate: po.targetEndDate ?? "",
+      completedDate: po.completedDate ?? "",
+      jobCards: (jcs.results ?? []).map((j) => ({
+        id: j.id, department: j.departmentCode ?? j.departmentName ?? "", sequence: j.sequence,
+        status: j.status, wipLabel: j.wipLabel ?? "", wipQty: j.wipQty ?? 0,
+        dueDate: j.dueDate ?? "", completedDate: j.completedDate ?? "",
+        pic1Name: j.pic1Name ?? "", pic2Name: j.pic2Name ?? "",
+        estMinutes: j.estMinutes, actualMinutes: j.actualMinutes ?? 0,
+      })),
+      deliveryOrders: (dos.results ?? []).map((d) => ({
+        id: d.id, doNo: d.doNo ?? "", status: d.status ?? "", deliveryDate: d.deliveryDate ?? "",
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Production — list_job_cards, get_wip_snapshot
+// ---------------------------------------------------------------------------
+
+const listJobCards: ToolDefinition = {
+  schema: {
+    name: "list_job_cards",
+    description: "List job cards. Filter by status, production order id, department, or PIC user id.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "WAITING, IN_PROGRESS, PAUSED, COMPLETED, TRANSFERRED, BLOCKED." },
+        productionOrderId: { type: "string", description: "Filter to one PO." },
+        department: { type: "string", description: "departmentCode (e.g. SEW)." },
+        picUserId: { type: "string", description: "Filter to a specific PIC (matches pic1Id OR pic2Id)." },
+        limit: { type: "number", description: "Max rows (1-100, default 25)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres: string[] = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const status = strOrNull(args.status);
+    if (status) { wheres.push("UPPER(status) = ?"); params.push(status.toUpperCase()); }
+    const poId = strOrNull(args.productionOrderId);
+    if (poId) { wheres.push("productionOrderId = ?"); params.push(poId); }
+    const dept = strOrNull(args.department);
+    if (dept) { wheres.push("UPPER(departmentCode) = ?"); params.push(dept.toUpperCase()); }
+    const pic = strOrNull(args.picUserId);
+    if (pic) { wheres.push("(pic1Id = ? OR pic2Id = ?)"); params.push(pic, pic); }
+    const limit = clampLimit(args.limit, 25);
+    const sql = `SELECT id, productionOrderId, departmentCode, status, wipLabel, wipQty,
+                        dueDate, completedDate, pic1Name, pic2Name
+                 FROM job_cards WHERE ${wheres.join(" AND ")}
+                 ORDER BY dueDate ASC NULLS LAST LIMIT ${limit}`;
+    const rows = await c.var.DB.prepare(sql).bind(...params).all<{
+      id: string; productionOrderId: string; departmentCode: string | null; status: string;
+      wipLabel: string | null; wipQty: number | null; dueDate: string | null;
+      completedDate: string | null; pic1Name: string | null; pic2Name: string | null;
+    }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_job_cards", action: "list_job_cards", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        id: r.id, productionOrderId: r.productionOrderId, department: r.departmentCode ?? "",
+        status: r.status, wipLabel: r.wipLabel ?? "", wipQty: r.wipQty ?? 0,
+        dueDate: r.dueDate ?? "", completedDate: r.completedDate ?? "",
+        pic1Name: r.pic1Name ?? "", pic2Name: r.pic2Name ?? "",
+      })),
+    };
+  },
+};
+
+const getWipSnapshot: ToolDefinition = {
+  schema: {
+    name: "get_wip_snapshot",
+    description: "WIP units snapshot. Without filters, returns per-department aggregates. With productCode, returns WIP for that product only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        department: { type: "string", description: "Department code filter (matches dept_status)." },
+        productCode: { type: "string", description: "Product code filter (matches relatedProduct)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres: string[] = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const dept = strOrNull(args.department);
+    if (dept) { wheres.push("UPPER(deptStatus) = ?"); params.push(dept.toUpperCase()); }
+    const prod = strOrNull(args.productCode);
+    if (prod) { wheres.push("relatedProduct = ?"); params.push(prod); }
+
+    const sql = `SELECT code, type, relatedProduct, deptStatus, stockQty, status
+                 FROM wip_items WHERE ${wheres.join(" AND ")} AND stockQty <> 0
+                 ORDER BY deptStatus, code LIMIT 100`;
+    const rows = await c.var.DB.prepare(sql).bind(...params).all<{
+      code: string; type: string; relatedProduct: string | null;
+      deptStatus: string | null; stockQty: number; status: string;
+    }>();
+
+    // Compute per-dept aggregates from the rows.
+    const byDept: Record<string, { units: number; lineCount: number }> = {};
+    for (const r of rows.results ?? []) {
+      const d = r.deptStatus ?? "UNKNOWN";
+      const o = byDept[d] ?? { units: 0, lineCount: 0 };
+      o.units += r.stockQty;
+      o.lineCount += 1;
+      byDept[d] = o;
+    }
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "get_wip_snapshot", action: "get_wip_snapshot", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      filters: { department: dept ?? "", productCode: prod ?? "" },
+      perDepartment: Object.entries(byDept).map(([d, v]) => ({
+        department: d, totalUnits: v.units, lineCount: v.lineCount,
+      })),
+      items: (rows.results ?? []).map((r) => ({
+        code: r.code, type: r.type, relatedProduct: r.relatedProduct ?? "",
+        department: r.deptStatus ?? "", stockQty: r.stockQty, status: r.status,
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Production — analyze_po_delay
+// ---------------------------------------------------------------------------
+
+const analyzePoDelay: ToolDefinition = {
+  schema: {
+    name: "analyze_po_delay",
+    description: "Cross-references a production order's planned vs actual progress. Returns variance per job_card stage, the bottleneck stage, and the rough RM revenue at risk if the PO ships late.",
+    input_schema: {
+      type: "object",
+      properties: { productionOrderId: { type: "string", description: "Internal PO id or poNo." } },
+      required: ["productionOrderId"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const lookup = strOrNull(args.productionOrderId);
+    if (!lookup) return { error: "productionOrderId is required" };
+
+    const po = await c.var.DB
+      .prepare(
+        `SELECT id, poNo, status, quantity, productCode, salesOrderId, currentDepartment,
+                progress, startDate, targetEndDate, completedDate
+         FROM production_orders WHERE orgId = ? AND (id = ? OR poNo = ?) LIMIT 1`,
+      )
+      .bind(orgId, lookup, lookup)
+      .first<{
+        id: string; poNo: string; status: string; quantity: number;
+        productCode: string | null; salesOrderId: string | null;
+        currentDepartment: string | null; progress: number;
+        startDate: string | null; targetEndDate: string | null; completedDate: string | null;
+      }>();
+    if (!po) return { error: `PO not found: ${lookup}` };
+
+    const jcs = await c.var.DB.prepare(
+      `SELECT id, departmentCode, sequence, status, dueDate, completedDate,
+              estMinutes, actualMinutes
+       FROM job_cards WHERE productionOrderId = ? ORDER BY sequence LIMIT 100`,
+    ).bind(po.id).all<{
+      id: string; departmentCode: string | null; sequence: number; status: string;
+      dueDate: string | null; completedDate: string | null;
+      estMinutes: number; actualMinutes: number | null;
+    }>();
+
+    const today = new Date();
+    const stages = (jcs.results ?? []).map((j) => {
+      const planned = j.estMinutes;
+      const actual = j.actualMinutes ?? 0;
+      const varianceMinutes = actual - planned;
+      let dueVarianceDays: number | null = null;
+      if (j.dueDate) {
+        const dueDate = new Date(j.dueDate);
+        if (j.completedDate) {
+          dueVarianceDays = Math.floor(
+            (new Date(j.completedDate).getTime() - dueDate.getTime()) / 86400000,
+          );
+        } else if ((j.status ?? "").toUpperCase() !== "COMPLETED") {
+          dueVarianceDays = Math.floor((today.getTime() - dueDate.getTime()) / 86400000);
+        }
+      }
+      return {
+        department: j.departmentCode ?? "",
+        status: j.status,
+        plannedMinutes: planned,
+        actualMinutes: actual,
+        varianceMinutes,
+        dueDate: j.dueDate ?? "",
+        completedDate: j.completedDate ?? "",
+        dueVarianceDays,
+      };
+    });
+
+    const incompleteOverdue = stages.filter(
+      (s) => (s.dueVarianceDays ?? 0) > 0 && s.status !== "COMPLETED",
+    );
+    const bottleneck = incompleteOverdue.length
+      ? incompleteOverdue.sort((a, b) => (b.dueVarianceDays ?? 0) - (a.dueVarianceDays ?? 0))[0]
+      : stages.sort((a, b) => b.varianceMinutes - a.varianceMinutes)[0] ?? null;
+
+    // Revenue at risk = quantity × unitPriceSen, fetched from SO items if available.
+    let revAtRiskSen = 0;
+    if (po.salesOrderId && po.productCode) {
+      const li = await c.var.DB.prepare(
+        `SELECT unitPriceSen, quantity FROM sales_order_items
+         WHERE salesOrderId = ? AND productCode = ? LIMIT 5`,
+      ).bind(po.salesOrderId, po.productCode).first<{ unitPriceSen: number | null; quantity: number | null }>();
+      if (li) {
+        revAtRiskSen = (li.unitPriceSen ?? 0) * (po.quantity ?? li.quantity ?? 0);
+      }
+    }
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: po.id, action: "analyze_po_delay", after: { poId: po.id }, source: "ui" });
+
+    return {
+      id: po.id,
+      poNo: po.poNo,
+      status: po.status,
+      quantity: po.quantity,
+      productCode: po.productCode ?? "",
+      progress: po.progress,
+      startDate: po.startDate ?? "",
+      targetEndDate: po.targetEndDate ?? "",
+      completedDate: po.completedDate ?? "",
+      stages,
+      bottleneckStage: bottleneck,
+      revenueAtRiskRM: senToRM(revAtRiskSen),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Production — get_capacity_loading
+// ---------------------------------------------------------------------------
+
+const getCapacityLoading: ToolDefinition = {
+  schema: {
+    name: "get_capacity_loading",
+    description: "Capacity loading for a given date. Returns total estimated minutes of in-progress / waiting job_cards per department (and overall) for jobs whose dueDate falls on that date.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD (defaults to today)." },
+        department: { type: "string", description: "departmentCode filter." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const date = ymdOrNull(args.date) ?? new Date().toISOString().slice(0, 10);
+    const dept = strOrNull(args.department);
+    const wheres = ["orgId = ?", "dueDate = ?", "UPPER(status) IN ('WAITING','IN_PROGRESS','PAUSED','BLOCKED')"];
+    const params: unknown[] = [orgId, date];
+    if (dept) { wheres.push("UPPER(departmentCode) = ?"); params.push(dept.toUpperCase()); }
+    const rows = await c.var.DB.prepare(
+      `SELECT departmentCode, status, estMinutes, actualMinutes
+       FROM job_cards WHERE ${wheres.join(" AND ")} LIMIT 500`,
+    ).bind(...params).all<{
+      departmentCode: string | null; status: string; estMinutes: number; actualMinutes: number | null;
+    }>();
+    const byDept: Record<string, { jobs: number; plannedMinutes: number; actualMinutes: number }> = {};
+    let totalJobs = 0, totalPlanned = 0;
+    for (const r of rows.results ?? []) {
+      const d = r.departmentCode ?? "UNKNOWN";
+      const o = byDept[d] ?? { jobs: 0, plannedMinutes: 0, actualMinutes: 0 };
+      o.jobs += 1;
+      o.plannedMinutes += r.estMinutes;
+      o.actualMinutes += r.actualMinutes ?? 0;
+      byDept[d] = o;
+      totalJobs += 1;
+      totalPlanned += r.estMinutes;
+    }
+    await emitAudit(c, { resource: "assistant-tool", resourceId: date, action: "get_capacity_loading", after: { date, department: dept }, source: "ui" });
+    return {
+      date,
+      totalJobs,
+      totalPlannedMinutes: totalPlanned,
+      totalPlannedHours: Math.round(totalPlanned / 6) / 10,
+      perDepartment: Object.entries(byDept).map(([d, v]) => ({
+        department: d,
+        jobs: v.jobs,
+        plannedMinutes: v.plannedMinutes,
+        plannedHours: Math.round(v.plannedMinutes / 6) / 10,
+        actualMinutes: v.actualMinutes,
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Delivery — list_packing_lists, get_packing_list, get_dispatch_summary
+// ---------------------------------------------------------------------------
+
+const listPackingLists: ToolDefinition = {
+  schema: {
+    name: "list_packing_lists",
+    description: "List packing lists. Filter by status or date range.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "OPEN, LOADED, DISPATCHED, COMPLETED, CANCELLED." },
+        dateFrom: { type: "string", description: "YYYY-MM-DD." },
+        dateTo: { type: "string", description: "YYYY-MM-DD." },
+        limit: { type: "number", description: "Max rows (1-100, default 25)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const status = strOrNull(args.status);
+    if (status) { wheres.push("UPPER(status) = ?"); params.push(status.toUpperCase()); }
+    const dateFrom = ymdOrNull(args.dateFrom);
+    if (dateFrom) { wheres.push("created_at >= ?"); params.push(dateFrom); }
+    const dateTo = ymdOrNull(args.dateTo);
+    if (dateTo) { wheres.push("created_at <= ?"); params.push(`${dateTo} 23:59:59`); }
+    const limit = clampLimit(args.limit, 25);
+
+    try {
+      const rows = await c.var.DB.prepare(
+        `SELECT id, packingNo, status, stopCount, totalUnits, totalM3, remarks, created_at AS createdAt
+         FROM packing_lists WHERE ${wheres.join(" AND ")}
+         ORDER BY packingNo DESC LIMIT ${limit}`,
+      ).bind(...params).all<{
+        id: string; packingNo: string; status: string;
+        stopCount: number; totalUnits: number; totalM3: number | string;
+        remarks: string | null; createdAt: string | null;
+      }>();
+      await emitAudit(c, { resource: "assistant-tool", resourceId: "list_packing_lists", action: "list_packing_lists", after: filterArgsForAudit(args), source: "ui" });
+      return {
+        count: rows.results?.length ?? 0,
+        results: (rows.results ?? []).map((r) => ({
+          id: r.id, packingNo: r.packingNo, status: r.status,
+          stopCount: r.stopCount, totalUnits: r.totalUnits, totalM3: Number(r.totalM3 ?? 0),
+          remarks: r.remarks ?? "", createdAt: r.createdAt ?? "",
+        })),
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/does not exist|no such table/i.test(msg)) {
+        return { count: 0, results: [], note: "Packing lists table not yet populated." };
+      }
+      throw err;
+    }
+  },
+};
+
+const getPackingList: ToolDefinition = {
+  schema: {
+    name: "get_packing_list",
+    description: "Get one packing list with its linked DOs (header info only).",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Internal id or packingNo." } },
+      required: ["id"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const lookup = strOrNull(args.id);
+    if (!lookup) return { error: "id is required" };
+    try {
+      const pl = await c.var.DB.prepare(
+        `SELECT id, packingNo, status, doIds, stopCount, totalUnits, totalM3, remarks, created_at AS createdAt
+         FROM packing_lists WHERE orgId = ? AND (id = ? OR packingNo = ?) LIMIT 1`,
+      ).bind(orgId, lookup, lookup).first<{
+        id: string; packingNo: string; status: string; doIds: string;
+        stopCount: number; totalUnits: number; totalM3: number | string;
+        remarks: string | null; createdAt: string | null;
+      }>();
+      if (!pl) return { error: `Packing list not found: ${lookup}` };
+      let doIds: string[] = [];
+      try { const j = JSON.parse(pl.doIds || "[]"); if (Array.isArray(j)) doIds = j.filter((x): x is string => typeof x === "string"); } catch { /* ignore */ }
+      let dos: Array<{ id: string; doNo: string; customerName: string; status: string; deliveryDate: string }> = [];
+      if (doIds.length) {
+        const placeholders = doIds.map(() => "?").join(",");
+        const rows = await c.var.DB.prepare(
+          `SELECT id, doNo, customerName, status, deliveryDate
+           FROM delivery_orders WHERE id IN (${placeholders}) LIMIT 100`,
+        ).bind(...doIds).all<{
+          id: string; doNo: string | null; customerName: string | null;
+          status: string | null; deliveryDate: string | null;
+        }>();
+        dos = (rows.results ?? []).map((r) => ({
+          id: r.id, doNo: r.doNo ?? "", customerName: r.customerName ?? "",
+          status: r.status ?? "", deliveryDate: r.deliveryDate ?? "",
+        }));
+      }
+      await emitAudit(c, { resource: "assistant-tool", resourceId: pl.id, action: "get_packing_list", after: { id: pl.id }, source: "ui" });
+      return {
+        id: pl.id, packingNo: pl.packingNo, status: pl.status,
+        stopCount: pl.stopCount, totalUnits: pl.totalUnits, totalM3: Number(pl.totalM3 ?? 0),
+        remarks: pl.remarks ?? "", createdAt: pl.createdAt ?? "", deliveryOrders: dos,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/does not exist|no such table/i.test(msg)) return { error: "Packing lists table not yet populated." };
+      throw err;
+    }
+  },
+};
+
+const getDispatchSummary: ToolDefinition = {
+  schema: {
+    name: "get_dispatch_summary",
+    description: "Per-hub dispatch summary: pending count, in-transit count, delivered (on the given date) count, late count.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date: { type: "string", description: "YYYY-MM-DD (defaults to today)." },
+        hubKey: { type: "string", description: "Filter to a specific hubId/hubName (partial match)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const date = ymdOrNull(args.date) ?? new Date().toISOString().slice(0, 10);
+    const hub = strOrNull(args.hubKey);
+    const baseWhere = ["orgId = ?"];
+    const baseParams: unknown[] = [orgId];
+    if (hub) { baseWhere.push("(LOWER(hubName) LIKE ? OR hubId = ?)"); baseParams.push(`%${hub.toLowerCase()}%`, hub); }
+    const w = baseWhere.join(" AND ");
+    const [pending, inTransit, delivered, late] = await Promise.all([
+      c.var.DB.prepare(`SELECT hubName, COUNT(*) AS n FROM delivery_orders WHERE ${w} AND UPPER(status) IN ('DRAFT','LOADED') GROUP BY hubName ORDER BY n DESC LIMIT 50`).bind(...baseParams).all<{ hubName: string | null; n: number }>(),
+      c.var.DB.prepare(`SELECT hubName, COUNT(*) AS n FROM delivery_orders WHERE ${w} AND UPPER(status) IN ('DISPATCHED','IN_TRANSIT') GROUP BY hubName ORDER BY n DESC LIMIT 50`).bind(...baseParams).all<{ hubName: string | null; n: number }>(),
+      c.var.DB.prepare(`SELECT hubName, COUNT(*) AS n FROM delivery_orders WHERE ${w} AND deliveryDate = ? AND UPPER(status) IN ('DELIVERED','SIGNED','INVOICED') GROUP BY hubName ORDER BY n DESC LIMIT 50`).bind(...baseParams, date).all<{ hubName: string | null; n: number }>(),
+      c.var.DB.prepare(`SELECT hubName, COUNT(*) AS n FROM delivery_orders WHERE ${w} AND deliveryDate IS NOT NULL AND deliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','SIGNED','INVOICED','CANCELLED') GROUP BY hubName ORDER BY n DESC LIMIT 50`).bind(...baseParams, date).all<{ hubName: string | null; n: number }>(),
+    ]);
+    await emitAudit(c, { resource: "assistant-tool", resourceId: date, action: "get_dispatch_summary", after: { date, hubKey: hub }, source: "ui" });
+    return {
+      date,
+      pendingByHub: (pending.results ?? []).map((r) => ({ hub: r.hubName ?? "(no hub)", count: r.n })),
+      inTransitByHub: (inTransit.results ?? []).map((r) => ({ hub: r.hubName ?? "(no hub)", count: r.n })),
+      deliveredTodayByHub: (delivered.results ?? []).map((r) => ({ hub: r.hubName ?? "(no hub)", count: r.n })),
+      lateByHub: (late.results ?? []).map((r) => ({ hub: r.hubName ?? "(no hub)", count: r.n })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Finance — get_ar_outstanding, get_gp_analysis
+// ---------------------------------------------------------------------------
+
+const getArOutstanding: ToolDefinition = {
+  schema: {
+    name: "get_ar_outstanding",
+    description: "Outstanding AR per customer with aging buckets (0-30 / 31-60 / 61-90 / 90+). If customerId provided, returns one customer's open invoices instead.",
+    input_schema: {
+      type: "object",
+      properties: {
+        customerId: { type: "string", description: "Filter to one customer." },
+        agingBucket: { type: "string", description: "Filter to one bucket: 0-30 / 31-60 / 61-90 / 90+." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const cust = strOrNull(args.customerId);
+    const bucket = strOrNull(args.agingBucket);
+    const wheres = ["orgId = ?", "UPPER(status) <> 'VOID'", "totalSen > COALESCE(paidAmount, 0)"];
+    const params: unknown[] = [orgId];
+    if (cust) { wheres.push("customerId = ?"); params.push(cust); }
+    const rows = await c.var.DB.prepare(
+      `SELECT id, invoiceNumber, customerName, customerId, totalSen,
+              COALESCE(paidAmount, 0) AS paidAmount, invoiceDate, dueDate
+       FROM invoices WHERE ${wheres.join(" AND ")}
+       ORDER BY dueDate ASC LIMIT 500`,
+    ).bind(...params).all<{
+      id: string; invoiceNumber: string | null; customerName: string | null; customerId: string | null;
+      totalSen: number | null; paidAmount: number | null; invoiceDate: string | null; dueDate: string | null;
+    }>();
+    const today = new Date();
+    const aged: Array<{ id: string; invoiceNumber: string; customerName: string; customerId: string; outSen: number; ageDays: number; bucket: string; invoiceDate: string; dueDate: string }> = [];
+    for (const r of rows.results ?? []) {
+      const out = (r.totalSen ?? 0) - (r.paidAmount ?? 0);
+      if (out <= 0) continue;
+      const due = r.dueDate ?? r.invoiceDate ?? today.toISOString().slice(0, 10);
+      const days = Math.max(0, Math.floor((today.getTime() - new Date(due).getTime()) / 86400000));
+      let b: string;
+      if (days <= 30) b = "0-30";
+      else if (days <= 60) b = "31-60";
+      else if (days <= 90) b = "61-90";
+      else b = "90+";
+      if (bucket && b !== bucket) continue;
+      aged.push({
+        id: r.id, invoiceNumber: r.invoiceNumber ?? "", customerName: r.customerName ?? "",
+        customerId: r.customerId ?? "", outSen: out, ageDays: days, bucket: b,
+        invoiceDate: r.invoiceDate ?? "", dueDate: r.dueDate ?? "",
+      });
+    }
+    const byCust: Record<string, { customer: string; b0_30: number; b31_60: number; b61_90: number; b90p: number; total: number }> = {};
+    for (const a of aged) {
+      const key = a.customerId || a.customerName || "unknown";
+      const o = byCust[key] ?? { customer: a.customerName, b0_30: 0, b31_60: 0, b61_90: 0, b90p: 0, total: 0 };
+      if (a.bucket === "0-30") o.b0_30 += a.outSen;
+      else if (a.bucket === "31-60") o.b31_60 += a.outSen;
+      else if (a.bucket === "61-90") o.b61_90 += a.outSen;
+      else o.b90p += a.outSen;
+      o.total += a.outSen;
+      byCust[key] = o;
+    }
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "get_ar_outstanding", action: "get_ar_outstanding", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      totalInvoices: aged.length,
+      perCustomer: Object.entries(byCust).map(([id, v]) => ({
+        customerId: id, customer: v.customer,
+        b0_30RM: senToRM(v.b0_30), b31_60RM: senToRM(v.b31_60),
+        b61_90RM: senToRM(v.b61_90), b90plusRM: senToRM(v.b90p), totalRM: senToRM(v.total),
+      })).sort((a, b) => Number(b.totalRM.replace(/,/g, "")) - Number(a.totalRM.replace(/,/g, ""))),
+      invoices: aged.slice(0, 100).map((a) => ({
+        id: a.id, invoiceNumber: a.invoiceNumber, customerName: a.customerName,
+        outstandingRM: senToRM(a.outSen), ageDays: a.ageDays, bucket: a.bucket,
+        invoiceDate: a.invoiceDate, dueDate: a.dueDate,
+      })),
+    };
+  },
+};
+
+const getGpAnalysis: ToolDefinition = {
+  schema: {
+    name: "get_gp_analysis",
+    description: "Gross profit analysis. Group by product, customer, salesman, or month. Returns revenue, estimated COGS (from product.costPriceSen × qty), and GP%. Ranked by revenue descending.",
+    input_schema: {
+      type: "object",
+      properties: {
+        groupBy: { type: "string", description: "product | customer | month." },
+        dateFrom: { type: "string", description: "YYYY-MM-DD." },
+        dateTo: { type: "string", description: "YYYY-MM-DD." },
+        limit: { type: "number", description: "Max rows (1-100, default 25)." },
+      },
+      required: ["groupBy", "dateFrom", "dateTo"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const groupBy = String(args.groupBy ?? "").toLowerCase();
+    const dateFrom = ymdOrNull(args.dateFrom);
+    const dateTo = ymdOrNull(args.dateTo);
+    if (!dateFrom || !dateTo) return { error: "dateFrom and dateTo (YYYY-MM-DD) are required" };
+    if (!["product", "customer", "month"].includes(groupBy)) {
+      return { error: "groupBy must be one of: product, customer, month" };
+    }
+    const limit = clampLimit(args.limit, 25);
+
+    // Pull invoice items joined to invoices + products. Cost = product.costPriceSen × qty.
+    const sql = `SELECT i.id AS invoiceId, i.customerName AS customerName,
+                        i.invoiceDate AS invoiceDate, ii.productCode AS productCode,
+                        ii.quantity AS quantity, ii.totalSen AS totalSen,
+                        COALESCE(p.costPriceSen, 0) AS costPriceSen
+                 FROM invoice_items ii
+                 JOIN invoices i ON i.id = ii.invoiceId
+                 LEFT JOIN products p ON p.code = ii.productCode AND p.orgId = i.orgId
+                 WHERE i.orgId = ? AND UPPER(i.status) <> 'VOID'
+                   AND i.invoiceDate >= ? AND i.invoiceDate <= ?
+                 LIMIT 5000`;
+    const rows = await c.var.DB.prepare(sql).bind(orgId, dateFrom, dateTo).all<{
+      invoiceId: string; customerName: string | null; invoiceDate: string | null;
+      productCode: string | null; quantity: number | null; totalSen: number | null; costPriceSen: number | null;
+    }>();
+
+    type Bucket = { key: string; label: string; revenueSen: number; costSen: number; units: number };
+    const map = new Map<string, Bucket>();
+    for (const r of rows.results ?? []) {
+      const rev = r.totalSen ?? 0;
+      const cost = (r.costPriceSen ?? 0) * (r.quantity ?? 0);
+      let key: string, label: string;
+      if (groupBy === "product") { key = r.productCode ?? "(unknown)"; label = key; }
+      else if (groupBy === "customer") { key = r.customerName ?? "(unknown)"; label = key; }
+      else { key = (r.invoiceDate ?? "").slice(0, 7); label = key; }
+      const b = map.get(key) ?? { key, label, revenueSen: 0, costSen: 0, units: 0 };
+      b.revenueSen += rev;
+      b.costSen += cost;
+      b.units += r.quantity ?? 0;
+      map.set(key, b);
+    }
+    const list = Array.from(map.values()).sort((a, b) => b.revenueSen - a.revenueSen).slice(0, limit);
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "get_gp_analysis", action: "get_gp_analysis", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      groupBy, dateFrom, dateTo,
+      results: list.map((b) => ({
+        key: b.label,
+        revenueRM: senToRM(b.revenueSen),
+        cogsRM: senToRM(b.costSen),
+        gpRM: senToRM(b.revenueSen - b.costSen),
+        gpPct: b.revenueSen > 0 ? Math.round(((b.revenueSen - b.costSen) / b.revenueSen) * 1000) / 10 : 0,
+        units: b.units,
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Inventory — list_foam_inventory (NOTE: no dedicated foam table — uses wip_items FOAM type)
+// list_fg_units, list_fabrics, get_fabric, list_accessories, get_accessory
+// predict_reorder_needs
+// ---------------------------------------------------------------------------
+
+const listFoamInventory: ToolDefinition = {
+  schema: {
+    name: "list_foam_inventory",
+    description: "Foam inventory. Reads from wip_items where type='FOAM' (Hookka has no dedicated foam_inventory table — foam is tracked as a WIP item). Filter by fabricCode (matches code prefix) or grade.",
+    input_schema: {
+      type: "object",
+      properties: {
+        fabricCode: { type: "string", description: "Partial match on WIP code." },
+        grade: { type: "string", description: "Partial match on WIP code/label for grade tokens like '25/45'." },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres = ["orgId = ?", "UPPER(type) = 'FOAM'"];
+    const params: unknown[] = [orgId];
+    const fc = strOrNull(args.fabricCode);
+    if (fc) { wheres.push("LOWER(code) LIKE ?"); params.push(`%${fc.toLowerCase()}%`); }
+    const grade = strOrNull(args.grade);
+    if (grade) { wheres.push("LOWER(code) LIKE ?"); params.push(`%${grade.toLowerCase()}%`); }
+    const limit = clampLimit(args.limit, 50);
+    const rows = await c.var.DB.prepare(
+      `SELECT code, type, relatedProduct, deptStatus, stockQty, status
+       FROM wip_items WHERE ${wheres.join(" AND ")} ORDER BY code LIMIT ${limit}`,
+    ).bind(...params).all<{
+      code: string; type: string; relatedProduct: string | null;
+      deptStatus: string | null; stockQty: number; status: string;
+    }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_foam_inventory", action: "list_foam_inventory", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        code: r.code, type: r.type, relatedProduct: r.relatedProduct ?? "",
+        department: r.deptStatus ?? "", stockQty: r.stockQty, status: r.status,
+      })),
+    };
+  },
+};
+
+const listFgUnits: ToolDefinition = {
+  schema: {
+    name: "list_fg_units",
+    description: "List finished-goods (FG) units. Filter by status (e.g. PACKED, LOADED, DELIVERED) or productCode.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "FG unit status." },
+        productCode: { type: "string", description: "Filter to one product." },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const status = strOrNull(args.status);
+    if (status) { wheres.push("UPPER(status) = ?"); params.push(status.toUpperCase()); }
+    const pc = strOrNull(args.productCode);
+    if (pc) { wheres.push("productCode = ?"); params.push(pc); }
+    const limit = clampLimit(args.limit, 50);
+    const rows = await c.var.DB.prepare(
+      `SELECT id, unitSerial, shortCode, soNo, poNo, productCode, productName,
+              customerName, status, packedAt, deliveredAt
+       FROM fg_units WHERE ${wheres.join(" AND ")}
+       ORDER BY id DESC LIMIT ${limit}`,
+    ).bind(...params).all<{
+      id: string; unitSerial: string; shortCode: string | null; soNo: string | null; poNo: string | null;
+      productCode: string | null; productName: string | null; customerName: string | null;
+      status: string; packedAt: string | null; deliveredAt: string | null;
+    }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_fg_units", action: "list_fg_units", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        id: r.id, unitSerial: r.unitSerial, shortCode: r.shortCode ?? "",
+        soNo: r.soNo ?? "", poNo: r.poNo ?? "", productCode: r.productCode ?? "",
+        productName: r.productName ?? "", customerName: r.customerName ?? "",
+        status: r.status, packedAt: r.packedAt ?? "", deliveredAt: r.deliveredAt ?? "",
+      })),
+    };
+  },
+};
+
+const listFabrics: ToolDefinition = {
+  schema: {
+    name: "list_fabrics",
+    description: "List fabric catalog (the fabrics table). Filter by partial code/name match.",
+    input_schema: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "Partial match on code or name." },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const s = strOrNull(args.search);
+    if (s) { wheres.push("(LOWER(code) LIKE ? OR LOWER(name) LIKE ?)"); const l = `%${s.toLowerCase()}%`; params.push(l, l); }
+    const limit = clampLimit(args.limit, 50);
+    const rows = await c.var.DB.prepare(
+      `SELECT id, code, name, category, priceSen, sohMeters, reorderLevel
+       FROM fabrics WHERE ${wheres.join(" AND ")} ORDER BY code LIMIT ${limit}`,
+    ).bind(...params).all<{
+      id: string; code: string; name: string; category: string | null;
+      priceSen: number; sohMeters: number; reorderLevel: number;
+    }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_fabrics", action: "list_fabrics", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        id: r.id, code: r.code, name: r.name, category: r.category ?? "",
+        priceRM: senToRM(r.priceSen), sohMeters: r.sohMeters, reorderLevel: r.reorderLevel,
+      })),
+    };
+  },
+};
+
+const getFabric: ToolDefinition = {
+  schema: {
+    name: "get_fabric",
+    description: "Get fabric detail plus which SOs and POs are currently using it.",
+    input_schema: {
+      type: "object",
+      properties: { code: { type: "string", description: "Fabric code." } },
+      required: ["code"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const code = strOrNull(args.code);
+    if (!code) return { error: "code is required" };
+    const fab = await c.var.DB.prepare(
+      `SELECT id, code, name, category, priceSen, sohMeters, reorderLevel
+       FROM fabrics WHERE orgId = ? AND code = ? LIMIT 1`,
+    ).bind(orgId, code).first<{
+      id: string; code: string; name: string; category: string | null;
+      priceSen: number; sohMeters: number; reorderLevel: number;
+    }>();
+    if (!fab) return { error: `Fabric not found: ${code}` };
+    const [activeSos, activePos] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT DISTINCT so.id, so.companySOId, so.customerName, so.status
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+         WHERE so.orgId = ? AND soi.fabricCode = ?
+           AND UPPER(so.status) NOT IN ('DELIVERED','INVOICED','CANCELLED','CLOSED')
+         ORDER BY so.created_at DESC LIMIT 25`,
+      ).bind(orgId, code).all<{ id: string; companySOId: string | null; customerName: string | null; status: string | null }>(),
+      c.var.DB.prepare(
+        `SELECT id, poNo, status, productCode, quantity
+         FROM production_orders WHERE orgId = ? AND fabricCode = ?
+           AND UPPER(status) NOT IN ('COMPLETED','CANCELLED')
+         ORDER BY created_at DESC LIMIT 25`,
+      ).bind(orgId, code).all<{ id: string; poNo: string; status: string; productCode: string | null; quantity: number }>(),
+    ]);
+    await emitAudit(c, { resource: "assistant-tool", resourceId: code, action: "get_fabric", after: { code }, source: "ui" });
+    return {
+      id: fab.id, code: fab.code, name: fab.name, category: fab.category ?? "",
+      priceRM: senToRM(fab.priceSen), sohMeters: fab.sohMeters, reorderLevel: fab.reorderLevel,
+      activeSalesOrders: (activeSos.results ?? []).map((r) => ({ id: r.id, companySOId: r.companySOId ?? "", customerName: r.customerName ?? "", status: r.status ?? "" })),
+      activeProductionOrders: (activePos.results ?? []).map((r) => ({ id: r.id, poNo: r.poNo, status: r.status, productCode: r.productCode ?? "", quantity: r.quantity })),
+    };
+  },
+};
+
+const listAccessories: ToolDefinition = {
+  schema: {
+    name: "list_accessories",
+    description: "List raw_materials whose itemGroup includes 'ACCESSORY' (and similar). Filter by partial code/description.",
+    input_schema: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "Partial match on itemCode or description." },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres = ["orgId = ?", "UPPER(itemGroup) LIKE '%ACCESS%'"];
+    const params: unknown[] = [orgId];
+    const s = strOrNull(args.search);
+    if (s) { wheres.push("(LOWER(itemCode) LIKE ? OR LOWER(description) LIKE ?)"); const l = `%${s.toLowerCase()}%`; params.push(l, l); }
+    const limit = clampLimit(args.limit, 50);
+    const rows = await c.var.DB.prepare(
+      `SELECT id, itemCode, description, baseUOM, itemGroup, balanceQty, isActive
+       FROM raw_materials WHERE ${wheres.join(" AND ")} ORDER BY itemCode LIMIT ${limit}`,
+    ).bind(...params).all<{
+      id: string; itemCode: string; description: string; baseUOM: string; itemGroup: string;
+      balanceQty: number; isActive: number | boolean;
+    }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_accessories", action: "list_accessories", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        id: r.id, itemCode: r.itemCode, description: r.description, baseUOM: r.baseUOM,
+        itemGroup: r.itemGroup, balanceQty: r.balanceQty, isActive: Boolean(r.isActive),
+      })),
+    };
+  },
+};
+
+const getAccessory: ToolDefinition = {
+  schema: {
+    name: "get_accessory",
+    description: "Get accessory (raw_material) detail. Look up by itemCode.",
+    input_schema: {
+      type: "object",
+      properties: { code: { type: "string", description: "Item code." } },
+      required: ["code"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const code = strOrNull(args.code);
+    if (!code) return { error: "code is required" };
+    const rm = await c.var.DB.prepare(
+      `SELECT id, itemCode, description, baseUOM, itemGroup, balanceQty, isActive
+       FROM raw_materials WHERE orgId = ? AND itemCode = ? LIMIT 1`,
+    ).bind(orgId, code).first<{
+      id: string; itemCode: string; description: string; baseUOM: string; itemGroup: string;
+      balanceQty: number; isActive: number | boolean;
+    }>();
+    if (!rm) return { error: `Accessory not found: ${code}` };
+    await emitAudit(c, { resource: "assistant-tool", resourceId: code, action: "get_accessory", after: { code }, source: "ui" });
+    return {
+      id: rm.id, itemCode: rm.itemCode, description: rm.description, baseUOM: rm.baseUOM,
+      itemGroup: rm.itemGroup, balanceQty: rm.balanceQty, isActive: Boolean(rm.isActive),
+    };
+  },
+};
+
+const predictReorderNeeds: ToolDefinition = {
+  schema: {
+    name: "predict_reorder_needs",
+    description: "For each fabric: compares current SOH against meters required by CONFIRMED/IN_PRODUCTION SOs (computed from fabricUsage × quantity of matching products). Flags those projected to go negative. Sorted by deficit descending.",
+    input_schema: {
+      type: "object",
+      properties: {
+        lookaheadDays: { type: "number", description: "Hint only — currently looks at all active SOs because Hookka has no per-day demand schedule." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    // Per-fabric required meters from active SOs.
+    const demand = await c.var.DB.prepare(
+      `SELECT soi.fabricCode AS fabricCode,
+              COALESCE(SUM(soi.quantity * COALESCE(p.fabricUsage, 0)), 0) AS metersRequired
+       FROM sales_order_items soi
+       JOIN sales_orders so ON so.id = soi.salesOrderId
+       LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
+       WHERE so.orgId = ? AND UPPER(so.status) IN ('CONFIRMED','IN_PRODUCTION','READY_TO_SHIP')
+         AND soi.fabricCode IS NOT NULL AND soi.fabricCode <> ''
+       GROUP BY soi.fabricCode LIMIT 500`,
+    ).bind(orgId).all<{ fabricCode: string; metersRequired: number }>();
+    const fabs = await c.var.DB.prepare(
+      `SELECT code, name, sohMeters, reorderLevel FROM fabrics WHERE orgId = ? LIMIT 500`,
+    ).bind(orgId).all<{ code: string; name: string; sohMeters: number; reorderLevel: number }>();
+    const sohMap = new Map<string, { name: string; soh: number; reorder: number }>();
+    for (const f of fabs.results ?? []) sohMap.set(f.code, { name: f.name, soh: f.sohMeters, reorder: f.reorderLevel });
+
+    const list = (demand.results ?? []).map((d) => {
+      const f = sohMap.get(d.fabricCode);
+      const soh = f?.soh ?? 0;
+      const required = Number(d.metersRequired) || 0;
+      const projected = soh - required;
+      return {
+        fabricCode: d.fabricCode,
+        fabricName: f?.name ?? "(unknown)",
+        sohMeters: soh,
+        metersRequired: Math.round(required * 10) / 10,
+        projectedMeters: Math.round(projected * 10) / 10,
+        reorderLevel: f?.reorder ?? 0,
+        needsReorder: projected < (f?.reorder ?? 0),
+      };
+    }).sort((a, b) => a.projectedMeters - b.projectedMeters);
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "predict_reorder_needs", action: "predict_reorder_needs", after: filterArgsForAudit(args), source: "ui" });
+    return {
+      lookaheadDays: Number(args.lookaheadDays) || null,
+      count: list.length,
+      atRisk: list.filter((x) => x.needsReorder).slice(0, 50),
+      all: list.slice(0, 100),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// HR / Payroll — get_employee_efficiency, get_payroll, get_department_efficiency
+// ---------------------------------------------------------------------------
+
+const getEmployeeEfficiency: ToolDefinition = {
+  schema: {
+    name: "get_employee_efficiency",
+    description: "Per-employee efficiency over a period. Computed from job_cards: counts COMPLETED JCs they were PIC1/PIC2 on, summed planned vs actual minutes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        employeeId: { type: "string", description: "Worker id (filter to one employee)." },
+        department: { type: "string", description: "Department code filter." },
+        periodFrom: { type: "string", description: "YYYY-MM-DD (required)." },
+        periodTo: { type: "string", description: "YYYY-MM-DD (required)." },
+      },
+      required: ["periodFrom", "periodTo"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const from = ymdOrNull(args.periodFrom);
+    const to = ymdOrNull(args.periodTo);
+    if (!from || !to) return { error: "periodFrom and periodTo (YYYY-MM-DD) are required" };
+    const emp = strOrNull(args.employeeId);
+    const dept = strOrNull(args.department);
+    const wheres = ["orgId = ?", "UPPER(status) = 'COMPLETED'", "completedDate >= ?", "completedDate <= ?"];
+    const params: unknown[] = [orgId, from, to];
+    if (emp) { wheres.push("(pic1Id = ? OR pic2Id = ?)"); params.push(emp, emp); }
+    if (dept) { wheres.push("UPPER(departmentCode) = ?"); params.push(dept.toUpperCase()); }
+    const rows = await c.var.DB.prepare(
+      `SELECT pic1Id, pic1Name, pic2Id, pic2Name, departmentCode,
+              estMinutes, actualMinutes
+       FROM job_cards WHERE ${wheres.join(" AND ")} LIMIT 2000`,
+    ).bind(...params).all<{
+      pic1Id: string | null; pic1Name: string | null; pic2Id: string | null; pic2Name: string | null;
+      departmentCode: string | null; estMinutes: number; actualMinutes: number | null;
+    }>();
+    type Bucket = { id: string; name: string; department: string; jobs: number; plannedMin: number; actualMin: number };
+    const byPerson = new Map<string, Bucket>();
+    for (const r of rows.results ?? []) {
+      const persons: Array<{ id: string | null; name: string | null }> = [{ id: r.pic1Id, name: r.pic1Name }];
+      if (r.pic2Id) persons.push({ id: r.pic2Id, name: r.pic2Name });
+      for (const p of persons) {
+        if (!p.id) continue;
+        const o = byPerson.get(p.id) ?? { id: p.id, name: p.name ?? "", department: r.departmentCode ?? "", jobs: 0, plannedMin: 0, actualMin: 0 };
+        o.jobs += 1;
+        // Split estMin between persons evenly so it doesn't double-count.
+        const share = persons.length;
+        o.plannedMin += (r.estMinutes ?? 0) / share;
+        o.actualMin += (r.actualMinutes ?? 0) / share;
+        byPerson.set(p.id, o);
+      }
+    }
+    const list = Array.from(byPerson.values()).map((b) => ({
+      employeeId: b.id, employeeName: b.name, department: b.department,
+      jobsCompleted: b.jobs,
+      plannedMinutes: Math.round(b.plannedMin),
+      actualMinutes: Math.round(b.actualMin),
+      efficiencyPct: b.actualMin > 0 ? Math.round((b.plannedMin / b.actualMin) * 1000) / 10 : null,
+    })).sort((a, b) => b.jobsCompleted - a.jobsCompleted);
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "get_employee_efficiency", action: "get_employee_efficiency", after: filterArgsForAudit(args), source: "ui" });
+    return { periodFrom: from, periodTo: to, count: list.length, results: list.slice(0, 100) };
+  },
+};
+
+const getPayroll: ToolDefinition = {
+  schema: {
+    name: "get_payroll",
+    description: "One employee's payroll for a period. Reads payroll_records (basic + OT + statutory + net).",
+    input_schema: {
+      type: "object",
+      properties: {
+        employeeId: { type: "string", description: "Worker id." },
+        period: { type: "string", description: "Period string (e.g. '2026-05')." },
+      },
+      required: ["employeeId", "period"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const emp = strOrNull(args.employeeId);
+    const period = strOrNull(args.period);
+    if (!emp || !period) return { error: "employeeId and period are required" };
+    try {
+      const r = await c.var.DB.prepare(
+        `SELECT id, workerId, workerName, period, basicSalarySen,
+                workingDays, otHoursWeekday, otHoursSunday, otHoursHoliday, otAmountSen,
+                grossSalarySen, epfEmployeeSen, socsoEmployeeSen, eisEmployeeSen, pcbSen,
+                totalDeductionsSen, netPaySen, status
+         FROM payroll_records WHERE orgId = ? AND workerId = ? AND period = ? LIMIT 1`,
+      ).bind(orgId, emp, period).first<{
+        id: string; workerId: string; workerName: string | null; period: string;
+        basicSalarySen: number; workingDays: number;
+        otHoursWeekday: number; otHoursSunday: number; otHoursHoliday: number; otAmountSen: number;
+        grossSalarySen: number; epfEmployeeSen: number; socsoEmployeeSen: number;
+        eisEmployeeSen: number; pcbSen: number; totalDeductionsSen: number; netPaySen: number;
+        status: string;
+      }>();
+      if (!r) return { error: `No payroll record found for ${emp} in period ${period}. See /payroll page to generate one.` };
+      await emitAudit(c, { resource: "assistant-tool", resourceId: r.id, action: "get_payroll", after: { id: r.id }, source: "ui" });
+      return {
+        id: r.id, workerId: r.workerId, workerName: r.workerName ?? "", period: r.period,
+        basicSalaryRM: senToRM(r.basicSalarySen), workingDays: r.workingDays,
+        otHours: { weekday: r.otHoursWeekday, sunday: r.otHoursSunday, holiday: r.otHoursHoliday },
+        otAmountRM: senToRM(r.otAmountSen), grossRM: senToRM(r.grossSalarySen),
+        deductions: {
+          epfRM: senToRM(r.epfEmployeeSen), socsoRM: senToRM(r.socsoEmployeeSen),
+          eisRM: senToRM(r.eisEmployeeSen), pcbRM: senToRM(r.pcbSen),
+          totalRM: senToRM(r.totalDeductionsSen),
+        },
+        netPayRM: senToRM(r.netPaySen), status: r.status,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Payroll lookup failed: ${msg.slice(0, 200)}. See /payroll page.` };
+    }
+  },
+};
+
+const getDepartmentEfficiency: ToolDefinition = {
+  schema: {
+    name: "get_department_efficiency",
+    description: "Aggregate efficiency at the department level for a period.",
+    input_schema: {
+      type: "object",
+      properties: {
+        department: { type: "string", description: "departmentCode." },
+        periodFrom: { type: "string", description: "YYYY-MM-DD." },
+        periodTo: { type: "string", description: "YYYY-MM-DD." },
+      },
+      required: ["department", "periodFrom", "periodTo"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const dept = strOrNull(args.department);
+    const from = ymdOrNull(args.periodFrom);
+    const to = ymdOrNull(args.periodTo);
+    if (!dept || !from || !to) return { error: "department, periodFrom, periodTo are required" };
+    const agg = await c.var.DB.prepare(
+      `SELECT COUNT(*) AS jobs, COALESCE(SUM(estMinutes),0) AS plannedMin,
+              COALESCE(SUM(actualMinutes),0) AS actualMin
+       FROM job_cards WHERE orgId = ? AND UPPER(departmentCode) = ? AND UPPER(status) = 'COMPLETED'
+         AND completedDate >= ? AND completedDate <= ?`,
+    ).bind(orgId, dept.toUpperCase(), from, to).first<{ jobs: number; plannedMin: number; actualMin: number }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: dept, action: "get_department_efficiency", after: filterArgsForAudit(args), source: "ui" });
+    const planned = agg?.plannedMin ?? 0;
+    const actual = agg?.actualMin ?? 0;
+    return {
+      department: dept.toUpperCase(),
+      periodFrom: from, periodTo: to,
+      jobsCompleted: agg?.jobs ?? 0,
+      plannedMinutes: planned, actualMinutes: actual,
+      plannedHours: Math.round(planned / 6) / 10,
+      actualHours: Math.round(actual / 6) / 10,
+      efficiencyPct: actual > 0 ? Math.round((planned / actual) * 1000) / 10 : null,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Reports / KPIs — get_dashboard_kpis, list_overdue_orders, get_abnormal_orders
+// ---------------------------------------------------------------------------
+
+const getDashboardKpis: ToolDefinition = {
+  schema: {
+    name: "get_dashboard_kpis",
+    description: "Comprehensive KPI snapshot for a date range (defaults to current month): SO count + revenue, CO count, delivery on-time %, overdue counts (SO/PO/DO/Invoice), WIP units, AR outstanding incl 90+, top 5 customers, top 5 products by units, blended GP%.",
+    input_schema: {
+      type: "object",
+      properties: {
+        dateFrom: { type: "string", description: "YYYY-MM-DD." },
+        dateTo: { type: "string", description: "YYYY-MM-DD." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const now = new Date();
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    const todayStr = now.toISOString().slice(0, 10);
+    const dateFrom = ymdOrNull(args.dateFrom) ?? monthStart;
+    const dateTo = ymdOrNull(args.dateTo) ?? todayStr;
+
+    const [soAgg, coAgg, invAgg, doStats, overdueSO, overduePO, overdueDO, overdueInv, wipAgg, ar, topCust, topProd] = await Promise.all([
+      c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen), 0) AS sumSen FROM sales_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number; sumSen: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n FROM consignment_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number }>(),
+      c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen), 0) AS totalSen, COALESCE(SUM(COALESCE(paidAmount,0)),0) AS paidSen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ totalSen: number; paidSen: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN UPPER(status) IN ('DELIVERED','SIGNED','INVOICED') AND deliveryDate >= delivery_date THEN 1 ELSE 0 END) AS onTime FROM delivery_orders WHERE orgId = ? AND deliveryDate >= ? AND deliveryDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ total: number; onTime: number }>().catch(() => null),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n FROM sales_orders WHERE orgId = ? AND customerDeliveryDate IS NOT NULL AND customerDeliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','INVOICED','CANCELLED','CLOSED')`).bind(orgId, todayStr).first<{ n: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n FROM production_orders WHERE orgId = ? AND targetEndDate IS NOT NULL AND targetEndDate < ? AND UPPER(status) NOT IN ('COMPLETED','CANCELLED')`).bind(orgId, todayStr).first<{ n: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n FROM delivery_orders WHERE orgId = ? AND deliveryDate IS NOT NULL AND deliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','SIGNED','INVOICED','CANCELLED')`).bind(orgId, todayStr).first<{ n: number }>(),
+      c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen - COALESCE(paidAmount,0)),0) AS outSen FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL') AND dueDate IS NOT NULL AND dueDate < ?`).bind(orgId, todayStr).first<{ n: number; outSen: number }>(),
+      c.var.DB.prepare(`SELECT COALESCE(SUM(stockQty), 0) AS units FROM wip_items WHERE orgId = ?`).bind(orgId).first<{ units: number }>(),
+      c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen - COALESCE(paidAmount,0)), 0) AS outSen FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL') AND totalSen > COALESCE(paidAmount,0)`).bind(orgId).first<{ outSen: number }>(),
+      c.var.DB.prepare(`SELECT customerName, COALESCE(SUM(totalSen),0) AS revSen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ? GROUP BY customerName ORDER BY revSen DESC LIMIT 5`).bind(orgId, dateFrom, dateTo).all<{ customerName: string | null; revSen: number }>(),
+      c.var.DB.prepare(`SELECT ii.productCode AS productCode, COALESCE(SUM(ii.quantity), 0) AS units FROM invoice_items ii JOIN invoices i ON i.id = ii.invoiceId WHERE i.orgId = ? AND UPPER(i.status) <> 'VOID' AND i.invoiceDate >= ? AND i.invoiceDate <= ? GROUP BY ii.productCode ORDER BY units DESC LIMIT 5`).bind(orgId, dateFrom, dateTo).all<{ productCode: string | null; units: number }>(),
+    ]);
+
+    // Blended GP% — same shape as get_gp_analysis but a single number.
+    const gpRows = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(ii.totalSen), 0) AS revSen,
+              COALESCE(SUM(ii.quantity * COALESCE(p.costPriceSen,0)), 0) AS costSen
+       FROM invoice_items ii
+       JOIN invoices i ON i.id = ii.invoiceId
+       LEFT JOIN products p ON p.code = ii.productCode AND p.orgId = i.orgId
+       WHERE i.orgId = ? AND UPPER(i.status) <> 'VOID'
+         AND i.invoiceDate >= ? AND i.invoiceDate <= ?`,
+    ).bind(orgId, dateFrom, dateTo).first<{ revSen: number; costSen: number }>();
+
+    const ar90 = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalSen - COALESCE(paidAmount,0)), 0) AS outSen
+       FROM invoices WHERE orgId = ? AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL')
+         AND totalSen > COALESCE(paidAmount,0)
+         AND dueDate IS NOT NULL AND dueDate < ?`,
+    ).bind(orgId, new Date(now.getTime() - 90 * 86400000).toISOString().slice(0, 10)).first<{ outSen: number }>();
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "get_dashboard_kpis", action: "get_dashboard_kpis", after: { dateFrom, dateTo }, source: "ui" });
+
+    const onTimePct = doStats && doStats.total > 0 ? Math.round((doStats.onTime / doStats.total) * 1000) / 10 : null;
+    const blendedGpPct = gpRows && gpRows.revSen > 0
+      ? Math.round(((gpRows.revSen - gpRows.costSen) / gpRows.revSen) * 1000) / 10
+      : null;
+
+    return {
+      dateFrom, dateTo,
+      salesOrders: { count: soAgg?.n ?? 0, revenueRM: senToRM(soAgg?.sumSen ?? 0) },
+      consignmentOrders: { count: coAgg?.n ?? 0 },
+      revenue: {
+        invoicedRM: senToRM(invAgg?.totalSen ?? 0),
+        collectedRM: senToRM(invAgg?.paidSen ?? 0),
+      },
+      deliveryOnTimePct: onTimePct,
+      overdue: {
+        salesOrders: overdueSO?.n ?? 0,
+        productionOrders: overduePO?.n ?? 0,
+        deliveryOrders: overdueDO?.n ?? 0,
+        invoices: overdueInv?.n ?? 0,
+        overdueInvoiceTotalRM: senToRM(overdueInv?.outSen ?? 0),
+      },
+      wipUnits: wipAgg?.units ?? 0,
+      ar: {
+        totalOutstandingRM: senToRM(ar?.outSen ?? 0),
+        over90DaysRM: senToRM(ar90?.outSen ?? 0),
+      },
+      top5Customers: (topCust.results ?? []).map((r) => ({ customerName: r.customerName ?? "", revenueRM: senToRM(r.revSen) })),
+      top5Products: (topProd.results ?? []).map((r) => ({ productCode: r.productCode ?? "", units: Number(r.units ?? 0) })),
+      blendedGpPct,
+    };
+  },
+};
+
+const listOverdueOrders: ToolDefinition = {
+  schema: {
+    name: "list_overdue_orders",
+    description: "List overdue orders of a given type. type: SO (customerDeliveryDate < asOf), PO (targetEndDate < asOf), DO (deliveryDate < asOf), INVOICE (dueDate < asOf).",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", description: "SO | PO | DO | INVOICE." },
+        dateAsOf: { type: "string", description: "YYYY-MM-DD (defaults to today)." },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+      required: ["type"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const type = String(args.type ?? "").toUpperCase();
+    const asOf = ymdOrNull(args.dateAsOf) ?? new Date().toISOString().slice(0, 10);
+    const limit = clampLimit(args.limit, 50);
+    let sql = "";
+    if (type === "SO") {
+      sql = `SELECT id, companySOId AS code, customerName, status, customerDeliveryDate AS date
+             FROM sales_orders WHERE orgId = ? AND customerDeliveryDate IS NOT NULL
+               AND customerDeliveryDate < ?
+               AND UPPER(status) NOT IN ('DELIVERED','INVOICED','CANCELLED','CLOSED')
+             ORDER BY customerDeliveryDate ASC LIMIT ${limit}`;
+    } else if (type === "PO") {
+      sql = `SELECT id, poNo AS code, customerName, status, targetEndDate AS date
+             FROM production_orders WHERE orgId = ? AND targetEndDate IS NOT NULL
+               AND targetEndDate < ?
+               AND UPPER(status) NOT IN ('COMPLETED','CANCELLED')
+             ORDER BY targetEndDate ASC LIMIT ${limit}`;
+    } else if (type === "DO") {
+      sql = `SELECT id, doNo AS code, customerName, status, deliveryDate AS date
+             FROM delivery_orders WHERE orgId = ? AND deliveryDate IS NOT NULL
+               AND deliveryDate < ?
+               AND UPPER(status) NOT IN ('DELIVERED','SIGNED','INVOICED','CANCELLED')
+             ORDER BY deliveryDate ASC LIMIT ${limit}`;
+    } else if (type === "INVOICE") {
+      sql = `SELECT id, invoiceNumber AS code, customerName, status, dueDate AS date,
+                    totalSen - COALESCE(paidAmount,0) AS outSen
+             FROM invoices WHERE orgId = ? AND dueDate IS NOT NULL
+               AND dueDate < ?
+               AND UPPER(status) IN ('ISSUED','OVERDUE','PARTIAL')
+               AND totalSen > COALESCE(paidAmount,0)
+             ORDER BY dueDate ASC LIMIT ${limit}`;
+    } else {
+      return { error: `Unknown type: ${type}. Use SO, PO, DO, INVOICE.` };
+    }
+    const rows = await c.var.DB.prepare(sql).bind(orgId, asOf).all<{
+      id: string; code: string | null; customerName: string | null; status: string | null;
+      date: string | null; outSen?: number | null;
+    }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "list_overdue_orders", action: "list_overdue_orders", after: { type, asOf }, source: "ui" });
+    return {
+      type, asOf,
+      count: rows.results?.length ?? 0,
+      results: (rows.results ?? []).map((r) => ({
+        id: r.id, code: r.code ?? "", customerName: r.customerName ?? "",
+        status: r.status ?? "", date: r.date ?? "",
+        outstandingRM: r.outSen != null ? senToRM(r.outSen) : undefined,
+      })),
+    };
+  },
+};
+
+const getAbnormalOrders: ToolDefinition = {
+  schema: {
+    name: "get_abnormal_orders",
+    description: "Find SOs/POs that look abnormal: abnormal GP (< 10% or > 80%) on SOs, or POs past targetEndDate with no progress.",
+    input_schema: {
+      type: "object",
+      properties: { limit: { type: "number", description: "Max per category (1-50, default 10)." } },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const limit = Math.min(50, Math.max(1, Number(args.limit) || 10));
+    const today = new Date().toISOString().slice(0, 10);
+    // Abnormal GP = SO total vs estimated cost (sum of cost × qty for its items).
+    const gpRows = await c.var.DB.prepare(
+      `SELECT so.id AS soId, so.companySOId AS companySOId, so.customerName AS customerName,
+              so.totalSen AS totalSen,
+              COALESCE(SUM(soi.quantity * COALESCE(p.costPriceSen,0)), 0) AS costSen
+       FROM sales_orders so
+       JOIN sales_order_items soi ON soi.salesOrderId = so.id
+       LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
+       WHERE so.orgId = ? AND UPPER(so.status) NOT IN ('DRAFT','CANCELLED')
+       GROUP BY so.id, so.companySOId, so.customerName, so.totalSen
+       HAVING so.totalSen > 0
+       ORDER BY so.created_at DESC
+       LIMIT 500`,
+    ).bind(orgId).all<{ soId: string; companySOId: string | null; customerName: string | null; totalSen: number; costSen: number }>();
+    const abnormalGp = (gpRows.results ?? []).map((r) => {
+      const gpPct = r.totalSen > 0 ? ((r.totalSen - r.costSen) / r.totalSen) * 100 : 0;
+      return { ...r, gpPct };
+    }).filter((r) => r.gpPct < 10 || r.gpPct > 80).slice(0, limit);
+
+    const stuckPo = await c.var.DB.prepare(
+      `SELECT id, poNo, customerName, status, progress, targetEndDate
+       FROM production_orders WHERE orgId = ? AND targetEndDate IS NOT NULL
+         AND targetEndDate < ? AND progress < 100 AND UPPER(status) NOT IN ('COMPLETED','CANCELLED')
+       ORDER BY targetEndDate ASC LIMIT ${limit}`,
+    ).bind(orgId, today).all<{
+      id: string; poNo: string; customerName: string | null; status: string;
+      progress: number; targetEndDate: string | null;
+    }>();
+
+    await emitAudit(c, { resource: "assistant-tool", resourceId: "get_abnormal_orders", action: "get_abnormal_orders", after: {}, source: "ui" });
+    return {
+      abnormalGpSos: abnormalGp.map((r) => ({
+        soId: r.soId, companySOId: r.companySOId ?? "", customerName: r.customerName ?? "",
+        totalRM: senToRM(r.totalSen), costRM: senToRM(r.costSen),
+        gpPct: Math.round(r.gpPct * 10) / 10,
+      })),
+      stuckProductionOrders: (stuckPo.results ?? []).map((r) => ({
+        id: r.id, poNo: r.poNo, customerName: r.customerName ?? "",
+        status: r.status, progress: r.progress, targetEndDate: r.targetEndDate ?? "",
+      })),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Catalog — list_cnc_templates, get_bom, find_products_using_fabric
+// ---------------------------------------------------------------------------
+
+const listCncTemplates: ToolDefinition = {
+  schema: {
+    name: "list_cnc_templates",
+    description: "List CNC fabric-cutting templates. Filter by productCode or partial display-name search.",
+    input_schema: {
+      type: "object",
+      properties: {
+        productCode: { type: "string", description: "Product code filter." },
+        search: { type: "string", description: "Partial match on displayName / pieceLabel." },
+        limit: { type: "number", description: "Max rows (1-100, default 50)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const wheres = ["orgId = ?"];
+    const params: unknown[] = [orgId];
+    const pc = strOrNull(args.productCode);
+    if (pc) { wheres.push("productCode = ?"); params.push(pc); }
+    const s = strOrNull(args.search);
+    if (s) { wheres.push("(LOWER(displayName) LIKE ? OR LOWER(pieceLabel) LIKE ?)"); const l = `%${s.toLowerCase()}%`; params.push(l, l); }
+    const limit = clampLimit(args.limit, 50);
+    try {
+      const rows = await c.var.DB.prepare(
+        `SELECT id, productCode, sizeLabel, fabricWidth, pieceLabel, displayName,
+                totalHeight, folder, sizeBytes, created_at AS createdAt
+         FROM cnc_templates WHERE ${wheres.join(" AND ")}
+         ORDER BY productCode, displayName LIMIT ${limit}`,
+      ).bind(...params).all<{
+        id: string; productCode: string; sizeLabel: string; fabricWidth: string; pieceLabel: string;
+        displayName: string; totalHeight: string; folder: string; sizeBytes: number; createdAt: string | null;
+      }>();
+      await emitAudit(c, { resource: "assistant-tool", resourceId: "list_cnc_templates", action: "list_cnc_templates", after: filterArgsForAudit(args), source: "ui" });
+      return {
+        count: rows.results?.length ?? 0,
+        results: (rows.results ?? []).map((r) => ({
+          id: r.id, productCode: r.productCode, sizeLabel: r.sizeLabel,
+          fabricWidth: r.fabricWidth, pieceLabel: r.pieceLabel, displayName: r.displayName,
+          totalHeight: r.totalHeight, folder: r.folder, sizeBytes: r.sizeBytes,
+          createdAt: r.createdAt ?? "",
+        })),
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/does not exist|no such table/i.test(msg)) return { count: 0, results: [], note: "cnc_templates not yet populated." };
+      throw err;
+    }
+  },
+};
+
+const getBom: ToolDefinition = {
+  schema: {
+    name: "get_bom",
+    description: "Get BOM components for a product.",
+    input_schema: {
+      type: "object",
+      properties: { productCode: { type: "string", description: "Product code." } },
+      required: ["productCode"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const code = strOrNull(args.productCode);
+    if (!code) return { error: "productCode is required" };
+    const p = await c.var.DB.prepare(
+      "SELECT id, code, name FROM products WHERE orgId = ? AND code = ? LIMIT 1",
+    ).bind(orgId, code).first<{ id: string; code: string; name: string }>();
+    if (!p) return { error: `Product not found: ${code}` };
+    const bom = await c.var.DB.prepare(
+      `SELECT materialCode, materialName, quantity, unit
+       FROM bom_components WHERE productId = ? ORDER BY id LIMIT 200`,
+    ).bind(p.id).all<{ materialCode: string | null; materialName: string | null; quantity: number | null; unit: string | null }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: code, action: "get_bom", after: { code }, source: "ui" });
+    return {
+      productCode: p.code, productName: p.name,
+      bom: (bom.results ?? []).map((r) => ({
+        materialCode: r.materialCode ?? "", materialName: r.materialName ?? "",
+        quantity: r.quantity ?? 0, unit: r.unit ?? "",
+      })),
+    };
+  },
+};
+
+const findProductsUsingFabric: ToolDefinition = {
+  schema: {
+    name: "find_products_using_fabric",
+    description: "Reverse lookup: which products' BOMs reference a given fabric code?",
+    input_schema: {
+      type: "object",
+      properties: { fabricCode: { type: "string", description: "Fabric code to search for." } },
+      required: ["fabricCode"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const code = strOrNull(args.fabricCode);
+    if (!code) return { error: "fabricCode is required" };
+    const rows = await c.var.DB.prepare(
+      `SELECT DISTINCT p.code AS productCode, p.name AS productName, p.category AS category
+       FROM products p
+       JOIN bom_components bc ON bc.productId = p.id
+       WHERE p.orgId = ? AND (bc.materialCode = ? OR LOWER(bc.materialName) LIKE ?)
+       ORDER BY p.code LIMIT 100`,
+    ).bind(orgId, code, `%${code.toLowerCase()}%`).all<{ productCode: string; productName: string; category: string }>();
+    await emitAudit(c, { resource: "assistant-tool", resourceId: code, action: "find_products_using_fabric", after: { code }, source: "ui" });
+    return {
+      fabricCode: code,
+      count: rows.results?.length ?? 0,
+      products: rows.results ?? [],
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// System / Help — list_audit_events, explain_feature
+// ---------------------------------------------------------------------------
+
+const listAuditEvents: ToolDefinition = {
+  schema: {
+    name: "list_audit_events",
+    description: "Recent audit events. Filter by resource (e.g. 'sales-orders'), userId, or date range.",
+    input_schema: {
+      type: "object",
+      properties: {
+        resource: { type: "string", description: "Resource filter." },
+        userId: { type: "string", description: "Actor user id filter." },
+        dateFrom: { type: "string", description: "YYYY-MM-DD." },
+        dateTo: { type: "string", description: "YYYY-MM-DD." },
+        limit: { type: "number", description: "Max rows (1-100, default 25)." },
+      },
+    },
+  },
+  execute: async (c, args) => {
+    const wheres: string[] = ["1=1"];
+    const params: unknown[] = [];
+    const res = strOrNull(args.resource);
+    if (res) { wheres.push("resource = ?"); params.push(res); }
+    const uid = strOrNull(args.userId);
+    if (uid) { wheres.push("actorUserId = ?"); params.push(uid); }
+    const dateFrom = ymdOrNull(args.dateFrom);
+    if (dateFrom) { wheres.push("ts >= ?"); params.push(dateFrom); }
+    const dateTo = ymdOrNull(args.dateTo);
+    if (dateTo) { wheres.push("ts <= ?"); params.push(`${dateTo} 23:59:59`); }
+    const limit = clampLimit(args.limit, 25);
+    const rows = await c.var.DB.prepare(
+      `SELECT id, actorUserId, actorUserName, actorRole, resource, resourceId, action, source, ts
+       FROM audit_events WHERE ${wheres.join(" AND ")}
+       ORDER BY ts DESC LIMIT ${limit}`,
+    ).bind(...params).all<{
+      id: string; actorUserId: string | null; actorUserName: string | null; actorRole: string | null;
+      resource: string; resourceId: string; action: string; source: string; ts: string;
+    }>();
+    return {
+      count: rows.results?.length ?? 0,
+      results: rows.results ?? [],
+    };
+  },
+};
+
+// Static knowledge map for common feature how-tos.
+const FEATURE_HELP: Record<string, { sidebar: string; steps: string[]; relatedPages?: string[] }> = {
+  "sales order create": {
+    sidebar: "Sales → Sales Orders → +New",
+    steps: [
+      "Click +New in the top-right of the Sales Orders page.",
+      "Pick the customer and hub (auto-fills delivery address).",
+      "Add lines — pick product code, fabric, divan/leg height/gap as required.",
+      "Set Customer Delivery Date and Hookka Expected DD.",
+      "Save Draft, then Confirm to push into production.",
+    ],
+  },
+  "sales order edit": {
+    sidebar: "Sales → Sales Orders → click row",
+    steps: [
+      "Open the SO row.",
+      "Edit fields inline (delivery date, lines, special orders).",
+      "Save. Cell turns yellow until saved.",
+      "If the SO is already CONFIRMED, status guardrails restrict which fields you can change.",
+    ],
+  },
+  "consignment order create": {
+    sidebar: "Sales → Consignment Orders → +New",
+    steps: [
+      "Pick the customer.",
+      "Add product lines (same dropdowns as SO).",
+      "Save. The CO flows through the same PO/JC pipeline as a SO.",
+    ],
+  },
+  "bom edit": {
+    sidebar: "Catalog → Products → click product → BOM tab",
+    steps: [
+      "Open the product.",
+      "Switch to the BOM tab.",
+      "Add / remove components — fabric, foam, wood, accessories.",
+      "Save. Existing POs are NOT retroactively changed.",
+    ],
+  },
+  "foam stock in": {
+    sidebar: "Inventory → Foam (WIP) → Stock In",
+    steps: [
+      "Click Stock In.",
+      "Pick the foam WIP code and grade.",
+      "Enter quantity (pieces).",
+      "Save — stock_qty on the wip_items row is incremented.",
+    ],
+  },
+  "run payroll": {
+    sidebar: "HR → Payroll → Generate",
+    steps: [
+      "Pick the period (YYYY-MM).",
+      "Click Generate — pulls attendance + OT, computes EPF/SOCSO/EIS/PCB.",
+      "Review each worker's draft slip.",
+      "Click Approve, then Pay when payment is sent.",
+      "If a worker-master change happened mid-month, click Regenerate to re-pull.",
+    ],
+  },
+  "print delivery order": {
+    sidebar: "Delivery → Delivery Orders → click row → Print",
+    steps: [
+      "Open the DO.",
+      "Click Print — generates a PDF with line items + delivery address + signature block.",
+    ],
+  },
+  "apply pic batch": {
+    sidebar: "Production → Daily Sheet → bulk PIC selector",
+    steps: [
+      "Open the daily sheet for the department.",
+      "Select multiple rows (Ctrl+Click or shift-click).",
+      "Pick PIC1 (and PIC2 if pair-work).",
+      "Click Apply — the same PIC is set on every selected row at once.",
+    ],
+  },
+  "confirm so": {
+    sidebar: "Sales → Sales Orders → click row → Confirm",
+    steps: [
+      "Open the DRAFT SO.",
+      "Click Confirm.",
+      "Production orders are auto-created per line + job cards spawned per department.",
+    ],
+  },
+  "create packing list": {
+    sidebar: "Delivery → Packing Lists → +New",
+    steps: [
+      "Pick the DOs going on the same truck run.",
+      "Save — system snapshots total stops, units, m3.",
+      "Print to give the warehouse one consolidated loading sheet.",
+    ],
+  },
+  "invoice from do": {
+    sidebar: "Sales → Delivery Orders → row menu → Invoice",
+    steps: [
+      "Find the DELIVERED DO.",
+      "Pick Invoice from the row menu.",
+      "Invoice is created from the DO line items + customer credit terms.",
+      "Status flips DO → INVOICED.",
+    ],
+  },
+  "record payment": {
+    sidebar: "Finance → Payments → +New Receipt",
+    steps: [
+      "Pick the customer.",
+      "Pick payment method (bank transfer / cheque / cash).",
+      "Allocate amount across outstanding invoices.",
+      "Save. paidAmount on each invoice is bumped accordingly.",
+    ],
+  },
+  "scan production": {
+    sidebar: "Worker portal (mobile) → Scan",
+    steps: [
+      "Worker logs in via PIN.",
+      "Scan the piece QR / sticker.",
+      "System updates job_card status + piece_pics.",
+    ],
+  },
+  "view daily report": {
+    sidebar: "Reports → Daily Report",
+    steps: [
+      "Pick the date (defaults today).",
+      "Choose the report type (compliance / efficiency / overdue / schedule).",
+      "Page renders, plus a Print/Email button at the top.",
+    ],
+  },
+  "stock take": {
+    sidebar: "Inventory → Stock Adjustments → +New",
+    steps: [
+      "Pick the WIP item or raw material.",
+      "Enter the counted quantity.",
+      "Save with a reason — a stock_movements row is logged for the variance.",
+    ],
+  },
+};
+
+const explainFeature: ToolDefinition = {
+  schema: {
+    name: "explain_feature",
+    description: "Look up how to perform a specific ERP feature (sidebar location + step-by-step). Pass the feature name in plain English; the tool does a case-insensitive partial match against a built-in knowledge base.",
+    input_schema: {
+      type: "object",
+      properties: { featureName: { type: "string", description: "Plain English feature name (e.g. 'create sales order', 'run payroll')." } },
+      required: ["featureName"],
+    },
+  },
+  execute: async (c, args) => {
+    const q = strOrNull(args.featureName);
+    if (!q) return { error: "featureName is required" };
+    const qLower = q.toLowerCase();
+    // Direct match.
+    let hit: { key: string; info: typeof FEATURE_HELP[string] } | null = null;
+    for (const [k, v] of Object.entries(FEATURE_HELP)) {
+      if (k === qLower) { hit = { key: k, info: v }; break; }
+    }
+    // Substring match.
+    if (!hit) {
+      for (const [k, v] of Object.entries(FEATURE_HELP)) {
+        const allWords = qLower.split(/\s+/).filter((w) => w.length > 2);
+        const matched = allWords.filter((w) => k.includes(w)).length;
+        if (matched >= Math.max(1, Math.ceil(allWords.length / 2))) {
+          hit = { key: k, info: v };
+          break;
+        }
+      }
+    }
+    await emitAudit(c, { resource: "assistant-tool", resourceId: q.slice(0, 60), action: "explain_feature", after: { featureName: q }, source: "ui" });
+    if (!hit) {
+      return {
+        query: q,
+        found: false,
+        knownFeatures: Object.keys(FEATURE_HELP),
+        note: "Feature not in built-in knowledge base. Suggest the user check the sidebar for the closest match.",
+      };
+    }
+    return {
+      query: q,
+      found: true,
+      featureKey: hit.key,
+      sidebarPath: hit.info.sidebar,
+      steps: hit.info.steps,
+      relatedPages: hit.info.relatedPages ?? [],
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
 export const TOOLS: ToolDefinition[] = [
+  // v1 — sales / consignment / delivery / invoices / payments / catalog / customers / suppliers / report / dashboard
   listSalesOrders,
   getSalesOrder,
   listConsignmentOrders,
@@ -1321,6 +4048,51 @@ export const TOOLS: ToolDefinition[] = [
   listSuppliers,
   getDailyReport,
   getDashboardStats,
+  // v1.5 — cross-module
+  traceOrder,
+  getCustomer360,
+  getProduct360,
+  searchAnything,
+  runSelectQuery,
+  // v1.5 — sales completeness
+  getSoMissingData,
+  // v1.5 — production
+  listProductionOrders,
+  getProductionOrder,
+  listJobCards,
+  getWipSnapshot,
+  analyzePoDelay,
+  getCapacityLoading,
+  // v1.5 — delivery
+  listPackingLists,
+  getPackingList,
+  getDispatchSummary,
+  // v1.5 — finance
+  getArOutstanding,
+  getGpAnalysis,
+  // v1.5 — inventory
+  listFoamInventory,
+  listFgUnits,
+  listFabrics,
+  getFabric,
+  listAccessories,
+  getAccessory,
+  predictReorderNeeds,
+  // v1.5 — HR / payroll
+  getEmployeeEfficiency,
+  getPayroll,
+  getDepartmentEfficiency,
+  // v1.5 — reports / KPIs
+  getDashboardKpis,
+  listOverdueOrders,
+  getAbnormalOrders,
+  // v1.5 — catalog
+  listCncTemplates,
+  getBom,
+  findProductsUsingFabric,
+  // v1.5 — system / help
+  listAuditEvents,
+  explainFeature,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

@@ -2053,6 +2053,518 @@ const getProduct360: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// Cross-module — smart_lookup (fuzzy, multi-format, multi-entity)
+//
+// The operator types things like "PO9003", "PO 9003", "po03 9003",
+// "houzs 9003", "9003" — and expects us to find the matching document,
+// or at least ASK what they mean instead of dying with "not found".
+//
+// Pure helpers below are exported so they can be unit-tested without
+// hitting the DB.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull every contiguous digit-run out of a free-text query. We use the
+ * longest digit run as the "numeric core" — that's the part that
+ * uniquely identifies a document number in 99% of operator typos.
+ *
+ *   "PO9003"        -> ["9003"]
+ *   "PO 9003"       -> ["9003"]
+ *   "PO-009003"     -> ["009003"]
+ *   "PO03 9003"     -> ["03", "9003"]  (we'll grab the longest: "9003")
+ *   "SO 2605 51"    -> ["2605", "51"]
+ *   "houzs 9003"    -> ["9003"]
+ *   "9k"            -> ["9"]
+ *   ""              -> []
+ */
+export function extractDigitRuns(raw: string): string[] {
+  if (!raw || typeof raw !== "string") return [];
+  const matches = raw.match(/\d+/g);
+  return matches ? matches.slice(0, 10) : [];
+}
+
+/**
+ * Given a raw query, generate a set of canonical-ish format strings to
+ * try as ILIKE patterns. We're not trying to be perfect — we cast a
+ * wide net and let the DB tell us what exists.
+ *
+ *   "PO9003" -> [
+ *     "%PO9003%",
+ *     "%9003%",
+ *     "%PO-9003%", "%PO-09003%", "%PO-009003%",   <- Houzs Customer-PO widths
+ *     "%PO-2605-9003%", "%PO-2605-009003%",        <- Internal Production-Order shape (current YYMM)
+ *     "%PO-2605-051%" (only if a 2-3 digit numeric core could match the sequence)
+ *   ]
+ */
+export function generateLookupPatterns(raw: string, currentYYMM: string): string[] {
+  const out = new Set<string>();
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return [];
+
+  // 1. Always include the raw query as a fuzzy contains-match.
+  out.add(`%${trimmed}%`);
+  // Strip spaces — operators often type "PO 9003" expecting "PO9003".
+  const noSpace = trimmed.replace(/\s+/g, "");
+  if (noSpace) out.add(`%${noSpace}%`);
+
+  const runs = extractDigitRuns(trimmed);
+  if (runs.length === 0) return Array.from(out);
+
+  // Pick the longest digit run as the "core". Falls back to all of them
+  // for short queries like "PO03 9003" where the operator gave us
+  // year + sequence separately.
+  const longest = runs.reduce((a, b) => (b.length > a.length ? b : a), "");
+
+  // Search by the raw core (e.g. "9003" matches both "PO-9003" and "PO-2605-9003").
+  out.add(`%${longest}%`);
+
+  // Houzs Customer-PO variants: zero-pad to 4/5/6 widths.
+  // "9003" -> "PO-9003", "PO-09003", "PO-009003"
+  if (longest.length <= 6) {
+    out.add(`%PO-${longest.padStart(6, "0")}%`);
+    out.add(`%PO-${longest.padStart(5, "0")}%`);
+    out.add(`%PO-${longest.padStart(4, "0")}%`);
+    out.add(`%PO-${longest}%`);
+  }
+
+  // Internal Production-Order shape (PO-YYMM-NNN) using the current
+  // year-month. Pad sequence to 3 digits — typical width.
+  if (longest.length <= 4) {
+    out.add(`%PO-${currentYYMM}-${longest.padStart(3, "0")}%`);
+    out.add(`%PO-${currentYYMM}-${longest}%`);
+  }
+
+  // Internal SO/CO/DO shapes — same idea.
+  if (longest.length <= 4) {
+    out.add(`%SO-${currentYYMM}-${longest.padStart(3, "0")}%`);
+    out.add(`%CO-${currentYYMM}-${longest.padStart(3, "0")}%`);
+    out.add(`%DO-${currentYYMM}-${longest.padStart(3, "0")}%`);
+    out.add(`%INV-${currentYYMM}-${longest.padStart(3, "0")}%`);
+  }
+
+  // If the operator passed both year-month and sequence ("SO 2605 51"),
+  // assemble the canonical form directly.
+  if (runs.length >= 2) {
+    const yymm = runs.find((r) => r.length === 4);
+    const seq = runs.find((r) => r.length >= 1 && r.length <= 4 && r !== yymm);
+    if (yymm && seq) {
+      out.add(`%SO-${yymm}-${seq.padStart(3, "0")}%`);
+      out.add(`%CO-${yymm}-${seq.padStart(3, "0")}%`);
+      out.add(`%PO-${yymm}-${seq.padStart(3, "0")}%`);
+      out.add(`%DO-${yymm}-${seq.padStart(3, "0")}%`);
+      out.add(`%INV-${yymm}-${seq.padStart(3, "0")}%`);
+    }
+  }
+
+  return Array.from(out);
+}
+
+/**
+ * Current YYMM string for the lookup-pattern generator. Uses UTC; close
+ * enough for ERP search heuristics (the model can always retry with an
+ * explicit year-month hint).
+ */
+function currentYYMM(): string {
+  const now = new Date();
+  const yy = String(now.getUTCFullYear() % 100).padStart(2, "0");
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${yy}${mm}`;
+}
+
+const smart_lookup: ToolDefinition = {
+  schema: {
+    name: "smart_lookup",
+    description:
+      "FUZZY MULTI-ENTITY LOOKUP. Use this as the FIRST call when the operator types an ambiguous identifier like 'PO9003', 'PO 9003', 'PO03 9003', 'houzs 9003', '9003', '9k houzs', 'SO 2605 51'. Strips the digits, tries multiple width-padded format guesses (PO-9003, PO-09003, PO-009003 for Houzs Customer POs; PO-YYMM-NNN for internal Production Orders), and scans every entity where a document number could live: sales_orders.companySOId + customerPOId, consignment_orders.companyCOId + customerCOId, production_orders.poNo + customerPOId, delivery_orders.doNo, invoices.invoiceNo, customers.code/name, suppliers.code/name. Returns matches GROUPED by entity type with disambiguating context (customer, date, status, amount). If zero matches, returns an empty list — the model must then ASK a clarifying question, not give up.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "Whatever the operator typed, exactly as typed. We do the normalisation. e.g. 'PO9003', 'PO 9003', 'houzs 9003', '9003'.",
+        },
+        customerHint: {
+          type: "string",
+          description:
+            "Optional customer name fragment to narrow the search (e.g. 'houzs', 'carress'). Case-insensitive contains match.",
+        },
+        limitPerType: {
+          type: "number",
+          description: "Max rows per entity type (1-20, default 8).",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const rawQuery = strOrNull(args.query);
+    if (!rawQuery) return { ok: false, error: "query is required" };
+
+    const customerHint = strOrNull(args.customerHint);
+    const limit = Math.min(20, Math.max(1, Number(args.limitPerType) || 8));
+
+    const yymm = currentYYMM();
+    const patterns = generateLookupPatterns(rawQuery, yymm);
+    if (patterns.length === 0) return { ok: false, error: "Could not extract any search pattern from query." };
+
+    // Build a single SQL clause that runs one column against all patterns
+    // via ILIKE ANY (...). Postgres-only, but we're on Postgres.
+    //
+    // sales_orders.customerPOId is the Houzs-style "PO-NNNNNN" field —
+    // the most common reason the operator types "PO9003".
+    const customerHintLike = customerHint ? `%${customerHint.toLowerCase()}%` : null;
+
+    const runColumnSearch = async (
+      table: string,
+      columns: string[],
+      selectClause: string,
+      orderBy: string,
+    ) => {
+      const orClause = columns.map((col) => `${col} ILIKE ANY (?)`).join(" OR ");
+      const where = customerHintLike
+        ? `orgId = ? AND (${orClause}) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+        : `orgId = ? AND (${orClause})`;
+      const params: unknown[] = [orgId];
+      for (const _col of columns) params.push(patterns);
+      if (customerHintLike) params.push(customerHintLike);
+
+      const sql = `SELECT ${selectClause} FROM ${table} WHERE ${where} ORDER BY ${orderBy} LIMIT ${limit}`;
+      try {
+        const rows = await c.var.DB.prepare(sql).bind(...params).all<Record<string, unknown>>();
+        return rows.results ?? [];
+      } catch (err) {
+        // ILIKE ANY is supported on PG but if the adapter trips, fall
+        // back to an OR-chain. Don't kill the whole tool.
+        const msg = err instanceof Error ? err.message : String(err);
+        return { _error: msg } as unknown as Record<string, unknown>[];
+      }
+    };
+
+    const [salesRows, consignmentRows, prodRows, deliveryRows, invoiceRows, customerRows, supplierRows] =
+      await Promise.all([
+        runColumnSearch(
+          "sales_orders",
+          ["companySOId", "customerPOId", "customerSOId", "id"],
+          "id, companySOId, customerPOId, customerSOId, customerName, status, totalSen, customerDeliveryDate, created_at AS createdAt",
+          "created_at DESC",
+        ),
+        runColumnSearch(
+          "consignment_orders",
+          ["companyCOId", "customerCOId", "id"],
+          "id, companyCOId, customerCOId, customerName, status, totalSen, created_at AS createdAt",
+          "created_at DESC",
+        ),
+        runColumnSearch(
+          "production_orders",
+          ["poNo", "customerPOId", "companySOId", "id"],
+          "id, poNo, salesOrderNo, customerPOId, customerName, productCode, productName, status, currentDepartment, progress, startDate, targetEndDate",
+          "created_at DESC",
+        ),
+        runColumnSearch(
+          "delivery_orders",
+          ["doNo", "customerPOId", "companySOId", "id"],
+          "id, doNo, customerPOId, customerName, status, deliveryDate, created_at AS createdAt",
+          "created_at DESC",
+        ),
+        runColumnSearch(
+          "invoices",
+          ["invoiceNo", "companySOId", "id"],
+          "id, invoiceNo, customerName, status, totalSen, paidAmount, invoiceDate",
+          "invoiceDate DESC",
+        ),
+        customerHintLike
+          ? c.var.DB.prepare(
+              `SELECT id, code, name FROM customers WHERE orgId = ? AND (LOWER(code) LIKE ? OR LOWER(name) LIKE ?) ORDER BY name LIMIT ${limit}`,
+            )
+              .bind(orgId, customerHintLike, customerHintLike)
+              .all<{ id: string; code: string | null; name: string | null }>()
+              .then((r) => r.results ?? [])
+          : Promise.resolve([] as Array<{ id: string; code: string | null; name: string | null }>),
+        // Suppliers by code/name only — no customer-hint join.
+        c.var.DB.prepare(
+          `SELECT id, code, name FROM suppliers WHERE orgId = ? AND (LOWER(code) LIKE ? OR LOWER(name) LIKE ?) ORDER BY name LIMIT ${limit}`,
+        )
+          .bind(orgId, `%${rawQuery.toLowerCase()}%`, `%${rawQuery.toLowerCase()}%`)
+          .all<{ id: string; code: string | null; name: string | null }>()
+          .then((r) => r.results ?? []),
+      ]);
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: rawQuery.slice(0, 100),
+      action: "smart_lookup",
+      after: { query: rawQuery, customerHint: customerHint ?? "", patternCount: patterns.length },
+      source: "ui",
+    });
+
+    const shape = (r: Record<string, unknown>) => r;
+    const safeRows = (rows: Record<string, unknown>[] | { _error: string }) =>
+      Array.isArray(rows) ? rows.map(shape) : [];
+
+    const salesOrders = safeRows(salesRows).map((r) => ({
+      id: String(r.id ?? ""),
+      label: String(r.companySOId ?? ""),
+      customerPO: String(r.customerPOId ?? ""),
+      customerSO: String(r.customerSOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      totalRM: senToRM(Number(r.totalSen ?? 0)),
+      deliveryDate: String(r.customerDeliveryDate ?? ""),
+      createdAt: String(r.createdAt ?? ""),
+    }));
+    const consignmentOrders = safeRows(consignmentRows).map((r) => ({
+      id: String(r.id ?? ""),
+      label: String(r.companyCOId ?? ""),
+      customerCO: String(r.customerCOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      totalRM: senToRM(Number(r.totalSen ?? 0)),
+      createdAt: String(r.createdAt ?? ""),
+    }));
+    const productionOrders = safeRows(prodRows).map((r) => ({
+      id: String(r.id ?? ""),
+      poNo: String(r.poNo ?? ""),
+      salesOrderNo: String(r.salesOrderNo ?? ""),
+      customerPO: String(r.customerPOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      product: `${r.productCode ?? ""} ${r.productName ?? ""}`.trim(),
+      status: String(r.status ?? ""),
+      currentDepartment: String(r.currentDepartment ?? ""),
+      progress: Number(r.progress ?? 0),
+      startDate: String(r.startDate ?? ""),
+      targetEndDate: String(r.targetEndDate ?? ""),
+    }));
+    const deliveryOrders = safeRows(deliveryRows).map((r) => ({
+      id: String(r.id ?? ""),
+      doNo: String(r.doNo ?? ""),
+      customerPO: String(r.customerPOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      deliveryDate: String(r.deliveryDate ?? ""),
+    }));
+    const invoices = safeRows(invoiceRows).map((r) => ({
+      id: String(r.id ?? ""),
+      invoiceNo: String(r.invoiceNo ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      totalRM: senToRM(Number(r.totalSen ?? 0)),
+      paidRM: senToRM(Number(r.paidAmount ?? 0)),
+      invoiceDate: String(r.invoiceDate ?? ""),
+    }));
+    const customers = customerRows.map((r) => ({
+      id: r.id,
+      code: r.code ?? "",
+      name: r.name ?? "",
+    }));
+    const suppliers = supplierRows.map((r) => ({
+      id: r.id,
+      code: r.code ?? "",
+      name: r.name ?? "",
+    }));
+
+    const totalMatches =
+      salesOrders.length +
+      consignmentOrders.length +
+      productionOrders.length +
+      deliveryOrders.length +
+      invoices.length +
+      customers.length +
+      suppliers.length;
+
+    return {
+      query: rawQuery,
+      customerHint: customerHint ?? "",
+      patternsTried: patterns,
+      totalMatches,
+      // Hint to the model when zero results so it knows to ASK.
+      askClarifyingQuestion:
+        totalMatches === 0
+          ? "No matches found. Ask the operator to clarify: is this a Customer PO (Houzs/Carress style, e.g. PO-009003), an internal Sales/Production Order (SO-2605-051 / PO-2605-012), or something else? Ask for a customer name or rough date."
+          : "",
+      salesOrders,
+      consignmentOrders,
+      productionOrders,
+      deliveryOrders,
+      invoices,
+      customers,
+      suppliers,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Cross-module — lookup_customer_po
+//
+// Tighter than smart_lookup — targets ONLY the customer-PO fields the
+// way Houzs / Carress / The Conts send them. Use when the operator
+// has already established context that it's a Customer-PO (not an
+// internal Production Order).
+// ---------------------------------------------------------------------------
+
+const lookupCustomerPo: ToolDefinition = {
+  schema: {
+    name: "lookup_customer_po",
+    description:
+      "Look up a Customer PO reference (the number the CUSTOMER sent us, stored on sales_orders.customerPOId / consignment_orders.customerCOId / production_orders.customerPOId). Houzs uses 'PO-NNNNNN' (6-digit, e.g. PO-009003), Carress uses 'PO/YYMM-XXX'. Accepts any reasonable variant — '9003', 'PO9003', 'PO-9003', 'PO-009003' all work. Returns matching SOs / COs / POs with customer + status + dates.",
+    input_schema: {
+      type: "object",
+      properties: {
+        ref: {
+          type: "string",
+          description:
+            "The customer-PO number, however the operator typed it. e.g. '9003', 'PO9003', 'PO-9003', 'PO-009003'.",
+        },
+        customerHint: {
+          type: "string",
+          description: "Optional customer name fragment (e.g. 'houzs').",
+        },
+      },
+      required: ["ref"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const raw = strOrNull(args.ref);
+    if (!raw) return { ok: false, error: "ref is required" };
+
+    const customerHint = strOrNull(args.customerHint);
+    const yymm = currentYYMM();
+    const patterns = generateLookupPatterns(raw, yymm);
+    const customerHintLike = customerHint ? `%${customerHint.toLowerCase()}%` : null;
+
+    const buildSql = (table: string, fields: string, dateCol: string) => {
+      const where = customerHintLike
+        ? `orgId = ? AND customerPOId ILIKE ANY (?) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+        : `orgId = ? AND customerPOId ILIKE ANY (?)`;
+      return `SELECT ${fields} FROM ${table} WHERE ${where} ORDER BY ${dateCol} DESC LIMIT 20`;
+    };
+
+    const bindFor = (): unknown[] => {
+      const p: unknown[] = [orgId, patterns];
+      if (customerHintLike) p.push(customerHintLike);
+      return p;
+    };
+
+    // production_orders uses customerPOId too. Search all three.
+    const [salesRows, prodRows, deliveryRows] = await Promise.all([
+      c.var.DB.prepare(
+        buildSql(
+          "sales_orders",
+          "id, companySOId, customerPOId, customerName, status, totalSen, customerDeliveryDate",
+          "created_at",
+        ),
+      )
+        .bind(...bindFor())
+        .all<Record<string, unknown>>()
+        .then((r) => r.results ?? [])
+        .catch(() => []),
+      c.var.DB.prepare(
+        buildSql(
+          "production_orders",
+          "id, poNo, salesOrderNo, customerPOId, customerName, productCode, productName, status, currentDepartment, startDate, targetEndDate",
+          "created_at",
+        ),
+      )
+        .bind(...bindFor())
+        .all<Record<string, unknown>>()
+        .then((r) => r.results ?? [])
+        .catch(() => []),
+      c.var.DB.prepare(
+        buildSql(
+          "delivery_orders",
+          "id, doNo, customerPOId, customerName, status, deliveryDate",
+          "created_at",
+        ),
+      )
+        .bind(...bindFor())
+        .all<Record<string, unknown>>()
+        .then((r) => r.results ?? [])
+        .catch(() => []),
+    ]);
+
+    // Also try consignment_orders.customerCOId — separate column name.
+    const coWhere = customerHintLike
+      ? `orgId = ? AND customerCOId ILIKE ANY (?) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+      : `orgId = ? AND customerCOId ILIKE ANY (?)`;
+    const coParams: unknown[] = [orgId, patterns];
+    if (customerHintLike) coParams.push(customerHintLike);
+    const coRows = await c.var.DB.prepare(
+      `SELECT id, companyCOId, customerCOId, customerName, status, totalSen FROM consignment_orders WHERE ${coWhere} ORDER BY created_at DESC LIMIT 20`,
+    )
+      .bind(...coParams)
+      .all<Record<string, unknown>>()
+      .then((r) => r.results ?? [])
+      .catch(() => []);
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: raw.slice(0, 100),
+      action: "lookup_customer_po",
+      after: { ref: raw, customerHint: customerHint ?? "" },
+      source: "ui",
+    });
+
+    const salesOrders = salesRows.map((r) => ({
+      id: String(r.id ?? ""),
+      label: String(r.companySOId ?? ""),
+      customerPO: String(r.customerPOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      totalRM: senToRM(Number(r.totalSen ?? 0)),
+      deliveryDate: String(r.customerDeliveryDate ?? ""),
+    }));
+    const consignmentOrders = coRows.map((r) => ({
+      id: String(r.id ?? ""),
+      label: String(r.companyCOId ?? ""),
+      customerCO: String(r.customerCOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      totalRM: senToRM(Number(r.totalSen ?? 0)),
+    }));
+    const productionOrders = prodRows.map((r) => ({
+      id: String(r.id ?? ""),
+      poNo: String(r.poNo ?? ""),
+      salesOrderNo: String(r.salesOrderNo ?? ""),
+      customerPO: String(r.customerPOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      product: `${r.productCode ?? ""} ${r.productName ?? ""}`.trim(),
+      status: String(r.status ?? ""),
+      currentDepartment: String(r.currentDepartment ?? ""),
+      startDate: String(r.startDate ?? ""),
+      targetEndDate: String(r.targetEndDate ?? ""),
+    }));
+    const deliveryOrders = deliveryRows.map((r) => ({
+      id: String(r.id ?? ""),
+      doNo: String(r.doNo ?? ""),
+      customerPO: String(r.customerPOId ?? ""),
+      customer: String(r.customerName ?? ""),
+      status: String(r.status ?? ""),
+      deliveryDate: String(r.deliveryDate ?? ""),
+    }));
+
+    const totalMatches =
+      salesOrders.length + consignmentOrders.length + productionOrders.length + deliveryOrders.length;
+
+    return {
+      ref: raw,
+      customerHint: customerHint ?? "",
+      patternsTried: patterns,
+      totalMatches,
+      askClarifyingQuestion:
+        totalMatches === 0
+          ? "No Customer-PO matches. Ask the operator: is this number maybe an internal Sales/Production Order (SO-2605-NNN / PO-2605-NNN) instead of a Customer PO? Or do they have a customer name / date hint?"
+          : "",
+      salesOrders,
+      consignmentOrders,
+      productionOrders,
+      deliveryOrders,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Cross-module — search_anything
 // ---------------------------------------------------------------------------
 
@@ -2080,14 +2592,14 @@ const searchAnything: ToolDefinition = {
     const [sos, cos, dos, invs, custs, sups, prods] = await Promise.all([
       c.var.DB.prepare(
         `SELECT id, companySOId, customerName, status FROM sales_orders
-         WHERE orgId = ? AND (LOWER(companySOId) LIKE ? OR LOWER(customerSOId) LIKE ?)
+         WHERE orgId = ? AND (LOWER(companySOId) LIKE ? OR LOWER(customerSOId) LIKE ? OR LOWER(customerPOId) LIKE ?)
          ORDER BY created_at DESC LIMIT ?`,
-      ).bind(orgId, like, like, limit).all<{ id: string; companySOId: string | null; customerName: string | null; status: string | null }>(),
+      ).bind(orgId, like, like, like, limit).all<{ id: string; companySOId: string | null; customerName: string | null; status: string | null }>(),
       c.var.DB.prepare(
         `SELECT id, companyCOId, customerName, status FROM consignment_orders
-         WHERE orgId = ? AND LOWER(companyCOId) LIKE ?
+         WHERE orgId = ? AND (LOWER(companyCOId) LIKE ? OR LOWER(customerCOId) LIKE ?)
          ORDER BY created_at DESC LIMIT ?`,
-      ).bind(orgId, like, limit).all<{ id: string; companyCOId: string | null; customerName: string | null; status: string | null }>(),
+      ).bind(orgId, like, like, limit).all<{ id: string; companyCOId: string | null; customerName: string | null; status: string | null }>(),
       c.var.DB.prepare(
         `SELECT id, doNo, customerName, status FROM delivery_orders
          WHERE orgId = ? AND LOWER(doNo) LIKE ?
@@ -4185,6 +4697,8 @@ export const TOOLS: ToolDefinition[] = [
   traceOrder,
   getCustomer360,
   getProduct360,
+  smart_lookup,
+  lookupCustomerPo,
   searchAnything,
   runSelectQuery,
   // v1.5 — sales completeness

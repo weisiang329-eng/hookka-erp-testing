@@ -46,7 +46,7 @@ const app = new Hono<Env>();
 // switching here is a one-line edit.
 const MODEL = "claude-sonnet-4-5-20250929";
 
-const MAX_ITERATIONS = 10;
+const MAX_ITERATIONS = 6;
 const MAX_MESSAGES_BYTES = 200_000;
 const MAX_TOKENS = 4096;
 
@@ -87,7 +87,23 @@ Style:
 
 **Help / how-to**:
 - If asked "how do I do X", use \`explain_feature\` first, then explain in your own words.
-- If you don't know the feature, say "I'm not sure where that is in the UI — try the sidebar's [best guess section]".`;
+- If you don't know the feature, say "I'm not sure where that is in the UI — try the sidebar's [best guess section]".
+
+**Identifier formats** (Hookka conventions):
+- Sales Order: SO-YYMM-NNN (e.g., SO-2605-303 = May 2026 sequence 303). Current year is 2026.
+- Consignment Order: CO-YYMM-NNN
+- Production Order: PO-YYMM-NNN
+- Delivery Order: DO-YYMM-NNN
+- Invoice: INV-YYMM-NNN
+- Payment: PAY-YYMM-NNN
+
+If the user types something close but not exact (e.g., "SO 2505 300", "SO2605300", "so-2605-300"), normalise to canonical form (SO-2605-300) before calling tools.
+If the year looks unusual (e.g., 2505 = 2025 May, but current year is 2026), ask the user to confirm before searching: "Did you mean SO-2605-300 (May 2026) or SO-2505-300 (May 2025)?"
+
+**Stopping rule (CRITICAL)**:
+- If a dedicated lookup tool (get_sales_order, get_invoice, get_delivery_order, trace_order, get_bom, etc.) returns an empty/null/not-found result, STOP. Do NOT immediately try another lookup tool or fall back to run_select_query. Instead, reply to the user: "I couldn't find [X]. Could you double-check the number? Example formats: SO-2605-303, INV-2605-099, DO-2605-097."
+- Only use run_select_query for genuinely novel questions where NO dedicated tool fits — never as a fallback after a failed lookup.
+- You have at most 6 tool calls per question. After that you MUST produce a text answer, even if it's "I couldn't fully answer that — here's what I found so far: ...".`;
 
 type IncomingMessage = {
   role: "user" | "assistant";
@@ -314,11 +330,14 @@ app.post("/chat", async (c) => {
         }
 
         if (iteration >= MAX_ITERATIONS) {
+          // The model exhausted its tool-call budget without producing a
+          // final text turn — emit a graceful synthetic answer instead of
+          // an error event (which leaves the UI with empty text).
           controller.enqueue(
             sseEvent({
-              type: "error",
-              message:
-                "Tool-call loop ran out of iterations. Try simplifying your question.",
+              type: "text",
+              value:
+                "I tried multiple lookups but couldn't piece together a clean answer. Could you rephrase or give me a more specific identifier (e.g. SO-2605-303, INV-2605-099, DO-2605-097)?",
             }),
           );
         }

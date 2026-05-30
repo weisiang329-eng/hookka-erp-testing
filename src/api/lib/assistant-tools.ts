@@ -169,13 +169,14 @@ const getSalesOrder: ToolDefinition = {
   schema: {
     name: "get_sales_order",
     description:
-      "Get full detail of a single sales order including line items, related delivery orders, invoices, and payments. Look up by SO id (e.g. 'so-xxxxxxxx') or by companySOId (e.g. 'SO-2605-253').",
+      "Get full detail of a single sales order including line items, related delivery orders, invoices, and payments. Pass whatever the user typed — the SO code they know (e.g. 'SO-2605-303') or the internal id (e.g. 'so-4e5f8592'). Both work, case-insensitive.",
     input_schema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "Either the internal SO id or the companySOId code.",
+          description:
+            "The SO identifier as the user knows it, e.g. 'SO-2605-303' or the internal id like 'so-4e5f8592'. Both work.",
         },
       },
       required: ["id"],
@@ -184,15 +185,16 @@ const getSalesOrder: ToolDefinition = {
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.id);
-    if (!lookup) return { error: "id is required" };
+    if (!lookup) return { ok: false, error: "id is required" };
 
+    // Try user-facing code first (case-insensitive), then internal id.
     const so = await c.var.DB
       .prepare(
         `SELECT id, companySOId, customerName, customerId, status, totalSen,
                 subtotalSen, customerDeliveryDate, hookkaExpectedDD, customerPO,
                 created_at AS createdAt
          FROM sales_orders
-         WHERE orgId = ? AND (id = ? OR companySOId = ?)
+         WHERE orgId = ? AND (companySOId ILIKE ? OR id ILIKE ?)
          LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
@@ -209,7 +211,7 @@ const getSalesOrder: ToolDefinition = {
         customerPO: string | null;
         createdAt: string | null;
       }>();
-    if (!so) return { error: `Sales order not found: ${lookup}` };
+    if (!so) return { ok: false, error: `Sales order not found: ${lookup}` };
 
     const [items, dos, invs] = await Promise.all([
       c.var.DB
@@ -366,11 +368,15 @@ const getConsignmentOrder: ToolDefinition = {
   schema: {
     name: "get_consignment_order",
     description:
-      "Get full detail of a single consignment order including line items. Look up by id or companyCOId.",
+      "Get full detail of a single consignment order including line items. Pass whatever the user typed — the CO code (e.g. 'CO-2605-045') or the internal id. Both work, case-insensitive.",
     input_schema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Internal CO id or companyCOId." },
+        id: {
+          type: "string",
+          description:
+            "The CO identifier as the user knows it, e.g. 'CO-2605-045' or the internal id. Both work.",
+        },
       },
       required: ["id"],
     },
@@ -378,14 +384,14 @@ const getConsignmentOrder: ToolDefinition = {
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.id);
-    if (!lookup) return { error: "id is required" };
+    if (!lookup) return { ok: false, error: "id is required" };
 
     const co = await c.var.DB
       .prepare(
         `SELECT id, companyCOId, customerName, customerId, status, totalSen,
                 created_at AS createdAt
          FROM consignment_orders
-         WHERE orgId = ? AND (id = ? OR companyCOId = ?)
+         WHERE orgId = ? AND (companyCOId ILIKE ? OR id ILIKE ?)
          LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
@@ -398,7 +404,7 @@ const getConsignmentOrder: ToolDefinition = {
         totalSen: number | null;
         createdAt: string | null;
       }>();
-    if (!co) return { error: `Consignment order not found: ${lookup}` };
+    if (!co) return { ok: false, error: `Consignment order not found: ${lookup}` };
 
     const items = await c.var.DB
       .prepare(
@@ -509,11 +515,16 @@ const listDeliveryOrders: ToolDefinition = {
 const getDeliveryOrder: ToolDefinition = {
   schema: {
     name: "get_delivery_order",
-    description: "Get full detail of a single delivery order. Look up by id or doNo (e.g. 'DO-2605-12').",
+    description:
+      "Get full detail of a single delivery order. Pass whatever the user typed — the DO number (e.g. 'DO-2605-097') or the internal id. Both work, case-insensitive.",
     input_schema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Internal id or doNo." },
+        id: {
+          type: "string",
+          description:
+            "The DO identifier as the user knows it, e.g. 'DO-2605-097' or the internal id. Both work.",
+        },
       },
       required: ["id"],
     },
@@ -521,14 +532,14 @@ const getDeliveryOrder: ToolDefinition = {
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.id);
-    if (!lookup) return { error: "id is required" };
+    if (!lookup) return { ok: false, error: "id is required" };
 
     const row = await c.var.DB
       .prepare(
         `SELECT id, doNo, customerName, customerId, status, deliveryDate,
                 deliveryAddress, salesOrderId, created_at AS createdAt
          FROM delivery_orders
-         WHERE orgId = ? AND (id = ? OR doNo = ?)
+         WHERE orgId = ? AND (doNo ILIKE ? OR id ILIKE ?)
          LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
@@ -543,7 +554,7 @@ const getDeliveryOrder: ToolDefinition = {
         salesOrderId: string | null;
         createdAt: string | null;
       }>();
-    if (!row) return { error: `Delivery order not found: ${lookup}` };
+    if (!row) return { ok: false, error: `Delivery order not found: ${lookup}` };
     return {
       id: row.id,
       doNo: row.doNo ?? "",
@@ -630,11 +641,16 @@ const listInvoices: ToolDefinition = {
 const getInvoice: ToolDefinition = {
   schema: {
     name: "get_invoice",
-    description: "Get full detail of one invoice. Look up by id or invoiceNumber.",
+    description:
+      "Get full detail of one invoice. Pass whatever the user typed — the invoice number (e.g. 'INV-2605-099') or the internal id. Both work, case-insensitive.",
     input_schema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Internal id or invoiceNumber." },
+        id: {
+          type: "string",
+          description:
+            "The invoice identifier as the user knows it, e.g. 'INV-2605-099' or the internal id. Both work.",
+        },
       },
       required: ["id"],
     },
@@ -642,7 +658,7 @@ const getInvoice: ToolDefinition = {
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.id);
-    if (!lookup) return { error: "id is required" };
+    if (!lookup) return { ok: false, error: "id is required" };
 
     const row = await c.var.DB
       .prepare(
@@ -650,7 +666,7 @@ const getInvoice: ToolDefinition = {
                 totalSen, subtotalSen, COALESCE(paidAmount, 0) AS paidAmount,
                 invoiceDate, dueDate, salesOrderId
          FROM invoices
-         WHERE orgId = ? AND (id = ? OR invoiceNumber = ?)
+         WHERE orgId = ? AND (invoiceNumber ILIKE ? OR id ILIKE ?)
          LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
@@ -667,7 +683,7 @@ const getInvoice: ToolDefinition = {
         dueDate: string | null;
         salesOrderId: string | null;
       }>();
-    if (!row) return { error: `Invoice not found: ${lookup}` };
+    if (!row) return { ok: false, error: `Invoice not found: ${lookup}` };
     return {
       id: row.id,
       invoiceNumber: row.invoiceNumber ?? "",
@@ -865,21 +881,27 @@ const getProduct: ToolDefinition = {
       }>();
     if (!p) return { error: `Product not found: ${code}` };
 
-    const bom = await c.var.DB
-      .prepare(
-        `SELECT materialCode, materialName, quantity, unit
-         FROM bom_components
-         WHERE productId = ?
-         ORDER BY id
-         LIMIT 100`,
-      )
-      .bind(p.id)
-      .all<{
-        materialCode: string | null;
-        materialName: string | null;
-        quantity: number | null;
-        unit: string | null;
-      }>();
+    // Read BOM from the active bom_templates row (the legacy bom_components
+    // columns don't match the live schema — see get_bom for the same fix).
+    let bomComponents: unknown[] = [];
+    try {
+      const tpl = await c.var.DB
+        .prepare(
+          `SELECT wipComponents FROM bom_templates
+           WHERE productCode ILIKE ?
+           ORDER BY (CASE WHEN UPPER(COALESCE(versionStatus, '')) = 'ACTIVE' THEN 0 ELSE 1 END),
+                    effectiveFrom DESC NULLS LAST
+           LIMIT 1`,
+        )
+        .bind(p.code ?? "")
+        .first<{ wipComponents: string | null }>();
+      if (tpl?.wipComponents) {
+        try {
+          const parsed = JSON.parse(tpl.wipComponents);
+          if (Array.isArray(parsed)) bomComponents = parsed;
+        } catch { /* ignore malformed JSON */ }
+      }
+    } catch { /* table missing → empty BOM */ }
 
     return {
       id: p.id,
@@ -893,12 +915,7 @@ const getProduct: ToolDefinition = {
       fabricUsage: p.fabricUsage ?? 0,
       productionTimeMinutes: p.productionTimeMinutes ?? 0,
       status: p.status ?? "",
-      bom: (bom.results ?? []).map((r) => ({
-        materialCode: r.materialCode ?? "",
-        materialName: r.materialName ?? "",
-        quantity: r.quantity ?? 0,
-        unit: r.unit ?? "",
-      })),
+      bom: bomComponents,
     };
   },
 };
@@ -1316,7 +1333,7 @@ const traceOrder: ToolDefinition = {
   schema: {
     name: "trace_order",
     description:
-      "Trace the full cascade chain for any document. Given a SO/CO/PO/DO/INVOICE id (internal or human code), returns the linked upstream + downstream documents: SO/CO → production_orders → job_cards → delivery_orders → invoices → payments. Use for 'where is SO-X' or 'what's the status of PO-Y' style questions.",
+      "Trace the full cascade chain for any document. Pass the SO/CO/PO/DO/INVOICE identifier as the user typed it (e.g. 'SO-2605-303', 'PO-2605-012', 'DO-2605-097', 'INV-2605-099') OR the internal id — both work, case-insensitive. Returns linked upstream + downstream documents: SO/CO → production_orders → job_cards → delivery_orders → invoices → payments.",
     input_schema: {
       type: "object",
       properties: {
@@ -1324,7 +1341,11 @@ const traceOrder: ToolDefinition = {
           type: "string",
           description: "One of: SO, CO, PO, DO, INVOICE.",
         },
-        id: { type: "string", description: "Internal id OR human code (SO-2605-253, PO-..., DO-..., INV-...)." },
+        id: {
+          type: "string",
+          description:
+            "The identifier as the user knows it (e.g. 'SO-2605-303', 'INV-2605-099', 'DO-2605-097', 'PO-2605-012') or the internal id. Both work.",
+        },
       },
       required: ["type", "id"],
     },
@@ -1333,7 +1354,7 @@ const traceOrder: ToolDefinition = {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.id);
     const type = String(args.type ?? "").toUpperCase();
-    if (!lookup) return { error: "id is required" };
+    if (!lookup) return { ok: false, error: "id is required" };
 
     // Resolve starting SO and/or CO id(s) from the entry point.
     let soId: string | null = null;
@@ -1342,51 +1363,51 @@ const traceOrder: ToolDefinition = {
     if (type === "SO") {
       const r = await c.var.DB
         .prepare(
-          "SELECT id FROM sales_orders WHERE orgId = ? AND (id = ? OR companySOId = ?) LIMIT 1",
+          "SELECT id FROM sales_orders WHERE orgId = ? AND (companySOId ILIKE ? OR id ILIKE ?) LIMIT 1",
         )
         .bind(orgId, lookup, lookup)
         .first<{ id: string }>();
-      if (!r) return { error: `Sales order not found: ${lookup}` };
+      if (!r) return { ok: false, error: `Sales order not found: ${lookup}` };
       soId = r.id;
     } else if (type === "CO") {
       const r = await c.var.DB
         .prepare(
-          "SELECT id FROM consignment_orders WHERE orgId = ? AND (id = ? OR companyCOId = ?) LIMIT 1",
+          "SELECT id FROM consignment_orders WHERE orgId = ? AND (companyCOId ILIKE ? OR id ILIKE ?) LIMIT 1",
         )
         .bind(orgId, lookup, lookup)
         .first<{ id: string }>();
-      if (!r) return { error: `Consignment order not found: ${lookup}` };
+      if (!r) return { ok: false, error: `Consignment order not found: ${lookup}` };
       coId = r.id;
     } else if (type === "PO") {
       const r = await c.var.DB
         .prepare(
-          "SELECT id, salesOrderId, consignmentOrderId FROM production_orders WHERE orgId = ? AND (id = ? OR poNo = ?) LIMIT 1",
+          "SELECT id, salesOrderId, consignmentOrderId FROM production_orders WHERE orgId = ? AND (poNo ILIKE ? OR id ILIKE ?) LIMIT 1",
         )
         .bind(orgId, lookup, lookup)
         .first<{ id: string; salesOrderId: string | null; consignmentOrderId: string | null }>();
-      if (!r) return { error: `Production order not found: ${lookup}` };
+      if (!r) return { ok: false, error: `Production order not found: ${lookup}` };
       soId = r.salesOrderId ?? null;
       coId = r.consignmentOrderId ?? null;
     } else if (type === "DO") {
       const r = await c.var.DB
         .prepare(
-          "SELECT id, salesOrderId FROM delivery_orders WHERE orgId = ? AND (id = ? OR doNo = ?) LIMIT 1",
+          "SELECT id, salesOrderId FROM delivery_orders WHERE orgId = ? AND (doNo ILIKE ? OR id ILIKE ?) LIMIT 1",
         )
         .bind(orgId, lookup, lookup)
         .first<{ id: string; salesOrderId: string | null }>();
-      if (!r) return { error: `Delivery order not found: ${lookup}` };
+      if (!r) return { ok: false, error: `Delivery order not found: ${lookup}` };
       soId = r.salesOrderId ?? null;
     } else if (type === "INVOICE") {
       const r = await c.var.DB
         .prepare(
-          "SELECT id, salesOrderId FROM invoices WHERE orgId = ? AND (id = ? OR invoiceNumber = ?) LIMIT 1",
+          "SELECT id, salesOrderId FROM invoices WHERE orgId = ? AND (invoiceNumber ILIKE ? OR id ILIKE ?) LIMIT 1",
         )
         .bind(orgId, lookup, lookup)
         .first<{ id: string; salesOrderId: string | null }>();
-      if (!r) return { error: `Invoice not found: ${lookup}` };
+      if (!r) return { ok: false, error: `Invoice not found: ${lookup}` };
       soId = r.salesOrderId ?? null;
     } else {
-      return { error: `Unknown type: ${type}. Use SO, CO, PO, DO, or INVOICE.` };
+      return { ok: false, error: `Unknown type: ${type}. Use SO, CO, PO, DO, or INVOICE.` };
     }
 
     if (!soId && !coId) {
@@ -1922,19 +1943,18 @@ const getProduct360: ToolDefinition = {
     sixAgo.setMonth(sixAgo.getMonth() - 6);
     const sixAgoStr = sixAgo.toISOString().slice(0, 10);
 
-    const [bom, wip, fg, vol, topCust] = await Promise.all([
+    const [bomTpl, wip, fg, vol, topCust] = await Promise.all([
       c.var.DB
         .prepare(
-          `SELECT materialCode, materialName, quantity, unit
-           FROM bom_components WHERE productId = ? ORDER BY id LIMIT 100`,
+          `SELECT wipComponents FROM bom_templates
+           WHERE productCode ILIKE ?
+           ORDER BY (CASE WHEN UPPER(COALESCE(versionStatus, '')) = 'ACTIVE' THEN 0 ELSE 1 END),
+                    effectiveFrom DESC NULLS LAST
+           LIMIT 1`,
         )
-        .bind(p.id)
-        .all<{
-          materialCode: string | null;
-          materialName: string | null;
-          quantity: number | null;
-          unit: string | null;
-        }>(),
+        .bind(p.code ?? code)
+        .first<{ wipComponents: string | null }>()
+        .catch(() => null),
       c.var.DB
         .prepare(
           `SELECT COALESCE(SUM(stockQty), 0) AS qty
@@ -1998,12 +2018,13 @@ const getProduct360: ToolDefinition = {
         productionTimeMinutes: p.productionTimeMinutes ?? 0,
         status: p.status ?? "",
       },
-      bom: (bom.results ?? []).map((r) => ({
-        materialCode: r.materialCode ?? "",
-        materialName: r.materialName ?? "",
-        quantity: r.quantity ?? 0,
-        unit: r.unit ?? "",
-      })),
+      bom: (() => {
+        if (!bomTpl?.wipComponents) return [];
+        try {
+          const parsed = JSON.parse(bomTpl.wipComponents);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch { return []; }
+      })(),
       wipUnits: wip?.qty ?? 0,
       fgUnitsInStock: fg?.n ?? 0,
       last6Months: {
@@ -2203,12 +2224,12 @@ const getSoMissingData: ToolDefinition = {
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.soId);
-    if (!lookup) return { error: "soId is required" };
+    if (!lookup) return { ok: false, error: "soId is required" };
 
     const so = await c.var.DB
       .prepare(
         `SELECT id, companySOId, customerDeliveryDate, hookkaExpectedDD, customerPO, notes
-         FROM sales_orders WHERE orgId = ? AND (id = ? OR companySOId = ?) LIMIT 1`,
+         FROM sales_orders WHERE orgId = ? AND (companySOId ILIKE ? OR id ILIKE ?) LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
       .first<{
@@ -2219,7 +2240,7 @@ const getSoMissingData: ToolDefinition = {
         customerPO: string | null;
         notes: string | null;
       }>();
-    if (!so) return { error: `SO not found: ${lookup}` };
+    if (!so) return { ok: false, error: `SO not found: ${lookup}` };
 
     const items = await c.var.DB
       .prepare(
@@ -2344,17 +2365,24 @@ const listProductionOrders: ToolDefinition = {
 const getProductionOrder: ToolDefinition = {
   schema: {
     name: "get_production_order",
-    description: "Get a production order in full: header, job_cards by department, plus linked SO/CO and any linked DO.",
+    description:
+      "Get a production order in full: header, job_cards by department, plus linked SO/CO and any linked DO. Pass whatever the user typed — the PO number (e.g. 'PO-2605-012') or the internal id. Both work, case-insensitive.",
     input_schema: {
       type: "object",
-      properties: { id: { type: "string", description: "Internal id or poNo." } },
+      properties: {
+        id: {
+          type: "string",
+          description:
+            "The PO identifier as the user knows it, e.g. 'PO-2605-012' or the internal id. Both work.",
+        },
+      },
       required: ["id"],
     },
   },
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.id);
-    if (!lookup) return { error: "id is required" };
+    if (!lookup) return { ok: false, error: "id is required" };
 
     const po = await c.var.DB
       .prepare(
@@ -2362,7 +2390,7 @@ const getProductionOrder: ToolDefinition = {
                 customerName, productCode, productName, itemCategory, sizeLabel, fabricCode,
                 quantity, gapInches, divanHeightInches, legHeightInches, specialOrder, notes,
                 status, currentDepartment, progress, startDate, targetEndDate, completedDate
-         FROM production_orders WHERE orgId = ? AND (id = ? OR poNo = ?) LIMIT 1`,
+         FROM production_orders WHERE orgId = ? AND (poNo ILIKE ? OR id ILIKE ?) LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
       .first<{
@@ -2375,7 +2403,7 @@ const getProductionOrder: ToolDefinition = {
         status: string; currentDepartment: string | null; progress: number;
         startDate: string | null; targetEndDate: string | null; completedDate: string | null;
       }>();
-    if (!po) return { error: `PO not found: ${lookup}` };
+    if (!po) return { ok: false, error: `PO not found: ${lookup}` };
 
     const [jcs, dos] = await Promise.all([
       c.var.DB.prepare(
@@ -2550,13 +2578,13 @@ const analyzePoDelay: ToolDefinition = {
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const lookup = strOrNull(args.productionOrderId);
-    if (!lookup) return { error: "productionOrderId is required" };
+    if (!lookup) return { ok: false, error: "productionOrderId is required" };
 
     const po = await c.var.DB
       .prepare(
         `SELECT id, poNo, status, quantity, productCode, salesOrderId, currentDepartment,
                 progress, startDate, targetEndDate, completedDate
-         FROM production_orders WHERE orgId = ? AND (id = ? OR poNo = ?) LIMIT 1`,
+         FROM production_orders WHERE orgId = ? AND (poNo ILIKE ? OR id ILIKE ?) LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
       .first<{
@@ -2565,7 +2593,7 @@ const analyzePoDelay: ToolDefinition = {
         currentDepartment: string | null; progress: number;
         startDate: string | null; targetEndDate: string | null; completedDate: string | null;
       }>();
-    if (!po) return { error: `PO not found: ${lookup}` };
+    if (!po) return { ok: false, error: `PO not found: ${lookup}` };
 
     const jcs = await c.var.DB.prepare(
       `SELECT id, departmentCode, sequence, status, dueDate, completedDate,
@@ -3737,32 +3765,120 @@ const listCncTemplates: ToolDefinition = {
 const getBom: ToolDefinition = {
   schema: {
     name: "get_bom",
-    description: "Get BOM components for a product.",
+    description:
+      "Get BOM components for a product. Returns the active BOM template's WIP component tree (fabric, foam, wood, accessories per sub-assembly). Pass the product code as the user knows it, e.g. '1003-(K)'.",
     input_schema: {
       type: "object",
-      properties: { productCode: { type: "string", description: "Product code." } },
+      properties: {
+        productCode: {
+          type: "string",
+          description: "Product code (e.g. '1003-(K)', 'BO315-02'). Case-insensitive.",
+        },
+      },
       required: ["productCode"],
     },
   },
   execute: async (c, args) => {
     const orgId = getOrgId(c);
     const code = strOrNull(args.productCode);
-    if (!code) return { error: "productCode is required" };
-    const p = await c.var.DB.prepare(
-      "SELECT id, code, name FROM products WHERE orgId = ? AND code = ? LIMIT 1",
-    ).bind(orgId, code).first<{ id: string; code: string; name: string }>();
-    if (!p) return { error: `Product not found: ${code}` };
-    const bom = await c.var.DB.prepare(
-      `SELECT materialCode, materialName, quantity, unit
-       FROM bom_components WHERE productId = ? ORDER BY id LIMIT 200`,
-    ).bind(p.id).all<{ materialCode: string | null; materialName: string | null; quantity: number | null; unit: string | null }>();
-    await emitAudit(c, { resource: "assistant-tool", resourceId: code, action: "get_bom", after: { code }, source: "ui" });
+    if (!code) return { ok: false, error: "productCode is required" };
+
+    // Resolve product (case-insensitive) so we can return the canonical code/name.
+    const p = await c.var.DB
+      .prepare(
+        "SELECT id, code, name, category FROM products WHERE orgId = ? AND code ILIKE ? LIMIT 1",
+      )
+      .bind(orgId, code)
+      .first<{
+        id: string;
+        code: string;
+        name: string;
+        category: string | null;
+      }>();
+    if (!p) {
+      return { ok: false, error: `Product not found: ${code}` };
+    }
+
+    // Active BOM template lives in bom_templates.wipComponents (JSON). The
+    // legacy bom_components table is keyed by snake_case columns that the
+    // assistant adapter doesn't auto-rewrite for SELECT-list aliases, so
+    // querying the template here matches what the BOM editor reads.
+    let wipComponents: unknown[] = [];
+    let templateFound = false;
+    try {
+      const tpl = await c.var.DB
+        .prepare(
+          `SELECT wipComponents FROM bom_templates
+           WHERE productCode ILIKE ?
+             AND UPPER(COALESCE(versionStatus, '')) = 'ACTIVE'
+           ORDER BY effectiveFrom DESC NULLS LAST
+           LIMIT 1`,
+        )
+        .bind(p.code)
+        .first<{ wipComponents: string | null }>();
+      if (tpl) {
+        templateFound = true;
+        if (tpl.wipComponents) {
+          try {
+            const parsed = JSON.parse(tpl.wipComponents);
+            if (Array.isArray(parsed)) wipComponents = parsed;
+          } catch {
+            // Malformed JSON — surface empty BOM rather than crashing.
+          }
+        }
+      } else {
+        // No ACTIVE template — fall back to most-recent template of any status.
+        const anyTpl = await c.var.DB
+          .prepare(
+            `SELECT wipComponents FROM bom_templates
+             WHERE productCode ILIKE ?
+             ORDER BY effectiveFrom DESC NULLS LAST
+             LIMIT 1`,
+          )
+          .bind(p.code)
+          .first<{ wipComponents: string | null }>();
+        if (anyTpl) {
+          templateFound = true;
+          if (anyTpl.wipComponents) {
+            try {
+              const parsed = JSON.parse(anyTpl.wipComponents);
+              if (Array.isArray(parsed)) wipComponents = parsed;
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+    } catch {
+      // Table missing or transient DB error — fall through to empty BOM.
+    }
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: p.code,
+      action: "get_bom",
+      after: { code: p.code },
+      source: "ui",
+    });
+
+    if (!templateFound) {
+      return {
+        ok: true,
+        productCode: p.code,
+        productName: p.name,
+        category: p.category ?? "",
+        bom: [],
+        note: "No BOM template defined for this product.",
+      };
+    }
+
     return {
-      productCode: p.code, productName: p.name,
-      bom: (bom.results ?? []).map((r) => ({
-        materialCode: r.materialCode ?? "", materialName: r.materialName ?? "",
-        quantity: r.quantity ?? 0, unit: r.unit ?? "",
-      })),
+      ok: true,
+      productCode: p.code,
+      productName: p.name,
+      category: p.category ?? "",
+      bom: wipComponents,
+      note: wipComponents.length === 0 ? "BOM template exists but has no components." : undefined,
     };
   },
 };

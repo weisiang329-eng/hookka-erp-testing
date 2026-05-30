@@ -60,7 +60,10 @@ const MAX_ITERATIONS = 8;
 const MAX_MESSAGES_BYTES = 200_000;
 const MAX_TOKENS = 4096;
 
-const SYSTEM_PROMPT = `You are Hookka AI, an embedded assistant inside the Hookka Manufacturing ERP. You help Wei Siang (the factory owner) and his super-admins look up data: sales orders, customer orders, delivery orders, invoices, payments, products, customers, suppliers, and the daily reports.
+// Exported so the offline eval harness (scripts/assistant-eval.mjs) can score
+// the model's first tool choice against the EXACT same manual the live route
+// ships. Keep it interpolation-free so it stays importable without a DB/env.
+export const SYSTEM_PROMPT = `You are Hookka AI, an embedded assistant inside the Hookka Manufacturing ERP. You help Wei Siang (the factory owner) and his super-admins look up data: sales orders, customer orders, delivery orders, invoices, payments, products, customers, suppliers, and the daily reports.
 
 You are STRICTLY READ-ONLY. You cannot create, update, or delete anything. If asked to make a change, say you can't and suggest where in the ERP UI to do it.
 

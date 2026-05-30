@@ -1,19 +1,21 @@
 // ---------------------------------------------------------------------------
-// Hookka AI — chat UI.
+// Hookka AI — slide-over panel.
 //
-// Talks to POST /api/assistant/chat which returns SSE. Each event is a
-// JSON-encoded object:
-//   { type: "text", value: "..." }            → append to current assistant msg
-//   { type: "tool_call_start", name: "..." }  → push a tool-chip into the msg
-//   { type: "tool_call_end", name: "..." }    → mark chip as completed
-//   { type: "error", message: "..." }         → error banner
-//   { type: "done" }                          → close the stream
+// Standard embedded-assistant UX (Intercom / Drift / ChatGPT widget):
+//   - Floating button toggles this panel
+//   - Panel fixed to the right edge, full-height
+//   - Width ~400px desktop, full-width on mobile (<sm)
+//   - Escape + the X button close it
+//   - Slides in/out via translate-x; 200ms transition
 //
-// In-session memory only — refreshing the tab clears history. That's by
-// design for v1 (no persistence to keep the schema footprint small).
+// All chat logic (SSE streaming, tool-call chips, markdown rendering,
+// composer + Stop) is inlined here — the dedicated /assistant page was
+// removed when this panel shipped. Backend is unchanged: POST
+// /api/assistant/chat returns the same SSE event stream.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { HookkaAILogo } from "@/components/assistant/HookkaAILogo";
 
 type ChatRole = "user" | "assistant";
@@ -28,8 +30,6 @@ type MessageBlock = { type: "text"; text: string } | { type: "tool"; tool: ToolC
 type ChatMessage = {
   id: string;
   role: ChatRole;
-  // For user messages: a single text block. For assistant: a sequence of
-  // text + tool chips in the order they streamed in.
   blocks: MessageBlock[];
 };
 
@@ -42,7 +42,6 @@ function uid(): string {
 // table rows. Avoids pulling in react-markdown (~80KB) for v1. The AI is
 // instructed to reply in this format.
 function renderMarkdown(text: string): React.ReactNode {
-  // Split fenced code first so the inline pass doesn't touch its contents.
   const parts = text.split(/(```[\s\S]*?```)/g);
   return parts.map((part, idx) => {
     if (part.startsWith("```") && part.endsWith("```")) {
@@ -61,30 +60,24 @@ function renderMarkdown(text: string): React.ReactNode {
 }
 
 function InlineMarkdown({ text }: { text: string }) {
-  // Detect a markdown table block (consecutive lines that start with `|`).
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    // Table — line starts with `|` and the next line is a separator.
     if (
       line.trim().startsWith("|") &&
       i + 1 < lines.length &&
       /^\s*\|?\s*[:\-| ]+$/.test(lines[i + 1])
     ) {
       const tableLines: string[] = [];
-      while (
-        i < lines.length &&
-        lines[i].trim().startsWith("|")
-      ) {
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
         tableLines.push(lines[i]);
         i++;
       }
       nodes.push(<TableBlock key={`t-${i}`} lines={tableLines} />);
       continue;
     }
-    // Bullet list — collect consecutive `- ` lines.
     if (/^\s*-\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^\s*-\s+/.test(lines[i])) {
@@ -101,13 +94,8 @@ function InlineMarkdown({ text }: { text: string }) {
       continue;
     }
     if (line.length > 0) {
-      nodes.push(
-        <span key={`l-${i}`}>
-          {renderInline(line)}
-        </span>,
-      );
+      nodes.push(<span key={`l-${i}`}>{renderInline(line)}</span>);
     }
-    // Preserve blank lines as paragraph breaks.
     if (i + 1 < lines.length) {
       nodes.push(<br key={`br-${i}`} />);
     }
@@ -117,7 +105,6 @@ function InlineMarkdown({ text }: { text: string }) {
 }
 
 function TableBlock({ lines }: { lines: string[] }) {
-  // First line is header, second is separator (skipped), rest are rows.
   const cells = (line: string): string[] =>
     line
       .replace(/^\s*\|/, "")
@@ -154,12 +141,8 @@ function TableBlock({ lines }: { lines: string[] }) {
   );
 }
 
-// Inline formatting: bold + inline code. Keep it small — anything fancier
-// would need a real parser.
 function renderInline(text: string): React.ReactNode {
   const tokens: React.ReactNode[] = [];
-  // Pattern matches **bold** OR `code` — capturing the delimiter style so
-  // we know which to render. Anything not matched is plain text.
   const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
   let lastIdx = 0;
   let m: RegExpExecArray | null;
@@ -192,275 +175,9 @@ function renderInline(text: string): React.ReactNode {
   return <>{tokens}</>;
 }
 
-export default function AssistantPage() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
-  // Auto-scroll to bottom on new message / streamed text.
-  useEffect(() => {
-    if (scrollerRef.current) {
-      scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
-    }
-  }, [messages]);
-
-  const sendMessage = useCallback(async () => {
-    const trimmed = draft.trim();
-    if (!trimmed || busy) return;
-
-    setError(null);
-    const userMsg: ChatMessage = {
-      id: uid(),
-      role: "user",
-      blocks: [{ type: "text", text: trimmed }],
-    };
-    const assistantMsg: ChatMessage = {
-      id: uid(),
-      role: "assistant",
-      blocks: [],
-    };
-    // Build the payload from history + new turn. The route expects plain
-    // text-only messages — we strip tool chips since the model doesn't
-    // see them (they're a UI affordance only; the model's own tool_use
-    // blocks are re-built server-side from the message history of each
-    // call, not from the browser state).
-    const payloadMessages = [...messages, userMsg].map((m) => ({
-      role: m.role,
-      content: m.blocks
-        .filter((b): b is { type: "text"; text: string } => b.type === "text")
-        .map((b) => b.text)
-        .join("")
-        .trim(),
-    })).filter((m) => m.content.length > 0);
-
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    setDraft("");
-    setBusy(true);
-
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-
-    try {
-      const res = await fetch("/api/assistant/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: payloadMessages }),
-        signal: ctrl.signal,
-      });
-
-      if (!res.ok) {
-        // Non-streaming error path — body is JSON.
-        let errText = `Request failed (${res.status})`;
-        try {
-          const j = (await res.json()) as { error?: string };
-          if (j.error) errText = j.error;
-        } catch {
-          // ignore
-        }
-        setError(errText);
-        setBusy(false);
-        return;
-      }
-      if (!res.body) {
-        setError("No response body");
-        setBusy(false);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // SSE events are separated by blank lines.
-        let sepIdx: number;
-        while ((sepIdx = buf.indexOf("\n\n")) !== -1) {
-          const chunk = buf.slice(0, sepIdx);
-          buf = buf.slice(sepIdx + 2);
-          const dataLine = chunk
-            .split("\n")
-            .find((l) => l.startsWith("data:"));
-          if (!dataLine) continue;
-          const jsonStr = dataLine.slice("data:".length).trim();
-          if (!jsonStr) continue;
-          let evt: Record<string, unknown>;
-          try {
-            evt = JSON.parse(jsonStr) as Record<string, unknown>;
-          } catch {
-            continue;
-          }
-          if (evt.type === "text" && typeof evt.value === "string") {
-            const delta = evt.value;
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const blocks = [...last.blocks];
-              const lastBlock = blocks[blocks.length - 1];
-              if (lastBlock && lastBlock.type === "text") {
-                blocks[blocks.length - 1] = {
-                  type: "text",
-                  text: lastBlock.text + delta,
-                };
-              } else {
-                blocks.push({ type: "text", text: delta });
-              }
-              next[next.length - 1] = { ...last, blocks };
-              return next;
-            });
-          } else if (evt.type === "tool_call_start" && typeof evt.name === "string") {
-            const toolName = evt.name;
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const blocks = [...last.blocks, {
-                type: "tool" as const,
-                tool: { name: toolName, state: "running" as const },
-              }];
-              next[next.length - 1] = { ...last, blocks };
-              return next;
-            });
-          } else if (evt.type === "tool_call_end" && typeof evt.name === "string") {
-            const toolName = evt.name;
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (!last || last.role !== "assistant") return prev;
-              const blocks = last.blocks.map((b) => {
-                if (
-                  b.type === "tool" &&
-                  b.tool.name === toolName &&
-                  b.tool.state === "running"
-                ) {
-                  return {
-                    type: "tool" as const,
-                    tool: { name: toolName, state: "done" as const },
-                  };
-                }
-                return b;
-              });
-              next[next.length - 1] = { ...last, blocks };
-              return next;
-            });
-          } else if (evt.type === "error" && typeof evt.message === "string") {
-            setError(evt.message);
-          }
-          // done → loop exits when reader returns done; nothing to do here.
-        }
-      }
-    } catch (err) {
-      if ((err as { name?: string })?.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-      abortRef.current = null;
-    }
-  }, [draft, busy, messages]);
-
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void sendMessage();
-    }
-  };
-
-  const stop = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setBusy(false);
-  };
-
-  return (
-    <div className="flex flex-col h-[calc(100vh-180px)] max-w-3xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center gap-3 pb-4 border-b border-[#E2DDD8]">
-        <div className="h-10 w-10 rounded-full bg-[#1F1D1B] text-white flex items-center justify-center">
-          <HookkaAILogo size={22} />
-        </div>
-        <div>
-          <h1 className="text-lg font-semibold text-[#1F1D1B]">Hookka AI</h1>
-          <p className="text-xs text-[#6B7280]">
-            Read-only assistant for orders, deliveries, invoices, and customers.
-          </p>
-        </div>
-      </div>
-
-      {/* Message list */}
-      <div
-        ref={scrollerRef}
-        className="flex-1 overflow-y-auto py-4 space-y-4"
-      >
-        {messages.length === 0 && (
-          <div className="text-center text-[#6B7280] mt-12 text-sm">
-            <div className="mx-auto mb-3 h-12 w-12 rounded-full bg-[#F0ECE9] text-[#1F1D1B] flex items-center justify-center">
-              <HookkaAILogo size={26} />
-            </div>
-            <p className="font-medium text-[#1F1D1B]">Ask me anything about today.</p>
-            <p className="mt-1">
-              Try: "What sales orders are due this week?" or "Show me unpaid invoices for Cosmos."
-            </p>
-          </div>
-        )}
-        {messages.map((m) => (
-          <MessageBubble key={m.id} message={m} />
-        ))}
-        {busy && (
-          <div className="flex items-center gap-2 text-xs text-[#6B7280] pl-12">
-            <span className="inline-block h-2 w-2 rounded-full bg-[#6B5C32] animate-pulse" />
-            Hookka AI is typing...
-          </div>
-        )}
-        {error && (
-          <div className="mx-auto max-w-md rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-            {error}
-          </div>
-        )}
-      </div>
-
-      {/* Composer */}
-      <div className="border-t border-[#E2DDD8] pt-3">
-        <div className="flex gap-2 items-end">
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Ask Hookka AI..."
-            rows={2}
-            className="flex-1 resize-none rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-            disabled={busy}
-          />
-          {busy ? (
-            <button
-              type="button"
-              onClick={stop}
-              className="h-10 px-4 rounded-md bg-[#E2DDD8] text-[#1F1D1B] text-sm font-medium hover:bg-[#d4cfca]"
-            >
-              Stop
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => void sendMessage()}
-              disabled={!draft.trim()}
-              className="h-10 px-4 rounded-md bg-[#1F1D1B] text-white text-sm font-medium hover:bg-[#3a3633] disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Send
-            </button>
-          )}
-        </div>
-        <p className="mt-2 text-[10px] text-[#6B7280]">
-          Read-only. Chat history clears when you leave this page.
-        </p>
-      </div>
-    </div>
-  );
+function prettyToolName(name: string): string {
+  // list_sales_orders → "sales orders"
+  return name.replace(/^(list|get)_/, "").replace(/_/g, " ");
 }
 
 function MessageBubble({ message }: { message: ChatMessage }) {
@@ -509,7 +226,318 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-function prettyToolName(name: string): string {
-  // list_sales_orders → "sales orders"
-  return name.replace(/^(list|get)_/, "").replace(/_/g, " ");
+export type AssistantSlideOverProps = {
+  open: boolean;
+  onClose: () => void;
+};
+
+export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Auto-scroll to bottom on new message / streamed text.
+  useEffect(() => {
+    if (scrollerRef.current) {
+      scrollerRef.current.scrollTop = scrollerRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  // Escape closes the panel. Only attach the listener while open so we
+  // don't fight other esc-handlers on the page (modals, dropdowns) when
+  // the panel isn't even up.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  // Abort any in-flight stream when the panel is closed — otherwise the
+  // SSE fetch keeps running in the background and bills tokens for a
+  // response the user can't see.
+  useEffect(() => {
+    if (open) return;
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, [open]);
+
+  const sendMessage = useCallback(async () => {
+    const trimmed = draft.trim();
+    if (!trimmed || busy) return;
+
+    setError(null);
+    const userMsg: ChatMessage = {
+      id: uid(),
+      role: "user",
+      blocks: [{ type: "text", text: trimmed }],
+    };
+    const assistantMsg: ChatMessage = {
+      id: uid(),
+      role: "assistant",
+      blocks: [],
+    };
+    const payloadMessages = [...messages, userMsg]
+      .map((m) => ({
+        role: m.role,
+        content: m.blocks
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("")
+          .trim(),
+      }))
+      .filter((m) => m.content.length > 0);
+
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    setDraft("");
+    setBusy(true);
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
+    try {
+      const res = await fetch("/api/assistant/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: payloadMessages }),
+        signal: ctrl.signal,
+      });
+
+      if (!res.ok) {
+        let errText = `Request failed (${res.status})`;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j.error) errText = j.error;
+        } catch {
+          // ignore
+        }
+        setError(errText);
+        setBusy(false);
+        return;
+      }
+      if (!res.body) {
+        setError("No response body");
+        setBusy(false);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let sepIdx: number;
+        while ((sepIdx = buf.indexOf("\n\n")) !== -1) {
+          const chunk = buf.slice(0, sepIdx);
+          buf = buf.slice(sepIdx + 2);
+          const dataLine = chunk
+            .split("\n")
+            .find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const jsonStr = dataLine.slice("data:".length).trim();
+          if (!jsonStr) continue;
+          let evt: Record<string, unknown>;
+          try {
+            evt = JSON.parse(jsonStr) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          if (evt.type === "text" && typeof evt.value === "string") {
+            const delta = evt.value;
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const blocks = [...last.blocks];
+              const lastBlock = blocks[blocks.length - 1];
+              if (lastBlock && lastBlock.type === "text") {
+                blocks[blocks.length - 1] = {
+                  type: "text",
+                  text: lastBlock.text + delta,
+                };
+              } else {
+                blocks.push({ type: "text", text: delta });
+              }
+              next[next.length - 1] = { ...last, blocks };
+              return next;
+            });
+          } else if (evt.type === "tool_call_start" && typeof evt.name === "string") {
+            const toolName = evt.name;
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const blocks = [
+                ...last.blocks,
+                {
+                  type: "tool" as const,
+                  tool: { name: toolName, state: "running" as const },
+                },
+              ];
+              next[next.length - 1] = { ...last, blocks };
+              return next;
+            });
+          } else if (evt.type === "tool_call_end" && typeof evt.name === "string") {
+            const toolName = evt.name;
+            setMessages((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (!last || last.role !== "assistant") return prev;
+              const blocks = last.blocks.map((b) => {
+                if (
+                  b.type === "tool" &&
+                  b.tool.name === toolName &&
+                  b.tool.state === "running"
+                ) {
+                  return {
+                    type: "tool" as const,
+                    tool: { name: toolName, state: "done" as const },
+                  };
+                }
+                return b;
+              });
+              next[next.length - 1] = { ...last, blocks };
+              return next;
+            });
+          } else if (evt.type === "error" && typeof evt.message === "string") {
+            setError(evt.message);
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as { name?: string })?.name === "AbortError") return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
+    }
+  }, [draft, busy, messages]);
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void sendMessage();
+    }
+  };
+
+  const stop = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setBusy(false);
+  };
+
+  return (
+    <aside
+      role="dialog"
+      aria-modal="true"
+      aria-label="Hookka AI"
+      aria-hidden={!open}
+      // Slide in/out from the right. `translate-x-full` parks the panel
+      // off-screen when closed; `translate-x-0` brings it on. The hidden
+      // state also goes pointer-events-none so it doesn't intercept clicks
+      // on the page underneath while collapsed.
+      className={`fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl border-l border-[#E2DDD8] w-full sm:w-[400px] transition-transform duration-200 ease-out ${
+        open ? "translate-x-0" : "translate-x-full pointer-events-none"
+      }`}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E2DDD8] shrink-0">
+        <div className="h-9 w-9 rounded-full bg-[#1F1D1B] text-white flex items-center justify-center">
+          <HookkaAILogo size={20} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold text-[#1F1D1B]">Hookka AI</h2>
+          <p className="text-[11px] text-[#6B7280] truncate">
+            Read-only assistant for orders, deliveries, invoices, customers.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close Hookka AI"
+          className="h-8 w-8 rounded-md flex items-center justify-center text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B] transition-colors"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* Message list */}
+      <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        {messages.length === 0 && (
+          <div className="text-center text-[#6B7280] mt-8 text-sm">
+            <div className="mx-auto mb-3 h-12 w-12 rounded-full bg-[#F0ECE9] text-[#1F1D1B] flex items-center justify-center">
+              <HookkaAILogo size={26} />
+            </div>
+            <p className="font-medium text-[#1F1D1B]">Ask me anything about today.</p>
+            <p className="mt-1 text-xs px-2">
+              Try: "What sales orders are due this week?" or "Show me unpaid invoices for Cosmos."
+            </p>
+          </div>
+        )}
+        {messages.map((m) => (
+          <MessageBubble key={m.id} message={m} />
+        ))}
+        {busy && (
+          <div className="flex items-center gap-2 text-xs text-[#6B7280] pl-10">
+            <span className="inline-block h-2 w-2 rounded-full bg-[#6B5C32] animate-pulse" />
+            Hookka AI is typing...
+          </div>
+        )}
+        {error && (
+          <div className="mx-auto max-w-md rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </div>
+        )}
+      </div>
+
+      {/* Composer */}
+      <div className="border-t border-[#E2DDD8] px-3 py-3 shrink-0">
+        <div className="flex gap-2 items-end">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="Ask Hookka AI..."
+            rows={2}
+            className="flex-1 resize-none rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+            disabled={busy}
+          />
+          {busy ? (
+            <button
+              type="button"
+              onClick={stop}
+              className="h-10 px-4 rounded-md bg-[#E2DDD8] text-[#1F1D1B] text-sm font-medium hover:bg-[#d4cfca]"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void sendMessage()}
+              disabled={!draft.trim()}
+              className="h-10 px-4 rounded-md bg-[#1F1D1B] text-white text-sm font-medium hover:bg-[#3a3633] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Send
+            </button>
+          )}
+        </div>
+        <p className="mt-2 text-[10px] text-[#6B7280]">
+          Read-only. Chat history clears when you close the panel.
+        </p>
+      </div>
+    </aside>
+  );
 }
+
+export default AssistantSlideOver;

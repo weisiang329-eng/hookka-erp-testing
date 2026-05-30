@@ -132,10 +132,6 @@ const SettingsUsers = lazy(() => import('./pages/settings/Users'))
 // Admin (SUPER_ADMIN-only screens — system health, etc.)
 const AdminHealth = lazy(() => import('./pages/admin/health'))
 
-// Hookka AI — embedded read-only chat assistant. SUPER_ADMIN-only; uses
-// the Anthropic Messages API via /api/assistant/chat (SSE).
-const AssistantPage = lazy(() => import('./pages/assistant'))
-
 // 2FA setup (any authenticated user — soft-prompt destination from /login).
 const Setup2FA = lazy(() => import('./pages/setup-2fa'))
 
@@ -410,18 +406,6 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
     element: (
       <RequireRole role="SUPER_ADMIN">
         <S><AdminHealth /></S>
-      </RequireRole>
-    ),
-  },
-
-  // Hookka AI — SUPER_ADMIN-only chat assistant. Server enforces the same
-  // role on /api/assistant/chat, but we still gate the client route so
-  // non-admins don't even see the page chrome.
-  {
-    path: '/assistant',
-    element: (
-      <RequireRole role="SUPER_ADMIN">
-        <S><AssistantPage /></S>
       </RequireRole>
     ),
   },

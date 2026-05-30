@@ -45,26 +45,17 @@ import {
   FolderOpen,
   ClipboardCheck,
   Scissors,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import { usePermissions } from "@/lib/use-permission";
 import { prefetchRoute } from "@/dashboard-routes";
-import { HookkaAILogo } from "@/components/assistant/HookkaAILogo";
-
-// Icon component contract — accepts the LucideIcon-style props the sidebar
-// passes (className, strokeWidth). Widened from `LucideIcon` so a custom
-// SVG component (e.g. HookkaAILogo) can also slot in for entries like the
-// AI Assistant link, without forcing those into Lucide's stricter type.
-type SidebarIcon = React.ComponentType<{
-  className?: string;
-  strokeWidth?: number | string;
-}>;
 
 interface NavItem {
   name: string;
   href: string;
-  icon: SidebarIcon;
+  icon: LucideIcon;
   badge?: number;
   children?: NavItem[];
 }
@@ -229,15 +220,6 @@ const SUPER_ADMIN_HEALTH_LINK: NavItem = {
   name: "System Health",
   href: "/admin/health",
   icon: Activity,
-};
-// SUPER_ADMIN-only AI assistant entry. Injected into the OVERVIEW group at
-// render time so non-admins never see it. The route itself is also gated
-// (RequireRole), and the backend on /api/assistant/chat checks role too —
-// three layers of the same fence.
-const SUPER_ADMIN_AI_LINK: NavItem = {
-  name: "AI Assistant",
-  href: "/assistant",
-  icon: HookkaAILogo,
 };
 
 type OrgInfo = {
@@ -454,12 +436,6 @@ export function Sidebar({
         SUPER_ADMIN_HEALTH_LINK,
         ...items.slice(insertAt),
       ];
-    }
-    if (group.label === "OVERVIEW" && isSuperAdmin) {
-      // Pin the AI Assistant link to the bottom of OVERVIEW — top-of-app
-      // surface but below the daily-driver entries (Dashboard, Daily
-      // Report) so super-admins find it without disturbing the others.
-      items = [...items, SUPER_ADMIN_AI_LINK];
     }
     // P3.6 — filter out nav items the current user can't access. Anything
     // not in NAV_PERMISSION_REQUIREMENTS stays visible (default-allow for

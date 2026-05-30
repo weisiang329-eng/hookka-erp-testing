@@ -1,36 +1,48 @@
 // ---------------------------------------------------------------------------
-// Floating action button that opens Hookka AI.
+// Floating action button that opens the Hookka AI slide-over panel.
 //
 // Behaviour:
-//   - Only renders for SUPER_ADMIN users (mirrors the route gate).
-//   - Hidden when already on /assistant (no point linking to itself).
-//   - Bottom-right fixed position, above page content but below modal
-//     overlays (z-30; modals in the app use z-50+).
-//   - Click navigates to /assistant — v1 is full-page, no slide-over.
+//   - Only renders for SUPER_ADMIN users (mirrors the API gate on
+//     /api/assistant/chat).
+//   - Bottom-right fixed position, above page content but below modals
+//     (z-40 for the button; the panel itself sits at z-50).
+//   - Click toggles the slide-over open/closed. While open the button
+//     swaps its icon to an X (standard Intercom / Drift pattern) so the
+//     same hit-target is also the "close" affordance — feels less janky
+//     than hiding the button on open.
+//   - Escape inside the panel also closes it (handled in the slide-over).
 // ---------------------------------------------------------------------------
 
-import { useNavigate, useLocation } from "react-router-dom";
+import { useState } from "react";
+import { X } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { HookkaAILogo } from "./HookkaAILogo";
+import { AssistantSlideOver } from "./AssistantSlideOver";
 
 export function FloatingChatButton() {
-  const navigate = useNavigate();
-  const { pathname } = useLocation();
-
   const user = getCurrentUser();
+  const [open, setOpen] = useState(false);
+
+  // Gate the entire feature on SUPER_ADMIN. Non-admins never see the
+  // button OR the panel, matching the backend role check on
+  // /api/assistant/chat. Three layers of the same fence: route guard
+  // (formerly /assistant), this UI gate, API role check.
   if (!user || user.role !== "SUPER_ADMIN") return null;
-  if (pathname.startsWith("/assistant")) return null;
 
   return (
-    <button
-      type="button"
-      onClick={() => navigate("/assistant")}
-      aria-label="Open Hookka AI"
-      title="Hookka AI"
-      className="fixed bottom-6 right-6 z-30 h-14 w-14 rounded-full bg-[#1F1D1B] text-white shadow-lg hover:bg-[#3a3633] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] transition-colors flex items-center justify-center"
-    >
-      <HookkaAILogo size={28} />
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label={open ? "Close Hookka AI" : "Open Hookka AI"}
+        aria-expanded={open}
+        title={open ? "Close Hookka AI" : "Hookka AI"}
+        className="fixed bottom-6 right-6 z-40 h-14 w-14 rounded-full bg-[#1F1D1B] text-white shadow-lg hover:bg-[#3a3633] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] transition-colors flex items-center justify-center"
+      >
+        {open ? <X className="h-6 w-6" /> : <HookkaAILogo size={28} />}
+      </button>
+      <AssistantSlideOver open={open} onClose={() => setOpen(false)} />
+    </>
   );
 }
 

@@ -140,9 +140,9 @@ export default function DashboardLayout() {
             <Routes>{DASHBOARD_ROUTE_ELEMENTS}</Routes>
           </main>
         </div>
-        {/* Hookka AI launch button — SUPER_ADMIN-only, self-hides on
-            /assistant. Mounted here so it overlays every authenticated
-            dashboard route in one place. */}
+        {/* Hookka AI launch button + slide-over panel. SUPER_ADMIN-only.
+            Mounted here so the same instance overlays every authenticated
+            dashboard route (state survives in-page navigation). */}
         <FloatingChatButton />
       </div>
       <ScrollRestoration />

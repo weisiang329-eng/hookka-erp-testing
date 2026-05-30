@@ -20,6 +20,7 @@ export type CncTemplate = {
   sizeLabel: string;
   fabricWidth: string;
   pieceLabel: string;
+  totalHeight: string;
   displayName: string;
   folder: string;
   hasDgt: boolean;
@@ -165,7 +166,14 @@ export function CncTemplatePanel({
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-medium text-[#111827] truncate">{t.displayName}</div>
                 <div className="text-[11px] text-[#6B7280] truncate">
-                  {[t.sizeLabel, t.fabricWidth, t.pieceLabel].filter(Boolean).join(" · ")}
+                  {[
+                    t.sizeLabel,
+                    t.totalHeight ? `${t.totalHeight} cm` : "",
+                    t.pieceLabel,
+                    t.fabricWidth,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </div>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">

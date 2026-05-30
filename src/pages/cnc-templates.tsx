@@ -162,7 +162,7 @@ export default function CncTemplatesPage() {
 
       {/* Loading skeleton */}
       {loading && templates.length === 0 ? (
-        <SkeletonTable rows={6} columns={5} />
+        <SkeletonTable rows={6} columns={6} />
       ) : groups.length === 0 ? (
         /* Empty state */
         <Card>
@@ -197,8 +197,9 @@ export default function CncTemplatesPage() {
                       <tr className="text-left text-[10px] font-medium text-[#6B7280] uppercase border-b border-[#E2DDD8]">
                         <th className="px-3 py-2">Display Name</th>
                         <th className="px-3 py-2">Size</th>
-                        <th className="px-3 py-2">Fabric Width</th>
                         <th className="px-3 py-2">Piece</th>
+                        <th className="px-3 py-2">Total H (cm)</th>
+                        <th className="px-3 py-2">Fabric Width</th>
                         <th className="px-3 py-2">Files</th>
                       </tr>
                     </thead>
@@ -207,8 +208,11 @@ export default function CncTemplatesPage() {
                         <tr key={t.id} className="border-b border-[#F3F4F6] last:border-0">
                           <td className="px-3 py-2 text-[#111827]">{t.displayName}</td>
                           <td className="px-3 py-2 text-[#6B7280]">{t.sizeLabel || "—"}</td>
-                          <td className="px-3 py-2 text-[#6B7280]">{t.fabricWidth || "—"}</td>
                           <td className="px-3 py-2 text-[#6B7280]">{t.pieceLabel || "—"}</td>
+                          <td className="px-3 py-2 text-[#6B7280]">
+                            {t.totalHeight ? `${t.totalHeight} cm` : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-[#6B7280]">{t.fabricWidth || "—"}</td>
                           <td className="px-3 py-2">
                             <div className="flex items-center gap-1.5">
                               {t.hasDgt && <FileButton templateId={t.id} kind="dgt" label="DGT" />}

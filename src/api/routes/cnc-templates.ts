@@ -58,13 +58,23 @@ type CncTemplateRow = {
   dgtKey: string | null;
   prjKey: string | null;
   emfKey: string | null;
+  totalHeight: string | null;
   driveFolderId: string | null;
   sizeBytes: number | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
 
+// SELECT clause used by every read. `total_height` is wrapped in COALESCE
+// against an empty literal so the query still succeeds when migration 0141
+// hasn't been applied — the column simply doesn't appear and we fall through
+// the catch below.
 const SELECT_COLS =
+  "id, org_id, product_code, size_label, fabric_width, piece_label, display_name, folder, dgt_key, prj_key, emf_key, total_height, drive_folder_id, size_bytes, created_at, updated_at";
+
+// Fallback SELECT used when total_height is missing — same columns minus
+// total_height (the adapter will return undefined for the field on the row).
+const SELECT_COLS_NO_HEIGHT =
   "id, org_id, product_code, size_label, fabric_width, piece_label, display_name, folder, dgt_key, prj_key, emf_key, drive_folder_id, size_bytes, created_at, updated_at";
 
 // Client-facing shape. The raw storage keys (dgt_key/prj_key/emf_key) are
@@ -76,6 +86,7 @@ function rowToCncTemplate(r: CncTemplateRow) {
     sizeLabel: r.sizeLabel ?? "",
     fabricWidth: r.fabricWidth ?? "",
     pieceLabel: r.pieceLabel ?? "",
+    totalHeight: r.totalHeight ?? "",
     displayName: r.displayName ?? "",
     folder: r.folder ?? "",
     hasDgt: Boolean(r.dgtKey && r.dgtKey.length > 0),
@@ -89,6 +100,250 @@ function rowToCncTemplate(r: CncTemplateRow) {
 function isMissingTable(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
   return /relation .*cnc_templates.* does not exist|no such table/i.test(msg);
+}
+
+// Postgres raises 42703 "column \"<name>\" does not exist" when the migration
+// hasn't been applied. We use this to fall back to the legacy column set so
+// the route keeps working on staging/prod between deploy and migration apply.
+function isMissingTotalHeightColumn(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /column .*total_height.* does not exist/i.test(msg);
+}
+
+// Minimal D1-style prepared-statement contract this route relies on. Avoids
+// pulling in the Cloudflare D1 types just to type the helpers below.
+type DbLike = {
+  prepare(sql: string): {
+    bind(...args: unknown[]): {
+      first<T = unknown>(): Promise<T | null>;
+      run(): Promise<unknown>;
+      all<T = unknown>(): Promise<{ results?: T[] }>;
+    };
+  };
+};
+
+// SELECT one template by (id, orgId) with backward-compat fallback for
+// pre-0141 deployments. Returns null when no row matches.
+async function selectOneTemplate(
+  db: DbLike,
+  id: string,
+  orgId: string,
+): Promise<CncTemplateRow | null> {
+  try {
+    return await db
+      .prepare(`SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ? AND org_id = ?`)
+      .bind(id, orgId)
+      .first<CncTemplateRow>();
+  } catch (e) {
+    if (isMissingTotalHeightColumn(e)) {
+      return await db
+        .prepare(
+          `SELECT ${SELECT_COLS_NO_HEIGHT} FROM cnc_templates WHERE id = ? AND org_id = ?`,
+        )
+        .bind(id, orgId)
+        .first<CncTemplateRow>();
+    }
+    throw e;
+  }
+}
+
+// SELECT one template by id (no orgId) — used right after INSERT to fetch the
+// just-created row by its surrogate key.
+async function selectOneTemplateById(
+  db: DbLike,
+  id: string,
+): Promise<CncTemplateRow | null> {
+  try {
+    return await db
+      .prepare(`SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ?`)
+      .bind(id)
+      .first<CncTemplateRow>();
+  } catch (e) {
+    if (isMissingTotalHeightColumn(e)) {
+      return await db
+        .prepare(`SELECT ${SELECT_COLS_NO_HEIGHT} FROM cnc_templates WHERE id = ?`)
+        .bind(id)
+        .first<CncTemplateRow>();
+    }
+    throw e;
+  }
+}
+
+// INSERT one template row. Tries the modern shape (with total_height) first
+// and falls back to the legacy shape if migration 0141 hasn't been applied.
+async function insertTemplateRow(
+  db: DbLike,
+  row: {
+    id: string;
+    orgId: string;
+    productCode: string;
+    sizeLabel: string;
+    fabricWidth: string;
+    pieceLabel: string;
+    totalHeight: string;
+    displayName: string;
+    folder: string;
+    dgtKey: string;
+    prjKey: string;
+    emfKey: string;
+    sizeBytes: number;
+    now: string;
+  },
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `INSERT INTO cnc_templates
+           (id, org_id, product_code, size_label, fabric_width, piece_label,
+            display_name, folder, dgt_key, prj_key, emf_key, total_height,
+            drive_folder_id, size_bytes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        row.id,
+        row.orgId,
+        row.productCode,
+        row.sizeLabel,
+        row.fabricWidth,
+        row.pieceLabel,
+        row.displayName,
+        row.folder,
+        row.dgtKey,
+        row.prjKey,
+        row.emfKey,
+        row.totalHeight,
+        "",
+        row.sizeBytes,
+        row.now,
+        row.now,
+      )
+      .run();
+    return;
+  } catch (e) {
+    if (!isMissingTotalHeightColumn(e)) throw e;
+  }
+  // Fallback: legacy shape without total_height. The operator can still write
+  // a height once the migration lands and the row is updated.
+  await db
+    .prepare(
+      `INSERT INTO cnc_templates
+         (id, org_id, product_code, size_label, fabric_width, piece_label,
+          display_name, folder, dgt_key, prj_key, emf_key,
+          drive_folder_id, size_bytes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      row.id,
+      row.orgId,
+      row.productCode,
+      row.sizeLabel,
+      row.fabricWidth,
+      row.pieceLabel,
+      row.displayName,
+      row.folder,
+      row.dgtKey,
+      row.prjKey,
+      row.emfKey,
+      "",
+      row.sizeBytes,
+      row.now,
+      row.now,
+    )
+    .run();
+}
+
+// UPDATE one template row's metadata + storage keys + size_bytes.
+async function updateTemplateRow(
+  db: DbLike,
+  row: {
+    id: string;
+    orgId: string;
+    sizeLabel: string;
+    fabricWidth: string;
+    pieceLabel: string;
+    totalHeight: string;
+    dgtKey: string;
+    prjKey: string;
+    emfKey: string;
+    sizeBytes: number;
+    now: string;
+  },
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `UPDATE cnc_templates
+           SET dgt_key = ?, prj_key = ?, emf_key = ?,
+               size_label = ?, fabric_width = ?, piece_label = ?,
+               total_height = ?, size_bytes = ?, updated_at = ?
+         WHERE id = ? AND org_id = ?`,
+      )
+      .bind(
+        row.dgtKey,
+        row.prjKey,
+        row.emfKey,
+        row.sizeLabel,
+        row.fabricWidth,
+        row.pieceLabel,
+        row.totalHeight,
+        row.sizeBytes,
+        row.now,
+        row.id,
+        row.orgId,
+      )
+      .run();
+    return;
+  } catch (e) {
+    if (!isMissingTotalHeightColumn(e)) throw e;
+  }
+  // Fallback: legacy shape without total_height.
+  await db
+    .prepare(
+      `UPDATE cnc_templates
+         SET dgt_key = ?, prj_key = ?, emf_key = ?,
+             size_label = ?, fabric_width = ?, piece_label = ?,
+             size_bytes = ?, updated_at = ?
+       WHERE id = ? AND org_id = ?`,
+    )
+    .bind(
+      row.dgtKey,
+      row.prjKey,
+      row.emfKey,
+      row.sizeLabel,
+      row.fabricWidth,
+      row.pieceLabel,
+      row.sizeBytes,
+      row.now,
+      row.id,
+      row.orgId,
+    )
+    .run();
+}
+
+// SELECT existing template by (orgId, productCode, displayName). Used by the
+// /import upsert to decide between UPDATE and INSERT.
+async function selectOneTemplateByName(
+  db: DbLike,
+  orgId: string,
+  productCode: string,
+  displayName: string,
+): Promise<CncTemplateRow | null> {
+  const where =
+    " FROM cnc_templates WHERE org_id = ? AND product_code = ? AND display_name = ?";
+  try {
+    return await db
+      .prepare(`SELECT ${SELECT_COLS}${where}`)
+      .bind(orgId, productCode, displayName)
+      .first<CncTemplateRow>();
+  } catch (e) {
+    if (isMissingTotalHeightColumn(e)) {
+      return await db
+        .prepare(`SELECT ${SELECT_COLS_NO_HEIGHT}${where}`)
+        .bind(orgId, productCode, displayName)
+        .first<CncTemplateRow>();
+    }
+    throw e;
+  }
 }
 
 // Pick the storage key column for a given file kind off a row.
@@ -118,11 +373,14 @@ function genId(): string {
 // still importable and editable later.
 //
 // Worked examples (base → parsed fields):
-//   "1007 5 FT 20' dgt"  → code 1007, size 5FT,   width 20',  piece ""
-//   "2041 6FT 24''"      → code 2041, size 6FT,   width 24'', piece ""
-//   "5535 ARM"           → code 5535, size "",    width "",   piece ARM
-//   "5535 CUSHION 30'"   → code 5535, size "",    width 30',  piece CUSHION
-//   "1013-1"             → code 1013, size "",    width "",   piece 1
+//   "1005 6 FT 20' dgt"  → code 1005, size 6FT,   totalHeight 20, piece ""
+//   "5535 2S 30'"        → code 5535, size 2S,    totalHeight 30, piece ""
+//   "5535 ARM"           → code 5535, size "",    totalHeight "", piece ARM
+//   "5535 TANGAN"        → code 5535, size "",    totalHeight "", piece TANGAN
+//   "1007 3'5 FT 20' dgt"→ code 1007, size 3.5FT, totalHeight 20, piece ""
+//   "5535 1A(LHF) 28'"   → code 5535, size 1A(LHF), totalHeight 28, piece ""
+//   "5535 ARM L"         → code 5535, size "",    totalHeight "", piece "ARM L"
+//   "1013-1"             → code 1013, size "",    totalHeight "", piece 1
 // ---------------------------------------------------------------------------
 
 // File extensions we accept. Anything else is ignored by the importer.
@@ -141,11 +399,17 @@ const PIECE_WORDS = new Set([
   "HB",
 ]);
 
+// Tokens that disambiguate L/R orientation of the piece (e.g. ARM L, ARM RHF).
+// Matched case-insensitively. When one of these follows a recognised piece word
+// we fold it into the pieceLabel (e.g. "ARM" + "L" → "ARM L").
+const ORIENTATION_WORDS = new Set(["L", "R", "LEFT", "RIGHT", "LHF", "RHF"]);
+
 type ParsedTemplateName = {
   productCode: string;
   sizeLabel: string;
   fabricWidth: string;
   pieceLabel: string;
+  totalHeight: string;
 };
 
 // Split "name.ext" into [base, ext-lowercased]. A filename with no dot returns
@@ -164,15 +428,31 @@ function stripTrailingDgtWord(base: string): string {
   return base.replace(/[\s_-]+dgt\s*$/i, "").trim();
 }
 
-// A token looks like a fabric width when it's digits followed by one or two
-// inch marks: 20', 24'', 30'. (NOT a foot size — those carry an explicit FT.)
-function isWidthToken(tok: string): boolean {
-  return /^\d+\s*''?'?$/.test(tok) && /['']/.test(tok);
+// A token looks like a total-height marker when it's digits (optionally with a
+// decimal) ending in a SINGLE apostrophe and nothing else: 20', 24', 30',
+// 3.5'. The trailing apostrophe is BUYI shorthand for cm — we drop it on the
+// way into total_height (digits only).
+function isHeightToken(tok: string): boolean {
+  return /^\d+(\.\d+)?'$/.test(tok);
 }
 
 // A token looks like a foot size when it's a number followed by FT: 5FT, 3.5FT.
 function isSizeToken(tok: string): boolean {
   return /^\d+(\.\d+)?\s*FT$/i.test(tok);
+}
+
+// A token looks like a sofa seat-config when it's a 1-3 digit prefix +
+// {NA,A,S} + optional (LHF)/(RHF). E.g., "1A", "2S", "1NA", "1A(LHF)",
+// "3S(RHF)". The bedframe "FT" tokens win when both match (handled by check
+// order below).
+function isSeatConfigToken(tok: string): boolean {
+  return /^[1-3](NA|A|S)(\(LHF\)|\(RHF\))?$/i.test(tok);
+}
+
+// Normalise a seat-config token: keep digits + uppercase the suffix + keep any
+// (LHF)/(RHF) marker uppercased.
+function normalizeSeatConfigToken(tok: string): string {
+  return tok.toUpperCase();
 }
 
 // Normalise a foot-size token to the compact "5FT" / "3.5FT" form.
@@ -182,13 +462,31 @@ function normalizeSizeToken(tok: string): string {
 }
 
 // Parse a base filename into structured fields. Tolerant + never throws.
+//
+// Pre-normalisation:
+//   1. Strip trailing literal "dgt" word (some operators append the kind).
+//   2. Collapse whitespace runs to a single space.
+//   3. Replace digit-apostrophe-digit (e.g. "3'5") with a decimal ("3.5") so
+//      the FT-detector sees "3.5 FT" instead of choking on the apostrophe.
+//
+// Token classification (first match wins, in this order):
+//   - isSizeToken  → sizeLabel (bedframe, e.g. "5FT", "3.5FT")
+//   - isSeatConfigToken → sizeLabel (sofa, e.g. "2S", "1A(LHF)")
+//   - isHeightToken → totalHeight (digits only, e.g. "20", "30")
+//   - PIECE_WORDS  → pieceLabel ("ARM", "CUSHION", "DIVAN" ...)
+//   - ORIENTATION_WORDS following a piece word → folded into pieceLabel
 function parseTemplateName(rawBase: string): ParsedTemplateName {
-  const base = stripTrailingDgtWord(rawBase);
+  // 1) Strip trailing "dgt", 2) collapse whitespace, 3) digit'-digit → decimal.
+  const base = stripTrailingDgtWord(rawBase)
+    .replace(/\s+/g, " ")
+    .replace(/(\d)'(\d)/g, "$1.$2")
+    .trim();
   const result: ParsedTemplateName = {
     productCode: "",
     sizeLabel: "",
     fabricWidth: "",
     pieceLabel: "",
+    totalHeight: "",
   };
   try {
     if (!base) return result;
@@ -204,9 +502,11 @@ function parseTemplateName(rawBase: string): ParsedTemplateName {
     const rest = base.slice(result.productCode.length).replace(/^[\s_-]+/, "");
     const tokens = rest.split(/[\s_]+/).flatMap((t) => t.split("-")).filter(Boolean);
 
-    const leftovers: string[] = [];
     // Foot sizes can arrive as two tokens ("5" then "FT") — fold a bare number
-    // followed by a standalone "FT" back together before classifying.
+    // followed by a standalone "FT" back together before classifying. (Note:
+    // we do NOT fold "3.5" then "FT" because the digit-apostrophe-digit
+    // normalisation already turned "3'5 FT" → "3.5 FT" and the pair still
+    // matches this branch.)
     const merged: string[] = [];
     for (let i = 0; i < tokens.length; i++) {
       const cur = tokens[i];
@@ -219,22 +519,45 @@ function parseTemplateName(rawBase: string): ParsedTemplateName {
       }
     }
 
-    for (const tok of merged) {
+    const pieceParts: string[] = [];
+    const leftovers: string[] = [];
+    for (let i = 0; i < merged.length; i++) {
+      const tok = merged[i];
+      const upper = tok.toUpperCase();
+
       if (!result.sizeLabel && isSizeToken(tok)) {
         result.sizeLabel = normalizeSizeToken(tok);
-      } else if (!result.fabricWidth && isWidthToken(tok)) {
-        result.fabricWidth = tok.replace(/\s+/g, "");
-      } else if (!result.pieceLabel && PIECE_WORDS.has(tok.toUpperCase())) {
-        result.pieceLabel = tok.toUpperCase();
-      } else {
-        leftovers.push(tok);
+        continue;
       }
+      if (!result.sizeLabel && isSeatConfigToken(tok)) {
+        result.sizeLabel = normalizeSeatConfigToken(tok);
+        continue;
+      }
+      if (!result.totalHeight && isHeightToken(tok)) {
+        result.totalHeight = tok.replace(/'$/, "");
+        continue;
+      }
+      if (PIECE_WORDS.has(upper)) {
+        // Greedy fold: any immediately-following orientation token belongs to
+        // this piece label (e.g. "ARM" + "L" → "ARM L").
+        let label = upper;
+        const next = merged[i + 1];
+        if (next && ORIENTATION_WORDS.has(next.toUpperCase())) {
+          label = `${label} ${next.toUpperCase()}`;
+          i++; // consume the orientation token
+        }
+        pieceParts.push(label);
+        continue;
+      }
+      leftovers.push(tok);
     }
 
-    // Any non-size/non-width token that wasn't a recognised piece word still
-    // carries meaning (e.g. "1" in "1013-1", or an unlisted piece name). Fold
-    // the leftovers into pieceLabel if we don't already have one.
-    if (!result.pieceLabel && leftovers.length > 0) {
+    if (pieceParts.length > 0) {
+      result.pieceLabel = pieceParts.join(" ");
+    } else if (leftovers.length > 0) {
+      // Any non-size/non-height token that wasn't a recognised piece word still
+      // carries meaning (e.g. "1" in "1013-1", or an unlisted piece name). Fold
+      // the leftovers into pieceLabel if we don't already have one.
       result.pieceLabel = leftovers.join(" ");
     }
 
@@ -245,7 +568,13 @@ function parseTemplateName(rawBase: string): ParsedTemplateName {
     }
   } catch {
     // Defensive: never let a weird filename break the whole import batch.
-    return { productCode: "", sizeLabel: "", fabricWidth: "", pieceLabel: base };
+    return {
+      productCode: "",
+      sizeLabel: "",
+      fabricWidth: "",
+      pieceLabel: base,
+      totalHeight: "",
+    };
   }
   return result;
 }
@@ -262,29 +591,39 @@ app.get("/", async (c) => {
   const q = (c.req.query("q") ?? "").trim();
   const productCode = (c.req.query("productCode") ?? "").trim();
 
-  let sql = `SELECT ${SELECT_COLS} FROM cnc_templates WHERE org_id = ?`;
+  // Build the WHERE/ORDER tail once; the SELECT column list is the only thing
+  // that differs between the modern shape and the pre-0141 fallback.
+  let tail = " FROM cnc_templates WHERE org_id = ?";
   const binds: unknown[] = [orgId];
   if (productCode) {
-    sql += " AND product_code = ?";
+    tail += " AND product_code = ?";
     binds.push(productCode);
   }
   if (q) {
     // LOWER(col) LIKE LOWER(?) — case-insensitive substring match across the
     // three searchable columns.
-    sql +=
+    tail +=
       " AND (LOWER(product_code) LIKE LOWER(?) OR LOWER(display_name) LIKE LOWER(?) OR LOWER(piece_label) LIKE LOWER(?))";
     const like = `%${q}%`;
     binds.push(like, like, like);
   }
-  sql += " ORDER BY product_code, size_label";
+  tail += " ORDER BY product_code, size_label";
 
   try {
-    const res = await c.var.DB.prepare(sql)
+    const res = await c.var.DB.prepare(`SELECT ${SELECT_COLS}${tail}`)
       .bind(...binds)
       .all<CncTemplateRow>();
     const data = (res.results ?? []).map(rowToCncTemplate);
     return c.json({ success: true, data });
   } catch (e) {
+    // Migration 0141 not applied yet — retry without total_height.
+    if (isMissingTotalHeightColumn(e)) {
+      const res = await c.var.DB.prepare(`SELECT ${SELECT_COLS_NO_HEIGHT}${tail}`)
+        .bind(...binds)
+        .all<CncTemplateRow>();
+      const data = (res.results ?? []).map(rowToCncTemplate);
+      return c.json({ success: true, data });
+    }
     // Table not migrated yet — don't break the page; return empty.
     if (isMissingTable(e)) return c.json({ success: true, data: [] });
     throw e;
@@ -300,11 +639,7 @@ app.get("/:id", async (c) => {
   const orgId = getOrgId(c);
   const id = c.req.param("id");
   try {
-    const row = await c.var.DB.prepare(
-      `SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ? AND org_id = ?`,
-    )
-      .bind(id, orgId)
-      .first<CncTemplateRow>();
+    const row = await selectOneTemplate(c.var.DB, id, orgId);
     if (!row) return c.json({ success: false, error: "Template not found." }, 404);
     return c.json({ success: true, data: rowToCncTemplate(row) });
   } catch (e) {
@@ -332,11 +667,7 @@ app.get("/:id/file/:kind", async (c) => {
 
   let row: CncTemplateRow | null;
   try {
-    row = await c.var.DB.prepare(
-      `SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ? AND org_id = ?`,
-    )
-      .bind(id, orgId)
-      .first<CncTemplateRow>();
+    row = await selectOneTemplate(c.var.DB, id, orgId);
   } catch (e) {
     if (isMissingTable(e))
       return c.json({ success: false, error: "Template not found." }, 404);
@@ -398,6 +729,7 @@ app.post("/", async (c) => {
   const sizeLabel = String(form.get("sizeLabel") ?? "").trim();
   const fabricWidth = String(form.get("fabricWidth") ?? "").trim();
   const pieceLabel = String(form.get("pieceLabel") ?? "").trim();
+  const totalHeight = String(form.get("totalHeight") ?? "").trim();
   const displayName = String(form.get("displayName") ?? "").trim();
   const folder = String(form.get("folder") ?? "").trim();
 
@@ -437,44 +769,31 @@ app.post("/", async (c) => {
       uploaded.push(key);
     }
 
-    await c.var.DB.prepare(
-      `INSERT INTO cnc_templates
-         (id, org_id, product_code, size_label, fabric_width, piece_label,
-          display_name, folder, dgt_key, prj_key, emf_key, drive_folder_id,
-          size_bytes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        id,
-        orgId,
-        productCode,
-        sizeLabel,
-        fabricWidth,
-        pieceLabel,
-        displayName,
-        folder,
-        keys.dgt,
-        keys.prj,
-        keys.emf,
-        "",
-        totalBytes,
-        now,
-        now,
-      )
-      .run();
+    await insertTemplateRow(c.var.DB, {
+      id,
+      orgId,
+      productCode,
+      sizeLabel,
+      fabricWidth,
+      pieceLabel,
+      totalHeight,
+      displayName,
+      folder,
+      dgtKey: keys.dgt,
+      prjKey: keys.prj,
+      emfKey: keys.emf,
+      sizeBytes: totalBytes,
+      now,
+    });
 
     await emitAudit(c, {
       resource: "cnc-templates",
       resourceId: id,
       action: "create",
-      after: { productCode, sizeLabel, fabricWidth, pieceLabel, displayName, sizeBytes: totalBytes },
+      after: { productCode, sizeLabel, fabricWidth, pieceLabel, totalHeight, displayName, sizeBytes: totalBytes },
     }).catch(() => {});
 
-    const created = await c.var.DB.prepare(
-      `SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ?`,
-    )
-      .bind(id)
-      .first<CncTemplateRow>();
+    const created = await selectOneTemplateById(c.var.DB, id);
     return c.json(
       { success: true, data: created ? rowToCncTemplate(created) : null },
       201,
@@ -608,12 +927,12 @@ app.post("/import", async (c) => {
       }
 
       // Look for an existing row with the same (product_code, display_name).
-      const existing = await c.var.DB.prepare(
-        `SELECT ${SELECT_COLS} FROM cnc_templates
-           WHERE org_id = ? AND product_code = ? AND display_name = ?`,
-      )
-        .bind(orgId, productCode, displayName)
-        .first<CncTemplateRow>();
+      const existing = await selectOneTemplateByName(
+        c.var.DB,
+        orgId,
+        productCode,
+        displayName,
+      );
 
       let rowId: string;
       if (existing) {
@@ -625,62 +944,42 @@ app.post("/import", async (c) => {
           prj: newKeys.prj ?? existing.prjKey ?? "",
           emf: newKeys.emf ?? existing.emfKey ?? "",
         };
-        await c.var.DB.prepare(
-          `UPDATE cnc_templates
-             SET dgt_key = ?, prj_key = ?, emf_key = ?,
-                 size_label = ?, fabric_width = ?, piece_label = ?,
-                 size_bytes = ?, updated_at = ?
-           WHERE id = ? AND org_id = ?`,
-        )
-          .bind(
-            finalKeys.dgt,
-            finalKeys.prj,
-            finalKeys.emf,
-            // Fill blanks from the parse, but don't clobber existing values.
-            existing.sizeLabel || g.parsed.sizeLabel,
-            existing.fabricWidth || g.parsed.fabricWidth,
-            existing.pieceLabel || g.parsed.pieceLabel,
-            batchBytes,
-            now,
-            rowId,
-            orgId,
-          )
-          .run();
+        await updateTemplateRow(c.var.DB, {
+          id: rowId,
+          orgId,
+          dgtKey: finalKeys.dgt,
+          prjKey: finalKeys.prj,
+          emfKey: finalKeys.emf,
+          // Fill blanks from the parse, but don't clobber existing values.
+          sizeLabel: existing.sizeLabel || g.parsed.sizeLabel,
+          fabricWidth: existing.fabricWidth || g.parsed.fabricWidth,
+          pieceLabel: existing.pieceLabel || g.parsed.pieceLabel,
+          totalHeight: existing.totalHeight || g.parsed.totalHeight,
+          sizeBytes: batchBytes,
+          now,
+        });
       } else {
         // INSERT a new row.
         rowId = genId();
-        await c.var.DB.prepare(
-          `INSERT INTO cnc_templates
-             (id, org_id, product_code, size_label, fabric_width, piece_label,
-              display_name, folder, dgt_key, prj_key, emf_key, drive_folder_id,
-              size_bytes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-          .bind(
-            rowId,
-            orgId,
-            productCode,
-            g.parsed.sizeLabel,
-            g.parsed.fabricWidth,
-            g.parsed.pieceLabel,
-            displayName,
-            "",
-            newKeys.dgt ?? "",
-            newKeys.prj ?? "",
-            newKeys.emf ?? "",
-            "",
-            batchBytes,
-            now,
-            now,
-          )
-          .run();
+        await insertTemplateRow(c.var.DB, {
+          id: rowId,
+          orgId,
+          productCode,
+          sizeLabel: g.parsed.sizeLabel,
+          fabricWidth: g.parsed.fabricWidth,
+          pieceLabel: g.parsed.pieceLabel,
+          totalHeight: g.parsed.totalHeight,
+          displayName,
+          folder: "",
+          dgtKey: newKeys.dgt ?? "",
+          prjKey: newKeys.prj ?? "",
+          emfKey: newKeys.emf ?? "",
+          sizeBytes: batchBytes,
+          now,
+        });
       }
 
-      const saved = await c.var.DB.prepare(
-        `SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ? AND org_id = ?`,
-      )
-        .bind(rowId, orgId)
-        .first<CncTemplateRow>();
+      const saved = await selectOneTemplate(c.var.DB, rowId, orgId);
       if (saved) outRows.push(rowToCncTemplate(saved));
 
       await emitAudit(c, {
@@ -693,6 +992,7 @@ app.post("/import", async (c) => {
           sizeLabel: g.parsed.sizeLabel,
           fabricWidth: g.parsed.fabricWidth,
           pieceLabel: g.parsed.pieceLabel,
+          totalHeight: g.parsed.totalHeight,
           sizeBytes: batchBytes,
           source: "import",
         },
@@ -746,11 +1046,7 @@ app.delete("/:id", async (c) => {
 
   let row: CncTemplateRow | null;
   try {
-    row = await c.var.DB.prepare(
-      `SELECT ${SELECT_COLS} FROM cnc_templates WHERE id = ? AND org_id = ?`,
-    )
-      .bind(id, orgId)
-      .first<CncTemplateRow>();
+    row = await selectOneTemplate(c.var.DB, id, orgId);
   } catch (e) {
     if (isMissingTable(e))
       return c.json({ success: false, error: "Template not found." }, 404);

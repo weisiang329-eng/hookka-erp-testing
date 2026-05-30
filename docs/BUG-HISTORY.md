@@ -34,6 +34,59 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-30-003 — Hookka AI assistant: get_sales_order + sibling lookup tools silently returning "not found"
+
+**Status:** 🟢 Fixed (2026-05-30)
+**Category:** data-migration
+
+**Symptom:** "Check SO-2605-303" in the AI assistant chat looped through 6 tool
+calls (the new MAX_ITERATIONS cap, lowered from 10 in 1578cda8) and produced
+"I tried multiple lookups but couldn't piece together a clean answer." Same
+SO read fine via `run_select_query` with hand-written snake-case SQL, so the
+data was there — the dedicated `get_sales_order` tool was failing.
+
+**Root cause:** `src/api/lib/assistant-tools.ts` was selecting columns that
+don't exist on the actual schema. The header SELECT on `sales_orders` succeeded,
+but the parallel `Promise.all` that fetched line items, DOs, and invoices
+threw on:
+- `sales_order_items.description` (real column: `productName` — the items table
+  never had a `description` column; `description` exists on `products`).
+- `sales_order_items.totalSen` (real column: `lineTotalSen`).
+- `invoices.invoiceNumber` (real column: `invoiceNo` — the assistant tools
+  were written against a phantom column name; routes/invoices.ts has always
+  used `invoiceNo`).
+
+The throw was caught by `runTool`'s try/catch and returned to the model as a
+generic tool error. The model interpreted this as a not-found and either gave
+up or fell back to `trace_order` → `search_anything` → `run_select_query`,
+burning the 6-call budget. Same three column mistakes lived in:
+- `get_sales_order` (items + invoices)
+- `get_consignment_order` (items)
+- `get_invoice` (header SELECT + WHERE)
+- `trace_order` (INVOICE branch lookup + invoices SELECT)
+- `get_customer_360` (aging-bucket invoices SELECT)
+- `get_ar_outstanding` (invoices SELECT)
+- `list_invoices` (header SELECT)
+- `list_overdue_orders` (INVOICE branch)
+- `search_anything` (invoices SELECT + WHERE)
+
+Bonus pre-existing bug found during the audit: `get_dashboard_kpis` on-time %
+was `deliveryDate >= delivery_date` — after the camelCase-to-snake_case rewrite
+both sides became `delivery_date`, comparing the column to itself (always true
+when non-null), so every delivered row counted as on-time. Switched to
+`SUBSTR(deliveredAt,1,10) <= deliveryDate` so the comparison is actual vs
+scheduled.
+
+**Fix:** Replaced every phantom column reference with the real schema column
+in `src/api/lib/assistant-tools.ts`. No SQL functional changes elsewhere.
+TypeScript type rows updated to match.
+
+**Verified:** `npx tsc -p tsconfig.app.json --noEmit` clean. Live regression
+test plan written at `tests/assistant-regression.md` (10 queries) for the
+parent session to execute via the slide-over chat panel post-deploy.
+
+---
+
 ## FEATURE-2026-05-30-002 — Product master: editable Fabric Usage (m) column
 
 **Status:** 🟢 Shipped (2026-05-30)

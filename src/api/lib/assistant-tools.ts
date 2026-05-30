@@ -213,22 +213,28 @@ const getSalesOrder: ToolDefinition = {
       }>();
     if (!so) return { ok: false, error: `Sales order not found: ${lookup}` };
 
+    // sales_order_items: real columns are productName (not description),
+    // lineTotalSen (not totalSen). invoices: invoiceNo (not invoiceNumber).
+    // The previous shape was inherited from a phantom schema and made the
+    // Promise.all reject — bubbling out as a generic tool error and the
+    // model interpreted it as "not found".
     const [items, dos, invs] = await Promise.all([
       c.var.DB
         .prepare(
-          `SELECT productCode, description, quantity, unitPriceSen, totalSen
+          `SELECT productCode, productName, sizeLabel, quantity, unitPriceSen, lineTotalSen
            FROM sales_order_items
            WHERE salesOrderId = ?
-           ORDER BY id
+           ORDER BY lineNo
            LIMIT 100`,
         )
         .bind(so.id)
         .all<{
           productCode: string | null;
-          description: string | null;
+          productName: string | null;
+          sizeLabel: string | null;
           quantity: number | null;
           unitPriceSen: number | null;
-          totalSen: number | null;
+          lineTotalSen: number | null;
         }>(),
       c.var.DB
         .prepare(
@@ -247,7 +253,7 @@ const getSalesOrder: ToolDefinition = {
         }>(),
       c.var.DB
         .prepare(
-          `SELECT id, invoiceNumber, status, totalSen, paidAmount, invoiceDate
+          `SELECT id, invoiceNo, status, totalSen, paidAmount, invoiceDate
            FROM invoices
            WHERE salesOrderId = ?
            ORDER BY invoiceDate DESC
@@ -256,7 +262,7 @@ const getSalesOrder: ToolDefinition = {
         .bind(so.id)
         .all<{
           id: string;
-          invoiceNumber: string | null;
+          invoiceNo: string | null;
           status: string | null;
           totalSen: number | null;
           paidAmount: number | null;
@@ -278,10 +284,11 @@ const getSalesOrder: ToolDefinition = {
       createdAt: so.createdAt ?? "",
       items: (items.results ?? []).map((r) => ({
         productCode: r.productCode ?? "",
-        description: r.description ?? "",
+        productName: r.productName ?? "",
+        sizeLabel: r.sizeLabel ?? "",
         quantity: r.quantity ?? 0,
         unitPriceRM: senToRM(r.unitPriceSen),
-        totalRM: senToRM(r.totalSen),
+        totalRM: senToRM(r.lineTotalSen),
       })),
       deliveryOrders: (dos.results ?? []).map((r) => ({
         id: r.id,
@@ -291,7 +298,7 @@ const getSalesOrder: ToolDefinition = {
       })),
       invoices: (invs.results ?? []).map((r) => ({
         id: r.id,
-        invoiceNumber: r.invoiceNumber ?? "",
+        invoiceNo: r.invoiceNo ?? "",
         status: r.status ?? "",
         totalRM: senToRM(r.totalSen),
         paidRM: senToRM(r.paidAmount),
@@ -406,21 +413,24 @@ const getConsignmentOrder: ToolDefinition = {
       }>();
     if (!co) return { ok: false, error: `Consignment order not found: ${lookup}` };
 
+    // consignment_order_items: same column reality as sales_order_items —
+    // productName (not description), lineTotalSen (not totalSen).
     const items = await c.var.DB
       .prepare(
-        `SELECT productCode, description, quantity, unitPriceSen, totalSen
+        `SELECT productCode, productName, sizeLabel, quantity, unitPriceSen, lineTotalSen
          FROM consignment_order_items
          WHERE consignmentOrderId = ?
-         ORDER BY id
+         ORDER BY lineNo
          LIMIT 100`,
       )
       .bind(co.id)
       .all<{
         productCode: string | null;
-        description: string | null;
+        productName: string | null;
+        sizeLabel: string | null;
         quantity: number | null;
         unitPriceSen: number | null;
-        totalSen: number | null;
+        lineTotalSen: number | null;
       }>();
 
     return {
@@ -433,10 +443,11 @@ const getConsignmentOrder: ToolDefinition = {
       createdAt: co.createdAt ?? "",
       items: (items.results ?? []).map((r) => ({
         productCode: r.productCode ?? "",
-        description: r.description ?? "",
+        productName: r.productName ?? "",
+        sizeLabel: r.sizeLabel ?? "",
         quantity: r.quantity ?? 0,
         unitPriceRM: senToRM(r.unitPriceSen),
-        totalRM: senToRM(r.totalSen),
+        totalRM: senToRM(r.lineTotalSen),
       })),
     };
   },
@@ -603,7 +614,9 @@ const listInvoices: ToolDefinition = {
     }
 
     const limit = clampLimit(args.limit, 25);
-    const sql = `SELECT id, invoiceNumber, customerName, status, totalSen,
+    // invoices table column is `invoiceNo`, not `invoiceNumber` — the original
+    // assistant tool was inheriting a phantom column name that doesn't exist.
+    const sql = `SELECT id, invoiceNo, customerName, status, totalSen,
                         COALESCE(paidAmount, 0) AS paidAmount, invoiceDate, dueDate
                  FROM invoices
                  WHERE ${wheres.join(" AND ")}
@@ -614,7 +627,7 @@ const listInvoices: ToolDefinition = {
       .bind(...params)
       .all<{
         id: string;
-        invoiceNumber: string | null;
+        invoiceNo: string | null;
         customerName: string | null;
         status: string | null;
         totalSen: number | null;
@@ -626,7 +639,7 @@ const listInvoices: ToolDefinition = {
       count: rows.results?.length ?? 0,
       results: (rows.results ?? []).map((r) => ({
         id: r.id,
-        invoiceNumber: r.invoiceNumber ?? "",
+        invoiceNo: r.invoiceNo ?? "",
         customerName: r.customerName ?? "",
         status: r.status ?? "",
         totalRM: senToRM(r.totalSen),
@@ -662,17 +675,17 @@ const getInvoice: ToolDefinition = {
 
     const row = await c.var.DB
       .prepare(
-        `SELECT id, invoiceNumber, customerName, customerId, status,
+        `SELECT id, invoiceNo, customerName, customerId, status,
                 totalSen, subtotalSen, COALESCE(paidAmount, 0) AS paidAmount,
                 invoiceDate, dueDate, salesOrderId
          FROM invoices
-         WHERE orgId = ? AND (invoiceNumber ILIKE ? OR id ILIKE ?)
+         WHERE orgId = ? AND (invoiceNo ILIKE ? OR id ILIKE ?)
          LIMIT 1`,
       )
       .bind(orgId, lookup, lookup)
       .first<{
         id: string;
-        invoiceNumber: string | null;
+        invoiceNo: string | null;
         customerName: string | null;
         customerId: string | null;
         status: string | null;
@@ -686,7 +699,7 @@ const getInvoice: ToolDefinition = {
     if (!row) return { ok: false, error: `Invoice not found: ${lookup}` };
     return {
       id: row.id,
-      invoiceNumber: row.invoiceNumber ?? "",
+      invoiceNo: row.invoiceNo ?? "",
       customerName: row.customerName ?? "",
       customerId: row.customerId ?? "",
       status: row.status ?? "",
@@ -1400,7 +1413,7 @@ const traceOrder: ToolDefinition = {
     } else if (type === "INVOICE") {
       const r = await c.var.DB
         .prepare(
-          "SELECT id, salesOrderId FROM invoices WHERE orgId = ? AND (invoiceNumber ILIKE ? OR id ILIKE ?) LIMIT 1",
+          "SELECT id, salesOrderId FROM invoices WHERE orgId = ? AND (invoiceNo ILIKE ? OR id ILIKE ?) LIMIT 1",
         )
         .bind(orgId, lookup, lookup)
         .first<{ id: string; salesOrderId: string | null }>();
@@ -1543,7 +1556,7 @@ const traceOrder: ToolDefinition = {
       soId
         ? c.var.DB
             .prepare(
-              `SELECT id, invoiceNumber, status, totalSen,
+              `SELECT id, invoiceNo, status, totalSen,
                       COALESCE(paidAmount, 0) AS paidAmount, invoiceDate, dueDate
                FROM invoices WHERE orgId = ? AND salesOrderId = ?
                ORDER BY invoiceDate DESC LIMIT 50`,
@@ -1551,7 +1564,7 @@ const traceOrder: ToolDefinition = {
             .bind(orgId, soId)
             .all<{
               id: string;
-              invoiceNumber: string | null;
+              invoiceNo: string | null;
               status: string | null;
               totalSen: number | null;
               paidAmount: number | null;
@@ -1667,7 +1680,7 @@ const traceOrder: ToolDefinition = {
       })),
       invoices: (invs.results ?? []).map((i) => ({
         id: i.id,
-        invoiceNumber: i.invoiceNumber ?? "",
+        invoiceNo: i.invoiceNo ?? "",
         status: i.status ?? "",
         totalRM: senToRM(i.totalSen),
         paidRM: senToRM(i.paidAmount),
@@ -1795,7 +1808,7 @@ const getCustomer360: ToolDefinition = {
         .first<{ totalSen: number; n: number }>(),
       c.var.DB
         .prepare(
-          `SELECT id, invoiceNumber, totalSen, COALESCE(paidAmount, 0) AS paidAmount,
+          `SELECT id, invoiceNo, totalSen, COALESCE(paidAmount, 0) AS paidAmount,
                   invoiceDate, dueDate
            FROM invoices
            WHERE orgId = ? AND customerId = ?
@@ -1806,7 +1819,7 @@ const getCustomer360: ToolDefinition = {
         .bind(orgId, cust.id)
         .all<{
           id: string;
-          invoiceNumber: string | null;
+          invoiceNo: string | null;
           totalSen: number | null;
           paidAmount: number | null;
           invoiceDate: string | null;
@@ -2081,10 +2094,10 @@ const searchAnything: ToolDefinition = {
          ORDER BY created_at DESC LIMIT ?`,
       ).bind(orgId, like, limit).all<{ id: string; doNo: string | null; customerName: string | null; status: string | null }>(),
       c.var.DB.prepare(
-        `SELECT id, invoiceNumber, customerName, status FROM invoices
-         WHERE orgId = ? AND LOWER(invoiceNumber) LIKE ?
+        `SELECT id, invoiceNo, customerName, status FROM invoices
+         WHERE orgId = ? AND LOWER(invoiceNo) LIKE ?
          ORDER BY invoiceDate DESC LIMIT ?`,
-      ).bind(orgId, like, limit).all<{ id: string; invoiceNumber: string | null; customerName: string | null; status: string | null }>(),
+      ).bind(orgId, like, limit).all<{ id: string; invoiceNo: string | null; customerName: string | null; status: string | null }>(),
       c.var.DB.prepare(
         `SELECT id, code, name FROM customers
          WHERE orgId = ? AND (LOWER(code) LIKE ? OR LOWER(name) LIKE ?)
@@ -2115,7 +2128,7 @@ const searchAnything: ToolDefinition = {
       salesOrders: (sos.results ?? []).map((r) => ({ id: r.id, label: r.companySOId ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
       consignmentOrders: (cos.results ?? []).map((r) => ({ id: r.id, label: r.companyCOId ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
       deliveryOrders: (dos.results ?? []).map((r) => ({ id: r.id, label: r.doNo ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
-      invoices: (invs.results ?? []).map((r) => ({ id: r.id, label: r.invoiceNumber ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
+      invoices: (invs.results ?? []).map((r) => ({ id: r.id, label: r.invoiceNo ?? "", customer: r.customerName ?? "", status: r.status ?? "" })),
       customers: (custs.results ?? []).map((r) => ({ id: r.id, code: r.code ?? "", name: r.name ?? "" })),
       suppliers: (sups.results ?? []).map((r) => ({ id: r.id, code: r.code ?? "", name: r.name ?? "" })),
       products: (prods.results ?? []).map((r) => ({ id: r.id, code: r.code ?? "", name: r.name ?? "" })),
@@ -2904,16 +2917,16 @@ const getArOutstanding: ToolDefinition = {
     const params: unknown[] = [orgId];
     if (cust) { wheres.push("customerId = ?"); params.push(cust); }
     const rows = await c.var.DB.prepare(
-      `SELECT id, invoiceNumber, customerName, customerId, totalSen,
+      `SELECT id, invoiceNo, customerName, customerId, totalSen,
               COALESCE(paidAmount, 0) AS paidAmount, invoiceDate, dueDate
        FROM invoices WHERE ${wheres.join(" AND ")}
        ORDER BY dueDate ASC LIMIT 500`,
     ).bind(...params).all<{
-      id: string; invoiceNumber: string | null; customerName: string | null; customerId: string | null;
+      id: string; invoiceNo: string | null; customerName: string | null; customerId: string | null;
       totalSen: number | null; paidAmount: number | null; invoiceDate: string | null; dueDate: string | null;
     }>();
     const today = new Date();
-    const aged: Array<{ id: string; invoiceNumber: string; customerName: string; customerId: string; outSen: number; ageDays: number; bucket: string; invoiceDate: string; dueDate: string }> = [];
+    const aged: Array<{ id: string; invoiceNo: string; customerName: string; customerId: string; outSen: number; ageDays: number; bucket: string; invoiceDate: string; dueDate: string }> = [];
     for (const r of rows.results ?? []) {
       const out = (r.totalSen ?? 0) - (r.paidAmount ?? 0);
       if (out <= 0) continue;
@@ -2926,7 +2939,7 @@ const getArOutstanding: ToolDefinition = {
       else b = "90+";
       if (bucket && b !== bucket) continue;
       aged.push({
-        id: r.id, invoiceNumber: r.invoiceNumber ?? "", customerName: r.customerName ?? "",
+        id: r.id, invoiceNo: r.invoiceNo ?? "", customerName: r.customerName ?? "",
         customerId: r.customerId ?? "", outSen: out, ageDays: days, bucket: b,
         invoiceDate: r.invoiceDate ?? "", dueDate: r.dueDate ?? "",
       });
@@ -2951,7 +2964,7 @@ const getArOutstanding: ToolDefinition = {
         b61_90RM: senToRM(v.b61_90), b90plusRM: senToRM(v.b90p), totalRM: senToRM(v.total),
       })).sort((a, b) => Number(b.totalRM.replace(/,/g, "")) - Number(a.totalRM.replace(/,/g, ""))),
       invoices: aged.slice(0, 100).map((a) => ({
-        id: a.id, invoiceNumber: a.invoiceNumber, customerName: a.customerName,
+        id: a.id, invoiceNo: a.invoiceNo, customerName: a.customerName,
         outstandingRM: senToRM(a.outSen), ageDays: a.ageDays, bucket: a.bucket,
         invoiceDate: a.invoiceDate, dueDate: a.dueDate,
       })),
@@ -3521,7 +3534,11 @@ const getDashboardKpis: ToolDefinition = {
       c.var.DB.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(totalSen), 0) AS sumSen FROM sales_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number; sumSen: number }>(),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM consignment_orders WHERE orgId = ? AND created_at >= ? AND created_at <= ?`).bind(orgId, dateFrom, `${dateTo} 23:59:59`).first<{ n: number }>(),
       c.var.DB.prepare(`SELECT COALESCE(SUM(totalSen), 0) AS totalSen, COALESCE(SUM(COALESCE(paidAmount,0)),0) AS paidSen FROM invoices WHERE orgId = ? AND UPPER(status) <> 'VOID' AND invoiceDate >= ? AND invoiceDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ totalSen: number; paidSen: number }>(),
-      c.var.DB.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN UPPER(status) IN ('DELIVERED','SIGNED','INVOICED') AND deliveryDate >= delivery_date THEN 1 ELSE 0 END) AS onTime FROM delivery_orders WHERE orgId = ? AND deliveryDate >= ? AND deliveryDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ total: number; onTime: number }>().catch(() => null),
+      // on-time = delivered (have a deliveredAt timestamp) AND deliveredAt
+      // is on/before scheduled deliveryDate. Earlier version compared
+      // deliveryDate to itself (snake/camel rewrite collision) which made
+      // every delivered row count as on-time.
+      c.var.DB.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN UPPER(status) IN ('DELIVERED','SIGNED','INVOICED') AND deliveredAt IS NOT NULL AND SUBSTR(deliveredAt, 1, 10) <= deliveryDate THEN 1 ELSE 0 END) AS onTime FROM delivery_orders WHERE orgId = ? AND deliveryDate >= ? AND deliveryDate <= ?`).bind(orgId, dateFrom, dateTo).first<{ total: number; onTime: number }>().catch(() => null),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM sales_orders WHERE orgId = ? AND customerDeliveryDate IS NOT NULL AND customerDeliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','INVOICED','CANCELLED','CLOSED')`).bind(orgId, todayStr).first<{ n: number }>(),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM production_orders WHERE orgId = ? AND targetEndDate IS NOT NULL AND targetEndDate < ? AND UPPER(status) NOT IN ('COMPLETED','CANCELLED')`).bind(orgId, todayStr).first<{ n: number }>(),
       c.var.DB.prepare(`SELECT COUNT(*) AS n FROM delivery_orders WHERE orgId = ? AND deliveryDate IS NOT NULL AND deliveryDate < ? AND UPPER(status) NOT IN ('DELIVERED','SIGNED','INVOICED','CANCELLED')`).bind(orgId, todayStr).first<{ n: number }>(),
@@ -3624,7 +3641,7 @@ const listOverdueOrders: ToolDefinition = {
                AND UPPER(status) NOT IN ('DELIVERED','SIGNED','INVOICED','CANCELLED')
              ORDER BY deliveryDate ASC LIMIT ${limit}`;
     } else if (type === "INVOICE") {
-      sql = `SELECT id, invoiceNumber AS code, customerName, status, dueDate AS date,
+      sql = `SELECT id, invoiceNo AS code, customerName, status, dueDate AS date,
                     totalSen - COALESCE(paidAmount,0) AS outSen
              FROM invoices WHERE orgId = ? AND dueDate IS NOT NULL
                AND dueDate < ?

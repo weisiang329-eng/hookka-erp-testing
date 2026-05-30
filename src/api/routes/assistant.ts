@@ -49,6 +49,12 @@ import {
   type ParsedAttachment,
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from "../lib/attachment-parser";
+import {
+  getDailyLimit,
+  getDailyUsage,
+  bumpDailyUsage,
+  secondsUntilSgtMidnight,
+} from "../lib/assistant-daily-quota";
 
 const app = new Hono<Env>();
 
@@ -395,6 +401,40 @@ app.post("/chat", async (c) => {
     return c.json({ success: false, error: "messages is required" }, 400);
   }
 
+  // ----- Daily question cap ----------------------------------------------
+  // Each POST to /chat is one operator question (the multi-step tool loop
+  // that follows is all one billable "question"). Cap the count per user per
+  // Singapore calendar day so worst-case Anthropic spend is bounded. Applies
+  // to everyone including SUPER_ADMIN (Wei Siang's explicit ask). The check
+  // reads the counter; we only INCREMENT later, right before opening the
+  // model stream, so requests that bail out early (oversize payload, bad
+  // attachments) don't burn a question. Fail-open: a missing/broken KV never
+  // blocks the operator.
+  const quotaUserId = (c.get as unknown as (k: string) => string | undefined)(
+    "userId",
+  );
+  const dailyLimit = getDailyLimit(c.env);
+  const nowMs = Date.now();
+  if (dailyLimit > 0 && quotaUserId) {
+    const usedToday = await getDailyUsage(
+      c.env.SESSION_CACHE,
+      quotaUserId,
+      nowMs,
+    );
+    if (usedToday >= dailyLimit) {
+      const retryAfterSec = secondsUntilSgtMidnight(nowMs);
+      c.res.headers.set("Retry-After", String(retryAfterSec));
+      return c.json(
+        {
+          success: false,
+          error: `Daily AI question limit reached (${dailyLimit} per day). Your quota resets at midnight Singapore time.`,
+          retryAfterSec,
+        },
+        429,
+      );
+    }
+  }
+
   // Build the running messages list. The Anthropic content shape allows
   // strings for plain text — we use strings for the initial user/assistant
   // turns and only switch to block arrays when we start appending
@@ -550,6 +590,13 @@ app.post("/chat", async (c) => {
       cache_control: { type: "ephemeral" as const },
     },
   ];
+
+  // Count this question against the daily cap now that it's cleared every
+  // early-return gate and is about to reach the model. One bump per POST.
+  // Best-effort — a KV write failure won't block the answer (fail-open).
+  if (dailyLimit > 0 && quotaUserId) {
+    await bumpDailyUsage(c.env.SESSION_CACHE, quotaUserId, nowMs);
+  }
 
   // Stream response back to the browser.
   const stream = new ReadableStream({

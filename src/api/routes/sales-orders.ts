@@ -13,7 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
-import { emitAudit } from "../lib/audit";
+import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
 import {
   hasMixedSofaBedframe,
@@ -3670,7 +3670,31 @@ app.patch("/:id/hub", async (c) => {
       );
     }
 
-    // 5. Apply the update.
+    // 5. Early-exit if nothing actually changes — avoids writing a noisy
+    //    cascade trail when the operator opens the modal, picks the same
+    //    hub and clicks Save out of habit.
+    if (so.hubId === hub.id) {
+      const same = await c.var.DB
+        .prepare("SELECT * FROM sales_orders WHERE id = ?")
+        .bind(so.id)
+        .first<SalesOrderRow>();
+      return c.json({
+        success: true,
+        data: same ? rowToSO(same, []) : null,
+        cascade: {
+          productionOrdersUpdated: 0,
+          deliveryOrdersUpdated: 0,
+          invoicesUpdated: 0,
+          warningDOs: [],
+          noop: true,
+        },
+      });
+    }
+
+    // 6. Discover downstream rows that need cascading. All counts/lookups
+    //    happen BEFORE the batch so we can return accurate numbers in the
+    //    response (the batch itself doesn't echo affected rowcounts on the
+    //    pg adapter consistently).
     const now = new Date().toISOString();
     const beforeSnap = { hubId: so.hubId, hubName: so.hubName };
     const afterSnap: Record<string, unknown> = {
@@ -3679,25 +3703,207 @@ app.patch("/:id/hub", async (c) => {
     };
     if (reason) afterSnap.reason = reason;
 
-    await c.var.DB
+    // 6a. production_orders — every PO linked to this SO. NO status filter:
+    //     a completed PO's production sheet / fabric tag may still be
+    //     reprinted and must show the correct hub.
+    const posRes = await c.var.DB
       .prepare(
-        `UPDATE sales_orders
-            SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
-          WHERE id = ?`,
+        `SELECT id, hubId, hubName
+           FROM production_orders
+          WHERE salesOrderId = ?`,
       )
-      .bind(hub.id, hub.shortName, hub.state ?? so.customerState ?? null, now, so.id)
-      .run();
+      .bind(so.id)
+      .all<{ id: string; hubId: string | null; hubName: string | null }>();
+    const poRows = posRes.results ?? [];
 
-    // 6. Audit.
-    await emitAudit(c, {
+    // 6b. delivery_orders — pre-shipment only (status NOT IN shipped set).
+    //     Two link paths: direct FK (delivery_orders.salesOrderId) AND
+    //     the per-item path (delivery_order_items.salesOrderNo = companySOId).
+    //     A consolidated multi-SO DO must be visible to BOTH the discovery
+    //     and the hub-mix conflict check. companySOId was already resolved
+    //     above (in the shipment-lock guard) so it's reused here.
+    const candidateDosRes = await c.var.DB
+      .prepare(
+        `SELECT DISTINCT d.id, d.doNo, d.status, d.hubId, d.hubName, d.salesOrderId
+           FROM delivery_orders d
+          WHERE d.status NOT IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+            AND (
+                  d.salesOrderId = ?
+               OR d.id IN (
+                    SELECT di.deliveryOrderId
+                      FROM delivery_order_items di
+                     WHERE di.salesOrderNo = ?
+                  )
+                )`,
+      )
+      .bind(so.id, companySOId)
+      .all<{
+        id: string;
+        doNo: string | null;
+        status: string | null;
+        hubId: string | null;
+        hubName: string | null;
+        salesOrderId: string | null;
+      }>();
+    const candidateDos = candidateDosRes.results ?? [];
+
+    // For each candidate DO, discover EVERY other SO it touches (direct FK
+    // + item-level join via companySOId). If any other linked SO has a hub
+    // different from the new hub, this DO is multi-SO with mixed customer
+    // hubs — skip it and warn. Resolving an unrelated SO's hub from KL→PG
+    // can't silently rewrite a DO that also serves a sibling SO still at KL.
+    const dosToUpdate: typeof candidateDos = [];
+    const warningDOs: { doNo: string; reason: string }[] = [];
+    for (const d of candidateDos) {
+      // Collect linked SO ids: direct FK + items table.
+      const linkedSosRes = await c.var.DB
+        .prepare(
+          `SELECT DISTINCT s.id, s.hubId, s.companySOId
+             FROM sales_orders s
+            WHERE s.id = (SELECT salesOrderId FROM delivery_orders WHERE id = ?)
+               OR s.companySOId IN (
+                    SELECT DISTINCT di.salesOrderNo
+                      FROM delivery_order_items di
+                     WHERE di.deliveryOrderId = ?
+                       AND di.salesOrderNo IS NOT NULL
+                       AND di.salesOrderNo <> ''
+                  )`,
+        )
+        .bind(d.id, d.id)
+        .all<{ id: string; hubId: string | null; companySOId: string | null }>();
+      const otherSos = (linkedSosRes.results ?? []).filter(
+        (s) => s.id !== so.id,
+      );
+      const conflict = otherSos.find((s) => (s.hubId ?? "") !== hub.id);
+      if (conflict) {
+        warningDOs.push({
+          doNo: d.doNo ?? "",
+          reason: "Multi-SO DO with different customer hub — skipped",
+        });
+        continue;
+      }
+      dosToUpdate.push(d);
+    }
+
+    // 6c. invoices — DRAFT only. Invoices link to SO via salesOrderId
+    //     (denormalized at create time from the originating DO).
+    const invsRes = await c.var.DB
+      .prepare(
+        `SELECT id, hubId, hubName
+           FROM invoices
+          WHERE salesOrderId = ?
+            AND status = 'DRAFT'`,
+      )
+      .bind(so.id)
+      .all<{ id: string; hubId: string | null; hubName: string | null }>();
+    const invRows = invsRes.results ?? [];
+
+    // 7. Build the batch. ONE transaction:
+    //    - update sales_orders.hub
+    //    - update each production_orders.hub
+    //    - update each eligible delivery_orders.hub
+    //    - update each DRAFT invoices.hub
+    //    - one audit row for SO change + one per cascaded downstream row.
+    const auditAfter = {
+      ...afterSnap,
+      parentSOId: so.id,
+      parentSOCode: so.companySOId,
+    };
+    const stmts: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
+
+    stmts.push(
+      c.var.DB
+        .prepare(
+          `UPDATE sales_orders
+              SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .bind(
+          hub.id,
+          hub.shortName,
+          hub.state ?? so.customerState ?? null,
+          now,
+          so.id,
+        ),
+    );
+    const soAudit = await buildAuditStatement(c, {
       resource: "sales-orders",
       resourceId: so.id,
       action: "hub-change",
       before: beforeSnap,
       after: afterSnap,
     });
+    if (soAudit) stmts.push(soAudit);
 
-    // 7. Return refreshed SO header (caller will refresh full detail).
+    for (const po of poRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE production_orders
+                SET hubId = ?, hubName = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(hub.id, hub.shortName, now, po.id),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "production-orders",
+        resourceId: po.id,
+        action: "hub-cascade-from-so",
+        before: { hubId: po.hubId, hubName: po.hubName },
+        after: auditAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
+    for (const d of dosToUpdate) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE delivery_orders
+                SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            hub.id,
+            hub.shortName,
+            hub.state ?? null,
+            now,
+            d.id,
+          ),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "delivery-orders",
+        resourceId: d.id,
+        action: "hub-cascade-from-so",
+        before: { hubId: d.hubId, hubName: d.hubName },
+        after: auditAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
+    for (const inv of invRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE invoices
+                SET hubId = ?, hubName = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(hub.id, hub.shortName, now, inv.id),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "invoices",
+        resourceId: inv.id,
+        action: "hub-cascade-from-so",
+        before: { hubId: inv.hubId, hubName: inv.hubName },
+        after: auditAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
+    await c.var.DB.batch(stmts);
+
+    // 8. Return refreshed SO header + cascade counts.
     const updated = await c.var.DB
       .prepare("SELECT * FROM sales_orders WHERE id = ?")
       .bind(so.id)
@@ -3705,6 +3911,12 @@ app.patch("/:id/hub", async (c) => {
     return c.json({
       success: true,
       data: updated ? rowToSO(updated, []) : null,
+      cascade: {
+        productionOrdersUpdated: poRows.length,
+        deliveryOrdersUpdated: dosToUpdate.length,
+        invoicesUpdated: invRows.length,
+        warningDOs,
+      },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

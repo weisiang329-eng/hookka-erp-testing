@@ -18,6 +18,21 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { DeliveryHub } from "@/types";
 
+/**
+ * Counts of downstream rows the backend cascaded the hub change into.
+ * The shapes from /sales-orders/:id/hub and /consignment-orders/:id/hub
+ * differ slightly (SO has invoices, CO has consignment notes), so both
+ * optional fields appear here and the renderer only shows non-zero ones.
+ */
+export interface HubCascadeResult {
+  productionOrdersUpdated: number;
+  deliveryOrdersUpdated?: number;
+  invoicesUpdated?: number;
+  consignmentNotesUpdated?: number;
+  warningDOs?: { doNo: string; reason: string }[];
+  noop?: boolean;
+}
+
 interface HubEditModalProps {
   open: boolean;
   /** Endpoint to PATCH against, e.g. `/api/sales-orders/<id>/hub`. */
@@ -25,8 +40,12 @@ interface HubEditModalProps {
   currentHubId: string | null | undefined;
   hubs: DeliveryHub[];
   onClose: () => void;
-  /** Called after a successful save so the parent can refresh + toast. */
-  onSaved: (hubName: string) => void;
+  /**
+   * Called after a successful save so the parent can refresh + toast.
+   * `cascade` carries the per-table counts so the parent can craft a
+   * "Cascaded to N production orders, M draft DOs" toast.
+   */
+  onSaved: (hubName: string, cascade: HubCascadeResult | null) => void;
 }
 
 export function HubEditModal({
@@ -80,7 +99,9 @@ export function HubEditModal({
       return;
     }
     const newHub = hubs.find((h) => h.id === hubId);
-    onSaved(newHub?.shortName || "(new hub)");
+    const cascade: HubCascadeResult | null =
+      data?.cascade && typeof data.cascade === "object" ? data.cascade : null;
+    onSaved(newHub?.shortName || "(new hub)", cascade);
   };
 
   return (

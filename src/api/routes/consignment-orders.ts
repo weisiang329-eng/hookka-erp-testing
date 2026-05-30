@@ -26,7 +26,7 @@ import {
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
-import { emitAudit } from "../lib/audit";
+import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import {
@@ -2011,7 +2011,25 @@ app.patch("/:id/hub", async (c) => {
       );
     }
 
-    // 5. Apply the update.
+    // 5. Early-exit if the hub didn't actually change.
+    if (co.hubId === hub.id) {
+      const same = await c.var.DB
+        .prepare("SELECT * FROM consignment_orders WHERE id = ?")
+        .bind(co.id)
+        .first<ConsignmentOrderRow>();
+      return c.json({
+        success: true,
+        data: same ? rowToCO(same, []) : null,
+        cascade: {
+          productionOrdersUpdated: 0,
+          consignmentNotesUpdated: 0,
+          warningDOs: [],
+          noop: true,
+        },
+      });
+    }
+
+    // 6. Discover downstream rows.
     const now = new Date().toISOString();
     const beforeSnap = { hubId: co.hubId, hubName: co.hubName };
     const afterSnap: Record<string, unknown> = {
@@ -2020,25 +2038,113 @@ app.patch("/:id/hub", async (c) => {
     };
     if (reason) afterSnap.reason = reason;
 
-    await c.var.DB
+    // 6a. production_orders linked to this CO (no status filter — completed
+    //     POs still print the production sheet).
+    const posRes = await c.var.DB
       .prepare(
-        `UPDATE consignment_orders
-            SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
-          WHERE id = ?`,
+        `SELECT id, hubId, hubName
+           FROM production_orders
+          WHERE consignmentOrderId = ?`,
       )
-      .bind(hub.id, hub.shortName, hub.state ?? co.customerState ?? null, now, co.id)
-      .run();
+      .bind(co.id)
+      .all<{ id: string; hubId: string | null; hubName: string | null }>();
+    const poRows = posRes.results ?? [];
 
-    // 6. Audit.
-    await emitAudit(c, {
+    // 6b. consignment_notes — pre-dispatch only. CN has hubId (FK) and
+    //     branchName (denormalized shortName, mirrors the DO.hubName
+    //     pattern). Update both. No customer_state column on CN.
+    const cnsRes = await c.var.DB
+      .prepare(
+        `SELECT id, noteNumber, hubId, branchName
+           FROM consignment_notes
+          WHERE consignmentOrderId = ?
+            AND status = 'ACTIVE'
+            AND dispatchedAt IS NULL`,
+      )
+      .bind(co.id)
+      .all<{
+        id: string;
+        noteNumber: string | null;
+        hubId: string | null;
+        branchName: string | null;
+      }>();
+    const cnRows = cnsRes.results ?? [];
+
+    // 7. Build the batch (single transaction).
+    const auditAfter = {
+      ...afterSnap,
+      parentCOId: co.id,
+      parentCOCode: co.companyCOId,
+    };
+    const stmts: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
+
+    stmts.push(
+      c.var.DB
+        .prepare(
+          `UPDATE consignment_orders
+              SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .bind(
+          hub.id,
+          hub.shortName,
+          hub.state ?? co.customerState ?? null,
+          now,
+          co.id,
+        ),
+    );
+    const coAudit = await buildAuditStatement(c, {
       resource: "consignment-orders",
       resourceId: co.id,
       action: "hub-change",
       before: beforeSnap,
       after: afterSnap,
     });
+    if (coAudit) stmts.push(coAudit);
 
-    // 7. Return refreshed CO header.
+    for (const po of poRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE production_orders
+                SET hubId = ?, hubName = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(hub.id, hub.shortName, now, po.id),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "production-orders",
+        resourceId: po.id,
+        action: "hub-cascade-from-co",
+        before: { hubId: po.hubId, hubName: po.hubName },
+        after: auditAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
+    for (const cn of cnRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE consignment_notes
+                SET hubId = ?, branchName = ?
+              WHERE id = ?`,
+          )
+          .bind(hub.id, hub.shortName, cn.id),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "consignment-notes",
+        resourceId: cn.id,
+        action: "hub-cascade-from-co",
+        before: { hubId: cn.hubId, branchName: cn.branchName },
+        after: auditAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
+    await c.var.DB.batch(stmts);
+
+    // 8. Return refreshed CO header + cascade counts.
     const updated = await c.var.DB
       .prepare("SELECT * FROM consignment_orders WHERE id = ?")
       .bind(co.id)
@@ -2046,6 +2152,11 @@ app.patch("/:id/hub", async (c) => {
     return c.json({
       success: true,
       data: updated ? rowToCO(updated, []) : null,
+      cascade: {
+        productionOrdersUpdated: poRows.length,
+        consignmentNotesUpdated: cnRows.length,
+        warningDOs: [],
+      },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

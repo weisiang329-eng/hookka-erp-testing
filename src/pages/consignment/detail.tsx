@@ -958,9 +958,27 @@ export default function SalesOrderDetailPage() {
         currentHubId={(order as SalesOrder & { hubId?: string }).hubId}
         hubs={customer?.deliveryHubs ?? []}
         onClose={() => setHubModalOpen(false)}
-        onSaved={(newHubName) => {
+        onSaved={(newHubName, cascade) => {
           setHubModalOpen(false);
-          toast.success(`Hub updated to ${newHubName}`);
+          // CO cascade summary: production orders + pending consignment
+          // notes (the CN equivalent of "draft DOs").
+          const parts: string[] = [];
+          if (cascade) {
+            if (cascade.productionOrdersUpdated > 0) {
+              parts.push(
+                `${cascade.productionOrdersUpdated} production order${cascade.productionOrdersUpdated === 1 ? "" : "s"}`,
+              );
+            }
+            if ((cascade.consignmentNotesUpdated ?? 0) > 0) {
+              parts.push(
+                `${cascade.consignmentNotesUpdated} pending CN${cascade.consignmentNotesUpdated === 1 ? "" : "s"}`,
+              );
+            }
+          }
+          const msg = parts.length
+            ? `Hub updated to ${newHubName}. Cascaded to: ${parts.join(", ")}.`
+            : `Hub updated to ${newHubName}.`;
+          toast.success(msg);
           fetchOrder();
         }}
       />

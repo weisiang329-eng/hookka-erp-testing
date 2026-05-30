@@ -26,6 +26,10 @@ import type { Env } from "../worker";
 import type { AnthropicTool } from "./anthropic-client";
 import { getOrgId } from "./tenant";
 import { emitAudit } from "./audit";
+import {
+  lookupAttachments,
+  type ParsedAttachment,
+} from "./attachment-parser";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -4672,6 +4676,418 @@ const explainFeature: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// Attachment-aware tools (added 2026-05-30, FEAT-2026-05-30-008)
+//
+// Three tools the model uses AFTER the user uploads a file. The actual
+// bytes are forwarded to Anthropic directly by the route — these tools
+// only orchestrate post-vision behaviour (extracted-data routing,
+// spreadsheet row access, fuzzy-match-to-Hookka).
+// ---------------------------------------------------------------------------
+
+function getRequestAttachments(c: Context<Env>): ParsedAttachment[] {
+  const id =
+    (c as unknown as { get: (k: string) => unknown }).get(
+      "assistantAttachmentReqId",
+    ) as string | undefined;
+  if (!id) return [];
+  return lookupAttachments(id);
+}
+
+const analyzeImage: ToolDefinition = {
+  schema: {
+    name: "analyze_image",
+    description:
+      "Acknowledge an image attachment the user just sent and trigger a Hookka lookup based on what was visible in it. Call this AFTER you've described what you saw in the image (PO numbers, customer logos, product codes). Pass the extracted reference(s) and an optional customer/context hint — the tool then routes to smart_lookup so you can answer with matched documents. Useful sequence: user uploads photo → you describe what you see → call analyze_image with extracted refs → present the matched SOs/POs/etc. to the user.",
+    input_schema: {
+      type: "object",
+      properties: {
+        attachmentName: {
+          type: "string",
+          description:
+            "Filename of the image the user uploaded (so we can audit-link). Optional — use the first image attachment if omitted.",
+        },
+        extractedReferences: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Reference numbers / codes you read off the image, e.g. ['PO-009003', 'SO-2605-051']. Pass each verbatim as you read it.",
+        },
+        customerHint: {
+          type: "string",
+          description:
+            "Customer name / logo you recognised in the image (e.g. 'Houzs').",
+        },
+        productCodes: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Product codes / SKUs visible on the image, if any (e.g. ['1003-K', '1005-Q']).",
+        },
+      },
+      required: ["extractedReferences"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const requested = strOrNull(args.attachmentName);
+    const all = getRequestAttachments(c);
+    const targetImage = requested
+      ? all.find(
+          (a) => a.name === requested || a.id === requested,
+        )
+      : all.find((a) => a.kind === "image");
+
+    const refs = Array.isArray(args.extractedReferences)
+      ? (args.extractedReferences as unknown[])
+          .map((r) => (typeof r === "string" ? r.trim() : ""))
+          .filter((r): r is string => r.length > 0)
+          .slice(0, 6)
+      : [];
+    const customerHint = strOrNull(args.customerHint);
+
+    if (refs.length === 0) {
+      return {
+        ok: false,
+        error:
+          "No references provided. Re-read the image and pass the visible PO / SO / invoice / DO numbers as extractedReferences.",
+        imageRecognised: !!targetImage,
+      };
+    }
+
+    // For each reference, do a smart_lookup-style scan. We inline the
+    // same logic the smart_lookup tool uses so the model gets a single
+    // consolidated response and doesn't burn 6 tool calls on a 6-ref
+    // image.
+    const yymm = currentYYMM();
+    const customerHintLike = customerHint
+      ? `%${customerHint.toLowerCase()}%`
+      : null;
+
+    const matches: Record<string, unknown>[] = [];
+
+    for (const ref of refs) {
+      const patterns = generateLookupPatterns(ref, yymm);
+      if (patterns.length === 0) continue;
+      // sales_orders.customerPOId is the most likely landing zone for a
+      // photographed Houzs PO. We also scan companySOId, customerSOId, and
+      // invoice / DO numbers for completeness.
+      const where = customerHintLike
+        ? `orgId = ? AND (companySOId ILIKE ANY (?) OR customerPOId ILIKE ANY (?) OR customerSOId ILIKE ANY (?)) AND LOWER(COALESCE(customerName, '')) LIKE ?`
+        : `orgId = ? AND (companySOId ILIKE ANY (?) OR customerPOId ILIKE ANY (?) OR customerSOId ILIKE ANY (?))`;
+      const params: unknown[] = [orgId, patterns, patterns, patterns];
+      if (customerHintLike) params.push(customerHintLike);
+
+      const salesRows = await c.var.DB
+        .prepare(
+          `SELECT id, companySOId, customerPOId, customerName, status, totalSen, customerDeliveryDate FROM sales_orders WHERE ${where} ORDER BY created_at DESC LIMIT 5`,
+        )
+        .bind(...params)
+        .all<Record<string, unknown>>()
+        .then((r) => r.results ?? [])
+        .catch(() => [] as Record<string, unknown>[]);
+
+      for (const row of salesRows) {
+        matches.push({
+          fromReference: ref,
+          type: "SalesOrder",
+          id: String(row.id ?? ""),
+          label: String(row.companySOId ?? ""),
+          customerPO: String(row.customerPOId ?? ""),
+          customer: String(row.customerName ?? ""),
+          status: String(row.status ?? ""),
+          totalRM: senToRM(Number(row.totalSen ?? 0)),
+          deliveryDate: String(row.customerDeliveryDate ?? ""),
+        });
+      }
+    }
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: targetImage?.id ?? "image",
+      action: "analyze_image",
+      after: {
+        attachmentName: targetImage?.name ?? "",
+        refCount: refs.length,
+        customerHint: customerHint ?? "",
+      },
+      source: "ui",
+    });
+
+    return {
+      attachmentName: targetImage?.name ?? null,
+      extractedReferences: refs,
+      productCodes: Array.isArray(args.productCodes) ? args.productCodes : [],
+      customerHint: customerHint ?? "",
+      matchCount: matches.length,
+      matches,
+      guidance:
+        matches.length === 0
+          ? "No matches in Hookka for those references. Suggest the user double-check the number, or ask whether the image is from a customer we don't have onboarded yet."
+          : "Show the matched documents to the user and ask which one (or what they want to do next).",
+    };
+  },
+};
+
+const parseSpreadsheet: ToolDefinition = {
+  schema: {
+    name: "parse_spreadsheet",
+    description:
+      "Return structured rows from a spreadsheet (.xlsx / .xls / .csv) the user uploaded in this message. Use when the user asks you to summarise, list, or count rows in an attached file. Pass the filename to target a specific attachment, or omit to use the first spreadsheet. Returns sheet names, header columns, and rows (capped at 200 per sheet for context).",
+    input_schema: {
+      type: "object",
+      properties: {
+        attachmentName: {
+          type: "string",
+          description:
+            "Filename of the uploaded spreadsheet. Omit to use the first spreadsheet attached.",
+        },
+        sheetName: {
+          type: "string",
+          description:
+            "If multi-sheet, target one specific sheet by name. Omit to return all sheets.",
+        },
+        maxRowsPerSheet: {
+          type: "number",
+          description:
+            "Cap on rows returned per sheet (default 100, max 200).",
+        },
+      },
+      required: [],
+    },
+  },
+  execute: async (c, args) => {
+    const all = getRequestAttachments(c);
+    if (all.length === 0) {
+      return {
+        ok: false,
+        error:
+          "No attachments on this message. The user needs to upload a spreadsheet first.",
+      };
+    }
+    const requested = strOrNull(args.attachmentName);
+    const target = requested
+      ? all.find((a) => a.name === requested || a.id === requested)
+      : all.find((a) => a.kind === "spreadsheet" || a.kind === "csv");
+    if (!target || !target.parsedRows) {
+      return {
+        ok: false,
+        error: requested
+          ? `Couldn't find a spreadsheet attachment named '${requested}'.`
+          : "No spreadsheet/CSV among the uploaded files.",
+      };
+    }
+    const cap = Math.min(
+      200,
+      Math.max(1, Number(args.maxRowsPerSheet) || 100),
+    );
+    const wantSheet = strOrNull(args.sheetName);
+    const sheets = target.parsedRows.sheets
+      .filter((s) => !wantSheet || s.name === wantSheet)
+      .map((s) => ({
+        name: s.name,
+        totalRowCount: s.rowCount,
+        headers: s.headers,
+        rows: s.rows.slice(0, cap),
+        truncated: s.rowCount > cap,
+      }));
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: target.id,
+      action: "parse_spreadsheet",
+      after: {
+        attachmentName: target.name,
+        sheetName: wantSheet ?? "(all)",
+        capPerSheet: cap,
+      },
+      source: "ui",
+    });
+
+    return {
+      attachmentName: target.name,
+      sheetCount: sheets.length,
+      sheets,
+    };
+  },
+};
+
+const matchUploadedDataToHookka: ToolDefinition = {
+  schema: {
+    name: "match_uploaded_data_to_hookka",
+    description:
+      "For each row in an uploaded spreadsheet, attempt to match against existing Hookka Sales Orders / Consignment Orders / Production Orders / Customer-PO fields. Use this for 'is this list of customer POs already in our system' workflows. The model picks the column that carries the lookup value (typically 'PO Number', 'Customer PO', 'Order Number'); the tool returns per-row match status (matched / no-match) plus the matched doc summary.",
+    input_schema: {
+      type: "object",
+      properties: {
+        attachmentName: {
+          type: "string",
+          description:
+            "Filename of the uploaded spreadsheet. Omit to use the first spreadsheet attached.",
+        },
+        sheetName: {
+          type: "string",
+          description:
+            "If multi-sheet, target one specific sheet. Omit for the first sheet.",
+        },
+        lookupColumn: {
+          type: "string",
+          description:
+            "Header name of the column holding the lookup values (e.g. 'PO Number', 'Customer PO', 'Order Number').",
+        },
+        maxRows: {
+          type: "number",
+          description: "Max rows to attempt to match (default 50, max 200).",
+        },
+      },
+      required: ["lookupColumn"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const all = getRequestAttachments(c);
+    if (all.length === 0) {
+      return {
+        ok: false,
+        error: "No attachments on this message — ask the user to upload the spreadsheet.",
+      };
+    }
+    const requested = strOrNull(args.attachmentName);
+    const target = requested
+      ? all.find((a) => a.name === requested || a.id === requested)
+      : all.find((a) => a.kind === "spreadsheet" || a.kind === "csv");
+    if (!target || !target.parsedRows) {
+      return { ok: false, error: "No spreadsheet/CSV among the uploaded files." };
+    }
+    const lookupCol = strOrNull(args.lookupColumn);
+    if (!lookupCol) return { ok: false, error: "lookupColumn is required" };
+
+    const wantSheet = strOrNull(args.sheetName);
+    const sheet =
+      target.parsedRows.sheets.find((s) => !wantSheet || s.name === wantSheet) ??
+      target.parsedRows.sheets[0];
+    if (!sheet) return { ok: false, error: "No sheets in the uploaded file." };
+
+    // Normalise the column name — operators write headers loosely
+    // ("PO Number" vs "po_number" vs "PO No."). We compare case- and
+    // punctuation-insensitively.
+    const normHeader = (s: string) =>
+      s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    const wanted = normHeader(lookupCol);
+    const matchedColumn = sheet.headers.find((h) => normHeader(h) === wanted);
+    if (!matchedColumn) {
+      return {
+        ok: false,
+        error: `Column '${lookupCol}' not found in sheet '${sheet.name}'. Available columns: ${sheet.headers.join(", ")}.`,
+      };
+    }
+
+    const max = Math.min(200, Math.max(1, Number(args.maxRows) || 50));
+    const candidates = sheet.rows.slice(0, max);
+
+    const yymm = currentYYMM();
+    const results: Record<string, unknown>[] = [];
+
+    // Issue queries serially (max 50 → at most 50 round trips). Could be
+    // parallelised, but Hyperdrive prepared-statement pooling makes this
+    // cheap and the model usually requests a few dozen at a time.
+    for (let idx = 0; idx < candidates.length; idx++) {
+      const row = candidates[idx];
+      const raw = String(row[matchedColumn] ?? "").trim();
+      if (!raw) {
+        results.push({
+          rowIndex: idx + 1,
+          lookupValue: "",
+          status: "skipped-empty",
+        });
+        continue;
+      }
+      const patterns = generateLookupPatterns(raw, yymm);
+      // Single combined query against the three places a customer PO can
+      // live. We don't need to cover delivery_orders here — operator-facing
+      // upload flows are almost always SO-level (the DO is downstream).
+      const sql = `
+        SELECT 'SalesOrder' AS kind, id, companySOId AS label, customerPOId AS customerPO, customerName, status
+          FROM sales_orders
+         WHERE orgId = ? AND (companySOId ILIKE ANY (?) OR customerPOId ILIKE ANY (?) OR customerSOId ILIKE ANY (?))
+        UNION ALL
+        SELECT 'ConsignmentOrder' AS kind, id, companyCOId AS label, customerCOId AS customerPO, customerName, status
+          FROM consignment_orders
+         WHERE orgId = ? AND (companyCOId ILIKE ANY (?) OR customerCOId ILIKE ANY (?))
+        UNION ALL
+        SELECT 'ProductionOrder' AS kind, id, poNo AS label, customerPOId AS customerPO, customerName, status
+          FROM production_orders
+         WHERE orgId = ? AND (poNo ILIKE ANY (?) OR customerPOId ILIKE ANY (?))
+        LIMIT 5
+      `;
+      const params: unknown[] = [
+        orgId, patterns, patterns, patterns,
+        orgId, patterns, patterns,
+        orgId, patterns, patterns,
+      ];
+
+      const matches = await c.var.DB
+        .prepare(sql)
+        .bind(...params)
+        .all<Record<string, unknown>>()
+        .then((r) => r.results ?? [])
+        .catch(() => [] as Record<string, unknown>[]);
+
+      if (matches.length === 0) {
+        results.push({
+          rowIndex: idx + 1,
+          lookupValue: raw,
+          status: "no-match",
+        });
+      } else {
+        results.push({
+          rowIndex: idx + 1,
+          lookupValue: raw,
+          status: "matched",
+          matchCount: matches.length,
+          matches: matches.map((m) => ({
+            kind: String(m.kind ?? ""),
+            id: String(m.id ?? ""),
+            label: String(m.label ?? ""),
+            customerPO: String(m.customerPO ?? ""),
+            customer: String(m.customerName ?? ""),
+            status: String(m.status ?? ""),
+          })),
+        });
+      }
+    }
+
+    const matchedCount = results.filter((r) => r.status === "matched").length;
+    const noMatchCount = results.filter((r) => r.status === "no-match").length;
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: target.id,
+      action: "match_uploaded_data_to_hookka",
+      after: {
+        attachmentName: target.name,
+        sheetName: sheet.name,
+        lookupColumn: matchedColumn,
+        rowsScanned: results.length,
+        matchedCount,
+        noMatchCount,
+      },
+      source: "ui",
+    });
+
+    return {
+      attachmentName: target.name,
+      sheetName: sheet.name,
+      lookupColumn: matchedColumn,
+      rowsScanned: results.length,
+      totalRowsInSheet: sheet.rowCount,
+      matchedCount,
+      noMatchCount,
+      results,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -4740,6 +5156,10 @@ export const TOOLS: ToolDefinition[] = [
   // v1.5 — system / help
   listAuditEvents,
   explainFeature,
+  // v1.6 — attachment-aware (FEAT-2026-05-30-008)
+  analyzeImage,
+  parseSpreadsheet,
+  matchUploadedDataToHookka,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

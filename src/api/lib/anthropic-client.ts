@@ -32,10 +32,36 @@ export type AnthropicToolResultBlock = {
   is_error?: boolean;
 };
 
+// Vision content block — base64-encoded image bytes inlined in the message.
+// `media_type` must be one of image/jpeg, image/png, image/gif, image/webp.
+export type AnthropicImageBlock = {
+  type: "image";
+  source: {
+    type: "base64";
+    media_type: string;
+    data: string;
+  };
+};
+
+// Document content block — Anthropic ships native PDF understanding so we
+// pass the bytes through without local OCR (Workers runtime has no
+// Node-flavoured PDF parser anyway). `media_type` is always
+// "application/pdf" today.
+export type AnthropicDocumentBlock = {
+  type: "document";
+  source: {
+    type: "base64";
+    media_type: string;
+    data: string;
+  };
+};
+
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
-  | AnthropicToolResultBlock;
+  | AnthropicToolResultBlock
+  | AnthropicImageBlock
+  | AnthropicDocumentBlock;
 
 export type AnthropicMessage = {
   role: AnthropicRole;
@@ -94,6 +120,12 @@ export type AnthropicStreamEvent =
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 
+// PDF / document content blocks require this beta header. Adding it is a
+// no-op for image-only and text-only requests, so we ship it on every call
+// — keeps the call site simple and the route doesn't need to introspect
+// content blocks to decide whether to opt-in.
+const ANTHROPIC_BETA_PDFS = "pdfs-2024-09-25";
+
 /**
  * Stream the Anthropic Messages endpoint. Yields normalised events the
  * route loop can hand straight to the browser (with renaming) or accumulate
@@ -114,6 +146,7 @@ export async function* streamMessages(
     headers: {
       "x-api-key": apiKey,
       "anthropic-version": ANTHROPIC_VERSION,
+      "anthropic-beta": ANTHROPIC_BETA_PDFS,
       "content-type": "application/json",
     },
     body: JSON.stringify({ ...body, stream: true }),

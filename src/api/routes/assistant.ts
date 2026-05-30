@@ -39,6 +39,14 @@ import {
   runTool,
   filterArgsForAudit,
 } from "../lib/assistant-tools";
+import {
+  ingestAttachments,
+  stashAttachments,
+  dropAttachments,
+  type IncomingAttachment,
+  type ParsedAttachment,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from "../lib/attachment-parser";
 
 const app = new Hono<Env>();
 
@@ -173,11 +181,45 @@ Remember the previous query's filters across turns and apply additive narrowing 
 - You have at most 6 tool calls per question. Spend them wisely.
 - For a fuzzy lookup, \`smart_lookup\` is the right FIRST call — it does multi-format guess and multi-entity scan in ONE call.
 - Only fall back to \`run_select_query\` for genuinely novel questions where no dedicated tool fits — never as a quick retry after a failed exact-match lookup.
-- After the budget is exhausted you MUST produce a text answer, even if it's "I'm not sure — here's what I found so far, can you clarify…".`;
+- After the budget is exhausted you MUST produce a text answer, even if it's "I'm not sure — here's what I found so far, can you clarify…".
+
+---
+
+## When the user attaches a file (image / PDF / Excel / CSV)
+
+Wei Siang often drops photos of paper documents or spreadsheets into the chat. You can see images and PDFs directly (vision). Excel and CSV files come through as a structured preview at the top of the user turn.
+
+**What to look for:**
+
+- **Photos of paper POs from Houzs** — look for the format \`PO-NNNNNN\` (6-digit zero-padded, e.g. \`PO-009003\`). That's the customer PO number. Extract it AND any other context (customer logo, hub stamp like KL/PG/SRW/SBH, product codes, quantities, due dates). Then call \`smart_lookup\` or \`lookup_customer_po\` with that number to find the matching Sales Order in our system.
+- **Photos of invoices / DOs / SOs** — extract the document ref (INV-YYMM-NNN, DO-YYMM-NNN, SO-YYMM-NNN) and call \`get_invoice\` / \`get_delivery_order\` / \`get_sales_order\`.
+- **Product photos with codes printed on the label** — look for model numbers like 1003, 1005, plus a size suffix (K/Q/S/SS) and a color. Use \`list_products\` to find the matching SKU.
+- **Excel of customer POs** — column headers usually include "PO Number", "Customer", "Date". Call \`match_uploaded_data_to_hookka\` to check which rows are already in our system vs new.
+- **Employee / production / batch spreadsheets** — summarise what you see, ask the user what they want to do with it (just check / find specific rows / cross-reference with a date range).
+
+**Behaviour:**
+
+1. Identify what type of document the file is (paper PO photo? customer-PO spreadsheet? handwritten note? screenshot?). Say so in one short sentence.
+2. Extract the most useful identifiers / data points.
+3. Proactively look them up in Hookka — don't just report what you see, find the match.
+4. If multiple candidates match, list them and ASK which one.
+5. If extraction fails or the photo is too blurry/low-light to read a number, say so honestly and ask Wei Siang to retake / type the number.
+
+**Never** ask the user to "upload again" if you can see the file — you already have it. Never invent a PO number that isn't visibly on the image.`;
 
 type IncomingMessage = {
   role: "user" | "assistant";
   content: string;
+};
+
+type IncomingBody = {
+  messages?: IncomingMessage[];
+  /**
+   * Attachments accompany the FINAL user message in `messages` (the one
+   * the model is about to respond to). UI clamps to 3 files, server
+   * re-validates. See src/api/lib/attachment-parser.ts.
+   */
+  attachments?: IncomingAttachment[];
 };
 
 // SSE encoder — every event is `data: <json>\n\n`. The Cloudflare runtime
@@ -205,9 +247,9 @@ app.post("/chat", async (c) => {
     );
   }
 
-  let body: { messages?: IncomingMessage[] };
+  let body: IncomingBody;
   try {
-    body = (await c.req.json()) as { messages?: IncomingMessage[] };
+    body = (await c.req.json()) as IncomingBody;
   } catch {
     return c.json({ success: false, error: "Invalid JSON body" }, 400);
   }
@@ -229,6 +271,104 @@ app.post("/chat", async (c) => {
         m.content.length > 0,
     )
     .map((m) => ({ role: m.role, content: m.content }));
+
+  // ----- Attachment intake ------------------------------------------------
+  // We process attachments ONCE, server-side, and splice them as image /
+  // document / text blocks into the FINAL user message. Tools can also
+  // re-fetch the parsed rows via the request-scoped cache (see
+  // attachment-parser.ts).
+  let parsedAttachments: ParsedAttachment[] = [];
+  const rejections: { name: string; reason: string }[] = [];
+  if (Array.isArray(body.attachments) && body.attachments.length > 0) {
+    if (body.attachments.length > MAX_ATTACHMENTS_PER_MESSAGE * 2) {
+      return c.json(
+        {
+          success: false,
+          error: `Too many attachments — max ${MAX_ATTACHMENTS_PER_MESSAGE} per message.`,
+        },
+        413,
+      );
+    }
+    const ingest = await ingestAttachments(body.attachments);
+    parsedAttachments = ingest.parsed;
+    rejections.push(...ingest.rejected);
+
+    // Splice content into the LAST user message. We always know there's
+    // at least one user message — the message array is non-empty and the
+    // UI never sends an assistant-only conversation.
+    const lastUserIdx = (() => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") return i;
+      }
+      return -1;
+    })();
+
+    if (lastUserIdx >= 0 && parsedAttachments.length > 0) {
+      const original = messages[lastUserIdx];
+      const originalText =
+        typeof original.content === "string" ? original.content : "";
+
+      const attachmentBlocks: AnthropicContentBlock[] = [];
+      // Header note so the model knows what files are inline AND what was
+      // dropped. Kept short — the actual content blocks carry the data.
+      const lines: string[] = [];
+      lines.push(
+        `[The user attached ${parsedAttachments.length} file(s) with this message:]`,
+      );
+      for (const a of parsedAttachments) {
+        lines.push(
+          `- ${a.name} (${a.kind}, ~${Math.ceil(a.sizeBytes / 1024)} KB)${a.truncated ? " — content truncated" : ""}`,
+        );
+      }
+      if (rejections.length > 0) {
+        lines.push("");
+        lines.push("Rejected files:");
+        for (const r of rejections) {
+          lines.push(`- ${r.name}: ${r.reason}`);
+        }
+      }
+      attachmentBlocks.push({ type: "text", text: lines.join("\n") });
+      for (const a of parsedAttachments) {
+        attachmentBlocks.push(...a.blocks);
+      }
+      if (originalText.length > 0) {
+        attachmentBlocks.push({ type: "text", text: originalText });
+      }
+      messages[lastUserIdx] = {
+        role: "user",
+        content: attachmentBlocks,
+      };
+    }
+  }
+
+  // Stash parsed attachments for in-loop tools (parse_spreadsheet etc.).
+  // Keyed by a per-request id so concurrent chats don't cross-pollinate.
+  const requestId = `assist_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  if (parsedAttachments.length > 0) {
+    stashAttachments(requestId, parsedAttachments);
+    // Make the id available to tools via the Hono context.
+    (c as unknown as { set: (k: string, v: unknown) => void }).set(
+      "assistantAttachmentReqId",
+      requestId,
+    );
+  }
+
+  // Best-effort audit row for each attachment so we have a trail of what
+  // the operator dropped into the assistant. Filename only — no body.
+  for (const a of parsedAttachments) {
+    await emitAudit(c, {
+      resource: "assistant-attachment",
+      resourceId: a.id,
+      action: "upload",
+      after: {
+        name: a.name,
+        kind: a.kind,
+        sizeBytes: a.sizeBytes,
+        mediaType: a.mediaType,
+      },
+      source: "ui",
+    });
+  }
 
   // Payload-size guard. Strings + content blocks both end up in the request
   // body, so the byte budget is enforced on serialised JSON.
@@ -415,6 +555,9 @@ app.post("/chat", async (c) => {
         const msg = err instanceof Error ? err.message : String(err);
         controller.enqueue(sseEvent({ type: "error", message: msg }));
       } finally {
+        if (parsedAttachments.length > 0) {
+          dropAttachments(requestId);
+        }
         controller.enqueue(sseEvent({ type: "done" }));
         controller.close();
       }

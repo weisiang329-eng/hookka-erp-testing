@@ -15,8 +15,36 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { X, Paperclip, FileText, Image as ImageIcon, FileSpreadsheet } from "lucide-react";
 import { HookkaAILogo } from "@/components/assistant/HookkaAILogo";
+
+// File upload limits — these match the server-side guard in
+// src/api/lib/attachment-parser.ts. Defined locally so the UI can refuse
+// oversized files without a round trip.
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_ATTACHMENTS_PER_MESSAGE = 3;
+const ACCEPTED_TYPES = [
+  "image/*",
+  "application/pdf",
+  "text/csv",
+  ".csv",
+  ".xlsx",
+  ".xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+].join(",");
+
+type PendingAttachment = {
+  // Local id so React can key the chip list when files are removed.
+  localId: string;
+  name: string;
+  mediaType: string;
+  sizeBytes: number;
+  // Base64 (no data: prefix). Lazy — computed once when the file is picked.
+  base64: string;
+  // For images, an object URL for the thumbnail.
+  previewUrl?: string;
+};
 
 type ChatRole = "user" | "assistant";
 
@@ -25,7 +53,17 @@ type ToolChip = {
   state: "running" | "done";
 };
 
-type MessageBlock = { type: "text"; text: string } | { type: "tool"; tool: ToolChip };
+type AttachmentChip = {
+  name: string;
+  mediaType: string;
+  sizeBytes: number;
+  previewUrl?: string;
+};
+
+type MessageBlock =
+  | { type: "text"; text: string }
+  | { type: "tool"; tool: ToolChip }
+  | { type: "attachment"; attachment: AttachmentChip };
 
 type ChatMessage = {
   id: string;
@@ -35,6 +73,37 @@ type ChatMessage = {
 
 function uid(): string {
   return `msg-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Read a File to a base64-encoded string (no data: prefix). Uses FileReader
+// for browser compatibility — works in every evergreen browser without
+// pulling in a polyfill.
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("file read returned non-string"));
+        return;
+      }
+      // result is "data:<mime>;base64,<payload>". Strip the prefix.
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("file read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function attachmentIconFor(mediaType: string): React.ReactNode {
+  if (mediaType.startsWith("image/")) {
+    return <ImageIcon className="h-3 w-3" />;
+  }
+  if (mediaType === "application/pdf") {
+    return <FileText className="h-3 w-3" />;
+  }
+  return <FileSpreadsheet className="h-3 w-3" />;
 }
 
 // Very basic markdown rendering — bold (**...**), inline code (`...`),
@@ -215,6 +284,31 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               </span>
             );
           }
+          if (b.type === "attachment") {
+            const sizeKb = Math.max(1, Math.round(b.attachment.sizeBytes / 1024));
+            return (
+              <div
+                key={idx}
+                className="inline-flex items-center gap-2 my-1 mr-1 rounded-md border border-white/30 bg-white/15 px-2 py-1 text-[11px]"
+              >
+                {b.attachment.previewUrl ? (
+                  <img
+                    src={b.attachment.previewUrl}
+                    alt=""
+                    className="h-6 w-6 rounded object-cover"
+                  />
+                ) : (
+                  <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-white/20">
+                    {attachmentIconFor(b.attachment.mediaType)}
+                  </span>
+                )}
+                <span className="max-w-[140px] truncate" title={b.attachment.name}>
+                  {b.attachment.name}
+                </span>
+                <span className="opacity-70">{sizeKb} KB</span>
+              </div>
+            );
+          }
           return (
             <div key={idx} className="whitespace-pre-wrap break-words">
               {isUser ? b.text : renderMarkdown(b.text)}
@@ -236,8 +330,32 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Track which preview URLs are still in use so we can revoke them on
+  // unmount. Revocation on individual remove happens in removeAttachment.
+  // We keep this in a ref so the cleanup function captures the live set
+  // at unmount time instead of a stale snapshot.
+  const previewUrlsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const live = new Set<string>();
+    for (const a of attachments) {
+      if (a.previewUrl) live.add(a.previewUrl);
+    }
+    previewUrlsRef.current = live;
+  }, [attachments]);
+  useEffect(() => {
+    // Unmount-only — revokes every preview URL still alive when the
+    // component is torn down.
+    return () => {
+      for (const url of previewUrlsRef.current) {
+        URL.revokeObjectURL(url);
+      }
+    };
+  }, []);
 
   // Auto-scroll to bottom on new message / streamed text.
   useEffect(() => {
@@ -272,13 +390,46 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
 
   const sendMessage = useCallback(async () => {
     const trimmed = draft.trim();
-    if (!trimmed || busy) return;
+    const hasAttachments = attachments.length > 0;
+    // Allow attachment-only messages — the user might just want to drop a
+    // photo and let the AI describe what it sees. Send if EITHER text or
+    // attachments are present.
+    if ((!trimmed && !hasAttachments) || busy) return;
 
     setError(null);
+
+    // Capture attachments at send time. We reset state right after so the
+    // user can compose a new message while this one is in flight.
+    const sendingAttachments = attachments;
+
+    const userBlocks: MessageBlock[] = [];
+    for (const a of sendingAttachments) {
+      userBlocks.push({
+        type: "attachment",
+        attachment: {
+          name: a.name,
+          mediaType: a.mediaType,
+          sizeBytes: a.sizeBytes,
+          previewUrl: a.previewUrl,
+        },
+      });
+    }
+    if (trimmed.length > 0) {
+      userBlocks.push({ type: "text", text: trimmed });
+    }
+    // If the user sent only files, give the model a hint instead of an
+    // empty turn — Anthropic requires at least one text or media block.
+    if (userBlocks.filter((b) => b.type !== "attachment").length === 0) {
+      userBlocks.push({
+        type: "text",
+        text: "(file attached)",
+      });
+    }
+
     const userMsg: ChatMessage = {
       id: uid(),
       role: "user",
-      blocks: [{ type: "text", text: trimmed }],
+      blocks: userBlocks,
     };
     const assistantMsg: ChatMessage = {
       id: uid(),
@@ -298,16 +449,29 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
 
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setDraft("");
+    setAttachments([]);
     setBusy(true);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
     try {
+      const body: {
+        messages: typeof payloadMessages;
+        attachments?: { name: string; mediaType: string; base64: string }[];
+      } = { messages: payloadMessages };
+      if (sendingAttachments.length > 0) {
+        body.attachments = sendingAttachments.map((a) => ({
+          name: a.name,
+          mediaType: a.mediaType,
+          base64: a.base64,
+        }));
+      }
+
       const res = await fetch("/api/assistant/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: payloadMessages }),
+        body: JSON.stringify(body),
         signal: ctrl.signal,
       });
 
@@ -422,7 +586,74 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       setBusy(false);
       abortRef.current = null;
     }
-  }, [draft, busy, messages]);
+  }, [draft, busy, messages, attachments]);
+
+  // Handle the <input type="file"> change event. Validates count + size
+  // per file and reads each to base64. Failures show inline in the
+  // composer error slot — never throws to the parent.
+  const onPickFiles = useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0) return;
+      setError(null);
+
+      const slotsLeft = MAX_ATTACHMENTS_PER_MESSAGE - attachments.length;
+      if (slotsLeft <= 0) {
+        setError(
+          `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`,
+        );
+        return;
+      }
+
+      const incoming = Array.from(files).slice(0, slotsLeft);
+      const next: PendingAttachment[] = [];
+      for (const f of incoming) {
+        if (f.size > MAX_ATTACHMENT_BYTES) {
+          setError(`"${f.name}" is over 10 MB — pick a smaller file.`);
+          continue;
+        }
+        try {
+          const base64 = await readFileAsBase64(f);
+          const previewUrl = f.type.startsWith("image/")
+            ? URL.createObjectURL(f)
+            : undefined;
+          next.push({
+            localId: uid(),
+            name: f.name,
+            mediaType: f.type || "application/octet-stream",
+            sizeBytes: f.size,
+            base64,
+            previewUrl,
+          });
+        } catch (err) {
+          setError(
+            `Couldn't read "${f.name}": ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      if (next.length > 0) {
+        setAttachments((prev) => [...prev, ...next]);
+      }
+
+      // Reset the input so the same file can be re-picked after removing
+      // it (browsers ignore change-events for identical FileList).
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    },
+    [attachments.length],
+  );
+
+  const removeAttachment = useCallback((localId: string) => {
+    setAttachments((prev) => {
+      const out = prev.filter((a) => {
+        if (a.localId === localId && a.previewUrl) {
+          URL.revokeObjectURL(a.previewUrl);
+        }
+        return a.localId !== localId;
+      });
+      return out;
+    });
+  }, []);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -503,7 +734,71 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
 
       {/* Composer */}
       <div className="border-t border-[#E2DDD8] px-3 py-3 shrink-0">
+        {/* Pending attachment chips */}
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {attachments.map((a) => {
+              const sizeKb = Math.max(1, Math.round(a.sizeBytes / 1024));
+              return (
+                <div
+                  key={a.localId}
+                  className="inline-flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-[#F8F5F2] px-2 py-1 text-[11px]"
+                >
+                  {a.previewUrl ? (
+                    <img
+                      src={a.previewUrl}
+                      alt=""
+                      className="h-7 w-7 rounded object-cover"
+                    />
+                  ) : (
+                    <span className="inline-flex h-6 w-6 items-center justify-center rounded bg-[#E2DDD8] text-[#6B5C32]">
+                      {attachmentIconFor(a.mediaType)}
+                    </span>
+                  )}
+                  <span
+                    className="max-w-[120px] truncate text-[#1F1D1B]"
+                    title={a.name}
+                  >
+                    {a.name}
+                  </span>
+                  <span className="text-[#6B7280]">{sizeKb} KB</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.localId)}
+                    aria-label={`Remove ${a.name}`}
+                    className="h-4 w-4 rounded-full text-[#6B7280] hover:bg-[#E2DDD8] hover:text-[#1F1D1B] flex items-center justify-center"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         <div className="flex gap-2 items-end">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_TYPES}
+            multiple
+            className="hidden"
+            onChange={(e) => void onPickFiles(e.target.files)}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy || attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE}
+            aria-label="Attach files"
+            title={
+              attachments.length >= MAX_ATTACHMENTS_PER_MESSAGE
+                ? `Max ${MAX_ATTACHMENTS_PER_MESSAGE} files per message`
+                : "Attach images, PDFs, Excel, or CSV"
+            }
+            className="h-10 w-10 rounded-md border border-[#E2DDD8] text-[#6B7280] hover:bg-[#F0ECE9] hover:text-[#1F1D1B] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -525,7 +820,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
             <button
               type="button"
               onClick={() => void sendMessage()}
-              disabled={!draft.trim()}
+              disabled={!draft.trim() && attachments.length === 0}
               className="h-10 px-4 rounded-md bg-[#1F1D1B] text-white text-sm font-medium hover:bg-[#3a3633] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Send
@@ -534,6 +829,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
         </div>
         <p className="mt-2 text-[10px] text-[#6B7280]">
           Read-only. Chat history clears when you close the panel.
+          Attach photos / PDFs / Excel / CSV (max 10 MB, {MAX_ATTACHMENTS_PER_MESSAGE} files).
         </p>
       </div>
     </aside>

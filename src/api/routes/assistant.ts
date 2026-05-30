@@ -33,6 +33,8 @@ import {
   type AnthropicMessage,
   type AnthropicContentBlock,
   type AnthropicToolUseBlock,
+  type AnthropicTool,
+  type AnthropicTextBlock,
 } from "../lib/anthropic-client";
 import {
   getToolSchemas,
@@ -499,6 +501,33 @@ app.post("/chat", async (c) => {
 
   const tools = getToolSchemas();
 
+  // ----- Prompt caching --------------------------------------------------
+  // The tool definitions (~20K tokens) and the system prompt (~5K tokens)
+  // are byte-for-byte identical on every call and every question. Without
+  // caching the API re-bills that whole ~25K-token prefix on each of the
+  // (up to 8) tool-loop iterations AND on every new question — the single
+  // biggest cost driver. We attach an ephemeral cache breakpoint to the
+  // LAST tool and to the system prompt, so the prefix is written to cache
+  // once then re-read at ~10% of the input cost for ~5 min. This also cuts
+  // latency on the follow-up iterations.
+  const cachedTools: AnthropicTool[] =
+    tools.length > 0
+      ? [
+          ...tools.slice(0, -1),
+          {
+            ...tools[tools.length - 1],
+            cache_control: { type: "ephemeral" as const },
+          },
+        ]
+      : tools;
+  const cachedSystem: AnthropicTextBlock[] = [
+    {
+      type: "text" as const,
+      text: SYSTEM_PROMPT,
+      cache_control: { type: "ephemeral" as const },
+    },
+  ];
+
   // Stream response back to the browser.
   const stream = new ReadableStream({
     async start(controller) {
@@ -536,9 +565,9 @@ app.post("/chat", async (c) => {
           for await (const evt of streamMessages(apiKey, {
             model: MODEL,
             max_tokens: MAX_TOKENS,
-            system: SYSTEM_PROMPT,
+            system: cachedSystem,
             messages,
-            tools,
+            tools: cachedTools,
           })) {
             if (evt.type === "text_delta") {
               activeText += evt.text;

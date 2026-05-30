@@ -16,6 +16,11 @@ export type AnthropicRole = "user" | "assistant";
 export type AnthropicTextBlock = {
   type: "text";
   text: string;
+  // Prompt-caching breakpoint. When set, Anthropic caches the prompt prefix
+  // up to and including this block (tools + system) for ~5 min, so repeat
+  // calls in the tool loop AND back-to-back questions re-read the cache at
+  // ~10% of the input cost instead of re-billing the full prefix.
+  cache_control?: { type: "ephemeral" };
 };
 
 export type AnthropicToolUseBlock = {
@@ -76,12 +81,17 @@ export type AnthropicTool = {
     properties: Record<string, unknown>;
     required?: string[];
   };
+  // Set on the LAST tool to cache the whole (static) tool block. See
+  // AnthropicTextBlock.cache_control.
+  cache_control?: { type: "ephemeral" };
 };
 
 export type AnthropicRequestBody = {
   model: string;
   max_tokens: number;
-  system?: string;
+  // Plain string, OR an array of text blocks so we can attach a
+  // cache_control breakpoint to the (static) system prompt.
+  system?: string | AnthropicTextBlock[];
   messages: AnthropicMessage[];
   tools?: AnthropicTool[];
   stream?: boolean;

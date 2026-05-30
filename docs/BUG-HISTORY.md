@@ -34,6 +34,85 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-30-004 — Hub cascade wrote to non-existent production_orders.hubId; DO+invoice cascade refreshed only 3 of 6 contact-block fields
+
+**Status:** 🟢 Fixed (2026-05-30) — commit `2138c139`, deploy run 26679479208
+**Category:** sales-orders, delivery-orders, data-integrity
+
+**Symptom (two bugs, one commit):**
+
+1. After shipping the hub-cascade feature in `e79c5d57`, any PATCH
+   `/api/sales-orders/:id/hub` or `/api/consignment-orders/:id/hub` that
+   reached an SO/CO with at least one linked production_orders row would
+   throw `column production_orders.hubId does not exist` and roll the
+   entire transaction back — including the SO/CO hub update itself. Hub
+   change appeared to succeed in the UI (the modal closed and toast
+   fired before the rollback) but the SO/CO row stayed on the old hub.
+
+2. Even on SO/COs with no POs (cascade reached DO+invoice without
+   blowing up), the cascade only refreshed `hubId`, `hubName` and
+   `customerState`. DO creation snaps SIX fields from `delivery_hubs`
+   (shortName, address, state, contactName, phone — plus hubId itself),
+   so the draft DO printed the OLD address and OLD contact even after
+   the hub was "changed". Same staleness on draft invoices (invoices
+   snap the contact block from the source DO at create time).
+
+**Root cause:**
+
+1. The cascade was modelled on the assumption that production_orders
+   denormalizes hub the same way delivery_orders / invoices /
+   consignment_notes do. It doesn't — `production_orders` has no hubId
+   or hubName column. Production sheet reads hub via JOIN against
+   `sales_orders` at print time (production-orders.ts:5156).
+
+2. The original cascade focused on the hub identity (id+name+state)
+   and missed the fact that DO/invoice both pre-snapshot the full
+   customer-contact block from `delivery_hubs` at create time. With
+   only 3 of 6 columns refreshed, the printed PDF stayed stale.
+
+**Fix:**
+
+- `src/api/routes/sales-orders.ts` PATCH `/:id/hub`:
+  - Removed `UPDATE production_orders SET hubId=?, hubName=?` write
+    (and its audit row). Kept a `SELECT id FROM production_orders`
+    count for the toast — "N production sheets will auto-update via
+    join on next print".
+  - Hub lookup extended to pull `address, contactName, phone`.
+  - DO UPDATE now writes 6 fields: `hubId, hubName, customerState,
+    deliveryAddress, contactPerson, contactPhone`. Discovery SELECT
+    also pulls the prior values for a complete audit before-state.
+  - Invoice UPDATE now writes 6 fields: `hubId, hubName, customerState,
+    customerAddress, attention, customerPhone` (invoice column names
+    differ — `attention` and `customerPhone` instead of
+    `contactPerson`/`contactPhone`).
+  - `customerState` cascade now uses `hub.state ?? so.customerState`
+    (matches the SO's own update line) instead of `hub.state ?? null`,
+    so a hub with no state doesn't accidentally null out the DO/invoice
+    customer state.
+  - audit_events `after_json` carries every changed column.
+
+- `src/api/routes/consignment-orders.ts` PATCH `/:id/hub`: same
+  production_orders fix (count-only, no write). CO has no DO/invoice
+  cascade — CO ships through consignment_notes, which were already
+  cascading hubId + branchName correctly.
+
+- `src/pages/sales/detail.tsx`, `src/pages/consignment/detail.tsx`:
+  toast text rewritten to be honest — DOs / invoices / CNs counted
+  under "Cascaded to: ...", production sheets called out separately
+  as "N production sheets will auto-update via join on next print".
+
+**Verification:** `npm run typecheck:app` passes. CI deploy run
+`26679479208` succeeded. The DB-level error reproduced cleanly in
+`information_schema.columns` before the fix (`hubId`/`hub_id` returned
+0 rows on `production_orders`).
+
+**Note:** No additional structural bugs found while auditing the cascade
+shape (transaction batching, rollback path, multi-SO conflict skip).
+The cascade is correct now; production sheet reads hub via join so the
+PO count remains purely informational.
+
+---
+
 ## BUG-2026-05-30-003 — Hookka AI assistant: get_sales_order + sibling lookup tools silently returning "not found"
 
 **Status:** 🟢 Fixed (2026-05-30)

@@ -1121,28 +1121,32 @@ export default function SalesOrderDetailPage() {
           setHubModalOpen(false);
           // Compose a single toast that includes the cascade summary so
           // the operator sees at a glance which downstream documents were
-          // refreshed (production sheets, DRAFT DOs, DRAFT invoices).
-          const parts: string[] = [];
+          // refreshed (DRAFT DOs, DRAFT invoices). Production sheets are
+          // NOT cascaded — production_orders has no hub columns, the
+          // sheet reads hub via JOIN at print time. We mention them
+          // separately as "auto-update via join" so the operator knows
+          // reprinting will pick up the new hub.
+          const cascadedParts: string[] = [];
           if (cascade) {
-            if (cascade.productionOrdersUpdated > 0) {
-              parts.push(
-                `${cascade.productionOrdersUpdated} production order${cascade.productionOrdersUpdated === 1 ? "" : "s"}`,
-              );
-            }
             if ((cascade.deliveryOrdersUpdated ?? 0) > 0) {
-              parts.push(
+              cascadedParts.push(
                 `${cascade.deliveryOrdersUpdated} draft DO${cascade.deliveryOrdersUpdated === 1 ? "" : "s"}`,
               );
             }
             if ((cascade.invoicesUpdated ?? 0) > 0) {
-              parts.push(
+              cascadedParts.push(
                 `${cascade.invoicesUpdated} draft invoice${cascade.invoicesUpdated === 1 ? "" : "s"}`,
               );
             }
           }
-          const msg = parts.length
-            ? `Hub updated to ${newHubName}. Cascaded to: ${parts.join(", ")}.`
-            : `Hub updated to ${newHubName}.`;
+          let msg = `Hub updated to ${newHubName}.`;
+          if (cascadedParts.length) {
+            msg += ` Cascaded to: ${cascadedParts.join(", ")}.`;
+          }
+          if (cascade && cascade.productionOrdersUpdated > 0) {
+            const n = cascade.productionOrdersUpdated;
+            msg += ` ${n} production sheet${n === 1 ? "" : "s"} will auto-update via join on next print.`;
+          }
           toast.success(msg);
           // Surface multi-SO DOs we deliberately skipped so the operator
           // can fix those by hand. These are NOT errors — the parent SO

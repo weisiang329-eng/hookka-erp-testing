@@ -3605,16 +3605,27 @@ app.patch("/:id/hub", async (c) => {
       return c.json({ success: false, error: "Sales order not found" }, 404);
     }
 
-    // 2. Resolve the new hub.
+    // 2. Resolve the new hub. We pull address / contactName / phone as
+    //    well so the DO + invoice cascade below can refresh the full
+    //    customer-contact block — DO creation snaps these 5 fields onto
+    //    every DO at create time (see delivery-orders.ts ~line 2546),
+    //    and invoices in turn snap them from the DO. Without refreshing
+    //    all five, a draft DO / invoice printed after the hub change
+    //    would still show the OLD address + OLD contact even though the
+    //    hubId column was updated.
     const hub = await c.var.DB
       .prepare(
-        "SELECT id, shortName, state, customerId FROM delivery_hubs WHERE id = ?",
+        `SELECT id, shortName, address, state, contactName, phone, customerId
+           FROM delivery_hubs WHERE id = ?`,
       )
       .bind(newHubId)
       .first<{
         id: string;
         shortName: string;
+        address: string | null;
         state: string | null;
+        contactName: string | null;
+        phone: string | null;
         customerId: string;
       }>();
     if (!hub) {
@@ -3703,17 +3714,23 @@ app.patch("/:id/hub", async (c) => {
     };
     if (reason) afterSnap.reason = reason;
 
-    // 6a. production_orders — every PO linked to this SO. NO status filter:
-    //     a completed PO's production sheet / fabric tag may still be
-    //     reprinted and must show the correct hub.
+    // 6a. production_orders — there is NOTHING to update here. The
+    //     production_orders table has no hubId / hubName columns
+    //     (confirmed against information_schema). The production sheet
+    //     resolves hub at print time via JOIN against sales_orders
+    //     (see production-orders.ts line 5156), so once the SO row is
+    //     updated above, every linked PO automatically reflects the new
+    //     hub on its next print. We only count linked POs here so the
+    //     toast can tell the operator "N production sheets will auto-
+    //     update via join". Cascade write removed in commit 2026-05-30
+    //     after the original hub-cascade shipped a runtime error
+    //     ("column production_orders.hubId does not exist").
     const posRes = await c.var.DB
       .prepare(
-        `SELECT id, hubId, hubName
-           FROM production_orders
-          WHERE salesOrderId = ?`,
+        `SELECT id FROM production_orders WHERE salesOrderId = ?`,
       )
       .bind(so.id)
-      .all<{ id: string; hubId: string | null; hubName: string | null }>();
+      .all<{ id: string }>();
     const poRows = posRes.results ?? [];
 
     // 6b. delivery_orders — pre-shipment only (status NOT IN shipped set).
@@ -3722,9 +3739,17 @@ app.patch("/:id/hub", async (c) => {
     //     A consolidated multi-SO DO must be visible to BOTH the discovery
     //     and the hub-mix conflict check. companySOId was already resolved
     //     above (in the shipment-lock guard) so it's reused here.
+    // Pull the full contact block (customerState / deliveryAddress /
+    // contactPerson / contactPhone) so the audit before-state is complete
+    // and the cascade UPDATE below knows what's actually being changed.
+    // These are the same 5 fields the DO snaps from delivery_hubs at
+    // create time (delivery-orders.ts ~line 2546) — we mirror the full
+    // create-time snapshot, not just hubId.
     const candidateDosRes = await c.var.DB
       .prepare(
-        `SELECT DISTINCT d.id, d.doNo, d.status, d.hubId, d.hubName, d.salesOrderId
+        `SELECT DISTINCT d.id, d.doNo, d.status, d.hubId, d.hubName,
+                         d.customerState, d.deliveryAddress,
+                         d.contactPerson, d.contactPhone, d.salesOrderId
            FROM delivery_orders d
           WHERE d.status NOT IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
             AND (
@@ -3743,6 +3768,10 @@ app.patch("/:id/hub", async (c) => {
         status: string | null;
         hubId: string | null;
         hubName: string | null;
+        customerState: string | null;
+        deliveryAddress: string | null;
+        contactPerson: string | null;
+        contactPhone: string | null;
         salesOrderId: string | null;
       }>();
     const candidateDos = candidateDosRes.results ?? [];
@@ -3786,29 +3815,72 @@ app.patch("/:id/hub", async (c) => {
     }
 
     // 6c. invoices — DRAFT only. Invoices link to SO via salesOrderId
-    //     (denormalized at create time from the originating DO).
+    //     (denormalized at create time from the originating DO). Pull
+    //     the full contact block so we can both (a) cascade the new hub's
+    //     address / contactName / phone into customerAddress / attention /
+    //     customerPhone, and (b) capture the before-state in audit. PDF
+    //     generation reads these columns directly (see
+    //     generate-invoice-pdf.ts), so refreshing only hubId/hubName
+    //     would still leave the printed invoice with the OLD address.
     const invsRes = await c.var.DB
       .prepare(
-        `SELECT id, hubId, hubName
+        `SELECT id, hubId, hubName, customerState, customerAddress,
+                attention, customerPhone
            FROM invoices
           WHERE salesOrderId = ?
             AND status = 'DRAFT'`,
       )
       .bind(so.id)
-      .all<{ id: string; hubId: string | null; hubName: string | null }>();
+      .all<{
+        id: string;
+        hubId: string | null;
+        hubName: string | null;
+        customerState: string | null;
+        customerAddress: string | null;
+        attention: string | null;
+        customerPhone: string | null;
+      }>();
     const invRows = invsRes.results ?? [];
 
     // 7. Build the batch. ONE transaction:
-    //    - update sales_orders.hub
-    //    - update each production_orders.hub
-    //    - update each eligible delivery_orders.hub
-    //    - update each DRAFT invoices.hub
-    //    - one audit row for SO change + one per cascaded downstream row.
-    const auditAfter = {
-      ...afterSnap,
+    //    - update sales_orders.hub (+ customerState)
+    //    - update each eligible delivery_orders row with the FULL contact
+    //      block (hubId, hubName, customerAddress, customerState,
+    //      contactPerson, contactPhone) — mirrors the 6-field snapshot
+    //      DO creation takes from delivery_hubs.
+    //    - update each DRAFT invoices row with the equivalent fields
+    //      (hubId, hubName, customerAddress, customerState, attention,
+    //      customerPhone) — invoice creation snaps these from the DO,
+    //      so the same staleness shows up on draft invoices.
+    //    - production_orders has NO hub columns; production sheet reads
+    //      hub via JOIN, so nothing to write there.
+    //    - one audit row for SO change + one per cascaded downstream row,
+    //      with both before and after carrying every field that changed.
+    // Effective state mirrors sales_orders.customerState write below
+    // (declared up here so the audit-after snapshots can reference it).
+    const effectiveState = hub.state ?? so.customerState ?? null;
+    const doAfter: Record<string, unknown> = {
+      hubId: hub.id,
+      hubName: hub.shortName,
+      customerAddress: hub.address ?? null,
+      customerState: effectiveState,
+      contactPerson: hub.contactName ?? null,
+      contactPhone: hub.phone ?? null,
       parentSOId: so.id,
       parentSOCode: so.companySOId,
     };
+    if (reason) doAfter.reason = reason;
+    const invAfter: Record<string, unknown> = {
+      hubId: hub.id,
+      hubName: hub.shortName,
+      customerAddress: hub.address ?? null,
+      customerState: effectiveState,
+      attention: hub.contactName ?? null,
+      customerPhone: hub.phone ?? null,
+      parentSOId: so.id,
+      parentSOCode: so.companySOId,
+    };
+    if (reason) invAfter.reason = reason;
     const stmts: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
 
     stmts.push(
@@ -3835,38 +3907,23 @@ app.patch("/:id/hub", async (c) => {
     });
     if (soAudit) stmts.push(soAudit);
 
-    for (const po of poRows) {
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `UPDATE production_orders
-                SET hubId = ?, hubName = ?, updated_at = ?
-              WHERE id = ?`,
-          )
-          .bind(hub.id, hub.shortName, now, po.id),
-      );
-      const a = await buildAuditStatement(c, {
-        resource: "production-orders",
-        resourceId: po.id,
-        action: "hub-cascade-from-so",
-        before: { hubId: po.hubId, hubName: po.hubName },
-        after: auditAfter,
-      });
-      if (a) stmts.push(a);
-    }
-
     for (const d of dosToUpdate) {
       stmts.push(
         c.var.DB
           .prepare(
             `UPDATE delivery_orders
-                SET hubId = ?, hubName = ?, customerState = ?, updated_at = ?
+                SET hubId = ?, hubName = ?, customerState = ?,
+                    deliveryAddress = ?, contactPerson = ?, contactPhone = ?,
+                    updated_at = ?
               WHERE id = ?`,
           )
           .bind(
             hub.id,
             hub.shortName,
-            hub.state ?? null,
+            effectiveState,
+            hub.address ?? "",
+            hub.contactName ?? "",
+            hub.phone ?? "",
             now,
             d.id,
           ),
@@ -3875,8 +3932,15 @@ app.patch("/:id/hub", async (c) => {
         resource: "delivery-orders",
         resourceId: d.id,
         action: "hub-cascade-from-so",
-        before: { hubId: d.hubId, hubName: d.hubName },
-        after: auditAfter,
+        before: {
+          hubId: d.hubId,
+          hubName: d.hubName,
+          customerAddress: d.deliveryAddress,
+          customerState: d.customerState,
+          contactPerson: d.contactPerson,
+          contactPhone: d.contactPhone,
+        },
+        after: doAfter,
       });
       if (a) stmts.push(a);
     }
@@ -3886,17 +3950,35 @@ app.patch("/:id/hub", async (c) => {
         c.var.DB
           .prepare(
             `UPDATE invoices
-                SET hubId = ?, hubName = ?, updated_at = ?
+                SET hubId = ?, hubName = ?, customerState = ?,
+                    customerAddress = ?, attention = ?, customerPhone = ?,
+                    updated_at = ?
               WHERE id = ?`,
           )
-          .bind(hub.id, hub.shortName, now, inv.id),
+          .bind(
+            hub.id,
+            hub.shortName,
+            effectiveState,
+            hub.address ?? "",
+            hub.contactName ?? "",
+            hub.phone ?? "",
+            now,
+            inv.id,
+          ),
       );
       const a = await buildAuditStatement(c, {
         resource: "invoices",
         resourceId: inv.id,
         action: "hub-cascade-from-so",
-        before: { hubId: inv.hubId, hubName: inv.hubName },
-        after: auditAfter,
+        before: {
+          hubId: inv.hubId,
+          hubName: inv.hubName,
+          customerAddress: inv.customerAddress,
+          customerState: inv.customerState,
+          attention: inv.attention,
+          customerPhone: inv.customerPhone,
+        },
+        after: invAfter,
       });
       if (a) stmts.push(a);
     }

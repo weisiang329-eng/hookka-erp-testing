@@ -2038,16 +2038,22 @@ app.patch("/:id/hub", async (c) => {
     };
     if (reason) afterSnap.reason = reason;
 
-    // 6a. production_orders linked to this CO (no status filter — completed
-    //     POs still print the production sheet).
+    // 6a. production_orders — there is NOTHING to update here. The
+    //     production_orders table has no hubId / hubName columns
+    //     (confirmed against information_schema). The production sheet
+    //     resolves hub at print time via JOIN against the parent SO/CO,
+    //     so once the CO row is updated above every linked PO reflects
+    //     the new hub on its next print. We only count linked POs so
+    //     the toast can tell the operator "N production sheets will
+    //     auto-update via join". Cascade write removed in commit
+    //     2026-05-30 after the original hub-cascade shipped a runtime
+    //     error ("column production_orders.hubId does not exist").
     const posRes = await c.var.DB
       .prepare(
-        `SELECT id, hubId, hubName
-           FROM production_orders
-          WHERE consignmentOrderId = ?`,
+        `SELECT id FROM production_orders WHERE consignmentOrderId = ?`,
       )
       .bind(co.id)
-      .all<{ id: string; hubId: string | null; hubName: string | null }>();
+      .all<{ id: string }>();
     const poRows = posRes.results ?? [];
 
     // 6b. consignment_notes — pre-dispatch only. CN has hubId (FK) and
@@ -2102,25 +2108,9 @@ app.patch("/:id/hub", async (c) => {
     });
     if (coAudit) stmts.push(coAudit);
 
-    for (const po of poRows) {
-      stmts.push(
-        c.var.DB
-          .prepare(
-            `UPDATE production_orders
-                SET hubId = ?, hubName = ?, updated_at = ?
-              WHERE id = ?`,
-          )
-          .bind(hub.id, hub.shortName, now, po.id),
-      );
-      const a = await buildAuditStatement(c, {
-        resource: "production-orders",
-        resourceId: po.id,
-        action: "hub-cascade-from-co",
-        before: { hubId: po.hubId, hubName: po.hubName },
-        after: auditAfter,
-      });
-      if (a) stmts.push(a);
-    }
+    // production_orders intentionally NOT updated — see 6a above. The
+    // table has no hubId/hubName columns; the production sheet reads
+    // hub via JOIN against the parent CO.
 
     for (const cn of cnRows) {
       stmts.push(

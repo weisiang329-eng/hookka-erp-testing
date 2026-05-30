@@ -960,24 +960,27 @@ export default function SalesOrderDetailPage() {
         onClose={() => setHubModalOpen(false)}
         onSaved={(newHubName, cascade) => {
           setHubModalOpen(false);
-          // CO cascade summary: production orders + pending consignment
-          // notes (the CN equivalent of "draft DOs").
-          const parts: string[] = [];
+          // CO cascade summary: pending consignment notes (the CN
+          // equivalent of "draft DOs"). Production sheets are NOT
+          // cascaded — production_orders has no hub columns, the sheet
+          // reads hub via JOIN at print time. We mention them separately
+          // as "auto-update via join".
+          const cascadedParts: string[] = [];
           if (cascade) {
-            if (cascade.productionOrdersUpdated > 0) {
-              parts.push(
-                `${cascade.productionOrdersUpdated} production order${cascade.productionOrdersUpdated === 1 ? "" : "s"}`,
-              );
-            }
             if ((cascade.consignmentNotesUpdated ?? 0) > 0) {
-              parts.push(
+              cascadedParts.push(
                 `${cascade.consignmentNotesUpdated} pending CN${cascade.consignmentNotesUpdated === 1 ? "" : "s"}`,
               );
             }
           }
-          const msg = parts.length
-            ? `Hub updated to ${newHubName}. Cascaded to: ${parts.join(", ")}.`
-            : `Hub updated to ${newHubName}.`;
+          let msg = `Hub updated to ${newHubName}.`;
+          if (cascadedParts.length) {
+            msg += ` Cascaded to: ${cascadedParts.join(", ")}.`;
+          }
+          if (cascade && cascade.productionOrdersUpdated > 0) {
+            const n = cascade.productionOrdersUpdated;
+            msg += ` ${n} production sheet${n === 1 ? "" : "s"} will auto-update via join on next print.`;
+          }
           toast.success(msg);
           fetchOrder();
         }}

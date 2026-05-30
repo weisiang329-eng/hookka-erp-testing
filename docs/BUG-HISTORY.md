@@ -34,6 +34,124 @@ Entries themselves stay newest-first.
 
 ---
 
+## FEAT-2026-05-30-008 — Hookka AI now accepts file attachments: photos / PDFs / Excel / CSV (vision + structured ingest)
+
+**Status:** 🟢 Shipped (2026-05-30)
+**Category:** assistant, feature
+
+**Why this:**
+
+Wei Siang wanted to drop a phone photo of a paper customer PO into the
+chat and have the assistant pull up the matching Sales Order. Same for
+dropping an Excel of customer POs and asking "are these in our system?".
+Before this feature the slide-over only accepted text — operator was
+typing PO numbers by hand off the paper.
+
+**What shipped:**
+
+1. **Paperclip + chip composer UI** in `AssistantSlideOver.tsx`. Accepts
+   `image/*`, `application/pdf`, `text/csv`, `.xls/.xlsx`. Max 10 MB
+   per file, 3 files per message. Image chips show a thumbnail; other
+   files show a typed icon. Each chip has an X to remove. Reject paths
+   surface inline ("over 10 MB", "max 3 files").
+
+2. **Backend file handling** in `src/api/lib/attachment-parser.ts`. Pure
+   Workers-compatible module:
+   - Images → forwarded as Anthropic `image` content block (base64,
+     `media_type` honoured).
+   - PDFs → forwarded as Anthropic `document` content block. We do NOT
+     ship `pdf-parse` — it's Node-only (depends on `fs` + `Buffer.from(file)`
+     which fail to load in Workers). Anthropic's native PDF support
+     (beta header `pdfs-2024-09-25`) handles tables, logos, handwriting
+     end-to-end.
+   - `.xlsx` / `.xls` → SheetJS (`xlsx`, already in deps; ~420KB
+     dynamic-imported only when an Excel file appears) → structured
+     rows per sheet.
+   - CSV → hand-rolled RFC 4180 parser (quoted fields, escaped quotes,
+     embedded newlines).
+   - Spreadsheet / CSV preview is truncated to 50 KB per file for the
+     in-context dump; the full parsed rows are stashed in a request-
+     scoped cache so tools can fetch them.
+
+3. **Three new assistant tools** in `assistant-tools.ts`:
+   - `analyze_image` — orchestrates a `smart_lookup` for every reference
+     the model extracted from a photo (PO numbers, SO numbers, invoice
+     numbers). Returns matched documents with customer / status / total.
+   - `parse_spreadsheet` — returns structured rows + headers for a
+     spreadsheet the user just uploaded. Capped at 200 rows per sheet.
+   - `match_uploaded_data_to_hookka` — given a column name, walks each
+     row and tries to match against `sales_orders`,
+     `consignment_orders`, `production_orders` via the same
+     `generateLookupPatterns` helper that powers `smart_lookup`. Returns
+     per-row `matched` / `no-match` with disambiguation context.
+
+4. **System prompt update** in `routes/assistant.ts`: added the
+   "When the user attaches a file" section so the model knows what to
+   look for (Houzs PO format on paper, customer logos, hub stamps,
+   spreadsheet column heuristics) and is told to proactively look up
+   Hookka after extracting data — not just report what it sees.
+
+5. **Security guardrails:**
+   - 10 MB / 3 files cap, enforced server-side and client-side.
+   - Extension allowlist; executable extensions (`.exe`, `.bat`, `.ps1`,
+     `.js`, `.dll`, etc.) are stripped even if MIME is spoofed.
+   - 50 KB cap on extracted text per file (truncation marker tells the
+     model there's more).
+   - Per-attachment audit row (`resource = "assistant-attachment"`,
+     `action = "upload"`) capturing filename + size + kind only — never
+     the body.
+   - Per-tool audit row for `analyze_image` / `parse_spreadsheet` /
+     `match_uploaded_data_to_hookka` (matches the existing pattern).
+
+**Cloudflare Workers compatibility notes:**
+
+- `wrangler.toml` already sets `compatibility_flags = ["nodejs_compat"]`.
+- `xlsx` (SheetJS) works in Workers — it's pure JS, no `fs`. Verified
+  by the `parseExcelBytes` test which round-trips a workbook in memory.
+- `pdf-parse` was NOT pulled in. The fallback (Anthropic native PDF) is
+  strictly better: no local OCR error path, handles handwriting +
+  scanned tables + logos that text-extractors miss.
+- `atob` for base64 decode works in both Workers and Node 18+.
+
+**Files touched:**
+
+- `src/api/lib/attachment-parser.ts` — NEW.
+- `src/api/lib/anthropic-client.ts` — added image / document block
+  types; added the `anthropic-beta: pdfs-2024-09-25` header.
+- `src/api/lib/assistant-tools.ts` — added three tools + registry rows.
+- `src/api/routes/assistant.ts` — accepts `attachments[]` on the chat
+  body, splices content blocks into the last user message, stashes
+  parsed rows in the request-scoped cache, audits intake.
+- `src/components/assistant/AssistantSlideOver.tsx` — paperclip
+  button, file chips with thumbnails, base64 upload.
+- `tests/assistant-attachments.test.mjs` — NEW (16 tests; CSV / Excel /
+  validation / ingest budget).
+- `docs/assistant-attachment-manual-test.md` — NEW.
+
+**Verification:**
+
+- `npm run build` clean.
+- `npm run typecheck:app` clean.
+- `npm run lint` clean for every touched file (existing repo errors
+  in unrelated files unchanged).
+- `node --import tsx/esm --test tests/assistant-attachments.test.mjs`
+  — 16/16 pass.
+- `node --import tsx/esm --test tests/assistant-fuzzy-match.test.mjs`
+  — 11/11 pass (regression — confirms `extractDigitRuns` and
+  `generateLookupPatterns` still behave).
+- Manual happy-path: see `docs/assistant-attachment-manual-test.md`.
+
+**Out of scope (left for follow-ups):**
+
+- File generation tools (`generate_excel`, `generate_pdf`,
+  `generate_csv`) — those are Agent 3's branch; only the ingest side
+  is in here. The TOOLS registry has clean trailing entries so the
+  next add-on doesn't conflict.
+- Image annotation / editing — operator can only upload, not draw.
+- OCR confidence scoring — we trust the model's vision.
+
+---
+
 ## BUG-2026-05-30-007 — Hookka AI said "not found" on operator shorthand like "PO9003" / "PO 9003 houzs" because customerPOId was never searched
 
 **Status:** 🟢 Fixed (2026-05-30)

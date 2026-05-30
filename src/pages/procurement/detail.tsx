@@ -613,7 +613,13 @@ export default function PurchaseOrderDetailPage() {
           )}
           <Button variant="outline" onClick={async () => {
             const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
-            generatePurchaseOrderPdf(po);
+            // Pick up the supplier's letterhead override so the PDF
+            // prints under HOOKKA / OHANA / any sister company the
+            // operator set. Defaults to HOOKKA when the supplier row
+            // is missing the field (pre-migration / unknown supplier).
+            const sup = allSuppliers.find((s) => s.id === po.supplierId);
+            const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
+            generatePurchaseOrderPdf({ ...po, purchaseOrgCode });
           }}>
             <Download className="h-4 w-4" /> Download PDF
           </Button>

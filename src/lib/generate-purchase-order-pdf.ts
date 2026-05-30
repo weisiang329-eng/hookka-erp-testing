@@ -2,6 +2,23 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { PurchaseOrder } from "@/lib/mock-data";
 import { addHookkaLetterhead } from "@/lib/pdf-utils";
+import { COMPANY } from "@/lib/constants";
+
+// Letterhead info passed in from the caller. Mirrors the COMPANY constant's
+// shape so HOOKKA/OHANA fall through directly, and the route can populate
+// the same fields from a registry row for dynamically-added sister
+// companies (HOUZS, etc) without redeploying.
+export type LetterheadInfo = {
+  code: string;
+  name: string;
+  tagline?: string;
+  phone?: string;
+  email?: string;
+  regNo?: string;
+  tin?: string;
+  address?: string;
+  footerLine?: string;
+};
 
 function fmtCurrency(sen: number): string {
   return `RM ${(sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -13,7 +30,61 @@ function fmtDate(iso: string): string {
   return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-export function generatePurchaseOrderPdf(po: PurchaseOrder) {
+// Resolve the supplier's purchase_org_code into a LetterheadInfo. Falls
+// back to HOOKKA so any pre-migration supplier (or unknown code) prints
+// with the same letterhead they always had.
+//
+// Why this lives in the PDF module: the DB/AP entity is always HOOKKA;
+// this is a cosmetic-only override on the printed page. Keeping the lookup
+// table-free (vs. fetching /api/organisations in the PDF code) avoids a
+// network round-trip during what is supposed to be an instant download.
+// For sister companies beyond HOOKKA/OHANA the caller can pass a fully
+// populated LetterheadInfo (looked up from /api/organisations elsewhere).
+function resolveLetterhead(code: string | undefined): LetterheadInfo {
+  const c = (code || "HOOKKA").toUpperCase();
+  if (c === "OHANA") {
+    return {
+      code: "OHANA",
+      name: COMPANY.OHANA.name,
+      tagline: "B2B Trading & Distribution",
+      phone: COMPANY.OHANA.phone,
+      email: COMPANY.OHANA.email,
+      regNo: COMPANY.OHANA.regNo,
+      tin: COMPANY.OHANA.tin,
+      address: COMPANY.OHANA.address,
+    };
+  }
+  return {
+    code: "HOOKKA",
+    name: COMPANY.HOOKKA.name,
+    tagline: "Manufacturer of Premium Upholstered Furniture",
+    phone: COMPANY.HOOKKA.phone,
+    email: COMPANY.HOOKKA.email,
+    regNo: COMPANY.HOOKKA.regNo,
+    tin: COMPANY.HOOKKA.tin,
+    address: COMPANY.HOOKKA.address,
+  };
+}
+
+// PurchaseOrder shape returned by /api/purchase-orders includes a
+// `purchaseOrgCode` field for letterhead override (migration 0142). Keep
+// this typed loosely so we don't have to expand the canonical PurchaseOrder
+// type just for the PDF caller.
+type PurchaseOrderWithLetterhead = PurchaseOrder & {
+  purchaseOrgCode?: string;
+};
+
+export function generatePurchaseOrderPdf(
+  po: PurchaseOrderWithLetterhead,
+  letterheadOverride?: LetterheadInfo,
+) {
+  // Letterhead override: HOOKKA by default; supplier.purchaseOrgCode flips
+  // this to OHANA (or any registered sister company via letterheadOverride).
+  // The actual buyer in the DB / accounting is always HOOKKA — this swap
+  // only changes what prints on the page.
+  const co = letterheadOverride ?? resolveLetterhead(po.purchaseOrgCode);
+  const isHookkaLetterhead = co.code === "HOOKKA";
+
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -21,18 +92,34 @@ export function generatePurchaseOrderPdf(po: PurchaseOrder) {
   let y = margin;
 
   // --- Header ---
-  addHookkaLetterhead(doc, margin, 5, 10);
-  const textX = margin + 26;
+  // The bundled Hookka logo only makes sense when the letterhead actually
+  // belongs to Hookka. For sister-company prints we skip the logo so we
+  // don't mis-brand OHANA / HOUZS docs. Text-only letterhead still looks
+  // clean.
+  if (isHookkaLetterhead) {
+    addHookkaLetterhead(doc, margin, 5, 10);
+  }
+  const textX = isHookkaLetterhead ? margin + 26 : margin;
 
   doc.setTextColor(0, 0, 0);
   doc.setFontSize(12);
   doc.setFont("helvetica", "bold");
-  doc.text("HOOKKA INDUSTRIES SDN BHD", textX, 14);
+  doc.text(co.name, textX, 14);
   doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text("Manufacturer of Premium Upholstered Furniture", textX, 20);
-  doc.text("Tel: +60X-XXXXXXX  |  Email: procurement@hookka.com.my", textX, 25);
+  if (co.tagline) {
+    doc.text(co.tagline, textX, 20);
+  }
+  const contactLine = [
+    co.phone ? `Tel: ${co.phone}` : "",
+    co.email ? `Email: ${co.email}` : "",
+  ]
+    .filter(Boolean)
+    .join("  |  ");
+  if (contactLine) {
+    doc.text(contactLine, textX, 25);
+  }
 
   // PO Title on right
   doc.setFontSize(14);
@@ -223,13 +310,19 @@ export function generatePurchaseOrderPdf(po: PurchaseOrder) {
   doc.setFontSize(7);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(107, 114, 128);
+  // Buyer in the T&Cs is the letterhead company — that's how the supplier
+  // reads it. Internally the buyer / AP entity is still HOOKKA INDUSTRIES;
+  // the cosmetic swap is documented in src/api/routes/organisations.ts.
+  const buyerShort = co.code === "HOOKKA"
+    ? "Hookka Industries"
+    : co.name.replace(/\s+SDN\s+BHD\.?$/i, "");
   const terms = [
-    "1. Goods must be delivered to Hookka Industries premises unless otherwise stated.",
+    `1. Goods must be delivered to ${buyerShort} premises unless otherwise stated.`,
     "2. All goods must comply with specified quality standards and specifications.",
-    "3. Supplier must notify Hookka Industries of any delivery delays at least 48 hours in advance.",
+    `3. Supplier must notify ${buyerShort} of any delivery delays at least 48 hours in advance.`,
     "4. Payment will be processed upon receipt and acceptance of goods as per agreed payment terms.",
-    "5. Hookka Industries reserves the right to reject goods that do not meet quality requirements.",
-    "6. This Purchase Order is subject to the standard terms of Hookka Industries Sdn Bhd.",
+    `5. ${buyerShort} reserves the right to reject goods that do not meet quality requirements.`,
+    `6. This Purchase Order is subject to the standard terms of ${co.name}.`,
   ];
 
   for (const term of terms) {
@@ -256,7 +349,7 @@ export function generatePurchaseOrderPdf(po: PurchaseOrder) {
   doc.text("Authorized Signature", margin, y + 17);
   doc.setFontSize(7);
   doc.setTextColor(107, 114, 128);
-  doc.text("HOOKKA INDUSTRIES SDN BHD", margin, y + 21);
+  doc.text(co.name, margin, y + 21);
 
   // Date on right
   doc.line(pageW - margin - 60, y + 12, pageW - margin, y + 12);
@@ -271,7 +364,7 @@ export function generatePurchaseOrderPdf(po: PurchaseOrder) {
   doc.setFontSize(7);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(156, 163, 175);
-  doc.text("HOOKKA INDUSTRIES SDN BHD  |  This is a computer-generated document.", margin, footerY);
+  doc.text(`${co.name}  |  This is a computer-generated document.`, margin, footerY);
   doc.text(`Generated: ${new Date().toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" })}`, pageW - margin, footerY, { align: "right" });
 
   // Save

@@ -45,6 +45,15 @@ type Supplier = {
   rating: number; // 1-5
   status: SupplierStatus;
   address: string;
+  // Purchase Company override (migration 0142 / multi-org letterhead).
+  // Default = HOOKKA. Picks which org's letterhead prints on the PO PDF.
+  // The legal/AP buyer is always HOOKKA — this is cosmetic.
+  purchaseOrgCode: string;
+};
+
+type OrgOption = {
+  code: string;
+  name: string;
 };
 
 type SupplierSKU = {
@@ -79,6 +88,7 @@ const _MOCK_SUPPLIERS: Supplier[] = [
     rating: 4,
     status: "ACTIVE",
     address: "12, Jalan Industri 3, Shah Alam, Selangor",
+    purchaseOrgCode: "HOOKKA",
   },
   {
     id: "sup-002",
@@ -91,6 +101,7 @@ const _MOCK_SUPPLIERS: Supplier[] = [
     rating: 5,
     status: "ACTIVE",
     address: "Lot 45, Kawasan Perindustrian Meru, Klang",
+    purchaseOrgCode: "HOOKKA",
   },
   {
     id: "sup-003",
@@ -103,6 +114,7 @@ const _MOCK_SUPPLIERS: Supplier[] = [
     rating: 3,
     status: "ACTIVE",
     address: "8, Jalan Perusahaan 2, Puchong, Selangor",
+    purchaseOrgCode: "HOOKKA",
   },
   {
     id: "sup-004",
@@ -115,6 +127,7 @@ const _MOCK_SUPPLIERS: Supplier[] = [
     rating: 4,
     status: "ACTIVE",
     address: "22, Persiaran Perindustrian, Rawang",
+    purchaseOrgCode: "HOOKKA",
   },
   {
     id: "sup-005",
@@ -127,6 +140,7 @@ const _MOCK_SUPPLIERS: Supplier[] = [
     rating: 2,
     status: "INACTIVE",
     address: "56, Jalan Besar, Petaling Jaya",
+    purchaseOrgCode: "HOOKKA",
   },
 ];
 
@@ -273,10 +287,12 @@ function ratingStars(rating: number) {
 // ============================================================
 function SupplierFormDialog({
   editData,
+  orgOptions,
   onSave,
   onClose,
 }: {
   editData?: Supplier | null;
+  orgOptions: OrgOption[];
   onSave: (data: Omit<Supplier, "id">) => void;
   onClose: () => void;
 }) {
@@ -288,6 +304,12 @@ function SupplierFormDialog({
   const [address, setAddress] = useState(editData?.address || "");
   const [paymentTerms, setPaymentTerms] = useState<PaymentTerms>(editData?.paymentTerms || "NET30");
   const [status, setStatus] = useState<SupplierStatus>(editData?.status || "ACTIVE");
+  // Purchase Company override — which org's letterhead prints on the PO.
+  // Default HOOKKA so existing suppliers / new suppliers without an
+  // explicit choice print under HOOKKA INDUSTRIES like they always did.
+  const [purchaseOrgCode, setPurchaseOrgCode] = useState<string>(
+    editData?.purchaseOrgCode || "HOOKKA",
+  );
   // Rating is no longer collected on the form. Preserve the existing value on
   // edit; default new suppliers to a neutral 3-star rating. Operators can
   // adjust ratings later via a dedicated path when that workflow exists.
@@ -295,7 +317,7 @@ function SupplierFormDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({ code, name, contactPerson, phone, email, address, paymentTerms, rating, status });
+    onSave({ code, name, contactPerson, phone, email, address, paymentTerms, rating, status, purchaseOrgCode });
   };
 
   // Close on Escape key — operators expect dialog dismissal even when
@@ -348,6 +370,31 @@ function SupplierFormDialog({
           <div>
             <label className="block text-sm font-medium text-[#374151] mb-1">Address</label>
             <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full address" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-[#374151] mb-1">
+              Purchase Company
+            </label>
+            <select
+              className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
+              value={purchaseOrgCode}
+              onChange={(e) => setPurchaseOrgCode(e.target.value)}
+              title="Letterhead that prints on this supplier's PO PDF. HOOKKA is always the legal buyer."
+            >
+              {orgOptions.length === 0 ? (
+                <option value="HOOKKA">HOOKKA INDUSTRIES SDN BHD</option>
+              ) : (
+                orgOptions.map((o) => (
+                  <option key={o.code} value={o.code}>
+                    {o.code} — {o.name}
+                  </option>
+                ))
+              )}
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              Frontend-only override. HOOKKA INDUSTRIES is always the legal
+              buyer / AP entity on the books.
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -407,6 +454,26 @@ export default function SupplierMaintenancePage() {
 
   const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/suppliers");
 
+  // Organisation list — feeds the Purchase Company dropdown + column lookup.
+  // We only need code + legal name; other fields live on the org admin page.
+  const { data: orgsResp } = useCachedJson<{
+    organisations?: Array<{ code: string; name: string; isActive?: boolean }>;
+  }>("/api/organisations");
+  const orgOptions: OrgOption[] = useMemo(() => {
+    const list = orgsResp?.organisations ?? [];
+    return list
+      .filter((o) => o.isActive !== false)
+      .map((o) => ({ code: o.code, name: o.name }));
+  }, [orgsResp]);
+  // Quick code → legal name lookup for the column pill tooltip.
+  const orgNameByCode = useMemo(() => {
+    const m: Record<string, string> = {};
+    orgOptions.forEach((o) => {
+      m[o.code] = o.name;
+    });
+    return m;
+  }, [orgOptions]);
+
   /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR suppliers data into mutable local state for optimistic UI */
   useEffect(() => {
     const d = suppliersResp;
@@ -430,6 +497,9 @@ export default function SupplierMaintenancePage() {
             .join(", ") ??
           "",
       ),
+      // Falls back to HOOKKA for pre-0142 rows (the column is missing on
+      // the JSON response when the migration hasn't been applied yet).
+      purchaseOrgCode: String(s.purchaseOrgCode ?? "HOOKKA"),
     }));
     setSuppliers(mapped);
   }, [suppliersResp]);
@@ -564,6 +634,30 @@ export default function SupplierMaintenancePage() {
       { key: "phone", label: "Phone", type: "text", width: "150px" },
       { key: "paymentTerms", label: "Terms", type: "text", width: "90px", sortable: true },
       {
+        key: "purchaseOrgCode",
+        label: "Purchase Company",
+        width: "140px",
+        sortable: true,
+        render: (_val: unknown, row: Supplier) => {
+          const code = row.purchaseOrgCode || "HOOKKA";
+          const fullName = orgNameByCode[code] || code;
+          const tone =
+            code === "HOOKKA"
+              ? "bg-[#1F1D1B]/10 text-[#1F1D1B] border-[#1F1D1B]/30"
+              : code === "OHANA"
+                ? "bg-[#6B5C32]/10 text-[#6B5C32] border-[#6B5C32]/30"
+                : "bg-[#8B7A4E]/10 text-[#8B7A4E] border-[#8B7A4E]/30";
+          return (
+            <span
+              title={fullName}
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold border ${tone}`}
+            >
+              {code}
+            </span>
+          );
+        },
+      },
+      {
         key: "rating",
         label: "Rating",
         width: "120px",
@@ -578,7 +672,7 @@ export default function SupplierMaintenancePage() {
         render: (_val: unknown, row: Supplier) => statusBadge(row.status),
       },
     ],
-    []
+    [orgNameByCode]
   );
 
   const supplierContextMenu = useMemo(
@@ -607,14 +701,49 @@ export default function SupplierMaintenancePage() {
     [navigate]
   );
 
-  const handleSaveSupplier = (data: Omit<Supplier, "id">) => {
+  const handleSaveSupplier = async (data: Omit<Supplier, "id">) => {
+    // Optimistic update first so the modal feels instant; the API call
+    // happens in the background. If it fails we still close the modal
+    // (matches the pre-existing UX) and the next /api/suppliers refresh
+    // will reconcile state.
     if (editingSupplier) {
+      const id = editingSupplier.id;
       setSuppliers((prev) =>
-        prev.map((s) => (s.id === editingSupplier.id ? { ...s, ...data } : s))
+        prev.map((s) => (s.id === id ? { ...s, ...data } : s))
       );
+      try {
+        await fetch(`/api/suppliers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+        });
+      } catch {
+        /* optimistic-only fallback — refresh will reconcile */
+      }
     } else {
-      const newSupplier: Supplier = { ...data, id: `sup-${Date.now()}` };
+      const tempId = `sup-${Date.now()}`;
+      const newSupplier: Supplier = { ...data, id: tempId };
       setSuppliers((prev) => [...prev, newSupplier]);
+      try {
+        const res = await fetch("/api/suppliers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+        });
+        if (res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            data?: { id?: string };
+          };
+          const realId = body.data?.id;
+          if (realId) {
+            setSuppliers((prev) =>
+              prev.map((s) => (s.id === tempId ? { ...s, id: realId } : s)),
+            );
+          }
+        }
+      } catch {
+        /* keep the optimistic row; refresh will reconcile */
+      }
     }
     setShowSupplierForm(false);
     setEditingSupplier(null);
@@ -910,6 +1039,7 @@ export default function SupplierMaintenancePage() {
       {showSupplierForm && (
         <SupplierFormDialog
           editData={editingSupplier}
+          orgOptions={orgOptions}
           onSave={handleSaveSupplier}
           onClose={() => { setShowSupplierForm(false); setEditingSupplier(null); }}
         />

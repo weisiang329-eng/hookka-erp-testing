@@ -1475,7 +1475,11 @@ export default function ProcurementPage() {
         icon: <Printer className="h-3.5 w-3.5" />,
         action: async () => {
           const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
-          generatePurchaseOrderPdf(row);
+          // Look up the supplier's letterhead override so the PDF prints
+          // under HOOKKA / OHANA / sister-company. Defaults to HOOKKA.
+          const sup = allSuppliers.find((s) => s.id === row.supplierId);
+          const purchaseOrgCode = sup?.purchaseOrgCode || "HOOKKA";
+          generatePurchaseOrderPdf({ ...row, purchaseOrgCode });
         },
       },
       { label: "", separator: true, action: () => {} },
@@ -1485,7 +1489,7 @@ export default function ProcurementPage() {
         action: () => fetchData(),
       },
     ];
-  }, [navigate, fetchData]);
+  }, [navigate, fetchData, allSuppliers]);
 
   if (loading) {
     return (

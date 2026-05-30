@@ -146,7 +146,7 @@ const navigationGroups: NavGroup[] = [
       { name: "Purchase Invoice", href: "/procurement/pi", icon: CreditCard },
       { name: "Pricing", href: "/procurement/pricing", icon: DollarSign },
       { name: "MRP", href: "/planning/mrp", icon: Layers },
-      { name: "Maintenance", href: "/procurement/maintenance", icon: Wrench },
+      { name: "Supplier", href: "/procurement/maintenance", icon: Building2 },
     ],
   },
   {
@@ -735,7 +735,15 @@ export function Sidebar({
           const activeOrg = orgs.find((o) => o.id === activeOrgId);
           const label = activeOrg?.name ?? "HOOKKA INDUSTRIES";
           const code = activeOrg?.code ?? "HI";
-          const shortCode = code === "HOOKKA" ? "HI" : "OM";
+          // Build a 2-letter avatar from the org code so any new sister
+          // company (HOUZS → HZ, etc) renders cleanly. Falls back to the
+          // first 2 chars of whatever code we have.
+          const shortCode =
+            code === "HOOKKA"
+              ? "HI"
+              : code === "OHANA"
+                ? "OM"
+                : code.slice(0, 2);
 
           if (collapsed) {
             return (
@@ -780,7 +788,12 @@ export function Sidebar({
             </div>
             {orgs.map((org) => {
               const isActive = org.id === activeOrgId;
-              const sc = org.code === "HOOKKA" ? "HI" : "OM";
+              const sc =
+                org.code === "HOOKKA"
+                  ? "HI"
+                  : org.code === "OHANA"
+                    ? "OM"
+                    : org.code.slice(0, 2);
               return (
                 <button
                   key={org.id}

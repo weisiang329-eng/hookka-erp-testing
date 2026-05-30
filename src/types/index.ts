@@ -505,6 +505,10 @@ export type Supplier = {
   status: string;
   rating: number;
   materials: SupplierMaterial[];
+  // Letterhead override (migration 0142). Picks which sister-company
+  // letterhead prints on the PO PDF. Default = "HOOKKA". The actual
+  // legal / AP buyer is always HOOKKA — this is cosmetic.
+  purchaseOrgCode?: string;
 };
 
 export type POItem = {

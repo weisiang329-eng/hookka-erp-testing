@@ -39,6 +39,10 @@ type SupplierRow = {
   paymentTerms: string | null;
   status: string;
   rating: number;
+  // Letterhead override (migration 0142). Null on pre-migration rows; the
+  // route normalises to "HOOKKA" for display + writes "HOOKKA" by default
+  // so existing POs print with the same letterhead they always did.
+  purchaseOrgCode: string | null;
   // AutoCount fields (migration 0023)
   controlAccount: string | null;
   creditorType: string | null;
@@ -140,6 +144,7 @@ function rowToSupplier(
     phone2: row.phone2 ?? "",
     mobile: row.mobile ?? "",
     fax: row.fax ?? "",
+    purchaseOrgCode: row.purchaseOrgCode ?? "HOOKKA",
     materials: materials
       .filter((m) => m.supplierId === row.id)
       .map(materialRowToApi),
@@ -190,6 +195,24 @@ function boolToInt(v: unknown, fallback: 0 | 1): 0 | 1 {
   return fallback;
 }
 
+// Postgres raises 42703 "column ... does not exist" when migration 0142
+// (purchase_org_code) hasn't been applied yet. We catch on the INSERT /
+// UPDATE path and retry without the new column so the route keeps working
+// between deploy and migration apply.
+function isMissingPurchaseOrgCol(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /column .*purchase_org_code.* does not exist/i.test(msg);
+}
+
+// Normalise purchaseOrgCode input. Empty / missing -> 'HOOKKA' default so
+// existing POs print with the existing default letterhead.
+function normalisePurchaseOrgCode(v: unknown): string {
+  if (typeof v === "string" && v.trim().length > 0) {
+    return v.trim().toUpperCase();
+  }
+  return "HOOKKA";
+}
+
 // GET /api/suppliers — list all suppliers + their materials
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
@@ -222,21 +245,24 @@ app.post("/", async (c) => {
     }
     const id = genId();
     const materials = sanitizeMaterials(body.materials);
+    const purchaseOrgCode = normalisePurchaseOrgCode(body.purchaseOrgCode);
 
-    const statements: D1PreparedStatement[] = [
-      c.var.DB.prepare(
-        `INSERT INTO suppliers (id, code, name, contactPerson, phone, email,
+    // INSERT with the new purchase_org_code column. If the migration hasn't
+    // been applied yet, retry without it (legacy shape) so the route works
+    // between deploy and migration apply.
+    function buildInsert(withPurchaseOrg: boolean): D1PreparedStatement {
+      const cols = `id, code, name, contactPerson, phone, email,
            address, state, paymentTerms, status, rating,
            controlAccount, creditorType, registrationNo, taxEntityTin,
            addressLine1, addressLine2, addressLine3, addressLine4,
            postalCode, area, website, attention, agent, businessNature,
            currency, statementType, agingOn, creditTerm,
            isActive, isGroupCompany, outstandingSen,
-           secondDescription, phone2, mobile, fax)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(
+           secondDescription, phone2, mobile, fax${withPurchaseOrg ? ", purchaseOrgCode" : ""}`;
+      const placeholders = withPurchaseOrg
+        ? "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        : "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+      const binds = [
         id,
         body.code,
         body.name,
@@ -273,10 +299,16 @@ app.post("/", async (c) => {
         body.phone2 ?? null,
         body.mobile ?? null,
         body.fax ?? null,
-      ),
-    ];
+      ];
+      if (withPurchaseOrg) binds.push(purchaseOrgCode);
+      return c.var.DB.prepare(
+        `INSERT INTO suppliers (${cols}) VALUES (${placeholders})`,
+      ).bind(...binds);
+    }
+
+    const matStmts: D1PreparedStatement[] = [];
     for (const m of materials) {
-      statements.push(
+      matStmts.push(
         c.var.DB.prepare(
           `INSERT INTO supplier_materials (supplierId, materialCategory,
              supplierSKU, unitPriceSen, leadTimeDays, minOrderQty, priority)
@@ -292,7 +324,15 @@ app.post("/", async (c) => {
         ),
       );
     }
-    await c.var.DB.batch(statements);
+    try {
+      await c.var.DB.batch([buildInsert(true), ...matStmts]);
+    } catch (e) {
+      if (isMissingPurchaseOrgCol(e)) {
+        await c.var.DB.batch([buildInsert(false), ...matStmts]);
+      } else {
+        throw e;
+      }
+    }
 
     const [created, matsRes] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
@@ -414,11 +454,20 @@ app.put("/:id", async (c) => {
       phone2: pick(body.phone2, existing.phone2),
       mobile: pick(body.mobile, existing.mobile),
       fax: pick(body.fax, existing.fax),
+      purchaseOrgCode:
+        body.purchaseOrgCode !== undefined
+          ? normalisePurchaseOrgCode(body.purchaseOrgCode)
+          : existing.purchaseOrgCode ?? "HOOKKA",
     };
 
-    const statements: D1PreparedStatement[] = [
-      c.var.DB.prepare(
-        `UPDATE suppliers SET code = ?, name = ?, contactPerson = ?, phone = ?,
+    // UPDATE with the new purchase_org_code column. Retry without it on
+    // pre-0142 schemas (column-does-not-exist) so the route stays alive
+    // during the deploy → migration apply window.
+    function buildUpdate(withPurchaseOrg: boolean): D1PreparedStatement {
+      const tail = withPurchaseOrg
+        ? ", purchaseOrgCode = ?"
+        : "";
+      const sql = `UPDATE suppliers SET code = ?, name = ?, contactPerson = ?, phone = ?,
            email = ?, address = ?, state = ?, paymentTerms = ?, status = ?,
            rating = ?,
            controlAccount = ?, creditorType = ?, registrationNo = ?,
@@ -427,9 +476,9 @@ app.put("/:id", async (c) => {
            postalCode = ?, area = ?, website = ?, attention = ?, agent = ?,
            businessNature = ?, currency = ?, statementType = ?, agingOn = ?,
            creditTerm = ?, isActive = ?, isGroupCompany = ?, outstandingSen = ?,
-           secondDescription = ?, phone2 = ?, mobile = ?, fax = ?
-         WHERE id = ?`,
-      ).bind(
+           secondDescription = ?, phone2 = ?, mobile = ?, fax = ?${tail}
+         WHERE id = ?`;
+      const binds: unknown[] = [
         merged.code,
         merged.name,
         merged.contactPerson,
@@ -465,9 +514,13 @@ app.put("/:id", async (c) => {
         merged.phone2,
         merged.mobile,
         merged.fax,
-        id,
-      ),
-    ];
+      ];
+      if (withPurchaseOrg) binds.push(merged.purchaseOrgCode);
+      binds.push(id);
+      return c.var.DB.prepare(sql).bind(...binds);
+    }
+
+    const statements: D1PreparedStatement[] = [buildUpdate(true)];
 
     if (body.materials !== undefined) {
       const materials = sanitizeMaterials(body.materials);
@@ -495,7 +548,18 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.var.DB.batch(statements);
+    try {
+      await c.var.DB.batch(statements);
+    } catch (e) {
+      if (isMissingPurchaseOrgCol(e)) {
+        // Replace the first statement (the supplier UPDATE) with the
+        // legacy shape and retry; material statements are untouched.
+        const legacy = [buildUpdate(false), ...statements.slice(1)];
+        await c.var.DB.batch(legacy);
+      } else {
+        throw e;
+      }
+    }
 
     const [updated, matsRes] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")

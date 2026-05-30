@@ -35,6 +35,7 @@ import {
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
 import { withOrgScope, getOrgId } from "../lib/tenant";
+import { invalidateHubChangeSnapshots } from "../lib/snapshot";
 import { loadDeliveredItemsValueSen } from "../lib/do-value";
 import {
   createProductionOrdersForOrder,
@@ -3984,6 +3985,22 @@ app.patch("/:id/hub", async (c) => {
     }
 
     await c.var.DB.batch(stmts);
+
+    // 7b. Belt-and-braces snapshot invalidation. The cascade above bumps
+    //     updated_at on every row it touches, and the cache-aside snapshot
+    //     helpers (src/api/lib/snapshot.ts) auto-invalidate via Layer 2 by
+    //     comparing built_from against MAX(updated_at) across configured
+    //     source tables — so in theory the next SO list / Production /
+    //     Dashboard / Delivery / Invoice fetch should recompute on its own.
+    //     In practice the freshness probe has misfired (mixed TEXT/TIMESTAMP
+    //     compares, source tables with no updated_at column, replication
+    //     lag) and operators saw a stale "Houzs KL" on the SO list even
+    //     after the DB row said "Houzs PG" — forcing a manual TRUNCATE of
+    //     21 snapshot tables via Supabase. Wipe the affected snapshot rows
+    //     here so the next read GUARANTEES a recompute. Internally swallows
+    //     per-snapshot errors — a wipe failure must not fail the hub edit
+    //     (the cascade has already committed).
+    await invalidateHubChangeSnapshots(c.var.DB, getOrgId(c), "sales");
 
     // 8. Return refreshed SO header + cascade counts.
     const updated = await c.var.DB

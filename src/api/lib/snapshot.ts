@@ -264,3 +264,81 @@ export async function invalidateSnapshot(
       .run();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Belt-and-braces explicit invalidation for the snapshots that render hub /
+// branch / customer-state fields. Called after a successful
+// PATCH /api/sales-orders/:id/hub or PATCH /api/consignment-orders/:id/hub
+// cascade completes.
+//
+// Why explicit on top of the auto-freshness layer? The cache-aside helpers
+// (this file, dashboard-snapshot.ts, delivery-snapshot.ts, invoice-snapshot.ts)
+// auto-invalidate by comparing built_from against MAX(updated_at) across the
+// configured sourceTables. The hub-edit cascade does bump updated_at on every
+// row it touches, so the freshness probe SHOULD detect staleness on the next
+// read. In practice we have hit edge cases where the probe lies:
+//   • Mixed TIMESTAMP / TEXT columns across source tables produce subtly
+//     wrong MAX comparisons (see snapshot.ts isSnapshotFresh comment, the
+//     2026-05-26 sales-orders 4-day-stale incident).
+//   • Source tables that don't have updated_at at all (line items / append-
+//     only) get silently skipped by the schema probe.
+//   • Replication lag between the cascade's write batch and the snapshot
+//     read's freshness probe on the same request.
+//
+// Hub changes are operator-visible and rare (<10/month) — a 7-row DELETE is
+// negligible cost. Wiping the affected rows GUARANTEES the next read recomputes,
+// regardless of whether the auto-freshness layer would have caught the bump.
+//
+// Each DELETE is wrapped in try/catch — a missing snapshot table or a transient
+// failure must NOT roll back the hub change. The cascade has already committed
+// at this point; the worst case is the snapshot stays stale until the nightly
+// rebuild (Layer 3) or the next source-table bump trips the freshness probe.
+//
+// `kind` selects the snapshot set:
+//   • 'sales'       — SO hub change. Wipes SO list / stats, production list,
+//                     dashboard, delivery stats + po-values, invoice stats.
+//   • 'consignment' — CO hub change. Wipes CO stats, CN stats, production list,
+//                     dashboard.
+// ---------------------------------------------------------------------------
+const HUB_CHANGE_SNAPSHOT_TABLES: Record<"sales" | "consignment", readonly string[]> = {
+  sales: [
+    "sales_orders_list_snapshot",
+    "sales_orders_stats_snapshot",
+    "production_orders_list_snapshot",
+    "dashboard_snapshot",
+    "delivery_stats_snapshot",
+    "delivery_po_values_snapshot",
+    "invoice_stats_snapshot",
+  ],
+  consignment: [
+    "consignment_orders_stats_snapshot",
+    "consignment_notes_stats_snapshot",
+    "production_orders_list_snapshot",
+    "dashboard_snapshot",
+  ],
+};
+
+export async function invalidateHubChangeSnapshots(
+  db: D1Database,
+  orgId: string,
+  kind: "sales" | "consignment",
+): Promise<void> {
+  const tables = HUB_CHANGE_SNAPSHOT_TABLES[kind];
+  await Promise.all(
+    tables.map(async (table) => {
+      try {
+        await db
+          .prepare(`DELETE FROM ${table} WHERE org_id = ?`)
+          .bind(orgId)
+          .run();
+      } catch (err) {
+        // Never fail the hub edit because a snapshot wipe failed. Log and
+        // continue — the freshness probe / nightly rebuild still cover us.
+        console.warn(
+          `[invalidateHubChangeSnapshots] DELETE ${table} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }),
+  );
+}

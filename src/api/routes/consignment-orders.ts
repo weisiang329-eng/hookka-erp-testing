@@ -29,6 +29,7 @@ import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { invalidateHubChangeSnapshots } from "../lib/snapshot";
 import {
   consumeEditLockOverrideToken,
   createEditLockOverride,
@@ -2133,6 +2134,20 @@ app.patch("/:id/hub", async (c) => {
     }
 
     await c.var.DB.batch(stmts);
+
+    // 7b. Belt-and-braces snapshot invalidation. The cache-aside helpers
+    //     (src/api/lib/snapshot.ts) would normally auto-invalidate via
+    //     updated_at bumps on the source tables, but consignment_notes has
+    //     NO updated_at column (only created_at) — confirmed against
+    //     information_schema. The CN-stats snapshot therefore cannot detect
+    //     a CN row update via the freshness probe and would serve stale
+    //     branchName / hubId rows forever (until the Layer 3 nightly
+    //     rebuild). Wipe the affected snapshot rows here so the next CO
+    //     stats / CN stats / Production / Dashboard fetch GUARANTEES a
+    //     recompute. Internally swallows per-snapshot errors — a wipe
+    //     failure must not fail the hub edit (the cascade has already
+    //     committed).
+    await invalidateHubChangeSnapshots(c.var.DB, getOrgId(c), "consignment");
 
     // 8. Return refreshed CO header + cascade counts.
     const updated = await c.var.DB

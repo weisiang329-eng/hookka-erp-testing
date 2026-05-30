@@ -34,6 +34,99 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-30-005 — SO list / Production / Dashboard / Delivery / Invoice cards kept showing OLD hub after hub-edit cascade succeeded
+
+**Status:** 🟢 Fixed (2026-05-30)
+**Category:** sales-orders, infrastructure
+
+**Symptom:**
+
+After PATCH `/api/sales-orders/:id/hub` or `/api/consignment-orders/:id/hub`
+succeeded (the SO/CO row was updated correctly in the DB, downstream
+DO/Invoice/CN rows were cascaded correctly, response payload showed the
+new hub), the operator-facing list / aggregate pages still rendered the
+OLD hub:
+
+- Sales Orders list page: row still says "Houzs KL" after change to PG
+- Delivery Planning / Production page: hub column stale on the affected SO
+- Dashboard summary cards: KPI counts not redistributing to the new hub
+- Delivery / Invoice / CN stats cards: same staleness
+
+Hard refresh (Ctrl+Shift+R) did NOT fix it — the staleness was server-side,
+not browser cache. Only a manual `TRUNCATE` of all 21 snapshot tables via
+Supabase SQL editor cleared it. Repeated every hub edit. Did not scale.
+
+**Root cause:**
+
+All 8 affected pages read from cache-aside snapshot tables
+(`sales_orders_list_snapshot`, `production_orders_list_snapshot`,
+`dashboard_snapshot`, `delivery_stats_snapshot`,
+`delivery_po_values_snapshot`, `invoice_stats_snapshot`,
+`consignment_orders_stats_snapshot`, `consignment_notes_stats_snapshot`).
+The cache-aside helpers (`src/api/lib/snapshot.ts`,
+`dashboard-snapshot.ts`, `delivery-snapshot.ts`, `invoice-snapshot.ts`)
+auto-invalidate via Layer 2: compare snapshot.built_from against
+MAX(updated_at) across configured sourceTables, recompute if newer.
+
+The hub-edit cascade DOES bump `updated_at` on every source row it
+touches (sales_orders / delivery_orders / invoices /
+consignment_orders), so in theory the freshness probe SHOULD detect
+staleness on the next read. In practice it didn't, for several reasons
+that compound:
+
+1. `consignment_notes` has NO `updated_at` column (only `created_at`,
+   per migrations-postgres/0001_init.sql:1320-1332). The CN cascade
+   physically cannot bump a column that doesn't exist — and the
+   freshness probe in snapshot-freshness.ts falls back to `created_at`,
+   which obviously doesn't change on update. CN-stats snapshot
+   therefore never auto-invalidates on a hub change.
+2. The freshness comparison (`isSnapshotFresh`) has a documented
+   history of misclassifying snapshots as fresh due to mixed-type
+   compares (TIMESTAMP vs TEXT MAX values, see the 2026-05-26
+   sales-orders 4-day stale incident in snapshot.ts isSnapshotFresh
+   comment).
+3. The schema probe in `snapshot-freshness.ts` silently skips source
+   tables that have no timestamp-typed column at all, so any
+   cross-table MAX that depends on them quietly returns null →
+   "trivially fresh" → snapshot served indefinitely.
+
+**Fix:**
+
+Belt-and-braces explicit invalidation after the cascade batch commits.
+Added `invalidateHubChangeSnapshots(db, orgId, kind)` to
+`src/api/lib/snapshot.ts` — wipes the 7 / 4 snapshot rows for the org
+in parallel, with per-snapshot try/catch so a missing table or
+transient failure cannot fail the hub edit (the cascade has already
+committed at that point).
+
+Called once from each PATCH endpoint:
+
+- `src/api/routes/sales-orders.ts` PATCH `/:id/hub` — kind=`sales`
+  (wipes sales_orders_list, sales_orders_stats, production_orders_list,
+   dashboard, delivery_stats, delivery_po_values, invoice_stats)
+- `src/api/routes/consignment-orders.ts` PATCH `/:id/hub` — kind=`consignment`
+  (wipes consignment_orders_stats, consignment_notes_stats,
+   production_orders_list, dashboard)
+
+Auto-freshness layer kept in place — the explicit wipe is defence in
+depth, not a replacement. Hub edits are rare (<10/month) so the 7-row
+DELETE adds negligible latency and runs in parallel with the response
+write-back.
+
+Scope strictly limited to hub-edit endpoints — no other writes get this
+treatment, per the original design that auto-freshness should handle
+the common case.
+
+**Verify:**
+
+1. Edit any unshipped SO's hub via the UI (PG → KL or vice versa).
+2. Immediately (no manual refresh) navigate to Sales Orders list — the
+   row should show the new hub on the first fetch.
+3. Same check for Delivery Planning / Production / Dashboard.
+4. CO hub edit: same flow, check Consignment Notes list + dashboard.
+
+---
+
 ## BUG-2026-05-30-004 — Hub cascade wrote to non-existent production_orders.hubId; DO+invoice cascade refreshed only 3 of 6 contact-block fields
 
 **Status:** 🟢 Fixed (2026-05-30) — commit `2138c139`, deploy run 26679479208

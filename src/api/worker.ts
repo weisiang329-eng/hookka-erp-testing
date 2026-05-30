@@ -912,6 +912,12 @@ import reports, { internal as reportsInternal } from "./routes/reports";
 app.route("/api/reports", reports);
 app.route("/api/internal/reports", reportsInternal);
 
+// Hookka AI — embedded read-only assistant (SUPER_ADMIN-gated). Streams
+// Anthropic SSE through to the browser; tool calls execute the read-only
+// query helpers in src/api/lib/assistant-tools.ts. See routes/assistant.ts.
+import assistant from "./routes/assistant";
+app.route("/api/assistant", assistant);
+
 // Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
 // a 500 with the error message — fine for dev, but in prod we want every
 // uncaught route exception to land in Sentry (when configured) so we can

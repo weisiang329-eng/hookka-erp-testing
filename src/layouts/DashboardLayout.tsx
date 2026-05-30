@@ -8,6 +8,7 @@ import { ToastProvider, useToast } from "@/components/ui/toast";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
 import { DASHBOARD_ROUTE_ELEMENTS } from "@/dashboard-routes";
+import { FloatingChatButton } from "@/components/assistant/FloatingChatButton";
 
 // Lives inside ToastProvider so it can pop a toast when a new deploy lands.
 // Polls for a new bundle hash every 5 min + on focus; on change, surfaces a
@@ -139,6 +140,10 @@ export default function DashboardLayout() {
             <Routes>{DASHBOARD_ROUTE_ELEMENTS}</Routes>
           </main>
         </div>
+        {/* Hookka AI launch button — SUPER_ADMIN-only, self-hides on
+            /assistant. Mounted here so it overlays every authenticated
+            dashboard route in one place. */}
+        <FloatingChatButton />
       </div>
       <ScrollRestoration />
     </ToastProvider>

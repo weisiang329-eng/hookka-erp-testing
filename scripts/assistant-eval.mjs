@@ -94,6 +94,12 @@ const BANK = [
     why: "browse/filter many SOs -> list_sales_orders",
   },
   {
+    q: "SO-2605-253 里面有什么货 给我看全部 line item",
+    module: "Sales",
+    accept: ["get_sales_order", "trace_order", "smart_lookup"],
+    why: "ONE SO's contents/line items -> get_sales_order (trace_order also returns it)",
+  },
+  {
     q: "Houzs 这个客户的所有资料给我看一下",
     module: "Customers",
     accept: ["get_customer_360", "smart_lookup"],
@@ -106,6 +112,12 @@ const BANK = [
     module: "Consignment",
     accept: ["list_consignment_orders"],
     why: "browse consignment orders -> list_consignment_orders",
+  },
+  {
+    q: "CO-2605-045 这张寄卖单的详情给我",
+    module: "Consignment",
+    accept: ["get_consignment_order", "trace_order", "smart_lookup"],
+    why: "ONE CO's detail -> get_consignment_order",
   },
 
   // ---- Production --------------------------------------------------------
@@ -158,6 +170,12 @@ const BANK = [
     module: "Delivery",
     accept: ["list_packing_lists"],
     why: "browse packing lists -> list_packing_lists",
+  },
+  {
+    q: "DO-2605-097 送了什么 详情给我",
+    module: "Delivery",
+    accept: ["get_delivery_order", "trace_order", "smart_lookup"],
+    why: "ONE DO's detail -> get_delivery_order",
   },
 
   // ---- Finance -----------------------------------------------------------
@@ -253,6 +271,30 @@ const BANK = [
     accept: ["predict_reorder_needs", "list_fabrics"],
     why: "Malay: enough fabric stock -> predict_reorder_needs / list_fabrics",
   },
+  {
+    q: "BO315 这个布的详情 用在哪些单",
+    module: "Inventory",
+    accept: ["get_fabric", "smart_lookup"],
+    why: "ONE fabric's detail + where used -> get_fabric",
+  },
+  {
+    q: "我们的产品 catalog 有什么 全部 list 给我",
+    module: "Inventory",
+    accept: ["list_products"],
+    why: "browse product catalog -> list_products",
+  },
+  {
+    q: "有哪些 CNC 切割模板 template",
+    module: "Inventory",
+    accept: ["list_cnc_templates"],
+    why: "CNC cutting templates -> list_cnc_templates",
+  },
+  {
+    q: "M8 这个螺丝配件的详情给我",
+    module: "Inventory",
+    accept: ["get_accessory", "smart_lookup", "list_accessories"],
+    why: "ONE accessory's detail -> get_accessory",
+  },
 
   // ---- People / HR -------------------------------------------------------
   {
@@ -273,6 +315,12 @@ const BANK = [
     accept: ["get_payroll"],
     why: "payroll -> get_payroll",
   },
+  {
+    q: "zaw lin 从 5月1号到5月15号的效率给我",
+    module: "People",
+    accept: ["get_employee_efficiency", "find_employee"],
+    why: "one worker's efficiency over a CUSTOM range -> get_employee_efficiency (find_employee fine as the resolve-first step)",
+  },
 
   // ---- Customers / Suppliers --------------------------------------------
   {
@@ -286,6 +334,12 @@ const BANK = [
     module: "Customers",
     accept: ["get_customer_360", "get_ar_outstanding", "smart_lookup"],
     why: "one customer's AR + history -> get_customer_360",
+  },
+  {
+    q: "Houzs 的基本资料 + 最近几张单",
+    module: "Customers",
+    accept: ["get_customer", "get_customer_360", "smart_lookup"],
+    why: "one customer detail + recent SOs -> get_customer / get_customer_360",
   },
 
   // ---- Overview / cross-module ------------------------------------------
@@ -344,6 +398,32 @@ const BANK = [
     module: "Fuzzy",
     accept: ["smart_lookup", "get_customer_360", "list_customers"],
     why: "bare customer name -> smart_lookup, don't ask 'what about Carress?'",
+  },
+
+  // ---- Export / generate files ------------------------------------------
+  {
+    q: "把 Carress 这个月的 SO export 成 excel 给我",
+    module: "Export",
+    accept: ["export_query_to_excel"],
+    why: "natural-language tabular export of one entity -> export_query_to_excel",
+  },
+  {
+    q: "帮我做一份 monthly sales summary 的报告档案",
+    module: "Export",
+    accept: ["run_report_template", "list_export_templates"],
+    why: "named monthly report as a file -> run_report_template",
+  },
+  {
+    q: "你能帮我做哪些 report",
+    module: "Export",
+    accept: ["list_export_templates"],
+    why: "what reports can you make -> list_export_templates",
+  },
+  {
+    q: "tolong buat report bulanan jualan",
+    module: "Export",
+    accept: ["run_report_template", "export_query_to_excel", "list_export_templates"],
+    why: "Malay: make a monthly sales report -> run_report_template / export",
   },
 
   // ---- How-to ------------------------------------------------------------

@@ -34,6 +34,131 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-05-30-006 — production_orders.customer_state + credit/debit-notes contact block stayed stale after hub-edit cascade
+
+**Status:** 🟢 Fixed (2026-05-30)
+**Category:** sales-orders, data-integrity
+
+**Symptom:**
+
+After Wei Siang changed an SO's hub from KL to PG via the hub-edit modal,
+the SO header / linked DOs / linked draft invoice all picked up the new
+hub correctly. But on the Delivery Planning tab the State column for the
+production-order rows linked to that SO still showed `KL`. Repro every
+time the operator hopped to Delivery Planning right after the hub change.
+
+The same staleness pattern (in theory, not yet operator-reported) applied
+to any draft credit_note / debit_note attached to a draft invoice for the
+same SO: the contact block (customer_state / customer_address / attention /
+customer_phone) snapshotted at create-time from the source invoice would
+keep the OLD hub's address even though the invoice itself had been
+refreshed by the cascade. Either of these would print a wrong PDF.
+
+**Root cause:**
+
+The hub-edit cascade landed in three phases:
+
+1. `e79c5d57` (2026-05-30) — first cut. Wrote hubId+hubName to
+   `production_orders` but the column doesn't exist there — runtime
+   `column does not exist` failure rolled back the entire PATCH.
+2. `2138c139` (2026-05-30) — removed the broken production_orders write,
+   added the full DO + invoice contact-block cascade.
+3. `2a7c92df` (2026-05-30) — added belt-and-braces snapshot invalidation
+   (BUG-005 above).
+
+Phase 2's "removed the broken production_orders write" comment
+correctly noted that `production_orders` has no hub_id / hub_name
+columns. What it MISSED is that `production_orders` does have a
+denormalized `customer_state` column (set at PO creation, see
+production-orders.ts ~line 5008), AND the Delivery Planning page reads
+po.customerState directly (src/pages/delivery/index.tsx:889). The hub
+itself was resolved correctly via the SO join, but customer_state on
+the PO row stayed at the OLD hub's state.
+
+Same blind spot for credit_notes + debit_notes. Migration 0126 added
+customer_state / customer_address / attention / customer_phone to both
+tables (mirrors the invoice contact block); CN/DN creation snapshots
+these from the source invoice. The hub-edit cascade refreshed the
+invoice but NOT any draft CN/DN sitting on top of it.
+
+The class of bug: hub-derived denormalized columns can live on
+downstream tables under more than one column-name scheme. Each new
+column added by a later migration was a fresh chance to miss it.
+
+**Fix:**
+
+1. Full schema audit. Walked every `migrations-postgres/*.sql` file
+   for occurrences of hub-derived column names (hub_id, hub_name,
+   customer_state, customer_address, delivery_address, contact_person,
+   contact_phone, attention, customer_phone, branch_name). Mapped each
+   table to the columns it carries:
+
+   | Table | Cascaded columns (post-fix) | Status filter |
+   |---|---|---|
+   | sales_orders | hub_id, hub_name, customer_state | n/a (header) |
+   | consignment_orders | hub_id, hub_name, customer_state | n/a (header) |
+   | production_orders | customer_state (no hub cols exist) | none — even COMPLETED POs may be reprinted |
+   | delivery_orders | hub_id, hub_name, customer_state, delivery_address, contact_person, contact_phone | NOT IN (LOADED/IN_TRANSIT/DELIVERED/INVOICED) |
+   | invoices | hub_id, hub_name, customer_state, customer_address, attention, customer_phone | status = DRAFT |
+   | credit_notes | customer_state, customer_address, attention, customer_phone (no hub cols exist) | status = DRAFT |
+   | debit_notes | customer_state, customer_address, attention, customer_phone (no hub cols exist) | status = DRAFT |
+   | consignment_notes | hub_id, branch_name (no customer_state col) | status = ACTIVE AND dispatched_at IS NULL |
+
+   Tables intentionally NOT cascaded TO:
+   - `production_orders_archive` / `sales_orders_archive` — archive tables are immutable.
+   - `service_cases` — parallel entity, not a downstream snapshot of SO/CO hub.
+   - `customer_hubs` — the SOURCE of hub data (master table).
+   - `three_pl_providers` — `contact_person` is the carrier's contact, not customer hub.
+   - `suppliers` — `attention` is purchase-letterhead recipient.
+   - `drivers` — `contact_person` is driver emergency contact.
+
+2. `src/api/routes/sales-orders.ts` PATCH `/:id/hub` cascade extended:
+   - Added `UPDATE production_orders SET customerState` for every PO
+     linked via salesOrderId — NO status filter (production sheet may
+     be reprinted for COMPLETED rows).
+   - Added `UPDATE credit_notes SET customerState, customerAddress,
+     attention, customerPhone` joined via invoices.salesOrderId, with
+     `status = 'DRAFT'` guard (APPROVED/POSTED CNs already applied
+     against invoice — rewriting would corrupt finance trail).
+   - Added `UPDATE debit_notes SET …` with same join + DRAFT-only guard.
+   - Response payload now carries `creditNotesUpdated` and
+     `debitNotesUpdated` counts.
+
+3. `src/api/routes/consignment-orders.ts` PATCH `/:id/hub` cascade extended:
+   - Added `UPDATE production_orders SET customerState` for every PO
+     linked via consignmentOrderId — NO status filter (same reasoning
+     as SO above).
+
+4. New regression test
+   `tests/hub-cascade-completeness.test.mjs`:
+   - Parses every migration file for tables carrying hub-derived
+     denormalized columns.
+   - Parses the PATCH `/:id/hub` handler in both routes for every
+     `UPDATE <table> SET …` statement.
+   - Fails if any (table × column) pair from the schema lacks a
+     matching cascade write — unless the table is in the explicit
+     EXCLUDED_TABLES allowlist with a comment explaining why.
+   - Wired into `npm test` so a future migration adding a new
+     hub-derived column on a downstream table fails CI loudly with
+     the exact table.column missing.
+
+**Verify:**
+
+After deploy:
+1. Open any unshipped SO with linked production_orders.
+2. Change hub PG → KL (or whatever swap) via the modal.
+3. Open Delivery Planning → State column on the affected PO rows
+   must show the new hub's state immediately on first fetch.
+4. Open any DRAFT credit_note / debit_note linked to a draft invoice
+   for the same SO → contact block on the CN/DN PDF must show the
+   new hub's address + contact.
+
+Files: `src/api/routes/sales-orders.ts`,
+`src/api/routes/consignment-orders.ts`,
+`tests/hub-cascade-completeness.test.mjs`, `package.json`.
+
+---
+
 ## BUG-2026-05-30-005 — SO list / Production / Dashboard / Delivery / Invoice cards kept showing OLD hub after hub-edit cascade succeeded
 
 **Status:** 🟢 Fixed (2026-05-30)

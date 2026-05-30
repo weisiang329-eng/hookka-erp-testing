@@ -3697,6 +3697,8 @@ app.patch("/:id/hub", async (c) => {
           productionOrdersUpdated: 0,
           deliveryOrdersUpdated: 0,
           invoicesUpdated: 0,
+          creditNotesUpdated: 0,
+          debitNotesUpdated: 0,
           warningDOs: [],
           noop: true,
         },
@@ -3715,23 +3717,28 @@ app.patch("/:id/hub", async (c) => {
     };
     if (reason) afterSnap.reason = reason;
 
-    // 6a. production_orders — there is NOTHING to update here. The
-    //     production_orders table has no hubId / hubName columns
-    //     (confirmed against information_schema). The production sheet
-    //     resolves hub at print time via JOIN against sales_orders
-    //     (see production-orders.ts line 5156), so once the SO row is
-    //     updated above, every linked PO automatically reflects the new
-    //     hub on its next print. We only count linked POs here so the
-    //     toast can tell the operator "N production sheets will auto-
-    //     update via join". Cascade write removed in commit 2026-05-30
-    //     after the original hub-cascade shipped a runtime error
-    //     ("column production_orders.hubId does not exist").
+    // 6a. production_orders — has no hubId / hubName columns (production
+    //     sheet joins back to sales_orders for those), but DOES have a
+    //     denormalized `customerState` column populated at PO creation
+    //     (production-orders.ts ~line 5008, INSERT INTO production_orders
+    //     ... customerState). Delivery Planning page reads po.customerState
+    //     directly (src/pages/delivery/index.tsx:889), so a stale value
+    //     here makes the operator see "State: KL" on a row whose parent
+    //     SO is now PG.
+    //
+    //     Update WITHOUT a status filter: even COMPLETED POs may be
+    //     reprinted on the production sheet / fabric tag and must show
+    //     the correct state. Per BUG-2026-05-30-006 audit + operator
+    //     direction "production sheet must show new state even for
+    //     COMPLETED POs".
     const posRes = await c.var.DB
       .prepare(
-        `SELECT id FROM production_orders WHERE salesOrderId = ?`,
+        `SELECT id, customerState
+           FROM production_orders
+          WHERE salesOrderId = ?`,
       )
       .bind(so.id)
-      .all<{ id: string }>();
+      .all<{ id: string; customerState: string | null }>();
     const poRows = posRes.results ?? [];
 
     // 6b. delivery_orders — pre-shipment only (status NOT IN shipped set).
@@ -3843,8 +3850,65 @@ app.patch("/:id/hub", async (c) => {
       }>();
     const invRows = invsRes.results ?? [];
 
+    // 6d. credit_notes — DRAFT only. CN links to invoice (not SO directly),
+    //     so we walk via invoices.salesOrderId = so.id. CN was extended
+    //     with customerState / customerAddress / attention / customerPhone
+    //     in migration 0126 (mirrors the invoice contact block); creation
+    //     snapshots these from the source invoice. When the SO hub
+    //     changes, draft CNs printed before approval would otherwise show
+    //     the OLD address.
+    //
+    //     Status filter: DRAFT only. APPROVED + POSTED CNs have already
+    //     been applied against the invoice (isIssuedStatus, credit-notes.ts
+    //     line 106); rewriting their customer block could corrupt the
+    //     finance trail. APPROVED/POSTED rows skipped silently — they
+    //     keep their snapshot, which matches the invoice they posted against.
+    const cnsRes = await c.var.DB
+      .prepare(
+        `SELECT cn.id, cn.customerState, cn.customerAddress,
+                cn.attention, cn.customerPhone
+           FROM credit_notes cn
+           JOIN invoices i ON i.id = cn.invoiceId
+          WHERE i.salesOrderId = ?
+            AND cn.status = 'DRAFT'`,
+      )
+      .bind(so.id)
+      .all<{
+        id: string;
+        customerState: string | null;
+        customerAddress: string | null;
+        attention: string | null;
+        customerPhone: string | null;
+      }>();
+    const cnRows = cnsRes.results ?? [];
+
+    // 6e. debit_notes — same rules + status enum as credit_notes. Same
+    //     0126-migration column set, same DRAFT-only safety rule.
+    const dnsRes = await c.var.DB
+      .prepare(
+        `SELECT dn.id, dn.customerState, dn.customerAddress,
+                dn.attention, dn.customerPhone
+           FROM debit_notes dn
+           JOIN invoices i ON i.id = dn.invoiceId
+          WHERE i.salesOrderId = ?
+            AND dn.status = 'DRAFT'`,
+      )
+      .bind(so.id)
+      .all<{
+        id: string;
+        customerState: string | null;
+        customerAddress: string | null;
+        attention: string | null;
+        customerPhone: string | null;
+      }>();
+    const dnRows = dnsRes.results ?? [];
+
     // 7. Build the batch. ONE transaction:
     //    - update sales_orders.hub (+ customerState)
+    //    - update each production_orders.customerState — no hub columns
+    //      exist on PO, but customerState is denormalized at create time
+    //      (production-orders.ts line 5008) and shown directly on the
+    //      Delivery Planning page.
     //    - update each eligible delivery_orders row with the FULL contact
     //      block (hubId, hubName, customerAddress, customerState,
     //      contactPerson, contactPhone) — mirrors the 6-field snapshot
@@ -3853,8 +3917,11 @@ app.patch("/:id/hub", async (c) => {
     //      (hubId, hubName, customerAddress, customerState, attention,
     //      customerPhone) — invoice creation snaps these from the DO,
     //      so the same staleness shows up on draft invoices.
-    //    - production_orders has NO hub columns; production sheet reads
-    //      hub via JOIN, so nothing to write there.
+    //    - update each DRAFT credit_notes / debit_notes row with the
+    //      4-field block (customerState, customerAddress, attention,
+    //      customerPhone). CN/DN have no hub_id / hub_name columns
+    //      (no FK to delivery_hubs); they only carry the customer
+    //      contact snapshot (migration 0126).
     //    - one audit row for SO change + one per cascaded downstream row,
     //      with both before and after carrying every field that changed.
     // Effective state mirrors sales_orders.customerState write below
@@ -3882,6 +3949,28 @@ app.patch("/:id/hub", async (c) => {
       parentSOCode: so.companySOId,
     };
     if (reason) invAfter.reason = reason;
+    // CN / DN share the same 4-field snapshot (no hubId/hubName, since
+    // those columns don't exist on credit_notes / debit_notes — they
+    // carry the customer contact block from the source invoice but not
+    // the hub linkage itself).
+    const noteAfter: Record<string, unknown> = {
+      customerAddress: hub.address ?? null,
+      customerState: effectiveState,
+      attention: hub.contactName ?? null,
+      customerPhone: hub.phone ?? null,
+      parentSOId: so.id,
+      parentSOCode: so.companySOId,
+    };
+    if (reason) noteAfter.reason = reason;
+    // production_orders only has customerState (no hub columns, no
+    // address/contact). Use a separate after-snapshot so the audit
+    // entry only records what actually changed.
+    const poAfter: Record<string, unknown> = {
+      customerState: effectiveState,
+      parentSOId: so.id,
+      parentSOCode: so.companySOId,
+    };
+    if (reason) poAfter.reason = reason;
     const stmts: import("@cloudflare/workers-types").D1PreparedStatement[] = [];
 
     stmts.push(
@@ -3907,6 +3996,26 @@ app.patch("/:id/hub", async (c) => {
       after: afterSnap,
     });
     if (soAudit) stmts.push(soAudit);
+
+    for (const po of poRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE production_orders
+                SET customerState = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(effectiveState, now, po.id),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "production-orders",
+        resourceId: po.id,
+        action: "hub-cascade-from-so",
+        before: { customerState: po.customerState },
+        after: poAfter,
+      });
+      if (a) stmts.push(a);
+    }
 
     for (const d of dosToUpdate) {
       stmts.push(
@@ -3984,6 +4093,70 @@ app.patch("/:id/hub", async (c) => {
       if (a) stmts.push(a);
     }
 
+    for (const cn of cnRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE credit_notes
+                SET customerState = ?, customerAddress = ?,
+                    attention = ?, customerPhone = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            effectiveState,
+            hub.address ?? "",
+            hub.contactName ?? "",
+            hub.phone ?? "",
+            cn.id,
+          ),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "credit-notes",
+        resourceId: cn.id,
+        action: "hub-cascade-from-so",
+        before: {
+          customerAddress: cn.customerAddress,
+          customerState: cn.customerState,
+          attention: cn.attention,
+          customerPhone: cn.customerPhone,
+        },
+        after: noteAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
+    for (const dn of dnRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE debit_notes
+                SET customerState = ?, customerAddress = ?,
+                    attention = ?, customerPhone = ?
+              WHERE id = ?`,
+          )
+          .bind(
+            effectiveState,
+            hub.address ?? "",
+            hub.contactName ?? "",
+            hub.phone ?? "",
+            dn.id,
+          ),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "debit-notes",
+        resourceId: dn.id,
+        action: "hub-cascade-from-so",
+        before: {
+          customerAddress: dn.customerAddress,
+          customerState: dn.customerState,
+          attention: dn.attention,
+          customerPhone: dn.customerPhone,
+        },
+        after: noteAfter,
+      });
+      if (a) stmts.push(a);
+    }
+
     await c.var.DB.batch(stmts);
 
     // 7b. Belt-and-braces snapshot invalidation. The cascade above bumps
@@ -4014,6 +4187,8 @@ app.patch("/:id/hub", async (c) => {
         productionOrdersUpdated: poRows.length,
         deliveryOrdersUpdated: dosToUpdate.length,
         invoicesUpdated: invRows.length,
+        creditNotesUpdated: cnRows.length,
+        debitNotesUpdated: dnRows.length,
         warningDOs,
       },
     });

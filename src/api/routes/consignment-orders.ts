@@ -2039,22 +2039,28 @@ app.patch("/:id/hub", async (c) => {
     };
     if (reason) afterSnap.reason = reason;
 
-    // 6a. production_orders — there is NOTHING to update here. The
-    //     production_orders table has no hubId / hubName columns
-    //     (confirmed against information_schema). The production sheet
-    //     resolves hub at print time via JOIN against the parent SO/CO,
-    //     so once the CO row is updated above every linked PO reflects
-    //     the new hub on its next print. We only count linked POs so
-    //     the toast can tell the operator "N production sheets will
-    //     auto-update via join". Cascade write removed in commit
-    //     2026-05-30 after the original hub-cascade shipped a runtime
-    //     error ("column production_orders.hubId does not exist").
+    // 6a. production_orders — has no hubId / hubName columns (production
+    //     sheet joins back to the parent CO for those), but DOES have a
+    //     denormalized `customerState` column populated at PO creation
+    //     (production-orders.ts ~line 5008, INSERT INTO production_orders
+    //     ... customerState). Delivery Planning page reads po.customerState
+    //     directly (src/pages/delivery/index.tsx:889), so a stale value
+    //     here makes the operator see the OLD state on a row whose parent
+    //     CO has just moved to a different hub.
+    //
+    //     Update WITHOUT a status filter: even COMPLETED POs may be
+    //     reprinted on the production sheet / fabric tag and must show
+    //     the correct state. Per BUG-2026-05-30-006 audit + operator
+    //     direction "production sheet must show new state even for
+    //     COMPLETED POs".
     const posRes = await c.var.DB
       .prepare(
-        `SELECT id FROM production_orders WHERE consignmentOrderId = ?`,
+        `SELECT id, customerState
+           FROM production_orders
+          WHERE consignmentOrderId = ?`,
       )
       .bind(co.id)
-      .all<{ id: string }>();
+      .all<{ id: string; customerState: string | null }>();
     const poRows = posRes.results ?? [];
 
     // 6b. consignment_notes — pre-dispatch only. CN has hubId (FK) and
@@ -2109,9 +2115,34 @@ app.patch("/:id/hub", async (c) => {
     });
     if (coAudit) stmts.push(coAudit);
 
-    // production_orders intentionally NOT updated — see 6a above. The
-    // table has no hubId/hubName columns; the production sheet reads
-    // hub via JOIN against the parent CO.
+    // Effective state — same fallback chain the CO header uses above.
+    const effectiveState = hub.state ?? co.customerState ?? null;
+    const poAfter: Record<string, unknown> = {
+      customerState: effectiveState,
+      parentCOId: co.id,
+      parentCOCode: co.companyCOId,
+    };
+    if (reason) poAfter.reason = reason;
+
+    for (const po of poRows) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE production_orders
+                SET customerState = ?, updated_at = ?
+              WHERE id = ?`,
+          )
+          .bind(effectiveState, now, po.id),
+      );
+      const a = await buildAuditStatement(c, {
+        resource: "production-orders",
+        resourceId: po.id,
+        action: "hub-cascade-from-co",
+        before: { customerState: po.customerState },
+        after: poAfter,
+      });
+      if (a) stmts.push(a);
+    }
 
     for (const cn of cnRows) {
       stmts.push(

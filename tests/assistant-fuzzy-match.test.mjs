@@ -34,11 +34,12 @@ try {
   throw err;
 }
 
-const { extractDigitRuns, generateLookupPatterns } = helpers;
+const { extractDigitRuns, generateLookupPatterns, aggregateWorkerEfficiency } = helpers;
 
-test('module exports the two pure helpers', () => {
+test('module exports the pure helpers', () => {
   assert.equal(typeof extractDigitRuns, 'function');
   assert.equal(typeof generateLookupPatterns, 'function');
+  assert.equal(typeof aggregateWorkerEfficiency, 'function');
 });
 
 test('extractDigitRuns — handles common operator shorthand', () => {
@@ -118,6 +119,78 @@ test('generateLookupPatterns — single-digit number does NOT explode', () => {
   // Defensive — guards against future loops.
   const patterns = generateLookupPatterns('9', '2605');
   assert.ok(patterns.length < 30, `too many patterns for single-digit query: ${patterns.length}`);
+});
+
+// ---------------------------------------------------------------------------
+// Universal lookup (2026-05-31): smart_lookup now scans people / products /
+// fabrics / materials too. For a NAME query (no digits) the pattern generator
+// must still emit usable contains-patterns so the worker/product scans match.
+// Triggered by Wei Siang's "check zaw lin last week performance" complaint —
+// the assistant used to ask for department + emp id instead of looking up.
+// ---------------------------------------------------------------------------
+
+test('generateLookupPatterns — person name "Zaw Lin" yields name patterns for the worker scan', () => {
+  const patterns = generateLookupPatterns('Zaw Lin', '2605');
+  assert.ok(patterns.includes('%Zaw Lin%'), 'should keep the raw name as a contains-match');
+  assert.ok(patterns.includes('%ZawLin%'), 'should add a space-stripped variant for "ZawLin"');
+  // No digits → must NOT manufacture document-number guesses.
+  assert.ok(!patterns.some((p) => p.includes('PO-')), 'a name must not emit PO- document guesses');
+});
+
+test('generateLookupPatterns — product "1003" still produces a bare numeric core for the product scan', () => {
+  const patterns = generateLookupPatterns('1003', '2605');
+  assert.ok(patterns.includes('%1003%'), 'product code 1003 should be searchable as a contains-match');
+});
+
+test('aggregateWorkerEfficiency — solo job cards (no pic2) count fully', () => {
+  const rows = [
+    { pic1Id: 'W1', pic2Id: null, estMinutes: 60, actualMinutes: 50 },
+    { pic1Id: 'W1', pic2Id: null, estMinutes: 40, actualMinutes: 50 },
+  ];
+  const r = aggregateWorkerEfficiency(rows, 'W1');
+  assert.equal(r.jobsCompleted, 2);
+  assert.equal(r.plannedMinutes, 100);
+  assert.equal(r.actualMinutes, 100);
+  assert.equal(r.efficiencyPct, 100); // 100 planned / 100 actual
+});
+
+test('aggregateWorkerEfficiency — shared job card splits minutes evenly', () => {
+  const rows = [
+    { pic1Id: 'W1', pic2Id: 'W2', estMinutes: 100, actualMinutes: 80 },
+  ];
+  const r = aggregateWorkerEfficiency(rows, 'W1');
+  assert.equal(r.jobsCompleted, 1);
+  assert.equal(r.plannedMinutes, 50, 'planned split in half for a 2-person card');
+  assert.equal(r.actualMinutes, 40, 'actual split in half for a 2-person card');
+  assert.equal(r.efficiencyPct, 125); // 50 / 40
+});
+
+test('aggregateWorkerEfficiency — counts cards where worker is pic2', () => {
+  const rows = [
+    { pic1Id: 'OTHER', pic2Id: 'W1', estMinutes: 60, actualMinutes: 60 },
+  ];
+  const r = aggregateWorkerEfficiency(rows, 'W1');
+  assert.equal(r.jobsCompleted, 1, 'pic2 assignments must count');
+  assert.equal(r.plannedMinutes, 30);
+});
+
+test('aggregateWorkerEfficiency — ignores cards the worker is not on', () => {
+  const rows = [
+    { pic1Id: 'A', pic2Id: 'B', estMinutes: 100, actualMinutes: 100 },
+  ];
+  const r = aggregateWorkerEfficiency(rows, 'W1');
+  assert.equal(r.jobsCompleted, 0);
+  assert.equal(r.plannedMinutes, 0);
+  assert.equal(r.efficiencyPct, null, 'no actual minutes → efficiency is null, not a divide-by-zero');
+});
+
+test('aggregateWorkerEfficiency — zero actual minutes yields null efficiency (no #DIV/0)', () => {
+  const rows = [
+    { pic1Id: 'W1', pic2Id: null, estMinutes: 60, actualMinutes: 0 },
+  ];
+  const r = aggregateWorkerEfficiency(rows, 'W1');
+  assert.equal(r.jobsCompleted, 1);
+  assert.equal(r.efficiencyPct, null);
 });
 
 test('loader detection — sanity check tsx loader is wired', () => {

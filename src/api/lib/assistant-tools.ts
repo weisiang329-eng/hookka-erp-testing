@@ -2179,7 +2179,7 @@ const smart_lookup: ToolDefinition = {
   schema: {
     name: "smart_lookup",
     description:
-      "FUZZY MULTI-ENTITY LOOKUP. Use this as the FIRST call when the operator types an ambiguous identifier like 'PO9003', 'PO 9003', 'PO03 9003', 'houzs 9003', '9003', '9k houzs', 'SO 2605 51'. Strips the digits, tries multiple width-padded format guesses (PO-9003, PO-09003, PO-009003 for Houzs Customer POs; PO-YYMM-NNN for internal Production Orders), and scans every entity where a document number could live: sales_orders.companySOId + customerPOId, consignment_orders.companyCOId + customerCOId, production_orders.poNo + customerPOId, delivery_orders.doNo, invoices.invoiceNo, customers.code/name, suppliers.code/name. Returns matches GROUPED by entity type with disambiguating context (customer, date, status, amount). If zero matches, returns an empty list — the model must then ASK a clarifying question, not give up.",
+      "UNIVERSAL FUZZY LOOKUP — your FIRST call for ANY thing the operator names, whether it's a document number OR a person / product / fabric / material. Handles ambiguous identifiers like 'PO9003', 'PO 9003', 'PO03 9003', 'houzs 9003', '9003', 'SO 2605 51' AND plain words like 'Zaw Lin', 'model 1003', 'grey suede'. For numbers it strips the digits and tries width-padded format guesses (PO-9003 / PO-09003 / PO-009003 for Houzs Customer POs; PO-YYMM-NNN for internal Production Orders). It scans EVERY entity: sales_orders (companySOId + customerPOId), consignment_orders, production_orders, delivery_orders, invoices, customers, suppliers, workers/employees (name + emp no), products (code + name), fabrics (code + name), raw_materials/accessories (item code + description). Returns matches GROUPED by entity type with disambiguating context. NEVER ask 'which department' or 'what's the id' before calling this — look up first. If zero matches, ASK a clarifying question; never just say 'not found'.",
     input_schema: {
       type: "object",
       properties: {
@@ -2225,6 +2225,7 @@ const smart_lookup: ToolDefinition = {
       columns: string[],
       selectClause: string,
       orderBy: string,
+      opts?: { hasCustomerName?: boolean },
     ) => {
       // Cross-product: every column ILIKE every pattern. Pattern count is
       // bounded (~10) and column count is small (~4) so 40 ORs is fine.
@@ -2232,6 +2233,11 @@ const smart_lookup: ToolDefinition = {
       // postgres.js + transaction-pooler + prepare:false has trouble
       // binding text[] params via the D1-shaped adapter — silently returns
       // zero rows where a normal OR chain works fine.
+      //
+      // hasCustomerName: people / catalog tables (workers, products,
+      // fabrics, raw_materials) have NO customerName column, so the
+      // customer-hint narrowing must be skipped for them or the query errors.
+      const hasCustomerName = opts?.hasCustomerName ?? true;
       const orParts: string[] = [];
       const params: unknown[] = [orgId];
       for (const col of columns) {
@@ -2241,10 +2247,10 @@ const smart_lookup: ToolDefinition = {
         }
       }
       const orClause = orParts.join(" OR ");
-      const where = customerHintLike
+      const where = customerHintLike && hasCustomerName
         ? `orgId = ? AND (${orClause}) AND LOWER(COALESCE(customerName, '')) LIKE ?`
         : `orgId = ? AND (${orClause})`;
-      if (customerHintLike) params.push(customerHintLike);
+      if (customerHintLike && hasCustomerName) params.push(customerHintLike);
 
       const sql = `SELECT ${selectClause} FROM ${table} WHERE ${where} ORDER BY ${orderBy} LIMIT ${limit}`;
       try {
@@ -2256,7 +2262,10 @@ const smart_lookup: ToolDefinition = {
       }
     };
 
-    const [salesRows, consignmentRows, prodRows, deliveryRows, invoiceRows, customerRows, supplierRows] =
+    const [
+      salesRows, consignmentRows, prodRows, deliveryRows, invoiceRows,
+      customerRows, supplierRows, workerRows, productRows, fabricRows, materialRows,
+    ] =
       await Promise.all([
         runColumnSearch(
           "sales_orders",
@@ -2303,6 +2312,41 @@ const smart_lookup: ToolDefinition = {
           .bind(orgId, `%${rawQuery.toLowerCase()}%`, `%${rawQuery.toLowerCase()}%`)
           .all<{ id: string; code: string | null; name: string | null }>()
           .then((r) => r.results ?? []),
+        // Workers / employees — resolve a PERSON by name or emp number.
+        // This is what was missing: "Zaw Lin" had no path to a record so
+        // the model used to ask "which department / emp id" instead of
+        // looking up first.
+        runColumnSearch(
+          "workers",
+          ["name", "empNo", "id"],
+          "id, empNo, name, departmentCode, role, status",
+          "name",
+          { hasCustomerName: false },
+        ),
+        // Products by code / name (e.g. "1003", "1005 queen").
+        runColumnSearch(
+          "products",
+          ["code", "name", "id"],
+          "id, code, name, category, status",
+          "code",
+          { hasCustomerName: false },
+        ),
+        // Fabrics by code / name (e.g. "that grey fabric").
+        runColumnSearch(
+          "fabrics",
+          ["code", "name", "id"],
+          "id, code, name, category",
+          "code",
+          { hasCustomerName: false },
+        ),
+        // Raw materials / accessories by item code / description.
+        runColumnSearch(
+          "raw_materials",
+          ["itemCode", "description", "id"],
+          "id, itemCode, description, itemGroup, baseUOM",
+          "itemCode",
+          { hasCustomerName: false },
+        ),
       ]);
 
     await emitAudit(c, {
@@ -2377,6 +2421,34 @@ const smart_lookup: ToolDefinition = {
       code: r.code ?? "",
       name: r.name ?? "",
     }));
+    const workers = safeRows(workerRows).map((r) => ({
+      employeeId: String(r.id ?? ""),
+      empNo: String(r.empNo ?? ""),
+      name: String(r.name ?? ""),
+      department: String(r.departmentCode ?? ""),
+      role: String(r.role ?? ""),
+      status: String(r.status ?? ""),
+    }));
+    const products = safeRows(productRows).map((r) => ({
+      id: String(r.id ?? ""),
+      code: String(r.code ?? ""),
+      name: String(r.name ?? ""),
+      category: String(r.category ?? ""),
+      status: String(r.status ?? ""),
+    }));
+    const fabrics = safeRows(fabricRows).map((r) => ({
+      id: String(r.id ?? ""),
+      code: String(r.code ?? ""),
+      name: String(r.name ?? ""),
+      category: String(r.category ?? ""),
+    }));
+    const materials = safeRows(materialRows).map((r) => ({
+      id: String(r.id ?? ""),
+      itemCode: String(r.itemCode ?? ""),
+      description: String(r.description ?? ""),
+      itemGroup: String(r.itemGroup ?? ""),
+      baseUOM: String(r.baseUOM ?? ""),
+    }));
 
     const totalMatches =
       salesOrders.length +
@@ -2385,17 +2457,22 @@ const smart_lookup: ToolDefinition = {
       deliveryOrders.length +
       invoices.length +
       customers.length +
-      suppliers.length;
+      suppliers.length +
+      workers.length +
+      products.length +
+      fabrics.length +
+      materials.length;
 
     return {
       query: rawQuery,
       customerHint: customerHint ?? "",
       patternsTried: patterns,
       totalMatches,
-      // Hint to the model when zero results so it knows to ASK.
+      // Hint to the model when zero results so it knows to ASK — universal,
+      // covers people / products / fabrics / materials, not just documents.
       askClarifyingQuestion:
         totalMatches === 0
-          ? "No matches found. Ask the operator to clarify: is this a Customer PO (Houzs/Carress style, e.g. PO-009003), an internal Sales/Production Order (SO-2605-051 / PO-2605-012), or something else? Ask for a customer name or rough date."
+          ? "No matches found anywhere (orders, customers, suppliers, employees, products, fabrics, materials). Ask the operator to clarify what kind of thing this is and give one extra hint — a customer or person name, a rough date, or the document type (Customer PO / Sales Order / Production Order)."
           : "",
       salesOrders,
       consignmentOrders,
@@ -2404,6 +2481,10 @@ const smart_lookup: ToolDefinition = {
       invoices,
       customers,
       suppliers,
+      workers,
+      products,
+      fabrics,
+      materials,
     };
   },
 };
@@ -4032,6 +4113,167 @@ const getDepartmentEfficiency: ToolDefinition = {
       plannedHours: Math.round(planned / 6) / 10,
       actualHours: Math.round(actual / 6) / 10,
       efficiencyPct: actual > 0 ? Math.round((planned / actual) * 1000) / 10 : null,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// HR — find_employee (resolve a PERSON by name, + their recent performance)
+//
+// This is the "look up first, don't be lazy" tool. When the operator names
+// a worker ("check zaw lin last week performance") the model should resolve
+// the person FIRST and — when there's exactly one match — get their recent
+// completed work + efficiency in the SAME call, so it can answer without
+// asking for a department or employee id.
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregate one worker's completed job-cards into jobs / planned / actual
+ * minutes. Pure + exported so it can be unit-tested without a DB.
+ *
+ * A job-card has 1 or 2 people (pic1 always, pic2 optional). When 2 people
+ * share a card we split the planned + actual minutes evenly so neither
+ * person's numbers are double-counted.
+ */
+export function aggregateWorkerEfficiency(
+  rows: Array<{
+    pic1Id: string | null;
+    pic2Id: string | null;
+    estMinutes: number | null;
+    actualMinutes: number | null;
+  }>,
+  workerId: string,
+): { jobsCompleted: number; plannedMinutes: number; actualMinutes: number; efficiencyPct: number | null } {
+  let jobs = 0;
+  let planned = 0;
+  let actual = 0;
+  for (const r of rows) {
+    const isPic1 = r.pic1Id === workerId;
+    const isPic2 = r.pic2Id === workerId;
+    if (!isPic1 && !isPic2) continue;
+    const share = r.pic2Id ? 2 : 1; // two people on the card → split evenly
+    jobs += 1;
+    planned += (r.estMinutes ?? 0) / share;
+    actual += (r.actualMinutes ?? 0) / share;
+  }
+  return {
+    jobsCompleted: jobs,
+    plannedMinutes: Math.round(planned),
+    actualMinutes: Math.round(actual),
+    efficiencyPct: actual > 0 ? Math.round((planned / actual) * 1000) / 10 : null,
+  };
+}
+
+const findEmployee: ToolDefinition = {
+  schema: {
+    name: "find_employee",
+    description:
+      "Resolve a PERSON by name or employee number. ALWAYS call this FIRST whenever the operator names a worker — e.g. 'Zaw Lin', 'check zaw lin performance', 'how is Ali doing', 'zawlin last week'. Fuzzy-matches the workers table on name + emp no. When EXACTLY ONE worker matches, it ALSO returns their performance for the period (DEFAULT: last 7 days) — completed job cards, planned vs actual minutes, efficiency % — so you can answer immediately WITHOUT asking the operator for a department or employee id. If 0 match: ask the operator to check spelling or give the emp no. If 2+ match: list them with department/role and ask which one. Do NOT ask clarifying questions before calling this.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Name or employee number as typed, e.g. 'Zaw Lin', 'zawlin', 'EMP012'.",
+        },
+        periodFrom: { type: "string", description: "YYYY-MM-DD. Default: 7 days ago." },
+        periodTo: { type: "string", description: "YYYY-MM-DD. Default: today." },
+      },
+      required: ["query"],
+    },
+  },
+  execute: async (c, args) => {
+    const orgId = getOrgId(c);
+    const q = strOrNull(args.query);
+    if (!q) return { error: "query is required" };
+
+    // Default period = last 7 days (covers "last week" with zero questions).
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const weekAgoStr = new Date(now.getTime() - 7 * 86400000).toISOString().slice(0, 10);
+    const from = ymdOrNull(args.periodFrom) ?? weekAgoStr;
+    const to = ymdOrNull(args.periodTo) ?? todayStr;
+
+    // Fuzzy match name + emp no. Plain OR-chain — NOT `ILIKE ANY (?::text[])`
+    // (that silently binds empty through the adapter). Active workers first.
+    const like = `%${q.toLowerCase()}%`;
+    const matchRes = await c.var.DB.prepare(
+      `SELECT id, empNo, name, departmentCode, role, status
+       FROM workers
+       WHERE orgId = ? AND (LOWER(name) LIKE ? OR LOWER(empNo) LIKE ?)
+       ORDER BY (CASE WHEN UPPER(COALESCE(status,'')) = 'ACTIVE' THEN 0 ELSE 1 END), name
+       LIMIT 25`,
+    ).bind(orgId, like, like).all<{
+      id: string; empNo: string | null; name: string | null;
+      departmentCode: string | null; role: string | null; status: string | null;
+    }>();
+    const matched = matchRes.results ?? [];
+
+    await emitAudit(c, {
+      resource: "assistant-tool",
+      resourceId: q.slice(0, 100),
+      action: "find_employee",
+      after: { query: q, matchCount: matched.length },
+      source: "ui",
+    });
+
+    const workers = matched.map((w) => ({
+      employeeId: w.id,
+      empNo: w.empNo ?? "",
+      name: w.name ?? "",
+      department: w.departmentCode ?? "",
+      role: w.role ?? "",
+      status: w.status ?? "",
+    }));
+
+    if (workers.length === 0) {
+      return {
+        query: q,
+        matchCount: 0,
+        workers: [],
+        performance: null,
+        askClarifyingQuestion: `No worker matches "${q}". Ask the operator to check the spelling or give the employee number.`,
+      };
+    }
+
+    // Exactly one → pull their recent completed work + efficiency in the
+    // same call so the model can answer without a second round-trip.
+    let performance: Record<string, unknown> | null = null;
+    if (workers.length === 1) {
+      const w = matched[0];
+      const jcRes = await c.var.DB.prepare(
+        `SELECT pic1Id, pic2Id, estMinutes, actualMinutes
+         FROM job_cards
+         WHERE orgId = ? AND UPPER(status) = 'COMPLETED'
+           AND completedDate >= ? AND completedDate <= ?
+           AND (pic1Id = ? OR pic2Id = ?)
+         LIMIT 2000`,
+      ).bind(orgId, from, to, w.id, w.id).all<{
+        pic1Id: string | null; pic2Id: string | null;
+        estMinutes: number | null; actualMinutes: number | null;
+      }>();
+      const agg = aggregateWorkerEfficiency(jcRes.results ?? [], w.id);
+      performance = {
+        periodFrom: from,
+        periodTo: to,
+        jobsCompleted: agg.jobsCompleted,
+        plannedMinutes: agg.plannedMinutes,
+        actualMinutes: agg.actualMinutes,
+        plannedHours: Math.round(agg.plannedMinutes / 6) / 10,
+        actualHours: Math.round(agg.actualMinutes / 6) / 10,
+        efficiencyPct: agg.efficiencyPct,
+      };
+    }
+
+    return {
+      query: q,
+      matchCount: workers.length,
+      workers,
+      performance, // null unless exactly 1 match
+      askClarifyingQuestion:
+        workers.length > 1
+          ? `Multiple workers match "${q}". List them with department + role and ask the operator which one.`
+          : "",
     };
   },
 };
@@ -5720,6 +5962,7 @@ export const TOOLS: ToolDefinition[] = [
   getAccessory,
   predictReorderNeeds,
   // v1.5 — HR / payroll
+  findEmployee,
   getEmployeeEfficiency,
   getPayroll,
   getDepartmentEfficiency,

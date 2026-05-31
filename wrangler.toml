@@ -244,6 +244,13 @@ APP_URL = "https://erp.hookka.com"
 # its background domain authentication (~5-15 min from DNS-record-add,
 # can take up to 48h max), all outbound mail comes from @hookka.com.
 RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@hookka.com>"
+# 2026-05-31 — Per-user daily cap on AI Assistant questions. Each question is
+# a full Claude call plus a multi-step tool loop, so worst case ~RM 0.5-1 a
+# question. This bounds the worst-case daily spend per user (applies to every
+# user including SUPER_ADMIN). Read by src/api/lib/assistant-daily-quota.ts;
+# code defaults to 10 if this is unset/blank/invalid. Set "0" to disable the
+# cap. Resets at Singapore midnight (UTC+8).
+ASSISTANT_DAILY_LIMIT = "10"
 # 2026-05-27 — Daily reports (efficiency / schedule / overdue). Comma-
 # separated list of recipients for cron-pushed reports. Leave unset to
 # auto-target every active SUPER_ADMIN user (the report code queries the

@@ -45,6 +45,11 @@ export type Env = {
     // a default of 10 in src/api/lib/assistant-daily-quota.ts. Applies to
     // every user including SUPER_ADMIN. Set to "0" to disable the cap.
     ASSISTANT_DAILY_LIMIT?: string;
+    // Temporary kill-switch for the Hookka AI assistant (routes/assistant.ts).
+    // When exactly "false", POST /api/assistant/chat returns a normal 200 SSE
+    // reply with a "turned off" message before any model call. Unset or any
+    // other value leaves behavior unchanged. Set "true" or remove to re-enable.
+    ASSISTANT_ENABLED?: string;
     // Supabase (Phase 2+). Transaction-mode pooler on port 6543.
     // Local dev uses DATABASE_URL directly from .dev.vars.
     // Production / preview use the HYPERDRIVE binding below (required to

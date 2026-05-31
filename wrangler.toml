@@ -251,6 +251,8 @@ RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@hookka.com>"
 # code defaults to 10 if this is unset/blank/invalid. Set "0" to disable the
 # cap. Resets at Singapore midnight (UTC+8).
 ASSISTANT_DAILY_LIMIT = "10"
+# Temporary kill-switch for the Hookka AI assistant — "false" turns it off; set "true" or remove to re-enable.
+ASSISTANT_ENABLED = "false"
 # 2026-05-27 — Daily reports (efficiency / schedule / overdue). Comma-
 # separated list of recipients for cron-pushed reports. Leave unset to
 # auto-target every active SUPER_ADMIN user (the report code queries the

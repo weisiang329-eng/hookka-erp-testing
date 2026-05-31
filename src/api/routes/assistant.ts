@@ -467,6 +467,37 @@ function sseEvent(obj: Record<string, unknown>): Uint8Array {
 }
 
 app.post("/chat", async (c) => {
+  // ----- Kill-switch ------------------------------------------------------
+  // Temporary, reversible toggle to turn the whole assistant OFF without a
+  // code change. When env.ASSISTANT_ENABLED is exactly the string "false"
+  // we short-circuit BEFORE any Anthropic call, the daily-quota check, or
+  // the tool loop, and return a normal HTTP 200 SSE stream shaped exactly
+  // like the success path below — one `text` event carrying the turned-off
+  // message, then `done`. The frontend renders it as an ordinary assistant
+  // reply. Any other value (unset, "true", etc.) leaves behavior unchanged.
+  if (c.env.ASSISTANT_ENABLED === "false") {
+    const offStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          sseEvent({
+            type: "text",
+            value: "The AI assistant is temporarily turned off.",
+          }),
+        );
+        controller.enqueue(sseEvent({ type: "done" }));
+        controller.close();
+      },
+    });
+    return new Response(offStream, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
+
   // SUPER_ADMIN gate. The global authMiddleware ensures the user is logged
   // in; we additionally require the role.
   const role = (c as unknown as { get: (k: string) => unknown }).get(

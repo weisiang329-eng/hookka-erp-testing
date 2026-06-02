@@ -152,7 +152,7 @@ export function SKUFormDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-6 border-b border-[#E2DDD8]">
           <h2 className="text-lg font-semibold text-[#1F1D1B]">
             {editData ? "Edit SKU Mapping" : "Add SKU Mapping"}
@@ -161,8 +161,13 @@ export function SKUFormDialog({
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+        <form onSubmit={handleSubmit} className="p-6 space-y-6">
+          {/* Internal material — the code search owns a full-width row so its
+              dropdown spans the whole dialog and descriptions stay readable. */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6B5C32]">
+              Internal Material
+            </h3>
             <div className="relative" ref={rmDropdownRef}>
               <label className="block text-sm font-medium text-[#374151] mb-1">Internal Code *</label>
               <Input
@@ -172,12 +177,12 @@ export function SKUFormDialog({
                   setShowRmDropdown(true);
                 }}
                 onFocus={() => setShowRmDropdown(true)}
-                placeholder="Search FG / WIP / RM..."
+                placeholder="Search by code or description (FG / WIP / RM)..."
                 required
                 autoComplete="off"
               />
               {showRmDropdown && (
-                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-48 overflow-y-auto">
+                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
                   {filteredInventory.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-gray-400">No items found</div>
                   ) : (
@@ -185,12 +190,12 @@ export function SKUFormDialog({
                       <button
                         key={item.id}
                         type="button"
-                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-[#FAF9F7] flex items-center gap-2 border-b border-[#E2DDD8]/50 last:border-0"
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] flex items-baseline gap-3 border-b border-[#E2DDD8]/50 last:border-0"
                         onClick={() => selectInventoryItem(item)}
                       >
-                        <span className="font-mono text-xs text-[#6B5C32] min-w-[100px]">{item.itemCode}</span>
-                        <span className="text-[#374151] truncate">{item.description}</span>
-                        <span className="text-[10px] text-gray-400 ml-auto shrink-0">{item.itemGroup}</span>
+                        <span className="font-mono text-xs text-[#6B5C32] shrink-0 w-[110px]">{item.itemCode}</span>
+                        <span className="text-[#374151] flex-1 min-w-0">{item.description}</span>
+                        <span className="text-[10px] text-gray-400 shrink-0">{item.itemGroup}</span>
                       </button>
                     ))
                   )}
@@ -207,44 +212,57 @@ export function SKUFormDialog({
               />
             </div>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-[#374151] mb-1">Supplier *</label>
-            <select
-              className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
-              value={supplierId}
-              onChange={(e) => setSupplierId(e.target.value)}
-              required
-            >
-              <option value="">Select supplier...</option>
-              {suppliers
-                .filter((s) => s.status === "ACTIVE")
-                .map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.code} - {s.name}
-                  </option>
-                ))}
-            </select>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
+
+          {/* Supplier details */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6B5C32]">
+              Supplier Details
+            </h3>
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Code *</label>
-              <Input
-                value={supplierSku}
-                onChange={(e) => setSupplierSku(e.target.value)}
+              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier *</label>
+              <select
+                className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
+                value={supplierId}
+                onChange={(e) => setSupplierId(e.target.value)}
                 required
-                placeholder="Supplier's SKU / part number"
-              />
+              >
+                <option value="">Select supplier...</option>
+                {suppliers
+                  .filter((s) => s.status === "ACTIVE")
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code} - {s.name}
+                    </option>
+                  ))}
+              </select>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Description</label>
-              <Input
-                value={supplierDescription}
-                onChange={(e) => setSupplierDescription(e.target.value)}
-                placeholder="As printed on supplier PI / quote"
-              />
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Code *</label>
+                <Input
+                  value={supplierSku}
+                  onChange={(e) => setSupplierSku(e.target.value)}
+                  required
+                  placeholder="Supplier's SKU / part number"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Supplier Description</label>
+                <Input
+                  value={supplierDescription}
+                  onChange={(e) => setSupplierDescription(e.target.value)}
+                  placeholder="As printed on supplier PI / quote"
+                />
+              </div>
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-4">
+
+          {/* Pricing & terms */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6B5C32]">
+              Pricing &amp; Terms
+            </h3>
+            <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Unit Price (RM) *</label>
               <Input
@@ -278,37 +296,39 @@ export function SKUFormDialog({
                 onChange={(e) => setMoq(Number(e.target.value))}
               />
             </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Valid From</label>
-              <Input
-                type="date"
-                value={validFrom}
-                onChange={(e) => setValidFrom(e.target.value)}
-              />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Valid To</label>
-              <Input
-                type="date"
-                value={validTo}
-                onChange={(e) => setValidTo(e.target.value)}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Valid From</label>
+                <Input
+                  type="date"
+                  value={validFrom}
+                  onChange={(e) => setValidFrom(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">Valid To</label>
+                <Input
+                  type="date"
+                  value={validTo}
+                  onChange={(e) => setValidTo(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <input
+                type="checkbox"
+                id="mainSupplier"
+                checked={isMainSupplier}
+                onChange={(e) => setIsMainSupplier(e.target.checked)}
+                className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
               />
+              <label htmlFor="mainSupplier" className="text-sm font-medium text-[#374151]">
+                Main supplier for this material
+              </label>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="mainSupplier"
-              checked={isMainSupplier}
-              onChange={(e) => setIsMainSupplier(e.target.checked)}
-              className="h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
-            />
-            <label htmlFor="mainSupplier" className="text-sm font-medium text-[#374151]">
-              Main supplier for this material
-            </label>
-          </div>
+
           <div className="flex justify-end gap-3 pt-4 border-t border-[#E2DDD8]">
             <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
             <Button type="submit" variant="primary">{editData ? "Update" : "Add Mapping"}</Button>

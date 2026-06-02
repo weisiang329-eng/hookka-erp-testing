@@ -19,6 +19,7 @@ import { useParams, Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Supplier } from "@/types";
@@ -28,6 +29,13 @@ import {
   type SkuFormSupplier,
   type SkuFormInventoryItem,
 } from "@/pages/procurement/sku-form-dialog";
+import {
+  SupplierFormDialog,
+  type OrgOption,
+  type PaymentTerms,
+  type SupplierStatus,
+  type SupplierFormData,
+} from "@/pages/procurement/supplier-form-dialog";
 import {
   ArrowLeft,
   Building2,
@@ -172,9 +180,43 @@ export default function SupplierDetailPage() {
     }));
   }, [invResp]);
 
+  // Organisation list — feeds the Edit Supplier dialog's Purchase Company
+  // dropdown (mirrors /procurement/maintenance). Only code + legal name.
+  const { data: orgsResp } = useCachedJson<{
+    organisations?: Array<{ code: string; name: string; isActive?: boolean }>;
+  }>("/api/organisations");
+  const orgOptions: OrgOption[] = useMemo(() => {
+    const list = orgsResp?.organisations ?? [];
+    return list
+      .filter((o) => o.isActive !== false)
+      .map((o) => ({ code: o.code, name: o.name }));
+  }, [orgsResp]);
+
   // SKU dialog state
   const [showSKUForm, setShowSKUForm] = useState(false);
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
+
+  // Supplier edit dialog state
+  const [showSupplierForm, setShowSupplierForm] = useState(false);
+
+  async function handleSaveSupplier(data: SupplierFormData) {
+    if (!id) return;
+    // Mirrors the list page's edit path: PUT /api/suppliers/:id then refresh
+    // the cached supplier so the Supplier Info card reflects the change.
+    const res = await fetch(`/api/suppliers/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      alert(`Save failed: ${j?.error ?? res.status}`);
+      return;
+    }
+    invalidateCachePrefix(`/api/suppliers/${id}`);
+    invalidateCachePrefix("/api/suppliers");
+    setShowSupplierForm(false);
+  }
 
   function bindingToSKU(b: SkuBinding): SupplierSKU {
     return {
@@ -278,6 +320,95 @@ export default function SupplierDetailPage() {
   const defectTone =
     defect <= 1 ? "text-[#4F7C3A]" : defect <= 3 ? "text-[#9C6F1E]" : "text-[#9A3A2D]";
 
+  // SKU mappings grid columns. Replaces the old hand-rolled <table> so columns
+  // are resizable (drag right edge, persisted per-user in localStorage) and
+  // long descriptions clip instead of overflowing. The inline Edit + Delete
+  // actions are preserved via a custom render on the Actions column so they
+  // stay visible (not buried in a right-click menu). Double-click-to-edit is
+  // wired through DataGrid's onDoubleClick below.
+  const skuColumns: Column<SkuBinding>[] = [
+    { key: "materialCode", label: "Internal Code", type: "docno", width: "130px", sortable: true },
+    { key: "materialName", label: "Internal Description", type: "text", width: "260px", sortable: true },
+    { key: "supplierSku", label: "Supplier Code", type: "text", width: "150px", sortable: true },
+    {
+      key: "supplierDescription",
+      label: "Supplier Description",
+      type: "text",
+      width: "260px",
+      sortable: true,
+      render: (_val: unknown, row: SkuBinding) => (
+        <span className="text-[#6B7280]">{row.supplierDescription || "—"}</span>
+      ),
+    },
+    {
+      key: "unitPrice",
+      label: "Unit Price",
+      width: "120px",
+      align: "right",
+      sortable: true,
+      render: (_val: unknown, row: SkuBinding) => (
+        <span className="text-[#1F1D1B]">
+          {formatCurrency(row.unitPrice)} {row.currency !== "MYR" ? row.currency : ""}
+        </span>
+      ),
+    },
+    {
+      key: "leadTimeDays",
+      label: "Lead Time",
+      width: "100px",
+      align: "right",
+      sortable: true,
+      render: (_val: unknown, row: SkuBinding) => <span>{row.leadTimeDays}d</span>,
+    },
+    { key: "moq", label: "MOQ", type: "number", width: "80px", align: "right", sortable: true },
+    {
+      key: "isMainSupplier",
+      label: "Main",
+      width: "80px",
+      sortable: true,
+      render: (_val: unknown, row: SkuBinding) =>
+        row.isMainSupplier ? (
+          <Badge className="bg-green-50 text-green-800 border-green-300">Main</Badge>
+        ) : (
+          <span className="text-[#9CA3AF] text-xs">—</span>
+        ),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      width: "90px",
+      align: "right",
+      render: (_val: unknown, row: SkuBinding) => (
+        <div className="flex items-center justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            title="Edit"
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditingSKU(bindingToSKU(row));
+              setShowSKUForm(true);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            title="Delete"
+            className="text-[#9A3A2D] hover:text-[#7A2E24]"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDeleteSKU(row);
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -296,7 +427,17 @@ export default function SupplierDetailPage() {
             <p className="text-xs text-[#6B7280]">Supplier scorecard and recent purchase order history</p>
           </div>
         </div>
-        <Badge variant="status" status={supplier.status} />
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowSupplierForm(true)}
+          >
+            <Pencil className="h-4 w-4" />
+            Edit Supplier
+          </Button>
+          <Badge variant="status" status={supplier.status} />
+        </div>
       </div>
 
       {/* Header card */}
@@ -407,81 +548,19 @@ export default function SupplierDetailPage() {
               No SKU mappings yet for this supplier.
             </p>
           ) : (
-            <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Internal Code</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Internal Description</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier Code</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier Description</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Unit Price</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Lead Time</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">MOQ</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Main</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {skus.map((s, idx) => (
-                    <tr
-                      key={s.id}
-                      onDoubleClick={() => {
-                        setEditingSKU(bindingToSKU(s));
-                        setShowSKUForm(true);
-                      }}
-                      className={`border-b border-[#E2DDD8] last:border-b-0 cursor-pointer hover:bg-[#FAF7EE] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}
-                      title="Double-click to edit"
-                    >
-                      <td className="h-10 px-3 font-medium text-[#6B5C32]">{s.materialCode}</td>
-                      <td className="h-10 px-3 text-[#374151]">{s.materialName}</td>
-                      <td className="h-10 px-3 text-[#374151]">{s.supplierSku}</td>
-                      <td className="h-10 px-3 text-[#6B7280]">{s.supplierDescription || "—"}</td>
-                      <td className="h-10 px-3 text-right text-[#1F1D1B]">
-                        {formatCurrency(s.unitPrice)} {s.currency !== "MYR" ? s.currency : ""}
-                      </td>
-                      <td className="h-10 px-3 text-right text-[#4B5563]">{s.leadTimeDays}d</td>
-                      <td className="h-10 px-3 text-right text-[#4B5563]">{s.moq}</td>
-                      <td className="h-10 px-3">
-                        {s.isMainSupplier ? (
-                          <Badge className="bg-green-50 text-green-800 border-green-300">Main</Badge>
-                        ) : (
-                          <span className="text-[#9CA3AF] text-xs">—</span>
-                        )}
-                      </td>
-                      <td className="h-10 px-3">
-                        <div className="flex items-center justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Edit"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditingSKU(bindingToSKU(s));
-                              setShowSKUForm(true);
-                            }}
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Delete"
-                            className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteSKU(s);
-                            }}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataGrid<SkuBinding>
+              columns={skuColumns}
+              data={skus}
+              keyField="id"
+              gridId="supplier-detail-sku-mappings"
+              onDoubleClick={(row) => {
+                setEditingSKU(bindingToSKU(row));
+                setShowSKUForm(true);
+              }}
+              emptyMessage="No SKU mappings yet for this supplier."
+              stickyHeader
+              maxHeight="calc(100vh - 360px)"
+            />
           )}
         </CardContent>
       </Card>
@@ -567,6 +646,28 @@ export default function SupplierDetailPage() {
             setShowSKUForm(false);
             setEditingSKU(null);
           }}
+        />
+      )}
+
+      {showSupplierForm && (
+        <SupplierFormDialog
+          editData={{
+            code: supplier.code,
+            name: supplier.name,
+            contactPerson: supplier.contactPerson,
+            phone: supplier.phone,
+            email: supplier.email,
+            address: supplier.address,
+            // status/paymentTerms are stored as plain strings on the @/types
+            // Supplier; the form's union types are a subset of those strings.
+            paymentTerms: supplier.paymentTerms as PaymentTerms,
+            status: supplier.status as SupplierStatus,
+            rating: supplier.rating,
+            purchaseOrgCode: supplier.purchaseOrgCode || "HOOKKA",
+          }}
+          orgOptions={orgOptions}
+          onSave={handleSaveSupplier}
+          onClose={() => setShowSupplierForm(false)}
         />
       )}
     </div>

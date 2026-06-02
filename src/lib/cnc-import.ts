@@ -28,9 +28,20 @@ export type CncImportResponse = {
  * - Surfaces a clear, operator-friendly message on a 503 (storage not set up).
  * - Throws on any other failure so the caller can toast the error.
  */
-export async function uploadCncFiles(files: File[]): Promise<string> {
+export async function uploadCncFiles(
+  files: File[],
+  opts?: { productCode?: string; displayName?: string },
+): Promise<string> {
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
+
+  // Optional overrides chosen at upload time. When a productCode is supplied,
+  // the server files every grouped row under it instead of the filename-parsed
+  // code. displayName, when supplied, overrides the auto-derived display name.
+  const productCode = opts?.productCode?.trim();
+  if (productCode) fd.append("productCode", productCode);
+  const displayName = opts?.displayName?.trim();
+  if (displayName) fd.append("displayName", displayName);
 
   const res = await fetch("/api/cnc-templates/import", {
     method: "POST",

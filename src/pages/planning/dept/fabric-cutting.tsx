@@ -2,17 +2,17 @@
 // Planning > Fabric Cutting department drill-in (Phase 1, template).
 //
 // Reached from Planning > Capacity Loading by clicking the "Fabric Cutting"
-// department name. The page leads with the actual schedule and keeps the two
-// explanatory sections collapsed so it opens compact:
-//   (b) Schedule Result — the saved snapshot in
-//       src/data/cutting-schedule-snapshot.json rendered as a date-grouped
-//       Cut Calendar (each cut headed by an orders/sets/slots summary line) +
-//       a By Day summary. This is the FIRST and primary section.
+// department name. The two explanatory sections sit at the top, collapsed, so
+// the page opens compact; the schedule is the main body below them:
 //   (a) Scheduling Process — plain-English explanation of how Fab Cut is
 //       scheduled (curated from docs/PRODUCTION-PLANNING-LOGIC.md and
 //       scripts/build_cutting_daily_xlsx.py). Collapsed by default.
 //   (c) Scheduling Logic / Prompt — the detailed rule reference. Collapsed by
 //       default.
+//   (b) Schedule Result — the saved snapshot in
+//       src/data/cutting-schedule-snapshot.json rendered as a date-grouped
+//       Cut Calendar (each cut headed by an orders/sets/slots summary line) +
+//       a By Day summary. This is the primary section, open by default.
 //
 // The Recalculate button is intentionally inert for this phase: live
 // re-scheduling from current orders is a later backend phase. The button
@@ -356,12 +356,12 @@ function buildCalendarGroups(sheet: Sheet | undefined): CalGroup[] {
 }
 
 // A grouped header line that sits above each cut's item rows, stating the
-// cut number, lane, model+size, and — what the owner asked for — how many
-// orders are batched into the cut, plus total sets and slots.
+// cut number, lane, and — what the owner asked for — how many orders are
+// batched into the cut, plus total sets and slots. Model + size are NOT
+// repeated here: the detail rows below already show them.
 function CutSummaryRow({ cut, colSpan }: { cut: CutBlock; colSpan: number }) {
   const lane = resolveLane(cut.lane);
   const meta = lane.key ? LANE_META[lane.key] : null;
-  const modelSize = [cut.model, cut.size].filter(Boolean).join(" · ");
   const slots = numeric(cut.slots);
   return (
     <tr
@@ -388,10 +388,6 @@ function CutSummaryRow({ cut, colSpan }: { cut: CutBlock; colSpan: number }) {
             >
               {lane.label}
             </span>
-          )}
-          {/* Model + size */}
-          {modelSize && (
-            <span className="text-[13px] font-semibold text-[#1F1D1B]">{modelSize}</span>
           )}
           {/* Order / set / slot counts — the headline numbers */}
           <span className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -717,7 +713,29 @@ export default function FabricCuttingDeptPage() {
         </p>
       </div>
 
-      {/* (b) Schedule Result — primary section, leads the page */}
+      {/* (a) Scheduling Process — explanation at top, collapsed by default */}
+      <CollapsibleCard
+        icon={<ListChecks className="h-4 w-4 text-[#6B5C32]" />}
+        title="Scheduling Process"
+        defaultOpen={false}
+      >
+        <SectionParagraphs items={PROCESS_SECTIONS} />
+      </CollapsibleCard>
+
+      {/* (c) Scheduling Logic / Prompt — explanation at top, collapsed by default */}
+      <CollapsibleCard
+        icon={<BookOpen className="h-4 w-4 text-[#6B5C32]" />}
+        title="Scheduling Logic / Prompt"
+        defaultOpen={false}
+      >
+        <p className="mb-4 text-xs leading-relaxed text-[#6B7280]">
+          The detailed rule set that drives the cutting schedule, kept here as a
+          reference for the owner.
+        </p>
+        <SectionParagraphs items={LOGIC_SECTIONS} />
+      </CollapsibleCard>
+
+      {/* (b) Schedule Result — main body, open by default */}
       <Card className="overflow-hidden">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base text-[#1F1D1B]">
@@ -756,28 +774,6 @@ export default function FabricCuttingDeptPage() {
           </div>
         </CardContent>
       </Card>
-
-      {/* (a) Scheduling Process — reference, collapsed by default */}
-      <CollapsibleCard
-        icon={<ListChecks className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Process"
-        defaultOpen={false}
-      >
-        <SectionParagraphs items={PROCESS_SECTIONS} />
-      </CollapsibleCard>
-
-      {/* (c) Scheduling Logic / Prompt — reference, collapsed by default */}
-      <CollapsibleCard
-        icon={<BookOpen className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Logic / Prompt"
-        defaultOpen={false}
-      >
-        <p className="mb-4 text-xs leading-relaxed text-[#6B7280]">
-          The detailed rule set that drives the cutting schedule, kept here as a
-          reference for the owner.
-        </p>
-        <SectionParagraphs items={LOGIC_SECTIONS} />
-      </CollapsibleCard>
     </div>
   );
 }

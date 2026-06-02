@@ -36,6 +36,7 @@ import {
   Eye,
   KeyRound,
   Copy,
+  AlertTriangle,
 } from "lucide-react";
 
 // --------------- TYPES ---------------
@@ -5762,6 +5763,141 @@ function LaborCostTab({
     return out;
   }, [showReconciliation, rows, reconPayslips, allDepts]);
 
+  // ---- Per-employee itemisation of the Non-production salary residual ------
+  // Finance can't accept a department-level residual — they need WHO and WHY.
+  // The residual mixes two very different things that must be separated:
+  //   1. Genuine non-production staff (admin / sales / management / drivers /
+  //      QC) — they legitimately log no factory hours, so their whole salary
+  //      belongs to admin / overhead. EXPECTED.
+  //   2. Production-department workers who were PAID but whose Working Hours
+  //      weren't fully logged (gross > logged-hours value). This is a DATA GAP
+  //      (someone forgot to record their hours), NOT something to park — it
+  //      must be flagged so the operator goes and records the missing hours.
+  //
+  // We compute each worker's logged labor-cost value with the SAME per-row
+  // formula the labor buckets use (regularH × regularRate + otH × otBaseRate ×
+  // multiplier, pro-rata OT split per worker/day), but aggregated per WORKER
+  // instead of per (dept, category). No category filter is applied — the panel
+  // only renders when no category filter is active.
+  const loggedValueByWorker = useMemo(() => {
+    const out = new Map<string, number>();
+    const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
+    const [hYear, hMonth] = (period || from).slice(0, 7).split("-").map(Number);
+    const holidays =
+      hYear && hMonth ? countPublicHolidaysInMonth(hYear, hMonth, holidayList) : 0;
+
+    // Group segments per (worker, date) so the OT threshold + pro-rata OT split
+    // are applied against the worker's whole workday — identical to the bucket
+    // calc above.
+    const segsByWorkerDate = new Map<string, WorkingHourEntry[]>();
+    for (const e of entries) {
+      const k = `${e.workerId}|${e.date}`;
+      const arr = segsByWorkerDate.get(k) ?? [];
+      arr.push(e);
+      segsByWorkerDate.set(k, arr);
+    }
+    for (const [k, segs] of segsByWorkerDate.entries()) {
+      const [workerId] = k.split("|");
+      const w = workersById.get(workerId);
+      if (!w || !w.basicSalarySen) continue;
+      const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
+      const regularDays = Math.max(1, monthDays - holidays);
+      const regularRateSen = w.basicSalarySen / regularDays / stdHours;
+      const otBaseRateSen = w.basicSalarySen / monthDays / stdHours;
+      const otMult = w.otMultiplier ?? 1.5;
+      const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const otTotalH = Math.max(0, totalH - stdHours);
+      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+      let dayValue = 0;
+      for (const e of segs) {
+        const hours = Number(e.hours) || 0;
+        const otH = hours * otShare;
+        const regularH = hours - otH;
+        dayValue += regularH * regularRateSen + otH * otBaseRateSen * otMult;
+      }
+      out.set(workerId, (out.get(workerId) ?? 0) + dayValue);
+    }
+    return out;
+  }, [entriesResp, workersById, period, from, holidayList]);
+
+  // Set of department codes the labor buckets cover (the 8 production depts +
+  // WAREHOUSING + PRODUCTION_SHORTFALL + REPAIR + MAINTENANCE + R_AND_D). A
+  // worker whose department is NOT in this set logs no factory hours by
+  // design — that's genuine non-production staff.
+  const factoryDeptCodes = useMemo(
+    () => new Set(allDepts.map((d) => d.code)),
+    [allDepts],
+  );
+
+  // Classify every active worker with a payslip into one of the two lists.
+  const employeeResidual = useMemo(() => {
+    const nonProductionStaff: Array<{
+      id: string;
+      name: string;
+      deptCode: string;
+      deptName: string;
+      grossSen: number;
+    }> = [];
+    const underLoggedFactory: Array<{
+      id: string;
+      name: string;
+      deptCode: string;
+      deptName: string;
+      grossSen: number;
+      loggedValueSen: number;
+      gapSen: number;
+    }> = [];
+    if (!showReconciliation) {
+      return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen: 0, underLoggedSubtotalSen: 0 };
+    }
+    for (const p of reconPayslips) {
+      const grossSen = Number(p.grossPay) || 0;
+      if (grossSen <= 0) continue;
+      const code = p.departmentCode || "UNASSIGNED";
+      const dept = allDepts.find((d) => d.code === code);
+      const w = p.employeeId ? workersById.get(p.employeeId) : undefined;
+      const deptName = dept?.name ?? w?.name ?? (code === "UNASSIGNED" ? "Unassigned" : code);
+      const name = p.employeeName || w?.name || p.employeeNo || "—";
+      const isFactoryDept = factoryDeptCodes.has(code);
+      if (!isFactoryDept) {
+        // Genuine non-production staff — whole salary is the residual.
+        nonProductionStaff.push({ id: p.id, name, deptCode: code, deptName, grossSen });
+        continue;
+      }
+      // Factory-department worker: residual = paid − logged-hours value.
+      const loggedValueSen = p.employeeId ? loggedValueByWorker.get(p.employeeId) ?? 0 : 0;
+      const gapSen = grossSen - loggedValueSen;
+      // A production worker fully reconciled (gap ≈ 0) is not a data gap. Use a
+      // small tolerance so rounding noise doesn't flag a fully-logged worker.
+      if (gapSen > 50) {
+        underLoggedFactory.push({
+          id: p.id,
+          name,
+          deptCode: code,
+          deptName,
+          grossSen,
+          loggedValueSen,
+          gapSen,
+        });
+      }
+    }
+    nonProductionStaff.sort((a, b) => b.grossSen - a.grossSen);
+    underLoggedFactory.sort((a, b) => b.gapSen - a.gapSen);
+    const nonProdSubtotalSen = nonProductionStaff.reduce((s, r) => s + r.grossSen, 0);
+    const underLoggedSubtotalSen = underLoggedFactory.reduce((s, r) => s + r.gapSen, 0);
+    return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
+  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker]);
+
+  // The two subtotals must SUM to the Non-production salary residual bucket so
+  // the whole thing still reconciles to Total Payroll. Any tiny remainder
+  // (rounding, or fully-logged factory workers with a sub-tolerance gap that we
+  // intentionally didn't list) is surfaced as a separate rounding line so the
+  // operator can see the itemisation closes to the residual.
+  const employeeItemisedSumSen =
+    employeeResidual.nonProdSubtotalSen + employeeResidual.underLoggedSubtotalSen;
+  const employeeResidualRemainderSen = nonProductionSalarySen - employeeItemisedSumSen;
+
   const loading = entriesLoading || plLoading;
 
   return (
@@ -5941,6 +6077,136 @@ function LaborCostTab({
               (office / sales / admin) and the company&rsquo;s EPF / SOCSO / EIS are added here so the breakdown reconciles to the
               full payroll. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
             </p>
+          </div>
+        )}
+
+        {/* Per-employee itemisation of the Non-production salary residual.
+            Splits the residual into (1) genuine non-production staff who log no
+            factory hours — expected — and (2) factory workers who were paid more
+            than their logged Working Hours value — a DATA GAP to fix. Same guard
+            as the panel above (un-filtered single month only). */}
+        {showReconciliation && (
+          <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-4">
+            <h3 className="text-sm font-semibold text-[#1F1D1B] mb-1">
+              Non-production salary — who &amp; why
+            </h3>
+            <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
+              The Non-production salary residual ({formatCurrency(nonProductionSalarySen)}) splits into two kinds:
+              {" "}<span className="font-medium text-[#4B5563]">genuine non-production staff</span> (admin / sales /
+              management / drivers / QC) who log no factory hours — expected; and
+              {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
+              {" "}— a data gap to fix by recording the missing hours.
+            </p>
+
+            {/* 1. Genuine non-production staff — whole salary is the residual. */}
+            <div className="mb-4">
+              <p className="text-xs font-semibold text-[#4B5563] mb-1">
+                Non-production staff (no factory hours — expected)
+              </p>
+              <div className="overflow-x-auto rounded-md border border-[#E2DDD8] bg-white">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                      <th className="py-1.5 px-3 text-left font-medium">Employee</th>
+                      <th className="py-1.5 px-3 text-left font-medium">Department</th>
+                      <th className="py-1.5 px-3 text-right font-medium">Salary</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {employeeResidual.nonProductionStaff.map((e) => (
+                      <tr key={`np-staff-${e.id}`} className="border-b border-[#F0EDE9]">
+                        <td className="py-1.5 px-3 text-[#1F1D1B]">{e.name}</td>
+                        <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
+                        <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
+                      </tr>
+                    ))}
+                    {employeeResidual.nonProductionStaff.length === 0 && (
+                      <tr>
+                        <td colSpan={3} className="py-2 px-3 text-center text-xs text-[#9CA3AF]">
+                          No non-production staff this period
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t border-[#E2DDD8]">
+                      <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={2}>Subtotal</td>
+                      <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#1F1D1B]">
+                        {formatCurrency(employeeResidual.nonProdSubtotalSen)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            {/* 2. Factory workers with unlogged hours — the DATA GAP. */}
+            <div className="mb-3">
+              <p className="text-xs font-semibold text-[#9A3A2D] mb-1 flex items-center gap-1.5">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                Factory workers with unlogged hours (data gap — record their Working Hours)
+              </p>
+              <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E7C9C1] text-xs text-[#9A3A2D]">
+                      <th className="py-1.5 px-3 text-left font-medium">Employee</th>
+                      <th className="py-1.5 px-3 text-left font-medium">Department</th>
+                      <th className="py-1.5 px-3 text-right font-medium">Paid</th>
+                      <th className="py-1.5 px-3 text-right font-medium">Logged</th>
+                      <th className="py-1.5 px-3 text-right font-medium">Gap</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {employeeResidual.underLoggedFactory.map((e) => (
+                      <tr key={`ul-fac-${e.id}`} className="border-b border-[#F1DDD7]">
+                        <td className="py-1.5 px-3 text-[#1F1D1B]">{e.name}</td>
+                        <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
+                        <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
+                        <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{formatCurrency(e.loggedValueSen)}</td>
+                        <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#9A3A2D]">{formatCurrency(e.gapSen)}</td>
+                      </tr>
+                    ))}
+                    {employeeResidual.underLoggedFactory.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="py-2 px-3 text-center text-xs text-[#4F7C3A]">
+                          All factory workers fully reconciled — no unlogged hours
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t border-[#E7C9C1]">
+                      <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={4}>Subtotal (unrecorded)</td>
+                      <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#9A3A2D]">
+                        {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            {/* Prove the two subtotals add up to the residual bucket. */}
+            <div className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[#6B7280]">
+                  Non-production staff {formatCurrency(employeeResidual.nonProdSubtotalSen)}
+                  {" + "}Unlogged factory hours {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
+                  {Math.abs(employeeResidualRemainderSen) > 1 && (
+                    <> {" + "}Rounding {formatCurrency(employeeResidualRemainderSen)}</>
+                  )}
+                </span>
+                <span className="inline-flex items-center gap-1.5 font-semibold text-[#1F1D1B]">
+                  = Non-production salary {formatCurrency(nonProductionSalarySen)}
+                  {Math.abs(employeeResidualRemainderSen) <= 1 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3E4] px-2 py-0.5 text-[#4F7C3A]">
+                      <Check className="h-3 w-3" /> matches
+                    </span>
+                  )}
+                </span>
+              </div>
+            </div>
           </div>
         )}
 

@@ -610,6 +610,11 @@ export default function DeliveryPage() {
   // status instead of just the active tab, so a DO is findable regardless of
   // which stage/tab it sits on.
   const [doGridSearch, setDoGridSearch] = useState("");
+  // Mirrors the Pending Delivery (PO) grid's global search box, the same way
+  // doGridSearch mirrors the DO grid. Feeds the unified auto-jump index below
+  // so searching from the Pending Delivery tab can hop to a DO tab (and vice
+  // versa) — all 4 delivery tabs share one search-to-tab jump.
+  const [poGridSearch, setPoGridSearch] = useState("");
 
   // ---------- Fetch ----------
   const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
@@ -1405,38 +1410,68 @@ export default function DeliveryPage() {
     return deliveryOrders.filter((d) => statuses.includes(d.status));
   }, [deliveryOrders, activeTab, doGridSearch]);
 
-  // Follow the record to its tab (Wei Siang 2026-06-02): the cross-status
-  // search above already surfaces a matching DO no matter which tab it sits
-  // on, but the tab header didn't follow — searching a delivered order while
-  // standing on Pending Dispatch left the page on the wrong stage. Here we
-  // look at where the matches actually live: if every match sits on ONE
-  // stage's tab, hop to that tab so the page context matches what the
-  // operator searched. Matches spanning several stages leave the tab alone
-  // (the cross-status list still shows them all). Only runs while already on
-  // a DO-based tab, and activeTab is read OUTSIDE the deps on purpose so a
-  // manual tab click during an active search is respected, not yanked back.
-  useEffect(() => {
-    const term = doGridSearch.trim().toLowerCase();
-    if (!term) return;
-    if (!TAB_DO_STATUSES[activeTab]) return; // not on a DO tab
-    const tabsHit = new Set<string>();
+  // Unified search index (Wei Siang 2026-06-02): one record-type-agnostic
+  // index so the auto-jump below works for all 4 delivery tabs, not just the
+  // 3 DO tabs. Each entry = { tab, haystack }. DO rows map to their stage tab
+  // via TAB_FOR_STATUS; PO rows (Pending Delivery) map to the fixed
+  // "pending_delivery" tab. Note the field-name trap: DO rows expose
+  // customerRef, PO rows expose customerReference — using the wrong one
+  // silently drops the customer-ref match.
+  const searchJumpIndex = useMemo(() => {
+    const entries: { tab: string; haystack: string }[] = [];
     for (const d of deliveryOrders) {
-      const hay = [
-        d.doNo,
-        d.companySO,
-        d.salesOrderNos,
-        d.customerPOId,
-        d.customerSO,
-        d.customerRef,
-        d.customerName,
-        d.vehicleNo,
-      ]
-        .join(" ")
-        .toLowerCase();
-      if (hay.includes(term)) {
-        const tab = TAB_FOR_STATUS[d.status];
-        if (tab) tabsHit.add(tab);
-      }
+      const tab = TAB_FOR_STATUS[d.status];
+      if (!tab) continue; // status with no tab (e.g. INVOICED) — never a jump target
+      entries.push({
+        tab,
+        haystack: [
+          d.doNo,
+          d.companySO,
+          d.salesOrderNos,
+          d.customerPOId,
+          d.customerSO,
+          d.customerRef,
+          d.customerName,
+          d.vehicleNo,
+        ]
+          .join(" ")
+          .toLowerCase(),
+      });
+    }
+    for (const po of readyPOs) {
+      entries.push({
+        tab: "pending_delivery",
+        haystack: [
+          po.salesOrderNo,
+          po.poNo,
+          po.customerPOId,
+          po.customerReference,
+          po.customerSO,
+          po.customerName,
+        ]
+          .join(" ")
+          .toLowerCase(),
+      });
+    }
+    return entries;
+  }, [deliveryOrders, readyPOs]);
+
+  // Follow the record to its tab (Wei Siang 2026-06-02): a matching record is
+  // surfaced no matter which tab it sits on, but the tab header should follow
+  // so the page context matches what the operator searched. We look at where
+  // the matches actually live across the unified index: if every match sits on
+  // ONE tab, hop to that tab. Matches spanning several tabs leave the tab
+  // alone. Fires for whichever search box changed — the DO grid (doGridSearch)
+  // or the Pending Delivery grid (poGridSearch); they're mutually exclusive in
+  // practice since only one grid is mounted at a time. The active tab is read
+  // OUTSIDE the deps on purpose so a manual tab click during an active search
+  // is respected, not yanked back.
+  useEffect(() => {
+    const term = (doGridSearch.trim() || poGridSearch.trim()).toLowerCase();
+    if (!term) return;
+    const tabsHit = new Set<string>();
+    for (const entry of searchJumpIndex) {
+      if (entry.haystack.includes(term)) tabsHit.add(entry.tab);
     }
     if (tabsHit.size === 1) {
       const only = Array.from(tabsHit)[0];
@@ -1444,7 +1479,7 @@ export default function DeliveryPage() {
     }
     // activeTab intentionally excluded — see comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doGridSearch, deliveryOrders]);
+  }, [doGridSearch, poGridSearch, searchJumpIndex]);
 
   // ---------- Summary counts (unique DOs, not rows) ----------
   // Read from /api/delivery-orders/stats so counts reflect the whole
@@ -3442,6 +3477,7 @@ export default function DeliveryPage() {
               groupBy="customerState"
               autoGroup={false}
               selectable
+              onSearchChange={setPoGridSearch}
               onSelectionChange={(rows) =>
                 // Drop incomplete SOFA sets defensively — even if the user
                 // clicks the row's checkbox, an incomplete set can't make

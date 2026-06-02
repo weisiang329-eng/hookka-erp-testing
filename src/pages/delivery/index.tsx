@@ -4661,9 +4661,18 @@ export default function DeliveryPage() {
                             className="flex items-center justify-between text-xs bg-white rounded px-2 py-1.5 border border-[#A8CAD2] hover:border-[#A8CAD2] cursor-pointer"
                             onClick={() => addReadyPOToEdit(po)}
                           >
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-3 flex-wrap">
                               <span className="font-mono text-[#3E6570]">{po.poNo}</span>
                               <span className="text-[#6B7280]">{po.salesOrderNo}</span>
+                              {/* Customer-side refs so the packer can match the
+                                  customer's own paperwork while picking, not just
+                                  the company SO no. (user request 2026-06-02). */}
+                              {po.customerPOId && (
+                                <span className="text-[#6B7280]">PO: <span className="text-[#1F1D1B]">{po.customerPOId}</span></span>
+                              )}
+                              {po.customerSO && (
+                                <span className="text-[#6B7280]">Cust SO: <span className="text-[#1F1D1B]">{po.customerSO}</span></span>
+                              )}
                               <span>{po.productName}</span>
                               <span className="text-[#6B7280]">{po.sizeLabel} · {po.fabricCode}</span>
                             </div>

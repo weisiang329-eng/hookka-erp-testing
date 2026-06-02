@@ -83,10 +83,9 @@ export function CncTemplatePanel({
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Bulk-upload cutting files for THIS product. The server still parses the
-  // productCode out of each filename, so even files dropped here are filed
-  // under the code in their name (usually this product's). Refresh the panel
-  // list afterwards.
+  // Bulk-upload cutting files for THIS product. We pass this panel's known
+  // productCode so the files are filed under THIS product instead of being
+  // guessed from the filename. Refresh the panel list afterwards.
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const input = e.target;
     const files = Array.from(input.files || []);
@@ -95,7 +94,7 @@ export function CncTemplatePanel({
 
     setUploading(true);
     try {
-      const msg = await uploadCncFiles(files);
+      const msg = await uploadCncFiles(files, { productCode });
       toast.success(msg);
       // Refresh this panel and the full library list (both cache keys).
       if (url) invalidateCache(url);

@@ -107,6 +107,8 @@ type PayslipData = {
   period: string;
   basicSalary: number;
   workingDays: number;
+  absentDays: number;
+  absenceDeductionSen: number;
   otWeekdayHours: number;
   otSundayHours: number;
   otPHHours: number;
@@ -4784,6 +4786,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     return payslipData.reduce(
       (acc, r) => ({
         basicSalary: acc.basicSalary + r.basicSalary,
+        absenceDeductionSen: acc.absenceDeductionSen + (r.absenceDeductionSen || 0),
         otWeekdayHours: acc.otWeekdayHours + r.otWeekdayHours,
         otSundayHours: acc.otSundayHours + r.otSundayHours,
         otPHHours: acc.otPHHours + r.otPHHours,
@@ -4801,7 +4804,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
         netPay: acc.netPay + r.netPay,
       }),
       {
-        basicSalary: 0, otWeekdayHours: 0, otSundayHours: 0, otPHHours: 0,
+        basicSalary: 0, absenceDeductionSen: 0, otWeekdayHours: 0, otSundayHours: 0, otPHHours: 0,
         totalOT: 0, allowances: 0, grossPay: 0, epfEmployee: 0, epfEmployer: 0,
         socsoEmployee: 0, socsoEmployer: 0, eisEmployee: 0, eisEmployer: 0,
         pcb: 0, totalDeductions: 0, netPay: 0,
@@ -4831,6 +4834,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     if (payslipData.length === 0) return;
     const headers = [
       "Employee No", "Employee Name", "Department", "Basic Salary", "Working Days",
+      "Absent Days", "Absence Deduction",
       "OT Weekday Hrs", "OT Sunday Hrs", "OT PH Hrs", "Hourly Rate",
       "OT Weekday Amt", "OT Sunday Amt", "OT PH Amt", "Total OT", "Allowances",
       "Gross Pay", "EPF EE (11%)", "EPF ER (13%)", "SOCSO EE", "SOCSO ER",
@@ -4838,7 +4842,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     ];
     const rows = payslipData.map((r) => [
       r.employeeNo, r.employeeName, r.departmentCode, (r.basicSalary / 100).toFixed(2),
-      r.workingDays, r.otWeekdayHours, r.otSundayHours, r.otPHHours,
+      r.workingDays, r.absentDays ?? 0, ((r.absenceDeductionSen ?? 0) / 100).toFixed(2),
+      r.otWeekdayHours, r.otSundayHours, r.otPHHours,
       (r.hourlyRate / 100).toFixed(2), (r.otWeekdayAmount / 100).toFixed(2),
       (r.otSundayAmount / 100).toFixed(2), (r.otPHAmount / 100).toFixed(2),
       (r.totalOT / 100).toFixed(2), (r.allowances / 100).toFixed(2),
@@ -5008,6 +5013,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <th className="h-10 px-3 text-left font-medium text-[#374151] min-w-[180px] whitespace-nowrap">Employee</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Basic (RM)</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Days</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Absence</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Wk</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Sun</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT PH</th>
@@ -5039,6 +5045,11 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                         </td>
                         <td className="h-10 px-3 text-right whitespace-nowrap">{formatCurrency(r.basicSalary)}</td>
                         <td className="h-10 px-2 text-center whitespace-nowrap">{r.workingDays}</td>
+                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]">
+                          {r.absenceDeductionSen > 0
+                            ? <span>−{formatCurrency(r.absenceDeductionSen)}<span className="text-[10px] text-[#9CA3AF]"> ({r.absentDays}d)</span></span>
+                            : "-"}
+                        </td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otWeekdayHours}h</td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otSundayHours > 0 ? `${r.otSundayHours}h` : "-"}</td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otPHHours > 0 ? `${r.otPHHours}h` : "-"}</td>
@@ -5068,7 +5079,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                       {/* Expanded Detail Row */}
                       {expandedRow === r.id && (
                         <tr className="bg-[#FDFCFB]">
-                          <td colSpan={17} className="px-6 py-4">
+                          <td colSpan={18} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                               {/* OT Calculation Breakdown */}
                               <div className="space-y-2">
@@ -5183,6 +5194,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <td className="h-10 px-3 text-[#1F1D1B]">TOTAL ({payslipData.length} workers)</td>
                     <td className="h-10 px-3 text-right">{formatCurrency(totals.basicSalary)}</td>
                     <td className="h-10 px-2"></td>
+                    <td className="h-10 px-3 text-right text-[#9A3A2D]">{totals.absenceDeductionSen > 0 ? `−${formatCurrency(totals.absenceDeductionSen)}` : "-"}</td>
                     <td className="h-10 px-2 text-right">{totals.otWeekdayHours}h</td>
                     <td className="h-10 px-2 text-right">{totals.otSundayHours > 0 ? `${totals.otSundayHours}h` : "-"}</td>
                     <td className="h-10 px-2 text-right">{totals.otPHHours > 0 ? `${totals.otPHHours}h` : "-"}</td>

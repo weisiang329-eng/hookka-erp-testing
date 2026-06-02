@@ -2282,7 +2282,7 @@ export default function PlanningPage() {
                           <div
                             key={`${day.phase}-${day.date}`}
                             className={`flex flex-col items-center w-10 min-w-[40px] relative ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
-                            title={`${day.date}\n${isPast ? "Produced" : "Loaded"}: ${formatHours(day.minutes)}\nCapacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
+                            title={`${day.date}\n${isPast ? "Produced" : "Loaded"}: ${formatHours(day.minutes)}\nCapacity: ${formatHours(Math.round(day.capacityMinutes))}\nUtilization: ${day.utilization}%`}
                           >
                             {/* Vertical dashed divider before the first
                                 future bar = the past/future boundary. */}
@@ -2315,9 +2315,16 @@ export default function PlanningPage() {
                                 Hours — the rolling daily capacity for
                                 this dept, shown under each bar so the
                                 operator reads the hours figure directly
-                                instead of only the % utilization. */}
-                            <span className="text-[8px] mt-0.5 text-[#6B7280] tabular-nums">
-                              {formatHours(day.capacityMinutes)}
+                                instead of only the % utilization.
+                                capacityMinutes is fractional under the
+                                Bedframe / Sofa filter (full cap × category
+                                share), so round it before formatting —
+                                otherwise formatHours emits a long decimal
+                                like "19h 4.5833m" that wraps and overlaps
+                                the next column into unreadable mush. nowrap
+                                keeps each label on one line as a guard. */}
+                            <span className="text-[8px] mt-0.5 text-[#6B7280] tabular-nums whitespace-nowrap">
+                              {formatHours(Math.round(day.capacityMinutes))}
                             </span>
                           </div>
                         );

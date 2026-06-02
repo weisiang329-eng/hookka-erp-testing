@@ -1769,12 +1769,12 @@ function EmployeeMasterTab({
         render: (_value, row) =>
           editingId === row.id ? (
             <Input
-              type="number" onFocus={(e) => e.currentTarget.select()}
+              type="number" step="0.5" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
               value={editForm.workingHoursPerDay}
               onChange={(e) =>
                 setEditForm((f) => ({
                   ...f,
-                  workingHoursPerDay: parseInt(e.target.value) || 0,
+                  workingHoursPerDay: parseFloat(e.target.value) || 0,
                 }))
               }
               className="h-8 w-16 text-xs"
@@ -2208,12 +2208,12 @@ function EmployeeMasterTab({
               <div>
                 <label className="text-xs text-[#6B7280]">Hrs/Day</label>
                 <Input
-                  type="number" onFocus={(e) => e.currentTarget.select()}
+                  type="number" step="0.5" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
                   value={form.workingHoursPerDay}
                   onChange={(e) =>
                     setForm((f) => ({
                       ...f,
-                      workingHoursPerDay: parseInt(e.target.value) || 0,
+                      workingHoursPerDay: parseFloat(e.target.value) || 0,
                     }))
                   }
                   className="h-8 text-xs"

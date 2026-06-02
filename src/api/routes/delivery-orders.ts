@@ -3376,10 +3376,16 @@ app.put("/:id", async (c) => {
         merged.driverId,
         merged.driverName,
         merged.driverContactPerson,
-        merged.driverPhone,
-        merged.vehicleId,
+        // Migration 0063 made driverPhone / vehicleId / vehicleType NOT NULL
+        // DEFAULT ''. The create path already coerces these to '' (see the
+        // INSERT bind); the edit path did not, so saving a DO with no vehicle
+        // (Vehicle = "Optional") sent a literal null and tripped the
+        // "vehicle_id violates not-null constraint" error. Coerce to '' here
+        // too so an unselected driver/vehicle becomes the documented default.
+        merged.driverPhone ?? "",
+        merged.vehicleId ?? "",
         merged.vehicleNo,
-        merged.vehicleType,
+        merged.vehicleType ?? "",
         merged.deliveryAddress,
         merged.contactPerson,
         merged.contactPhone,

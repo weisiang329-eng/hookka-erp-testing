@@ -3427,6 +3427,7 @@ export default function DeliveryPage() {
               emptyMessage="No items in planning."
               groupBy="customerState"
               autoGroup={false}
+              initialSearch={doGridSearch || poGridSearch}
             />
           </CardContent>
         </Card>
@@ -3477,6 +3478,7 @@ export default function DeliveryPage() {
               groupBy="customerState"
               autoGroup={false}
               selectable
+              initialSearch={doGridSearch || poGridSearch}
               onSearchChange={setPoGridSearch}
               onSelectionChange={(rows) =>
                 // Drop incomplete SOFA sets defensively — even if the user
@@ -3549,6 +3551,7 @@ export default function DeliveryPage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No delivery orders found."
               onDoubleClick={(row) => setDetailDO(row)}
+              initialSearch={doGridSearch || poGridSearch}
               onSearchChange={setDoGridSearch}
               contextMenuItems={getContextMenuItems}
             />

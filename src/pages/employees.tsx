@@ -233,12 +233,13 @@ function WorkerDayDrillIn({
   return (
     <>
       <p className="text-xs font-semibold text-[#4B5563] mb-1">
-        Per-day Working Hours for {name} — which days are absent or under-recorded
+        Per-day Working Hours for {name} — absent days are already settled in Payroll; only under-recorded days need action here
       </p>
       <p className="text-[11px] text-[#4B5563] mb-1.5">
-        Absent: {breakdown.absentDays} day(s) · −{formatRM(breakdown.absenceDeductionSen)}
+        Absent: {breakdown.absentDays} day(s) · −{formatRM(breakdown.absenceDeductionSen)}{" "}
+        <span className="text-[#9CA3AF]">(already deducted in Payroll)</span>
         {"   |   "}
-        Under-recorded: {breakdown.underHours.toFixed(1)} h to fill
+        <span className="font-semibold text-[#B45309]">Under-recorded: {breakdown.underHours.toFixed(1)} h to fill</span>
         {breakdown.pendingDays > 0 ? `   |   Pending: ${breakdown.pendingDays} day(s)` : ""}
       </p>
       <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
@@ -306,7 +307,7 @@ function WorkerDayDrillIn({
           <tfoot>
             <tr className="border-t border-[#E2DDD8]">
               <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={4}>
-                Absence deduction · Under-recorded hours
+                Absence deduction (in Payroll) · Under-recorded hours (to fill)
               </td>
               <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
                 −{formatRM(breakdown.absenceDeductionSen)} · {breakdown.underHours.toFixed(1)} h
@@ -6080,6 +6081,13 @@ function LaborCostTab({
       const perDayDeductionSen = w
         ? Math.round(w.basicSalarySen / (w.workingDaysPerMonth || 26))
         : 0;
+      // Resigned workers: days AFTER their last day (resignedAt, inclusive) are
+      // neither worked nor absent — they have left. Such days are skipped so the
+      // breakdown never shows post-departure "absences".
+      const leftIso =
+        w && w.status === "RESIGNED" && /^\d{4}-\d{2}-\d{2}$/.test(w.resignedAt ?? "")
+          ? (w.resignedAt as string)
+          : null;
 
       // Grace window: a 0-logged working day is NOT yet a confirmed absence
       // until it is at least 2 WORKING days in the past. Walk the working-day
@@ -6120,6 +6128,10 @@ function LaborCostTab({
       let pendingDays = 0;
       const rows = periodWorkingDays.map((date) => {
         const logged = loggedHoursByWorkerDate.get(`${workerId}|${date}`) ?? 0;
+        // Past the worker's last employed day → excluded (not absent, not short).
+        if (leftIso && date > leftIso) {
+          return { date, logged, expected, short: 0, type: "ok" as const };
+        }
         const short = Math.max(0, expected - logged);
         totalShort += short;
         let type: "absent" | "under" | "pending" | "ok";
@@ -7571,7 +7583,10 @@ export default function EmployeesPage() {
   );
 
   // Summary stats — driven by `summaryRange` (the Working Hours date pick).
-  const totalWorkers = workers.length;
+  // Headcount counts only currently-employed staff: resigned (and otherwise
+  // inactive) workers are excluded so the "Total Workers" / "Present" KPIs drop
+  // the moment someone is marked Resigned.
+  const totalWorkers = workers.filter((w) => w.status === "ACTIVE").length;
   const presentCount = summaryTotals?.workerCount ?? 0;
   const summaryWorkingMinutes = summaryTotals?.workingMinutes ?? 0;
   const avgEfficiency =

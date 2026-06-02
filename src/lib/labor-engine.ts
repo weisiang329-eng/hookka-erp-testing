@@ -211,6 +211,20 @@ export type MonthlyLaborInput = {
    * days that haven't happened yet aren't charged as absences.
    */
   absenceThroughDay: number;
+  /**
+   * Last day-of-month the worker was employed (their resignation date's day),
+   * INCLUSIVE. Days after this are neither worked nor absent — the person has
+   * left. Omit (undefined) for everyone still employed: they are treated as
+   * employed for the whole month.
+   */
+  employmentEndDay?: number;
+  /**
+   * When true the worker resigned mid-month, so they are entitled only to the
+   * days they actually served — pay = days worked × daily rate (not full
+   * salary − absences). Days after `employmentEndDay` are excluded entirely
+   * (not charged as absence). Default false = the normal full-salary worker.
+   */
+  prorateToService?: boolean;
 };
 
 /** What one worker's month costs and earns. All money fields in sen. */
@@ -314,15 +328,31 @@ export function computeMonthlyLabor(
   const costingDailyRateSen = basicSalarySen / costingDivisor;
 
   // ── Payroll side (÷26).
+  // Resignation: a worker who left mid-month was only employed through
+  // `employmentEndDay` (their last day, inclusive). Days AFTER that are not
+  // worked AND not absent — they have left. Cap the elapsed-day window at both
+  // the data-entry grace cutoff and the last employed day.
+  const monthLastDay = new Date(year, month, 0).getDate();
+  const employmentEndDay = input.employmentEndDay ?? monthLastDay;
+  const throughDay = Math.min(absenceThroughDay, employmentEndDay);
   const elapsedWorkingDays = countElapsedWorkingDays(
     year,
     month,
-    absenceThroughDay,
+    throughDay,
     publicHolidays,
   );
-  const absentDays = Math.max(0, elapsedWorkingDays - daysWorked);
+  // Clamp days-worked to the employed window so a stray post-resignation log
+  // can't make absences negative or inflate prorated pay.
+  const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
+  const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
   const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
-  const basicEarnedSen = Math.max(0, basicSalarySen - absenceDeductionSen);
+  // Active worker → entitled to the FULL monthly salary, minus absences.
+  // Resigned mid-month → entitled only to the days actually served (days worked
+  // × daily rate); the days after they left are simply unpaid, NOT charged as
+  // absence. prorateToService selects between the two.
+  const basicEarnedSen = input.prorateToService
+    ? Math.round(workedWithinWindow * payrollDailyRateSen)
+    : Math.max(0, basicSalarySen - absenceDeductionSen);
   const otPaySen = Math.round(otHours * otHourlyRateSen);
   const grossSen = basicEarnedSen + otPaySen;
 

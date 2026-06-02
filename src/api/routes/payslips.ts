@@ -342,6 +342,18 @@ app.post("/", async (c) => {
 
     const rows: PayslipRow[] = [];
     for (const worker of activeWorkers) {
+      // Resignation proration. A worker whose resignedAt falls inside THIS
+      // period was employed only through that day (inclusive) — their last day.
+      // Pay them for the days actually served; days after they left are neither
+      // worked nor absent. Workers still employed (resignedDay undefined) keep
+      // the normal full-salary-minus-absences treatment.
+      const resignedDay =
+        worker.status === "RESIGNED" &&
+        typeof worker.resignedAt === "string" &&
+        worker.resignedAt.startsWith(`${period}-`)
+          ? Number(worker.resignedAt.slice(8, 10))
+          : undefined;
+
       // One engine call per worker — the SAME computeMonthlyLabor that
       // drives production labor cost and the worker phone view, so a
       // payslip and the worker's phone always agree.
@@ -357,6 +369,8 @@ app.post("/", async (c) => {
         days: daysByWorker.get(worker.id) ?? [],
         publicHolidays,
         absenceThroughDay,
+        employmentEndDay: resignedDay,
+        prorateToService: resignedDay !== undefined,
       });
 
       const allowances = 0;

@@ -111,11 +111,43 @@ type AeResp = {
 // Posts one SQL statement to the Cloudflare AE SQL endpoint and returns
 // the parsed body. Throws on non-2xx / network errors so the caller can
 // fall through to the mock cleanly.
+// 60-second edge cache for Analytics Engine queries. The System Health page
+// fires ~14 of these per open, each scanning millions of metric rows (~1–2s).
+// AE aggregate stats don't need to be real-time, so caching the result for a
+// minute turns every repeat open (any admin, same colo, within 60s) from
+// seconds into instant. Keyed by a hash of the exact SQL so different queries /
+// ranges never collide. The cold (first) load still runs live.
+const AE_CACHE_TTL_SECONDS = 60;
+
+async function aeCacheKey(accountId: string, sql: string): Promise<Request> {
+  const digest = await crypto.subtle.digest(
+    "SHA-1",
+    new TextEncoder().encode(sql),
+  );
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  // Synthetic, never-fetched URL — only used as a Cache API key.
+  return new Request(`https://ae-cache.hookka.internal/${accountId}/${hex}`);
+}
+
 async function runAeSql(
   accountId: string,
   token: string,
   sql: string,
 ): Promise<AeResp> {
+  const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
+  let key: Request | null = null;
+  if (cache) {
+    try {
+      key = await aeCacheKey(accountId, sql);
+      const hit = await cache.match(key);
+      if (hit) return (await hit.json()) as AeResp;
+    } catch {
+      // Any cache-read error → fall through to a live query.
+    }
+  }
+
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/analytics_engine/sql`;
   const res = await fetch(url, {
     method: "POST",
@@ -129,7 +161,24 @@ async function runAeSql(
     const body = await res.text().catch(() => "");
     throw new Error(`AE SQL ${res.status}: ${body.slice(0, 200)}`);
   }
-  return (await res.json()) as AeResp;
+  const data = (await res.json()) as AeResp;
+
+  if (cache && key) {
+    try {
+      await cache.put(
+        key,
+        new Response(JSON.stringify(data), {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": `max-age=${AE_CACHE_TTL_SECONDS}`,
+          },
+        }),
+      );
+    } catch {
+      // Caching is best-effort; a put failure must never fail the request.
+    }
+  }
+  return data;
 }
 
 // Read live KPIs from Analytics Engine. Three SQL hits in parallel —

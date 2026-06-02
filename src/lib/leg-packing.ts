@@ -7,24 +7,21 @@
 //
 //     { value: '4"', priceSen: 0, packSeparately?: boolean }
 //
-// `packSeparately` is the owner-set, once-per-leg-height flag:
-//   - TICKED:    the leg ships in its own box and shows as its OWN piece on
-//                the FG packing sticker (its own box in the X/N count).
-//   - UNTICKED:  the leg ships inside the main item (no separate box).
-//   - UNDEFINED (legacy rows that predate the flag): fall back to the old
-//                height rule -- any leg taller than LEG_PACK_THRESHOLD_INCHES
-//                got its own box. This keeps pre-existing configs unchanged.
+// `packSeparately` is the owner-set, once-per-leg-height flag and the SINGLE
+// source of truth (Wei Siang 2026-06-02 — manage packing purely from the
+// Products > Maintenance > Leg Heights checkbox; the old automatic
+// "taller than 1 inch" height rule was removed):
+//   - TICKED (true):  the leg ships in its own box and shows as its OWN piece
+//                     on the FG packing sticker (its own box in the X/N count).
+//   - UNTICKED / UNDEFINED: the leg ships inside the main item (no separate
+//                     box). A leg only packs separately when its Maintenance
+//                     checkbox is ticked — nothing is inferred from the height.
 //
 // Production orders carry the leg height as a NUMBER (`legHeightInches`), while
 // the catalog keys it as a STRING (`4"`). The mapping is exact: 4 maps to "4"",
-// null / 0 maps to "No Leg". This module centralises both the option-list
-// lookup and the legacy fallback so the Maintenance editor and the FG-sticker
-// builder agree on the rule.
+// null / 0 maps to "No Leg". This module centralises the option-list lookup so
+// the Maintenance editor and the FG-sticker builder agree on the rule.
 // ---------------------------------------------------------------------------
-
-// Legacy rule: legs taller than 1" used to get their own pack. Mirrors the
-// LEG_PACK_THRESHOLD_INCHES constant in the FG-sticker aggregation block.
-export const LEG_PACK_THRESHOLD_INCHES = 1;
 
 export type LegHeightOption = {
   value: string;
@@ -40,31 +37,20 @@ export function parseLegInches(value: string | null | undefined): number | null 
 }
 
 /**
- * Legacy default for a leg height when no explicit flag is set: anything
- * strictly taller than the threshold packs separately. Used to seed new rows
- * in the Maintenance editor and as the fallback when `packSeparately` is
- * undefined on an existing option.
- */
-export function legHeightPacksByDefault(value: string): boolean {
-  const inches = parseLegInches(value);
-  return inches !== null && inches > LEG_PACK_THRESHOLD_INCHES;
-}
-
-/**
- * Resolve a single leg-height option to a boolean. Explicit flag wins; when
- * undefined, fall back to the legacy height rule.
+ * Resolve a single leg-height option to a boolean. Only the explicit
+ * Maintenance flag matters: a leg packs separately iff `packSeparately` is
+ * ticked (true). Untick / undefined => packed with the main item.
  */
 export function optionPacksSeparately(opt: LegHeightOption): boolean {
-  if (typeof opt.packSeparately === "boolean") return opt.packSeparately;
-  return legHeightPacksByDefault(opt.value);
+  return opt.packSeparately === true;
 }
 
 /**
  * Decide whether a leg of `legHeightInches` (the production-order number)
  * packs separately, given the catalog's leg-height option list. Looks the
- * height up by its `N"` string form; if the catalog has no matching row
- * (e.g. an ad-hoc height the operator typed), fall back to the legacy
- * height rule so behaviour is never worse than before.
+ * height up by its `N"` string form and returns its Maintenance flag. A height
+ * with no catalog row (e.g. an ad-hoc height the operator typed) is treated as
+ * NOT separate — only configured, ticked leg heights pack on their own.
  */
 export function legPacksSeparately(
   legHeightInches: number | null | undefined,
@@ -75,7 +61,5 @@ export function legPacksSeparately(
   }
   const key = `${legHeightInches}"`;
   const match = (options ?? []).find((o) => o.value === key);
-  if (match) return optionPacksSeparately(match);
-  // No catalog row for this exact height — legacy fallback.
-  return legHeightInches > LEG_PACK_THRESHOLD_INCHES;
+  return match ? optionPacksSeparately(match) : false;
 }

@@ -57,7 +57,7 @@ import {
   VARIANTS_CONFIG_KEY,
   type VariantsConfig,
 } from "@/lib/kv-config";
-import { legHeightPacksByDefault, optionPacksSeparately } from "@/lib/leg-packing";
+import { optionPacksSeparately } from "@/lib/leg-packing";
 
 // ---------- Types matching mock-data ----------
 // Sofa fabric price tier — values mirror fabric_tracking.priceTier verbatim
@@ -1003,11 +1003,11 @@ function MaintenanceView() {
     if (isPricedTab) {
       const list = config[k] as PricedOption[];
       if (list.some(o => o.value === v)) { setNewValue(""); return; }
-      // For new leg-height rows, seed the "pack separately" flag from the
-      // legacy >1" rule so a freshly-added height matches the old behaviour
-      // until the operator decides otherwise.
+      // New leg-height rows default to "packed with item" (packSeparately
+      // false). Packing is controlled solely by this Maintenance checkbox now,
+      // so the operator ticks a height when it should ship in its own box.
       const newOpt: PricedOption = isLegTab
-        ? { value: v, priceSen: newPriceSen, packSeparately: legHeightPacksByDefault(v) }
+        ? { value: v, priceSen: newPriceSen, packSeparately: false }
         : { value: v, priceSen: newPriceSen };
       setConfig(prev => ({ ...prev, [k]: [...(prev[k] as PricedOption[]), newOpt] }));
     } else {

@@ -5930,7 +5930,15 @@ app.post("/bulk-patch", async (c) => {
     const placeholders = ids.map(() => "?").join(",");
     const readbackRes = await c.var.DB
       .prepare(
-        `SELECT id, status, dueDate, completedDate, pic1Id, pic1Name, pic2Id, pic2Name
+        // The readback MUST list every column applyPoUpdate can write,
+        // otherwise the diff loop below reads `undefined` for an omitted
+        // column and reports a false "verify-readback mismatch — X: tried
+        // ..., db has undefined" even though the write persisted fine.
+        // distributedAt (the "Sent to floor" tick), rackingNumber, overdue
+        // and actualMinutes were missing here, so any bulk patch that set
+        // one of them always reverted the cell on screen. Added 2026-06-02.
+        `SELECT id, status, dueDate, completedDate, pic1Id, pic1Name, pic2Id, pic2Name,
+                actualMinutes, rackingNumber, overdue, distributedAt
            FROM job_cards WHERE id IN (${placeholders})`,
       )
       .bind(...ids)
@@ -5943,6 +5951,10 @@ app.post("/bulk-patch", async (c) => {
         pic1Name: string | null;
         pic2Id: string | null;
         pic2Name: string | null;
+        actualMinutes: number | null;
+        rackingNumber: string | null;
+        overdue: number | null;
+        distributedAt: string | null;
       }>();
     const byId = new Map(
       (readbackRes.results ?? []).map((r) => [r.id, r] as const),

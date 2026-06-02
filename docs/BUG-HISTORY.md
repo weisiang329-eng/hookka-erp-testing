@@ -34,6 +34,54 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-02-001 — Bulk-patch verify-readback always reverted the "Sent to floor" tick (and rackingNumber / overdue / actualMinutes) on the production grid
+
+**Status:** 🟢 Fixed (2026-06-02)
+**Category:** production-orders
+
+**What happened (user-visible):**
+
+On the production grid, ticking a job card's "Sent" checkbox (the
+`distributedAt` mark that tells the floor a card was handed out) flashed
+green then snapped back with a toast: `FAB_SEW JC save failed:
+verify-readback mismatch — distributedAt: tried "2026-06-…Z", db has
+undefined. Cell reverted — click again to retry.` The same false failure
+hit any bulk edit that set `rackingNumber`, `overdue`, or `actualMinutes`.
+The underlying write actually persisted — only the on-screen cell rolled
+back — so operators saw a permanent "save failed" on a save that had in
+fact succeeded.
+
+**Root cause:**
+
+`POST /api/production-orders/bulk-patch` runs a verify-readback after each
+patch (the 2026-05-25 verifiedSave rule): it re-SELECTs the job card and
+diffs every requested field against the stored value. The readback SELECT
+listed only `status, dueDate, completedDate, pic1Id, pic1Name, pic2Id,
+pic2Name` — but `applyPoUpdate` can also write `distributedAt`,
+`rackingNumber`, `overdue`, and `actualMinutes`. For those four columns
+the readback row had no key, so `actual[k]` was `undefined`; the diff loop
+compared `undefined` against the value just written and reported a
+mismatch. Pure false negative — the write itself was fine. Latent since
+the readback was added (2026-05-25); surfaced now because the schedule
+work drove operators to the grid's tick column. Unrelated to the
+2026-06-02 bulk due-date rewrite (that only sent `dueDate`, which was
+already in the SELECT, so all 3,702 patches verified clean).
+
+**Fix (file:line):**
+
+`src/api/routes/production-orders.ts` ~5933 — added `actualMinutes,
+rackingNumber, overdue, distributedAt` to the readback SELECT column list
+and to its row type so the diff loop compares real stored values. No
+write-path change; no regression risk (those columns were guaranteed
+`undefined` before, i.e. already always-mismatch for any caller that sent
+them).
+
+**Verified:** `tsc -p tsconfig.app.json --noEmit` clean. Pending: live
+prod check — tick "Sent" on a FAB_SEW card after deploy and confirm it
+stays green + survives refresh.
+
+---
+
 ## FEAT-2026-05-30-009 — Hookka AI export / report generation (CSV, Excel, PDF, named report templates)
 
 **Status:** 🟢 Shipped (2026-05-30)

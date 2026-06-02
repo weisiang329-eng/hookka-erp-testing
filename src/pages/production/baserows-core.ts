@@ -463,7 +463,19 @@ export const buildBaseRows = (
           const sum = g + d + l;
           return sum > 0 ? `${sum}"` : "";
         })(),
-        qty: (jc as JobCard & { wipQty?: number }).wipQty ?? o.quantity ?? 0,
+        // Qty = the ORDER quantity. Every production row is its own
+        // SO line (`SO-XXXX-01/-02/…`), so this is 1. Previously this
+        // was bound to job_cards.wipQty (the cutting-recipe piece /
+        // fabric-panel count) which made single-item sofa / divan rows
+        // display 2/3/4/6 — see BUG-2026-06-01-001. The piece count now
+        // lives in its own `piecesToCut` field below.
+        qty: o.quantity ?? 0,
+        // Pieces to cut for this WIP — the cutting-recipe panel / piece
+        // count (job_cards.wipQty). Drives the new "Pieces" grid column
+        // and every piece-count consumer (sticker fan-out, sticker-count
+        // badge, the merged cutting-schedule print total). NOT the order
+        // quantity.
+        piecesToCut: (jc as JobCard & { wipQty?: number }).wipQty ?? o.quantity ?? 0,
         specialOrder: o.specialOrder || "",
         // Per-jc production time (minutes), TOTAL = per-unit × wipQty so the
         // sheet column shows hours of work, not per-piece. Populated on every

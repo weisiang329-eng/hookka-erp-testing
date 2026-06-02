@@ -159,7 +159,15 @@ export type DeptRow = {
   divan: string;
   leg: string;
   totalHeight: string;  // gap + divan + leg, inches
+  // Order quantity for this row. Always 1 here — every production row is
+  // its own SO line (`SO-XXXX-01/-02/…`). Drives the grid "Qty" column.
   qty: number;
+  // Pieces to cut = the cutting-recipe panel / piece count
+  // (job_cards.wipQty). Distinct from `qty`: a single sofa / divan order
+  // (qty 1) can need 2/3/4/6 fabric pieces cut. Drives the "Pieces" grid
+  // column, sticker fan-out, the sticker-count badge, and the merged
+  // cutting-schedule print total. See BUG-2026-06-01-001.
+  piecesToCut: number;
   specialOrder: string; // free-text note from the SO line ("custom legs", "no piping", etc.)
   prodTime: number;     // per-jc production minutes (merged sum on FAB_CUT rows)
   rack: string;         // Packing dept — assigned rack location ("Rack 3")

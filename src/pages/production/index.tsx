@@ -2998,6 +2998,13 @@ export default function ProductionPage({
     { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right", defaultHidden: isTablet },
     { key: "specialOrder",  label: "Special Order",  type: "text",   width: "130px", sortable: true },
     { key: "qty",           label: "Qty",            type: "number", width: "60px",  sortable: true, align: "right" },
+    // Pieces to cut — the cutting-recipe panel / piece count for this WIP.
+    // Distinct from Qty: a single sofa / divan order (Qty 1) can need
+    // several fabric pieces cut (combined sofa = one per compartment,
+    // Queen/King divan = 2 panels). Surfaced as its own column so the
+    // floor sees how many pieces to cut without the Qty column lying
+    // about the order quantity. See BUG-2026-06-01-001.
+    { key: "piecesToCut",   label: "Pieces",         type: "number", width: "70px",  sortable: true, align: "right" },
     // Fabric Usage column — predicted meters of fabric this WIP will consume.
     // Server computes by walking the PO's bom_templates.wipComponents tree
     // (see rowToMinimalJobCard in production-orders.ts), summing FC-node
@@ -3327,8 +3334,12 @@ export default function ProductionPage({
       // out sticker represents one physical fabric panel, so displayQty
       // is 1 (the "Qty" line on the body says "Qty 1" — this sticker
       // covers 1 piece). The piece-position marker conveys batch context.
-      const pieceCount = Math.max(1, row.qty || 1);
-      const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.qty || 1);
+      // Fan out one physical sticker PER PIECE — use piecesToCut (the
+      // cutting-recipe panel count), NOT qty (the order quantity, always
+      // 1). See BUG-2026-06-01-001: qty used to carry the piece count;
+      // it now carries order quantity, so the piece count moved here.
+      const pieceCount = Math.max(1, row.piecesToCut || 1);
+      const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
       // Wei Siang 2026-05-15: BASE on FAB_SEW shows the variant-
       // qualified product code (e.g. "5540-1A(LHF)" / "5540-2A(RHF)")
       // as the WIP label, NOT the long fabric-encoded string
@@ -4816,7 +4827,11 @@ export default function ProductionPage({
           };
           buckets.set(key, b);
         }
-        b.qty += r.qty || 0;
+        // "Total Qty" on this merged WIP cutting-schedule print means
+        // total PIECES to cut for the WIP, so sum piecesToCut (panel
+        // count), NOT qty (order quantity, always 1). See
+        // BUG-2026-06-01-001 — qty used to carry the piece count.
+        b.qty += r.piecesToCut || 0;
         b.sourceRows += 1;
         b.earliestDue = earliestIso([b.earliestDue, r.dueDate].filter(Boolean));
         if (r.customerName) b.customers.add(r.customerName);
@@ -6703,8 +6718,11 @@ export default function ProductionPage({
                       return `(${realCount} sticker${realCount === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;
                     }
                     const visibleRows = gridFilteredDeptRows ?? deptRows;
+                    // One sticker per physical piece — sum piecesToCut
+                    // (cutting-recipe panel count), NOT qty (order
+                    // quantity, always 1). See BUG-2026-06-01-001.
                     const qtySum = visibleRows.reduce(
-                      (s, r) => s + ((r as { qty?: number }).qty ?? 0),
+                      (s, r) => s + ((r as { piecesToCut?: number }).piecesToCut ?? 0),
                       0,
                     );
                     return `(${qtySum} sticker${qtySum === 1 ? "" : "s"} in ${activeDept?.name || activeTab})`;

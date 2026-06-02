@@ -34,6 +34,96 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-02-009 — Employee Master accepted 7.5 hrs/day in the form but the database silently rounded it to 8 (INTEGER column)
+
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `351152cb`), migration `0144` applied to prod, deployed.
+**Category:** data-integrity, payroll
+
+**Symptom:**
+
+Wei Siang: "Employee Master 为什么不能填写 7.5 个小时呢？" An earlier frontend-only
+fix had switched the Hrs/Day input from `parseInt` to `parseFloat` (step 0.5),
+so the form accepted 7.5 — but the value still came back as a whole number after
+save. A 7.5-hour standard day was being stored as 8, silently corrupting that
+worker's OT threshold and hourly rate (basic ÷ 26 ÷ hours).
+
+**Root cause:**
+
+`workers.working_hours_per_day` was `INTEGER` in Postgres (migration 0001). The
+backend passed the decimal straight through (no `parseInt`), but the INTEGER
+column rounded 7.5 → 8 on write. The frontend fix had no DB column to land in —
+classic frontend-accepts / backend-truncates split.
+
+**Fix:**
+
+Migration `migrations-postgres/0144_workers_hours_decimal.sql` widens the column
+to `DOUBLE PRECISION` (mirrors `workers.ot_multiplier`, which is already a
+per-worker decimal returned by postgres.js as a JS number, so the labor engine
+keeps doing plain arithmetic). `departments.working_hours_per_day` stays INTEGER
+— it is only a per-department default, not the pay-driving figure.
+
+**Verified:** SQL editor on prod after applying — `working_hours_per_day` now
+`double precision`. Engine math (`src/lib/labor-engine.ts`) already treats it as
+a number, tsc + build:strict clean.
+
+---
+
+## BUG-2026-06-02-008 — Daily Report "SO delivered, no invoice" list collapsed 164 → 0 after the grace-days filter shipped (real issues hidden)
+
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main, deployed + verified (count restored to 164).
+**Category:** ui-display, sales-orders
+
+**Symptom:**
+
+After adding the configurable SOP grace-days threshold to the Daily Report, the
+"SO delivered but not invoiced" count dropped from 164 to 0 — silently hiding
+every genuinely-overdue invoice, the opposite of the report's purpose.
+
+**Root cause:**
+
+The new grace filter compared `deliveredAt` against the threshold, but
+`deliveredAt` is blank for many DELIVERED SOs (delivery date never back-filled).
+A blank date made the age comparison falsy for every such row, so the filter
+suppressed all of them.
+
+**Fix:**
+
+`src/api/lib/compliance-report.ts` — made `days?: number` optional and changed
+the filter to `s.days === undefined || s.days >= graceDays`: a row with an
+unknown delivery age is KEPT (surfaced), not hidden. Only rows with a known age
+inside the grace window are suppressed.
+
+**Verified:** Daily Report count restored to 164 on prod.
+
+---
+
+## BUG-2026-06-02-007 — CNC bulk upload: selecting 5 cutting files imported only 1 (4 templates silently lost)
+
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main, verified via API (3 files → imported 3).
+**Category:** data-integrity, ui-frontend
+
+**Symptom:**
+
+Wei Siang uploaded 5 CNC cutting files in one go; only 1 template appeared. The
+other 4 vanished with no error — he had to re-upload the lost files.
+
+**Root cause:**
+
+The `/api/cnc-templates/import` handler applied a single `displayName` override
+to EVERY file in the batch. With 5 files that collapsed all of them onto one
+template key, so 4 were overwritten/dropped.
+
+**Fix:**
+
+`src/api/routes/cnc-templates.ts` — group the upload by each file's own parsed
+base name and apply a `displayName` override ONLY when `groups.size === 1` (the
+single-file rename case it was meant for). Multi-file batches now keep each
+file's own parsed identity.
+
+**Verified:** API test — 3 distinct files → `imported: 3`.
+
+---
+
 ## BUG-2026-06-02-006 — Planning › Capacity Loading: per-day capacity-hours label rendered as garbled overlapping digits under a category filter ("你看下面的字")
 
 **Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `2de2e967`), deployed + verified live.
@@ -146,325 +236,229 @@ irreversible prod backfill.
 
 ---
 
+## BUG-2026-06-02-003 — Delivery Order line items scattered: same Customer PO / SO rows were non-adjacent in the items table and printed docs ("很乱")
 
-## BUG-2026-06-02-003 — Foam (and any dept) "Show / Print Packing Stickers" greyed out on the full sheet even with job-card rows ticked
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `18319788`), deployed + verified.
+**Category:** delivery-orders, ui-display
 
-**Status:** 🟢 Fixed (2026-06-02)
-**Category:** production-orders
+**Symptom:**
 
-**What happened (user-visible):**
-
-On the Foam department sheet (and any dept production sheet), the
-"Show Packing Stickers" / "Print Packing Stickers" buttons in the QR
-Stickers panel were greyed out and would not open, even after the
-operator ticked one or more job-card rows. Marked urgent — the operator
-could not print foam-bonding packing stickers at all on the default view.
-
-**Root cause:**
-
-The two buttons gated only on (a) a top-search term, or (b) the grid
-being filtered down to fewer than ~10 distinct SOs. The default Foam
-sheet loads 446 rows spanning dozens of SOs, so the "too many SOs" guard
-permanently disabled the buttons. Ticking rows in the grid — the natural
-way an operator narrows to a few cards — was not treated as a scope at
-all, so it never enabled the buttons.
-
-**Fix (file:line):**
-
-`src/pages/production/index.tsx` — made the ticked job-card rows
-(`selectedDeptRows`) a first-class scope. Carried each row's SO id onto
-the selection (`DeptRowLite.soId`, onSelectionChange ~5533). The
-packing-sticker fetch (`loadFoamPackingStickers` ~3892) now scopes to the
-SOs of the ticked rows when any are selected, ahead of the top-search
-path. The render gate (~6303) treats a selection of 1–10 distinct SOs as
-a valid scope, so ticking rows enables the buttons and the tooltip reads
-"Packing stickers for the N SO in your M ticked rows."
-
-**Verified:**
-
-Live on prod (commit 77ea7e43). Loaded the full Foam sheet (446 rows),
-ticked 2 rows of SV-2605-003 → buttons enabled, tooltip showed "1 SO in
-your 2 ticked rows", clicked Show → rendered "Packing Stickers preview ·
-1 sticker". No longer greyed out.
-
----
-
-## BUG-2026-06-02-002 — Add Items picker search did not match by customer PO / SO / Ref
-
-**Status:** 🟢 Fixed (2026-06-02)
-**Category:** delivery-orders
-
-**What happened (user-visible):**
-
-In the Delivery Order "Add Items" picker, typing a customer PO number
-(e.g. "8891" for PO-008891) returned "No available production orders"
-even though that order existed and was ready to add. The picker showed
-the customer PO / SO / Ref columns but the search box ignored them.
+Wei Siang: "这个SOID和customer PO为什么同样的没有放在一起 这样很乱 …
+整个DO都是这样 … 包过PDF也是 我觉得你可以set 顺序由顾客的PO号码 从下到上
+PO001 PO002". Line items with the same Customer PO / SO were spread across
+non-adjacent rows in the DO "Items (N)" table AND in the printed DO / packing
+docs, making it hard to read and pack.
 
 **Root cause:**
 
-The picker's filter (`addablePOs`, `src/pages/delivery/index.tsx` ~2213)
-matched the typed term only against `poNo`, `productCode`, `productName`,
-`customerName`, and our own `salesOrderNo`. The customer-side reference
-fields (`customerPOId`, `customerSO`, `customerReference`) were added to
-the display columns later but never wired into the search predicate, so
-searching by anything the customer calls the order found nothing.
+The items table and the print/PDF paths rendered line items in their stored
+(insertion) order — no sort by Customer PO. There was no shared ordering rule.
 
-**Fix (file:line):**
+**Fix:**
 
-`src/pages/delivery/index.tsx` ~2213 — added `customerPOId`, `customerSO`,
-and `customerReference` to the `addablePOs` filter so the picker search
-matches the same customer-side fields it displays.
+- `src/lib/do-item-order.ts` (NEW) — shared, dependency-free comparator
+  `compareDoLinesByCustomerPO`: Customer PO ascending (natural/numeric, so
+  `PO-008636 < PO-008654 < PO-008770`), blank PO last, then our SO no. as
+  tie-break. Lives in its own module so the page doesn't pull jsPDF.
+- `src/pages/delivery/index.tsx` — the "Items (N)" modal table (edit + view)
+  now maps over a **sorted copy**; `editItems` / `detailDO.items` and the
+  `tfoot` totals are untouched. Per-line `customerPOId` threaded into the
+  print payload.
+- `src/lib/generate-do-pdf.ts` — both render sites sort copies (the main DO
+  table sorts within each loader band BEDFRAME→SOFA→ACCESSORY→SERVICE; the
+  packing-summary manifest sorts by PO→SO). Totals iterate the raw items.
+- `src/components/delivery/print-do.tsx` — browser-print path sorts a copy.
 
-**Verified:**
+DISPLAY-ONLY: every site sorts a COPY; no stored data, totals, or backend
+payload changed.
 
-Strict typecheck clean (`tsc -p tsconfig.app.json --noEmit`, exit 0).
-Committed on delivery-cluster (126f5d09).
+**Verification:** `npx tsc --noEmit` exit 0; on-screen table + jsPDF DO +
+packing summary + browser-print all order by Customer PO ascending,
+blank-PO last.
 
 ---
 
-## BUG-2026-06-02-001 — Bulk-patch verify-readback always reverted the "Sent to floor" tick (and rackingNumber / overdue / actualMinutes) on the production grid
+## BUG-2026-06-02-002 — Editing a Pending-Dispatch DO with no vehicle selected crashed on Save: "null value in column vehicle_id violates not-null constraint"
 
-**Status:** 🟢 Fixed (2026-06-02)
-**Category:** production-orders
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `06e71ea0`), deployed + verified live (PUT now returns 200, `vehicleId` stored as `""`).
+**Category:** delivery-orders, infrastructure
 
-**What happened (user-visible):**
+**Symptom:**
 
-On the production grid, ticking a job card's "Sent" checkbox (the
-`distributedAt` mark that tells the floor a card was handed out) flashed
-green then snapped back with a toast: `FAB_SEW JC save failed:
-verify-readback mismatch — distributedAt: tried "2026-06-…Z", db has
-undefined. Cell reverted — click again to retry.` The same false failure
-hit any bulk edit that set `rackingNumber`, `overdue`, or `actualMinutes`.
-The underlying write actually persisted — only the on-screen cell rolled
-back — so operators saw a permanent "save failed" on a save that had in
-fact succeeded.
+Wei Siang: "为什么我edit pending delivery的 要delete然后 show这个" — editing a
+Pending-Dispatch delivery order while leaving Vehicle / Driver on "Optional"
+(empty) failed on Save with a red toast: *null value in column "vehicle_id"
+of relation "delivery_orders" violates not-null constraint*.
 
 **Root cause:**
 
-`POST /api/production-orders/bulk-patch` runs a verify-readback after each
-patch (the 2026-05-25 verifiedSave rule): it re-SELECTs the job card and
-diffs every requested field against the stored value. The readback SELECT
-listed only `status, dueDate, completedDate, pic1Id, pic1Name, pic2Id,
-pic2Name` — but `applyPoUpdate` can also write `distributedAt`,
-`rackingNumber`, `overdue`, and `actualMinutes`. For those four columns
-the readback row had no key, so `actual[k]` was `undefined`; the diff loop
-compared `undefined` against the value just written and reported a
-mismatch. Pure false negative — the write itself was fine. Latent since
-the readback was added (2026-05-25); surfaced now because the schedule
-work drove operators to the grid's tick column. Unrelated to the
-2026-06-02 bulk due-date rewrite (that only sent `dueDate`, which was
-already in the SELECT, so all 3,702 patches verified clean).
+Migration 0063 added `vehicleId` / `vehicleType` / `driverPhone` to
+`delivery_orders` as `NOT NULL DEFAULT ''` (mapped to Postgres `vehicle_id`
+etc. via `column-rename-map.json`). The DO **create** path already coerced
+these to `''` before the INSERT, but the **edit** (PUT) path did not: when
+the caller cleared the vehicle, `merged.vehicleId` became `null` and the
+UPDATE bound a literal `null` → NOT NULL violation.
 
-**Fix (file:line):**
+**Fix:**
 
-`src/api/routes/production-orders.ts` ~5933 — added `actualMinutes,
-rackingNumber, overdue, distributedAt` to the readback SELECT column list
-and to its row type so the diff loop compares real stored values. No
-write-path change; no regression risk (those columns were guaranteed
-`undefined` before, i.e. already always-mismatch for any caller that sent
-them).
+`src/api/routes/delivery-orders.ts` — in the PUT UPDATE bind, coerce the
+three NOT-NULL columns to `''` to match the create path:
+`merged.driverPhone ?? ""`, `merged.vehicleId ?? ""`,
+`merged.vehicleType ?? ""` (around line 3385-3388).
 
-**Verified:** `tsc -p tsconfig.app.json --noEmit` clean. Pending: live
-prod check — tick "Sent" on a FAB_SEW card after deploy and confirm it
-stays green + survives refresh.
+**Verification:** `npx tsc --noEmit` exit 0. Live on prod: `PUT
+/api/delivery-orders/do-a03815ee` with body `{vehicleId:null}` returned
+**200 OK** with the row's `vehicleId` stored as `""` (previously 500). The
+first post-deploy attempt still 500'd due to Cloudflare Pages propagation
+lag; re-tested after propagation = success.
 
 ---
 
-## FEAT-2026-05-30-009 — Hookka AI export / report generation (CSV, Excel, PDF, named report templates)
+## BUG-2026-06-02-001 — Phantom duplicate FG-unit stickers: CO/SO orders showed more finished-goods stickers than the order has compartments
 
-**Status:** 🟢 Shipped (2026-05-30)
-**Category:** assistant, feature
+**Status:** 🟢 Fixed (2026-06-02) — duplicates removed via one-shot dedupe (59 rows across 7 POs; 91 already-shipped duplicates left untouched), POST-side guard in place; verified.
+**Category:** inventory-display, inventory-cascade
 
-**What it adds:**
+**Symptom:**
 
-The chat assistant can now generate files — CSV, multi-sheet Excel, and
-PDF — in response to plain-language asks like "export this month's
-Carress sales orders to Excel" or "give me a PDF of overdue production
-orders". Files are uploaded to Supabase Storage under
-`hookka-files/assistant-exports/<orgId>/` with an opaque uuid prefix,
-and surfaced to the chat as a 1-hour signed download URL rendered as
-a clickable download card in the slide-over.
+CO-2605-008 (a 2-compartment order) showed **5** finished-goods stickers
+instead of the expected 2. 14 orders were affected across the dataset.
 
-**Six new tools** (in `src/api/lib/assistant-tools.ts`):
+**Root cause:**
 
-1. `generate_csv` — build CSV from `rows: Array<Record<string, any>>` with
-   RFC-4180-correct escaping (quotes, commas, CR/LF inside cells).
-2. `generate_excel` — build a multi-sheet xlsx via sheetjs. Header row
-   frozen, autofilter enabled, currency / date column formats auto-detected
-   from header names, empty cells render `-`.
-3. `generate_pdf` — build a PDF via `pdf-lib` (pure JS, Workers-safe).
-   Today supports `template: 'simple_table'` with title, subtitle, header
-   row, body rows, optional totals row, and footer. Auto-paginates and
-   truncates long text with `...` rather than overflowing.
-4. `list_export_templates` — describes available PDF templates, named
-   report templates, and the family of single-document client-side PDFs
-   (PO/DO/invoice/CN/DN/packing/etc.) so the model knows what to suggest.
-5. `export_query_to_excel` — composite tool for the common "export
-   <entity> with these filters" ask. Supports
-   `sales_orders / consignment_orders / production_orders /
-   delivery_orders / invoices / payments / customers / suppliers /
-   products / employees` with `customer / status / dateFrom / dateTo /
-   hub / department` filters.
-6. `run_report_template` — invokes a named template from
-   `src/api/lib/assistant-skills.ts`:
-   - `monthly_sales_summary` — one Excel sheet per hub (KL/PG/SRW/SBH),
-     totals row.
-   - `customer_outstanding_pos` — DRAFT-status SOs with a customerPOId,
-     last 90 days.
-   - `employee_efficiency_weekly` — per-employee jobs / planned /
-     actual / efficiency %, defaults to last 7 days.
-   - `production_overdue_report` — PDF, POs past targetEndDate.
+The finished-goods unit generation path could write duplicate `fg_units`
+rows for the same compartment (no idempotency guard on re-fire), inflating
+the sticker count.
 
-**Wire-level changes:**
+**Fix:**
 
-- New SSE event `{ type: "download", downloadUrl, filename, byteSize,
-  rowCount, contentType, expiresInSeconds }` emitted by
-  `src/api/routes/assistant.ts` whenever a tool result carries a
-  downloadUrl. The chat UI in
-  `src/components/assistant/AssistantSlideOver.tsx` renders this as a
-  styled download card (file-type badge, filename, row count, size,
-  expiry note).
-- System prompt extended with an "Exporting / generating files" section
-  that tells the model: ask first when the ask is ambiguous, pick the
-  right tool by intent, mention the 1-hour expiry, never paste rows back
-  in chat after exporting.
+- One-shot cleanup endpoint `/backfill-dedupe-fg-units`
+  (`src/api/routes/fg-units.ts`): dry-run matched the preview (59 dup rows /
+  7 POs; 91 rows on already-shipped units deliberately left untouched —
+  shipped work is inviolate), real run removed 59, re-run dry-check = 0
+  remaining.
+- POST-side guard so duplicate fg_units can't be re-created.
 
-**Safety invariants:**
-
-- Read-only: no tool can mutate domain tables. The assistant route is
-  still SUPER_ADMIN-only.
-- Caps: 10,000 rows / 5 MB per export.
-- Signed URLs only (1 h TTL). Bucket is private (`hookka-files`), keys
-  use a random uuid prefix so brute-force walking can't reach another
-  tenant's exports. `orgId` is in the path as defense-in-depth.
-- Filename sanitisation strips path traversal and unsafe characters,
-  forces a sane extension.
-- Every tool call is audit-logged via `emitAudit` (one row per call).
-
-**Files changed:**
-
-| File | Change |
-|---|---|
-| `src/api/lib/assistant-exports.ts` | New. CSV / Excel / PDF builders + signed-URL upload. |
-| `src/api/lib/assistant-skills.ts` | New. Four named report templates. |
-| `src/api/lib/assistant-tools.ts` | Six new tools + registry entries. |
-| `src/api/routes/assistant.ts` | New `download` SSE event; prompt section. |
-| `src/components/assistant/AssistantSlideOver.tsx` | Download card UI + SSE handler. |
-| `tests/assistant-exports.test.mjs` | 19 unit tests (CSV escape, xlsx zip shape, PDF `%PDF-` header, filename sanitisation). |
-| `docs/ASSISTANT-EXPORT-TEST-PLAN.md` | Manual test plan. |
-
-**Verification:**
-
-- `tsc -p tsconfig.app.json --noEmit` → exit 0.
-- `npm run build` → exit 0.
-- `npm test` → 506 pass, 0 fail, 1 skip (was 487 before; +19 new tests).
-- `eslint` on the new files → 0 warnings, 0 errors.
+**Verification:** Post-cleanup CO-2605-008 has exactly 2 `fg_units`
+(`CO-2605-008-R1-U01-P1/1` + `R2-U01-P1/1`, both PACKED). The leg is a
+synthetic render-time sticker (not a DB row), so 2 sofa + 1 leg = 3
+stickers is correct. Idempotent re-check returned 0 remaining duplicates.
 
 ---
 
-## FEAT-2026-05-30-008 — Hookka AI now accepts file attachments: photos / PDFs / Excel / CSV (vision + structured ingest)
+## BUG-2026-06-01-001 — Production / Fab Cut "Qty" column shows 2/3/4/6 for orders that are quantity 1, because it reads job_cards.wipQty (cut-piece / fabric-panel count) instead of the order quantity
 
-**Status:** 🟢 Shipped (2026-05-30)
-**Category:** assistant, feature
+**Status:** 🟢 Fixed (2026-06-02) — Option A (display-only) shipped to main (commit `fd35b175`), deployed + verified live. Qty column now shows order quantity (1); a new "Pieces" column carries the cut-piece count.
+**Category:** production-orders, ui-display
 
-**Why this:**
+**Symptom:**
 
-Wei Siang wanted to drop a phone photo of a paper customer PO into the
-chat and have the assistant pull up the matching Sales Order. Same for
-dropping an Excel of customer POs and asking "are these in our system?".
-Before this feature the slide-over only accepted text — operator was
-typing PO numbers by hand off the paper.
+Wei Siang noticed the Production sheet (and the Fab Cut view) shows a "Qty"
+of 2, 3, 4, even 6 on rows that are every one a single set / single piece.
+His invariant: every production row is already split into its own SO line
+ID (`SO-XXXX-01`, `-02`, …), so each row is quantity 1 — "正常来说，一个 Row
+应该 Quantity 就只有一个". He checked one bedframe (a "D1") himself: order
+quantity 1, yet the sheet told the floor to cut two pieces.
 
-**What shipped:**
+Concrete examples (all are order quantity 1):
+- `SO-2605-077-01` combined sofa `5540-1A(LHF)+1NA+CSL+L(RHF)` → shows **4**
+- `SO-2605-106-01` combined sofa with 6 compartments → shows **6**
+- `SO-2605-303-01` `5535-2A(LHF)+1A(RHF)` → shows **2**
+- Standalone `DIVAN-(Q)` / `DIVAN-(K)` → show **2**
 
-1. **Paperclip + chip composer UI** in `AssistantSlideOver.tsx`. Accepts
-   `image/*`, `application/pdf`, `text/csv`, `.xls/.xlsx`. Max 10 MB
-   per file, 3 files per message. Image chips show a thumbnail; other
-   files show a typed icon. Each chip has an X to remove. Reject paths
-   surface inline ("over 10 MB", "max 3 files").
+NOTE: **full bedframes** (1003/1005/2008 etc., headboard + divan) already
+show **1** — their cutting recipe collapses the whole frame to one cut.
+This is the precedent Wei Siang is pointing at: bedframe is set up right;
+sofa and standalone divan are not.
 
-2. **Backend file handling** in `src/api/lib/attachment-parser.ts`. Pure
-   Workers-compatible module:
-   - Images → forwarded as Anthropic `image` content block (base64,
-     `media_type` honoured).
-   - PDFs → forwarded as Anthropic `document` content block. We do NOT
-     ship `pdf-parse` — it's Node-only (depends on `fs` + `Buffer.from(file)`
-     which fail to load in Workers). Anthropic's native PDF support
-     (beta header `pdfs-2024-09-25`) handles tables, logos, handwriting
-     end-to-end.
-   - `.xlsx` / `.xls` → SheetJS (`xlsx`, already in deps; ~420KB
-     dynamic-imported only when an Excel file appears) → structured
-     rows per sheet.
-   - CSV → hand-rolled RFC 4180 parser (quoted fields, escaped quotes,
-     embedded newlines).
-   - Spreadsheet / CSV preview is truncated to 50 KB per file for the
-     in-context dump; the full parsed rows are stashed in a request-
-     scoped cache so tools can fetch them.
+**Root cause:**
 
-3. **Three new assistant tools** in `assistant-tools.ts`:
-   - `analyze_image` — orchestrates a `smart_lookup` for every reference
-     the model extracted from a photo (PO numbers, SO numbers, invoice
-     numbers). Returns matched documents with customer / status / total.
-   - `parse_spreadsheet` — returns structured rows + headers for a
-     spreadsheet the user just uploaded. Capped at 200 rows per sheet.
-   - `match_uploaded_data_to_hookka` — given a column name, walks each
-     row and tries to match against `sales_orders`,
-     `consignment_orders`, `production_orders` via the same
-     `generateLookupPatterns` helper that powers `smart_lookup`. Returns
-     per-row `matched` / `no-match` with disambiguation context.
+The "Qty" column is bound to `job_cards.wipQty`, not
+`production_orders.quantity`.
 
-4. **System prompt update** in `routes/assistant.ts`: added the
-   "When the user attaches a file" section so the model knows what to
-   look for (Houzs PO format on paper, customer logos, hub stamps,
-   spreadsheet column heuristics) and is told to proactively look up
-   Hookka after extracting data — not just report what it sees.
+`src/pages/production/baserows-core.ts:466`
+```
+qty: (jc as ...).wipQty ?? o.quantity ?? 0,
+```
 
-5. **Security guardrails:**
-   - 10 MB / 3 files cap, enforced server-side and client-side.
-   - Extension allowlist; executable extensions (`.exe`, `.bat`, `.ps1`,
-     `.js`, `.dll`, etc.) are stripped even if MIME is spoofed.
-   - 50 KB cap on extracted text per file (truncation marker tells the
-     model there's more).
-   - Per-attachment audit row (`resource = "assistant-attachment"`,
-     `action = "upload"`) capturing filename + size + kind only — never
-     the body.
-   - Per-tool audit row for `analyze_image` / `parse_spreadsheet` /
-     `match_uploaded_data_to_hookka` (matches the existing pattern).
+`wipQty` is NOT the order quantity. It is set at job-card generation in
+`src/lib/production-order-builder.ts:134-176`:
+```
+const effectiveQty = (node.quantity || 1) * (parentQty || 1);
+...
+wipQty: effectiveQty,
+```
+i.e. **`wipQty` = the cutting-recipe (BOM) node's piece quantity × order
+quantity**. There is NO category-specific branch — the same generic
+`createJobCardsFromBOM` runs for sofa, bedframe, and divan alike. The
+ONLY difference is how each product's recipe (`bom_templates.wipComponents`)
+was authored:
 
-**Cloudflare Workers compatibility notes:**
+- **Full bedframe recipe:** the merged headboard+divan cut node is set to
+  `quantity = 1` → `wipQty = 1`. Correct; one merged cut = one job.
+- **Standalone divan recipe:** the cut node `quantity` = number of fabric
+  panels (Queen/King = 2, Single/SS = 1) → `wipQty = 2`.
+- **Combined sofa recipe:** the cut node carries a merged "+" `wipLabel`
+  (e.g. `5540-1A(LHF)+1NA+CSL+L(RHF)`) — the LABEL was merged correctly —
+  but its `quantity` was left as the **compartment count** (2/3/4/6).
 
-- `wrangler.toml` already sets `compatibility_flags = ["nodejs_compat"]`.
-- `xlsx` (SheetJS) works in Workers — it's pure JS, no `fs`. Verified
-  by the `parseExcelBytes` test which round-trips a workbook in memory.
-- `pdf-parse` was NOT pulled in. The fallback (Anthropic native PDF) is
-  strictly better: no local OCR error path, handles handwriting +
-  scanned tables + logos that text-extractors miss.
-- `atob` for base64 decode works in both Workers and Node 18+.
+So this is a **recipe-setup inconsistency**, not a code branch: bedframe
+recipes collapse the merged cut to 1; sofa + standalone-divan recipes were
+left counting pieces/panels.
 
-**Files touched:**
+Caveat for the fix: `wipQty` is double-duty. It also drives `pieceSlots`
+(one PIC/sticker/scan slot per physical piece — production-order-builder.ts:153),
+`prodTime` (= per-unit minutes × wipQty, baserows-core.ts:473-475),
+`piecesTotal` (line 489), and predicted fabric meters. So changing the
+sofa/divan recipe quantity to 1 must be checked against sticker count,
+piece scanning, fabric, and time — though the full bedframe already runs
+at quantity 1 with these intact, so the precedent suggests low risk.
 
-- `src/api/lib/attachment-parser.ts` — NEW.
-- `src/api/lib/anthropic-client.ts` — added image / document block
-  types; added the `anthropic-beta: pdfs-2024-09-25` header.
-- `src/api/lib/assistant-tools.ts` — added three tools + registry rows.
-- `src/api/routes/assistant.ts` — accepts `attachments[]` on the chat
-  body, splices content blocks into the last user message, stashes
-  parsed rows in the request-scoped cache, audits intake.
-- `src/components/assistant/AssistantSlideOver.tsx` — paperclip
-  button, file chips with thumbnails, base64 upload.
-- `tests/assistant-attachments.test.mjs` — NEW (16 tests; CSV / Excel /
-  validation / ingest budget).
-- `docs/assistant-attachment-manual-test.md` — NEW.
+**Scope (live prod snapshot, 2026-06-01, read-only):**
 
-**Verification:**
+- 1147 production orders, **all quantity = 1**.
+- 960 have a FAB_CUT card; 187 (all SOFA) have none (merged-away siblings).
+- FAB_CUT `wipQty` distribution {1:793, 2:129, 3:30, 4:6, 5:1, 6:1} →
+  167 cards display Qty > 1.
+- Among the **262 active planning rows** (PENDING 260 + ON_HOLD 2),
+  **55 rows** show Qty > 1.
 
-- `npm run build` clean.
-- `npm run typecheck:app` clean.
-- `npm run lint` clean for every touched file.
-- `node --test tests/assistant-attachments.test.mjs` — 16/16 pass.
-- `node --test tests/assistant-fuzzy-match.test.mjs` — 11/11 pass (regression).
-- Manual happy-path: see `docs/assistant-attachment-manual-test.md`.
+**Fix (SHIPPED — Option A, display-only, commit `fd35b175`):**
+
+Wei Siang picked Option A. The piece count was split off `qty` into its own
+field/column so the "Qty" column tells the truth (order quantity) while the
+floor still sees how many pieces to cut:
+
+- `src/pages/production/baserows-core.ts` — `qty` now binds to
+  `o.quantity` (order quantity); the old `wipQty` piece count moved to a
+  new `piecesToCut` field on the row.
+- `src/pages/production/types.ts` — added `piecesToCut: number` to `DeptRow`.
+- `src/pages/production/index.tsx` — added a "Pieces" grid column bound to
+  `piecesToCut`; and re-pointed EVERY piece-count consumer off `qty` onto
+  `piecesToCut` so nothing regressed: the FAB_CUT sticker fan-out
+  (`pieceCount`/`displayQty`), the merged cutting-schedule print "Total
+  Qty", and the sticker-count badge ("N stickers in …").
+
+No DB write, no migration, no cascade change — `wipQty` and all server-side
+piece/fabric/time math are untouched. Option B (re-home the piece count in
+the DB) was deliberately NOT done; it was higher risk and unnecessary once
+the display read the right field.
+
+**Considered but rejected:** Option B (data correction) — stop storing
+piece counts in `wipQty`, add a dedicated pieces field, re-derive sticker /
+fabric / prodTime cascades. Needs a migration + full cascade audit; not
+worth the risk when the operator-visible problem was display-only.
+
+**Verification so far:**
+
+- Traced the binding to `baserows-core.ts:466` and the merge to the
+  FAB_CUT `wipLabel`/`wipQty` (confirmed sibling lines have `fcCount:0`).
+- Extracted all 262 active rows from live prod (read-only) to
+  `scripts/planning_rows.jsonl` and confirmed every order quantity is 1.
+- Delivered `Production-Planning-2026-06-02.xlsx` with Qty forced to 1
+  (one merged set per row, grouped by model, Customer DD + Our Expected
+  DD as two columns) and a "Qty Bug" sheet listing the 55 mis-counted
+  rows for operator cross-check.
 
 ---
 

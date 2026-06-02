@@ -78,11 +78,13 @@ export interface SchedulerInput {
 export interface ScheduleSnapshot {
   generatedAt: string;
   department: string;
-  sheets: {
-    "Summary & Notes": Cell[][];
-    "Cut Calendar": Cell[][];
-    "By Day": Cell[][];
-  };
+  /**
+   * Named sheets — one calendar + a By Day load sheet + Summary & Notes per
+   * department. Phase 1 cutting emits "Cut Calendar"; the Phase 2 chain depts
+   * emit their own calendar sheet name (Sew Calendar, Framing Calendar, …),
+   * so the map is keyed by string rather than a fixed cutting shape.
+   */
+  sheets: Record<string, Cell[][]>;
 }
 
 // ── Integer date arithmetic (no Date objects in the hot path) ───────────────
@@ -91,7 +93,7 @@ export interface ScheduleSnapshot {
 // add / subtract integer-based and timezone-proof. We convert back to a
 // YYYY-MM-DD string (and a weekday) only when formatting output.
 
-const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+export const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 interface Ymd {
@@ -126,12 +128,12 @@ function fromDayNum(z: number): Ymd {
 }
 
 /** Day-of-week for a day number. 0 = Sunday … 6 = Saturday. */
-function dowOf(dayNum: number): number {
+export function dowOf(dayNum: number): number {
   // 1970-01-01 (dayNum 0) was a Thursday (4).
   return ((dayNum % 7) + 4 + 7) % 7;
 }
 
-function parseYmd(s: string | null | undefined): number | null {
+export function parseYmd(s: string | null | undefined): number | null {
   if (!s) return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
   if (!m) return null;
@@ -139,7 +141,7 @@ function parseYmd(s: string | null | undefined): number | null {
 }
 
 /** LOCAL YYYY-MM-DD from a day number. */
-function fmtIso(dayNum: number): string {
+export function fmtIso(dayNum: number): string {
   const t = fromDayNum(dayNum);
   const mm = String(t.m).padStart(2, "0");
   const dd = String(t.d).padStart(2, "0");
@@ -147,23 +149,23 @@ function fmtIso(dayNum: number): string {
 }
 
 /** "DD Mon" short label, e.g. "25 May". */
-function fmtDayMon(dayNum: number): string {
+export function fmtDayMon(dayNum: number): string {
   const t = fromDayNum(dayNum);
   return `${String(t.d).padStart(2, "0")} ${MONTHS[t.m - 1]}`;
 }
 
 /** "MM-DD Www" label, e.g. "06-03 Tue". */
-function fmtMonDayDow(dayNum: number): string {
+export function fmtMonDayDow(dayNum: number): string {
   const t = fromDayNum(dayNum);
   return `${String(t.m).padStart(2, "0")}-${String(t.d).padStart(2, "0")} ${DOW[dowOf(dayNum)]}`;
 }
 
-const FAR_DAY = toDayNum({ y: 9999, m: 12, d: 31 });
+export const FAR_DAY = toDayNum({ y: 9999, m: 12, d: 31 });
 
 // ── Calendar helpers (ported: is_offday / next_workday / step_workday /
 //    workday_index / back_workday / add_workdays) ───────────────────────────
 
-class Calendar {
+export class Calendar {
   private holidays: Set<number>;
   readonly start: number; // START day number
   readonly day1: number; // next_workday(START)
@@ -204,6 +206,12 @@ class Calendar {
       while (this.isOffday(x)) x -= 1;
       k -= 1;
     }
+    return x;
+  }
+  /** n working days AFTER d (skips off-days). add(d,0) = next_workday(d). */
+  addWorkdays(d: number, n: number): number {
+    let x = this.nextWorkday(d);
+    for (let k = 0; k < n; k++) x = this.stepWorkday(x);
     return x;
   }
   /** Day number rendered as the calendar's "Day N" relative to day1. */
@@ -471,7 +479,21 @@ function deadlineLabel(g: Group): string {
 
 // ── Main entry point ────────────────────────────────────────────────────────
 
-export function scheduleCutting(input: SchedulerInput): ScheduleSnapshot {
+/**
+ * Internal cutting run. Returns the rendered snapshot PLUS the structures the
+ * downstream chain needs: the calendar (so every dept shares one calendar) and
+ * a map of soPo → its LAST scheduled cut day-number (a line cut across several
+ * config groups waits for the last). The public scheduleCutting() is a thin
+ * wrapper that returns only the snapshot.
+ */
+export interface CuttingRun {
+  snapshot: ScheduleSnapshot;
+  cal: Calendar;
+  /** soPo → last scheduled cut day-number. */
+  cutLastDay: Map<string, number>;
+}
+
+export function runCutting(input: SchedulerInput): CuttingRun {
   const cfg = input.config;
   const startDayNum = parseYmd(input.startDate);
   if (startDayNum === null) {
@@ -726,7 +748,21 @@ export function scheduleCutting(input: SchedulerInput): ScheduleSnapshot {
 
   const summaryRows: Cell[][] = notes.map((t) => [t]);
 
-  return {
+  // soPo → last scheduled cut day-number (for the downstream chain coupling).
+  const cutLastDay = new Map<string, number>();
+  for (const lane of LANE_ORDER) {
+    for (const g of laneGroups[lane]) {
+      const gEnd = g.days.length ? g.days[g.days.length - 1] : g.end;
+      for (const it of g.items) {
+        const po = it.soPo;
+        if (!po) continue;
+        const prev = cutLastDay.get(po);
+        if (prev === undefined || gEnd > prev) cutLastDay.set(po, gEnd);
+      }
+    }
+  }
+
+  const snapshot: ScheduleSnapshot = {
     generatedAt: input.generatedAt,
     department: "Fabric Cutting",
     sheets: {
@@ -735,4 +771,10 @@ export function scheduleCutting(input: SchedulerInput): ScheduleSnapshot {
       "By Day": byDayRows,
     },
   };
+  return { snapshot, cal, cutLastDay };
+}
+
+/** Public cutting entry point — returns only the snapshot (Phase 1 contract). */
+export function scheduleCutting(input: SchedulerInput): ScheduleSnapshot {
+  return runCutting(input).snapshot;
 }

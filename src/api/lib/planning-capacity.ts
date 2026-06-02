@@ -27,6 +27,66 @@ export interface ReserveTier {
   cuts: number;
 }
 
+/**
+ * Per-department capacities + handoffs for the downstream chain
+ * (Fab Sew → Wood Cut → Framing → Foam Bonding → Upholstery → Packing).
+ *
+ * All defaults mirror the trusted Python builders
+ * (scripts/_algo_ref/build_{sewing,woodcut,framing}_daily_xlsx.py, owner-
+ * confirmed Wei Siang 2026-06-01/02). Production lanes here are BEDFRAME / SOFA
+ * (+ ACCESSORY for sewing pillows only). Capacities are integers; minutes/day
+ * for the hour-gated stages, sets/day for wood cutting. Handoffs are working
+ * days. Nothing here depends on a clock.
+ */
+export interface ChainConfig {
+  /** Fabric sewing: minutes/day per lane (SOFA 2100, BEDFRAME 1200, ACCESSORY 240). */
+  sewCapMin: { BEDFRAME: number; SOFA: number; ACCESSORY: number };
+  /** Pillow sew time override (min/pc) — ERP's 300 is wrong; the bench reality is 15. */
+  pillowMinEach: number;
+  /** Cut → sew handoff in working days (sew floor = cut day + this). */
+  sewHandoffDays: number;
+  /** Wood cutting: sets/day per lane (BEDFRAME 20, SOFA 10). */
+  woodCapSets: { BEDFRAME: number; SOFA: number };
+  /** Sew → wood handoff in working days (wood floor = sew end + this). */
+  woodHandoffDays: number;
+  /** Framing: minutes/day per lane (BEDFRAME 22h, SOFA 8h). */
+  frameCapMin: { BEDFRAME: number; SOFA: number };
+  /** Wood → frame handoff in working days. */
+  frameHandoffDays: number;
+  /** Sofa foam bonding: minutes/day for base+armrest only (8h). */
+  foamCapMin: number;
+  /** Sofa framing → foam handoff in working days. */
+  foamHandoffDays: number;
+  /** Upholstery: minutes/day per lane (BEDFRAME 24h, SOFA 12h). */
+  uphCapMin: { BEDFRAME: number; SOFA: number };
+  /** Upstream → upholstery handoff in working days. */
+  uphHandoffDays: number;
+}
+
+/**
+ * Owner-confirmed downstream-chain defaults (Wei Siang, 2026-06-01/02), ported
+ * verbatim from the trusted Python builders:
+ *   • sew minutes/day: SOFA 2100 / BEDFRAME 1200 / ACCESSORY 240; pillow 15min/pc
+ *   • wood sets/day: BEDFRAME 20 / SOFA 10
+ *   • framing minutes/day: BEDFRAME 1320 (22h) / SOFA 480 (8h)
+ *   • foam (base+armrest) 480 min/day (8h)
+ *   • upholstery minutes/day: BEDFRAME 1440 (24h) / SOFA 720 (12h)
+ *   • handoffs: cut→sew +1, sew→wood +2, wood→frame +1, frame→foam +1, →uph +1
+ */
+export const DEFAULT_CHAIN_CONFIG: ChainConfig = {
+  sewCapMin: { BEDFRAME: 1200, SOFA: 2100, ACCESSORY: 240 },
+  pillowMinEach: 15,
+  sewHandoffDays: 1,
+  woodCapSets: { BEDFRAME: 20, SOFA: 10 },
+  woodHandoffDays: 2,
+  frameCapMin: { BEDFRAME: 22 * 60, SOFA: 8 * 60 },
+  frameHandoffDays: 1,
+  foamCapMin: 8 * 60,
+  foamHandoffDays: 1,
+  uphCapMin: { BEDFRAME: 24 * 60, SOFA: 12 * 60 },
+  uphHandoffDays: 1,
+};
+
 export interface CapacityConfig {
   /** Per-lane ceiling of cuts/day inside the shared pool. */
   laneCap: Record<Lane, number>;
@@ -61,6 +121,8 @@ export interface CapacityConfig {
   clusterLanes: Lane[];
   /** Whether each lane's capacity figure is owner-confirmed (Pillow is TBC). */
   laneConfirmed: Record<Lane, boolean>;
+  /** Downstream-chain capacities + handoffs (sew → … → packing). */
+  chain: ChainConfig;
 }
 
 /**
@@ -87,6 +149,7 @@ export const DEFAULT_CAPACITY_CONFIG: CapacityConfig = {
   modelLeadDays: 6,
   clusterLanes: ["BEDFRAME", "SOFA"],
   laneConfirmed: { BEDFRAME: true, SOFA: true, ACCESSORY: false },
+  chain: DEFAULT_CHAIN_CONFIG,
 };
 
 /** Minimal DB shape — mirrors the `.first()` accessor used across routes. */
@@ -116,7 +179,66 @@ function cloneDefaults(): CapacityConfig {
     modelLeadDays: DEFAULT_CAPACITY_CONFIG.modelLeadDays,
     clusterLanes: [...DEFAULT_CAPACITY_CONFIG.clusterLanes],
     laneConfirmed: { ...DEFAULT_CAPACITY_CONFIG.laneConfirmed },
+    chain: cloneChain(),
   };
+}
+
+/** Deep-clone the default chain config so callers never mutate the constant. */
+function cloneChain(): ChainConfig {
+  const c = DEFAULT_CHAIN_CONFIG;
+  return {
+    sewCapMin: { ...c.sewCapMin },
+    pillowMinEach: c.pillowMinEach,
+    sewHandoffDays: c.sewHandoffDays,
+    woodCapSets: { ...c.woodCapSets },
+    woodHandoffDays: c.woodHandoffDays,
+    frameCapMin: { ...c.frameCapMin },
+    frameHandoffDays: c.frameHandoffDays,
+    foamCapMin: c.foamCapMin,
+    foamHandoffDays: c.foamHandoffDays,
+    uphCapMin: { ...c.uphCapMin },
+    uphHandoffDays: c.uphHandoffDays,
+  };
+}
+
+/** Merge a (possibly partial / malformed) chain override over the defaults. */
+function mergeChain(base: ChainConfig, override: unknown): void {
+  if (typeof override !== "object" || override === null) return;
+  const o = override as Record<string, unknown>;
+  const posInt = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+  const nonNegInt = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null;
+
+  const mergeLaneMin = (target: Record<string, number>, src: unknown, keys: string[]): void => {
+    if (typeof src !== "object" || src === null) return;
+    const s = src as Record<string, unknown>;
+    for (const k of keys) {
+      const v = posInt(s[k]);
+      if (v !== null) target[k] = v;
+    }
+  };
+
+  mergeLaneMin(base.sewCapMin, o.sewCapMin, ["BEDFRAME", "SOFA", "ACCESSORY"]);
+  mergeLaneMin(base.woodCapSets, o.woodCapSets, ["BEDFRAME", "SOFA"]);
+  mergeLaneMin(base.frameCapMin, o.frameCapMin, ["BEDFRAME", "SOFA"]);
+  mergeLaneMin(base.uphCapMin, o.uphCapMin, ["BEDFRAME", "SOFA"]);
+
+  const pme = posInt(o.pillowMinEach);
+  if (pme !== null) base.pillowMinEach = pme;
+  const fcm = posInt(o.foamCapMin);
+  if (fcm !== null) base.foamCapMin = fcm;
+
+  for (const key of [
+    "sewHandoffDays",
+    "woodHandoffDays",
+    "frameHandoffDays",
+    "foamHandoffDays",
+    "uphHandoffDays",
+  ] as const) {
+    const v = nonNegInt(o[key]);
+    if (v !== null) base[key] = v;
+  }
 }
 
 /**
@@ -186,6 +308,7 @@ export function mergeCapacityConfig(override: unknown): CapacityConfig {
       if (typeof v === "boolean") cfg.laneConfirmed[lane] = v;
     }
   }
+  mergeChain(cfg.chain, o.chain);
   return cfg;
 }
 

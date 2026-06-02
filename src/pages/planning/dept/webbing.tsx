@@ -1,43 +1,62 @@
 // ---------------------------------------------------------------------------
 // Planning > Webbing department drill-in.
 //
-// Webbing has NO standalone calendar: each SO's webbing is done on the SAME
-// day as that SO's framing (different people / stations, run in parallel —
-// it does not consume the framing hour budget). So instead of its own
-// schedule, this page makes the same-day rule explicit and surfaces the
-// per-day webbing volume pulled straight from the framing plan: the same-day
-// webbing-pieces column of the Framing snapshot's "By Day" sheet.
-//
-// Built on the shared _PlainDeptSchedulePage scaffold (same header, snapshot
-// caption, Recalculate toast, collapsible Process / Logic sections, and
-// snapshot-result Card as the other dept pages) so it stays visually
-// consistent. A `resultIntro` banner explains the same-day model, and
-// `valueCols` lifts only Date / Day / webbing-pieces / SOs out of the wider
-// framing By Day sheet.
+// Webbing has NO standalone schedule: each SO's webbing is done on the SAME day
+// as that SO's framing (different people / stations, run in parallel — it does
+// not consume the framing hour budget). The live chain emits a per-SO grouped
+// "Webbing Calendar" (each row a framing day with the SOs webbed that day) and a
+// per-day By Day volume, so this page uses the same rich renderer as the other
+// departments. A live fetch drives it; the saved snapshot is the offline
+// fallback.
 //
 // Reached from Planning > Capacity Loading / Capacity Overview by clicking the
 // "Webbing" department name. All UI copy is English.
 // ---------------------------------------------------------------------------
-import { LayoutGrid, Frame } from "lucide-react";
-import snapshot from "@/data/framing-schedule-snapshot.json";
-import PlainDeptSchedulePage, {
+import { LayoutGrid } from "lucide-react";
+import snapshot from "@/data/webbing-schedule-snapshot.json";
+import DepartmentSchedulePage, {
   type Snapshot,
   type Para,
-} from "./_PlainDeptSchedulePage";
+  type CalendarConfig,
+  type ByDayConfig,
+} from "./_DepartmentSchedulePage";
 
-// ── Webbing view of the framing By Day sheet ───────────────────────────────
-// The framing "By Day" sheet columns: 0 Date, 1 Day, 2 Bedframe h, 3 cap,
-// 4 Sofa h, 5 cap, 6 Bedframe SOs, 7 Sofa SOs, 8 Webbing pieces (same day),
-// 9 HB Foam pieces (same day), 10 SOs (model). Webbing rides framing the same
-// day, so we lift Date / Day / webbing-pieces / SOs and present them as the
-// "same day as framing" volume.
-const HEADER_OVERRIDE = [
-  "Frame Date (same day)",
-  "Day",
-  "Webbing Pieces (same day)",
-  "SOs framed that day (model)",
-];
-const VALUE_COLS = [0, 1, 8, 10];
+// ── Webbing Calendar column layout ─────────────────────────────────────────
+// Sheet columns: 0 Frame Date (same day), 1 Lane, 2 SO ID, 3 Model, 4 Item,
+// 5 Webbing Pieces, 6 Webbing Mins, 7 Customer DD. Webbing rides framing the
+// same day; each SO appears once on its framing day.
+const CALENDAR_CONFIG: CalendarConfig = {
+  headers: [
+    "Frame Date (same day)",
+    "Lane",
+    "SO ID",
+    "Model",
+    "Item",
+    "Webbing Pieces",
+    "Webbing Mins",
+    "Customer DD",
+  ],
+  laneCol: 1,
+  groupKeyCol: 2, // SO ID — non-empty only on the SO's first row
+  groupChipPrefix: "SO",
+  cddCol: 7,
+  wideCol: 4, // Item
+  chips: [
+    { label: "SO", kind: "count" },
+    { label: "pc", kind: "sum", col: 5 },
+    { label: "min", kind: "sum", col: 6 },
+  ],
+};
+
+// ── By Day column layout ───────────────────────────────────────────────────
+// The webbing By Day sheet has NO lane column — it is one row per framing day:
+// 0 Frame Date (same day), 1 Day, 2 Webbing Pieces (same day),
+// 3 SOs framed that day (model). Rendered as a plain table; the long SO list
+// (col 3) gets extra width.
+const BY_DAY_CONFIG: ByDayConfig = {
+  mode: "plain",
+  wideCol: 3,
+};
 
 const PROCESS_SECTIONS: Para[] = [
   {
@@ -58,10 +77,9 @@ const PROCESS_SECTIONS: Para[] = [
   {
     heading: "What this page shows",
     body:
-      "For each framing day, this page shows how many webbing pieces fall on that " +
-      "day (pulled straight from the framing plan's same-day webbing count) and " +
-      "which orders are framed — and therefore webbed — that day. To see the full " +
-      "framing detail for a day, open the Framing department page.",
+      "The calendar groups each framing day's orders so you can see which SOs are " +
+      "webbed that day and how many webbing pieces fall on it (pulled straight " +
+      "from the framing plan). The By Day table sums the webbing pieces per day.",
   },
   {
     heading: "Sofa webbing is also same-day",
@@ -109,38 +127,23 @@ const LOGIC_SECTIONS: Para[] = [
   },
 ];
 
-// Banner shown inside the result Card, above the table — makes the same-day
-// model explicit and points to the Framing page for full detail.
-const RESULT_INTRO = (
-  <div className="flex items-start gap-2 rounded-lg border border-[#D6E9DD] bg-[#EEF7F1] px-4 py-3">
-    <Frame className="mt-0.5 h-4 w-4 shrink-0 text-[#0F7A4A]" />
-    <p className="text-xs leading-relaxed text-[#2F5740]">
-      <strong>Webbing runs the same day as the SO's Framing.</strong> It is done by a separate
-      crew at a separate station, in parallel with framing, so it has no schedule of its own.
-      The table below is the framing plan seen from webbing's side — each row is a framing day
-      with the webbing pieces that ride along on that day. Open the{" "}
-      <strong>Framing</strong> department page for the full per-order framing detail.
-    </p>
-  </div>
-);
-
 export default function WebbingDeptPage() {
   return (
-    <PlainDeptSchedulePage
+    <DepartmentSchedulePage
       departmentName="Webbing"
       subtitle="Same day as framing — runs in parallel, no separate schedule"
       icon={<LayoutGrid className="h-4 w-4 text-[#10B981]" />}
       accentColor="#10B981"
       snapshot={snapshot as unknown as Snapshot}
-      sheetName="By Day"
-      resultHeading="Webbing by Day (same day as framing)"
-      headerOverride={HEADER_OVERRIDE}
-      valueCols={VALUE_COLS}
-      wideCol={3}
+      fetchUrl="/api/planning/schedule/webbing"
+      calendarSheetName="Webbing Calendar"
+      calendarConfig={CALENDAR_CONFIG}
+      calendarHeading="Webbing Calendar (same day as framing)"
+      byDaySheetName="By Day"
+      byDayConfig={BY_DAY_CONFIG}
       processSections={PROCESS_SECTIONS}
       logicSections={LOGIC_SECTIONS}
       logicIntro="The detailed rule set behind the webbing plan, kept here as a reference for the owner."
-      resultIntro={RESULT_INTRO}
     />
   );
 }

@@ -1,33 +1,65 @@
 // ---------------------------------------------------------------------------
 // Planning > Foam Bonding department drill-in.
 //
-// Thin wrapper over the shared _PlainDeptSchedulePage scaffold, supplying the
-// "Sofa Foam Bonding" sheet of the Framing snapshot, curated English
-// Process / Logic content, and the sheet's English column titles. Foam bonding
+// Rich _DepartmentSchedulePage (per-SO grouped calendar), driven live by the
+// chain endpoint and falling back to the saved snapshot offline. Foam bonding
 // is a sofa back-end stage: it runs the working day AFTER each sofa's framing
-// (webbing rides framing the same day; foam bonding is +1).
+// (webbing rides framing the same day; foam bonding is +1). Only base + armrest
+// consume the daily hour cap — the back cushion rides the same day uncapped.
 //
 // Reached from Planning > Capacity Loading / Capacity Overview by clicking the
 // "Foam Bonding" department name. All UI copy is English.
 // ---------------------------------------------------------------------------
 import { Layers } from "lucide-react";
-import snapshot from "@/data/framing-schedule-snapshot.json";
-import PlainDeptSchedulePage, {
+import snapshot from "@/data/foambonding-schedule-snapshot.json";
+import DepartmentSchedulePage, {
   type Snapshot,
   type Para,
-} from "./_PlainDeptSchedulePage";
+  type CalendarConfig,
+  type ByDayConfig,
+} from "./_DepartmentSchedulePage";
 
-// ── Sofa Foam Bonding column layout ────────────────────────────────────────
-// Sheet columns: 0 Date, 1 Day, 2 Foam hours, 3 cap, 4 pieces Base/Arm/Cushion,
-// 5 SOs (model). One row per working day; the long SO list (col 5) gets width.
-const HEADER_OVERRIDE = [
-  "Date",
-  "Day",
-  "Foam Hours",
-  "Cap",
-  "Pieces (Base/Arm/Cushion)",
-  "SOs (model)",
-];
+// ── Foam Calendar column layout ────────────────────────────────────────────
+// Sheet columns: 0 Foam Date, 1 Lane, 2 SO ID, 3 Model, 4 Item, 5 Base,
+// 6 Armrest, 7 Cushion, 8 Foam Mins, 9 Customer DD, 10 Frame done. The first
+// row of each SO carries Lane + SO ID; a whole SO is bonded the same day.
+const CALENDAR_CONFIG: CalendarConfig = {
+  headers: [
+    "Foam Date",
+    "Lane",
+    "SO ID",
+    "Model",
+    "Item",
+    "Base",
+    "Armrest",
+    "Cushion",
+    "Foam Mins",
+    "Customer DD",
+    "Frame done",
+  ],
+  laneCol: 1,
+  groupKeyCol: 2, // SO ID — non-empty only on the SO's first row
+  groupChipPrefix: "SO",
+  cddCol: 9,
+  wideCol: 4, // Item
+  chips: [
+    { label: "SO", kind: "count" },
+    { label: "min", kind: "sum", col: 8 },
+  ],
+};
+
+// ── By Day column layout ───────────────────────────────────────────────────
+// Sheet columns: 0 Date, 1 Day, 2 Lane, 3 SOs that day, 4 SOs, 5 Foam h,
+// 6 Cap h.
+const BY_DAY_CONFIG: ByDayConfig = {
+  mode: "lane",
+  dateCol: 0,
+  dayCol: 1,
+  laneCol: 2,
+  laneHeaders: ["Lane", "SOs that day", "SOs", "Foam h", "Cap h"],
+  laneValueCols: [2, 3, 4, 5, 6],
+  wideCol: 3,
+};
 
 const PROCESS_SECTIONS: Para[] = [
   {
@@ -51,7 +83,7 @@ const PROCESS_SECTIONS: Para[] = [
       "The day's hour budget counts the base and armrest foam bonding only. The " +
       "back cushion is bonded the same day as its base — it follows the base even " +
       "when the base is pushed to a later day — but its hours do not count toward " +
-      "the daily cap. The Pieces column shows Base / Armrest / Cushion counts.",
+      "the daily cap. The Base / Armrest / Cushion piece counts are shown per SO.",
   },
   {
     heading: "Priority by customer delivery date",
@@ -78,7 +110,7 @@ const LOGIC_SECTIONS: Para[] = [
       "it simply rides the same day as its base.",
   },
   {
-    heading: "Foam → frame handoff (1 working day)",
+    heading: "Foam -> frame handoff (1 working day)",
     body:
       "An order's foam-bonding floor is (its sofa framing day) + 1 working day — " +
       "bonded the next working day after framing. Orders whose sofa is already " +
@@ -101,16 +133,18 @@ const LOGIC_SECTIONS: Para[] = [
 
 export default function FoamBondingDeptPage() {
   return (
-    <PlainDeptSchedulePage
+    <DepartmentSchedulePage
       departmentName="Foam Bonding"
       subtitle="Sofa foam bonding — back-end stage after framing"
       icon={<Layers className="h-4 w-4 text-[#8B5CF6]" />}
       accentColor="#8B5CF6"
       snapshot={snapshot as unknown as Snapshot}
-      sheetName="Sofa Foam Bonding"
-      resultHeading="Foam Bonding by Day"
-      headerOverride={HEADER_OVERRIDE}
-      wideCol={5}
+      fetchUrl="/api/planning/schedule/foam-bonding"
+      calendarSheetName="Foam Calendar"
+      calendarConfig={CALENDAR_CONFIG}
+      calendarHeading="Foam Bonding Calendar"
+      byDaySheetName="By Day"
+      byDayConfig={BY_DAY_CONFIG}
       processSections={PROCESS_SECTIONS}
       logicSections={LOGIC_SECTIONS}
       logicIntro="The detailed rule set that drives the foam-bonding schedule, kept here as a reference for the owner."

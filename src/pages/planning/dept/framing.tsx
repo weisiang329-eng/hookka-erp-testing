@@ -197,6 +197,7 @@ export default function FramingDeptPage() {
       icon={<Frame className="h-4 w-4 text-[#F97316]" />}
       accentColor="#F97316"
       snapshot={snapshot as unknown as Snapshot}
+      fetchUrl="/api/planning/schedule/framing"
       calendarSheetName="Framing Calendar"
       calendarConfig={CALENDAR_CONFIG}
       calendarHeading="Framing Calendar"

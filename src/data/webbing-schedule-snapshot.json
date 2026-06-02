@@ -1,0 +1,2296 @@
+{
+  "generatedAt": "2026-06-02",
+  "department": "Webbing",
+  "sheets": {
+    "Summary & Notes": [
+      [
+        "Webbing - Same Day as Framing"
+      ],
+      [
+        "Generated 2026-06-02 as a live recompute. Read-only - nothing written to the ERP."
+      ],
+      [
+        ""
+      ],
+      [
+        "[No separate schedule] Each SO's webbing is done the SAME day as that SO's framing,"
+      ],
+      [
+        "  on a separate crew running in parallel - it does not consume the framing hour budget."
+      ],
+      [
+        ""
+      ],
+      [
+        "[Volume] Same-day webbing total: 314 pieces across the framing plan."
+      ],
+      [
+        ""
+      ],
+      [
+        "[How to read] Each row is a framing day with the webbing pieces that ride along on that day."
+      ],
+      [
+        "  Open the Framing department page for the full per-order framing detail."
+      ],
+      [
+        ""
+      ],
+      [
+        "  Webbing  06-06 Sat -> 07-06 Mon   181 SOs"
+      ],
+      [
+        ""
+      ],
+      [
+        "  Note: live read-only planning, not yet written to the ERP."
+      ]
+    ],
+    "Webbing Calendar": [
+      [
+        "Frame Date (same day)",
+        "Lane",
+        "SO ID",
+        "Model",
+        "Item",
+        "Webbing Pieces",
+        "Webbing Mins",
+        "Customer DD"
+      ],
+      [
+        "2026-06-06  Sat   (Day 5)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-069",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-214",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-244",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-264",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-269",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-278",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-289",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-141",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-166",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-193",
+        "1013-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "2026-06-08  Mon   (Day 7)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-096",
+        "1013-(Q) + 1013-(SK)",
+        "Webbing (same day as framing)",
+        3,
+        19,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-111",
+        "1013-(K) + 1013-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-216",
+        "1013-(K) + 1013-(Q)",
+        "Webbing (same day as framing)",
+        4,
+        12,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-271",
+        "1013-(K) + 1013-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        6,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-293",
+        "1013-(K) + 1013-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        8,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-070",
+        "1013-(K) + 1013-(SS)",
+        "Webbing (same day as framing)",
+        2,
+        8,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-276",
+        "1013-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-277",
+        "1013-(SS)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-285",
+        "1013-(SS)",
+        "Webbing (same day as framing)",
+        2,
+        12,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-186",
+        "1013-(SS)",
+        "Webbing (same day as framing)",
+        1,
+        8,
+        ""
+      ],
+      [
+        "2026-06-09  Tue   (Day 8)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-171",
+        "2011(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        16,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-235",
+        "2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-260",
+        "2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        2,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-279",
+        "2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-245",
+        "1013-(S)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-140",
+        "2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        4,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-188",
+        "1013-(SS)",
+        "Webbing (same day as framing)",
+        1,
+        4,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-213",
+        "1013-(K)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-227",
+        "1013-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-254",
+        "1013-(Q) + 1013-(S)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-262",
+        "1013-(Q) + 1013-(SS)",
+        "Webbing (same day as framing)",
+        2,
+        14,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-298",
+        "2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-324",
+        "5540-1A(RHF) + 5540-2A(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        31,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-105",
+        "5540-1A(LHF) + 5540-1A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        21,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-221",
+        "5540-1A(LHF) + 5540-1A(RHF) + 5540-1NA",
+        "Webbing (same day as framing)",
+        3,
+        46,
+        "2026-06-03"
+      ],
+      [
+        "2026-06-10  Wed   (Day 9)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-204",
+        "2038(A)-(Q) + 2038(A)-(SS)",
+        "Webbing (same day as framing)",
+        2,
+        16,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-153",
+        "1013-(Q) + 2038(A)-(K)",
+        "Webbing (same day as framing)",
+        2,
+        9,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-189",
+        "1003(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-212",
+        "1003(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-064",
+        "5540-1A(LHF) + 5540-2A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        16,
+        ""
+      ],
+      [
+        "2026-06-11  Thu   (Day 10)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-281",
+        "1005-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-291",
+        "1003(A)-(K) + 1005-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        12,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-123",
+        "1003(A)-(SK) + 2038(A)-(SS)",
+        "Webbing (same day as framing)",
+        2,
+        11,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-124",
+        "1005-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-157",
+        "1005-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-187",
+        "1003(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        4,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-226",
+        "1003(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        9,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-108",
+        "5540-2S",
+        "Webbing (same day as framing)",
+        1,
+        8,
+        ""
+      ],
+      [
+        "2026-06-12  Fri   (Day 11)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2604-281",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-229",
+        "1013-(K) + 2008(A)-(K)",
+        "Webbing (same day as framing)",
+        2,
+        11,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-242",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-252",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-258",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-295",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-162",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        8,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-208",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        4,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-209",
+        "2008(A)-(K) + 2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        4,
+        8,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-238",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        3,
+        18,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-263",
+        "2008(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-077",
+        "5540-1A(LHF) + 5540-1NA + 5540-CSL + 5540-L(RHF)",
+        "Webbing (same day as framing)",
+        4,
+        61,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-078",
+        "5540-2A(RHF) + 5540-CSL + 5540-L(LHF)",
+        "Webbing (same day as framing)",
+        3,
+        47,
+        ""
+      ],
+      [
+        "2026-06-13  Sat   (Day 12)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-241",
+        "2009(A)-(K) + 2009(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        12,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-098",
+        "2008(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-099",
+        "2008(A)-(K) + 2008(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        8,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-239",
+        "2009(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-247",
+        "2009(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        ""
+      ],
+      [
+        "2026-06-15  Mon   (Day 14)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-231",
+        "1003(A)-(Q) + 2041(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        2,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-280",
+        "2041(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        14,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-211",
+        "2009(A)-(SK)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-010",
+        "2041(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-303",
+        "5535-1A(RHF) + 5535-2A(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        29,
+        "2026-06-10"
+      ],
+      [
+        "2026-06-16  Tue   (Day 15)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-302",
+        "1007-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2604-276",
+        "2041(A)-(SS)",
+        "Webbing (same day as framing)",
+        1,
+        21,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-009",
+        "1007-(K)",
+        "Webbing (same day as framing)",
+        1,
+        12,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-023",
+        "1007-(K)",
+        "Webbing (same day as framing)",
+        1,
+        16,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-203",
+        "1007-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-248",
+        "1007-(K)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-256",
+        "1007-(K)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "2026-06-17  Wed   (Day 16)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-192",
+        "1007-(Q) + 2008(A)-(K)",
+        "Webbing (same day as framing)",
+        4,
+        24,
+        "2026-06-03"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-282",
+        "1007-(Q) + 2008(A)-(K)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-275",
+        "1007-(K) + 1007-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        8,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-284",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-154",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-160",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        9,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-161",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        9,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-167",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-195",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-207",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-234",
+        "1005-(Q) + 1007-(Q) + 2008(A)-(K)",
+        "Webbing (same day as framing)",
+        3,
+        8,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-273",
+        "5535-2A(RHF) + 5535-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        33,
+        "2026-06-11"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-106",
+        "5535-1A(LHF) + 5535-1A(RHF) + 5535-1NA + 5535-1S",
+        "Webbing (same day as framing)",
+        6,
+        80,
+        ""
+      ],
+      [
+        "2026-06-18  Thu   (Day 17)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-292",
+        "1007-(SS) + 2008(A)-(K)",
+        "Webbing (same day as framing)",
+        3,
+        12,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-215",
+        "1007-(Q) + 1013-(S) + 2008(A)-(K)",
+        "Webbing (same day as framing)",
+        4,
+        25,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-243",
+        "1007-(Q) + 2009(A)-(K)",
+        "Webbing (same day as framing)",
+        4,
+        20,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-246",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        4,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-249",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        6,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-255",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-257",
+        "1007-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        12,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-104",
+        "5535-1A(LHF) + 5535-1NA + 5535-L(RHF)",
+        "Webbing (same day as framing)",
+        3,
+        44,
+        "2026-06-04"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-270",
+        "5535-2A(LHF) + 5535-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        38,
+        "2026-06-10"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-222",
+        "5535-2A(LHF) + 5535-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        28,
+        ""
+      ],
+      [
+        "2026-06-19  Fri   (Day 18)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-288",
+        "1052-(Q) + 2038(A)-(Q)",
+        "Webbing (same day as framing)",
+        2,
+        11,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-185",
+        "1007-(Q) + 1007-(S) + 1013-(Q)",
+        "Webbing (same day as framing)",
+        4,
+        20,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-205",
+        "1007-(S)",
+        "Webbing (same day as framing)",
+        2,
+        6,
+        ""
+      ],
+      [
+        "2026-06-20  Sat   (Day 19)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-261",
+        "1013-(Q) + 2006(A)-(K)",
+        "Webbing (same day as framing)",
+        3,
+        13,
+        "2026-06-02"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-190",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-294",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-297",
+        "1007-(Q) + 2006(A)-(K)",
+        "Webbing (same day as framing)",
+        2,
+        7,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-102",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-132",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-210",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-286",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        2,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SV-2605-002",
+        "2006(A)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-301",
+        "5531-2S",
+        "Webbing (same day as framing)",
+        1,
+        12,
+        "2026-06-11"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-345",
+        "5531-2S",
+        "Webbing (same day as framing)",
+        1,
+        15,
+        ""
+      ],
+      [
+        "2026-06-22  Mon   (Day 21)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-191",
+        "2006(A)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-194",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        34,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-196",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        36,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-327",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        14,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-067",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        14,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-072",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        22,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-183",
+        "5531-1A(LHF) + 5531-2A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        35,
+        ""
+      ],
+      [
+        "2026-06-23  Tue   (Day 22)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-202",
+        "2033(HF)(W)-(K) + 2033(HF)(W)-(SS)",
+        "Webbing (same day as framing)",
+        2,
+        10,
+        "2026-06-06"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-206",
+        "DIVAN-(K)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        "2026-06-06"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-011",
+        "DIVAN-(K)",
+        "Webbing (same day as framing)",
+        1,
+        16,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-259",
+        "1007-(Q) + DIVAN-(K)",
+        "Webbing (same day as framing)",
+        2,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-236",
+        "5531-2A(LHF) + 5531-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        32,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-076",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        34,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-182",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        29,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-071",
+        "5531-2A(LHF) + 5531-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        24,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-197",
+        "5531-1A(LHF) + 5531-2A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        34,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-237",
+        "5531-2A(RHF) + 5531-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        34,
+        ""
+      ],
+      [
+        "2026-06-24  Wed   (Day 23)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-200",
+        "2008(A)-(K) + DIVAN-(Q)",
+        "Webbing (same day as framing)",
+        3,
+        6,
+        "2026-06-06"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-265",
+        "DIVAN-(Q) + DIVAN-(S)",
+        "Webbing (same day as framing)",
+        2,
+        2,
+        "2026-06-06"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2604-300",
+        "DIVAN-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        8,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-296",
+        "DIVAN-(Q) + DIVAN-(S)",
+        "Webbing (same day as framing)",
+        3,
+        6,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-079",
+        "5531-2A(LHF) + 5531-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        28,
+        "2026-06-05"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-052",
+        "5530-1A(LHF)",
+        "Webbing (same day as framing)",
+        1,
+        5,
+        "2026-06-06"
+      ],
+      [
+        "2026-06-25  Thu   (Day 24)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-274",
+        "1023-(K)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-283",
+        "DIVAN-(SS)",
+        "Webbing (same day as framing)",
+        1,
+        3,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SV-2605-003",
+        "5530-L(RHF)",
+        "Webbing (same day as framing)",
+        1,
+        18,
+        "2026-06-10"
+      ],
+      [
+        "2026-06-26  Fri   (Day 25)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-228",
+        "1030-(K)",
+        "Webbing (same day as framing)",
+        1,
+        2,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-299",
+        "1030-(Q)",
+        "Webbing (same day as framing)",
+        3,
+        8,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-300",
+        "1030-(Q) + DIVAN-(K)",
+        "Webbing (same day as framing)",
+        2,
+        6,
+        ""
+      ],
+      [
+        "2026-06-27  Sat   (Day 26)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2604-321",
+        "1023(HF)(W)-(SS)",
+        "Webbing (same day as framing)",
+        1,
+        13,
+        ""
+      ],
+      [
+        "2026-06-29  Mon   (Day 28)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-131",
+        "1003(A)-(Q) + 1005-(Q) + 1041-(Q) + 2003-(K) + 2009(A)-(K) + 2041(A)-(Q) + DIVAN-(K)",
+        "Webbing (same day as framing)",
+        7,
+        40,
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-233",
+        "2038(A)(HF)(W)-(K)",
+        "Webbing (same day as framing)",
+        1,
+        4,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-088",
+        "5530-1A(LHF) + 5530-1A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        60,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-050",
+        "5530-1A(LHF) + 5530-1A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        13,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-051",
+        "5530-1A(LHF) + 5530-1A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        2,
+        ""
+      ],
+      [
+        "2026-06-30  Tue   (Day 29)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Bedframe",
+        "SO-2605-251",
+        "2038(A)(HF)(W)-(Q)",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "CO-2605-008-01",
+        "5530-2A(LHF)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-130",
+        "5530-1A(LHF) + 5530-1A(RHF) + 5530-1NA",
+        "Webbing (same day as framing)",
+        3,
+        42,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-199",
+        "5530-2A(LHF) + 5530-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        29,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-224",
+        "5530-2A(LHF) + 5530-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        28,
+        ""
+      ],
+      [
+        "2026-07-01  Wed   (Day 30)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-293",
+        "5530-2A(RHF) + 5530-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        30,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-240",
+        "5530-2A(RHF) + 5530-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        38,
+        "2026-06-08"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-265",
+        "5530-2A(RHF) + 5530-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        38,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-063",
+        "5530-1NA + 5530-2A(LHF) + 5530-L(RHF)",
+        "Webbing (same day as framing)",
+        3,
+        30,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-198",
+        "5530-2A(RHF) + 5530-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        28,
+        ""
+      ],
+      [
+        "2026-07-02  Thu   (Day 31)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-290",
+        "5530-1A(LHF) + 5530-2A(RHF) + 5530-STOOL",
+        "Webbing (same day as framing)",
+        3,
+        44,
+        "2026-06-06"
+      ],
+      [
+        "",
+        "Sofa",
+        "CO-2605-008-02",
+        "5530-L(RHF)",
+        "Webbing (same day as framing)",
+        1,
+        1,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-086",
+        "5530-2A(RHF) + 5530-L(LHF)",
+        "Webbing (same day as framing)",
+        2,
+        47,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-080",
+        "5530-1A(LHF) + 5530-2NA + 5530-L(RHF) + 5530-STOOL",
+        "Webbing (same day as framing)",
+        4,
+        63,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-109",
+        "5530-2A(LHF) + 5530-L(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        15,
+        ""
+      ],
+      [
+        "2026-07-03  Fri   (Day 32)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-177",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        15,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-178",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        15,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-179",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        16,
+        "2026-06-09"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2604-307",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        7,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-173",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        14,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-174",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        15,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-175",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        15,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-176",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        16,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-180",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        16,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-181",
+        "6112-2S",
+        "Webbing (same day as framing)",
+        1,
+        17,
+        ""
+      ],
+      [
+        "2026-07-04  Sat   (Day 33)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-225",
+        "5536-1A(LHF) + 5536-1A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        32,
+        "2026-06-11"
+      ],
+      [
+        "2026-07-06  Mon   (Day 35)",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-184",
+        "5536-1A(RHF) + 5536-2A(LHF) + 5536-CNR",
+        "Webbing (same day as framing)",
+        3,
+        40,
+        "2026-06-11"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-223",
+        "5536-1A(LHF) + 5536-2A(RHF) + 5536-2S + 5536-CNR",
+        "Webbing (same day as framing)",
+        4,
+        65,
+        "2026-06-11"
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2603-207",
+        "5537-1A(LHF) + 5537-1A(RHF)",
+        "Webbing (same day as framing)",
+        2,
+        60,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-103",
+        "5536-1A(RHF) + 5536-CNR",
+        "Webbing (same day as framing)",
+        2,
+        16,
+        ""
+      ],
+      [
+        "",
+        "Sofa",
+        "SO-2605-220",
+        "5536-2S",
+        "Webbing (same day as framing)",
+        1,
+        15,
+        ""
+      ]
+    ],
+    "By Day": [
+      [
+        "Frame Date (same day)",
+        "Day",
+        "Webbing Pieces (same day)",
+        "SOs framed that day (model)"
+      ],
+      [
+        "2026-06-06 Sat",
+        5,
+        12,
+        "SO-2605-289(1013-(Q)), SO-2605-278(1013-(Q)), SO-2605-269(1013-(Q)), SO-2605-264(1013-(Q)), SO-2605-244(1013-(Q)), SO-2605-214(1013-(Q)), SO-2605-193(1013-(Q)), SO-2605-166(1013-(Q)), SO-2605-141(1013-(Q)), SO-2605-069(1013-(Q))"
+      ],
+      [
+        "2026-06-08 Mon",
+        7,
+        20,
+        "SO-2605-293(1013-(K)+1013-(Q)), SO-2605-271(1013-(K)+1013-(Q)), SO-2605-276(1013-(K)), SO-2605-277(1013-(SS)), SO-2605-285(1013-(SS)), SO-2605-216(1013-(K)+1013-(Q)), SO-2605-186(1013-(SS)), SO-2605-111(1013-(K)+1013-(Q)), SO-2605-096(1013-(Q)+1013-(SK)), SO-2605-070(1013-(K)+1013-(SS))"
+      ],
+      [
+        "2026-06-09 Tue",
+        8,
+        21,
+        "SO-2605-298(2038(A)-(Q)), SO-2605-279(2038(A)-(Q)), SO-2605-260(2038(A)-(Q)), SO-2605-262(1013-(Q)+1013-(SS)), SO-2605-245(1013-(S)), SO-2605-254(1013-(Q)+1013-(S)), SO-2605-227(1013-(K)), SO-2605-235(2038(A)-(Q)), SO-2605-221(5540-1A(LHF)+5540-1A(RHF)+5540-1NA), SO-2605-213(1013-(K)), SO-2605-188(1013-(SS)), SO-2605-171(2011(A)-(K)), SO-2605-140(2038(A)-(Q)), SO-2605-105(5540-1A(LHF)+5540-1A(RHF)), SO-2604-324(5540-1A(RHF)+5540-2A(LHF))"
+      ],
+      [
+        "2026-06-10 Wed",
+        9,
+        8,
+        "SO-2605-204(2038(A)-(Q)+2038(A)-(SS)), SO-2605-212(1003(A)-(K)), SO-2605-189(1003(A)-(K)), SO-2605-153(1013-(Q)+2038(A)-(K)), SO-2605-064(5540-1A(LHF)+5540-2A(RHF))"
+      ],
+      [
+        "2026-06-11 Thu",
+        10,
+        11,
+        "SO-2605-291(1003(A)-(K)+1005-(Q)), SO-2605-281(1005-(Q)), SO-2605-226(1003(A)-(Q)), SO-2605-187(1003(A)-(Q)), SO-2605-157(1005-(Q)), SO-2605-123(1003(A)-(SK)+2038(A)-(SS)), SO-2605-124(1005-(Q)), SO-2605-108(5540-2S)"
+      ],
+      [
+        "2026-06-12 Fri",
+        11,
+        25,
+        "SO-2605-295(2008(A)-(K)), SO-2605-263(2008(A)-(K)), SO-2605-242(2008(A)-(K)), SO-2605-252(2008(A)-(K)), SO-2605-258(2008(A)-(K)), SO-2605-238(2008(A)-(K)), SO-2605-229(1013-(K)+2008(A)-(K)), SO-2605-208(2008(A)-(K)), SO-2605-209(2008(A)-(K)+2038(A)-(Q)), SO-2605-162(2008(A)-(K)), SO-2605-078(5540-2A(RHF)+5540-CSL+5540-L(LHF)), SO-2605-077(5540-1A(LHF)+5540-1NA+5540-CSL+5540-L(RHF)), SO-2604-281(2008(A)-(K))"
+      ],
+      [
+        "2026-06-13 Sat",
+        12,
+        8,
+        "SO-2605-239(2009(A)-(Q)), SO-2605-241(2009(A)-(K)+2009(A)-(Q)), SO-2605-247(2009(A)-(K)), SO-2605-098(2008(A)-(Q)), SO-2605-099(2008(A)-(K)+2008(A)-(Q))"
+      ],
+      [
+        "2026-06-15 Mon",
+        14,
+        8,
+        "SO-2605-303(5535-1A(RHF)+5535-2A(LHF)), SO-2605-280(2041(A)-(Q)), SO-2605-231(1003(A)-(Q)+2041(A)-(Q)), SO-2605-211(2009(A)-(SK)), SO-2605-010(2041(A)-(Q))"
+      ],
+      [
+        "2026-06-16 Tue",
+        15,
+        7,
+        "SO-2605-302(1007-(K)), SO-2605-248(1007-(K)), SO-2605-256(1007-(K)), SO-2605-203(1007-(K)), SO-2605-023(1007-(K)), SO-2605-009(1007-(K)), SO-2604-276(2041(A)-(SS))"
+      ],
+      [
+        "2026-06-17 Wed",
+        16,
+        26,
+        "SO-2605-273(5535-2A(RHF)+5535-L(LHF)), SO-2605-275(1007-(K)+1007-(Q)), SO-2605-282(1007-(Q)+2008(A)-(K)), SO-2605-284(1007-(Q)), SO-2605-234(1005-(Q)+1007-(Q)+2008(A)-(K)), SO-2605-207(1007-(Q)), SO-2605-195(1007-(Q)), SO-2605-192(1007-(Q)+2008(A)-(K)), SO-2605-167(1007-(Q)), SO-2605-161(1007-(Q)), SO-2605-160(1007-(Q)), SO-2605-154(1007-(Q)), SO-2605-106(5535-1A(LHF)+5535-1A(RHF)+5535-1NA+5535-1S)"
+      ],
+      [
+        "2026-06-18 Thu",
+        17,
+        23,
+        "SO-2605-292(1007-(SS)+2008(A)-(K)), SO-2605-270(5535-2A(LHF)+5535-L(RHF)), SO-2605-243(1007-(Q)+2009(A)-(K)), SO-2605-246(1007-(Q)), SO-2605-249(1007-(Q)), SO-2605-255(1007-(Q)), SO-2605-257(1007-(Q)), SO-2605-222(5535-2A(LHF)+5535-L(RHF)), SO-2605-215(1007-(Q)+1013-(S)+2008(A)-(K)), SO-2605-104(5535-1A(LHF)+5535-1NA+5535-L(RHF))"
+      ],
+      [
+        "2026-06-19 Fri",
+        18,
+        8,
+        "SO-2605-288(1052-(Q)+2038(A)-(Q)), SO-2605-205(1007-(S)), SO-2605-185(1007-(Q)+1007-(S)+1013-(Q))"
+      ],
+      [
+        "2026-06-20 Sat",
+        19,
+        14,
+        "SO-2605-301(5531-2S), SO-2605-294(2006(A)-(K)), SO-2605-297(1007-(Q)+2006(A)-(K)), SV-2605-002(2006(A)-(K)), SO-2605-286(2006(A)-(K)), SO-2605-261(1013-(Q)+2006(A)-(K)), SO-2605-210(2006(A)-(K)), SO-2605-190(2006(A)-(K)), SO-2605-132(2006(A)-(K)), SO-2605-102(2006(A)-(K)), SO-2604-345(5531-2S)"
+      ],
+      [
+        "2026-06-22 Mon",
+        21,
+        13,
+        "SO-2605-183(5531-1A(LHF)+5531-2A(RHF)), SO-2605-194(5531-2A(RHF)+5531-L(LHF)), SO-2605-196(5531-2A(RHF)+5531-L(LHF)), SO-2605-191(2006(A)-(Q)), SO-2605-067(5531-2A(RHF)+5531-L(LHF)), SO-2605-072(5531-2A(RHF)+5531-L(LHF)), SO-2604-327(5531-2A(RHF)+5531-L(LHF))"
+      ],
+      [
+        "2026-06-23 Tue",
+        22,
+        18,
+        "SO-2605-197(5531-1A(LHF)+5531-2A(RHF)), SO-2605-259(1007-(Q)+DIVAN-(K)), SO-2605-236(5531-2A(LHF)+5531-L(RHF)), SO-2605-237(5531-2A(RHF)+5531-L(LHF)), SO-2605-202(2033(HF)(W)-(K)+2033(HF)(W)-(SS)), SO-2605-206(DIVAN-(K)), SO-2605-182(5531-2A(RHF)+5531-L(LHF)), SO-2605-071(5531-2A(LHF)+5531-L(RHF)), SO-2605-076(5531-2A(RHF)+5531-L(LHF)), SO-2605-011(DIVAN-(K))"
+      ],
+      [
+        "2026-06-24 Wed",
+        23,
+        12,
+        "SO-2605-296(DIVAN-(Q)+DIVAN-(S)), SO-2605-265(DIVAN-(Q)+DIVAN-(S)), SO-2605-200(2008(A)-(K)+DIVAN-(Q)), SO-2605-079(5531-2A(LHF)+5531-L(RHF)), SO-2605-052(5530-1A(LHF)), SO-2604-300(DIVAN-(Q))"
+      ],
+      [
+        "2026-06-25 Thu",
+        24,
+        3,
+        "SV-2605-003(5530-L(RHF)), SO-2605-274(1023-(K)), SO-2605-283(DIVAN-(SS))"
+      ],
+      [
+        "2026-06-26 Fri",
+        25,
+        6,
+        "SO-2605-299(1030-(Q)), SO-2605-300(1030-(Q)+DIVAN-(K)), SO-2605-228(1030-(K))"
+      ],
+      [
+        "2026-06-27 Sat",
+        26,
+        1,
+        "SO-2604-321(1023(HF)(W)-(SS))"
+      ],
+      [
+        "2026-06-29 Mon",
+        28,
+        14,
+        "SO-2605-233(2038(A)(HF)(W)-(K)), SO-2605-131(1003(A)-(Q)+1005-(Q)+1041-(Q)+2003-(K)+2009(A)-(K)+2041(A)-(Q)+DIVAN-(K)), SO-2605-051(5530-1A(LHF)+5530-1A(RHF)), SO-2605-050(5530-1A(LHF)+5530-1A(RHF)), SO-2604-088(5530-1A(LHF)+5530-1A(RHF))"
+      ],
+      [
+        "2026-06-30 Tue",
+        29,
+        9,
+        "SO-2605-251(2038(A)(HF)(W)-(Q)), SO-2605-224(5530-2A(LHF)+5530-L(RHF)), CO-2605-008-01(5530-2A(LHF)), SO-2605-199(5530-2A(LHF)+5530-L(RHF)), SO-2605-130(5530-1A(LHF)+5530-1A(RHF)+5530-1NA)"
+      ],
+      [
+        "2026-07-01 Wed",
+        30,
+        11,
+        "SO-2605-240(5530-2A(RHF)+5530-L(LHF)), SO-2605-198(5530-2A(RHF)+5530-L(LHF)), SO-2605-063(5530-1NA+5530-2A(LHF)+5530-L(RHF)), SO-2604-293(5530-2A(RHF)+5530-L(LHF)), SO-2604-265(5530-2A(RHF)+5530-L(LHF))"
+      ],
+      [
+        "2026-07-02 Thu",
+        31,
+        12,
+        "SO-2605-290(5530-1A(LHF)+5530-2A(RHF)+5530-STOOL), CO-2605-008-02(5530-L(RHF)), SO-2605-109(5530-2A(LHF)+5530-L(RHF)), SO-2605-080(5530-1A(LHF)+5530-2NA+5530-L(RHF)+5530-STOOL), SO-2604-086(5530-2A(RHF)+5530-L(LHF))"
+      ],
+      [
+        "2026-07-03 Fri",
+        32,
+        10,
+        "SO-2605-181(6112-2S), SO-2605-180(6112-2S), SO-2605-179(6112-2S), SO-2605-178(6112-2S), SO-2605-177(6112-2S), SO-2605-176(6112-2S), SO-2605-175(6112-2S), SO-2605-174(6112-2S), SO-2605-173(6112-2S), SO-2604-307(6112-2S)"
+      ],
+      [
+        "2026-07-04 Sat",
+        33,
+        2,
+        "SO-2605-225(5536-1A(LHF)+5536-1A(RHF))"
+      ],
+      [
+        "2026-07-06 Mon",
+        35,
+        12,
+        "SO-2605-223(5536-1A(LHF)+5536-2A(RHF)+5536-2S+5536-CNR), SO-2605-220(5536-2S), SO-2605-184(5536-1A(RHF)+5536-2A(LHF)+5536-CNR), SO-2605-103(5536-1A(RHF)+5536-CNR), SO-2603-207(5537-1A(LHF)+5537-1A(RHF))"
+      ]
+    ]
+  }
+}

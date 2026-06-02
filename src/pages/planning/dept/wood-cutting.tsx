@@ -157,6 +157,7 @@ export default function WoodCuttingDeptPage() {
       icon={<Axe className="h-4 w-4 text-[#F59E0B]" />}
       accentColor="#F59E0B"
       snapshot={snapshot as unknown as Snapshot}
+      fetchUrl="/api/planning/schedule/wood-cutting"
       calendarSheetName="Wood Cut Calendar"
       calendarConfig={CALENDAR_CONFIG}
       calendarHeading="Wood Cut Calendar"

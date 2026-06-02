@@ -162,6 +162,7 @@ export default function FabricSewingDeptPage() {
       icon={<Workflow className="h-4 w-4 text-[#6366F1]" />}
       accentColor="#6366F1"
       snapshot={snapshot as unknown as Snapshot}
+      fetchUrl="/api/planning/schedule/fabric-sewing"
       calendarSheetName="Sew Calendar"
       calendarConfig={CALENDAR_CONFIG}
       calendarHeading="Sew Calendar"

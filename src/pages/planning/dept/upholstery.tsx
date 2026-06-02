@@ -1,37 +1,62 @@
 // ---------------------------------------------------------------------------
 // Planning > Upholstery department drill-in.
 //
-// Thin wrapper over the shared _PlainDeptSchedulePage scaffold, supplying the
-// "Upholstery" sheet of the Framing snapshot, curated English Process / Logic
-// content, and the sheet's English column titles. Upholstery (the subcontract
-// stage) runs the working day after its upstream stage: bedframe upholstery =
-// framing + 1; sofa upholstery = base foam-bonding + 1.
+// Rich _DepartmentSchedulePage (per-SO grouped calendar), driven live by the
+// chain endpoint and falling back to the saved snapshot offline. Upholstery
+// (the subcontract stage) runs the working day after its upstream stage:
+// bedframe upholstery = framing + 1; sofa upholstery = base foam-bonding + 1.
 //
 // Reached from Planning > Capacity Loading / Capacity Overview by clicking the
 // "Upholstery" department name. All UI copy is English.
 // ---------------------------------------------------------------------------
 import { Sofa } from "lucide-react";
-import snapshot from "@/data/framing-schedule-snapshot.json";
-import PlainDeptSchedulePage, {
+import snapshot from "@/data/upholstery-schedule-snapshot.json";
+import DepartmentSchedulePage, {
   type Snapshot,
   type Para,
-} from "./_PlainDeptSchedulePage";
+  type CalendarConfig,
+  type ByDayConfig,
+} from "./_DepartmentSchedulePage";
 
-// ── Upholstery column layout ───────────────────────────────────────────────
-// Sheet columns: 0 Date, 1 Day, 2 Bedframe hours, 3 Bedframe cap, 4 Sofa hours,
-// 5 Sofa cap, 6 Bedframe SOs, 7 Sofa SOs, 8 SOs (model). One row per working
-// day; the long SO list (col 8) gets width.
-const HEADER_OVERRIDE = [
-  "Date",
-  "Day",
-  "Bedframe h",
-  "Bedframe Cap",
-  "Sofa h",
-  "Sofa Cap",
-  "Bedframe SOs",
-  "Sofa SOs",
-  "SOs (model)",
-];
+// ── Uph Calendar column layout ─────────────────────────────────────────────
+// Sheet columns: 0 Uph Date, 1 Lane, 2 SO ID, 3 Model, 4 Item, 5 Pieces,
+// 6 Mins, 7 Customer DD, 8 Upstream done. The first row of each SO carries
+// Lane + SO ID; a whole SO is upholstered the same day.
+const CALENDAR_CONFIG: CalendarConfig = {
+  headers: [
+    "Uph Date",
+    "Lane",
+    "SO ID",
+    "Model",
+    "Item",
+    "Pieces",
+    "Mins",
+    "Customer DD",
+    "Upstream done",
+  ],
+  laneCol: 1,
+  groupKeyCol: 2, // SO ID — non-empty only on the SO's first row
+  groupChipPrefix: "SO",
+  cddCol: 7,
+  wideCol: 4, // Item
+  chips: [
+    { label: "piece", kind: "count" },
+    { label: "min", kind: "sum", col: 6 },
+  ],
+};
+
+// ── By Day column layout ───────────────────────────────────────────────────
+// Sheet columns: 0 Date, 1 Day, 2 Lane, 3 SOs that day, 4 SOs, 5 Load h,
+// 6 Cap h.
+const BY_DAY_CONFIG: ByDayConfig = {
+  mode: "lane",
+  dateCol: 0,
+  dayCol: 1,
+  laneCol: 2,
+  laneHeaders: ["Lane", "SOs that day", "SOs", "Load h", "Cap h"],
+  laneValueCols: [2, 3, 4, 5, 6],
+  wideCol: 3,
+};
 
 const PROCESS_SECTIONS: Para[] = [
   {
@@ -55,7 +80,7 @@ const PROCESS_SECTIONS: Para[] = [
     body:
       "Bedframe and sofa are upholstered with two separate daily hour budgets. A " +
       "sofa-light day cannot be filled with bedframe work, and the other way " +
-      "round. The table shows each lane's hours used against its cap side by side.",
+      "round. The By Day table shows each lane's hours used against its cap.",
   },
   {
     heading: "Priority by customer delivery date",
@@ -106,16 +131,18 @@ const LOGIC_SECTIONS: Para[] = [
 
 export default function UpholsteryDeptPage() {
   return (
-    <PlainDeptSchedulePage
+    <DepartmentSchedulePage
       departmentName="Upholstery"
       subtitle="Subcontract upholstery — bedframe & sofa lanes"
       icon={<Sofa className="h-4 w-4 text-[#F43F5E]" />}
       accentColor="#F43F5E"
       snapshot={snapshot as unknown as Snapshot}
-      sheetName="Upholstery"
-      resultHeading="Upholstery by Day"
-      headerOverride={HEADER_OVERRIDE}
-      wideCol={8}
+      fetchUrl="/api/planning/schedule/upholstery"
+      calendarSheetName="Uph Calendar"
+      calendarConfig={CALENDAR_CONFIG}
+      calendarHeading="Upholstery Calendar"
+      byDaySheetName="By Day"
+      byDayConfig={BY_DAY_CONFIG}
       processSections={PROCESS_SECTIONS}
       logicSections={LOGIC_SECTIONS}
       logicIntro="The detailed rule set that drives the upholstery schedule, kept here as a reference for the owner."

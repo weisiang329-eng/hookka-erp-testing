@@ -1,33 +1,60 @@
 // ---------------------------------------------------------------------------
 // Planning > Packing department drill-in.
 //
-// Thin wrapper over the shared _PlainDeptSchedulePage scaffold, supplying the
-// "Packing" sheet of the Framing snapshot, curated English Process / Logic
-// content, and the sheet's English column titles. Packing is the last stage:
-// it is NOT capacity-limited — an order is packed the same day its upholstery
-// is done.
+// Rich _DepartmentSchedulePage (per-SO grouped calendar), driven live by the
+// chain endpoint and falling back to the saved snapshot offline. Packing is the
+// last stage: it is NOT capacity-limited — an order is packed the same day its
+// upholstery is done.
 //
 // Reached from Planning > Capacity Loading / Capacity Overview by clicking the
 // "Packing" department name. All UI copy is English.
 // ---------------------------------------------------------------------------
 import { Package } from "lucide-react";
-import snapshot from "@/data/framing-schedule-snapshot.json";
-import PlainDeptSchedulePage, {
+import snapshot from "@/data/packing-schedule-snapshot.json";
+import DepartmentSchedulePage, {
   type Snapshot,
   type Para,
-} from "./_PlainDeptSchedulePage";
+  type CalendarConfig,
+  type ByDayConfig,
+} from "./_DepartmentSchedulePage";
 
-// ── Packing column layout ──────────────────────────────────────────────────
-// Sheet columns: 0 Date, 1 Day, 2 Total pieces, 3 Bedframe SOs, 4 Sofa SOs,
-// 5 SOs (model). One row per working day; the long SO list (col 5) gets width.
-const HEADER_OVERRIDE = [
-  "Date",
-  "Day",
-  "Total Pieces",
-  "Bedframe SOs",
-  "Sofa SOs",
-  "SOs (model)",
-];
+// ── Pack Calendar column layout ────────────────────────────────────────────
+// Sheet columns: 0 Pack Date, 1 Lane, 2 SO ID, 3 Model, 4 Item, 5 Pieces,
+// 6 Customer DD, 7 Uph done. The first row of each SO carries Lane + SO ID;
+// a whole SO is packed the same day its upholstery completes.
+const CALENDAR_CONFIG: CalendarConfig = {
+  headers: [
+    "Pack Date",
+    "Lane",
+    "SO ID",
+    "Model",
+    "Item",
+    "Pieces",
+    "Customer DD",
+    "Uph done",
+  ],
+  laneCol: 1,
+  groupKeyCol: 2, // SO ID — non-empty only on the SO's first row
+  groupChipPrefix: "SO",
+  cddCol: 6,
+  wideCol: 4, // Item
+  chips: [
+    { label: "piece", kind: "count" },
+    { label: "pc", kind: "sum", col: 5 },
+  ],
+};
+
+// ── By Day column layout ───────────────────────────────────────────────────
+// Sheet columns: 0 Date, 1 Day, 2 Lane, 3 SOs that day, 4 SOs, 5 Total Pieces.
+const BY_DAY_CONFIG: ByDayConfig = {
+  mode: "lane",
+  dateCol: 0,
+  dayCol: 1,
+  laneCol: 2,
+  laneHeaders: ["Lane", "SOs that day", "SOs", "Total Pieces"],
+  laneValueCols: [2, 3, 4, 5],
+  wideCol: 3,
+};
 
 const PROCESS_SECTIONS: Para[] = [
   {
@@ -100,16 +127,18 @@ const LOGIC_SECTIONS: Para[] = [
 
 export default function PackingDeptPage() {
   return (
-    <PlainDeptSchedulePage
+    <DepartmentSchedulePage
       departmentName="Packing"
       subtitle="Final packing — follows upholstery, no capacity cap"
       icon={<Package className="h-4 w-4 text-[#06B6D4]" />}
       accentColor="#06B6D4"
       snapshot={snapshot as unknown as Snapshot}
-      sheetName="Packing"
-      resultHeading="Packing by Day"
-      headerOverride={HEADER_OVERRIDE}
-      wideCol={5}
+      fetchUrl="/api/planning/schedule/packing"
+      calendarSheetName="Pack Calendar"
+      calendarConfig={CALENDAR_CONFIG}
+      calendarHeading="Packing Calendar"
+      byDaySheetName="By Day"
+      byDayConfig={BY_DAY_CONFIG}
       processSections={PROCESS_SECTIONS}
       logicSections={LOGIC_SECTIONS}
       logicIntro="The detailed rule set that drives the packing schedule, kept here as a reference for the owner."

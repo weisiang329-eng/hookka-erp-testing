@@ -21,6 +21,11 @@ import {
   getMaxSourceUpdatedAt,
   isSnapshotFresh,
 } from "../lib/dashboard-snapshot";
+import {
+  writeStateSnapshot,
+  readStateSnapshotForMonth,
+  type DashboardStateMetrics,
+} from "../lib/dashboard-state-snapshot";
 
 // DO statuses that mean goods have shipped — same set the all-time
 // "Delivered" figure uses (loadDeliveredItemsValueSen) so This-Month
@@ -50,6 +55,61 @@ app.get("/", async (c) => {
   const periodRaw = c.req.query("period") ?? "all";
   const period = /^\d{4}-\d{2}$/.test(periodRaw) ? periodRaw : "all";
 
+  // Command Center month-awareness (2026-06-02). The state-snapshot widgets
+  // — Backlog, Active Jobs, Workforce — are point-in-time counts, not sums
+  // over the period, so they are NOT reconstructible for a PAST month from
+  // current-state-only tables. We (1) capture a daily snapshot of those
+  // counts from now on, (2) for a past month serve the stored snapshot when
+  // one exists (truthful history), else serve the live value clearly tagged
+  // as "live (no history)". The current month and All-time view always serve
+  // live — the current value IS truthful for "now". `period` for past months
+  // is lexically < the current month prefix (ISO YYYY-MM sorts chronologically).
+  const todayISOTop = fmtISO(new Date());
+  const currentMonthPrefix = todayISOTop.slice(0, 7);
+  const isPastMonth = period !== "all" && period < currentMonthPrefix;
+
+  // Extract the live STATE metrics from a computed overview payload and
+  // upsert today's daily snapshot (idempotent on (org_id, snap_date)).
+  // Fire-and-forget via waitUntil so it never slows the response. Only
+  // called with a payload that reflects LIVE state (period=all or current
+  // month) — a past-month payload may have its state widgets overridden
+  // from an older snapshot, which must never be written back as "today".
+  const captureTodayState = (payload: Record<string, unknown>): void => {
+    try {
+      const prod = (payload?.production ?? {}) as Record<string, unknown>;
+      const emp = (payload?.employee ?? {}) as Record<string, unknown>;
+      const aj = (prod.activeJobs ?? {}) as Record<string, unknown>;
+      const metrics: DashboardStateMetrics = {
+        backlogMin: Number(prod.backlogMin) || 0,
+        backlogDays: Number(prod.backlogDays) || 0,
+        backlogByDept: Array.isArray(prod.backlogByDept)
+          ? (prod.backlogByDept as unknown[])
+          : [],
+        backlogGrandMin: Number(prod.backlogGrandMin) || 0,
+        activeJobs: {
+          bedframeUnits: Number(aj.bedframeUnits) || 0,
+          sofaSets: Number(aj.sofaSets) || 0,
+          byCustomer: Array.isArray(aj.byCustomer)
+            ? (aj.byCustomer as unknown[])
+            : [],
+        },
+        activeHeadcount: Number(emp.activeHeadcount) || 0,
+      };
+      const write = writeStateSnapshot(
+        c.var.DB,
+        orgId,
+        todayISOTop,
+        metrics,
+      ).catch((e) =>
+        console.warn("[dashboard-state-snapshot] write failed:", e),
+      );
+      if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(write);
+      else void write;
+    } catch (e) {
+      console.warn("[dashboard-state-snapshot] capture skipped:", e);
+    }
+  };
+
   // PR 1 (2026-05-20) — read-through dashboard snapshot.
   //
   // Three-layer freshness model (see src/api/lib/dashboard-snapshot.ts
@@ -69,11 +129,14 @@ app.get("/", async (c) => {
       getMaxSourceUpdatedAt(c.var.DB),
     ]);
     if (isSnapshotFresh(snap, currentMax) && snap) {
+      // Keep the daily state snapshot fresh even when the dashboard_snapshot
+      // stays valid all day (so a quiet-data day still records its row).
+      captureTodayState(snap.data);
       return c.json({ success: true, ...snap.data });
     }
   }
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v19:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v20:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1409,21 +1472,79 @@ app.get("/", async (c) => {
       dept: r.dept || "—",
       count: Number(r.n) || 0,
     }));
+    const activeHeadcount = headByDept.reduce((s, d) => s + d.count, 0);
+
+    // ---- Command Center month-awareness — state widgets ----
+    // The live values just computed (backlog / activeJobs / headcount) are
+    // a point-in-time snapshot of NOW. For a PAST month they are NOT that
+    // month's truth. If we have a captured daily snapshot covering the
+    // selected past month, serve it (truthful history, no tag). Otherwise
+    // serve the live values flagged as "live (no history)" so the operator
+    // is never misled. All-time and the current month always serve live
+    // (source=live, isHistorical=false → no tag).
+    let stateProduction = {
+      dailyCapacityMin,
+      backlogMin,
+      backlogDays,
+      activeJobs,
+      completedYesterday,
+      completedLast7,
+      capacityDays,
+      backlogByDept,
+      backlogGrandMin,
+    };
+    let stateEmployee = {
+      activeHeadcount,
+      byDept: headByDept.sort((a, b) => b.count - a.count),
+    };
+    let stateSnapshot: {
+      source: "live" | "snapshot";
+      isHistorical: boolean;
+      asOf: string | null;
+    } = { source: "live", isHistorical: false, asOf: null };
+    if (isPastMonth) {
+      const snapRow = await readStateSnapshotForMonth(db, orgId, period);
+      if (snapRow) {
+        // Truthful history available → override the state widgets from the
+        // snapshot and drop the "live" tag. Flow/sum sections (revenue,
+        // top sellers, fabric, AOV…) are already period-scoped and untouched.
+        const m = snapRow.metrics;
+        stateProduction = {
+          ...stateProduction,
+          backlogMin: Number(m.backlogMin) || 0,
+          backlogDays: Number(m.backlogDays) || 0,
+          backlogByDept: Array.isArray(m.backlogByDept)
+            ? (m.backlogByDept as typeof backlogByDept)
+            : backlogByDept,
+          backlogGrandMin: Number(m.backlogGrandMin) || 0,
+          activeJobs: {
+            bedframeUnits: Number(m.activeJobs?.bedframeUnits) || 0,
+            sofaSets: Number(m.activeJobs?.sofaSets) || 0,
+            byCustomer: Array.isArray(m.activeJobs?.byCustomer)
+              ? (m.activeJobs.byCustomer as typeof activeJobs.byCustomer)
+              : [],
+          },
+        };
+        stateEmployee = {
+          ...stateEmployee,
+          activeHeadcount: Number(m.activeHeadcount) || 0,
+        };
+        stateSnapshot = {
+          source: "snapshot",
+          isHistorical: false,
+          asOf: snapRow.snapDate,
+        };
+      } else {
+        // No snapshot for this past month → live value, clearly tagged.
+        stateSnapshot = { source: "live", isHistorical: true, asOf: null };
+      }
+    }
 
     return {
       salesThisMonthSen: thisMonthSalesSen,
       deliveredThisMonthSen: thisMonthDeliveredSen,
-      production: {
-        dailyCapacityMin,
-        backlogMin,
-        backlogDays,
-        activeJobs,
-        completedYesterday,
-        completedLast7,
-        capacityDays,
-        backlogByDept,
-        backlogGrandMin,
-      },
+      production: stateProduction,
+      stateSnapshot,
       purchasing: {
         openPOCount: Number(poOpenRes?.n) || 0,
         spendThisMonthSen: Number(poSpendRes?.v) || 0,
@@ -1453,10 +1574,7 @@ app.get("/", async (c) => {
       weeklyRevenue,
       period,
       salesMonths,
-      employee: {
-        activeHeadcount: headByDept.reduce((s, d) => s + d.count, 0),
-        byDept: headByDept.sort((a, b) => b.count - a.count),
-      },
+      employee: stateEmployee,
     };
   });
 
@@ -1481,6 +1599,15 @@ app.get("/", async (c) => {
     } catch (e) {
       console.warn("[dashboard-snapshot] write-back failed:", e);
     }
+  }
+
+  // Capture today's daily STATE snapshot (Backlog / Active Jobs / Workforce)
+  // so future past-month views can show the true figure. Only when `data`
+  // reflects LIVE state — i.e. NOT a past month (a past-month payload may
+  // carry state widgets overridden from an older snapshot, which must never
+  // be recorded as today). All-time and the current month both qualify.
+  if (!isPastMonth) {
+    captureTodayState(data as Record<string, unknown>);
   }
 
   return c.json({ success: true, ...data });

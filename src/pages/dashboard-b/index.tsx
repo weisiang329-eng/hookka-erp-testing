@@ -42,6 +42,7 @@ import {
   ArrowDownRight,
   Scissors,
   ClipboardCheck,
+  Info,
 } from "lucide-react";
 
 // ---------- API response types (mirror /dashboard) ----------
@@ -177,6 +178,15 @@ type Overview = {
     productionSen: number;
   }[];
   employee?: { activeHeadcount: number };
+  // Command Center month-awareness. Describes whether the point-in-time
+  // STATE widgets (Backlog, Active Jobs, Workforce) reflect a true
+  // historical snapshot, the current live value, or a live value shown for
+  // a past month with NO stored history (→ show a muted "live" tag).
+  stateSnapshot?: {
+    source: "live" | "snapshot";
+    isHistorical: boolean; // true → live value for a past month, no history
+    asOf: string | null; // snap_date when source === "snapshot"
+  };
 };
 type PODeliveryShape = PipelinePO & {
   salesOrderId?: string;
@@ -845,6 +855,15 @@ export default function DashboardBPage() {
   const backlogDays = prod?.backlogDays ?? 0;
   const util = Math.min(1, backlogDays / 14);
   const gaugeAccent = backlogDays > 12 ? C_RED : backlogDays > 7 ? C_PROD : C_GREEN;
+  // Month-awareness: the state widgets (Backlog / Active Jobs / Workforce)
+  // are point-in-time counts. For a past month with no captured history the
+  // backend serves the live value flagged isHistorical — show a muted tag so
+  // the figure is never mistaken for that month's true state. When the
+  // backend served a true historical snapshot (source === "snapshot"), no
+  // tag. asOf carries the snapshot's date for the "as of" note.
+  const stateLiveTag = ov.stateSnapshot?.isHistorical === true;
+  const stateAsOf =
+    ov.stateSnapshot?.source === "snapshot" ? ov.stateSnapshot?.asOf : null;
 
   const aovAll = ov.aovByCustomer ?? [];
   const topBed = ov.topSellers?.BEDFRAME ?? [];
@@ -1148,6 +1167,21 @@ export default function DashboardBPage() {
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5 flex flex-col items-center">
             <SectionTitle title="Plant Load" sub="backlog vs daily capacity" />
+            {stateLiveTag && (
+              <span
+                title="Backlog, Active Jobs and Workforce are point-in-time counts. No daily snapshot was stored for this past month, so the current live figures are shown — not that month's true state."
+                className="mt-1 inline-flex items-center gap-1 rounded-full bg-[#FBF3E2] px-2 py-0.5 text-[10px] font-medium text-[#9A7B2E]"
+              >
+                <Info className="h-3 w-3" />
+                live (no history before today)
+              </span>
+            )}
+            {stateAsOf && (
+              <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-[#EEF3EE] px-2 py-0.5 text-[10px] font-medium text-[#4B7A52]">
+                <Info className="h-3 w-3" />
+                as of {stateAsOf}
+              </span>
+            )}
             <Gauge
               value={util}
               big={`${backlogDays.toLocaleString()}d`}
@@ -2172,6 +2206,21 @@ export default function DashboardBPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">
+            {stateLiveTag && (
+              <span
+                title="Backlog is a point-in-time count. No daily snapshot was stored for this past month, so the current live figures are shown — not that month's true state."
+                className="mb-2 inline-flex items-center gap-1 rounded-full bg-[#FBF3E2] px-2 py-0.5 text-[10px] font-medium text-[#9A7B2E]"
+              >
+                <Info className="h-3 w-3" />
+                live (no history before today)
+              </span>
+            )}
+            {stateAsOf && (
+              <span className="mb-2 inline-flex items-center gap-1 rounded-full bg-[#EEF3EE] px-2 py-0.5 text-[10px] font-medium text-[#4B7A52]">
+                <Info className="h-3 w-3" />
+                as of {stateAsOf}
+              </span>
+            )}
             <SectionTitle
               title="Department Backlog"
               sub="active work vs daily capacity — bottleneck first · click a legend to toggle"

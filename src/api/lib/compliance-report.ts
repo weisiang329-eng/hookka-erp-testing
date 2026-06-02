@@ -185,8 +185,11 @@ export interface SoNoInvoiceRow {
   customerName: string;
   status: string;
   // Whole days since the SO was delivered (latest deliveredAt across its DOs).
-  // Row is only flagged once this reaches graceDays.soWithoutInvoice.
-  days: number;
+  // Once known, the row is only flagged when this reaches graceDays. When the
+  // delivered date can't be resolved (a DELIVERED SO whose DO never stamped
+  // deliveredAt — common), days is left undefined and the row is STILL flagged
+  // (we never hide an uninvoiced delivered SO just because its date is missing).
+  days?: number;
 }
 
 export interface PoNotReceivedRow {
@@ -709,17 +712,24 @@ async function checkSoNoInvoice(
 
     return sos
       .filter((s) => !invoicedSoIds.has(s.id))
-      .map((s) => ({
-        id: s.id,
-        companySOId: s.companySOId ?? "",
-        customerName: s.customerName ?? "",
-        status: s.status,
-        // Clock-start = latest deliveredAt across the SO's DOs. When none is
-        // recorded (defensive — a DELIVERED SO should have one), days = 0 and
-        // the row is suppressed unless the grace window is 0.
-        days: daysBetween(deliveredAtBySoId.get(s.id), todayYmd),
-      }))
-      .filter((s) => s.days >= graceDays);
+      .map((s) => {
+        // Clock-start = latest deliveredAt across the SO's DOs. A DELIVERED SO
+        // SHOULD have one, but in practice the deliveredAt timestamp is often
+        // left blank, so treat "unknown" as a first-class case: keep the row
+        // (days undefined → shown as "—") instead of hiding a real uninvoiced
+        // delivered SO. Only a KNOWN delivered date drives the grace filter.
+        const delivered = deliveredAtBySoId.get(s.id);
+        return {
+          id: s.id,
+          companySOId: s.companySOId ?? "",
+          customerName: s.customerName ?? "",
+          status: s.status,
+          days: isEmpty(delivered) ? undefined : daysBetween(delivered, todayYmd),
+        };
+      })
+      // Drop only rows whose delivered date is KNOWN and still inside the grace
+      // window; unknown-date rows (days === undefined) always stay flagged.
+      .filter((s) => s.days === undefined || s.days >= graceDays);
   } catch (err) {
     console.error("[compliance] soNoInvoice failed:", err);
     return [];

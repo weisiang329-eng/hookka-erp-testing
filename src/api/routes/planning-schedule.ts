@@ -301,14 +301,16 @@ function normalizeChainCard(r: ChainRawRow, dept: ChainDept): ChainCard {
   };
 }
 
-app.get("/schedule/:dept", async (c) => {
-  const slug = c.req.param("dept");
+// Reusable: load WAITING cards, run the full chain ONCE, and return the
+// snapshot-shaped output for ONE department. Shared by the GET route AND the
+// assistant's get_production_schedule tool so both see byte-identical plans.
+// Returns null for an unknown slug.
+export async function computeDeptSchedule(
+  db: D1Database,
+  slug: string,
+): Promise<ChainOutput[keyof ChainOutput] | null> {
   const which = DEPT_SLUGS[slug];
-  if (!which) {
-    return c.json({ error: `Unknown department "${slug}"` }, 404);
-  }
-  const db = c.var.DB;
-  void getOrgId(c);
+  if (!which) return null;
 
   // ── ONE batched query: every WAITING production card + order + SO dates ────
   const sql = `
@@ -384,7 +386,17 @@ app.get("/schedule/:dept", async (c) => {
     generatedAt,
   });
 
-  return c.json(out[which]);
+  return out[which];
+}
+
+app.get("/schedule/:dept", async (c) => {
+  const slug = c.req.param("dept");
+  void getOrgId(c);
+  const result = await computeDeptSchedule(c.var.DB, slug);
+  if (!result) {
+    return c.json({ error: `Unknown department "${slug}"` }, 404);
+  }
+  return c.json(result);
 });
 
 export default app;

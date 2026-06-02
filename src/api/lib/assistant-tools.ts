@@ -30,6 +30,8 @@ import {
   lookupAttachments,
   type ParsedAttachment,
 } from "./attachment-parser";
+import { computeDeptSchedule } from "../routes/planning-schedule";
+import type { Cell } from "./planning-scheduler";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -5908,6 +5910,281 @@ async function runEntityExportQuery(
 }
 
 // ---------------------------------------------------------------------------
+// Live production schedule (Planning > department day-by-day plan)
+// ---------------------------------------------------------------------------
+
+// Departments the live scheduler can plan today. Only Fabric Cutting has a
+// shipped scheduler so far (GET /api/planning/schedule/fabric-cutting); the
+// rest are listed so the tool can give a precise "not live yet" answer
+// instead of failing. Add a dept here once its endpoint ships.
+const SCHEDULE_DEPARTMENTS = [
+  "fabric-cutting",
+  "fabric-sewing",
+  "wood-cutting",
+  "framing",
+  "foam-bonding",
+  "upholstery",
+  "packing",
+  "webbing",
+] as const;
+type ScheduleDept = (typeof SCHEDULE_DEPARTMENTS)[number];
+
+/** Normalise a free-text dept ("Fab Cut", "cutting", "fabric_cutting") to a key. */
+function normalizeScheduleDept(raw: unknown): ScheduleDept | null {
+  const s = (typeof raw === "string" ? raw : "")
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .trim();
+  if (!s) return null;
+  if ((SCHEDULE_DEPARTMENTS as readonly string[]).includes(s)) {
+    return s as ScheduleDept;
+  }
+  // Friendly aliases for the only live dept.
+  if (/(^|-)(cut|cutting|fab-?cut|fabric-?cut)/.test(s)) return "fabric-cutting";
+  return null;
+}
+
+// Cut Calendar column indices (mirror calHeaders in planning-scheduler.ts).
+const CAL_COL = {
+  cutDate: 0,
+  lane: 1,
+  cutNo: 2,
+  model: 3,
+  size: 4,
+  soPo: 5,
+  customer: 6,
+  fabric: 8,
+  sets: 9,
+  customerDd: 11,
+  expectedDd: 12,
+} as const;
+
+interface ScheduledCardView {
+  cutDate: string;
+  lane: string;
+  cutNo: string;
+  model: string;
+  size: string;
+  soPo: string;
+  customer: string;
+  fabric: string;
+  sets: string;
+  customerDd: string;
+  expectedDd: string;
+}
+
+function cellStr(v: Cell | undefined): string {
+  if (v == null) return "";
+  return typeof v === "string" ? v.trim() : String(v);
+}
+
+/**
+ * Flatten the Cut Calendar sheet into one object per scheduled card, carrying
+ * down the date-band separator rows. The calendar interleaves date-separator
+ * rows (only col 0 populated, the rest blank) with item rows; item rows only
+ * repeat the band fields (lane / cut# / model / size) on the FIRST row of a
+ * batch, so we forward-fill those too.
+ */
+function flattenCutCalendar(calendar: Cell[][]): ScheduledCardView[] {
+  const out: ScheduledCardView[] = [];
+  if (calendar.length <= 1) return out;
+  let bandDate = "";
+  let lane = "";
+  let cutNo = "";
+  let model = "";
+  let size = "";
+  // Row 0 is the header — skip it.
+  for (let i = 1; i < calendar.length; i++) {
+    const row = calendar[i];
+    const soPo = cellStr(row[CAL_COL.soPo]);
+    const col0 = cellStr(row[CAL_COL.cutDate]);
+    // A date-separator row has the "YYYY-MM-DD ... (Day N)" banner in col 0
+    // and an empty SO/PO column. Capture the date, then move on.
+    if (!soPo && /^\d{4}-\d{2}-\d{2}/.test(col0)) {
+      bandDate = col0.slice(0, 10);
+      continue;
+    }
+    if (!soPo) continue; // blank/spacer row
+    const rowLane = cellStr(row[CAL_COL.lane]);
+    if (rowLane) lane = rowLane;
+    const rowCut = cellStr(row[CAL_COL.cutNo]);
+    if (rowCut) cutNo = rowCut;
+    const rowModel = cellStr(row[CAL_COL.model]);
+    if (rowModel) model = rowModel;
+    const rowSize = cellStr(row[CAL_COL.size]);
+    if (rowSize) size = rowSize;
+    out.push({
+      cutDate: bandDate,
+      lane,
+      cutNo,
+      model,
+      size,
+      soPo,
+      customer: cellStr(row[CAL_COL.customer]),
+      fabric: cellStr(row[CAL_COL.fabric]),
+      sets: cellStr(row[CAL_COL.sets]),
+      customerDd: cellStr(row[CAL_COL.customerDd]),
+      expectedDd: cellStr(row[CAL_COL.expectedDd]),
+    });
+  }
+  return out;
+}
+
+const getProductionScheduleTool: ToolDefinition = {
+  schema: {
+    name: "get_production_schedule",
+    description:
+      "Live, read-only production schedule for ONE department — the day-by-day plan of what's queued to run. Today only 'fabric-cutting' is live (the Fab Cut day-by-day cut plan, recomputed from current WAITING orders); the other departments are recognised but not yet wired and will say so. Use this to answer 'when is SO-XXXX scheduled for cutting?', 'what's loaded on cutting next week?', or 'how busy is Fab Cut'. Pass orderRef to filter to one SO/PO. The schedule plans ONLY cards still to be cut (excludes already-cut / on-hold / cancelled) and writes nothing to the ERP.",
+    input_schema: {
+      type: "object",
+      properties: {
+        department: {
+          type: "string",
+          description: `Department to schedule. One of: ${SCHEDULE_DEPARTMENTS.join(", ")}. All 8 departments return a live plan (cutting gives the richest per-card view).`,
+        },
+        orderRef: {
+          type: "string",
+          description:
+            "Optional. Filter to a single SO / PO (partial match on the 'SO / PO' column, e.g. 'SO-2605-051' or '051'). Use this for 'when is SO-XXXX scheduled'.",
+        },
+        maxRows: {
+          type: "number",
+          description:
+            "Optional cap on scheduled-card rows returned (default 60, max 100). The By-Day load summary is always returned in full.",
+        },
+      },
+      required: ["department"],
+    },
+  },
+  execute: async (c, args) => {
+    const dept = normalizeScheduleDept(args.department);
+    if (!dept) {
+      return {
+        ok: false,
+        error: `Unknown department. Valid departments: ${SCHEDULE_DEPARTMENTS.join(", ")}.`,
+      };
+    }
+    const snapshot = await computeDeptSchedule(c.var.DB, dept);
+    if (!snapshot) {
+      return {
+        ok: false,
+        error: `No live schedule available for '${dept}'.`,
+      };
+    }
+    const sheets = snapshot.sheets as Record<string, Cell[][]>;
+    const refArg = strOrNull(args.orderRef);
+    const rowCap = Math.min(
+      100,
+      Math.max(1, typeof args.maxRows === "number" ? args.maxRows : 60),
+    );
+
+    // Generic per-day load + calendar for the 7 downstream departments. The
+    // cutting dept keeps the richer card view below (flattenCutCalendar).
+    if (dept !== "fabric-cutting") {
+      const toObjects = (sheet: Cell[][]): Record<string, string>[] => {
+        const headers = (sheet[0] ?? []).map(
+          (h: Cell, i: number) => cellStr(h) || `col${i}`,
+        );
+        return sheet.slice(1).map((row: Cell[]) => {
+          const obj: Record<string, string> = {};
+          headers.forEach((h: string, idx: number) => {
+            obj[h] = cellStr(row[idx]);
+          });
+          return obj;
+        });
+      };
+      const calName = Object.keys(sheets).find((k) => /calendar$/i.test(k));
+      let cal = (calName ? toObjects(sheets[calName]) : []).filter((r) =>
+        Object.values(r).some((v) => v.trim() !== ""),
+      );
+      if (refArg) {
+        const needle = refArg.toLowerCase();
+        cal = cal.filter((r) =>
+          Object.values(r).some((v) => v.toLowerCase().includes(needle)),
+        );
+      }
+      const matched = cal.length;
+      const summaryLinesG = (sheets["Summary & Notes"] ?? [])
+        .map((row: Cell[]) => cellStr(row[0]))
+        .filter((s: string) => s.length > 0);
+      return {
+        ok: true,
+        department: snapshot.department,
+        live: true,
+        generatedAt: snapshot.generatedAt,
+        matchedRows: matched,
+        returnedRows: Math.min(matched, rowCap),
+        truncated: matched > rowCap,
+        orderRef: refArg ?? null,
+        schedule: cal.slice(0, rowCap),
+        byDayLoad: toObjects(sheets["By Day"] ?? []),
+        summary: summaryLinesG,
+        note: refArg
+          ? matched === 0
+            ? `No WAITING ${snapshot.department} cards match '${refArg}'. It may be at a different stage — check trace_order.`
+            : `Schedule rows for '${refArg}' in ${snapshot.department}. The date column is the planned day.`
+          : `Live ${snapshot.department} plan. 'By Day' shows load vs capacity per lane per day.`,
+      };
+    }
+
+    const allCards = flattenCutCalendar(sheets["Cut Calendar"]);
+
+    // Optional SO/PO filter.
+    const ref = strOrNull(args.orderRef);
+    const filtered = ref
+      ? allCards.filter((r) =>
+          r.soPo.toLowerCase().includes(ref.toLowerCase()),
+        )
+      : allCards;
+
+    const maxRows = Math.min(
+      100,
+      Math.max(1, typeof args.maxRows === "number" ? args.maxRows : 60),
+    );
+    const cards = filtered.slice(0, maxRows);
+
+    // Per-day load summary from the By Day sheet (already lane×day rows).
+    const byDay = sheets["By Day"] ?? [];
+    const byDayHeaders = (byDay[0] ?? []).map((h) => cellStr(h));
+    const byDayRows = byDay.slice(1).map((row) => {
+      const obj: Record<string, string> = {};
+      byDayHeaders.forEach((h, idx) => {
+        obj[h || `col${idx}`] = cellStr(row[idx]);
+      });
+      return obj;
+    });
+
+    // The Summary & Notes sheet's first ~3 lines + the "Resulting spans"
+    // block are the most useful prose for the model. We send the whole
+    // Summary column (it's short, single-column text) so the model can quote
+    // the span dates without re-deriving them.
+    const summaryLines = (sheets["Summary & Notes"] ?? [])
+      .map((row) => cellStr(row[0]))
+      .filter((s) => s.length > 0);
+
+    return {
+      ok: true,
+      department: "Fabric Cutting",
+      live: true,
+      generatedAt: snapshot.generatedAt,
+      totalScheduledCards: allCards.length,
+      matchedCards: filtered.length,
+      returnedCards: cards.length,
+      truncated: filtered.length > cards.length,
+      orderRef: ref ?? null,
+      cards,
+      byDayLoad: byDayRows,
+      summary: summaryLines,
+      note: ref
+        ? filtered.length === 0
+          ? `No WAITING cutting cards match '${ref}'. It may already be cut, on hold, or not a cutting job — check trace_order for its real stage.`
+          : `Showing the cutting plan for cards matching '${ref}'. 'Cut Date' is the planned day each set is cut.`
+        : "This is the live Fab Cut plan. 'Cut Date' is the planned cutting day; 'By Day' shows load vs capacity per lane per day.",
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -5988,6 +6265,8 @@ export const TOOLS: ToolDefinition[] = [
   listExportTemplatesTool,
   exportQueryToExcelTool,
   runReportTemplateTool,
+  // v1.7 — live production schedule (Planning day-by-day plan)
+  getProductionScheduleTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, ToolDefinition>(

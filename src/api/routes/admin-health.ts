@@ -391,11 +391,21 @@ app.get("/kpis-diag", async (c) => {
     AE_QUERY_TOKEN_len: (env.AE_QUERY_TOKEN || "").length,
     AE_QUERY_TOKEN_prefix: (env.AE_QUERY_TOKEN || "").slice(0, 4),
   };
-  // Run BOTH actual production queries (percentile + sparkline) so we
+  // Run the actual production queries (percentile source + sparkline) so we
   // see which one fails. Each gets full status + first chunk of body.
+  //
+  // 2026-06-02: the `pct` probe used to run `quantile(0.50)(double1)` +
+  // `countIf(...)`, which Cloudflare AE SQL rejects with 422
+  // "unknown function call: QUANTILE". That made the diag falsely report
+  // the percentile path as broken even though the real /kpis route works
+  // fine — it pulls raw `double1` and computes percentiles in JS (see the
+  // sqlPct comment in liveKpis). The probe now mirrors that supported
+  // approach: SELECT the raw double1 rows the percentile math runs over.
+  // Percentiles + longTaskCount are then derived in JS by /kpis, never in
+  // SQL — there is no QUANTILE call to fail.
   const queries: Record<string, string> = {
     smoke: "SELECT count() AS n FROM hookka_erp_metrics WHERE timestamp > NOW() - INTERVAL '1' DAY",
-    pct: `SELECT quantile(0.50)(double1) AS p50, quantile(0.75)(double1) AS p75, quantile(0.95)(double1) AS p95, countIf(double1 >= 200) AS longTaskCount FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY`,
+    pct: `SELECT double1 FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY LIMIT 1`,
     spark: `SELECT toStartOfInterval(timestamp, INTERVAL '1' HOUR) AS hour, count() AS n FROM hookka_erp_metrics WHERE blob1 = 'req' AND timestamp > NOW() - INTERVAL '1' DAY GROUP BY hour ORDER BY hour ASC`,
   };
   const liveCalls: Record<string, unknown> = {};
@@ -424,7 +434,14 @@ app.get("/kpis-diag", async (c) => {
       }
     }
   }
-  return c.json({ success: true, diag, liveCalls });
+  return c.json({
+    success: true,
+    diag,
+    liveCalls,
+    notes: {
+      pct: "Percentiles (p50/p75/p95) + longTaskCount are computed JS-side from raw double1 rows — Cloudflare AE SQL has no QUANTILE function. The 'pct' probe above only checks that the raw double1 read works; a 200 there means the real /kpis percentile path is healthy.",
+    },
+  });
 });
 
 app.get("/kpis", async (c) => {

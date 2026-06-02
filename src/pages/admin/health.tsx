@@ -451,6 +451,14 @@ export default function AdminHealthPage() {
   // "Last 24 hours" copy + is the cheapest scan over AE.
   const [range, setRange] = useState<Range>("24h");
   const rangeQS = `?range=${range}`;
+  // Dismiss state for the live-data cold-load hint (Item 4). Local to the
+  // session — re-shows on a fresh page open, which is intentional since
+  // the cold-load wait happens on every fresh open.
+  const [coldHintDismissed, setColdHintDismissed] = useState(false);
+  // Client-side filter for the Module open times panel (Item 2). Lets the
+  // operator find ANY route (e.g. "employees") even when it isn't in the
+  // top rows by P95.
+  const [moduleFilter, setModuleFilter] = useState("");
 
   const { data, loading, error } = useCachedJson<KpiPayload>(
     `/api/admin/health/kpis${rangeQS}`,
@@ -544,6 +552,19 @@ export default function AdminHealthPage() {
   const slowSql = useMemo(() => slowSqlResp?.data ?? [], [slowSqlResp]);
   const feErrors = useMemo(() => feErrorsResp?.data ?? [], [feErrorsResp]);
   const fePerf = useMemo(() => fePerfResp?.data ?? [], [fePerfResp]);
+  // Front-End perf rows re-ordered for display (Item 3). The backend
+  // already groups longtask first, but within longtask we re-sort by hit
+  // count desc so the MOST FREQUENTLY frozen pages lead — "how often did
+  // this page freeze" matters more than "how long the worst freeze was".
+  // Non-longtask metrics keep the backend's metric-then-p95 order.
+  const fePerfDisplay = useMemo(() => {
+    const longtask = fePerf
+      .filter((r) => r.metric === "longtask")
+      .slice()
+      .sort((a, b) => b.hits - a.hits || b.p95 - a.p95);
+    const rest = fePerf.filter((r) => r.metric !== "longtask");
+    return [...longtask, ...rest];
+  }, [fePerf]);
   const auditFeed = auditFeedResp?.data ?? [];
   const auditSummary = auditFeedResp?.summary ?? { byAction: [], byResource: [] };
   // Security feed defaults — all empty arrays so the panel renders its
@@ -613,10 +634,23 @@ export default function AdminHealthPage() {
   // the panel that directly answers "when I click into DO / SO /
   // Production etc, how long does it take" — exactly what Wei Siang
   // asked for.
-  const moduleOpenTimes = useMemo(
-    () => fePerf.filter((p) => p.metric === "nav").sort((a, b) => b.p95 - a.p95).slice(0, 15),
+  // Full nav list, sorted slowest-first. The panel shows the top 30 by
+  // default (raised from 15). When the operator types a filter, we match
+  // against this FULL list so a slow page that isn't in the top 30 (e.g.
+  // /employees) is still findable — the whole point of Item 2.
+  const moduleNavSorted = useMemo(
+    () => fePerf.filter((p) => p.metric === "nav").sort((a, b) => b.p95 - a.p95),
     [fePerf],
   );
+  const moduleOpenTimes = useMemo(() => {
+    const q = moduleFilter.trim().toLowerCase();
+    if (q) {
+      // Filtered: search the entire nav set, no top-N cap, so any route
+      // matching the query shows even if it's far down the P95 list.
+      return moduleNavSorted.filter((p) => p.route.toLowerCase().includes(q));
+    }
+    return moduleNavSorted.slice(0, 30);
+  }, [moduleNavSorted, moduleFilter]);
 
   // Auto-computed health summary — single colored banner so the
   // operator's first-glance answer is "is the system OK right now".
@@ -702,6 +736,29 @@ export default function AdminHealthPage() {
           either missing or the SQL token isn't wired. The numbers below are
           deterministic mocks so the dashboard can be reviewed end-to-end.
           See <code>docs/OBSERVABILITY.md</code> for the remaining setup.
+        </div>
+      )}
+
+      {/* Cold-load hint — only when live (_source === "ae"). The page
+          fires ~14 analytics queries on open, each a 1-2s AE scan, and
+          the browser caps parallel requests at ~6, so the first open
+          feels slow. This note tells the operator that wait is expected,
+          not a bug, and that repeat opens within a minute are served
+          from the 60s edge cache. Dismissible so it doesn't nag. */}
+      {kpis?._source === "ae" && !coldHintDismissed && (
+        <div className="rounded-md border border-[#D9E3EC] bg-[#F2F6FA] p-3 text-sm text-[#33526B] flex items-start gap-3">
+          <div className="flex-1">
+            <strong>Live data.</strong> First load runs ~14 analytics queries
+            and can take a few seconds. Repeat opens within a minute are
+            cached and return instantly.
+          </div>
+          <button
+            type="button"
+            onClick={() => setColdHintDismissed(true)}
+            className="shrink-0 text-[11px] text-[#5A7894] hover:text-[#33526B] underline"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -796,9 +853,37 @@ export default function AdminHealthPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {/* Filter input (Item 2). Type a route fragment (e.g.
+                  "employees") to surface its row even when it isn't in
+                  the top 30 by P95. Empty = default top-30 view. */}
+              <div className="mb-2 flex items-center gap-2">
+                <input
+                  type="text"
+                  value={moduleFilter}
+                  onChange={(e) => setModuleFilter(e.target.value)}
+                  placeholder="Filter routes (e.g. employees)…"
+                  className="w-full max-w-xs rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-xs text-[#1F1D1B] placeholder:text-[#B5AFA9] focus:outline-none focus:ring-1 focus:ring-[#C9C2BB]"
+                />
+                {moduleFilter.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setModuleFilter("")}
+                    className="text-[11px] text-[#8B8580] underline hover:text-[#5A5550]"
+                  >
+                    Clear
+                  </button>
+                )}
+                <span className="text-[10px] text-[#8B8580] whitespace-nowrap">
+                  {moduleFilter.trim()
+                    ? `${moduleOpenTimes.length} match${moduleOpenTimes.length === 1 ? "" : "es"}`
+                    : `top ${moduleOpenTimes.length} of ${moduleNavSorted.length}`}
+                </span>
+              </div>
               {moduleOpenTimes.length === 0 ? (
                 <p className="text-xs text-[#8B8580]">
-                  No nav timing yet — RUM auto-records every initial page load + SPA route change. Give it a few visits after deploy.
+                  {moduleFilter.trim()
+                    ? "No route matches that filter in this window."
+                    : "No nav timing yet — RUM auto-records every initial page load + SPA route change. Give it a few visits after deploy."}
                 </p>
               ) : (
                 <table className="w-full text-xs">
@@ -1133,12 +1218,18 @@ export default function AdminHealthPage() {
                           <th className="py-1.5 font-medium">Metric</th>
                           <th className="py-1.5 font-medium">Route</th>
                           <th className="py-1.5 font-medium text-right">Hits</th>
+                          <th
+                            className="py-1.5 font-medium text-right"
+                            title="How often this page froze the UI (longtask samples). Higher = froze more often."
+                          >
+                            Freezes
+                          </th>
                           <th className="py-1.5 font-medium text-right">P50</th>
                           <th className="py-1.5 font-medium text-right">P95</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {fePerf.map((r, i) => (
+                        {fePerfDisplay.map((r, i) => (
                           <tr key={i} className="border-b border-[#F5F2EE] align-top">
                             <td className="py-1.5 text-[#5A5550]" title={FE_METRIC_HINT[r.metric] ?? ''}>
                               <div className="font-mono text-[11px] text-[#1F1D1B]">{r.metric}</div>
@@ -1146,6 +1237,18 @@ export default function AdminHealthPage() {
                             </td>
                             <td className="py-1.5 font-mono text-[11px] text-[#1F1D1B] truncate max-w-[180px]" title={r.route}>{r.route}</td>
                             <td className="py-1.5 text-right text-[#5A5550]">{r.hits}</td>
+                            {/* Freezes column (Item 3): for longtask rows
+                                the hit count IS the freeze count. Other
+                                metrics aren't freezes, so show a dash. */}
+                            <td className="py-1.5 text-right">
+                              {r.metric === "longtask" ? (
+                                <span className={`font-semibold ${r.hits >= 100 ? "text-[#9A3A2D]" : r.hits >= 25 ? "text-[#9C6F1E]" : "text-[#5A5550]"}`}>
+                                  {r.hits}
+                                </span>
+                              ) : (
+                                <span className="text-[#B5AFA9]">—</span>
+                              )}
+                            </td>
                             <td className="py-1.5 text-right text-[#5A5550]">{r.p50}ms</td>
                             <td className={`py-1.5 text-right font-semibold ${r.p95 >= 2500 ? 'text-[#9A3A2D]' : r.p95 >= 1000 ? 'text-[#9C6F1E]' : 'text-[#4F7C3A]'}`}>{r.p95}ms</td>
                           </tr>

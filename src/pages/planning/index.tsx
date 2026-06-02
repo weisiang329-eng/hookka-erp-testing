@@ -141,6 +141,17 @@ const DEPARTMENTS = [
   { id: "dept-8", code: "PACKING", name: "Packing", shortName: "Packing", color: "#06B6D4" },
 ];
 
+// Department code → drill-in route. A department appears as a clickable name
+// on Capacity Overview + Capacity Loading only when it has a built schedule
+// page; depts not in this map (Foam, Webbing, Upholstery, Packing) stay plain
+// text. Keeps the click affordance in one place instead of four if-branches.
+const DEPT_DRILL_ROUTE: Record<string, string> = {
+  FAB_CUT: "/planning/dept/fabric-cutting",
+  FAB_SEW: "/planning/dept/fabric-sewing",
+  WOOD_CUT: "/planning/dept/wood-cutting",
+  FRAMING: "/planning/dept/framing",
+};
+
 // HOURS_PER_DAY: fallback for workers whose workingHoursPerDay is
 // missing. Surfaced as "Hours/day" on each dept card.
 //
@@ -1854,15 +1865,16 @@ export default function PlanningPage() {
                         className="w-2.5 h-2.5 rounded-full inline-block"
                         style={{ backgroundColor: dept.color }}
                       />
-                      {/* Phase 1: only Fabric Cutting opens a department
-                          drill-in page. Other depts stay plain text until
-                          their own detail pages are built. */}
-                      {dept.code === "FAB_CUT" ? (
+                      {/* Departments with a built schedule page open a
+                          drill-in (Fab Cut / Fab Sew / Wood Cut / Framing);
+                          the rest stay plain text. Route lookup keeps all
+                          four affordances identical. */}
+                      {DEPT_DRILL_ROUTE[dept.code] ? (
                         <button
                           type="button"
-                          onClick={() => navigate("/planning/dept/fabric-cutting")}
+                          onClick={() => navigate(DEPT_DRILL_ROUTE[dept.code])}
                           className="inline-flex items-center gap-1 font-semibold text-[#6B5C32] hover:text-[#574B28] hover:underline underline-offset-2 transition-colors"
-                          title="Open the Fabric Cutting department schedule"
+                          title={`Open the ${dept.name} department schedule`}
                         >
                           {dept.name}
                           <ChevronRight className="h-3.5 w-3.5" />
@@ -2207,15 +2219,16 @@ export default function PlanningPage() {
                   <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
-                      {/* Phase 1: only Fabric Cutting opens a department
-                          drill-in page. Other depts stay plain text until
-                          their own detail pages are built. */}
-                      {dept.deptCode === "FAB_CUT" ? (
+                      {/* Departments with a built schedule page open a
+                          drill-in (Fab Cut / Fab Sew / Wood Cut / Framing);
+                          the rest stay plain text. Route lookup keeps all
+                          four affordances identical. */}
+                      {DEPT_DRILL_ROUTE[dept.deptCode] ? (
                         <button
                           type="button"
-                          onClick={() => navigate("/planning/dept/fabric-cutting")}
+                          onClick={() => navigate(DEPT_DRILL_ROUTE[dept.deptCode])}
                           className="inline-flex items-center gap-1 font-semibold text-[#6B5C32] hover:text-[#574B28] hover:underline underline-offset-2 transition-colors"
-                          title="Open the Fabric Cutting department schedule"
+                          title={`Open the ${dept.deptName} department schedule`}
                         >
                           {dept.deptName}
                           <ChevronRight className="h-3.5 w-3.5" />

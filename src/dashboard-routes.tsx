@@ -101,9 +101,13 @@ const CashFlow = lazy(() => import('./pages/accounting/cash-flow'))
 // Planning
 const Planning = lazy(() => import('./pages/planning'))
 const MRP = lazy(() => import('./pages/planning/mrp'))
-// Planning > department drill-in pages. Phase 1 = Fabric Cutting only
-// (reached by clicking the "Fabric Cutting" card on Capacity Loading).
+// Planning > department drill-in pages — one per production department,
+// reached by clicking a department name on Capacity Overview / Capacity
+// Loading. All four render the shared _DepartmentSchedulePage component.
 const PlanningFabricCutting = lazy(() => import('./pages/planning/dept/fabric-cutting'))
+const PlanningFabricSewing = lazy(() => import('./pages/planning/dept/fabric-sewing'))
+const PlanningWoodCutting = lazy(() => import('./pages/planning/dept/wood-cutting'))
+const PlanningFraming = lazy(() => import('./pages/planning/dept/framing'))
 
 // Quality
 const Quality = lazy(() => import('./pages/quality'))
@@ -366,6 +370,9 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/planning', element: <S><Planning /></S> },
   { path: '/planning/mrp', element: <S><MRP /></S> },
   { path: '/planning/dept/fabric-cutting', element: <S><PlanningFabricCutting /></S> },
+  { path: '/planning/dept/fabric-sewing', element: <S><PlanningFabricSewing /></S> },
+  { path: '/planning/dept/wood-cutting', element: <S><PlanningWoodCutting /></S> },
+  { path: '/planning/dept/framing', element: <S><PlanningFraming /></S> },
 
   // Quality
   { path: '/quality', element: <S><Quality /></S> },
@@ -483,6 +490,9 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/planning': () => import('./pages/planning'),
   '/planning/mrp': () => import('./pages/planning/mrp'),
   '/planning/dept/fabric-cutting': () => import('./pages/planning/dept/fabric-cutting'),
+  '/planning/dept/fabric-sewing': () => import('./pages/planning/dept/fabric-sewing'),
+  '/planning/dept/wood-cutting': () => import('./pages/planning/dept/wood-cutting'),
+  '/planning/dept/framing': () => import('./pages/planning/dept/framing'),
   '/products': () => import('./pages/products'),
   '/cnc-templates': () => import('./pages/cnc-templates'),
   '/bom': () => import('./pages/bom'),

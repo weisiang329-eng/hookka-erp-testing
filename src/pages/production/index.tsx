@@ -18,6 +18,8 @@ import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
 import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
 import { workerCoversDept } from "@/lib/worker";
+import { fetchVariantsConfig } from "@/lib/kv-config";
+import { legPacksSeparately, type LegHeightOption } from "@/lib/leg-packing";
 
 // Build headers for mutating fetches. The default Hookka fetcher (fetchJson)
 // auto-injects X-CSRF-Token, but Phase 2.5's sendOneDraft / flushDrafts go
@@ -3486,15 +3488,35 @@ export default function ProductionPage({
         }
       }),
     );
-    // Sofa legs <= 1" sit inside the compartment box (no separate pack).
-    // Anything taller (>= 2") gets its own pack, PHYSICALLY placed
-    // inside Compartment 1 of the SO and labelled with a 2-in-1 sticker
-    // shared with Compartment 1. Wei Siang 2026-05-14 clarification:
-    // the合成 (composite) logic is REQUIRED — the leg should not
-    // print as its own physical sticker, but it also shouldn't
-    // disappear. It goes ON the Compartment 1 sticker as a paired
-    // secondary section (legsPair → comboPairKey machinery below).
-    const LEG_PACK_THRESHOLD_INCHES = 1;
+    // Whether a leg gets its own pack is now driven by the per-leg-height
+    // "Pack leg separately" flag set once in the Product Catalog
+    // (Maintenance > Leg Heights). When ticked, the leg gets its own pack,
+    // PHYSICALLY placed inside Compartment 1 of the SO and labelled with a
+    // 2-in-1 sticker shared with Compartment 1 (the composite logic below):
+    // the leg never prints as its own physical sticker, but it still counts
+    // as its own piece in the X/N count via the comboPairKey machinery.
+    // Legacy fallback: if a leg height has no explicit flag (or no catalog
+    // row), the old "leg taller than 1 inch packs separately" rule applies,
+    // so pre-existing orders are unchanged. Sofa legs use sofaLegHeights;
+    // bedframe / divan legs use legHeights.
+    // Sofa leg-height catalog. The bedframe/divan path does not (today)
+    // build a separate leg box on the FG sticker, so only the sofa list is
+    // needed to drive hasLegs. The "Pack leg separately" checkbox is still
+    // exposed for divan legs in the catalog (legHeights) for the owner to
+    // set, but wiring a divan-leg box onto the bedframe sticker is a
+    // follow-up — flagged in the build report.
+    let legHeightOptions: LegHeightOption[] = [];
+    try {
+      const vc = await fetchVariantsConfig();
+      legHeightOptions = Array.isArray(vc?.sofaLegHeights)
+        ? (vc!.sofaLegHeights.filter(
+            (o) => o && typeof o === "object" && "value" in (o as object),
+          ) as LegHeightOption[])
+        : [];
+    } catch {
+      // Catalog fetch failed — legPacksSeparately falls back to the legacy
+      // height rule on an empty option list, so legs still behave sensibly.
+    }
 
     // Mirror of joinModelLabel from src/api/routes/_shared/production-builder.ts:
     // join multiple sofa productCodes into a single composite "fullcompartment"
@@ -3588,7 +3610,8 @@ export default function ProductionPage({
     // SO-level sofa pack aggregation. Sofa pack count is computed across
     // every sofa PO in the same SO (not per PO). Within a sofa SO we also:
     //   - Inject a synthetic Legs sticker as 2-in-1 with Compartment 1
-    //     when any sofa line has legs > LEG_PACK_THRESHOLD_INCHES.
+    //     when any sofa line's leg height has the catalog "Pack leg
+    //     separately" flag set (legacy fallback: leg taller than 1").
     //   - Pull the SO's pillow stickers (ACCESSORY POs whose productName
     //     contains "pillow") out of nonSofa and append them as the LAST
     //     pack — last sofa compartment becomes 2-in-1 with the pillow.
@@ -3669,8 +3692,13 @@ export default function ProductionPage({
       // page. The comboPairKey + pair-lookup below already implements
       // the 2-in-1 visual; just hasLegs needs to track real legs
       // again so the legs sticker actually gets generated.
+      //
+      // The leg now becomes its own piece when ANY sofa line in the SO
+      // carries a leg height whose catalog "Pack leg separately" flag is
+      // ticked (legPacksSeparately resolves the flag, falling back to the
+      // legacy >1" rule for un-flagged / unknown heights).
       const hasLegs = group.some(
-        (s) => (s.legHeightInches ?? 0) > LEG_PACK_THRESHOLD_INCHES,
+        (s) => legPacksSeparately(s.legHeightInches, legHeightOptions),
       );
       const rawPillows = pillowsBySo.get(soId) ?? [];
       // Group pillows by productCode so the badge shows

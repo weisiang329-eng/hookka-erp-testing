@@ -57,6 +57,7 @@ import {
   VARIANTS_CONFIG_KEY,
   type VariantsConfig,
 } from "@/lib/kv-config";
+import { legHeightPacksByDefault } from "@/lib/leg-packing";
 
 // ---------- Types matching mock-data ----------
 // Sofa fabric price tier — values mirror fabric_tracking.priceTier verbatim
@@ -714,7 +715,14 @@ type MaintenanceListKey =
   | "sofaSpecials"
   | "sofaSizes";
 
-type PricedOption = { value: string; priceSen: number };
+// `packSeparately` is OPTIONAL and only meaningful on the leg-height lists
+// (`legHeights` / `sofaLegHeights`). When TICKED the leg ships in its own box
+// and gets its own piece on the FG packing sticker; when UNTICKED it ships
+// inside the main item (no separate box). Undefined = "not set yet" — the FG
+// sticker then falls back to the legacy >1" height rule so existing configs
+// behave exactly as before. Set once per leg-height here in the catalog; it
+// applies to every order that uses that leg height.
+type PricedOption = { value: string; priceSen: number; packSeparately?: boolean };
 
 type MaintenanceConfig = {
   divanHeights: PricedOption[];
@@ -744,13 +752,16 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
     { value: '14"', priceSen: 14000 },
     { value: '16"', priceSen: 15000 },
   ],
+  // packSeparately defaults mirror the legacy FG-sticker rule (leg > 1" gets
+  // its own box) so a fresh install behaves identically to before this flag
+  // existed. The owner can override per leg height in the Maintenance tab.
   legHeights: [
-    { value: "No Leg", priceSen: 0 },
-    { value: '1"', priceSen: 0 },
-    { value: '2"', priceSen: 0 },
-    { value: '4"', priceSen: 0 },
-    { value: '6"', priceSen: 0 },
-    { value: '7"', priceSen: 16000 },
+    { value: "No Leg", priceSen: 0, packSeparately: false },
+    { value: '1"', priceSen: 0, packSeparately: false },
+    { value: '2"', priceSen: 0, packSeparately: true },
+    { value: '4"', priceSen: 0, packSeparately: true },
+    { value: '6"', priceSen: 0, packSeparately: true },
+    { value: '7"', priceSen: 16000, packSeparately: true },
   ],
   totalHeights: [
     { value: '10"', priceSen: 0 },
@@ -786,9 +797,9 @@ const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
     { value: 'Seat Add On 4"', priceSen: 0 },
   ],
   sofaLegHeights: [
-    { value: "No Leg", priceSen: 0 },
-    { value: '4"', priceSen: 0 },
-    { value: '6"', priceSen: 0 },
+    { value: "No Leg", priceSen: 0, packSeparately: false },
+    { value: '4"', priceSen: 0, packSeparately: true },
+    { value: '6"', priceSen: 0, packSeparately: true },
   ],
   sofaSpecials: [
     { value: "Nylon Fabric", priceSen: 0 },
@@ -977,6 +988,10 @@ function MaintenanceView() {
   const isFabricsTab = tab === "fabrics";
   const meta = MAINTENANCE_TABS.find((t) => t.key === tab)!;
   const isPricedTab = !isFabricsTab && (meta.priced ?? false);
+  // Leg-height tabs get an extra "Pack leg separately" checkbox per row. The
+  // flag drives whether the leg becomes its own piece on the FG packing
+  // sticker (its own box in the X/N count).
+  const isLegTab = tab === "legHeights" || tab === "sofaLegHeights";
   const currentStringList = !isFabricsTab && !isPricedTab ? (config[tab as MaintenanceListKey] as string[]) : [];
   const currentPricedList = !isFabricsTab && isPricedTab ? (config[tab as MaintenanceListKey] as PricedOption[]) : [];
 
@@ -988,7 +1003,13 @@ function MaintenanceView() {
     if (isPricedTab) {
       const list = config[k] as PricedOption[];
       if (list.some(o => o.value === v)) { setNewValue(""); return; }
-      setConfig(prev => ({ ...prev, [k]: [...(prev[k] as PricedOption[]), { value: v, priceSen: newPriceSen }] }));
+      // For new leg-height rows, seed the "pack separately" flag from the
+      // legacy >1" rule so a freshly-added height matches the old behaviour
+      // until the operator decides otherwise.
+      const newOpt: PricedOption = isLegTab
+        ? { value: v, priceSen: newPriceSen, packSeparately: legHeightPacksByDefault(v) }
+        : { value: v, priceSen: newPriceSen };
+      setConfig(prev => ({ ...prev, [k]: [...(prev[k] as PricedOption[]), newOpt] }));
     } else {
       const list = config[k] as string[];
       if (list.includes(v)) { setNewValue(""); return; }
@@ -1013,6 +1034,18 @@ function MaintenanceView() {
     setConfig(prev => ({
       ...prev,
       [k]: (prev[k] as PricedOption[]).map((o, i) => i === idx ? { ...o, priceSen } : o),
+    }));
+  }
+
+  // Toggle the "Pack leg separately" flag on a leg-height row. Only the leg
+  // tabs (legHeights / sofaLegHeights) surface the checkbox, but the writer is
+  // generic — it just stamps the boolean onto the PricedOption at idx.
+  function updatePackSeparately(idx: number, packSeparately: boolean) {
+    if (isFabricsTab || !editMode) return;
+    const k = tab as MaintenanceListKey;
+    setConfig(prev => ({
+      ...prev,
+      [k]: (prev[k] as PricedOption[]).map((o, i) => i === idx ? { ...o, packSeparately } : o),
     }));
   }
 
@@ -1431,6 +1464,29 @@ function MaintenanceView() {
                           )}
                         </div>
                         <div className="flex items-center gap-3 flex-shrink-0">
+                          {/* Pack leg separately — leg-height tabs only. When
+                              ticked the leg ships in its own box and shows as
+                              its own piece on the FG packing sticker. */}
+                          {isLegTab && (
+                            editMode ? (
+                              <label className="flex items-center gap-1.5 text-xs text-[#374151] cursor-pointer select-none whitespace-nowrap">
+                                <input
+                                  type="checkbox"
+                                  checked={entry.packSeparately ?? false}
+                                  onChange={(e) => updatePackSeparately(idx, e.target.checked)}
+                                  className="w-3.5 h-3.5 accent-[#6B5C32] cursor-pointer"
+                                />
+                                Pack leg separately
+                              </label>
+                            ) : (
+                              <span
+                                className={`text-xs whitespace-nowrap ${entry.packSeparately ? "text-[#6B5C32] font-medium" : "text-gray-400"}`}
+                                title="Whether this leg ships in its own box on the FG packing sticker"
+                              >
+                                {entry.packSeparately ? "Separate box" : "Packed with item"}
+                              </span>
+                            )
+                          )}
                           <div className="flex items-center gap-1">
                             <span className="text-xs text-gray-400">RM</span>
                             {editMode ? (

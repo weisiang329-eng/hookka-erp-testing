@@ -101,6 +101,9 @@ const CashFlow = lazy(() => import('./pages/accounting/cash-flow'))
 // Planning
 const Planning = lazy(() => import('./pages/planning'))
 const MRP = lazy(() => import('./pages/planning/mrp'))
+// Planning > department drill-in pages. Phase 1 = Fabric Cutting only
+// (reached by clicking the "Fabric Cutting" card on Capacity Loading).
+const PlanningFabricCutting = lazy(() => import('./pages/planning/dept/fabric-cutting'))
 
 // Quality
 const Quality = lazy(() => import('./pages/quality'))
@@ -358,8 +361,11 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   },
 
   // Planning
+  // Literal child paths (mrp, dept/*) come before any future /planning/:id
+  // wildcard so the matcher resolves them first.
   { path: '/planning', element: <S><Planning /></S> },
   { path: '/planning/mrp', element: <S><MRP /></S> },
+  { path: '/planning/dept/fabric-cutting', element: <S><PlanningFabricCutting /></S> },
 
   // Quality
   { path: '/quality', element: <S><Quality /></S> },
@@ -476,6 +482,7 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/production/folders': () => import('./pages/production/folders'),
   '/planning': () => import('./pages/planning'),
   '/planning/mrp': () => import('./pages/planning/mrp'),
+  '/planning/dept/fabric-cutting': () => import('./pages/planning/dept/fabric-cutting'),
   '/products': () => import('./pages/products'),
   '/cnc-templates': () => import('./pages/cnc-templates'),
   '/bom': () => import('./pages/bom'),

@@ -2192,7 +2192,22 @@ export default function PlanningPage() {
                   <CardTitle className="text-sm flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: dept.color }} />
-                      {dept.deptName}
+                      {/* Phase 1: only Fabric Cutting opens a department
+                          drill-in page. Other depts stay plain text until
+                          their own detail pages are built. */}
+                      {dept.deptCode === "FAB_CUT" ? (
+                        <button
+                          type="button"
+                          onClick={() => navigate("/planning/dept/fabric-cutting")}
+                          className="inline-flex items-center gap-1 font-semibold text-[#6B5C32] hover:text-[#574B28] hover:underline underline-offset-2 transition-colors"
+                          title="Open the Fabric Cutting department schedule"
+                        >
+                          {dept.deptName}
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </button>
+                      ) : (
+                        dept.deptName
+                      )}
                     </div>
                     <div className="flex items-center gap-4 text-xs font-normal text-[#6B7280]">
                       <span className="flex items-center gap-1">

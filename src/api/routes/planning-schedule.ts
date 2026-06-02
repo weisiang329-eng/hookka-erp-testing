@@ -1,12 +1,19 @@
 // ---------------------------------------------------------------------------
-// Planning > live department schedule (Phase 1: Fabric Cutting only).
+// Planning > live department schedule (Phase 2: all 8 production departments).
 //
-// GET /api/planning/schedule/fabric-cutting
+// GET /api/planning/schedule/fabric-cutting  (Phase 1, retained)
 //   Batched-loads every WAITING FAB_CUT job card whose order is not
 //   ON_HOLD / CANCELLED, normalizes each into a CutCard, loads the capacity
 //   config (kv_config['planning_capacity'] over defaults), runs the pure
 //   scheduleCutting() port, and returns the snapshot-shaped JSON the existing
 //   Fabric Cutting page renderer already consumes.
+//
+// GET /api/planning/schedule/:dept  (Phase 2)
+//   For dept in {fabric-cutting, fabric-sewing, wood-cutting, framing,
+//   foam-bonding, upholstery, packing, webbing}. ONE batched load of all
+//   WAITING production cards across departments, run computeChain() ONCE, and
+//   return the requested dept's sheets. Upstream depts always run, so floors
+//   stay consistent no matter which dept is requested.
 //
 //   Read-only — nothing is written to the ERP. ONE batched query (no per-card
 //   round-trips), mirroring src/api/lib/schedule-overdue-report.ts.
@@ -18,6 +25,12 @@ import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { loadCapacityConfig, type Lane } from "../lib/planning-capacity";
 import { scheduleCutting, type CutCard } from "../lib/planning-scheduler";
+import {
+  computeChain,
+  type ChainCard,
+  type ChainDept,
+  type ChainOutput,
+} from "../lib/planning-chain";
 
 const app = new Hono<Env>();
 
@@ -132,43 +145,7 @@ app.get("/schedule/fabric-cutting", async (c) => {
   }
 
   const config = await loadCapacityConfig(db);
-
-  // Calendar START = today's next working day. is_offday = Sunday OR holiday.
-  const holidaySet = new Set<string>();
-  {
-    const hrow = await db
-      .prepare("SELECT value FROM kv_config WHERE key = ?")
-      .bind("public_holidays")
-      .first<{ value: string }>();
-    if (hrow?.value) {
-      try {
-        const arr = JSON.parse(hrow.value);
-        if (Array.isArray(arr)) {
-          for (const d of arr) {
-            if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) holidaySet.add(d);
-          }
-        }
-      } catch {
-        // Malformed list → Sundays-only.
-      }
-    }
-  }
-  const holidays = [...holidaySet];
-
-  // START = tomorrow's first working day (skip Sundays + holidays). The
-  // scheduler itself re-applies next_workday, but we advance once here so the
-  // start date is the real first cutting day.
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() + 1);
-  const isOff = (d: Date): boolean => d.getDay() === 0 || holidaySet.has(fmtLocalIso(d));
-  let guard = 0;
-  while (isOff(start) && guard < 60) {
-    start.setDate(start.getDate() + 1);
-    guard++;
-  }
-  const startDate = fmtLocalIso(start);
-  const generatedAt = fmtLocalIso(new Date());
+  const { holidays, startDate, generatedAt } = await loadCalendarWindow(db);
 
   const snapshot = scheduleCutting({
     cards,
@@ -179,6 +156,235 @@ app.get("/schedule/fabric-cutting", async (c) => {
   });
 
   return c.json(snapshot);
+});
+
+// ── Shared calendar window (holidays + first working day + generatedAt) ──────
+async function loadCalendarWindow(
+  db: D1Database,
+): Promise<{ holidays: string[]; startDate: string; generatedAt: string }> {
+  const holidaySet = new Set<string>();
+  const hrow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string }>();
+  if (hrow?.value) {
+    try {
+      const arr = JSON.parse(hrow.value);
+      if (Array.isArray(arr)) {
+        for (const d of arr) {
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) holidaySet.add(d);
+        }
+      }
+    } catch {
+      // Malformed list → Sundays-only.
+    }
+  }
+  const holidays = [...holidaySet];
+
+  // START = tomorrow's first working day (skip Sundays + holidays). The
+  // scheduler re-applies next_workday; we advance once so it's the real start.
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() + 1);
+  const isOff = (d: Date): boolean => d.getDay() === 0 || holidaySet.has(fmtLocalIso(d));
+  let guard = 0;
+  while (isOff(start) && guard < 60) {
+    start.setDate(start.getDate() + 1);
+    guard++;
+  }
+  return {
+    holidays,
+    startDate: fmtLocalIso(start),
+    generatedAt: fmtLocalIso(new Date()),
+  };
+}
+
+// ── Phase 2: all-department live schedule ────────────────────────────────────
+// URL slug → which dept's snapshot computeChain output to return.
+const DEPT_SLUGS: Record<string, keyof ChainOutput> = {
+  "fabric-cutting": "cutting",
+  "fabric-sewing": "sewing",
+  "wood-cutting": "woodCutting",
+  framing: "framing",
+  "foam-bonding": "foamBonding",
+  upholstery: "upholstery",
+  packing: "packing",
+  webbing: "webbing",
+};
+
+// job_cards.departmentCode → which ChainDept (downstream chain) a card feeds.
+const DEPT_CODE_TO_CHAIN: Record<string, ChainDept> = {
+  FAB_SEW: "FAB_SEW",
+  WOOD_CUT: "WOOD_CUT",
+  FRAMING: "FRAMING",
+  WEBBING: "WEBBING",
+  FOAM: "FOAM",
+  UPHOLSTERY: "UPHOLSTERY",
+  PACKING: "PACKING",
+};
+
+interface ChainRawRow {
+  departmentCode: string | null;
+  status: string | null;
+  wipLabel: string | null;
+  wipCode: string | null;
+  wipType: string | null;
+  wipQty: number | null;
+  category: string | null;
+  productionTimeMinutes: number | null;
+  estMinutes: number | null;
+  sequence: number | null;
+  poId: string;
+  companySOId: string | null;
+  poNo: string | null;
+  lineNo: number | null;
+  itemCategory: string | null;
+  sizeLabel: string | null;
+  fabricCode: string | null;
+  productCode: string | null;
+  customerName: string | null;
+  orderStatus: string | null;
+  salesOrderId: string | null;
+  customerDeliveryDate: string | null;
+  hookkaExpectedDD: string | null;
+}
+
+/** "SO / PO" display id for a chain row (companySOId + zero-padded line). */
+function soPoOfChain(r: ChainRawRow): string {
+  const so = (r.companySOId ?? "").trim();
+  if (so) {
+    const line = r.lineNo != null ? `-${String(r.lineNo).padStart(2, "0")}` : "";
+    return `${so}${line}`;
+  }
+  return (r.poNo ?? r.poId).trim();
+}
+
+function laneOf(r: ChainRawRow): Lane | null {
+  const cat = (r.category ?? r.itemCategory ?? "").toUpperCase();
+  if (cat === "BEDFRAME" || cat === "SOFA" || cat === "ACCESSORY") return cat as Lane;
+  return null;
+}
+
+/** Model = the product code, falling back to the wipLabel's first segment. */
+function modelOf(r: ChainRawRow): string {
+  const pc = (r.productCode ?? "").trim();
+  if (pc) return pc;
+  const wl = (r.wipLabel ?? "").trim();
+  return wl ? wl.split("|")[0].trim() : "";
+}
+
+function normalizeChainCard(r: ChainRawRow, dept: ChainDept): ChainCard {
+  const lane = (laneOf(r) ?? "ACCESSORY") as Lane;
+  const qty = Math.max(1, r.wipQty ?? 1);
+  const perUnit = r.productionTimeMinutes ?? 0;
+  const mins = perUnit > 0 ? perUnit * qty : r.estMinutes ?? 0;
+  return {
+    dept,
+    soPo: soPoOfChain(r),
+    soId: (r.companySOId ?? r.salesOrderId ?? "").trim(),
+    customer: r.customerName ?? "",
+    label: r.wipLabel ?? r.wipCode ?? "",
+    fabric: r.fabricCode ?? "",
+    lane,
+    model: modelOf(r),
+    size: (r.sizeLabel ?? "").trim(),
+    sets: qty,
+    mins,
+    customerDd: (r.customerDeliveryDate ?? "").slice(0, 10) || null,
+    expectedDd: (r.hookkaExpectedDD ?? "").slice(0, 10) || null,
+    wipType: (r.wipType ?? "").toUpperCase(),
+    // Cut state is resolved within the chain by the cutting plan; a downstream
+    // card with no fabric-cut step is treated as ready (sewing floor = day 1
+    // when the line never appears in the cutting plan).
+    cutDone: false,
+    noCutStep: false,
+  };
+}
+
+app.get("/schedule/:dept", async (c) => {
+  const slug = c.req.param("dept");
+  const which = DEPT_SLUGS[slug];
+  if (!which) {
+    return c.json({ error: `Unknown department "${slug}"` }, 404);
+  }
+  const db = c.var.DB;
+  void getOrgId(c);
+
+  // ── ONE batched query: every WAITING production card + order + SO dates ────
+  const sql = `
+    SELECT jc.departmentCode AS departmentCode,
+           jc.status         AS status,
+           jc.wipLabel       AS wipLabel,
+           jc.wipCode        AS wipCode,
+           jc.wipType        AS wipType,
+           jc.wipQty         AS wipQty,
+           jc.category       AS category,
+           jc.productionTimeMinutes AS productionTimeMinutes,
+           jc.estMinutes     AS estMinutes,
+           jc.sequence       AS sequence,
+           po.id             AS poId,
+           po.companySOId    AS companySOId,
+           po.poNo           AS poNo,
+           po.lineNo         AS lineNo,
+           po.itemCategory   AS itemCategory,
+           po.sizeLabel      AS sizeLabel,
+           po.fabricCode     AS fabricCode,
+           po.productCode    AS productCode,
+           po.customerName   AS customerName,
+           po.status         AS orderStatus,
+           po.salesOrderId   AS salesOrderId,
+           so.customerDeliveryDate AS customerDeliveryDate,
+           so.hookkaExpectedDD     AS hookkaExpectedDD
+      FROM job_cards jc
+      JOIN production_orders po ON po.id = jc.productionOrderId
+      LEFT JOIN sales_orders so ON so.id = po.salesOrderId
+     WHERE jc.status = 'WAITING'
+     ORDER BY po.companySOId, jc.sequence`;
+  const res = await db.prepare(sql).all<ChainRawRow>();
+  const raw = res.results ?? [];
+
+  const cutCards: CutCard[] = [];
+  const chainCards: ChainCard[] = [];
+  for (const r of raw) {
+    if (EXCLUDED_ORDER_STATUSES.has((r.orderStatus ?? "").toUpperCase())) continue;
+    const code = (r.departmentCode ?? "").toUpperCase();
+    if (code === FAB_CUT) {
+      const lane = laneOf(r);
+      if (lane) {
+        cutCards.push({
+          soPo: soPoOfChain(r),
+          customer: r.customerName ?? "",
+          label: r.wipLabel ?? "",
+          fabric: r.fabricCode ?? "",
+          lane,
+          config: (r.wipLabel ?? "").trim().split("|")[0].trim() || "(none)",
+          size: (r.sizeLabel ?? "").trim(),
+          sets: Math.max(1, r.wipQty ?? 1),
+          customerDd: (r.customerDeliveryDate ?? "").slice(0, 10) || null,
+          expectedDd: (r.hookkaExpectedDD ?? "").slice(0, 10) || null,
+        });
+      }
+      continue;
+    }
+    const chainDept = DEPT_CODE_TO_CHAIN[code];
+    if (!chainDept) continue;
+    if (!laneOf(r)) continue;
+    chainCards.push(normalizeChainCard(r, chainDept));
+  }
+
+  const config = await loadCapacityConfig(db);
+  const { holidays, startDate, generatedAt } = await loadCalendarWindow(db);
+
+  const out = computeChain({
+    cutCards,
+    chainCards,
+    config,
+    holidays,
+    startDate,
+    generatedAt,
+  });
+
+  return c.json(out[which]);
 });
 
 export default app;

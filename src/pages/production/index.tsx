@@ -1255,7 +1255,7 @@ export default function ProductionPage({
   // patch endpoint or the production-folders endpoint. Per Wei Siang's
   // 2026-05-12 ask: multi-select rows → batch Apply Date / Apply PIC /
   // Save into a Folder so paper-schedule sheets are easy to find again.
-  type DeptRowLite = { id: string; poId: string; jobCardId: string; prodTime: number };
+  type DeptRowLite = { id: string; poId: string; jobCardId: string; prodTime: number; soId: string };
   const [selectedDeptRows, setSelectedDeptRows] = useState<DeptRowLite[]>([]);
   const [batchDateOpen, setBatchDateOpen] = useState(false);
   const [batchDueDateOpen, setBatchDueDateOpen] = useState(false);
@@ -3893,10 +3893,17 @@ export default function ProductionPage({
     const q = (fltSearch || "").trim().toLowerCase();
     const gridRows =
       (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
+    // Scope source 0 (highest priority): ticked job-card rows. When the
+    // operator has selected rows, pack exactly those SOs — they don't need
+    // to narrow the whole Foam sheet to ≤10 SOs first (Wei Siang 2026-06-02).
+    const selSoIds = new Set(
+      selectedDeptRows.map((r) => r.soId).filter(Boolean),
+    );
+    const hasSelectionScope = selSoIds.size > 0;
     const hasGridScope =
       gridRows !== null && gridRows.length > 0 && gridRows.length < deptRows.length;
-    if (!q && !hasGridScope) {
-      toast.info("Filter the Foam grid first — either type in the top Search box or narrow a column below.");
+    if (!q && !hasSelectionScope && !hasGridScope) {
+      toast.info("Tick the Foam rows you want to pack, type an SO in the top Search box, or narrow a column below.");
       return [];
     }
     setLoadingFoamPrint(true);
@@ -3914,7 +3921,11 @@ export default function ProductionPage({
         return [];
       }
       let scoped: ProductionOrder[];
-      if (q) {
+      if (hasSelectionScope) {
+        scoped = all.filter((o) =>
+          selSoIds.has(o.salesOrderId || o.consignmentOrderId || ""),
+        );
+      } else if (q) {
         scoped = all.filter((o) => {
           const hay = [
             o.poNo, o.companySOId, o.customerPOId, o.customerReference,
@@ -3935,9 +3946,11 @@ export default function ProductionPage({
       }
       if (scoped.length === 0) {
         toast.warning(
-          q
-            ? `No production orders matched "${fltSearch}".`
-            : "Could not match the visible Foam rows to any production orders.",
+          hasSelectionScope
+            ? "Could not match the ticked rows to any production orders."
+            : q
+              ? `No production orders matched "${fltSearch}".`
+              : "Could not match the visible Foam rows to any production orders.",
         );
         return [];
       }
@@ -3955,7 +3968,7 @@ export default function ProductionPage({
     } finally {
       setLoadingFoamPrint(false);
     }
-  }, [fltSearch, toast, fetchFgStickersForOrders, gridFilteredDeptRows, deptRows]);
+  }, [fltSearch, toast, fetchFgStickersForOrders, gridFilteredDeptRows, deptRows, selectedDeptRows]);
 
   // Preview toggle — loads (fresh, so a changed grid filter is honoured)
   // and reveals the on-screen tile strip under the QR Stickers panel.
@@ -5535,6 +5548,9 @@ export default function ProductionPage({
                   poId: r.poId,
                   jobCardId: r.jobCardId,
                   prodTime: Number(r.prodTime) || 0,
+                  // SO this row belongs to — lets the Foam packing-sticker
+                  // buttons scope to the ticked rows (Wei Siang 2026-06-02).
+                  soId: r.salesOrderId || r.consignmentOrderId || "",
                 })),
               )
             }
@@ -6312,6 +6328,15 @@ export default function ProductionPage({
                   if (sid) distinctSoIds.add(sid);
                 }
               }
+              // Ticked job-card rows scope the packing stickers to just
+              // those SOs — so the operator can pick the pieces to pack
+              // instead of narrowing the whole Foam sheet (Wei Siang
+              // 2026-06-02). Takes priority over grid/search scope.
+              const selSoIds = new Set(
+                selectedDeptRows.map((r) => r.soId).filter(Boolean),
+              );
+              const hasSelectionScope =
+                selSoIds.size > 0 && selSoIds.size <= MAX_SO_FOR_PRINT;
               const gridScoped =
                 gridRows !== null &&
                 gridRows.length > 0 &&
@@ -6320,17 +6345,20 @@ export default function ProductionPage({
                 distinctSoIds.size <= MAX_SO_FOR_PRINT;
               const tooWide =
                 !hasTopSearch &&
+                !hasSelectionScope &&
                 gridRows !== null &&
                 distinctSoIds.size > MAX_SO_FOR_PRINT;
-              const scopeOK = hasTopSearch || gridScoped;
+              const scopeOK = hasTopSearch || hasSelectionScope || gridScoped;
               const enabled = scopeOK && !loadingFoamPrint && !foamPrintRequested;
-              const tooltipBase = hasTopSearch
-                ? `Packing stickers (HB / Divan / Sofa pieces) for every piece of the SO in the Search box`
-                : gridScoped
-                  ? `Packing stickers for ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid`
-                  : tooWide
-                    ? `Too many SOs (${distinctSoIds.size}) — narrow the grid to ≤ ${MAX_SO_FOR_PRINT} SOs first, or type one in the top Search box`
-                    : "Filter the Foam grid first — top Search box or a column filter below";
+              const tooltipBase = hasSelectionScope
+                ? `Packing stickers for the ${selSoIds.size} SO${selSoIds.size === 1 ? "" : "s"} in your ${selectedDeptRows.length} ticked row${selectedDeptRows.length === 1 ? "" : "s"}`
+                : hasTopSearch
+                  ? `Packing stickers (HB / Divan / Sofa pieces) for every piece of the SO in the Search box`
+                  : gridScoped
+                    ? `Packing stickers for ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid`
+                    : tooWide
+                      ? `Too many SOs (${distinctSoIds.size}) — tick the rows you want, narrow the grid to ≤ ${MAX_SO_FOR_PRINT} SOs, or type one in the top Search box`
+                      : "Tick the Foam rows you want to pack, or filter the grid — top Search box or a column filter below";
               return (
                 <>
                   <Button

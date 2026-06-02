@@ -925,6 +925,19 @@ app.post("/import", async (c) => {
     return c.json({ success: false, error: "No files were uploaded." }, 400);
   }
 
+  // Optional upload-time overrides chosen in the model picker. When present,
+  // productCode is PREFERRED over the filename-parsed code for every grouped
+  // row, and displayName overrides the auto-derived display name. Both fall
+  // back to the existing filename parse when absent.
+  const overrideProductCode = (() => {
+    const v = form.get("productCode");
+    return typeof v === "string" && v.trim() ? v.trim() : "";
+  })();
+  const overrideDisplayName = (() => {
+    const v = form.get("displayName");
+    return typeof v === "string" && v.trim() ? v.trim() : "";
+  })();
+
   // Group files by (productCode + display identity). The display identity is
   // the base filename with any trailing "dgt" word stripped, so the .dgt/.prj/
   // .emf trio that share a base collapse into one row.
@@ -942,9 +955,12 @@ app.post("/import", async (c) => {
     const kind = ext as FileKind;
     const identity = stripTrailingDgtWord(base);
     const parsed = parseTemplateName(base);
+    // Prefer the operator-chosen model over the filename-parsed code.
+    if (overrideProductCode) parsed.productCode = overrideProductCode;
     // displayName is the base verbatim (sans trailing "dgt"), so the trio
-    // shares one display name and one row.
-    const displayName = identity || base;
+    // shares one display name and one row. An explicit displayName override
+    // (from the upload form) wins when supplied.
+    const displayName = overrideDisplayName || identity || base;
     const groupKey = `${parsed.productCode}|${displayName.toLowerCase()}`;
 
     let g = groups.get(groupKey);

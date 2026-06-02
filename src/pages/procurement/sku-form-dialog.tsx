@@ -83,9 +83,13 @@ export function SKUFormDialog({
     const q = rmSearch.toLowerCase();
     return inventoryItems
       .filter(
+        // Guard against items missing a code or description — an undefined
+        // value here threw "Cannot read properties of undefined (reading
+        // 'toLowerCase')" and crashed the whole page the moment the operator
+        // typed. Matches on EITHER internal code OR internal description.
         (item) =>
-          item.itemCode.toLowerCase().includes(q) ||
-          item.description.toLowerCase().includes(q),
+          (item.itemCode || "").toLowerCase().includes(q) ||
+          (item.description || "").toLowerCase().includes(q),
       )
       .slice(0, 50);
   }, [inventoryItems, rmSearch]);

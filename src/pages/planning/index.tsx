@@ -149,7 +149,11 @@ const DEPT_DRILL_ROUTE: Record<string, string> = {
   FAB_CUT: "/planning/dept/fabric-cutting",
   FAB_SEW: "/planning/dept/fabric-sewing",
   WOOD_CUT: "/planning/dept/wood-cutting",
+  FOAM: "/planning/dept/foam-bonding",
   FRAMING: "/planning/dept/framing",
+  WEBBING: "/planning/dept/webbing",
+  UPHOLSTERY: "/planning/dept/upholstery",
+  PACKING: "/planning/dept/packing",
 };
 
 // HOURS_PER_DAY: fallback for workers whose workingHoursPerDay is

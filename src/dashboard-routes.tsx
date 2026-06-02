@@ -108,6 +108,10 @@ const PlanningFabricCutting = lazy(() => import('./pages/planning/dept/fabric-cu
 const PlanningFabricSewing = lazy(() => import('./pages/planning/dept/fabric-sewing'))
 const PlanningWoodCutting = lazy(() => import('./pages/planning/dept/wood-cutting'))
 const PlanningFraming = lazy(() => import('./pages/planning/dept/framing'))
+const PlanningFoamBonding = lazy(() => import('./pages/planning/dept/foam-bonding'))
+const PlanningUpholstery = lazy(() => import('./pages/planning/dept/upholstery'))
+const PlanningPacking = lazy(() => import('./pages/planning/dept/packing'))
+const PlanningWebbing = lazy(() => import('./pages/planning/dept/webbing'))
 
 // Quality
 const Quality = lazy(() => import('./pages/quality'))
@@ -373,6 +377,10 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/planning/dept/fabric-sewing', element: <S><PlanningFabricSewing /></S> },
   { path: '/planning/dept/wood-cutting', element: <S><PlanningWoodCutting /></S> },
   { path: '/planning/dept/framing', element: <S><PlanningFraming /></S> },
+  { path: '/planning/dept/foam-bonding', element: <S><PlanningFoamBonding /></S> },
+  { path: '/planning/dept/upholstery', element: <S><PlanningUpholstery /></S> },
+  { path: '/planning/dept/packing', element: <S><PlanningPacking /></S> },
+  { path: '/planning/dept/webbing', element: <S><PlanningWebbing /></S> },
 
   // Quality
   { path: '/quality', element: <S><Quality /></S> },
@@ -493,6 +501,10 @@ const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
   '/planning/dept/fabric-sewing': () => import('./pages/planning/dept/fabric-sewing'),
   '/planning/dept/wood-cutting': () => import('./pages/planning/dept/wood-cutting'),
   '/planning/dept/framing': () => import('./pages/planning/dept/framing'),
+  '/planning/dept/foam-bonding': () => import('./pages/planning/dept/foam-bonding'),
+  '/planning/dept/upholstery': () => import('./pages/planning/dept/upholstery'),
+  '/planning/dept/packing': () => import('./pages/planning/dept/packing'),
+  '/planning/dept/webbing': () => import('./pages/planning/dept/webbing'),
   '/products': () => import('./pages/products'),
   '/cnc-templates': () => import('./pages/cnc-templates'),
   '/bom': () => import('./pages/bom'),

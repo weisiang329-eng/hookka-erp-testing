@@ -5737,6 +5737,13 @@ function LaborCostTab({
     [reconPayslipResp],
   );
 
+  // Index departments by code once so the per-row / per-worker reconciliation
+  // loops below do O(1) lookups instead of allDepts.find() on every iteration.
+  const deptByCode = useMemo(
+    () => new Map(allDepts.map((d) => [d.code, d] as const)),
+    [allDepts],
+  );
+
   const rows: LaborCostRow[] = useMemo(() => {
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
     const revData = plResp?.success ? plResp.data ?? {} : {};
@@ -5822,7 +5829,7 @@ function LaborCostTab({
     const out: LaborCostRow[] = [];
     for (const [key, b] of buckets.entries()) {
       const [departmentCode, category] = key.split("|") as [string, Category];
-      const dept = allDepts.find((d) => d.code === departmentCode);
+      const dept = deptByCode.get(departmentCode);
       const isProduction = prodCodes.has(departmentCode);
       out.push({
         id: key,
@@ -5972,7 +5979,7 @@ function LaborCostTab({
       // Only surface departments that carry un-bucketed salary. Tiny rounding
       // residuals on fully-logged production depts get hidden.
       if (residual <= 50) continue;
-      const dept = allDepts.find((d) => d.code === code);
+      const dept = deptByCode.get(code);
       out.push({
         code,
         name: dept?.name ?? (code === "UNASSIGNED" ? "Unassigned" : code),
@@ -6253,7 +6260,7 @@ function LaborCostTab({
       const regularRateSen = w.basicSalarySen
         ? w.basicSalarySen / regularDays / stdHours
         : 0;
-      const dept = allDepts.find((d) => d.code === w.departmentCode);
+      const dept = deptByCode.get(w.departmentCode);
       out.push({
         id: w.id,
         workerId: w.id,
@@ -6308,7 +6315,7 @@ function LaborCostTab({
       const grossSen = Number(p.grossPay) || 0;
       if (grossSen <= 0) continue;
       const code = p.departmentCode || "UNASSIGNED";
-      const dept = allDepts.find((d) => d.code === code);
+      const dept = deptByCode.get(code);
       const w = p.employeeId ? workersById.get(p.employeeId) : undefined;
       const deptName = dept?.name ?? w?.name ?? (code === "UNASSIGNED" ? "Unassigned" : code);
       const name = p.employeeName || w?.name || p.employeeNo || "—";

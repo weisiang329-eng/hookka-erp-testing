@@ -3505,17 +3505,24 @@ export default function ProductionPage({
     // exposed for divan legs in the catalog (legHeights) for the owner to
     // set, but wiring a divan-leg box onto the bedframe sticker is a
     // follow-up — flagged in the build report.
+    // Sofa legs use `sofaLegHeights`; bedframe / divan legs use `legHeights`.
+    // Each list is managed independently in Products > Maintenance, and a leg
+    // packs separately ONLY when its row's "Pack leg separately" flag is ticked.
     let legHeightOptions: LegHeightOption[] = [];
+    let bedframeLegHeightOptions: LegHeightOption[] = [];
     try {
       const vc = await fetchVariantsConfig();
-      legHeightOptions = Array.isArray(vc?.sofaLegHeights)
-        ? (vc!.sofaLegHeights.filter(
-            (o) => o && typeof o === "object" && "value" in (o as object),
-          ) as LegHeightOption[])
-        : [];
+      const pickOptions = (list: unknown): LegHeightOption[] =>
+        Array.isArray(list)
+          ? (list.filter(
+              (o) => o && typeof o === "object" && "value" in (o as object),
+            ) as LegHeightOption[])
+          : [];
+      legHeightOptions = pickOptions(vc?.sofaLegHeights);
+      bedframeLegHeightOptions = pickOptions(vc?.legHeights);
     } catch {
-      // Catalog fetch failed — legPacksSeparately falls back to the legacy
-      // height rule on an empty option list, so legs still behave sensibly.
+      // Catalog fetch failed — an empty option list means legPacksSeparately
+      // returns false, so legs simply don't split until the config loads.
     }
 
     // Mirror of joinModelLabel from src/api/routes/_shared/production-builder.ts:
@@ -3709,6 +3716,61 @@ export default function ProductionPage({
         }
       }
     }
+
+    // Bedframe legs — mirror the sofa leg behaviour, but PER BED (per PO
+    // line), because each bedframe SKU line picks its own leg in Maintenance.
+    // When a bed's leg height is ticked "pack separately" in the BEDFRAME leg
+    // catalog (legHeights), inject a synthetic leg piece for that bed:
+    //   - numbered last for the bed (e.g. HB + 2 Divan + Leg → leg is 4/4),
+    //   - badge shows the actual leg size (e.g. "6\" leg"),
+    //   - rendered 2-in-1 with the bed's FIRST piece (the headboard) via the
+    //     same comboPairKey machinery as sofa — never a standalone page.
+    // The HB box-height number is left exactly as-is (Wei Siang 2026-06-02:
+    // splitting the leg's packing does not change the headboard height).
+    const bedframeBeds = new Map<string, FgSticker[]>();
+    for (const s of nonSofa) {
+      if (s.itemCategory === "BEDFRAME" && s.salesOrderId) {
+        const bedKey = `${s.poId || s.poNo}__${s.unitNo}`;
+        const list = bedframeBeds.get(bedKey) ?? [];
+        list.push(s);
+        bedframeBeds.set(bedKey, list);
+      }
+    }
+    const bedframeLegStickers: FgSticker[] = [];
+    for (const [, bed] of bedframeBeds) {
+      const hasLegs = bed.some((s) =>
+        legPacksSeparately(s.legHeightInches, bedframeLegHeightOptions),
+      );
+      if (!hasLegs) continue;
+      bed.sort((a, b) => a.pieceNo - b.pieceNo);
+      const totalWithLeg = bed.length + 1;
+      const heights = Array.from(
+        new Set(
+          bed
+            .map((s) => s.legHeightInches)
+            .filter((h): h is number => h !== null && h !== undefined && h > 0),
+        ),
+      ).sort((a, b) => a - b);
+      const legsInfo = heights.length ? heights.map((h) => `${h}"`).join(", ") : "";
+      // Bump every real piece's total so they read 1/4, 2/4, 3/4...; keep
+      // their existing pieceNo (HB = 1, Divans follow) and HB box label.
+      for (const s of bed) s.totalPieces = totalWithLeg;
+      const first = bed[0]; // HB for a full bedframe, first Divan for divan-only
+      const legBadge = legsInfo ? `${legsInfo} leg` : "leg";
+      bedframeLegStickers.push({
+        ...first,
+        key: `legs-${first.key}`,
+        unitSerial: `${first.unitSerial}-LEGS`,
+        shortCode: "LEGS",
+        pieceNo: totalWithLeg,
+        totalPieces: totalWithLeg,
+        pieceName: legBadge,
+        isSyntheticLegs: true,
+        comboPairKey: first.key,
+        legsInfo: legsInfo || first.legsInfo,
+      });
+    }
+    nonSofa.push(...bedframeLegStickers);
 
     const aggregated: FgSticker[] = [...nonSofa];
     for (const [soId, group] of sofaBySo) {

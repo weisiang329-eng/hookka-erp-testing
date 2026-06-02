@@ -80,6 +80,8 @@ type Worker = {
   position: string;
   phone: string;
   status: string;
+  /** Resignation date (YYYY-MM-DD); "" when not resigned. */
+  resignedAt?: string;
   basicSalarySen: number;
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
@@ -190,6 +192,136 @@ function csvCell(value: string): string {
   const needsQuote = /[",\n\r]/.test(value);
   const escaped = value.replace(/"/g, '""');
   return needsQuote ? `"${escaped}"` : escaped;
+}
+
+// Per-day breakdown row + aggregates returned by buildWorkerDayBreakdown.
+// Shared so the two drill-in panels render identically.
+type WorkerDayRow = {
+  date: string;
+  logged: number;
+  expected: number;
+  short: number;
+  type: "absent" | "under" | "pending" | "ok";
+};
+type WorkerDayBreakdown = {
+  rows: WorkerDayRow[];
+  totalShort: number;
+  expected: number;
+  absentDays: number;
+  absenceDeductionSen: number;
+  underHours: number;
+  pendingDays: number;
+  perDayDeductionSen: number;
+};
+
+// Shared drill-in panel: splits a worker's per-day shortfall into Absent
+// (real money lost, shown as an RM deduction), Under-recorded (a data-entry
+// gap shown as short hours), and Pending (recent 0-logged days still inside
+// the 2-working-day grace window). Used by both the payroll-residual and the
+// range-based unlogged-hours tables.
+function WorkerDayDrillIn({
+  name,
+  idPrefix,
+  breakdown,
+  emptyLabel,
+}: {
+  name: string;
+  idPrefix: string;
+  breakdown: WorkerDayBreakdown;
+  emptyLabel: string;
+}) {
+  return (
+    <>
+      <p className="text-xs font-semibold text-[#4B5563] mb-1">
+        Per-day Working Hours for {name} — which days are absent or under-recorded
+      </p>
+      <p className="text-[11px] text-[#4B5563] mb-1.5">
+        Absent: {breakdown.absentDays} day(s) · −{formatRM(breakdown.absenceDeductionSen)}
+        {"   |   "}
+        Under-recorded: {breakdown.underHours.toFixed(1)} h to fill
+        {breakdown.pendingDays > 0 ? `   |   Pending: ${breakdown.pendingDays} day(s)` : ""}
+      </p>
+      <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[#E2DDD8] text-[#6B7280]">
+              <th className="py-1 px-2 text-left font-medium">Date</th>
+              <th className="py-1 px-2 text-left font-medium">Type</th>
+              <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
+              <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
+              <th className="py-1 px-2 text-right font-medium">Short</th>
+            </tr>
+          </thead>
+          <tbody>
+            {breakdown.rows
+              .filter((d) => d.type !== "ok")
+              .map((d) => {
+                const chip =
+                  d.type === "absent"
+                    ? { label: "Absent", cls: "bg-[#FCE4E0] text-[#9A3A2D]" }
+                    : d.type === "under"
+                      ? { label: "Under-recorded", cls: "bg-[#FBEFD4] text-[#B45309]" }
+                      : { label: "Pending", cls: "bg-[#EFEDEA] text-[#6B7280]" };
+                return (
+                  <tr
+                    key={`${idPrefix}-${d.date}`}
+                    className={`border-b border-[#F0EDE9] ${
+                      d.type === "absent"
+                        ? "bg-[#FCEDE9]"
+                        : d.type === "under"
+                          ? "bg-[#FDF6E3]"
+                          : ""
+                    }`}
+                  >
+                    <td className="py-1 px-2 text-[#1F1D1B]">{d.date}</td>
+                    <td className="py-1 px-2">
+                      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${chip.cls}`}>
+                        {chip.label}
+                      </span>
+                    </td>
+                    <td className={`py-1 px-2 text-right tabular-nums ${d.logged <= 0 ? "text-[#9A3A2D] font-semibold" : "text-[#4B5563]"}`}>
+                      {d.logged.toFixed(1)}
+                    </td>
+                    <td className="py-1 px-2 text-right tabular-nums text-[#6B7280]">{d.expected.toFixed(1)}</td>
+                    <td className={`py-1 px-2 text-right tabular-nums font-semibold ${
+                      d.type === "absent" ? "text-[#9A3A2D]" : d.type === "under" ? "text-[#B45309]" : "text-[#6B7280]"
+                    }`}>
+                      {d.type === "absent"
+                        ? `−${formatRM(breakdown.perDayDeductionSen)}`
+                        : d.type === "under"
+                          ? `${d.short.toFixed(1)} h`
+                          : "— (recent)"}
+                    </td>
+                  </tr>
+                );
+              })}
+            {breakdown.rows.filter((d) => d.type !== "ok").length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-2 px-2 text-center text-[#9CA3AF]">
+                  {emptyLabel}
+                </td>
+              </tr>
+            )}
+          </tbody>
+          <tfoot>
+            <tr className="border-t border-[#E2DDD8]">
+              <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={4}>
+                Absence deduction · Under-recorded hours
+              </td>
+              <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
+                −{formatRM(breakdown.absenceDeductionSen)} · {breakdown.underHours.toFixed(1)} h
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="mt-1 text-[11px] text-[#9CA3AF]">
+        Working days are Mon–Sat, excluding Sundays and declared public holidays.
+        Absent days are a salary deduction; under-recorded days just need the missing hours keyed in.
+        Pending days are too recent to confirm (within 2 working days) and are not yet deducted.
+      </p>
+    </>
+  );
 }
 
 // Lightweight projection of /api/departments for in-page use. Full Department
@@ -1106,6 +1238,8 @@ type WorkerFormData = {
   joinDate: string;
   nationality: string;
   status: string;
+  /** Resignation date (YYYY-MM-DD); "" when not resigned. */
+  resignedAt: string;
 };
 
 const emptyForm: WorkerFormData = {
@@ -1130,6 +1264,7 @@ const emptyForm: WorkerFormData = {
   joinDate: todayStr(),
   nationality: "",
   status: "ACTIVE",
+  resignedAt: "",
 };
 
 // PIN-modal state. The single-worker dialog has two phases:
@@ -1503,16 +1638,28 @@ function EmployeeMasterTab({
       joinDate: w.joinDate,
       nationality: w.nationality,
       status: w.status,
+      resignedAt: w.resignedAt ?? "",
     });
   };
 
   const handleUpdate = async () => {
     if (!editingId) return;
+    // Resignation date is required when status is Resigned. Mirror the
+    // backend rule on the frontend so the operator gets an instant reject
+    // instead of a delayed 400.
+    const isResigned = editForm.status === "RESIGNED";
+    if (isResigned && !/^\d{4}-\d{2}-\d{2}$/.test(editForm.resignedAt || "")) {
+      toast.error("A resignation date is required when status is Resigned.");
+      return;
+    }
+    // Backend rejects a non-empty resignedAt unless status is RESIGNED, so
+    // send "" whenever the worker is not resigned.
+    const resignedAt = isResigned ? (editForm.resignedAt || "") : "";
     setSaving(true);
     const payload =
       editForm.position === "Operator Leader"
-        ? editForm
-        : { ...editForm, categories: [] };
+        ? { ...editForm, resignedAt }
+        : { ...editForm, resignedAt, categories: [] };
     // 2026-05-27 verifiedSave migration. Worker master-data drives
     // payroll, statutory toggles, and OT — a stale-cache silent
     // overwrite would mis-pay workers. Read back and confirm.
@@ -1939,18 +2086,41 @@ function EmployeeMasterTab({
         width: "110px",
         render: (_value, row) =>
           editingId === row.id ? (
-            <select
-              value={editForm.status}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, status: e.target.value }))
-              }
-              className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-            >
-              <option value="ACTIVE">ACTIVE</option>
-              <option value="INACTIVE">INACTIVE</option>
-            </select>
+            <div className="flex flex-col gap-1">
+              <select
+                value={editForm.status}
+                onChange={(e) =>
+                  setEditForm((f) => ({ ...f, status: e.target.value }))
+                }
+                className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="INACTIVE">INACTIVE</option>
+                <option value="RESIGNED">Resigned</option>
+              </select>
+              {editForm.status === "RESIGNED" && (
+                <div className="flex items-center gap-1">
+                  <span className="text-[11px] text-[#6B7280]">Resigned on</span>
+                  <input
+                    type="date"
+                    value={editForm.resignedAt ?? ""}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, resignedAt: e.target.value }))
+                    }
+                    className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  />
+                </div>
+              )}
+            </div>
           ) : (
-            <Badge variant="status" status={row.status} />
+            <span className="inline-flex items-center gap-1">
+              <Badge variant="status" status={row.status} />
+              {row.status === "RESIGNED" && row.resignedAt && (
+                <span className="text-[11px] text-[#9CA3AF]">
+                  · left {row.resignedAt}
+                </span>
+              )}
+            </span>
           ),
       },
       {
@@ -5902,17 +6072,75 @@ function LaborCostTab({
   // to 9); short = max(0, expected − logged). A day with 0 logged is fully
   // missing.
   const buildWorkerDayBreakdown = useCallback(
-    (workerId: string) => {
+    (workerId: string): WorkerDayBreakdown => {
       const w = workersById.get(workerId);
       const expected = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      // Per-day salary deduction for a full no-show: one day's basic pay
+      // (basicSalarySen ÷ working days per month, default 26 days).
+      const perDayDeductionSen = w
+        ? Math.round(w.basicSalarySen / (w.workingDaysPerMonth || 26))
+        : 0;
+
+      // Grace window: a 0-logged working day is NOT yet a confirmed absence
+      // until it is at least 2 WORKING days in the past. Walk the working-day
+      // calendar (capped at the period end) up to "today" and treat the last
+      // 2 such days as the pending grace window. Any 0-logged day strictly
+      // AFTER the cutoff is "pending"; on/before the cutoff is a confirmed
+      // "absent". This is view code (not the pure engine), so reading the real
+      // current date here is fine.
+      const todayIso = (() => {
+        const t = new Date();
+        return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+      })();
+      // Working days that are on/before today (within the period). The last 2
+      // of these form the grace window; the day just before them is the cutoff.
+      const daysUpToToday = periodWorkingDays.filter((d) => d <= todayIso);
+      // cutoffDate = 2 working days before the most recent working day <= today.
+      // Everything strictly after cutoffDate (and <= today) is pending.
+      const cutoffIndex = daysUpToToday.length - 1 - 2; // 2 working days back
+      const cutoffDate =
+        cutoffIndex >= 0 ? daysUpToToday[cutoffIndex] : null;
+
       let totalShort = 0;
+      let absentDays = 0;
+      let underHours = 0;
+      let pendingDays = 0;
       const rows = periodWorkingDays.map((date) => {
         const logged = loggedHoursByWorkerDate.get(`${workerId}|${date}`) ?? 0;
         const short = Math.max(0, expected - logged);
         totalShort += short;
-        return { date, logged, expected, short };
+        let type: "absent" | "under" | "pending" | "ok";
+        if (logged <= 0) {
+          // Full no-show. Pending if it is in the 2-working-day grace window
+          // (i.e. <= today AND strictly after the cutoff working day).
+          const isWithinGrace =
+            date <= todayIso && (cutoffDate === null || date > cutoffDate);
+          if (isWithinGrace) {
+            type = "pending";
+            pendingDays += 1;
+          } else {
+            type = "absent";
+            absentDays += 1;
+          }
+        } else if (logged < expected) {
+          type = "under";
+          underHours += short;
+        } else {
+          type = "ok";
+        }
+        return { date, logged, expected, short, type };
       });
-      return { rows, totalShort, expected };
+      const absenceDeductionSen = absentDays * perDayDeductionSen;
+      return {
+        rows,
+        totalShort,
+        expected,
+        absentDays,
+        absenceDeductionSen,
+        underHours,
+        pendingDays,
+        perDayDeductionSen,
+      };
     },
     [workersById, periodWorkingDays, loggedHoursByWorkerDate],
   );
@@ -6384,71 +6612,12 @@ function LaborCostTab({
                           {isOpen && breakdown && (
                             <tr className="border-b border-[#F1DDD7] bg-white">
                               <td colSpan={5} className="px-3 py-2">
-                                <p className="text-xs font-semibold text-[#4B5563] mb-1">
-                                  Per-day Working Hours for {e.name} — which days are short
-                                </p>
-                                <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
-                                  <table className="w-full text-xs">
-                                    <thead>
-                                      <tr className="border-b border-[#E2DDD8] text-[#6B7280]">
-                                        <th className="py-1 px-2 text-left font-medium">Date</th>
-                                        <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
-                                        <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
-                                        <th className="py-1 px-2 text-right font-medium">Short hrs</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {breakdown.rows.map((d) => {
-                                        const fullyMissing = d.logged <= 0;
-                                        const isShort = d.short > 0;
-                                        return (
-                                          <tr
-                                            key={`gap-day-${e.id}-${d.date}`}
-                                            className={`border-b border-[#F0EDE9] ${
-                                              fullyMissing
-                                                ? "bg-[#FCEDE9]"
-                                                : isShort
-                                                  ? "bg-[#FDF6E3]"
-                                                  : ""
-                                            }`}
-                                          >
-                                            <td className="py-1 px-2 text-[#1F1D1B]">{d.date}</td>
-                                            <td className={`py-1 px-2 text-right tabular-nums ${fullyMissing ? "text-[#9A3A2D] font-semibold" : "text-[#4B5563]"}`}>
-                                              {d.logged.toFixed(1)}
-                                            </td>
-                                            <td className="py-1 px-2 text-right tabular-nums text-[#6B7280]">{d.expected.toFixed(1)}</td>
-                                            <td className={`py-1 px-2 text-right tabular-nums font-semibold ${
-                                              fullyMissing ? "text-[#9A3A2D]" : isShort ? "text-[#B45309]" : "text-[#4F7C3A]"
-                                            }`}>
-                                              {d.short > 0 ? d.short.toFixed(1) : "0.0"}
-                                            </td>
-                                          </tr>
-                                        );
-                                      })}
-                                      {breakdown.rows.length === 0 && (
-                                        <tr>
-                                          <td colSpan={4} className="py-2 px-2 text-center text-[#9CA3AF]">
-                                            No working days in this period
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </tbody>
-                                    <tfoot>
-                                      <tr className="border-t border-[#E2DDD8]">
-                                        <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={3}>
-                                          Total short hours
-                                        </td>
-                                        <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
-                                          {breakdown.totalShort.toFixed(1)}
-                                        </td>
-                                      </tr>
-                                    </tfoot>
-                                  </table>
-                                </div>
-                                <p className="mt-1 text-[11px] text-[#9CA3AF]">
-                                  Working days are Mon–Sat, excluding Sundays and declared public holidays.
-                                  Go record the missing hours on the short days to close the gap.
-                                </p>
+                                <WorkerDayDrillIn
+                                  name={e.name}
+                                  idPrefix={`gap-day-${e.id}`}
+                                  breakdown={breakdown}
+                                  emptyLabel="No absent or under-recorded days in this period"
+                                />
                               </td>
                             </tr>
                           )}
@@ -6566,70 +6735,12 @@ function LaborCostTab({
                         {isOpen && breakdown && (
                           <tr className="border-b border-[#F1DDD7] bg-white">
                             <td colSpan={6} className="px-3 py-2">
-                              <p className="text-xs font-semibold text-[#4B5563] mb-1">
-                                Per-day Working Hours for {e.name} — which days are short
-                              </p>
-                              <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
-                                <table className="w-full text-xs">
-                                  <thead>
-                                    <tr className="border-b border-[#E2DDD8] text-[#6B7280]">
-                                      <th className="py-1 px-2 text-left font-medium">Date</th>
-                                      <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
-                                      <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
-                                      <th className="py-1 px-2 text-right font-medium">Short hrs</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {breakdown.rows.map((d) => {
-                                      const fullyMissing = d.logged <= 0;
-                                      const isShort = d.short > 0;
-                                      return (
-                                        <tr
-                                          key={`range-gap-day-${e.id}-${d.date}`}
-                                          className={`border-b border-[#F0EDE9] ${
-                                            fullyMissing
-                                              ? "bg-[#FCEDE9]"
-                                              : isShort
-                                                ? "bg-[#FDF6E3]"
-                                                : ""
-                                          }`}
-                                        >
-                                          <td className="py-1 px-2 text-[#1F1D1B]">{d.date}</td>
-                                          <td className={`py-1 px-2 text-right tabular-nums ${fullyMissing ? "text-[#9A3A2D] font-semibold" : "text-[#4B5563]"}`}>
-                                            {d.logged.toFixed(1)}
-                                          </td>
-                                          <td className="py-1 px-2 text-right tabular-nums text-[#6B7280]">{d.expected.toFixed(1)}</td>
-                                          <td className={`py-1 px-2 text-right tabular-nums font-semibold ${
-                                            fullyMissing ? "text-[#9A3A2D]" : isShort ? "text-[#B45309]" : "text-[#4F7C3A]"
-                                          }`}>
-                                            {d.short > 0 ? d.short.toFixed(1) : "0.0"}
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
-                                    {breakdown.rows.length === 0 && (
-                                      <tr>
-                                        <td colSpan={4} className="py-2 px-2 text-center text-[#9CA3AF]">
-                                          No working days in this range
-                                        </td>
-                                      </tr>
-                                    )}
-                                  </tbody>
-                                  <tfoot>
-                                    <tr className="border-t border-[#E2DDD8]">
-                                      <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={3}>
-                                        Total short hours
-                                      </td>
-                                      <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
-                                        {breakdown.totalShort.toFixed(1)}
-                                      </td>
-                                    </tr>
-                                  </tfoot>
-                                </table>
-                              </div>
-                              <p className="mt-1 text-[11px] text-[#9CA3AF]">
-                                Go record the missing hours on the short days to close the gap.
-                              </p>
+                              <WorkerDayDrillIn
+                                name={e.name}
+                                idPrefix={`range-gap-day-${e.id}`}
+                                breakdown={breakdown}
+                                emptyLabel="No absent or under-recorded days in this range"
+                              />
                             </td>
                           </tr>
                         )}

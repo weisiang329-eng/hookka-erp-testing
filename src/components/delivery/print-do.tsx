@@ -1,11 +1,16 @@
 "use client";
 
 import React, { forwardRef } from "react";
+import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 
 type PrintDOItem = {
   id: string;
   salesOrderNo: string;
   poNo: string;
+  // Customer's PO no. for THIS line (from /print-extras). Used only to sort
+  // the printed lines by customer PO ascending; not shown as its own column
+  // (the doc-level Customer PO already appears in the reference block).
+  customerPOId?: string;
   productCode: string;
   productName: string;
   sizeLabel: string;
@@ -55,6 +60,15 @@ const WAREHOUSE_BRANCH = "Hookka HQ — Bukit Minyak, Penang";
 const PrintDO = forwardRef<HTMLDivElement, PrintDOProps>(({ data, mode }, ref) => {
   const title = mode === "do" ? "DELIVERY ORDER" : "PACKING LIST";
   const totalQty = data.items.reduce((s, i) => s + i.quantity, 0);
+  // Display order only — sort a COPY by customer PO ascending (blanks last),
+  // then SO, so identical Customer PO / SO group together. Totals above are
+  // computed from the unsorted source, so they're unaffected.
+  const sortedItems = [...data.items].sort((a, b) =>
+    compareDoLinesByCustomerPO(
+      { customerPOId: a.customerPOId, salesOrderNo: a.salesOrderNo },
+      { customerPOId: b.customerPOId, salesOrderNo: b.salesOrderNo },
+    ),
+  );
   const dim = (v?: number | null) =>
     v == null || v === 0 ? "-" : `${v}"`;
   const docDate = (
@@ -275,7 +289,7 @@ const PrintDO = forwardRef<HTMLDivElement, PrintDOProps>(({ data, mode }, ref) =
           </tr>
         </thead>
         <tbody>
-          {data.items.map((item, idx) => (
+          {sortedItems.map((item, idx) => (
             <tr key={item.id}>
               <td className="text-center">{idx + 1}</td>
               <td className="nowrap">{item.salesOrderNo || "-"}</td>

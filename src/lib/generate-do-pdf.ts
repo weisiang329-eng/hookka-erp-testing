@@ -3,6 +3,10 @@ import autoTable, { type RowInput } from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
 import { COMPANY } from "@/lib/constants";
 import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+// Shared DO line ordering (customer PO ascending, blanks last, then SO).
+// Lives in its own dependency-free module so the page can import the same
+// comparator without pulling jsPDF into the page bundle.
+import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 
 // Read-only print-extras from GET /api/delivery-orders/:id/print-extras.
 // All optional — the PDF still renders if not supplied.
@@ -371,13 +375,26 @@ export function renderDoInto(
       .map(([lab, n]) => `${n} ${lab}`)
       .join("  +  ") || "-";
 
+  // Keep the deliberate category banding (BEDFRAME / SOFA / ACCESSORY /
+  // SERVICE — the loader's physical-stacking order) as the OUTERMOST key,
+  // then sort WITHIN each band by customer PO ascending (blanks last), then
+  // our SO, so identical Customer PO / SO group together on the printed DO.
+  // (Display order only — order.items itself is untouched.)
   const ordered = order.items
     .map((it, i) => ({ it, i }))
-    .sort(
-      (a, b) =>
+    .sort((a, b) => {
+      const cr =
         catRank(extras?.items?.[a.it.id]?.itemCategory) -
-          catRank(extras?.items?.[b.it.id]?.itemCategory) || a.i - b.i,
-    )
+        catRank(extras?.items?.[b.it.id]?.itemCategory);
+      if (cr !== 0) return cr;
+      const exA = extras?.items?.[a.it.id];
+      const exB = extras?.items?.[b.it.id];
+      const pc = compareDoLinesByCustomerPO(
+        { customerPOId: exA?.customerPOId, salesOrderNo: exA?.salesOrderNo },
+        { customerPOId: exB?.customerPOId, salesOrderNo: exB?.salesOrderNo },
+      );
+      return pc !== 0 ? pc : a.i - b.i;
+    })
     .map((x) => x.it);
 
   const body: RowInput[] = [];
@@ -810,8 +827,17 @@ function renderPackingSummary(
 
     // Each DO at this drop, with its own deliver-to address.
     g.dos.forEach((o) => {
-      const items = o.items || [];
       const exDo = extrasById?.[o.id];
+      // Sort a COPY by customer PO ascending (blanks last), then SO, so the
+      // manifest lines match the printed DO order. Source array untouched.
+      const items = [...(o.items || [])].sort((ia, ib) => {
+        const exA = exDo?.items?.[ia.id ?? ""];
+        const exB = exDo?.items?.[ib.id ?? ""];
+        return compareDoLinesByCustomerPO(
+          { customerPOId: exA?.customerPOId, salesOrderNo: exA?.salesOrderNo },
+          { customerPOId: exB?.customerPOId, salesOrderNo: exB?.salesOrderNo },
+        );
+      });
 
       if (y > pageH - 34) {
         doc.addPage();

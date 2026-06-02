@@ -32,6 +32,7 @@ import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "
 import PODDialog from "@/components/delivery/POD-dialog";
 import PrintDO from "@/components/delivery/print-do";
 import type { PrintDOData, PrintMode } from "@/components/delivery/print-do";
+import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { mutationWithData, MutationResultSchema } from "@/lib/schemas/common";
@@ -2359,6 +2360,9 @@ export default function DeliveryPage() {
           id: i.id,
           salesOrderNo: i.salesOrderNo,
           poNo: i.poNo,
+          // Per-line customer PO (from /print-extras) — drives the print
+          // sort order; falls back to the row's own customerPOId.
+          customerPOId: ex?.customerPOId ?? i.customerPOId ?? "",
           productCode: i.productCode,
           productName: i.productName,
           sizeLabel: i.sizeLabel,
@@ -4694,7 +4698,22 @@ export default function DeliveryPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(editMode ? editItems : detailDO.items).map((item, idx) => {
+                      {/* Sort a COPY for display only — by customer PO
+                          ascending (blanks last), then SO — so identical
+                          Customer PO / SO group together instead of
+                          scattering across non-adjacent rows. editItems /
+                          detailDO.items themselves are untouched, so totals
+                          and the saved order never change. */}
+                      {[...(editMode ? editItems : detailDO.items)]
+                        .sort((a, b) => {
+                          const ra = lineRefs(a);
+                          const rb = lineRefs(b);
+                          return compareDoLinesByCustomerPO(
+                            { customerPOId: ra.customerPOId, salesOrderNo: ra.salesOrderNo },
+                            { customerPOId: rb.customerPOId, salesOrderNo: rb.salesOrderNo },
+                          );
+                        })
+                        .map((item, idx) => {
                         const refs = lineRefs(item);
                         return (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">

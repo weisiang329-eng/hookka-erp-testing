@@ -34,6 +34,119 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-02-006 — Planning › Capacity Loading: per-day capacity-hours label rendered as garbled overlapping digits under a category filter ("你看下面的字")
+
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `2de2e967`), deployed + verified live.
+**Category:** ui-display, scheduling
+
+**Symptom:**
+
+Wei Siang: "你看下面的字" (with screenshot). On Planning › Capacity Loading,
+under a category filter (Bedframe / Sofa), the small capacity-hours label under
+each day's bar — the line below e.g. "19h" — printed as an unreadable run of
+overlapping digits ("548165587431658…"). The "All" view looked fine; only the
+filtered views broke.
+
+**Root cause:**
+
+Under a category filter the per-day capacity is `dailyCap = fullDailyCap ×
+categoryShare`, where `categoryShare` is fractional — so `capacityMinutes`
+became a long decimal (e.g. `1144.5833`). `formatHours` then did `minutes % 60`
+and emitted `"19h 4.5833m"`. That 4-decimal minute string was wider than the
+40px (`w-10`) bar column, so it WRAPPED to a second line that overlapped the
+first → mush. With "All" category, `categoryShare = 1` so minutes were whole and
+nothing wrapped, which is why only filtered views showed the bug.
+
+**Fix:**
+
+`src/pages/planning/index.tsx` — the per-day capacity label (~line 2319) now
+renders `formatHours(Math.round(day.capacityMinutes))` and carries
+`whitespace-nowrap`; the hover tooltip (~line 2285) also rounds. Rounding kills
+the fractional minutes so the label is always a short whole-minute string.
+
+**Verification:** `npx tsc -p tsconfig.app.json --noEmit` exit 0. Live on prod
+2026-06-02 via Chrome: Capacity Loading under BOTH Bedframe and Sofa filters —
+280 per-day labels, all clean rounded values ("19h 5m", "12h 35m", "4h 15m"),
+zero fractional/garbled labels.
+
+---
+
+## BUG-2026-06-02-005 — Foam "Show / Print Packing Stickers" needed ticked rows / a top-search SO and was capped at ≤10 SOs; owner wanted it to follow the grid filter like "Show QR"
+
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `10a11379`), deployed + verified live.
+**Category:** production-orders, ui-frontend
+
+**Symptom:**
+
+Wei Siang: "应该是像show QR 那样跟filter一样的". The Foam dept "Show / Print
+Packing Stickers" buttons required the operator to tick rows or type an SO in the
+top Search box, and refused to run for more than 10 SOs. He wanted them to behave
+like the "Show QR" button: act on whatever the Foam grid is currently SHOWING
+(its filters applied), with no tick requirement, no top-search requirement and no
+SO-count cap.
+
+**Root cause:**
+
+The button-gating block and `loadFoamPackingStickers` scoped off a
+selection / top-search / `MAX_SO_FOR_PRINT = 10` gate instead of the grid's
+visible (filtered) rows — unlike Show QR, which already scopes to
+`gridFilteredDeptRows ?? deptRows`.
+
+**Fix:**
+
+`src/pages/production/index.tsx` — `loadFoamPackingStickers` (~line 3920) now
+scopes to `visibleRows = gridFilteredDeptRows ?? deptRows`; the FOAM button
+gating (~line 6347) drops `MAX_SO_FOR_PRINT` / `tooWide` and enables the buttons
+when there are visible rows OR a selection OR a top-search term. Ticked rows and
+the top-search box remain available as *optional narrower* scopes.
+
+**Verification:** `npx tsc -p tsconfig.app.json --noEmit` exit 0. Live on prod
+2026-06-02: with 0 rows ticked and an empty top-search, both buttons are enabled,
+tooltip reads "Packing stickers for the 138 SOs shown in the Foam grid — filter
+the grid to narrow" (138 ≫ old 10-SO cap).
+
+---
+
+## BUG-2026-06-02-004 — Products › Maintenance › Leg Heights showed every leg as "Packed with item" even though tall legs ship in their own box at print time
+
+**Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `8ae8722d`), deployed + verified live. DISPLAY-ONLY (no data written).
+**Category:** pricing-products, ui-display
+
+**Symptom:**
+
+On Products › Maintenance › Leg Heights, every leg-height row showed
+"Packed with item" / unchecked — even 4" / 6" / 7" legs, which actually ship in
+their OWN box (their own piece on the FG packing sticker). The Maintenance screen
+disagreed with what the printer produces.
+
+**Root cause:**
+
+The Maintenance editor read `entry.packSeparately ?? false`. Legacy leg rows
+carry no stored `packSeparately` flag, and the one-time backfill (migration
+`0121`) never ran on prod — so the UI fell to `false` for all of them. Meanwhile
+the FG-sticker builder resolves packing via `legPacksSeparately()`
+(`src/lib/leg-packing.ts`), which — when the flag is undefined — falls back to
+the legacy "leg > 1 inch packs separately" rule. Display and runtime disagreed.
+
+**Fix:**
+
+`src/pages/products/index.tsx` — the "Pack leg separately" checkbox and the
+browse-mode label now use `optionPacksSeparately(entry)` (imported from
+`@/lib/leg-packing`) instead of `entry.packSeparately ?? false`, so the screen
+uses the SAME resolver the printer uses: explicit owner flag wins, undefined
+falls back to the legacy `> 1"` rule. No data written — this avoided an
+irreversible prod backfill.
+
+**Verification:** `npx tsc -p tsconfig.app.json --noEmit` exit 0. Live on prod
+2026-06-02: Bedframe Leg Heights now reads No Leg / 1" = "Packed with item",
+6" / 7" = "Separate box" (legacy > 1"), and explicit owner flags are honored
+(2" / 4" = "Packed with item" with stored `packSeparately:false`, 5" =
+"Separate box" with stored `packSeparately:true`) — matching the stored
+`variants-config` exactly.
+
+---
+
+
 ## BUG-2026-06-02-003 — Foam (and any dept) "Show / Print Packing Stickers" greyed out on the full sheet even with job-card rows ticked
 
 **Status:** 🟢 Fixed (2026-06-02)

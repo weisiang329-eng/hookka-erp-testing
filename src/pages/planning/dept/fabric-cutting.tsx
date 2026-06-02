@@ -2,14 +2,17 @@
 // Planning > Fabric Cutting department drill-in (Phase 1, template).
 //
 // Reached from Planning > Capacity Loading by clicking the "Fabric Cutting"
-// department name. Renders three sections + a Recalculate button:
-//   (a) Scheduling Process — plain-English explanation of how Fab Cut is
-//       scheduled (curated from docs/PRODUCTION-PLANNING-LOGIC.md and
-//       scripts/build_cutting_daily_xlsx.py).
+// department name. The page leads with the actual schedule and keeps the two
+// explanatory sections collapsed so it opens compact:
 //   (b) Schedule Result — the saved snapshot in
 //       src/data/cutting-schedule-snapshot.json rendered as a date-grouped
-//       Cut Calendar + a By Day summary.
-//   (c) Scheduling Logic / Prompt — the detailed rule reference (collapsible).
+//       Cut Calendar (each cut headed by an orders/sets/slots summary line) +
+//       a By Day summary. This is the FIRST and primary section.
+//   (a) Scheduling Process — plain-English explanation of how Fab Cut is
+//       scheduled (curated from docs/PRODUCTION-PLANNING-LOGIC.md and
+//       scripts/build_cutting_daily_xlsx.py). Collapsed by default.
+//   (c) Scheduling Logic / Prompt — the detailed rule reference. Collapsed by
+//       default.
 //
 // The Recalculate button is intentionally inert for this phase: live
 // re-scheduling from current orders is a later backend phase. The button
@@ -19,7 +22,7 @@
 // text; lane labels are mapped to English (Bedframe / Sofa / Accessory),
 // every other cell renders as-is.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -255,6 +258,79 @@ const CUT_CALENDAR_HEADERS = [
   "Batch Deadline",
 ];
 
+// Column indices in the Cut Calendar sheet.
+const CUT_NO_COL = 2; // "Cut #" — non-empty only on a cut's first row
+const MODEL_COL = 3; // "Model"
+const SIZE_COL = 4; // "Size"
+const SETS_COL = 9; // "Sets" — one value per item row
+const SLOTS_COL = 10; // "Slots" — carried on the cut's first row only
+
+// A cut is one batch: its first item row carries the Cut # / Model / Size /
+// Slots; following item rows have a blank Cut #. We group the raw item rows of
+// a date into cuts so each cut can show how many orders are batched into it.
+type CutBlock = {
+  cutNo: string;
+  lane: Cell;
+  model: string;
+  size: string;
+  slots: Cell;
+  orders: number; // count of item rows in this cut
+  sets: number; // sum of the Sets column across the cut's item rows
+  rows: Cell[][];
+};
+
+function numeric(cell: Cell): number {
+  if (typeof cell === "number") return cell;
+  const n = parseFloat(String(cell ?? "").trim());
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Split a date group's item rows into cuts. A new cut begins on any row whose
+// Cut # cell is non-empty; subsequent blank-Cut# rows belong to that cut.
+function buildCutBlocks(rows: Cell[][]): CutBlock[] {
+  const blocks: CutBlock[] = [];
+  let current: CutBlock | null = null;
+  for (const row of rows) {
+    const cutNo = String(row[CUT_NO_COL] ?? "").trim();
+    if (cutNo) {
+      current = {
+        cutNo,
+        lane: row[LANE_COL],
+        model: String(row[MODEL_COL] ?? "").trim(),
+        size: String(row[SIZE_COL] ?? "").trim(),
+        slots: row[SLOTS_COL],
+        orders: 0,
+        sets: 0,
+        rows: [],
+      };
+      blocks.push(current);
+    }
+    if (!current) {
+      // Defensive: an item row before any Cut # — start a fallback cut.
+      current = {
+        cutNo: "—",
+        lane: row[LANE_COL],
+        model: String(row[MODEL_COL] ?? "").trim(),
+        size: String(row[SIZE_COL] ?? "").trim(),
+        slots: row[SLOTS_COL],
+        orders: 0,
+        sets: 0,
+        rows: [],
+      };
+      blocks.push(current);
+    }
+    current.orders += 1;
+    current.sets += numeric(row[SETS_COL]);
+    current.rows.push(row);
+  }
+  return blocks;
+}
+
+// Column index for Lane (shared by Cut Calendar grouping + rendering).
+const LANE_COL = 1;
+// Customer-DD column (overdue tinting).
+const CDD_COL = 11;
+
 type CalGroup = { dateLabel: string; rows: Cell[][] };
 
 function buildCalendarGroups(sheet: Sheet | undefined): CalGroup[] {
@@ -279,82 +355,144 @@ function buildCalendarGroups(sheet: Sheet | undefined): CalGroup[] {
   return groups;
 }
 
+// A grouped header line that sits above each cut's item rows, stating the
+// cut number, lane, model+size, and — what the owner asked for — how many
+// orders are batched into the cut, plus total sets and slots.
+function CutSummaryRow({ cut, colSpan }: { cut: CutBlock; colSpan: number }) {
+  const lane = resolveLane(cut.lane);
+  const meta = lane.key ? LANE_META[lane.key] : null;
+  const modelSize = [cut.model, cut.size].filter(Boolean).join(" · ");
+  const slots = numeric(cut.slots);
+  return (
+    <tr
+      className="border-t border-[#E2DDD8]"
+      style={{ backgroundColor: meta ? meta.tint : "#F4F1EE" }}
+    >
+      <td colSpan={colSpan} className="px-2 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Cut number chip */}
+          <span
+            className="inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-bold text-white"
+            style={{ backgroundColor: meta?.color ?? "#6B7280" }}
+          >
+            Cut {cut.cutNo}
+          </span>
+          {/* Lane */}
+          {lane.label && (
+            <span
+              className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold"
+              style={{
+                color: meta?.color ?? "#6B7280",
+                border: `1px solid ${meta?.color ?? "#D1CFCB"}`,
+              }}
+            >
+              {lane.label}
+            </span>
+          )}
+          {/* Model + size */}
+          {modelSize && (
+            <span className="text-[13px] font-semibold text-[#1F1D1B]">{modelSize}</span>
+          )}
+          {/* Order / set / slot counts — the headline numbers */}
+          <span className="ml-auto flex flex-wrap items-center gap-1.5">
+            <span className="inline-flex items-center rounded-full bg-[#1F1D1B] px-2 py-0.5 text-[11px] font-bold text-white">
+              {cut.orders} {cut.orders === 1 ? "order" : "orders"}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-[#D1CFCB] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#4B4642]">
+              {cut.sets} {cut.sets === 1 ? "set" : "sets"}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-[#D1CFCB] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#4B4642]">
+              {slots} {slots === 1 ? "slot" : "slots"}
+            </span>
+          </span>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function CutCalendar({ sheet }: { sheet: Sheet | undefined }) {
   const groups = useMemo(() => buildCalendarGroups(sheet), [sheet]);
   if (!groups.length) {
     return <p className="text-sm text-[#6B7280]">No cut calendar rows in this snapshot.</p>;
   }
-  // Column indices: 1 = Lane, 11 = Customer DD (per the Cut Calendar schema).
-  const LANE_COL = 1;
-  const CDD_COL = 11;
+  const colCount = CUT_CALENDAR_HEADERS.length;
   return (
     <div className="space-y-5">
-      {groups.map((g) => (
-        <div key={g.dateLabel} className="overflow-hidden rounded-lg border border-[#E2DDD8]">
-          <div className="bg-[#F0ECE9] px-3 py-2 text-sm font-semibold text-[#1F1D1B]">
-            {g.dateLabel}
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-xs">
-              <thead>
-                <tr className="bg-[#FAF8F6] text-left text-[#6B7280]">
-                  {CUT_CALENDAR_HEADERS.map((h) => (
-                    <th key={h} className="whitespace-nowrap px-2 py-1.5 font-medium">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {g.rows.map((row, ri) => {
-                  const lane = resolveLane(row[LANE_COL]);
-                  const meta = lane.key ? LANE_META[lane.key] : null;
-                  return (
-                    <tr
-                      key={ri}
-                      className="border-t border-[#EFEAE5]"
-                      style={meta ? { backgroundColor: meta.tint } : undefined}
-                    >
-                      {CUT_CALENDAR_HEADERS.map((_, ci) => {
-                        const raw = row[ci];
-                        if (ci === LANE_COL) {
-                          if (!String(raw ?? "").trim()) {
-                            return <td key={ci} className="px-2 py-1.5" />;
-                          }
-                          return (
-                            <td key={ci} className="whitespace-nowrap px-2 py-1.5">
-                              <span
-                                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold text-white"
-                                style={{ backgroundColor: meta?.color ?? "#6B7280" }}
-                              >
-                                {lane.label}
-                              </span>
-                            </td>
-                          );
-                        }
-                        const overdue = ci === CDD_COL && isOverdueDate(raw);
-                        return (
-                          <td
-                            key={ci}
-                            className={`px-2 py-1.5 align-top ${
-                              overdue
-                                ? "font-semibold text-[#9A3A2D]"
-                                : "text-[#3A3530]"
-                            } ${ci === 7 ? "min-w-[260px]" : "whitespace-nowrap"}`}
-                            title={overdue ? "Customer delivery date is overdue" : undefined}
+      {groups.map((g) => {
+        const cuts = buildCutBlocks(g.rows);
+        return (
+          <div key={g.dateLabel} className="overflow-hidden rounded-lg border border-[#E2DDD8]">
+            <div className="bg-[#F0ECE9] px-3 py-2 text-sm font-semibold text-[#1F1D1B]">
+              {g.dateLabel}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="bg-[#FAF8F6] text-left text-[#6B7280]">
+                    {CUT_CALENDAR_HEADERS.map((h) => (
+                      <th key={h} className="whitespace-nowrap px-2 py-1.5 font-medium">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {cuts.map((cut) => {
+                    const lane = resolveLane(cut.lane);
+                    const meta = lane.key ? LANE_META[lane.key] : null;
+                    return (
+                      <Fragment key={cut.cutNo}>
+                        <CutSummaryRow cut={cut} colSpan={colCount} />
+                        {cut.rows.map((row, ri) => (
+                          <tr
+                            key={ri}
+                            className="border-t border-[#EFEAE5]"
+                            style={meta ? { backgroundColor: meta.tint } : undefined}
                           >
-                            {raw === null || raw === undefined ? "" : String(raw)}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                            {CUT_CALENDAR_HEADERS.map((_, ci) => {
+                              const raw = row[ci];
+                              if (ci === LANE_COL) {
+                                if (!String(raw ?? "").trim()) {
+                                  return <td key={ci} className="px-2 py-1.5" />;
+                                }
+                                return (
+                                  <td key={ci} className="whitespace-nowrap px-2 py-1.5">
+                                    <span
+                                      className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold text-white"
+                                      style={{ backgroundColor: meta?.color ?? "#6B7280" }}
+                                    >
+                                      {lane.label}
+                                    </span>
+                                  </td>
+                                );
+                              }
+                              const overdue = ci === CDD_COL && isOverdueDate(raw);
+                              return (
+                                <td
+                                  key={ci}
+                                  className={`px-2 py-1.5 align-top ${
+                                    overdue
+                                      ? "font-semibold text-[#9A3A2D]"
+                                      : "text-[#3A3530]"
+                                  } ${ci === 7 ? "min-w-[260px]" : "whitespace-nowrap"}`}
+                                  title={overdue ? "Customer delivery date is overdue" : undefined}
+                                >
+                                  {raw === null || raw === undefined ? "" : String(raw)}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -511,16 +649,7 @@ export default function FabricCuttingDeptPage() {
         </p>
       </div>
 
-      {/* (a) Scheduling Process */}
-      <CollapsibleCard
-        icon={<ListChecks className="h-4 w-4 text-[#6B5C32]" />}
-        title="Scheduling Process"
-        defaultOpen
-      >
-        <SectionParagraphs items={PROCESS_SECTIONS} />
-      </CollapsibleCard>
-
-      {/* (b) Schedule Result */}
+      {/* (b) Schedule Result — primary section, leads the page */}
       <Card className="overflow-hidden">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2 text-base text-[#1F1D1B]">
@@ -560,7 +689,16 @@ export default function FabricCuttingDeptPage() {
         </CardContent>
       </Card>
 
-      {/* (c) Scheduling Logic / Prompt */}
+      {/* (a) Scheduling Process — reference, collapsed by default */}
+      <CollapsibleCard
+        icon={<ListChecks className="h-4 w-4 text-[#6B5C32]" />}
+        title="Scheduling Process"
+        defaultOpen={false}
+      >
+        <SectionParagraphs items={PROCESS_SECTIONS} />
+      </CollapsibleCard>
+
+      {/* (c) Scheduling Logic / Prompt — reference, collapsed by default */}
       <CollapsibleCard
         icon={<BookOpen className="h-4 w-4 text-[#6B5C32]" />}
         title="Scheduling Logic / Prompt"

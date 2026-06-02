@@ -161,11 +161,17 @@ const ROLLING_WINDOW_DAYS = 7;
 // Wei Siang 2026-05-15: Capacity Loading chart window. Operator
 // asked for ~21 days total split as "past production" + "future
 // planned" — past matches the rolling-avg window so the operator
-// sees variance vs the same 7-day baseline shown elsewhere; future
-// runs 14 days out so the chart still answers "when is the next
+// sees variance vs the same baseline shown elsewhere; future runs
+// out far enough that the chart still answers "when is the next
 // crunch coming?" without going so far it becomes noise.
-const LOADING_CHART_PAST_DAYS = 7;
-const LOADING_CHART_FUTURE_DAYS = 14;
+//
+// Wei Siang 2026-06-02: widened the window — Past Production now
+// covers 14 WORKING days (Mon-Sat, Sundays excluded) and Planned
+// Capacity now covers 21 WORKING days. Both counts are working
+// days only, so the chart spans more wall-clock time. The chart is
+// horizontally scrollable to fit the wider span.
+const LOADING_CHART_PAST_DAYS = 14;
+const LOADING_CHART_FUTURE_DAYS = 21;
 
 const TABS = [
   { id: "capacity", label: "Capacity Overview", icon: BarChart3 },
@@ -952,10 +958,10 @@ export default function PlanningPage() {
   // two-view layout per dept:
   //   Past N days    → completedDate-bucketed actual production
   //   Future M days  → dueDate-bucketed planned load
-  // Both use the same dailyCapacity denominator (the 7-day rolling avg
-  // from capacityData) so the % is directly comparable between the
-  // two surfaces — past variance vs the avg, future pressure vs the
-  // same avg.
+  // Both use the same dailyCapacity denominator (the rolling daily
+  // avg from capacityData, ROLLING_WINDOW_DAYS wide) so the % is
+  // directly comparable between the two surfaces — past variance vs
+  // the avg, future pressure vs the same avg.
   //
   // Renders are in /loading tab; the dailyCapacityMinutes is kept on
   // the dept object for internal % math but no longer shown on the
@@ -2128,9 +2134,9 @@ export default function PlanningPage() {
             <div className="flex items-center gap-2 flex-wrap">
               <Gauge className="h-5 w-5 text-[#6B5C32]" />
               <span className="text-sm font-medium text-[#1F1D1B]">
-                Daily Capacity Loading — Past {LOADING_CHART_PAST_DAYS} days · Next {LOADING_CHART_FUTURE_DAYS} days
+                Daily Capacity Loading — Past {LOADING_CHART_PAST_DAYS} working days · Next {LOADING_CHART_FUTURE_DAYS} working days
               </span>
-              <span className="text-xs text-[#6B7280]">(Mon-Sat, excl. Sundays · % vs 7-day rolling capacity)</span>
+              <span className="text-xs text-[#6B7280]">(Mon-Sat working days, Sundays excluded · scroll left/right ↔ · % vs rolling daily capacity)</span>
             </div>
             {/* 2026-05-26: Category toggle. Default ALL; SOFA / BEDFRAME
                 isolate the chart to a single product line. State lives on
@@ -2162,10 +2168,13 @@ export default function PlanningPage() {
           {/* Wei Siang 2026-05-16: ONE continuous chart per dept —
               past production bars + a vertical dashed divider at the
               past/future boundary + future planned-load bars. Bar
-              heights scale to the dept's own max value across all 21
+              heights scale to the dept's own max value across all
               days so every % gets a visibly distinct height (lively),
-              and a horizontal dashed line marks the 100% (= 7-day
-              rolling capacity) reference at its proportional spot. */}
+              and a horizontal dashed line marks the 100% (= rolling
+              daily capacity) reference at its proportional spot.
+              Wei Siang 2026-06-02: window widened to 14 past + 21
+              future working days, so the chart body is wrapped in an
+              overflow-x-auto container and scrolls left/right. */}
           {dailyLoadingByDept.map((dept) => {
             const combined = [
               ...dept.pastProduction.map((d) => ({ ...d, phase: "past" as const, minutes: d.producedMinutes })),
@@ -2219,13 +2228,13 @@ export default function PlanningPage() {
                         className="font-medium text-[#4F7C3A]"
                         style={{ width: `${dept.pastProduction.length * 44}px` }}
                       >
-                        ◂ Past {LOADING_CHART_PAST_DAYS}d Production
+                        ◂ Past {LOADING_CHART_PAST_DAYS}d Production (working days)
                       </div>
                       <div
                         className="font-medium text-[#3E6570] pl-2 border-l border-dashed border-[#6B5C32]/50"
                         style={{ width: `${dept.futureLoad.length * 44}px` }}
                       >
-                        Planned Capacity · Next {LOADING_CHART_FUTURE_DAYS}d ▸
+                        Planned Capacity · Next {LOADING_CHART_FUTURE_DAYS}d (working days) ▸
                       </div>
                     </div>
                     <div
@@ -2273,7 +2282,7 @@ export default function PlanningPage() {
                           <div
                             key={`${day.phase}-${day.date}`}
                             className={`flex flex-col items-center w-10 min-w-[40px] relative ${isToday ? "bg-[#6B5C32]/5 rounded" : ""}`}
-                            title={`${day.date}\n${isPast ? "Produced" : "Loaded"}: ${formatHours(day.minutes)}\n7-day avg capacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
+                            title={`${day.date}\n${isPast ? "Produced" : "Loaded"}: ${formatHours(day.minutes)}\nCapacity: ${formatHours(day.capacityMinutes)}\nUtilization: ${day.utilization}%`}
                           >
                             {/* Vertical dashed divider before the first
                                 future bar = the past/future boundary. */}
@@ -2301,6 +2310,14 @@ export default function PlanningPage() {
                             <span className={`text-[9px] font-semibold ${textColor} tabular-nums`}>{day.utilization}%</span>
                             <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
                               {d.getDate()}/{d.getMonth() + 1}
+                            </span>
+                            {/* Wei Siang 2026-06-02: per-day Capacity
+                                Hours — the rolling daily capacity for
+                                this dept, shown under each bar so the
+                                operator reads the hours figure directly
+                                instead of only the % utilization. */}
+                            <span className="text-[8px] mt-0.5 text-[#6B7280] tabular-nums">
+                              {formatHours(day.capacityMinutes)}
                             </span>
                           </div>
                         );

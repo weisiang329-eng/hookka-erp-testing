@@ -112,10 +112,11 @@ export function SKUFormDialog({
   const [leadTimeDays, setLeadTimeDays] = useState(editData?.leadTimeDays || 7);
   const [moq, setMoq] = useState(editData?.moq || 1);
   const [isMainSupplier, setIsMainSupplier] = useState(editData?.isMainSupplier || false);
-  const [validFrom, setValidFrom] = useState(
-    editData?.validFrom || new Date().toISOString().split("T")[0],
-  );
-  const [validTo, setValidTo] = useState(editData?.validTo || "2026-12-31");
+  // Valid From / To default to blank for a new mapping — the operator fills
+  // them only when a price has a real validity window. (Editing keeps whatever
+  // was stored.)
+  const [validFrom, setValidFrom] = useState(editData?.validFrom || "");
+  const [validTo, setValidTo] = useState(editData?.validTo || "");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -190,11 +191,16 @@ export function SKUFormDialog({
                       <button
                         key={item.id}
                         type="button"
-                        className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] flex items-baseline gap-3 border-b border-[#E2DDD8]/50 last:border-0"
+                        className="w-full text-left px-3 py-2 hover:bg-[#FAF9F7] flex items-center gap-3 border-b border-[#E2DDD8]/50 last:border-0"
                         onClick={() => selectInventoryItem(item)}
                       >
-                        <span className="font-mono text-xs text-[#6B5C32] shrink-0 w-[110px]">{item.itemCode}</span>
-                        <span className="text-[#374151] flex-1 min-w-0">{item.description}</span>
+                        {/* Description is the primary line so the operator can
+                            scan/search by it; the code sits underneath as a
+                            muted sub-label. App font throughout (no monospace). */}
+                        <span className="flex-1 min-w-0">
+                          <span className="block truncate text-sm text-[#1F1D1B]">{item.description}</span>
+                          <span className="block truncate text-xs text-[#9CA3AF]">{item.itemCode}</span>
+                        </span>
                         <span className="text-[10px] text-gray-400 shrink-0">{item.itemGroup}</span>
                       </button>
                     ))

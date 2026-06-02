@@ -2358,20 +2358,22 @@ export default function PlanningPage() {
                             <span className={`text-[8px] mt-0.5 ${isToday ? "font-bold text-[#6B5C32]" : isSat ? "text-[#9C6F1E]" : "text-[#9CA3AF]"}`}>
                               {d.getDate()}/{d.getMonth() + 1}
                             </span>
-                            {/* Wei Siang 2026-06-02: per-day Capacity
-                                Hours — the rolling daily capacity for
-                                this dept, shown under each bar so the
-                                operator reads the hours figure directly
-                                instead of only the % utilization.
-                                capacityMinutes is fractional under the
-                                Bedframe / Sofa filter (full cap × category
-                                share), so round it before formatting —
-                                otherwise formatHours emits a long decimal
-                                like "19h 4.5833m" that wraps and overlaps
-                                the next column into unreadable mush. nowrap
-                                keeps each label on one line as a guard. */}
+                            {/* Wei Siang 2026-06-03: per-day PRODUCTION
+                                hours — the actual work for THIS day, not the
+                                flat daily capacity. Past side = hours produced
+                                (completion); plan side = hours loaded by due
+                                date. `day.minutes` already carries the right
+                                figure per side (produced vs loaded), so it
+                                varies day to day instead of showing the same
+                                capacity number on every bar. Rounded before
+                                formatting because under the Bedframe / Sofa
+                                filter the value is fractional (full × category
+                                share) and would otherwise wrap as "19h 4.58m";
+                                nowrap keeps each label on one line. The flat
+                                capacity baseline is still the dashed line +
+                                the "/day" total above the chart. */}
                             <span className="text-[8px] mt-0.5 text-[#6B7280] tabular-nums whitespace-nowrap">
-                              {formatHours(Math.round(day.capacityMinutes))}
+                              {formatHours(Math.round(day.minutes))}
                             </span>
                           </div>
                         );

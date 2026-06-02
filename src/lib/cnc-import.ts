@@ -57,3 +57,43 @@ export async function uploadCncFiles(files: File[]): Promise<string> {
   const fileCount = body.files ?? files.length;
   return `Imported ${imported} template${imported === 1 ? "" : "s"} from ${fileCount} file${fileCount === 1 ? "" : "s"}.`;
 }
+
+// Editable metadata fields for a CNC template (model re-assignment etc.). Every
+// field is optional — only the provided ones are changed server-side.
+export type CncTemplateEdit = {
+  productCode?: string;
+  sizeLabel?: string;
+  fabricWidth?: string;
+  pieceLabel?: string;
+  totalHeight?: string;
+  displayName?: string;
+};
+
+/**
+ * Save edited metadata for one CNC template (PATCH /api/cnc-templates/:id) and
+ * return the updated row. Throws with a clear message on failure so the caller
+ * can toast it. Does NOT touch the uploaded files — only the model / size /
+ * piece / height / display name.
+ */
+export async function updateCncTemplate(
+  id: string,
+  edit: CncTemplateEdit,
+): Promise<CncTemplate> {
+  const res = await fetch(`/api/cnc-templates/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(edit),
+  });
+
+  let body: { success?: boolean; data?: CncTemplate; error?: string } = {};
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    // Non-JSON — fall through to the status-based message below.
+  }
+
+  if (!res.ok || body.success === false || !body.data) {
+    throw new Error(body.error || `Save failed (HTTP ${res.status}).`);
+  }
+  return body.data;
+}

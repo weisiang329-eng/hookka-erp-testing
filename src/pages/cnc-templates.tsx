@@ -7,14 +7,25 @@
 // real download URL). Client-side search filters the loaded list by
 // productCode / displayName / pieceLabel.
 // ---------------------------------------------------------------------------
-import { useMemo, useRef, useState } from "react";
+import { Fragment, useMemo, useRef, useState } from "react";
 import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { SkeletonTable } from "@/components/ui/skeleton";
-import { Scissors, Search, Upload, Loader2 } from "lucide-react";
+import { Scissors, Search, Upload, Loader2, Pencil, Check, X } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
-import { uploadCncFiles } from "@/lib/cnc-import";
+import { uploadCncFiles, updateCncTemplate } from "@/lib/cnc-import";
 import type { CncTemplate } from "@/components/cnc/CncTemplatePanel";
+
+// Editable-field draft for the inline row editor. Mirrors the metadata columns
+// the operator can change (model re-assignment, size, piece, height, etc.).
+type EditDraft = {
+  productCode: string;
+  displayName: string;
+  sizeLabel: string;
+  pieceLabel: string;
+  totalHeight: string;
+  fabricWidth: string;
+};
 
 type CncTemplatesResponse = { success?: boolean; data?: CncTemplate[] };
 
@@ -48,9 +59,67 @@ export default function CncTemplatesPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
+  // Inline row editor: which row is open + its working draft + save spinner.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<EditDraft | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
   const { data, loading, refresh } = useCachedJson<CncTemplatesResponse>(
     "/api/cnc-templates",
   );
+
+  // Open the editor for a row, seeding the draft from its current values.
+  const startEdit = (t: CncTemplate) => {
+    setEditingId(t.id);
+    setDraft({
+      productCode: t.productCode || "",
+      displayName: t.displayName || "",
+      sizeLabel: t.sizeLabel || "",
+      pieceLabel: t.pieceLabel || "",
+      totalHeight: t.totalHeight || "",
+      fabricWidth: t.fabricWidth || "",
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setDraft(null);
+  };
+
+  // Save the edited metadata. Requires a model + display name (server enforces
+  // the same). On success, drop the cached list so the row re-groups under its
+  // (possibly new) model and refetches.
+  const saveEdit = async () => {
+    if (!editingId || !draft) return;
+    if (!draft.productCode.trim()) {
+      toast.error("Please enter a model (product code).");
+      return;
+    }
+    if (!draft.displayName.trim()) {
+      toast.error("Display name cannot be empty.");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      await updateCncTemplate(editingId, {
+        productCode: draft.productCode.trim(),
+        displayName: draft.displayName.trim(),
+        sizeLabel: draft.sizeLabel.trim(),
+        pieceLabel: draft.pieceLabel.trim(),
+        totalHeight: draft.totalHeight.trim(),
+        fabricWidth: draft.fabricWidth.trim(),
+      });
+      toast.success("Template updated.");
+      setEditingId(null);
+      setDraft(null);
+      invalidateCache("/api/cnc-templates");
+      refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
 
   // Bulk-upload chosen files, then refresh the library list. The server parses
   // each filename into product/size/width/piece — the operator just picks the
@@ -201,29 +270,145 @@ export default function CncTemplatesPage() {
                         <th className="px-3 py-2">Total H (cm)</th>
                         <th className="px-3 py-2">Fabric Width</th>
                         <th className="px-3 py-2">Files</th>
+                        <th className="px-3 py-2 text-right">Edit</th>
                       </tr>
                     </thead>
                     <tbody>
                       {rows.map((t) => (
-                        <tr key={t.id} className="border-b border-[#F3F4F6] last:border-0">
-                          <td className="px-3 py-2 text-[#111827]">{t.displayName}</td>
-                          <td className="px-3 py-2 text-[#6B7280]">{t.sizeLabel || "—"}</td>
-                          <td className="px-3 py-2 text-[#6B7280]">{t.pieceLabel || "—"}</td>
-                          <td className="px-3 py-2 text-[#6B7280]">
-                            {t.totalHeight ? `${t.totalHeight} cm` : "—"}
-                          </td>
-                          <td className="px-3 py-2 text-[#6B7280]">{t.fabricWidth || "—"}</td>
-                          <td className="px-3 py-2">
-                            <div className="flex items-center gap-1.5">
-                              {t.hasDgt && <FileButton templateId={t.id} kind="dgt" label="DGT" />}
-                              {t.hasPrj && <FileButton templateId={t.id} kind="prj" label="PRJ" />}
-                              {t.hasEmf && <FileButton templateId={t.id} kind="emf" label="EMF" />}
-                              {!t.hasDgt && !t.hasPrj && !t.hasEmf && (
-                                <span className="text-[11px] text-[#9CA3AF] italic">No files</span>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
+                        <Fragment key={t.id}>
+                          <tr className="border-b border-[#F3F4F6] last:border-0">
+                            <td className="px-3 py-2 text-[#111827]">{t.displayName}</td>
+                            <td className="px-3 py-2 text-[#6B7280]">{t.sizeLabel || "—"}</td>
+                            <td className="px-3 py-2 text-[#6B7280]">{t.pieceLabel || "—"}</td>
+                            <td className="px-3 py-2 text-[#6B7280]">
+                              {t.totalHeight ? `${t.totalHeight} cm` : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-[#6B7280]">{t.fabricWidth || "—"}</td>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-1.5">
+                                {t.hasDgt && <FileButton templateId={t.id} kind="dgt" label="DGT" />}
+                                {t.hasPrj && <FileButton templateId={t.id} kind="prj" label="PRJ" />}
+                                {t.hasEmf && <FileButton templateId={t.id} kind="emf" label="EMF" />}
+                                {!t.hasDgt && !t.hasPrj && !t.hasEmf && (
+                                  <span className="text-[11px] text-[#9CA3AF] italic">No files</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                type="button"
+                                onClick={() => (editingId === t.id ? cancelEdit() : startEdit(t))}
+                                className="inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-[11px] font-medium text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
+                                title="Edit this template (re-assign model, fix size / piece / height)"
+                              >
+                                <Pencil className="h-3 w-3" />
+                                Edit
+                              </button>
+                            </td>
+                          </tr>
+                          {editingId === t.id && draft && (
+                            <tr className="bg-[#FAF9F7] border-b border-[#E2DDD8]">
+                              <td colSpan={7} className="px-3 py-3">
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                                    Model (product code)
+                                    <input
+                                      type="text"
+                                      value={draft.productCode}
+                                      onChange={(e) =>
+                                        setDraft({ ...draft, productCode: e.target.value })
+                                      }
+                                      placeholder="e.g. 5535"
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                                    Display Name
+                                    <input
+                                      type="text"
+                                      value={draft.displayName}
+                                      onChange={(e) =>
+                                        setDraft({ ...draft, displayName: e.target.value })
+                                      }
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                                    Size
+                                    <input
+                                      type="text"
+                                      value={draft.sizeLabel}
+                                      onChange={(e) =>
+                                        setDraft({ ...draft, sizeLabel: e.target.value })
+                                      }
+                                      placeholder="e.g. 6FT / 2S"
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                                    Piece
+                                    <input
+                                      type="text"
+                                      value={draft.pieceLabel}
+                                      onChange={(e) =>
+                                        setDraft({ ...draft, pieceLabel: e.target.value })
+                                      }
+                                      placeholder="e.g. ARM / CUSHION"
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                                    Total H (cm)
+                                    <input
+                                      type="text"
+                                      value={draft.totalHeight}
+                                      onChange={(e) =>
+                                        setDraft({ ...draft, totalHeight: e.target.value })
+                                      }
+                                      placeholder="e.g. 20"
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                                    Fabric Width
+                                    <input
+                                      type="text"
+                                      value={draft.fabricWidth}
+                                      onChange={(e) =>
+                                        setDraft({ ...draft, fabricWidth: e.target.value })
+                                      }
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                </div>
+                                <div className="mt-3 flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={cancelEdit}
+                                    disabled={savingEdit}
+                                    className="inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50 transition-colors"
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={saveEdit}
+                                    disabled={savingEdit}
+                                    className="inline-flex items-center gap-1 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                  >
+                                    {savingEdit ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Check className="h-3.5 w-3.5" />
+                                    )}
+                                    {savingEdit ? "Saving…" : "Save"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>

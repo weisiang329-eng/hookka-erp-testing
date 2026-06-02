@@ -320,6 +320,72 @@ async function updateTemplateRow(
     .run();
 }
 
+// UPDATE one template row's METADATA ONLY (product_code / size_label /
+// fabric_width / piece_label / total_height / display_name) — no storage keys.
+// Used by PATCH /:id so the operator can re-assign a template to a different
+// model (or fix its size/piece) after upload. The stored dgt/prj/emf keys are
+// absolute object paths, so changing product_code here does NOT move or break
+// the already-uploaded files; downloads keep working off the stored keys.
+async function updateTemplateMeta(
+  db: DbLike,
+  row: {
+    id: string;
+    orgId: string;
+    productCode: string;
+    sizeLabel: string;
+    fabricWidth: string;
+    pieceLabel: string;
+    totalHeight: string;
+    displayName: string;
+    now: string;
+  },
+): Promise<void> {
+  try {
+    await db
+      .prepare(
+        `UPDATE cnc_templates
+           SET product_code = ?, size_label = ?, fabric_width = ?,
+               piece_label = ?, total_height = ?, display_name = ?,
+               updated_at = ?
+         WHERE id = ? AND org_id = ?`,
+      )
+      .bind(
+        row.productCode,
+        row.sizeLabel,
+        row.fabricWidth,
+        row.pieceLabel,
+        row.totalHeight,
+        row.displayName,
+        row.now,
+        row.id,
+        row.orgId,
+      )
+      .run();
+    return;
+  } catch (e) {
+    if (!isMissingTotalHeightColumn(e)) throw e;
+  }
+  // Fallback: legacy shape without total_height (migration 0141 not applied).
+  await db
+    .prepare(
+      `UPDATE cnc_templates
+         SET product_code = ?, size_label = ?, fabric_width = ?,
+             piece_label = ?, display_name = ?, updated_at = ?
+       WHERE id = ? AND org_id = ?`,
+    )
+    .bind(
+      row.productCode,
+      row.sizeLabel,
+      row.fabricWidth,
+      row.pieceLabel,
+      row.displayName,
+      row.now,
+      row.id,
+      row.orgId,
+    )
+    .run();
+}
+
 // SELECT existing template by (orgId, productCode, displayName). Used by the
 // /import upsert to decide between UPDATE and INSERT.
 async function selectOneTemplateByName(
@@ -1032,6 +1098,99 @@ app.post("/import", async (c) => {
       500,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /:id — edit one template's metadata (re-assign model / fix size /
+// piece / height / display name). JSON body; every field is optional and only
+// the provided ones are changed. Does NOT touch the stored files — the dgt/prj/
+// emf object keys stay as-is, so downloads keep working after a model change.
+// productCode is required to be non-empty when present (the whole point is to
+// ASSIGN a model — we don't let an edit blank it out).
+// ---------------------------------------------------------------------------
+app.patch("/:id", async (c) => {
+  const denied = await requirePermission(c, "products", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body." }, 400);
+  }
+
+  let existing: CncTemplateRow | null;
+  try {
+    existing = await selectOneTemplate(c.var.DB, id, orgId);
+  } catch (e) {
+    if (isMissingTable(e))
+      return c.json({ success: false, error: "Template not found." }, 404);
+    throw e;
+  }
+  if (!existing) return c.json({ success: false, error: "Template not found." }, 404);
+
+  // For each editable field: use the provided value when the key is present,
+  // otherwise keep the existing value. Strings are trimmed.
+  const pick = (key: string, fallback: string): string =>
+    Object.prototype.hasOwnProperty.call(body, key)
+      ? String(body[key] ?? "").trim()
+      : fallback;
+
+  const productCode = pick("productCode", existing.productCode ?? "");
+  const sizeLabel = pick("sizeLabel", existing.sizeLabel ?? "");
+  const fabricWidth = pick("fabricWidth", existing.fabricWidth ?? "");
+  const pieceLabel = pick("pieceLabel", existing.pieceLabel ?? "");
+  const totalHeight = pick("totalHeight", existing.totalHeight ?? "");
+  const displayName = pick("displayName", existing.displayName ?? "");
+
+  if (!productCode) {
+    return c.json(
+      { success: false, error: "A model (product code) is required." },
+      400,
+    );
+  }
+  if (!displayName) {
+    return c.json({ success: false, error: "Display name cannot be empty." }, 400);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await updateTemplateMeta(c.var.DB, {
+      id,
+      orgId,
+      productCode,
+      sizeLabel,
+      fabricWidth,
+      pieceLabel,
+      totalHeight,
+      displayName,
+      now,
+    });
+  } catch (e) {
+    if (isMissingTable(e))
+      return c.json({ success: false, error: "Template not found." }, 404);
+    throw e;
+  }
+
+  await emitAudit(c, {
+    resource: "cnc-templates",
+    resourceId: id,
+    action: "update",
+    before: {
+      productCode: existing.productCode,
+      sizeLabel: existing.sizeLabel,
+      fabricWidth: existing.fabricWidth,
+      pieceLabel: existing.pieceLabel,
+      totalHeight: existing.totalHeight,
+      displayName: existing.displayName,
+    },
+    after: { productCode, sizeLabel, fabricWidth, pieceLabel, totalHeight, displayName },
+  }).catch(() => {});
+
+  const updated = await selectOneTemplate(c.var.DB, id, orgId);
+  return c.json({ success: true, data: updated ? rowToCncTemplate(updated) : null });
 });
 
 // ---------------------------------------------------------------------------

@@ -172,8 +172,17 @@ function rowToFGUnitPublic(r: FGUnitRow) {
   return out;
 }
 
+// Deterministic id per (poId, unitNo, pieceNo). Previously this appended a
+// random `crypto.randomUUID().slice(0,8)` suffix, so the same physical box
+// got a DIFFERENT id every time generateFGUnitsForPO ran. Combined with the
+// read-then-insert idempotency check (no DB-level uniqueness), a repeat or
+// concurrent generate inserted a SECOND full set of stickers for the same
+// slot — the source of the duplicate-sticker inflation (14 POs / 150 phantom
+// rows, audit 2026-06-02). With a deterministic id the primary key now
+// rejects the second insert (paired with ON CONFLICT (id) DO NOTHING on the
+// INSERT below), so a box can never be stickered twice.
 function genFGUnitId(poId: string, unitNo: number, pieceNo: number): string {
-  return `fgu-${poId}-${unitNo}-${pieceNo}-${crypto.randomUUID().slice(0, 8)}`;
+  return `fgu-${poId}-${unitNo}-${pieceNo}`;
 }
 
 /**
@@ -440,7 +449,8 @@ export async function generateFGUnitsForPO(
            poId, poNo, productCode, productName, unitNo, totalUnits,
            pieceNo, totalPieces, pieceName, customerName, customerHub,
            mfdDate, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PACKED')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PACKED')
+         ON CONFLICT (id) DO NOTHING`,
       )
       .bind(
         unit.id,
@@ -538,6 +548,124 @@ app.get("/:id", async (c) => {
     return c.json({ success: true, data: rowToFGUnitPublic(unit) });
   }
   return c.json({ success: true, data: rowToFGUnit(unit) });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/fg-units/backfill-dedupe-fg-units — one-shot cleanup (2026-06-02)
+//
+// Removes the historical DUPLICATE fg_units rows. Root cause (now fixed for
+// new units by the deterministic id + ON CONFLICT above): the same physical
+// box (poId, unitNo, pieceNo slot) ended up with >1 fg_unit row — each with
+// a different random id + shortCode — so the PACKING sticker preview printed
+// 2+ boxes where there is one. Audit found 14 POs / 150 phantom rows.
+//
+// Owner rule (Wei Siang 2026-06-02): ALREADY-SHIPPED units are left alone —
+// status LOADED/DELIVERED/RETURNED, or attached to a delivery order (doId set).
+// Those are out the door; the extra sticker is harmless and we must NOT
+// disturb delivery records. So the cleanup only collapses NOT-yet-shipped
+// duplicates, always keeping one row per slot:
+//   - slot has a shipped row  → keep the shipped one(s) as-is, delete every
+//                               not-shipped duplicate in that slot
+//   - slot all not-shipped    → keep the lowest-id row, delete the rest
+// Never deletes a shipped row, so delivery_orders.fgUnitIds is never touched.
+//
+//   ?dry=1 → preview only, no writes. Idempotent (re-run after clean → 0).
+// Registered BEFORE /generate/:poId (static-before-param). Temporary; delete
+// once the book is clean.
+// ---------------------------------------------------------------------------
+app.post("/backfill-dedupe-fg-units", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+
+  const res = await c.var.DB.prepare(
+    `SELECT id, poId, poNo, unitNo, pieceNo, status, doId
+       FROM fg_units WHERE orgId = ?`,
+  )
+    .bind(orgId)
+    .all<{
+      id: string;
+      poId: string | null;
+      poNo: string | null;
+      unitNo: number | null;
+      pieceNo: number | null;
+      status: string | null;
+      doId: string | null;
+    }>();
+  const rows = res.results ?? [];
+
+  const SHIPPED = new Set(["LOADED", "DELIVERED", "RETURNED"]);
+  const isShipped = (r: { status: string | null; doId: string | null }) =>
+    (r.status != null && SHIPPED.has(r.status)) || !!r.doId;
+
+  // Group by physical-box slot.
+  const slots = new Map<string, typeof rows>();
+  for (const r of rows) {
+    const k = `${r.poId}|${r.unitNo}|${r.pieceNo}`;
+    const list = slots.get(k) ?? [];
+    list.push(r);
+    slots.set(k, list);
+  }
+
+  const deleteIds: string[] = [];
+  const perPo = new Map<string, { poNo: string; removed: number }>();
+  let slotsCleaned = 0;
+  let shippedRowsLeftAlone = 0;
+
+  for (const [, list] of slots) {
+    if (list.length <= 1) continue; // no duplicate in this slot
+    const shipped = list.filter(isShipped);
+    const notShipped = list.filter((r) => !isShipped(r));
+    let toDelete: typeof rows;
+    if (shipped.length > 0) {
+      // Keep every shipped row untouched; drop the not-shipped phantoms.
+      toDelete = notShipped;
+      shippedRowsLeftAlone += shipped.length - 1; // extra shipped dups we deliberately keep
+    } else {
+      // All not-shipped — keep the lowest id, delete the others.
+      const ordered = [...notShipped].sort((a, b) =>
+        String(a.id).localeCompare(String(b.id)),
+      );
+      toDelete = ordered.slice(1);
+    }
+    if (toDelete.length === 0) continue;
+    slotsCleaned++;
+    for (const r of toDelete) {
+      deleteIds.push(r.id);
+      const po = r.poId ?? "";
+      const e = perPo.get(po) ?? { poNo: r.poNo ?? po, removed: 0 };
+      e.removed++;
+      perPo.set(po, e);
+    }
+  }
+
+  if (!dry && deleteIds.length > 0) {
+    for (let i = 0; i < deleteIds.length; i += 100) {
+      const chunk = deleteIds.slice(i, i + 100);
+      const ph = chunk.map(() => "?").join(",");
+      await c.var.DB.prepare(
+        `DELETE FROM fg_units WHERE id IN (${ph})`,
+      )
+        .bind(...chunk)
+        .run();
+    }
+  }
+
+  const perPoList = [...perPo.entries()]
+    .map(([poId, e]) => ({ poId, poNo: e.poNo, phantomRowsRemoved: e.removed }))
+    .sort((a, b) => b.phantomRowsRemoved - a.phantomRowsRemoved);
+
+  return c.json({
+    success: true,
+    mode: dry ? "dry-run" : "executed",
+    slotsCleaned,
+    phantomRowsRemoved: deleteIds.length,
+    affectedPOs: perPoList.length,
+    shippedDuplicatesLeftUntouched: shippedRowsLeftAlone,
+    perPo: perPoList,
+  });
 });
 
 // POST /api/fg-units/generate/:poId — idempotent

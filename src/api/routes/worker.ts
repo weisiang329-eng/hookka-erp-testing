@@ -22,7 +22,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
-import { computeMonthlyLabor } from "../../lib/labor-engine";
+import { computeMonthlyLabor, absenceCutoffDay } from "../../lib/labor-engine";
 
 const app = new Hono<Env>();
 
@@ -956,9 +956,16 @@ app.get("/payslips", async (c) => {
       hours: Number(r.hours) || 0,
     })),
     publicHolidays,
-    // Current month — count absences only through today, so days that
-    // haven't happened yet aren't charged.
-    absenceThroughDay: now.getDate(),
+    // Current month — count absences only through the data-entry grace cutoff
+    // (2 working days back), so days that haven't happened yet AND the most
+    // recent not-yet-keyed days aren't charged as absences. Matches payroll.
+    absenceThroughDay: absenceCutoffDay(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      now,
+      2,
+      publicHolidays,
+    ),
   });
 
   // Efficiency allowance — placeholder until Wei Siang specifies the

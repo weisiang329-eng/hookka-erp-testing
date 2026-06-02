@@ -433,6 +433,7 @@
   "jobCardId": "job_card_id",
   "joinDate": "join_date",
   "journalEntryId": "journal_entry_id",
+  "resignedAt": "resigned_at",
   "l1Processes": "l1_processes",
   "laborCostSen": "labor_cost_sen",
   "labourCost": "labour_cost",

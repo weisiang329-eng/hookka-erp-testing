@@ -129,6 +129,67 @@ export function countElapsedWorkingDays(
   return count;
 }
 
+/**
+ * The day-of-month through which absences should be COUNTED for the given
+ * period, after applying a data-entry grace.
+ *
+ * Spec from Wei Siang (2026-06-02): the office does not key Working Hours in
+ * real time, so a recent working day with no hours is more likely "not entered
+ * yet" than a true absence. An absence is only confirmed — and only then
+ * docked — once the day is at least `graceWorkingDays` working days in the
+ * past. Worked example he gave: a no-show on the 25th, with the 26th and 27th
+ * still unrecorded, only starts being deducted on the 28th (grace = 2 working
+ * days; Sundays and public holidays don't count toward the grace).
+ *
+ * Behaviour by period:
+ *   - A finished (past) month: the whole month is well past the grace window,
+ *     so the full month counts — returns the month's last day.
+ *   - The current month: returns (today − graceWorkingDays working days)'s
+ *     day-of-month, so the last couple of working days are held back as
+ *     "maybe just unentered" and not yet charged.
+ *   - A future month, or a month so early that the grace cutoff lands before
+ *     it: returns 0 (nothing counted yet).
+ *
+ * `month` is 1-indexed. `today` is injected (not read from the clock) so the
+ * function stays pure and testable. `graceWorkingDays = 0` reproduces the old
+ * "count through today" behaviour exactly.
+ */
+export function absenceCutoffDay(
+  year: number,
+  month: number,
+  today: Date,
+  graceWorkingDays: number,
+  publicHolidays: Iterable<string>,
+): number {
+  const holidaySet =
+    publicHolidays instanceof Set
+      ? (publicHolidays as Set<string>)
+      : new Set(publicHolidays);
+  const isHoliday = (d: Date): boolean => {
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate(),
+    ).padStart(2, "0")}`;
+    return holidaySet.has(iso);
+  };
+
+  // Walk backwards from today by `graceWorkingDays` working days (Mon–Sat,
+  // skipping public holidays). The day we land on is the confirmation cutoff.
+  const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  let remaining = Math.max(0, Math.floor(graceWorkingDays));
+  while (remaining > 0) {
+    cutoff.setDate(cutoff.getDate() - 1);
+    if (WORKING_DOW.has(cutoff.getDay()) && !isHoliday(cutoff)) remaining--;
+  }
+
+  const monthLastDay = new Date(year, month, 0).getDate();
+  const cutoffYM = cutoff.getFullYear() * 12 + cutoff.getMonth(); // 0-indexed month
+  const periodYM = year * 12 + (month - 1);
+
+  if (periodYM < cutoffYM) return monthLastDay; // finished month — count it all
+  if (periodYM > cutoffYM) return 0; // cutoff hasn't reached this month yet
+  return cutoff.getDate(); // current/cutoff month — count through the cutoff day
+}
+
 /** Inputs for one worker, one month. */
 export type MonthlyLaborInput = {
   worker: LaborWorker;

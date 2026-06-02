@@ -14,7 +14,14 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
-import { computeMonthlyLabor } from "../../lib/labor-engine";
+import { computeMonthlyLabor, absenceCutoffDay } from "../../lib/labor-engine";
+
+// Data-entry grace before an unrecorded working day is treated as a confirmed
+// absence. Spec (Wei Siang, 2026-06-02): the office keys Working Hours a few
+// days late, so the most recent working days with no hours are "maybe just not
+// entered yet" — only count a day as absent once it is this many working days
+// in the past. Finished months are unaffected (the whole month is past grace).
+const ABSENCE_GRACE_WORKING_DAYS = 2;
 
 const app = new Hono<Env>();
 
@@ -34,6 +41,9 @@ type WorkerRow = {
   socsoEnabled: boolean | null;
   eisEnabled: boolean | null;
   pcbEnabled: boolean | null;
+  // YYYY-MM-DD last day of employment, or null for current staff (migration
+  // 0143). Used only to scope which month a RESIGNED worker is still paid for.
+  resignedAt: string | null;
 };
 
 type PayslipRow = {
@@ -268,8 +278,15 @@ app.post("/", async (c) => {
     }
 
     const wres = await c.var.DB.prepare(
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled FROM workers WHERE status = 'ACTIVE'",
-    ).all<WorkerRow>();
+      // ACTIVE workers are always paid. A RESIGNED worker is paid only for the
+      // single month that contains their resignedAt date (their final, usually
+      // partial, month) — the existing absence math prorates the days after
+      // they left. Later months exclude them because resignedAt no longer
+      // matches the period. Earlier months were generated while still ACTIVE.
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+    )
+      .bind(`${period}-%`)
+      .all<WorkerRow>();
     const activeWorkers = wres.results ?? [];
 
     // Public holidays — kv_config['public_holidays']. A holiday is never
@@ -309,15 +326,19 @@ app.post("/", async (c) => {
       daysByWorker.set(r.workerId, arr);
     }
 
-    // Absences are only counted for elapsed working days: a finished
-    // month counts the whole month; the current month stops at today.
+    // Absences are only counted for elapsed working days, minus a data-entry
+    // grace: a finished month counts the whole month; the current month stops
+    // ABSENCE_GRACE_WORKING_DAYS working days back from today, so the most
+    // recent (likely not-yet-keyed) days aren't charged as absences yet.
     const [pYear, pMonth] = period.split("-").map(Number);
     const today = new Date();
-    const isCurrentMonth =
-      pYear === today.getFullYear() && pMonth === today.getMonth() + 1;
-    const absenceThroughDay = isCurrentMonth
-      ? today.getDate()
-      : new Date(pYear, pMonth, 0).getDate();
+    const absenceThroughDay = absenceCutoffDay(
+      pYear,
+      pMonth,
+      today,
+      ABSENCE_GRACE_WORKING_DAYS,
+      publicHolidays,
+    );
 
     const rows: PayslipRow[] = [];
     for (const worker of activeWorkers) {

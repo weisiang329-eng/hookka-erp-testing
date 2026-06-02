@@ -6088,18 +6088,31 @@ function LaborCostTab({
       // AFTER the cutoff is "pending"; on/before the cutoff is a confirmed
       // "absent". This is view code (not the pure engine), so reading the real
       // current date here is fine.
-      const todayIso = (() => {
-        const t = new Date();
-        return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+      const isoOf = (t: Date) =>
+        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+      const todayIso = isoOf(new Date());
+      // cutoffDate = the calendar date 2 WORKING days before today (Mon–Sat,
+      // skipping Sundays and public holidays) — measured against the REAL
+      // calendar, NOT the selected period. A 0-logged working day is "pending"
+      // (maybe just not keyed yet) only when it is strictly after this cutoff
+      // and on/before today; everything on/before the cutoff is a confirmed
+      // absence. For a closed past month the cutoff sits in the current month,
+      // so no day in that month is pending — the whole month is confirmed.
+      // Matches the backend absenceCutoffDay(today, 2, publicHolidays).
+      const cutoffDate = (() => {
+        const holidaySet = new Set(holidayList);
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        let remaining = 2;
+        while (remaining > 0) {
+          d.setDate(d.getDate() - 1);
+          const dow = d.getDay();
+          if (dow === 0) continue; // Sunday — non-working
+          if (holidaySet.has(isoOf(d))) continue; // public holiday
+          remaining -= 1;
+        }
+        return isoOf(d);
       })();
-      // Working days that are on/before today (within the period). The last 2
-      // of these form the grace window; the day just before them is the cutoff.
-      const daysUpToToday = periodWorkingDays.filter((d) => d <= todayIso);
-      // cutoffDate = 2 working days before the most recent working day <= today.
-      // Everything strictly after cutoffDate (and <= today) is pending.
-      const cutoffIndex = daysUpToToday.length - 1 - 2; // 2 working days back
-      const cutoffDate =
-        cutoffIndex >= 0 ? daysUpToToday[cutoffIndex] : null;
 
       let totalShort = 0;
       let absentDays = 0;
@@ -6142,7 +6155,7 @@ function LaborCostTab({
         perDayDeductionSen,
       };
     },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate],
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList],
   );
 
   // Set of department codes the labor buckets cover (the 8 production depts +

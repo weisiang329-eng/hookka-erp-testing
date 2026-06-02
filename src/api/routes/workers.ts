@@ -46,6 +46,10 @@ type WorkerRow = {
   icNumber: string | null;
   passportNumber: string | null;
   nationality: string | null;
+  // YYYY-MM-DD last day of employment (migration 0143). NULL for current
+  // staff. Set together with status = 'RESIGNED' so payroll stops after the
+  // resignation month.
+  resignedAt: string | null;
 };
 
 type DepartmentRow = {
@@ -111,6 +115,7 @@ function rowToWorker(row: WorkerRow) {
     icNumber: row.icNumber ?? "",
     passportNumber: row.passportNumber ?? "",
     nationality: row.nationality ?? "",
+    resignedAt: row.resignedAt ?? "",
   };
 }
 
@@ -347,6 +352,43 @@ app.put("/:id", async (c) => {
         ? incomingCategories
         : parseCategories(existing.categories);
 
+    // ── Resignation. status === 'RESIGNED' requires a resignation date so
+    //    payroll knows which month is the worker's last paid one. Moving the
+    //    status to anything else clears the date. A bad date is rejected at the
+    //    backend (the frontend Save handler rejects the same way) rather than
+    //    silently stored.
+    const nextStatus = body.status ?? existing.status;
+    const isValidDate = (v: unknown): v is string =>
+      typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+    let nextResignedAt: string | null;
+    if (nextStatus === "RESIGNED") {
+      const candidate =
+        body.resignedAt !== undefined ? body.resignedAt : existing.resignedAt;
+      if (!isValidDate(candidate)) {
+        return c.json(
+          {
+            success: false,
+            error: "A resignation date (YYYY-MM-DD) is required when status is Resigned.",
+          },
+          400,
+        );
+      }
+      nextResignedAt = candidate;
+    } else {
+      // Reject a stray resignedAt on a non-resigned worker rather than store a
+      // contradictory pair.
+      if (body.resignedAt && isValidDate(body.resignedAt)) {
+        return c.json(
+          {
+            success: false,
+            error: "Set status to Resigned before recording a resignation date.",
+          },
+          400,
+        );
+      }
+      nextResignedAt = null;
+    }
+
     const merged = {
       name: body.name ?? existing.name,
       empNo: body.empNo ?? existing.empNo,
@@ -356,7 +398,7 @@ app.put("/:id", async (c) => {
       categories: JSON.stringify(finalCategories),
       position: body.position ?? existing.position ?? "",
       phone: body.phone ?? existing.phone ?? "",
-      status: body.status ?? existing.status,
+      status: nextStatus,
       basicSalarySen: body.basicSalarySen ?? existing.basicSalarySen,
       workingHoursPerDay:
         body.workingHoursPerDay ?? existing.workingHoursPerDay,
@@ -384,6 +426,7 @@ app.put("/:id", async (c) => {
       icNumber: body.icNumber ?? existing.icNumber ?? "",
       passportNumber: body.passportNumber ?? existing.passportNumber ?? "",
       nationality: body.nationality ?? existing.nationality ?? "",
+      resignedAt: nextResignedAt,
     };
 
     await c.var.DB.prepare(
@@ -392,7 +435,7 @@ app.put("/:id", async (c) => {
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
          epfEnabled = ?, socsoEnabled = ?, eisEnabled = ?, pcbEnabled = ?,
-         joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?
+         joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?
        WHERE id = ?`,
     )
       .bind(
@@ -417,6 +460,7 @@ app.put("/:id", async (c) => {
         merged.icNumber,
         merged.passportNumber,
         merged.nationality,
+        merged.resignedAt,
         id,
       )
       .run();

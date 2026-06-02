@@ -5424,6 +5424,12 @@ function LaborCostTab({
   // operators don't lose sight of them.
   const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
 
+  // Accordion: which under-logged factory worker's per-day breakdown is open.
+  // Only one at a time — clicking a row toggles it; clicking again or another
+  // row collapses / switches. Keyed by the worker's employeeId (the worker
+  // record id), which is stable across the period.
+  const [expandedGapWorkerId, setExpandedGapWorkerId] = useState<string | null>(null);
+
   const handlePeriodChange = useCallback((p: string) => {
     setPeriod(p);
     if (p) {
@@ -5821,6 +5827,65 @@ function LaborCostTab({
     return out;
   }, [entriesResp, workersById, period, from, holidayList]);
 
+  // Per-(worker, date) logged HOURS — used by the per-worker drill-in so the
+  // owner can see which DAY each worker's hours weren't recorded. This is a
+  // pure hours sum (regular + OT, i.e. the raw `hours` field), NOT a money
+  // value — the drill-in compares logged hours against the worker's standard
+  // daily hours. Keyed "workerId|YYYY-MM-DD".
+  const loggedHoursByWorkerDate = useMemo(() => {
+    const out = new Map<string, number>();
+    const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
+    for (const e of entries) {
+      const key = `${e.workerId}|${e.date}`;
+      out.set(key, (out.get(key) ?? 0) + (Number(e.hours) || 0));
+    }
+    return out;
+  }, [entriesResp]);
+
+  // Working days (Mon–Sat, excluding declared public holidays) in the selected
+  // period — the calendar the drill-in walks to flag short / missing days. We
+  // use the same holiday list the labor calc already consumes and the same
+  // Mon–Sat convention (Sunday = 0 is non-working). Built from the actual
+  // from/to range so a custom (non-month) window still drills in correctly.
+  const periodWorkingDays = useMemo(() => {
+    const holidaySet = new Set(holidayList);
+    const days: string[] = [];
+    if (!from || !to) return days;
+    const start = new Date(`${from}T00:00:00`);
+    const end = new Date(`${to}T00:00:00`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return days;
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const dow = d.getDay();
+      if (dow === 0) continue; // Sunday — non-working
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      if (holidaySet.has(iso)) continue; // declared public holiday
+      days.push(iso);
+    }
+    return days;
+  }, [from, to, holidayList]);
+
+  // Build the per-day shortfall breakdown for one worker on demand (only the
+  // open accordion row is computed). For each working day in the period:
+  // logged = Σ that worker's hours that date; expected = the worker's standard
+  // daily hours (the SAME workingHoursPerDay the labor calc uses, defaulting
+  // to 9); short = max(0, expected − logged). A day with 0 logged is fully
+  // missing.
+  const buildWorkerDayBreakdown = useCallback(
+    (workerId: string) => {
+      const w = workersById.get(workerId);
+      const expected = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      let totalShort = 0;
+      const rows = periodWorkingDays.map((date) => {
+        const logged = loggedHoursByWorkerDate.get(`${workerId}|${date}`) ?? 0;
+        const short = Math.max(0, expected - logged);
+        totalShort += short;
+        return { date, logged, expected, short };
+      });
+      return { rows, totalShort, expected };
+    },
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate],
+  );
+
   // Set of department codes the labor buckets cover (the 8 production depts +
   // WAREHOUSING + PRODUCTION_SHORTFALL + REPAIR + MAINTENANCE + R_AND_D). A
   // worker whose department is NOT in this set logs no factory hours by
@@ -5841,6 +5906,7 @@ function LaborCostTab({
     }> = [];
     const underLoggedFactory: Array<{
       id: string;
+      workerId: string | undefined;
       name: string;
       deptCode: string;
       deptName: string;
@@ -5873,6 +5939,7 @@ function LaborCostTab({
       if (gapSen > 50) {
         underLoggedFactory.push({
           id: p.id,
+          workerId: p.employeeId || undefined,
           name,
           deptCode: code,
           deptName,
@@ -6091,54 +6158,63 @@ function LaborCostTab({
               Non-production salary — who &amp; why
             </h3>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
-              The Non-production salary residual ({formatCurrency(nonProductionSalarySen)}) splits into two kinds:
-              {" "}<span className="font-medium text-[#4B5563]">genuine non-production staff</span> (admin / sales /
-              management / drivers / QC) who log no factory hours — expected; and
-              {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
-              {" "}— a data gap to fix by recording the missing hours.
+              {employeeResidual.nonProductionStaff.length > 0 ? (
+                <>
+                  The Non-production salary residual ({formatCurrency(nonProductionSalarySen)}) splits into two kinds:
+                  {" "}<span className="font-medium text-[#4B5563]">genuine non-production staff</span> (admin / sales /
+                  management / drivers / QC) who log no factory hours — expected; and
+                  {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
+                  {" "}— a data gap to fix by recording the missing hours.
+                </>
+              ) : (
+                <>
+                  The Non-production salary residual ({formatCurrency(nonProductionSalarySen)}) is entirely
+                  {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
+                  {" "}— a data gap to fix by recording the missing hours. Everyone on payroll this period is a
+                  production worker, so there is no non-production staff to park. Click a worker to see which days
+                  are short.
+                </>
+              )}
             </p>
 
-            {/* 1. Genuine non-production staff — whole salary is the residual. */}
-            <div className="mb-4">
-              <p className="text-xs font-semibold text-[#4B5563] mb-1">
-                Non-production staff (no factory hours — expected)
-              </p>
-              <div className="overflow-x-auto rounded-md border border-[#E2DDD8] bg-white">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                      <th className="py-1.5 px-3 text-left font-medium">Employee</th>
-                      <th className="py-1.5 px-3 text-left font-medium">Department</th>
-                      <th className="py-1.5 px-3 text-right font-medium">Salary</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {employeeResidual.nonProductionStaff.map((e) => (
-                      <tr key={`np-staff-${e.id}`} className="border-b border-[#F0EDE9]">
-                        <td className="py-1.5 px-3 text-[#1F1D1B]">{e.name}</td>
-                        <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
-                        <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
+            {/* 1. Genuine non-production staff — whole salary is the residual.
+                Hidden entirely when there are none (this factory is all
+                production workers, so the table is usually empty). */}
+            {employeeResidual.nonProductionStaff.length > 0 && (
+              <div className="mb-4">
+                <p className="text-xs font-semibold text-[#4B5563] mb-1">
+                  Non-production staff (no factory hours — expected)
+                </p>
+                <div className="overflow-x-auto rounded-md border border-[#E2DDD8] bg-white">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                        <th className="py-1.5 px-3 text-left font-medium">Employee</th>
+                        <th className="py-1.5 px-3 text-left font-medium">Department</th>
+                        <th className="py-1.5 px-3 text-right font-medium">Salary</th>
                       </tr>
-                    ))}
-                    {employeeResidual.nonProductionStaff.length === 0 && (
-                      <tr>
-                        <td colSpan={3} className="py-2 px-3 text-center text-xs text-[#9CA3AF]">
-                          No non-production staff this period
+                    </thead>
+                    <tbody>
+                      {employeeResidual.nonProductionStaff.map((e) => (
+                        <tr key={`np-staff-${e.id}`} className="border-b border-[#F0EDE9]">
+                          <td className="py-1.5 px-3 text-[#1F1D1B]">{e.name}</td>
+                          <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
+                          <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t border-[#E2DDD8]">
+                        <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={2}>Subtotal</td>
+                        <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#1F1D1B]">
+                          {formatCurrency(employeeResidual.nonProdSubtotalSen)}
                         </td>
                       </tr>
-                    )}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t border-[#E2DDD8]">
-                      <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={2}>Subtotal</td>
-                      <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#1F1D1B]">
-                        {formatCurrency(employeeResidual.nonProdSubtotalSen)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
+                    </tfoot>
+                  </table>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* 2. Factory workers with unlogged hours — the DATA GAP. */}
             <div className="mb-3">
@@ -6158,15 +6234,110 @@ function LaborCostTab({
                     </tr>
                   </thead>
                   <tbody>
-                    {employeeResidual.underLoggedFactory.map((e) => (
-                      <tr key={`ul-fac-${e.id}`} className="border-b border-[#F1DDD7]">
-                        <td className="py-1.5 px-3 text-[#1F1D1B]">{e.name}</td>
-                        <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
-                        <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
-                        <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{formatCurrency(e.loggedValueSen)}</td>
-                        <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#9A3A2D]">{formatCurrency(e.gapSen)}</td>
-                      </tr>
-                    ))}
+                    {employeeResidual.underLoggedFactory.map((e) => {
+                      // Drill-in keys on the worker record id (employeeId), not
+                      // the payslip id, since the per-day hours map is keyed by
+                      // workerId. Rows whose payslip has no linked employeeId
+                      // can't be drilled — render them non-interactive.
+                      const drillWorkerId = e.workerId;
+                      const canDrill = !!drillWorkerId && workersById.has(drillWorkerId);
+                      const isOpen = canDrill && expandedGapWorkerId === drillWorkerId;
+                      const breakdown = isOpen ? buildWorkerDayBreakdown(drillWorkerId!) : null;
+                      return (
+                        <Fragment key={`ul-fac-${e.id}`}>
+                          <tr
+                            className={`border-b border-[#F1DDD7] ${canDrill ? "cursor-pointer hover:bg-[#FBEAE5]" : ""}`}
+                            onClick={canDrill ? () => setExpandedGapWorkerId(isOpen ? null : drillWorkerId!) : undefined}
+                          >
+                            <td className="py-1.5 px-3 text-[#1F1D1B]">
+                              <span className="inline-flex items-center gap-1.5">
+                                {canDrill && (
+                                  isOpen
+                                    ? <ChevronDown className="h-3.5 w-3.5 text-[#9A3A2D]" />
+                                    : <ChevronRight className="h-3.5 w-3.5 text-[#9A3A2D]" />
+                                )}
+                                {e.name}
+                              </span>
+                            </td>
+                            <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-[#1F1D1B]">{formatCurrency(e.grossSen)}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{formatCurrency(e.loggedValueSen)}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#9A3A2D]">{formatCurrency(e.gapSen)}</td>
+                          </tr>
+                          {isOpen && breakdown && (
+                            <tr className="border-b border-[#F1DDD7] bg-white">
+                              <td colSpan={5} className="px-3 py-2">
+                                <p className="text-xs font-semibold text-[#4B5563] mb-1">
+                                  Per-day Working Hours for {e.name} — which days are short
+                                </p>
+                                <div className="overflow-x-auto rounded-md border border-[#E2DDD8]">
+                                  <table className="w-full text-xs">
+                                    <thead>
+                                      <tr className="border-b border-[#E2DDD8] text-[#6B7280]">
+                                        <th className="py-1 px-2 text-left font-medium">Date</th>
+                                        <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
+                                        <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
+                                        <th className="py-1 px-2 text-right font-medium">Short hrs</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {breakdown.rows.map((d) => {
+                                        const fullyMissing = d.logged <= 0;
+                                        const isShort = d.short > 0;
+                                        return (
+                                          <tr
+                                            key={`gap-day-${e.id}-${d.date}`}
+                                            className={`border-b border-[#F0EDE9] ${
+                                              fullyMissing
+                                                ? "bg-[#FCEDE9]"
+                                                : isShort
+                                                  ? "bg-[#FDF6E3]"
+                                                  : ""
+                                            }`}
+                                          >
+                                            <td className="py-1 px-2 text-[#1F1D1B]">{d.date}</td>
+                                            <td className={`py-1 px-2 text-right tabular-nums ${fullyMissing ? "text-[#9A3A2D] font-semibold" : "text-[#4B5563]"}`}>
+                                              {d.logged.toFixed(1)}
+                                            </td>
+                                            <td className="py-1 px-2 text-right tabular-nums text-[#6B7280]">{d.expected.toFixed(1)}</td>
+                                            <td className={`py-1 px-2 text-right tabular-nums font-semibold ${
+                                              fullyMissing ? "text-[#9A3A2D]" : isShort ? "text-[#B45309]" : "text-[#4F7C3A]"
+                                            }`}>
+                                              {d.short > 0 ? d.short.toFixed(1) : "0.0"}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                      {breakdown.rows.length === 0 && (
+                                        <tr>
+                                          <td colSpan={4} className="py-2 px-2 text-center text-[#9CA3AF]">
+                                            No working days in this period
+                                          </td>
+                                        </tr>
+                                      )}
+                                    </tbody>
+                                    <tfoot>
+                                      <tr className="border-t border-[#E2DDD8]">
+                                        <td className="py-1 px-2 font-semibold text-[#1F1D1B]" colSpan={3}>
+                                          Total short hours
+                                        </td>
+                                        <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
+                                          {breakdown.totalShort.toFixed(1)}
+                                        </td>
+                                      </tr>
+                                    </tfoot>
+                                  </table>
+                                </div>
+                                <p className="mt-1 text-[11px] text-[#9CA3AF]">
+                                  Working days are Mon–Sat, excluding Sundays and declared public holidays.
+                                  Go record the missing hours on the short days to close the gap.
+                                </p>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                     {employeeResidual.underLoggedFactory.length === 0 && (
                       <tr>
                         <td colSpan={5} className="py-2 px-3 text-center text-xs text-[#4F7C3A]">

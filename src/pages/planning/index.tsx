@@ -1854,7 +1854,22 @@ export default function PlanningPage() {
                         className="w-2.5 h-2.5 rounded-full inline-block"
                         style={{ backgroundColor: dept.color }}
                       />
-                      {dept.name}
+                      {/* Phase 1: only Fabric Cutting opens a department
+                          drill-in page. Other depts stay plain text until
+                          their own detail pages are built. */}
+                      {dept.code === "FAB_CUT" ? (
+                        <button
+                          type="button"
+                          onClick={() => navigate("/planning/dept/fabric-cutting")}
+                          className="inline-flex items-center gap-1 font-semibold text-[#6B5C32] hover:text-[#574B28] hover:underline underline-offset-2 transition-colors"
+                          title="Open the Fabric Cutting department schedule"
+                        >
+                          {dept.name}
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </button>
+                      ) : (
+                        dept.name
+                      )}
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2 pb-3 text-xs">

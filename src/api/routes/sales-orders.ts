@@ -495,9 +495,21 @@ export async function createProductionOrdersForSO(
 async function generateCompanySOId(
   db: D1Database,
   isServiceOrder = false,
+  // The SO id's YYMM follows the ORDER DATE (companySODate = the customer's PO
+  // date the operator entered), NOT the system clock (Wei Siang 2026-06-02). So
+  // a customer PO dated 29 May, keyed in on 1 June, gets SO-2505-NNN — the
+  // number reflects when the customer ordered, not when we keyed it. Falls back
+  // to today's month when no valid order date is supplied.
+  orderDate?: string | null,
 ): Promise<string> {
-  const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  let yymm: string;
+  const m = typeof orderDate === "string" ? orderDate.match(/^(\d{4})-(\d{2})/) : null;
+  if (m) {
+    yymm = `${m[1].slice(2)}${m[2]}`;
+  } else {
+    const now = new Date();
+    yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  }
   const prefix = isServiceOrder ? `SV-${yymm}-` : `SO-${yymm}-`;
   const res = await db
     .prepare(
@@ -1810,7 +1822,18 @@ app.post("/", async (c) => {
     // the regular Sales Orders list, which filters
     // ?isServiceOrder=false by default).
     const isServiceOrder = body.isServiceOrder === true;
-    const companySOId = await generateCompanySOId(c.var.DB, isServiceOrder);
+    // Number the SO by its order date (companySODate = the customer's PO date),
+    // not the system clock — see generateCompanySOId. Falls back to today when
+    // no order date was supplied (mirrors the INSERT's `companySODate ?? today`).
+    const orderDateForId =
+      typeof body.companySODate === "string" && body.companySODate
+        ? body.companySODate
+        : now.split("T")[0];
+    const companySOId = await generateCompanySOId(
+      c.var.DB,
+      isServiceOrder,
+      orderDateForId,
+    );
     const soId = genSoId();
     const today = now.split("T")[0];
 

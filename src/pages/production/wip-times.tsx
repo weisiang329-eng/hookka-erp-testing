@@ -11,7 +11,7 @@
 // Source: /api/wip-times — BOM templates ONLY, never job_cards. See
 // routes/wip-times.ts for the rationale.
 // ---------------------------------------------------------------------------
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -159,6 +159,18 @@ export default function WipTimesPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Multi-select batch edit. The grid's tick boxes feed `selectedRows`;
+  // when one or more rows are ticked a toolbar appears that opens a batch
+  // dialog. Applying writes the SAME new minutes to every ticked WIP using
+  // the normal /api/wip-times PUT, one call per row — no special bulk path,
+  // so each write goes through the same validation a single edit does.
+  const [selectedRows, setSelectedRows] = useState<WipTimeRow[]>([]);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchMinutes, setBatchMinutes] = useState("");
+  const [batchSaving, setBatchSaving] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
+
   // Import-from-Excel state. The flow is two-step:
   //   1. Operator picks a file → we parse + POST dryRun → render `importPreview`
   //   2. Operator clicks "Apply N changes" → we POST dryRun:false → toast result
@@ -271,6 +283,80 @@ export default function WipTimesPage() {
       setSaveError(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Opens the single-row Edit BOM Time dialog seeded from a row. Shared by
+  // the ✏️ pencil button and the row double-click, so double-clicking any
+  // WIP row jumps straight into editing its time.
+  const openEditForRow = useCallback((r: WipTimeRow) => {
+    setSaveError(null);
+    setEditing({
+      wipLabel: r.wipLabel,
+      departmentCode: r.departmentCode,
+      bomMinMinutes: r.bomMinMinutes,
+      bomMaxMinutes: r.bomMaxMinutes,
+      bomAvgMinutes: r.bomAvgMinutes,
+      productCount: r.productCount,
+      productCodes: r.productCodes ?? [],
+      draftMinutes: String(r.bomAvgMinutes),
+    });
+  }, []);
+
+  // -- Batch edit save ------------------------------------------------------
+  // Writes the same new minutes to every ticked WIP row. Each row is one
+  // PUT to /api/wip-times (the single-edit endpoint), run sequentially so
+  // the server isn't hammered and a mid-run failure stops cleanly. The same
+  // 0–1440 guard the single edit uses applies here.
+  const handleBatchSave = async () => {
+    if (batchSaving || selectedRows.length === 0) return;
+    setBatchError(null);
+    const m = Number(batchMinutes.trim());
+    if (!Number.isFinite(m) || m < 0 || m > 1440) {
+      setBatchError("Enter a number between 0 and 1440 (24h cap).");
+      return;
+    }
+    setBatchSaving(true);
+    setBatchProgress({ done: 0, total: selectedRows.length });
+    const failed: string[] = [];
+    try {
+      let done = 0;
+      for (const r of selectedRows) {
+        try {
+          const res = await fetch("/api/wip-times", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              wipLabel: r.wipLabel,
+              deptCode: r.departmentCode,
+              minutes: m,
+            }),
+          });
+          if (!res.ok) {
+            const body = (await res.json().catch(() => ({}))) as { error?: string };
+            failed.push(`${r.wipLabel}: ${body.error || `HTTP ${res.status}`}`);
+          }
+        } catch (err) {
+          failed.push(`${r.wipLabel}: ${err instanceof Error ? err.message : "failed"}`);
+        }
+        done += 1;
+        setBatchProgress({ done, total: selectedRows.length });
+      }
+      invalidateCachePrefix("/api/wip-times");
+      if (failed.length > 0) {
+        setBatchError(
+          `${failed.length} of ${selectedRows.length} did not save:\n${failed.slice(0, 5).join("\n")}`,
+        );
+        return;
+      }
+      // All saved — close the dialog and clear the selection.
+      setBatchOpen(false);
+      setBatchMinutes("");
+      setSelectedRows([]);
+    } finally {
+      setBatchSaving(false);
+      setBatchProgress(null);
     }
   };
 
@@ -667,22 +753,8 @@ export default function WipTimesPage() {
             </span>
             <button
               type="button"
-              title={`Edit BOM minutes for "${r.wipLabel}" — applies to all ${r.productCount} product(s) using this WIP`}
-              onClick={() =>
-                setEditing({
-                  wipLabel: r.wipLabel,
-                  departmentCode: r.departmentCode,
-                  bomMinMinutes: r.bomMinMinutes,
-                  bomMaxMinutes: r.bomMaxMinutes,
-                  bomAvgMinutes: r.bomAvgMinutes,
-                  productCount: r.productCount,
-                  productCodes: r.productCodes ?? [],
-                  // Seed input with current value — avg is the most useful
-                  // single starting point when min == max (which is the
-                  // common case); for ranges, user can replace.
-                  draftMinutes: String(r.bomAvgMinutes),
-                })
-              }
+              title={`Edit BOM minutes for "${r.wipLabel}" — applies to all ${r.productCount} product(s) using this WIP. Tip: double-click the row to edit.`}
+              onClick={() => openEditForRow(r)}
               className="ml-1 p-1 rounded hover:bg-[#F0ECE9] text-[#8A8680] hover:text-[#6B5C32]"
             >
               <Pencil className="h-3.5 w-3.5" />
@@ -703,7 +775,7 @@ export default function WipTimesPage() {
         ),
       },
     ],
-    [],
+    [openEditForRow],
   );
 
   return (
@@ -1043,6 +1115,176 @@ export default function WipTimesPage() {
         </div>
       )}
 
+      {/* Batch-edit toolbar — appears once one or more WIP rows are ticked.
+          Sets the SAME new minutes on every selected WIP. */}
+      {selectedRows.length > 0 && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-[#6B5C32]/30 bg-[#FDF9F0] px-4 py-2.5">
+          <div className="text-sm text-[#1F1D1B]">
+            <span className="font-semibold">
+              {selectedRows.length} WIP{selectedRows.length === 1 ? "" : "s"} selected
+            </span>
+            <span className="text-[#6B7280]">
+              {" "}· affects{" "}
+              {selectedRows.reduce((s, r) => s + r.productCount, 0).toLocaleString()}{" "}
+              product BOM
+              {selectedRows.reduce((s, r) => s + r.productCount, 0) === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSelectedRows([])}
+            >
+              Clear
+            </Button>
+            <Button
+              size="sm"
+              className="bg-[#6B5C32] text-white hover:bg-[#574B29]"
+              onClick={() => {
+                setBatchError(null);
+                setBatchMinutes("");
+                setBatchOpen(true);
+              }}
+            >
+              <Pencil className="h-4 w-4 mr-1.5" />
+              Set BOM Time…
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Edit BOM Time modal — sets one minutes value on every ticked
+          WIP. Each WIP can itself cover several product BOMs, so we show
+          both counts before the operator commits. */}
+      {batchOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+          onClick={() => !batchSaving && setBatchOpen(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-md w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-[#E2DDD8] flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-bold text-[#1F1D1B]">
+                  Set BOM Time — {selectedRows.length} WIP
+                  {selectedRows.length === 1 ? "" : "s"}
+                </h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">
+                  Writes the same minutes to every selected WIP's BOM.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => !batchSaving && setBatchOpen(false)}
+                className="p-1 rounded hover:bg-[#F0ECE9] text-[#8A8680]"
+                disabled={batchSaving}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-4 space-y-4">
+              <div className="grid grid-cols-2 gap-3 bg-[#FAF9F7] rounded-md p-3 text-sm">
+                <div>
+                  <p className="text-xs text-[#6B7280]">WIPs selected</p>
+                  <p className="font-semibold text-[#1F1D1B] mt-0.5">
+                    {selectedRows.length}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-[#6B7280]">Product BOMs affected</p>
+                  <p className="font-semibold text-[#1F1D1B] mt-0.5">
+                    {selectedRows
+                      .reduce((s, r) => s + r.productCount, 0)
+                      .toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              {/* The WIP labels being changed, so the operator can confirm the
+                  selection before committing a bulk write. */}
+              <div className="bg-white border border-[#E2DDD8] rounded-md">
+                <div className="px-3 py-2 text-xs text-[#6B7280] border-b border-[#E2DDD8]">
+                  Selected WIPs
+                </div>
+                <div className="max-h-32 overflow-y-auto px-3 py-2 text-sm">
+                  {selectedRows.map((r) => (
+                    <div
+                      key={`${r.wipLabel}::${r.departmentCode}`}
+                      className="text-[#1F1D1B] py-0.5 flex items-center justify-between gap-2"
+                    >
+                      <span className="truncate" title={r.wipLabel}>
+                        {r.wipLabel}
+                      </span>
+                      <span className="text-xs text-[#8A8680] shrink-0">
+                        {DEPT_LABEL_BY_CODE.get(r.departmentCode) ??
+                          r.departmentCode}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-[#1F1D1B] mb-1">
+                  New BOM Time (minutes per unit)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={1440}
+                  step={1}
+                  value={batchMinutes}
+                  onChange={(e) => setBatchMinutes(e.target.value)}
+                  className="w-full h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-base font-semibold tabular-nums focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                  placeholder="0"
+                  disabled={batchSaving}
+                  autoFocus
+                />
+                <p className="text-xs text-[#6B7280] mt-1">
+                  0 – 1440 minutes (24h cap). Applied to every selected WIP.
+                </p>
+              </div>
+
+              {batchProgress && (
+                <div className="text-xs text-[#6B7280]">
+                  Saving… {batchProgress.done} / {batchProgress.total}
+                </div>
+              )}
+              {batchError && (
+                <div className="text-xs text-[#B91C1C] bg-[#FEF2F2] border border-[#FECACA] rounded p-2 whitespace-pre-line">
+                  {batchError}
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 border-t border-[#E2DDD8] flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setBatchOpen(false)}
+                disabled={batchSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleBatchSave}
+                disabled={batchSaving}
+                className="bg-[#6B5C32] text-white hover:bg-[#574B29]"
+              >
+                {batchSaving
+                  ? "Saving…"
+                  : `Apply to ${selectedRows.length} WIP${selectedRows.length === 1 ? "" : "s"}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* WIP table */}
       <Card>
         <CardHeader className="pb-3">
@@ -1065,6 +1307,9 @@ export default function WipTimesPage() {
             loading={loading}
             stickyHeader
             virtualize
+            selectable
+            onSelectionChange={setSelectedRows}
+            onDoubleClick={openEditForRow}
             gridId="wip-times-list"
             maxHeight="calc(100vh - 360px)"
             emptyMessage="No BOM-defined WIPs for this scope yet. Make sure relevant products have active BOMs configured."

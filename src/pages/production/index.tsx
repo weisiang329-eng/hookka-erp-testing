@@ -3538,20 +3538,26 @@ export default function ProductionPage({
       return all.join("+");
     };
 
-    const all: FgSticker[] = [];
-    try {
-      for (const o of ordersToProcess) {
-        const [gRes, pRes] = await Promise.all([
-          fetch(`/api/fg-units/generate/${encodeURIComponent(o.id)}`, { method: "POST" })
-            .then((r) => r.json() as Promise<{ success?: boolean; data?: FGUnitMini[] }>),
-          fetch(`/api/products/${encodeURIComponent(o.productId)}`)
-            .then((r) => r.json() as Promise<{ success?: boolean; data?: ProductMini }>)
-            .catch(() => null),
-        ]);
-        const units: FGUnitMini[] = gRes?.success ? (gRes.data ?? []) : [];
-        const p: ProductMini | undefined = pRes?.success ? pRes.data : undefined;
-        for (const u of units) {
-          all.push({
+    // Per-order sticker fetch. Each order makes the same two-call
+    // Promise.all as before (generate fg-units + fetch product). Returns
+    // that order's slice of stickers so the caller can place it back into
+    // its original position — preserving the exact order the old serial
+    // loop produced (nonSofa downstream keeps insertion order).
+    const buildStickersForOrder = async (
+      o: ProductionOrder,
+    ): Promise<FgSticker[]> => {
+      const slice: FgSticker[] = [];
+      const [gRes, pRes] = await Promise.all([
+        fetch(`/api/fg-units/generate/${encodeURIComponent(o.id)}`, { method: "POST" })
+          .then((r) => r.json() as Promise<{ success?: boolean; data?: FGUnitMini[] }>),
+        fetch(`/api/products/${encodeURIComponent(o.productId)}`)
+          .then((r) => r.json() as Promise<{ success?: boolean; data?: ProductMini }>)
+          .catch(() => null),
+      ]);
+      const units: FGUnitMini[] = gRes?.success ? (gRes.data ?? []) : [];
+      const p: ProductMini | undefined = pRes?.success ? pRes.data : undefined;
+      for (const u of units) {
+        slice.push({
             key: u.id,
             unitSerial: u.unitSerial,
             shortCode: u.shortCode,
@@ -3601,7 +3607,34 @@ export default function ProductionPage({
             customerRef: o.customerReference ?? "",
             customerSO: customerSOBySo.get(o.salesOrderId) ?? "",
           });
+      }
+      return slice;
+    };
+
+    // Bounded-parallel fetch. The old code awaited each order INSIDE a
+    // for...of, so all ~138 orders ran fully sequentially (~12-22s). Run
+    // up to MAX_CONCURRENCY orders at once instead. Cap is intentionally
+    // modest (not unbounded 138) to stay within D1/Hyperdrive connection
+    // limits — each order already issues two backend calls. Results are
+    // written into their original index positions, so the flattened `all`
+    // array is identical to what the serial loop produced (nonSofa
+    // downstream relies on this insertion order).
+    const all: FgSticker[] = [];
+    try {
+      const MAX_CONCURRENCY = 10;
+      const slices: FgSticker[][] = new Array(ordersToProcess.length);
+      let nextIndex = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const i = nextIndex++;
+          if (i >= ordersToProcess.length) return;
+          slices[i] = await buildStickersForOrder(ordersToProcess[i]);
         }
+      };
+      const poolSize = Math.min(MAX_CONCURRENCY, ordersToProcess.length);
+      await Promise.all(Array.from({ length: poolSize }, () => worker()));
+      for (const slice of slices) {
+        if (slice) all.push(...slice);
       }
     } catch (err) {
       console.error("[fetchFgStickersForOrders] failed", err);

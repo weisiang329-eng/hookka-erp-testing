@@ -115,6 +115,12 @@ export type DataGridProps<T> = {
   // whole-dataset fetch so the search covers every record, not just the
   // currently loaded page.
   onSearchChange?: (query: string) => void;
+  // Seeds the grid's internal search box on mount only (useState initializer).
+  // Lets a parent that remounts the grid — e.g. a tab switch that unmounts the
+  // old grid and mounts a fresh one — carry the active search term across so
+  // the new grid opens already filtered instead of with an empty box. Read once
+  // on mount; later changes don't re-apply (the operator owns the box after).
+  initialSearch?: string;
   // Opt-in row virtualization (windowed rendering via @tanstack/react-virtual).
   // Off by default to keep the table-layout-driven column widths working for
   // small grids; turn on for large data sets (~500+ rows) where the DOM
@@ -1419,6 +1425,7 @@ export function DataGrid<T extends Record<string, any>>({
   viewStorageKey,
   onFilteredDataChange,
   onSearchChange,
+  initialSearch,
   virtualize = false,
   defaultExcludedValues,
   valueFilterKey,
@@ -1786,7 +1793,7 @@ export function DataGrid<T extends Record<string, any>>({
     } catch { return null; }
   };
   const seeded = readFilterState();
-  const [searchText, setSearchText] = useState(seeded?.searchText ?? "");
+  const [searchText, setSearchText] = useState(initialSearch ?? seeded?.searchText ?? "");
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>(
     seeded?.columnFilters ?? {},
   );

@@ -63,6 +63,12 @@ export function SKUFormDialog({
   const [rmSearch, setRmSearch] = useState("");
   const [showRmDropdown, setShowRmDropdown] = useState(false);
   const rmDropdownRef = useRef<HTMLDivElement>(null);
+  // Parallel search state for the Internal Description field — the owner
+  // records materials by code OR by description and wants to search by
+  // whichever he remembers. Mirrors the Internal Code field exactly.
+  const [descSearch, setDescSearch] = useState("");
+  const [showDescDropdown, setShowDescDropdown] = useState(false);
+  const descDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close the inventory dropdown on outside click. Without this it stayed
   // open indefinitely once focused, overlaying the Cancel + Add Mapping
@@ -77,6 +83,18 @@ export function SKUFormDialog({
     document.addEventListener("mousedown", onMouseDown);
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, [showRmDropdown]);
+
+  // Same outside-click-close behavior for the description search dropdown.
+  useEffect(() => {
+    if (!showDescDropdown) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (descDropdownRef.current && !descDropdownRef.current.contains(e.target as Node)) {
+        setShowDescDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [showDescDropdown]);
 
   const filteredInventory = useMemo(() => {
     if (!rmSearch) return inventoryItems.slice(0, 50);
@@ -94,11 +112,27 @@ export function SKUFormDialog({
       .slice(0, 50);
   }, [inventoryItems, rmSearch]);
 
+  // Same filter, driven off the description search box. Also matches on code
+  // OR description so picking by either term fills both fields.
+  const filteredInventoryByDesc = useMemo(() => {
+    if (!descSearch) return inventoryItems.slice(0, 50);
+    const q = descSearch.toLowerCase();
+    return inventoryItems
+      .filter(
+        (item) =>
+          (item.itemCode || "").toLowerCase().includes(q) ||
+          (item.description || "").toLowerCase().includes(q),
+      )
+      .slice(0, 50);
+  }, [inventoryItems, descSearch]);
+
   const selectInventoryItem = (item: SkuFormInventoryItem) => {
     setInternalRMCode(item.itemCode);
     setMaterialName(item.description);
     setShowRmDropdown(false);
     setRmSearch("");
+    setShowDescDropdown(false);
+    setDescSearch("");
   };
   const [supplierId, setSupplierId] = useState(
     editData?.supplierId || presetSupplierId || "",
@@ -208,14 +242,44 @@ export function SKUFormDialog({
                 </div>
               )}
             </div>
-            <div>
+            <div className="relative" ref={descDropdownRef}>
               <label className="block text-sm font-medium text-[#374151] mb-1">Internal Description *</label>
               <Input
-                value={materialName}
-                onChange={(e) => setMaterialName(e.target.value)}
+                value={showDescDropdown ? descSearch : materialName}
+                onChange={(e) => {
+                  setDescSearch(e.target.value);
+                  setShowDescDropdown(true);
+                }}
+                onFocus={() => setShowDescDropdown(true)}
+                placeholder="Search by description..."
                 required
-                placeholder="Auto-filled from selection"
+                autoComplete="off"
               />
+              {showDescDropdown && (
+                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-64 overflow-y-auto">
+                  {filteredInventoryByDesc.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-gray-400">No items found</div>
+                  ) : (
+                    filteredInventoryByDesc.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="w-full text-left px-3 py-2 hover:bg-[#FAF9F7] flex items-center gap-3 border-b border-[#E2DDD8]/50 last:border-0"
+                        onClick={() => selectInventoryItem(item)}
+                      >
+                        {/* Description is the primary line so the operator can
+                            scan/search by it; the code sits underneath as a
+                            muted sub-label. App font throughout (no monospace). */}
+                        <span className="flex-1 min-w-0">
+                          <span className="block truncate text-sm text-[#1F1D1B]">{item.description}</span>
+                          <span className="block truncate text-xs text-[#9CA3AF]">{item.itemCode}</span>
+                        </span>
+                        <span className="text-[10px] text-gray-400 shrink-0">{item.itemGroup}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

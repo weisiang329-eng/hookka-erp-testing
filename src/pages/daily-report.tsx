@@ -26,6 +26,7 @@ import {
   Users,
   CheckCircle2,
   ArrowUpRight,
+  ArrowLeft,
   GitBranch,
   Timer,
   Layers,
@@ -330,12 +331,16 @@ function CountTile({
   value,
   icon: Icon,
   highlight = false,
+  active = false,
   onClick,
 }: {
   label: string;
   value: number;
   icon: React.ElementType;
   highlight?: boolean;
+  // True when this tile's detail is the one currently open — draws a ring so
+  // the operator can see which category is expanded.
+  active?: boolean;
   // When provided AND value > 0 the tile becomes a drill-in button that
   // reveals its detail section. Zero-count tiles are inert.
   onClick?: () => void;
@@ -389,7 +394,11 @@ function CountTile({
 
   const card = (
     <Card
-      className={`rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] transition-all ${tone} ${
+      className={`rounded-xl transition-all ${tone} ${
+        active
+          ? "shadow-[0_0_0_2px_#C9A24B,0_8px_20px_rgba(201,162,75,0.25)]"
+          : "shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+      } ${
         interactive
           ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(0,0,0,0.12)]"
           : ""
@@ -422,7 +431,8 @@ function CountTile({
       type="button"
       onClick={onClick}
       className="text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C9A24B] focus-visible:ring-offset-1 rounded-xl"
-      aria-label={`${label}: ${value} — show details`}
+      aria-label={`${label}: ${value} — ${active ? "hide details" : "show details"}`}
+      aria-pressed={active}
     >
       {card}
     </button>
@@ -437,7 +447,6 @@ function Section({
   subtitle,
   count,
   icon: Icon,
-  highlighted = false,
   children,
 }: {
   id: string;
@@ -445,18 +454,12 @@ function Section({
   subtitle: string;
   count: number;
   icon: React.ElementType;
-  // Briefly emphasised after a tile drill-in.
-  highlighted?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <Card
       id={id}
-      className={`rounded-xl bg-white scroll-mt-24 transition-shadow duration-500 ${
-        highlighted
-          ? "shadow-[0_0_0_2px_#C9A24B,0_8px_24px_rgba(201,162,75,0.25)]"
-          : "shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-      }`}
+      className="rounded-xl bg-white scroll-mt-24 shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
     >
       <CardHeader className="flex flex-row items-start justify-between gap-3 p-5 pb-3">
         <div className="flex items-start gap-3">
@@ -740,24 +743,21 @@ export default function DailyReportPage() {
     return raw.data ?? null;
   }, [raw]);
 
-  // Drill-in: which section is briefly emphasised after a tile click.
-  const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
-  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Drill-in: which one category's detail is open (null = cards-only overview).
+  const [openKey, setOpenKey] = useState<SectionKey | null>(null);
+  const detailRef = useRef<HTMLDivElement | null>(null);
 
-  const drillTo = useCallback((key: SectionKey) => {
-    const el = document.getElementById(SECTION_IDS[key]);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-    setActiveSection(key);
-    if (highlightTimer.current) clearTimeout(highlightTimer.current);
-    highlightTimer.current = setTimeout(() => setActiveSection(null), 1800);
+  // Toggle a tile: open its detail, or close it if it's already the open one.
+  const toggleKey = useCallback((key: SectionKey) => {
+    setOpenKey((cur) => (cur === key ? null : key));
   }, []);
 
-  useEffect(
-    () => () => {
-      if (highlightTimer.current) clearTimeout(highlightTimer.current);
-    },
-    [],
-  );
+  // Smooth-scroll the freshly-opened detail into view.
+  useEffect(() => {
+    if (openKey && detailRef.current) {
+      detailRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [openKey]);
 
   // Settings panel open/closed.
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -837,73 +837,85 @@ export default function DailyReportPage() {
           label="DO Pending Dispatch"
           value={counts.doPendingDispatch}
           icon={Truck}
-          onClick={() => drillTo("doPendingDispatch")}
+          active={openKey === "doPendingDispatch"}
+          onClick={() => toggleKey("doPendingDispatch")}
         />
         <CountTile
           label="DO Not Delivered"
           value={counts.doNotDelivered}
           icon={PackageCheck}
-          onClick={() => drillTo("doNotDelivered")}
+          active={openKey === "doNotDelivered"}
+          onClick={() => toggleKey("doNotDelivered")}
         />
         <CountTile
           label="DO Not Invoiced"
           value={counts.doNotInvoiced}
           icon={FileText}
-          onClick={() => drillTo("doNotInvoiced")}
+          active={openKey === "doNotInvoiced"}
+          onClick={() => toggleKey("doNotInvoiced")}
         />
         <CountTile
           label="SO Without DO"
           value={counts.soNoDo}
           icon={ShoppingCart}
-          onClick={() => drillTo("soNoDo")}
+          active={openKey === "soNoDo"}
+          onClick={() => toggleKey("soNoDo")}
         />
         <CountTile
           label="SO Without Invoice"
           value={counts.soNoInvoice}
           icon={Receipt}
-          onClick={() => drillTo("soNoInvoice")}
+          active={openKey === "soNoInvoice"}
+          onClick={() => toggleKey("soNoInvoice")}
         />
         <CountTile
           label="Overdue Orders"
           value={counts.overdueOrders}
           icon={CalendarClock}
-          onClick={() => drillTo("overdueOrders")}
+          active={openKey === "overdueOrders"}
+          onClick={() => toggleKey("overdueOrders")}
         />
         <CountTile
           label="PO Not Received"
           value={counts.poNotReceived}
           icon={PackageX}
-          onClick={() => drillTo("poNotReceived")}
+          active={openKey === "poNotReceived"}
+          onClick={() => toggleKey("poNotReceived")}
         />
         <CountTile
           label="Low-Efficiency Workers"
           value={counts.lowEfficiencyWorkers}
           icon={Users}
-          onClick={() => drillTo("lowEfficiencyWorkers")}
+          active={openKey === "lowEfficiencyWorkers"}
+          onClick={() => toggleKey("lowEfficiencyWorkers")}
         />
         <CountTile
           label="Process Skips"
           value={counts.processSkips}
           icon={GitBranch}
-          onClick={() => drillTo("processSkips")}
+          active={openKey === "processSkips"}
+          onClick={() => toggleKey("processSkips")}
         />
         <CountTile
           label="Missing WIP Times"
           value={counts.missingWipTimes}
           icon={Timer}
-          onClick={() => drillTo("missingWipTimes")}
+          active={openKey === "missingWipTimes"}
+          onClick={() => toggleKey("missingWipTimes")}
         />
         <CountTile
           label="Incomplete BOMs"
           value={counts.incompleteBoms}
           icon={Layers}
-          onClick={() => drillTo("incompleteBoms")}
+          active={openKey === "incompleteBoms"}
+          onClick={() => toggleKey("incompleteBoms")}
         />
         <CountTile
           label="R&D Stalled"
           value={counts.rdStalled}
           icon={FlaskConical}
-          onClick={() => drillTo("rdStalled")}
+          active={openKey === "rdStalled"}
+          onClick={() => toggleKey("rdStalled")}
         />
       </div>
 
@@ -924,12 +936,25 @@ export default function DailyReportPage() {
         </Card>
       )}
 
-      {/* Sections */}
-      <div className="space-y-5">
+      {/* Drilled-in detail — only the one open category renders here. The cards
+          grid above stays visible as the navigation. */}
+      {openKey && (
+        <div ref={detailRef} className="space-y-4 scroll-mt-24">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setOpenKey(null)}
+            className="shrink-0"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to overview
+          </Button>
+
         {/* DO pending dispatch */}
+        {openKey === "doPendingDispatch" && (
         <Section
           id={SECTION_IDS.doPendingDispatch}
-          highlighted={activeSection === "doPendingDispatch"}
           title="Deliveries Pending Dispatch"
           subtitle="DOs still in draft for more than 1 day — load them onto a truck."
           count={counts.doPendingDispatch}
@@ -966,11 +991,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* DO not delivered */}
+        {openKey === "doNotDelivered" && (
         <Section
           id={SECTION_IDS.doNotDelivered}
-          highlighted={activeSection === "doNotDelivered"}
           title="Dispatched But Not Delivered"
           subtitle="On the road for more than 1 day with no delivery confirmation."
           count={counts.doNotDelivered}
@@ -1007,11 +1033,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* DO not invoiced */}
+        {openKey === "doNotInvoiced" && (
         <Section
           id={SECTION_IDS.doNotInvoiced}
-          highlighted={activeSection === "doNotInvoiced"}
           title="Delivered But Not Invoiced"
           subtitle="Delivered more than 1 day ago with no invoice raised — bill the customer."
           count={counts.doNotInvoiced}
@@ -1048,11 +1075,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* SO without DO */}
+        {openKey === "soNoDo" && (
         <Section
           id={SECTION_IDS.soNoDo}
-          highlighted={activeSection === "soNoDo"}
           title="Sales Orders Without a Delivery Order"
           subtitle="Confirmed / ready-to-ship orders that have no delivery order yet."
           count={counts.soNoDo}
@@ -1098,11 +1126,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* SO without invoice */}
+        {openKey === "soNoInvoice" && (
         <Section
           id={SECTION_IDS.soNoInvoice}
-          highlighted={activeSection === "soNoInvoice"}
           title="Sales Orders Without an Invoice"
           subtitle="Delivered / closed orders with no invoice on record."
           count={counts.soNoInvoice}
@@ -1148,11 +1177,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* Overdue orders */}
+        {openKey === "overdueOrders" && (
         <Section
           id={SECTION_IDS.overdueOrders}
-          highlighted={activeSection === "overdueOrders"}
           title="Overdue Orders"
           subtitle="Sales orders past their customer delivery date and not yet finished."
           count={counts.overdueOrders}
@@ -1198,11 +1228,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* PO not received */}
+        {openKey === "poNotReceived" && (
         <Section
           id={SECTION_IDS.poNotReceived}
-          highlighted={activeSection === "poNotReceived"}
           title="Purchase Orders Not Received"
           subtitle="Open for more than 14 days with no goods receipt or purchase invoice."
           count={counts.poNotReceived}
@@ -1257,11 +1288,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* Low-efficiency workers */}
+        {openKey === "lowEfficiencyWorkers" && (
         <Section
           id={SECTION_IDS.lowEfficiencyWorkers}
-          highlighted={activeSection === "lowEfficiencyWorkers"}
           title="Low-Efficiency Workers"
           subtitle="Below 60% efficiency yesterday (production time ÷ clocked time)."
           count={counts.lowEfficiencyWorkers}
@@ -1300,11 +1332,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* Process skips — production out-of-sequence */}
+        {openKey === "processSkips" && (
         <Section
           id={SECTION_IDS.processSkips}
-          highlighted={activeSection === "processSkips"}
           title="Production Out of Sequence"
           subtitle="A later step is finished while an earlier step in the same branch is not — check the order of work."
           count={counts.processSkips}
@@ -1362,11 +1395,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* BOM / WIP gaps — missing WIP times + incomplete BOMs */}
+        {openKey === "missingWipTimes" && (
         <Section
           id={SECTION_IDS.missingWipTimes}
-          highlighted={activeSection === "missingWipTimes"}
           title="Missing WIP Times"
           subtitle="Products in production with no standard time set for a step — workers and scheduling have nothing to plan against."
           count={counts.missingWipTimes}
@@ -1404,10 +1438,11 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
+        {openKey === "incompleteBoms" && (
         <Section
           id={SECTION_IDS.incompleteBoms}
-          highlighted={activeSection === "incompleteBoms"}
           title="Incomplete BOMs"
           subtitle="Products in production with no active bill of materials — costing and material planning cannot run."
           count={counts.incompleteBoms}
@@ -1440,11 +1475,12 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
+        )}
 
         {/* R&D stalled */}
+        {openKey === "rdStalled" && (
         <Section
           id={SECTION_IDS.rdStalled}
-          highlighted={activeSection === "rdStalled"}
           title="R&D Projects Stalled"
           subtitle="Active projects past their target launch date, or projects on hold — they need a push or a decision."
           count={counts.rdStalled}
@@ -1487,7 +1523,9 @@ export default function DailyReportPage() {
             </div>
           )}
         </Section>
-      </div>
+        )}
+        </div>
+      )}
 
       <div className="flex justify-end">
         <Link to="/dashboard">

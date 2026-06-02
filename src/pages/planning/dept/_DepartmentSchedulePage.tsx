@@ -23,8 +23,9 @@
 // lane labels are mapped to English (Bedframe / Sofa / Accessory), every other
 // cell renders as-is.
 // ---------------------------------------------------------------------------
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { fetchJson, passthrough } from "@/lib/fetch-json";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
@@ -620,8 +621,13 @@ export type DepartmentSchedulePageProps = {
   icon: React.ReactNode;
   /** Accent colour for the header badge (brand palette hex). */
   accentColor: string;
-  /** The imported snapshot JSON object. */
+  /** The imported snapshot JSON object — used as the fallback when fetchUrl
+   *  is unset or the live fetch fails, so the page never breaks. */
   snapshot: Snapshot;
+  /** Optional live endpoint. When set, the page fetches this URL on mount (and
+   *  on Recalculate) and renders the response as the snapshot; any error falls
+   *  back to the imported static `snapshot`. */
+  fetchUrl?: string;
   /** Calendar sheet name + its column layout. */
   calendarSheetName: string;
   calendarConfig: CalendarConfig;
@@ -643,13 +649,55 @@ export default function DepartmentSchedulePage(props: DepartmentSchedulePageProp
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const SNAP = props.snapshot;
+  // Live schedule, when a fetchUrl is supplied. Starts as the imported static
+  // snapshot (so the first paint is never blank) and is replaced by the live
+  // recompute once it arrives. Any fetch error keeps the static fallback so the
+  // page never breaks.
+  const [liveSnap, setLiveSnap] = useState<Snapshot | null>(null);
+  const [isLive, setIsLive] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const loadLive = useCallback(
+    async (announce: boolean) => {
+      if (!props.fetchUrl) return;
+      setLoading(true);
+      try {
+        const data = (await fetchJson(props.fetchUrl, passthrough)) as Snapshot;
+        if (!data || typeof data !== "object" || !data.sheets) {
+          throw new Error("malformed schedule response");
+        }
+        setLiveSnap(data);
+        setIsLive(true);
+        if (announce) toast.success("Schedule recalculated from current orders.");
+      } catch {
+        // Keep the static fallback; surface a gentle note only on an explicit
+        // Recalculate so the page never appears broken on first load.
+        setIsLive(false);
+        if (announce) {
+          toast.error("Could not load the live schedule — showing the saved snapshot.");
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [props.fetchUrl, toast],
+  );
+
+  useEffect(() => {
+    void loadLive(false);
+  }, [loadLive]);
+
+  const SNAP = liveSnap ?? props.snapshot;
   const generatedAt = SNAP.generatedAt ?? "unknown date";
   const calendarSheet = SNAP.sheets?.[props.calendarSheetName];
   const byDaySheet = SNAP.sheets?.[props.byDaySheetName];
 
   function handleRecalculate() {
-    toast.info("Live re-scheduling from current orders is coming next.");
+    if (props.fetchUrl) {
+      void loadLive(true);
+    } else {
+      toast.info("Live re-scheduling from current orders is coming next.");
+    }
   }
 
   return (
@@ -681,19 +729,39 @@ export default function DepartmentSchedulePage(props: DepartmentSchedulePageProp
             </div>
           </div>
         </div>
-        <Button variant="primary" onClick={handleRecalculate} className="gap-1.5">
-          <RefreshCw className="h-4 w-4" />
-          Recalculate
+        <Button
+          variant="primary"
+          onClick={handleRecalculate}
+          disabled={loading}
+          className="gap-1.5"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          {loading ? "Recalculating…" : "Recalculate"}
         </Button>
       </div>
 
-      {/* Snapshot caption */}
+      {/* Schedule source caption — live recompute vs saved snapshot. */}
       <div className="flex items-start gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAF8F6] px-4 py-3">
         <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#6B5C32]" />
         <p className="text-xs leading-relaxed text-[#4B4642]">
-          The Schedule Result below is a <strong>saved snapshot</strong> generated on{" "}
-          <strong>{generatedAt}</strong>. The Recalculate button does not re-run the schedule
-          yet — live re-scheduling from current orders is the next phase.
+          {isLive ? (
+            <>
+              The Schedule Result below is a <strong>live recompute</strong> from the current
+              orders, generated on <strong>{generatedAt}</strong>. Press Recalculate to refresh it.
+              It is read-only — nothing is written to the ERP.
+            </>
+          ) : props.fetchUrl ? (
+            <>
+              Showing a <strong>saved snapshot</strong> generated on <strong>{generatedAt}</strong>{" "}
+              — the live schedule could not be loaded. Press Recalculate to try again.
+            </>
+          ) : (
+            <>
+              The Schedule Result below is a <strong>saved snapshot</strong> generated on{" "}
+              <strong>{generatedAt}</strong>. The Recalculate button does not re-run the schedule
+              yet — live re-scheduling from current orders is the next phase.
+            </>
+          )}
         </p>
       </div>
 

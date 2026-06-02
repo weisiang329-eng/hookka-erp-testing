@@ -1,0 +1,209 @@
+// ---------------------------------------------------------------------------
+// Planning capacity configuration (Fab Cut, Phase 1).
+//
+// The cutting scheduler (planning-scheduler.ts) is driven entirely by these
+// constants — the per-lane caps, the shared bedframe+sofa pool, the reserve
+// tiers and the lead/window knobs. They are the TypeScript port of the values
+// confirmed by the factory owner in the trusted Python cutter (Wei Siang,
+// 2026-06-01). Keeping them in their own typed module means:
+//   • the pure scheduler takes a CapacityConfig argument (no hard-coded magic
+//     numbers buried in the algorithm), so it stays testable; and
+//   • the owner can override any value at runtime via kv_config without a
+//     deploy (loadCapacityConfig merges kv_config['planning_capacity'] over the
+//     defaults below).
+//
+// No Hono / DB types leak into the scheduler — only this loader touches the DB.
+// All values are integers / day-index based; nothing here depends on a clock.
+// ---------------------------------------------------------------------------
+
+/** Production lanes the cutting scheduler plans, in priority order. */
+export type Lane = "BEDFRAME" | "SOFA" | "ACCESSORY";
+
+/** A reserve tier: working days up to (and including) `uptoDay` get `cuts`. */
+export interface ReserveTier {
+  /** Inclusive working-day index ceiling (1 = first working day). */
+  uptoDay: number;
+  /** Total bedframe+sofa cuts allowed per day inside this tier. */
+  cuts: number;
+}
+
+export interface CapacityConfig {
+  /** Per-lane ceiling of cuts/day inside the shared pool. */
+  laneCap: Record<Lane, number>;
+  /**
+   * Reserve-capacity tiers for the shared bedframe+sofa pool, ascending by
+   * `uptoDay`. Near days are packed tight; far days stay loose so spare slots
+   * remain for orders that walk in later. The last tier's `uptoDay` should be
+   * effectively unbounded.
+   */
+  reserveTiers: ReserveTier[];
+  /** Guaranteed minimum sofa cuts/day so sofa is never starved by bedframe. */
+  sofaMin: number;
+  /** Max sets in ONE cut, per lane. Bigger batches auto-split into chunks. */
+  setupCap: Record<Lane, number>;
+  /**
+   * Only merge same-cut orders whose customer delivery dates fall within this
+   * many days of each other. Orders due further out wait for a later batch.
+   */
+  pullWindowDays: number;
+  /**
+   * When a batch splits into multiple cuts, each later cut floors this many
+   * working days before its own earliest customer DD (non-cluster lanes).
+   */
+  chunkLeadDays: number;
+  /**
+   * Cluster lanes keep a model's cuts together, flooring this many working
+   * days before the model's earliest customer DD (looser than chunkLeadDays so
+   * a model's later cuts pull in next to its first).
+   */
+  modelLeadDays: number;
+  /** Lanes that use the model-block (concentrated) ordering. */
+  clusterLanes: Lane[];
+  /** Whether each lane's capacity figure is owner-confirmed (Pillow is TBC). */
+  laneConfirmed: Record<Lane, boolean>;
+}
+
+/**
+ * Owner-confirmed defaults (Wei Siang, 2026-06-01), ported verbatim from
+ * scripts/_algo_ref/build_cutting_daily_xlsx.py.
+ *   • pool reserve tiers: days 1-3 → 7, 4-7 → 6, 8+ → 5
+ *   • lane ceilings: bedframe 6 / sofa 6 / accessory 8
+ *   • setup caps (sets per cut): bedframe 8 / sofa 3 / accessory 8
+ *   • sofa guaranteed minimum: 3 cuts/day
+ *   • pull window 10 days; chunk lead 3; model lead 6
+ *   • cluster lanes: bedframe + sofa
+ */
+export const DEFAULT_CAPACITY_CONFIG: CapacityConfig = {
+  laneCap: { BEDFRAME: 6, SOFA: 6, ACCESSORY: 8 },
+  reserveTiers: [
+    { uptoDay: 3, cuts: 7 },
+    { uptoDay: 7, cuts: 6 },
+    { uptoDay: Number.MAX_SAFE_INTEGER, cuts: 5 },
+  ],
+  sofaMin: 3,
+  setupCap: { BEDFRAME: 8, SOFA: 3, ACCESSORY: 8 },
+  pullWindowDays: 10,
+  chunkLeadDays: 3,
+  modelLeadDays: 6,
+  clusterLanes: ["BEDFRAME", "SOFA"],
+  laneConfirmed: { BEDFRAME: true, SOFA: true, ACCESSORY: false },
+};
+
+/** Minimal DB shape — mirrors the `.first()` accessor used across routes. */
+interface DbLike {
+  prepare(sql: string): {
+    bind(...args: unknown[]): {
+      first<T = unknown>(): Promise<T | null>;
+    };
+  };
+}
+
+const LANES: Lane[] = ["BEDFRAME", "SOFA", "ACCESSORY"];
+
+function isLaneRecord(v: unknown): v is Partial<Record<Lane, number>> {
+  return typeof v === "object" && v !== null;
+}
+
+/** Deep-clone the default so callers never mutate the shared constant. */
+function cloneDefaults(): CapacityConfig {
+  return {
+    laneCap: { ...DEFAULT_CAPACITY_CONFIG.laneCap },
+    reserveTiers: DEFAULT_CAPACITY_CONFIG.reserveTiers.map((t) => ({ ...t })),
+    sofaMin: DEFAULT_CAPACITY_CONFIG.sofaMin,
+    setupCap: { ...DEFAULT_CAPACITY_CONFIG.setupCap },
+    pullWindowDays: DEFAULT_CAPACITY_CONFIG.pullWindowDays,
+    chunkLeadDays: DEFAULT_CAPACITY_CONFIG.chunkLeadDays,
+    modelLeadDays: DEFAULT_CAPACITY_CONFIG.modelLeadDays,
+    clusterLanes: [...DEFAULT_CAPACITY_CONFIG.clusterLanes],
+    laneConfirmed: { ...DEFAULT_CAPACITY_CONFIG.laneConfirmed },
+  };
+}
+
+/**
+ * Merge a (possibly partial, possibly malformed) override object over the
+ * defaults. Only well-typed fields are taken; anything missing or the wrong
+ * shape falls back to the default. Pure — no DB / clock.
+ */
+export function mergeCapacityConfig(override: unknown): CapacityConfig {
+  const cfg = cloneDefaults();
+  if (typeof override !== "object" || override === null) return cfg;
+  const o = override as Record<string, unknown>;
+
+  if (isLaneRecord(o.laneCap)) {
+    for (const lane of LANES) {
+      const v = o.laneCap[lane];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) cfg.laneCap[lane] = Math.floor(v);
+    }
+  }
+  if (isLaneRecord(o.setupCap)) {
+    for (const lane of LANES) {
+      const v = o.setupCap[lane];
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) cfg.setupCap[lane] = Math.floor(v);
+    }
+  }
+  if (Array.isArray(o.reserveTiers)) {
+    const tiers: ReserveTier[] = [];
+    for (const t of o.reserveTiers) {
+      if (
+        typeof t === "object" &&
+        t !== null &&
+        typeof (t as ReserveTier).uptoDay === "number" &&
+        typeof (t as ReserveTier).cuts === "number" &&
+        (t as ReserveTier).cuts > 0
+      ) {
+        tiers.push({
+          uptoDay: Math.floor((t as ReserveTier).uptoDay),
+          cuts: Math.floor((t as ReserveTier).cuts),
+        });
+      }
+    }
+    if (tiers.length > 0) {
+      tiers.sort((a, b) => a.uptoDay - b.uptoDay);
+      cfg.reserveTiers = tiers;
+    }
+  }
+  if (typeof o.sofaMin === "number" && Number.isFinite(o.sofaMin) && o.sofaMin >= 0) {
+    cfg.sofaMin = Math.floor(o.sofaMin);
+  }
+  if (typeof o.pullWindowDays === "number" && o.pullWindowDays > 0) {
+    cfg.pullWindowDays = Math.floor(o.pullWindowDays);
+  }
+  if (typeof o.chunkLeadDays === "number" && o.chunkLeadDays >= 0) {
+    cfg.chunkLeadDays = Math.floor(o.chunkLeadDays);
+  }
+  if (typeof o.modelLeadDays === "number" && o.modelLeadDays >= 0) {
+    cfg.modelLeadDays = Math.floor(o.modelLeadDays);
+  }
+  if (Array.isArray(o.clusterLanes)) {
+    const lanes = o.clusterLanes.filter(
+      (l): l is Lane => typeof l === "string" && (LANES as string[]).includes(l),
+    );
+    cfg.clusterLanes = lanes;
+  }
+  if (isLaneRecord(o.laneConfirmed)) {
+    for (const lane of LANES) {
+      const v = (o.laneConfirmed as Record<string, unknown>)[lane];
+      if (typeof v === "boolean") cfg.laneConfirmed[lane] = v;
+    }
+  }
+  return cfg;
+}
+
+/**
+ * Load the effective capacity config: kv_config['planning_capacity'] merged
+ * over DEFAULT_CAPACITY_CONFIG. A missing / malformed row yields the defaults.
+ */
+export async function loadCapacityConfig(db: DbLike): Promise<CapacityConfig> {
+  let override: unknown = null;
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("planning_capacity")
+      .first<{ value: string }>();
+    if (row?.value) override = JSON.parse(row.value);
+  } catch {
+    // Missing table / malformed JSON → fall back to defaults.
+    override = null;
+  }
+  return mergeCapacityConfig(override);
+}

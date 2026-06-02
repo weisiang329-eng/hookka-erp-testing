@@ -202,6 +202,7 @@ export default function FabricCuttingDeptPage() {
       icon={<Scissors className="h-4 w-4 text-[#3B82F6]" />}
       accentColor="#3B82F6"
       snapshot={snapshot as unknown as Snapshot}
+      fetchUrl="/api/planning/schedule/fabric-cutting"
       calendarSheetName="Cut Calendar"
       calendarConfig={CALENDAR_CONFIG}
       calendarHeading="Cut Calendar"

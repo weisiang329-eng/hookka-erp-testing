@@ -712,6 +712,7 @@ import qcPending from "./routes/qc-pending";
 import rdProjects from "./routes/rd-projects";
 import rdTeamMembers from "./routes/rd-team-members";
 import scheduling from "./routes/scheduling";
+import planningSchedule from "./routes/planning-schedule";
 import scanPo from "./routes/scan-po";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
 // Server-only super-admin tool gated by production-orders:update; see
@@ -895,6 +896,7 @@ app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/rd-team-members", rdTeamMembers);
 app.route("/api/scheduling", scheduling);
+app.route("/api/planning", planningSchedule);
 app.route("/api/scan-po", scanPo);
 // One-shot historical job_card completion importer. POST
 // /api/import/job-card-completion drives backfill of pre-ERP orders from a

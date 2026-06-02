@@ -497,64 +497,132 @@ function CutCalendar({ sheet }: { sheet: Sheet | undefined }) {
   );
 }
 
-// ── (b) By Day summary table ───────────────────────────────────────────────
+// ── (b) By Day summary table — grouped by day ──────────────────────────────
+// By Day sheet columns: 0 Date, 1 Day, 2 Lane, 3 Models that day, 4 Slots,
+// 5 Orders, 6 Cap. The owner wants the table to read day-by-day: one day
+// header row (date + "Day N") shown once, then the lane rows for that day
+// below it — each lane row colour-banded by its lane (Bedframe blue, Sofa
+// amber, Accessory green). The Date/Day columns move into the header so the
+// date is never repeated on a lane row.
+const BYDAY_DATE_COL = 0;
+const BYDAY_DAY_COL = 1;
+const BYDAY_LANE_COL = 2;
+const BYDAY_MODELS_COL = 3;
+
+// Body columns shown on each lane row (Date + Day are lifted into the header).
+const BYDAY_LANE_HEADERS = ["Lane", "Models that day", "Slots", "Orders", "Cap"];
+const BYDAY_LANE_VALUE_COLS = [
+  BYDAY_LANE_COL,
+  BYDAY_MODELS_COL,
+  4, // Slots
+  5, // Orders
+  6, // Cap
+];
+
+type ByDayGroup = { dateLabel: string; dayLabel: string; rows: Cell[][] };
+
+function buildByDayGroups(body: Cell[][]): ByDayGroup[] {
+  const groups: ByDayGroup[] = [];
+  let current: ByDayGroup | null = null;
+  for (const row of body) {
+    const dateLabel = String(row[BYDAY_DATE_COL] ?? "").trim();
+    if (!dateLabel) continue;
+    const dayCell = row[BYDAY_DAY_COL];
+    const dayLabel =
+      dayCell === "" || dayCell === null || dayCell === undefined
+        ? ""
+        : `Day ${String(dayCell)}`;
+    if (!current || current.dateLabel !== dateLabel) {
+      current = { dateLabel, dayLabel, rows: [] };
+      groups.push(current);
+    }
+    current.rows.push(row);
+  }
+  return groups;
+}
+
 function ByDayTable({ sheet }: { sheet: Sheet | undefined }) {
-  if (!sheet || sheet.length < 2) {
+  const groups = useMemo(
+    () => (sheet && sheet.length >= 2 ? buildByDayGroups(sheet.slice(1)) : []),
+    [sheet],
+  );
+  if (!groups.length) {
     return <p className="text-sm text-[#6B7280]">No By Day summary in this snapshot.</p>;
   }
-  const headers = sheet[0];
-  const body = sheet.slice(1);
-  const LANE_COL = 2; // "Lane" column in the By Day sheet
+  const colCount = BYDAY_LANE_HEADERS.length;
   return (
     <div className="overflow-x-auto rounded-lg border border-[#E2DDD8]">
       <table className="w-full border-collapse text-xs">
         <thead>
           <tr className="bg-[#F0ECE9] text-left text-[#1F1D1B]">
-            {headers.map((h, i) => (
+            {BYDAY_LANE_HEADERS.map((h, i) => (
               <th key={i} className="whitespace-nowrap px-2 py-1.5 font-semibold">
-                {String(h ?? "")}
+                {h}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {body.map((row, ri) => {
-            const lane = resolveLane(row[LANE_COL]);
-            const meta = lane.key ? LANE_META[lane.key] : null;
-            return (
-              <tr
-                key={ri}
-                className="border-t border-[#EFEAE5]"
-                style={meta ? { backgroundColor: meta.tint } : undefined}
-              >
-                {headers.map((_, ci) => {
-                  const raw = row[ci];
-                  if (ci === LANE_COL && String(raw ?? "").trim()) {
-                    return (
-                      <td key={ci} className="whitespace-nowrap px-2 py-1.5">
-                        <span
-                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold text-white"
-                          style={{ backgroundColor: meta?.color ?? "#6B7280" }}
-                        >
-                          {lane.label}
-                        </span>
-                      </td>
-                    );
-                  }
-                  return (
-                    <td
-                      key={ci}
-                      className={`px-2 py-1.5 align-top text-[#3A3530] ${
-                        ci === 3 ? "min-w-[320px]" : "whitespace-nowrap"
-                      }`}
-                    >
-                      {raw === null || raw === undefined ? "" : String(raw)}
-                    </td>
-                  );
-                })}
+          {groups.map((g) => (
+            <Fragment key={g.dateLabel}>
+              {/* Day group header — shown once per calendar day */}
+              <tr className="border-t-2 border-[#D8D2CC] bg-[#EAE5E0]">
+                <td colSpan={colCount} className="px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <CalendarDays className="h-3.5 w-3.5 text-[#6B5C32]" />
+                    <span className="text-[13px] font-bold text-[#1F1D1B]">
+                      {g.dateLabel}
+                    </span>
+                    {g.dayLabel && (
+                      <span className="inline-flex items-center rounded-full bg-[#1F1D1B] px-2 py-0.5 text-[11px] font-semibold text-white">
+                        {g.dayLabel}
+                      </span>
+                    )}
+                  </div>
+                </td>
               </tr>
-            );
-          })}
+              {/* Lane rows for this day — colour-banded by lane */}
+              {g.rows.map((row, ri) => {
+                const lane = resolveLane(row[BYDAY_LANE_COL]);
+                const meta = lane.key ? LANE_META[lane.key] : null;
+                return (
+                  <tr
+                    key={ri}
+                    className="border-t border-[#EFEAE5]"
+                    style={meta ? { backgroundColor: meta.tint } : undefined}
+                  >
+                    {BYDAY_LANE_VALUE_COLS.map((ci) => {
+                      const raw = row[ci];
+                      if (ci === BYDAY_LANE_COL) {
+                        return (
+                          <td key={ci} className="whitespace-nowrap px-2 py-1.5">
+                            {String(raw ?? "").trim() ? (
+                              <span
+                                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold text-white"
+                                style={{ backgroundColor: meta?.color ?? "#6B7280" }}
+                              >
+                                {lane.label}
+                              </span>
+                            ) : null}
+                          </td>
+                        );
+                      }
+                      return (
+                        <td
+                          key={ci}
+                          className={`px-2 py-1.5 align-top text-[#3A3530] ${
+                            ci === BYDAY_MODELS_COL ? "min-w-[320px]" : "whitespace-nowrap"
+                          }`}
+                        >
+                          {raw === null || raw === undefined ? "" : String(raw)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </Fragment>
+          ))}
         </tbody>
       </table>
     </div>

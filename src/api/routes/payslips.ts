@@ -44,6 +44,9 @@ type WorkerRow = {
   // YYYY-MM-DD last day of employment, or null for current staff (migration
   // 0143). Used only to scope which month a RESIGNED worker is still paid for.
   resignedAt: string | null;
+  // YYYY-MM-DD join date, or null. Days before it aren't worked/absent, and a
+  // worker who joined in a later month is excluded from this period entirely.
+  joinDate: string | null;
 };
 
 type PayslipRow = {
@@ -283,7 +286,7 @@ app.post("/", async (c) => {
       // partial, month) — the existing absence math prorates the days after
       // they left. Later months exclude them because resignedAt no longer
       // matches the period. Earlier months were generated while still ACTIVE.
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
     )
       .bind(`${period}-%`)
       .all<WorkerRow>();
@@ -341,7 +344,28 @@ app.post("/", async (c) => {
     );
 
     const rows: PayslipRow[] = [];
+    // Last calendar day of the period, as YYYY-MM-DD, for join-date comparison.
+    const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
+
     for (const worker of activeWorkers) {
+      // Join date. A worker who joined AFTER this period had not started yet —
+      // skip them entirely (no payslip for a month before they were hired).
+      // KINM MG HLA joined 2026-06-02, so May must not generate a slip for him.
+      if (
+        typeof worker.joinDate === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(worker.joinDate) &&
+        worker.joinDate > periodLastIso
+      ) {
+        continue;
+      }
+      // Join day-of-month when they joined DURING this period (partial first
+      // month). Days before this aren't worked or absent, and pay is prorated.
+      const joinedDay =
+        typeof worker.joinDate === "string" &&
+        worker.joinDate.startsWith(`${period}-`)
+          ? Number(worker.joinDate.slice(8, 10))
+          : undefined;
+
       // Resignation proration. A worker whose resignedAt falls inside THIS
       // period was employed only through that day (inclusive) — their last day.
       // Pay them for the days actually served; days after they left are neither
@@ -369,8 +393,10 @@ app.post("/", async (c) => {
         days: daysByWorker.get(worker.id) ?? [],
         publicHolidays,
         absenceThroughDay,
+        employmentStartDay: joinedDay,
         employmentEndDay: resignedDay,
-        prorateToService: resignedDay !== undefined,
+        // Joined OR resigned mid-month → prorate to days served.
+        prorateToService: joinedDay !== undefined || resignedDay !== undefined,
       });
 
       const allowances = 0;

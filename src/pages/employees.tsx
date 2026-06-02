@@ -6100,6 +6100,12 @@ function LaborCostTab({
         w && w.status === "RESIGNED" && /^\d{4}-\d{2}-\d{2}$/.test(w.resignedAt ?? "")
           ? (w.resignedAt as string)
           : null;
+      // Symmetric to resignation: days BEFORE the worker joined (joinDate,
+      // inclusive) are neither worked nor absent — they had not started yet.
+      const joinedIso =
+        w && /^\d{4}-\d{2}-\d{2}$/.test(w.joinDate ?? "")
+          ? (w.joinDate as string)
+          : null;
 
       // Grace window: a 0-logged working day is NOT yet a confirmed absence
       // until it is at least 2 WORKING days in the past. Walk the working-day
@@ -6140,8 +6146,9 @@ function LaborCostTab({
       let pendingDays = 0;
       const rows = periodWorkingDays.map((date) => {
         const logged = loggedHoursByWorkerDate.get(`${workerId}|${date}`) ?? 0;
-        // Past the worker's last employed day → excluded (not absent, not short).
-        if (leftIso && date > leftIso) {
+        // Outside the employment window (before joining or after leaving) →
+        // excluded (not absent, not short).
+        if ((leftIso && date > leftIso) || (joinedIso && date < joinedIso)) {
           return { date, logged, expected, short: 0, type: "ok" as const };
         }
         const short = Math.max(0, expected - logged);

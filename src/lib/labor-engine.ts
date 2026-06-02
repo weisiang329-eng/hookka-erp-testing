@@ -219,10 +219,20 @@ export type MonthlyLaborInput = {
    */
   employmentEndDay?: number;
   /**
-   * When true the worker resigned mid-month, so they are entitled only to the
-   * days they actually served — pay = days worked × daily rate (not full
-   * salary − absences). Days after `employmentEndDay` are excluded entirely
-   * (not charged as absence). Default false = the normal full-salary worker.
+   * First day-of-month the worker was employed (their join date's day),
+   * INCLUSIVE. Days BEFORE this are neither worked nor absent — the person had
+   * not joined yet. Omit (undefined / 1) for anyone employed from the start of
+   * the month. A worker whose join date is in a LATER month should be excluded
+   * from this period's payroll entirely by the caller, not handled here.
+   */
+  employmentStartDay?: number;
+  /**
+   * When true the worker was employed for only PART of the month — they joined
+   * and/or resigned mid-month — so they are entitled only to the days actually
+   * served: pay = days worked × daily rate (not full salary − absences). Days
+   * outside the [employmentStartDay, employmentEndDay] window are excluded
+   * entirely (not charged as absence). Default false = the normal full-salary
+   * worker employed the whole month.
    */
   prorateToService?: boolean;
 };
@@ -328,28 +338,32 @@ export function computeMonthlyLabor(
   const costingDailyRateSen = basicSalarySen / costingDivisor;
 
   // ── Payroll side (÷26).
-  // Resignation: a worker who left mid-month was only employed through
-  // `employmentEndDay` (their last day, inclusive). Days AFTER that are not
-  // worked AND not absent — they have left. Cap the elapsed-day window at both
-  // the data-entry grace cutoff and the last employed day.
+  // Employment window: a worker is only "expected to work" between their join
+  // day (employmentStartDay, inclusive) and their last day (employmentEndDay,
+  // inclusive). Days BEFORE they joined or AFTER they left are neither worked
+  // nor absent. The absence window is the working days inside that span, also
+  // capped at the data-entry grace cutoff.
   const monthLastDay = new Date(year, month, 0).getDate();
+  const employmentStartDay = Math.max(1, input.employmentStartDay ?? 1);
   const employmentEndDay = input.employmentEndDay ?? monthLastDay;
   const throughDay = Math.min(absenceThroughDay, employmentEndDay);
-  const elapsedWorkingDays = countElapsedWorkingDays(
-    year,
-    month,
-    throughDay,
-    publicHolidays,
+  // Working days from employmentStartDay..throughDay = (1..throughDay) minus
+  // (1..startDay-1). Never negative.
+  const elapsedWorkingDays = Math.max(
+    0,
+    countElapsedWorkingDays(year, month, throughDay, publicHolidays) -
+      countElapsedWorkingDays(year, month, employmentStartDay - 1, publicHolidays),
   );
   // Clamp days-worked to the employed window so a stray post-resignation log
   // can't make absences negative or inflate prorated pay.
   const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
   const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
   const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
-  // Active worker → entitled to the FULL monthly salary, minus absences.
-  // Resigned mid-month → entitled only to the days actually served (days worked
-  // × daily rate); the days after they left are simply unpaid, NOT charged as
-  // absence. prorateToService selects between the two.
+  // Full-month worker → entitled to the FULL monthly salary, minus absences.
+  // Partial-month worker (joined and/or resigned mid-month) → entitled only to
+  // the days actually served (days worked × daily rate); days outside their
+  // employment window are simply unpaid, NOT charged as absence.
+  // prorateToService selects between the two.
   const basicEarnedSen = input.prorateToService
     ? Math.round(workedWithinWindow * payrollDailyRateSen)
     : Math.max(0, basicSalarySen - absenceDeductionSen);

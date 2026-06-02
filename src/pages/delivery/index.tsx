@@ -482,13 +482,6 @@ export default function DeliveryPage() {
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [selectedReadyPOs, setSelectedReadyPOs] = useState<Set<string>>(new Set());
   const [creatingDOFromPO, setCreatingDOFromPO] = useState(false);
-  // Quick Dispatch path (added 2026-05-08) — short-circuits the 8-click
-  // flow (Create DO modal → POST → switch tab → select → Mark Dispatched
-  // → PUT) into one button: groups selected POs by customer, POSTs one
-  // DO per customer, then immediately PUTs each to LOADED. Carrier /
-  // driver / vehicle stay null and can be filled inline on the
-  // Dispatched tab.
-  const [quickDispatching, setQuickDispatching] = useState(false);
   const [dragDropIdx, setDragDropIdx] = useState<number | null>(null);
 
   // ----- Detail Edit mode -----
@@ -1621,114 +1614,6 @@ export default function DeliveryPage() {
     fetchData();
   };
 
-  // Quick Dispatch — one-click "Convert to Dispatched" on Pending Delivery.
-  // Skips the Create DO modal + the second-tab Mark Dispatched click. Groups
-  // selected POs by customerId, POSTs one DO per customer with date=today
-  // and null carrier, then immediately PUTs each new DO to LOADED. Halts on
-  // first failure (no rollback — operator can fix manually on Dispatched
-  // tab). See line ~2313 for the existing Create DO button this sits next
-  // to, and line ~2050 for the existing Mark Dispatched flow this fuses.
-  const handleQuickDispatch = async () => {
-    const selected = readyPOs.filter(
-      (po) => selectedReadyPOs.has(po.id) && po.setComplete,
-    );
-    if (selected.length === 0) return;
-
-    // Group by customerId — matches existing openCreateDODialog semantics
-    // (line 1156: `${po.customerId}__${po.customerState}`). Quick Dispatch
-    // groups on customerId only so multi-state customers still get one DO
-    // per customer; operator can edit inline if they need to split.
-    const groups = new Map<string, { customerName: string; poIds: string[] }>();
-    for (const po of selected) {
-      const existing = groups.get(po.customerId);
-      if (existing) {
-        existing.poIds.push(po.id);
-      } else {
-        groups.set(po.customerId, {
-          customerName: po.customerName || "(unknown)",
-          poIds: [po.id],
-        });
-      }
-    }
-
-    const breakdown = Array.from(groups.values())
-      .map((g) => `${g.customerName} (${g.poIds.length} PO${g.poIds.length === 1 ? "" : "s"})`)
-      .join(", ");
-    const itemCount = selected.length;
-    const ok = confirm(
-      `Create ${groups.size} DO${groups.size === 1 ? "" : "s"} and dispatch immediately?\n\n` +
-        `Customer breakdown: ${breakdown}\n\n` +
-        `Splits one DO per customer. Carrier / driver / vehicle will be empty — ` +
-        `fill them in later via inline edit on the Dispatched tab if needed.`,
-    );
-    if (!ok) return;
-
-    setQuickDispatching(true);
-    const today = new Date().toISOString().slice(0, 10);
-    let createdCount = 0;
-    try {
-      for (const group of groups.values()) {
-        // POST → DRAFT DO
-        const created = await fetchJson(
-          "/api/delivery-orders",
-          DOMutationSchema,
-          {
-            method: "POST",
-            body: {
-              productionOrderIds: group.poIds,
-              providerId: null,
-              vehicleId: null,
-              driverId: null,
-              dropPoints: 1,
-              remarks: "",
-              deliveryDate: today,
-            },
-          },
-        );
-        if (!created.success || !created.data?.id) {
-          toast.error(
-            created.error ||
-              `Failed to create DO for ${group.customerName} — stopped after ${createdCount} DO${createdCount === 1 ? "" : "s"}`,
-          );
-          return;
-        }
-        // PUT → LOADED (the "Dispatched" status; see DOStatus comment line 49)
-        const dispatched = await fetchJson(
-          `/api/delivery-orders/${created.data.id}`,
-          DOMutationSchema,
-          {
-            method: "PUT",
-            body: { status: "LOADED" },
-          },
-        );
-        if (!dispatched.success) {
-          toast.error(
-            dispatched.error ||
-              `DO ${created.data.doNo} created but failed to dispatch — fix manually on Pending Dispatch tab`,
-          );
-          return;
-        }
-        createdCount += 1;
-      }
-      toast.success(
-        `Dispatched ${createdCount} DO${createdCount === 1 ? "" : "s"} — ${itemCount} item${itemCount === 1 ? "" : "s"}`,
-      );
-    } catch (e) {
-      if (e instanceof FetchJsonError) {
-        toast.error((e.body as { error?: string } | undefined)?.error || e.message);
-      } else {
-        toast.error("Quick Dispatch failed");
-      }
-    } finally {
-      setQuickDispatching(false);
-      setSelectedReadyPOs(new Set());
-      // Refresh both Pending Delivery (PO-side) and Dispatched (DO-side).
-      invalidateCachePrefix("/api/delivery-orders");
-      invalidateCachePrefix("/api/production-orders");
-      fetchData();
-    }
-  };
-
   // Opens the "Create Packing List" confirm dialog from the multi-selected DOs.
   const handlePrintPackingList = () => {
     if (selectedIds.size === 0) return;
@@ -1866,11 +1751,14 @@ export default function DeliveryPage() {
         }),
       );
       const { generateConsolidatedDoPdf } = await import("@/lib/generate-do-pdf");
+      // Packing list prints as a standalone driver manifest only — no DO forms
+      // bundled behind it (operator request 2026-06-02).
       generateConsolidatedDoPdf(
         orders as unknown as import("@/types").DeliveryOrder[],
         extrasById,
         mode,
         pl.packingNo,
+        false,
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate packing list");
@@ -2218,7 +2106,14 @@ export default function DeliveryPage() {
           po.productCode.toLowerCase().includes(q) ||
           po.productName.toLowerCase().includes(q) ||
           po.customerName.toLowerCase().includes(q) ||
-          po.salesOrderNo.toLowerCase().includes(q),
+          po.salesOrderNo.toLowerCase().includes(q) ||
+          // Customer-side refs are shown in each picker row, so the packer
+          // must be able to search them too — typing "8891" off the
+          // customer PO PO-008891 returned nothing before (Wei Siang
+          // 2026-06-02).
+          (po.customerPOId || "").toLowerCase().includes(q) ||
+          (po.customerSO || "").toLowerCase().includes(q) ||
+          (po.customerReference || "").toLowerCase().includes(q),
       );
     }
     return filtered;
@@ -3463,7 +3358,7 @@ export default function DeliveryPage() {
                   <Button
                     variant="primary"
                     size="sm"
-                    disabled={creatingDOFromPO || quickDispatching}
+                    disabled={creatingDOFromPO}
                     onClick={() => {
                       // Multi-customer/multi-state selections are allowed
                       // (user request 2026-04-27). One DO can carry POs
@@ -3476,22 +3371,6 @@ export default function DeliveryPage() {
                       <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Creating...</>
                     ) : (
                       <><PackageCheck className="h-3.5 w-3.5" /> Create DO ({selectedReadyPOs.size})</>
-                    )}
-                  </Button>
-                  {/* Quick Dispatch — short-circuits the 8-click flow into
-                      one click for the common "everything ready, just send
-                      it" case. Groups by customer, POSTs one DO per group,
-                      then PUTs each to LOADED in series. Carrier left null. */}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={creatingDOFromPO || quickDispatching}
-                    onClick={handleQuickDispatch}
-                  >
-                    {quickDispatching ? (
-                      <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Dispatching...</>
-                    ) : (
-                      <><Send className="h-3.5 w-3.5" /> Convert to Dispatched ({selectedReadyPOs.size})</>
                     )}
                   </Button>
                 </div>

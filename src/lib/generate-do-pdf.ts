@@ -965,14 +965,20 @@ export function generateConsolidatedDoPdf(
   // first, no download.
   mode: "download" | "view" = "download",
   packingNo?: string,
+  // When false, prints ONLY the packing-list manifest page and omits the
+  // per-DO delivery-order forms that normally follow it. The packing list
+  // is a standalone driver manifest; the DOs print separately.
+  includeDoPages = true,
 ) {
   if (!orders || orders.length === 0) return;
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   renderPackingSummary(doc, orders, packingNo, extrasById);
-  orders.forEach((o, i) => {
-    doc.addPage();
-    renderDoInto(doc, o, extrasById?.[o.id], { seq: i + 1, total: orders.length });
-  });
+  if (includeDoPages) {
+    orders.forEach((o, i) => {
+      doc.addPage();
+      renderDoInto(doc, o, extrasById?.[o.id], { seq: i + 1, total: orders.length });
+    });
+  }
   stampDoFooters(doc);
   const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const fileName = packingNo

@@ -303,6 +303,17 @@ const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
 // PO-based tabs (show production orders, not delivery orders)
 const PO_TABS = new Set(["planning", "pending_delivery"]);
 
+// Reverse of TAB_DO_STATUSES: which DO tab a given status lives on. Derived
+// from the one map above so the two can never drift apart. INVOICED has no
+// tab (not in TAB_DO_STATUSES) and so never triggers an auto-jump.
+const TAB_FOR_STATUS: Partial<Record<DOStatus, string>> = (() => {
+  const m: Partial<Record<DOStatus, string>> = {};
+  for (const [tab, statuses] of Object.entries(TAB_DO_STATUSES)) {
+    for (const s of statuses) m[s] = tab;
+  }
+  return m;
+})();
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -1393,6 +1404,47 @@ export default function DeliveryPage() {
     if (doGridSearch.trim()) return deliveryOrders;
     return deliveryOrders.filter((d) => statuses.includes(d.status));
   }, [deliveryOrders, activeTab, doGridSearch]);
+
+  // Follow the record to its tab (Wei Siang 2026-06-02): the cross-status
+  // search above already surfaces a matching DO no matter which tab it sits
+  // on, but the tab header didn't follow — searching a delivered order while
+  // standing on Pending Dispatch left the page on the wrong stage. Here we
+  // look at where the matches actually live: if every match sits on ONE
+  // stage's tab, hop to that tab so the page context matches what the
+  // operator searched. Matches spanning several stages leave the tab alone
+  // (the cross-status list still shows them all). Only runs while already on
+  // a DO-based tab, and activeTab is read OUTSIDE the deps on purpose so a
+  // manual tab click during an active search is respected, not yanked back.
+  useEffect(() => {
+    const term = doGridSearch.trim().toLowerCase();
+    if (!term) return;
+    if (!TAB_DO_STATUSES[activeTab]) return; // not on a DO tab
+    const tabsHit = new Set<string>();
+    for (const d of deliveryOrders) {
+      const hay = [
+        d.doNo,
+        d.companySO,
+        d.salesOrderNos,
+        d.customerPOId,
+        d.customerSO,
+        d.customerRef,
+        d.customerName,
+        d.vehicleNo,
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (hay.includes(term)) {
+        const tab = TAB_FOR_STATUS[d.status];
+        if (tab) tabsHit.add(tab);
+      }
+    }
+    if (tabsHit.size === 1) {
+      const only = Array.from(tabsHit)[0];
+      if (only !== activeTab) setActiveTab(only);
+    }
+    // activeTab intentionally excluded — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doGridSearch, deliveryOrders]);
 
   // ---------- Summary counts (unique DOs, not rows) ----------
   // Read from /api/delivery-orders/stats so counts reflect the whole

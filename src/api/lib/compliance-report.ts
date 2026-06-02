@@ -31,19 +31,117 @@ import {
 } from "./efficiency-report";
 
 // D1-compat shape (the SupabaseAdapter installed in worker.ts exposes this).
+// `first` is used to read the single kv_config row (mirrors kv-config.ts).
 interface DbLike {
   prepare(sql: string): {
     bind(...args: unknown[]): {
       all<T = unknown>(): Promise<{ results?: T[] }>;
+      first<T = unknown>(): Promise<T | null>;
     };
   };
 }
 
-// Thresholds (days). DO stages move daily; a stalled DO older than this is a
-// process miss. POs are slower-moving so the bar is two weeks.
-const DO_STALE_DAYS = 1;
-const PO_STALE_DAYS = 14;
 const LOW_EFFICIENCY_THRESHOLD = 60; // workers below this (when present) flagged
+
+// ─── Configurable SOP grace windows ────────────────────────────────────────
+// Per-category exception thresholds (whole days). A record is only flagged once
+// it has been stuck at its stage for at least this many days. Stored in the
+// kv_config table under key `daily-report-config` (shared contract with the
+// Daily Report settings UI). Missing row / missing field falls back to these
+// exact defaults. DO stages move daily; POs are slower-moving (two weeks).
+export interface GraceDays {
+  doPendingDispatch: number;
+  doNotDelivered: number;
+  doNotInvoiced: number;
+  soWithoutDo: number;
+  soWithoutInvoice: number;
+  poNotReceived: number;
+  processSkips: number;
+}
+
+const DEFAULT_GRACE_DAYS: GraceDays = {
+  doPendingDispatch: 1,
+  doNotDelivered: 1,
+  doNotInvoiced: 1,
+  soWithoutDo: 2,
+  soWithoutInvoice: 3,
+  poNotReceived: 14,
+  processSkips: 1,
+};
+
+const DAILY_REPORT_CONFIG_KEY = "daily-report-config";
+
+// Coerce an arbitrary value into a non-negative whole-day number, else fall
+// back. Guards against strings ("2"), floats, NaN and negatives coming from a
+// hand-edited config blob.
+function toGraceDay(v: unknown, fallback: number): number {
+  const n = typeof v === "string" ? Number(v) : v;
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
+
+// Load the `daily-report-config` row server-side and merge with the defaults so
+// every key is always present. The kv_config value may be stored as a JSON
+// string (the normal kv-config.ts write path) OR already as an object (some
+// adapters auto-parse JSON columns) — both are handled. Any read/parse failure
+// falls back to the full default set so the report can never 500 on config.
+async function loadGraceDays(db: DbLike): Promise<GraceDays> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind(DAILY_REPORT_CONFIG_KEY)
+      .first<{ value: unknown }>();
+    if (!row || row.value == null) return { ...DEFAULT_GRACE_DAYS };
+
+    let parsed: unknown = row.value;
+    if (typeof parsed === "string") {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        return { ...DEFAULT_GRACE_DAYS };
+      }
+    }
+
+    const cfg =
+      parsed && typeof parsed === "object"
+        ? ((parsed as Record<string, unknown>).graceDays as
+            | Record<string, unknown>
+            | undefined)
+        : undefined;
+    if (!cfg || typeof cfg !== "object") return { ...DEFAULT_GRACE_DAYS };
+
+    return {
+      doPendingDispatch: toGraceDay(
+        cfg.doPendingDispatch,
+        DEFAULT_GRACE_DAYS.doPendingDispatch,
+      ),
+      doNotDelivered: toGraceDay(
+        cfg.doNotDelivered,
+        DEFAULT_GRACE_DAYS.doNotDelivered,
+      ),
+      doNotInvoiced: toGraceDay(
+        cfg.doNotInvoiced,
+        DEFAULT_GRACE_DAYS.doNotInvoiced,
+      ),
+      soWithoutDo: toGraceDay(cfg.soWithoutDo, DEFAULT_GRACE_DAYS.soWithoutDo),
+      soWithoutInvoice: toGraceDay(
+        cfg.soWithoutInvoice,
+        DEFAULT_GRACE_DAYS.soWithoutInvoice,
+      ),
+      poNotReceived: toGraceDay(
+        cfg.poNotReceived,
+        DEFAULT_GRACE_DAYS.poNotReceived,
+      ),
+      processSkips: toGraceDay(
+        cfg.processSkips,
+        DEFAULT_GRACE_DAYS.processSkips,
+      ),
+    };
+  } catch (err) {
+    console.error("[compliance] loadGraceDays failed, using defaults:", err);
+    return { ...DEFAULT_GRACE_DAYS };
+  }
+}
 
 // ─── Row interfaces ──────────────────────────────────────────────────────
 
@@ -76,6 +174,9 @@ export interface SoNoDoRow {
   companySOId: string;
   customerName: string;
   status: string;
+  // Whole days since the SO's clock-start (companySODate, else createdAt /
+  // updatedAt). Row is only flagged once this reaches graceDays.soWithoutDo.
+  days: number;
 }
 
 export interface SoNoInvoiceRow {
@@ -83,6 +184,9 @@ export interface SoNoInvoiceRow {
   companySOId: string;
   customerName: string;
   status: string;
+  // Whole days since the SO was delivered (latest deliveredAt across its DOs).
+  // Row is only flagged once this reaches graceDays.soWithoutInvoice.
+  days: number;
 }
 
 export interface PoNotReceivedRow {
@@ -92,6 +196,10 @@ export interface PoNotReceivedRow {
   status: string;
   orderDate: string;
   daysOpen: number;
+  // Whole days past the PO's Expected Delivery Date (purchase_orders.expectedDate)
+  // when that date exists and is before today; 0 otherwise. Enrichment only —
+  // does not change which POs are flagged.
+  expectedOverdueDays: number;
 }
 
 // v2 — production out-of-sequence: a later step is done while an earlier step
@@ -106,6 +214,9 @@ export interface ProcessSkipRow {
   doneDeptCompletedDate: string;
   blockedByDept: string;
   blockedByStatus: string;
+  // Whole days since the DONE card's completedDate. Row is only flagged once
+  // this reaches graceDays.processSkips.
+  days: number;
 }
 
 // v2 — a product step in active production with no standard WIP time set.
@@ -209,9 +320,10 @@ function isEmpty(v: string | null | undefined): boolean {
 async function checkDoPendingDispatch(
   db: DbLike,
   todayYmd: string,
+  graceDays: number,
 ): Promise<DoPendingDispatchRow[]> {
   try {
-    const cutoff = isoCutoff(todayYmd, DO_STALE_DAYS);
+    const cutoff = isoCutoff(todayYmd, graceDays);
     const res = await db
       .prepare(
         `SELECT id, doNo, customerName, createdAt
@@ -246,9 +358,10 @@ async function checkDoPendingDispatch(
 async function checkDoNotDelivered(
   db: DbLike,
   todayYmd: string,
+  graceDays: number,
 ): Promise<DoNotDeliveredRow[]> {
   try {
-    const cutoff = isoCutoff(todayYmd, DO_STALE_DAYS);
+    const cutoff = isoCutoff(todayYmd, graceDays);
     const res = await db
       .prepare(
         `SELECT id, doNo, customerName, dispatchedAt, deliveredAt
@@ -286,9 +399,10 @@ async function checkDoNotDelivered(
 async function checkDoNotInvoiced(
   db: DbLike,
   todayYmd: string,
+  graceDays: number,
 ): Promise<DoNotInvoicedRow[]> {
   try {
-    const cutoff = isoCutoff(todayYmd, DO_STALE_DAYS);
+    const cutoff = isoCutoff(todayYmd, graceDays);
     const res = await db
       .prepare(
         `SELECT id, doNo, customerName, deliveredAt
@@ -348,11 +462,18 @@ async function checkDoNotInvoiced(
 //    DO). Mirrors the reverse lookup in sales-orders.ts GET /:id.
 async function checkSoNoDo(
   db: DbLike,
+  todayYmd: string,
+  graceDays: number,
 ): Promise<SoNoDoRow[]> {
   try {
+    // Clock-start for "how long has this confirmed SO had no DO": sales_orders
+    // carries no confirmed/ready timestamp, so we use companySODate (the date
+    // the order was booked as a company SO) and fall back to createdAt /
+    // updatedAt when it's blank.
     const soRes = await db
       .prepare(
-        `SELECT id, companySOId, customerName, status
+        `SELECT id, companySOId, customerName, status,
+                companySODate, createdAt, updatedAt
            FROM sales_orders
           WHERE status IN ('CONFIRMED','READY_TO_SHIP')
           ORDER BY companySOId ASC`,
@@ -363,6 +484,9 @@ async function checkSoNoDo(
         companySOId: string | null;
         customerName: string | null;
         status: string;
+        companySODate: string | null;
+        createdAt: string | null;
+        updatedAt: string | null;
       }>();
     const sos = soRes.results ?? [];
     if (sos.length === 0) return [];
@@ -414,12 +538,21 @@ async function checkSoNoDo(
         const byNo = !isEmpty(s.companySOId) && linkedSoNos.has(s.companySOId!);
         return !byId && !byNo;
       })
-      .map((s) => ({
-        id: s.id,
-        companySOId: s.companySOId ?? "",
-        customerName: s.customerName ?? "",
-        status: s.status,
-      }));
+      .map((s) => {
+        const clockStart = !isEmpty(s.companySODate)
+          ? s.companySODate
+          : !isEmpty(s.createdAt)
+            ? s.createdAt
+            : s.updatedAt;
+        return {
+          id: s.id,
+          companySOId: s.companySOId ?? "",
+          customerName: s.customerName ?? "",
+          status: s.status,
+          days: daysBetween(clockStart, todayYmd),
+        };
+      })
+      .filter((s) => s.days >= graceDays);
   } catch (err) {
     console.error("[compliance] soNoDo failed:", err);
     return [];
@@ -431,6 +564,8 @@ async function checkSoNoDo(
 //    DO set). DO set resolved via salesOrderId + consolidated salesOrderNo link.
 async function checkSoNoInvoice(
   db: DbLike,
+  todayYmd: string,
+  graceDays: number,
 ): Promise<SoNoInvoiceRow[]> {
   try {
     const soRes = await db
@@ -476,23 +611,36 @@ async function checkSoNoInvoice(
 
     // Map each SO → its DO ids (salesOrderId + consolidated salesOrderNo), so
     // we can also count an invoice raised on one of its DOs as "invoiced".
+    // deliveredAtBySoId tracks the LATEST deliveredAt across an SO's DOs — the
+    // clock-start for "days since delivered".
     const soNos = sos
       .map((s) => s.companySOId)
       .filter((x): x is string => !isEmpty(x));
     const doIdToSoId = new Map<string, string>(); // doId → owning soId
+    const deliveredAtBySoId = new Map<string, string>(); // soId → latest deliveredAt
+    const noteDelivered = (soId: string, deliveredAt: string | null) => {
+      if (isEmpty(deliveredAt)) return;
+      const prev = deliveredAtBySoId.get(soId);
+      if (!prev || String(deliveredAt) > prev) {
+        deliveredAtBySoId.set(soId, String(deliveredAt));
+      }
+    };
     {
       const ph = soIds.map(() => "?").join(",");
       const r = await db
         .prepare(
-          `SELECT id, salesOrderId FROM delivery_orders
+          `SELECT id, salesOrderId, deliveredAt FROM delivery_orders
             WHERE salesOrderId IN (${ph})
               AND salesOrderId IS NOT NULL
               AND salesOrderId <> ''`,
         )
         .bind(...soIds)
-        .all<{ id: string; salesOrderId: string | null }>();
+        .all<{ id: string; salesOrderId: string | null; deliveredAt: string | null }>();
       for (const x of r.results ?? []) {
-        if (x.salesOrderId) doIdToSoId.set(x.id, x.salesOrderId);
+        if (x.salesOrderId) {
+          doIdToSoId.set(x.id, x.salesOrderId);
+          noteDelivered(x.salesOrderId, x.deliveredAt);
+        }
       }
     }
     if (soNos.length > 0) {
@@ -536,6 +684,29 @@ async function checkSoNoInvoice(
       }
     }
 
+    // Backfill deliveredAt for consolidated DOs (linked via items, so their
+    // deliveredAt wasn't read in the salesOrderId query above).
+    const doIdsNeedingDelivered = allDoIds.filter((doId) => {
+      const soId = doIdToSoId.get(doId);
+      return soId !== undefined && !deliveredAtBySoId.has(soId);
+    });
+    if (doIdsNeedingDelivered.length > 0) {
+      const ph = doIdsNeedingDelivered.map(() => "?").join(",");
+      const r = await db
+        .prepare(
+          `SELECT id, deliveredAt FROM delivery_orders
+            WHERE id IN (${ph})
+              AND deliveredAt IS NOT NULL
+              AND deliveredAt <> ''`,
+        )
+        .bind(...doIdsNeedingDelivered)
+        .all<{ id: string; deliveredAt: string | null }>();
+      for (const x of r.results ?? []) {
+        const owningSo = doIdToSoId.get(x.id);
+        if (owningSo) noteDelivered(owningSo, x.deliveredAt);
+      }
+    }
+
     return sos
       .filter((s) => !invoicedSoIds.has(s.id))
       .map((s) => ({
@@ -543,7 +714,12 @@ async function checkSoNoInvoice(
         companySOId: s.companySOId ?? "",
         customerName: s.customerName ?? "",
         status: s.status,
-      }));
+        // Clock-start = latest deliveredAt across the SO's DOs. When none is
+        // recorded (defensive — a DELIVERED SO should have one), days = 0 and
+        // the row is suppressed unless the grace window is 0.
+        days: daysBetween(deliveredAtBySoId.get(s.id), todayYmd),
+      }))
+      .filter((s) => s.days >= graceDays);
   } catch (err) {
     console.error("[compliance] soNoInvoice failed:", err);
     return [];
@@ -556,12 +732,13 @@ async function checkSoNoInvoice(
 async function checkPoNotReceived(
   db: DbLike,
   todayYmd: string,
+  graceDays: number,
 ): Promise<PoNotReceivedRow[]> {
   try {
-    const cutoff = isoCutoff(todayYmd, PO_STALE_DAYS).slice(0, 10); // orderDate is a date
+    const cutoff = isoCutoff(todayYmd, graceDays).slice(0, 10); // orderDate is a date
     const res = await db
       .prepare(
-        `SELECT id, poNo, supplierName, status, orderDate
+        `SELECT id, poNo, supplierName, status, orderDate, expectedDate
            FROM purchase_orders
           WHERE status NOT IN ('RECEIVED','CLOSED','CANCELLED')
             AND orderDate IS NOT NULL
@@ -576,6 +753,7 @@ async function checkPoNotReceived(
         supplierName: string | null;
         status: string;
         orderDate: string | null;
+        expectedDate: string | null;
       }>();
     const pos = res.results ?? [];
     if (pos.length === 0) return [];
@@ -627,6 +805,13 @@ async function checkPoNotReceived(
         status: p.status,
         orderDate: (p.orderDate ?? "").slice(0, 10),
         daysOpen: daysBetween(p.orderDate, todayYmd),
+        // Days past the Expected Delivery Date when set and already in the
+        // past; 0 when there's no expectedDate or it's still upcoming.
+        expectedOverdueDays:
+          !isEmpty(p.expectedDate) &&
+          String(p.expectedDate).slice(0, 10) < todayYmd
+            ? daysBetween(p.expectedDate, todayYmd)
+            : 0,
       }));
   } catch (err) {
     console.error("[compliance] poNotReceived failed:", err);
@@ -680,7 +865,11 @@ const JC_DONE_STATUSES = new Set(["COMPLETED", "TRANSFERRED"]);
 //    card in the same group that is NOT done. We only look at production orders
 //    that are not fully finished (status NOT IN COMPLETED/CANCELLED) to bound
 //    the set. One row per (PO, doneDept) violation.
-async function checkProcessSkips(db: DbLike): Promise<ProcessSkipRow[]> {
+async function checkProcessSkips(
+  db: DbLike,
+  todayYmd: string,
+  graceDays: number,
+): Promise<ProcessSkipRow[]> {
   try {
     // Active production orders — bound the set + carry display/link fields.
     const poRes = await db
@@ -793,6 +982,10 @@ async function checkProcessSkips(db: DbLike): Promise<ProcessSkipRow[]> {
         if (!blockedBy) continue;
         const meta = poById.get(card.productionOrderId);
         if (!meta) continue;
+        // Clock-start = the DONE card's completedDate; suppress fresh skips
+        // inside the grace window.
+        const days = daysBetween(card.completedDate, todayYmd);
+        if (days < graceDays) continue;
         rows.push({
           productionOrderId: card.productionOrderId,
           poNo: meta.poNo,
@@ -803,6 +996,7 @@ async function checkProcessSkips(db: DbLike): Promise<ProcessSkipRow[]> {
           doneDeptCompletedDate: (card.completedDate ?? "").slice(0, 10),
           blockedByDept: blockedBy.departmentCode,
           blockedByStatus: blockedBy.status,
+          days,
         });
       }
     }
@@ -1005,6 +1199,10 @@ export async function collectComplianceData(
   db: DbLike,
   todayYmd: string,
 ): Promise<ComplianceData> {
+  // Load per-category grace windows once (kv_config `daily-report-config`),
+  // merged with the bundled defaults so every key is present.
+  const graceDays = await loadGraceDays(db);
+
   const [
     doPendingDispatch,
     doNotDelivered,
@@ -1019,15 +1217,15 @@ export async function collectComplianceData(
     incompleteBoms,
     rdStalled,
   ] = await Promise.all([
-    checkDoPendingDispatch(db, todayYmd),
-    checkDoNotDelivered(db, todayYmd),
-    checkDoNotInvoiced(db, todayYmd),
-    checkSoNoDo(db),
-    checkSoNoInvoice(db),
+    checkDoPendingDispatch(db, todayYmd, graceDays.doPendingDispatch),
+    checkDoNotDelivered(db, todayYmd, graceDays.doNotDelivered),
+    checkDoNotInvoiced(db, todayYmd, graceDays.doNotInvoiced),
+    checkSoNoDo(db, todayYmd, graceDays.soWithoutDo),
+    checkSoNoInvoice(db, todayYmd, graceDays.soWithoutInvoice),
     checkOverdueOrders(db, todayYmd),
-    checkPoNotReceived(db, todayYmd),
+    checkPoNotReceived(db, todayYmd, graceDays.poNotReceived),
     checkLowEfficiencyWorkers(db, todayYmd),
-    checkProcessSkips(db),
+    checkProcessSkips(db, todayYmd, graceDays.processSkips),
     checkMissingWipTimes(db),
     checkIncompleteBoms(db),
     checkRdStalled(db, todayYmd),

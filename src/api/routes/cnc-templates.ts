@@ -955,12 +955,15 @@ app.post("/import", async (c) => {
     const kind = ext as FileKind;
     const identity = stripTrailingDgtWord(base);
     const parsed = parseTemplateName(base);
-    // Prefer the operator-chosen model over the filename-parsed code.
+    // Prefer the operator-chosen model over the filename-parsed code, so every
+    // file in the upload is filed under the picked model.
     if (overrideProductCode) parsed.productCode = overrideProductCode;
-    // displayName is the base verbatim (sans trailing "dgt"), so the trio
-    // shares one display name and one row. An explicit displayName override
-    // (from the upload form) wins when supplied.
-    const displayName = overrideDisplayName || identity || base;
+    // Group by each file's OWN base name (the .dgt/.prj/.emf trio that share a
+    // base collapse into one row). Do NOT use the single displayName override
+    // here — applying one name to every file would collapse a multi-file upload
+    // into one template and overwrite the rest (data loss). The override is
+    // applied below, only when the whole upload is a single template.
+    const displayName = identity || base;
     const groupKey = `${parsed.productCode}|${displayName.toLowerCase()}`;
 
     let g = groups.get(groupKey);
@@ -981,6 +984,15 @@ app.post("/import", async (c) => {
       },
       400,
     );
+  }
+
+  // Apply the operator's chosen file name ONLY when the upload is a single
+  // template (one base name → one group, e.g. an arm.dgt/arm.prj/arm.emf trio).
+  // For multi-file uploads (several different pieces) we keep each file's own
+  // name so they stay as separate templates under the picked model.
+  if (overrideDisplayName && groups.size === 1) {
+    const only = [...groups.values()][0];
+    only.displayName = overrideDisplayName;
   }
 
   const now = new Date().toISOString();

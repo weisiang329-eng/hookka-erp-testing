@@ -57,7 +57,7 @@ import {
   VARIANTS_CONFIG_KEY,
   type VariantsConfig,
 } from "@/lib/kv-config";
-import { legHeightPacksByDefault } from "@/lib/leg-packing";
+import { legHeightPacksByDefault, optionPacksSeparately } from "@/lib/leg-packing";
 
 // ---------- Types matching mock-data ----------
 // Sofa fabric price tier — values mirror fabric_tracking.priceTier verbatim
@@ -1466,13 +1466,19 @@ function MaintenanceView() {
                         <div className="flex items-center gap-3 flex-shrink-0">
                           {/* Pack leg separately — leg-height tabs only. When
                               ticked the leg ships in its own box and shows as
-                              its own piece on the FG packing sticker. */}
+                              its own piece on the FG packing sticker. Legacy
+                              rows that predate the flag have no stored value, so
+                              we show the SAME effective rule the packing sticker
+                              uses (optionPacksSeparately: explicit flag wins,
+                              else legs taller than 1" pack on their own). This
+                              keeps the screen honest with what actually prints,
+                              without needing a stored value on every old row. */}
                           {isLegTab && (
                             editMode ? (
                               <label className="flex items-center gap-1.5 text-xs text-[#374151] cursor-pointer select-none whitespace-nowrap">
                                 <input
                                   type="checkbox"
-                                  checked={entry.packSeparately ?? false}
+                                  checked={optionPacksSeparately(entry)}
                                   onChange={(e) => updatePackSeparately(idx, e.target.checked)}
                                   className="w-3.5 h-3.5 accent-[#6B5C32] cursor-pointer"
                                 />
@@ -1480,10 +1486,10 @@ function MaintenanceView() {
                               </label>
                             ) : (
                               <span
-                                className={`text-xs whitespace-nowrap ${entry.packSeparately ? "text-[#6B5C32] font-medium" : "text-gray-400"}`}
+                                className={`text-xs whitespace-nowrap ${optionPacksSeparately(entry) ? "text-[#6B5C32] font-medium" : "text-gray-400"}`}
                                 title="Whether this leg ships in its own box on the FG packing sticker"
                               >
-                                {entry.packSeparately ? "Separate box" : "Packed with item"}
+                                {optionPacksSeparately(entry) ? "Separate box" : "Packed with item"}
                               </span>
                             )
                           )}

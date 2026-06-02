@@ -3919,19 +3919,24 @@ export default function ProductionPage({
   //      sofa components on other dept paths) still come through.
   const loadFoamPackingStickers = useCallback(async (): Promise<FgSticker[]> => {
     const q = (fltSearch || "").trim().toLowerCase();
-    const gridRows =
-      (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
-    // Scope source 0 (highest priority): ticked job-card rows. When the
-    // operator has selected rows, pack exactly those SOs — they don't need
-    // to narrow the whole Foam sheet to ≤10 SOs first (Wei Siang 2026-06-02).
+    // Mirror Show QR: the natural scope is whatever the Foam grid is
+    // currently SHOWING (its column filters / in-grid search applied),
+    // falling back to all rows before the DataGrid has reported. No row-
+    // ticking and no ≤10-SO cap required — filter the sheet, then print
+    // exactly what's visible (Wei Siang 2026-06-02: "像 Show QR 那样跟
+    // filter 一样的").
+    const visibleRows =
+      (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
+    // Scope source 0 (optional override): ticked job-card rows. If the
+    // operator has ticked specific rows, pack exactly those SOs instead of
+    // the whole visible set.
     const selSoIds = new Set(
       selectedDeptRows.map((r) => r.soId).filter(Boolean),
     );
     const hasSelectionScope = selSoIds.size > 0;
-    const hasGridScope =
-      gridRows !== null && gridRows.length > 0 && gridRows.length < deptRows.length;
+    const hasGridScope = visibleRows.length > 0;
     if (!q && !hasSelectionScope && !hasGridScope) {
-      toast.info("Tick the Foam rows you want to pack, type an SO in the top Search box, or narrow a column below.");
+      toast.info("No Foam rows are visible to pack. Type an SO in the top Search box or adjust the filter.");
       return [];
     }
     setLoadingFoamPrint(true);
@@ -3964,7 +3969,7 @@ export default function ProductionPage({
         });
       } else {
         const soIds = new Set(
-          (gridRows ?? [])
+          visibleRows
             .map((r) => r.salesOrderId || r.consignmentOrderId || "")
             .filter(Boolean),
         );
@@ -6339,54 +6344,39 @@ export default function ProductionPage({
                 {printingJobCards ? "Generating…" : "Print All"}
               </Button>
             )}
-            {/* Foam-only Packing-sticker controls. Both buttons gate on
-                the same scope rule: top-bar search OR ≤10 distinct SOs
-                in the grid. Show loads + reveals on-screen tiles for a
-                WYSIWYG check before printing; Print sends the same
-                payload to the hidden print container. */}
+            {/* Foam-only Packing-sticker controls. Scope mirrors Show QR:
+                the buttons act on whatever the Foam grid is currently
+                SHOWING (its column filters / search applied) — no row-
+                ticking and no SO-count cap. Filter the sheet, then Show
+                (on-screen WYSIWYG check) or Print (same payload to the
+                hidden print container). A top-bar Search or ticked rows
+                still work as optional narrower scopes. */}
             {activeTab === "FOAM" && (() => {
-              const MAX_SO_FOR_PRINT = 10;
               const hasTopSearch = !!fltSearch.trim();
-              const gridRows =
-                (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? null;
+              // Whatever the grid is showing right now, falling back to all
+              // rows until the DataGrid reports its filtered set.
+              const visibleRows =
+                (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
               const distinctSoIds = new Set<string>();
-              if (gridRows) {
-                for (const r of gridRows) {
-                  const sid = r.salesOrderId || r.consignmentOrderId;
-                  if (sid) distinctSoIds.add(sid);
-                }
+              for (const r of visibleRows) {
+                const sid = r.salesOrderId || r.consignmentOrderId;
+                if (sid) distinctSoIds.add(sid);
               }
-              // Ticked job-card rows scope the packing stickers to just
-              // those SOs — so the operator can pick the pieces to pack
-              // instead of narrowing the whole Foam sheet (Wei Siang
-              // 2026-06-02). Takes priority over grid/search scope.
+              // Ticked rows are an optional override — pack just those SOs.
               const selSoIds = new Set(
                 selectedDeptRows.map((r) => r.soId).filter(Boolean),
               );
-              const hasSelectionScope =
-                selSoIds.size > 0 && selSoIds.size <= MAX_SO_FOR_PRINT;
-              const gridScoped =
-                gridRows !== null &&
-                gridRows.length > 0 &&
-                gridRows.length < deptRows.length &&
-                distinctSoIds.size > 0 &&
-                distinctSoIds.size <= MAX_SO_FOR_PRINT;
-              const tooWide =
-                !hasTopSearch &&
-                !hasSelectionScope &&
-                gridRows !== null &&
-                distinctSoIds.size > MAX_SO_FOR_PRINT;
-              const scopeOK = hasTopSearch || hasSelectionScope || gridScoped;
+              const hasSelectionScope = selSoIds.size > 0;
+              const hasVisibleRows = visibleRows.length > 0;
+              const scopeOK = hasTopSearch || hasSelectionScope || hasVisibleRows;
               const enabled = scopeOK && !loadingFoamPrint && !foamPrintRequested;
               const tooltipBase = hasSelectionScope
                 ? `Packing stickers for the ${selSoIds.size} SO${selSoIds.size === 1 ? "" : "s"} in your ${selectedDeptRows.length} ticked row${selectedDeptRows.length === 1 ? "" : "s"}`
                 : hasTopSearch
                   ? `Packing stickers (HB / Divan / Sofa pieces) for every piece of the SO in the Search box`
-                  : gridScoped
-                    ? `Packing stickers for ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid`
-                    : tooWide
-                      ? `Too many SOs (${distinctSoIds.size}) — tick the rows you want, narrow the grid to ≤ ${MAX_SO_FOR_PRINT} SOs, or type one in the top Search box`
-                      : "Tick the Foam rows you want to pack, or filter the grid — top Search box or a column filter below";
+                  : hasVisibleRows
+                    ? `Packing stickers for the ${distinctSoIds.size} SO${distinctSoIds.size === 1 ? "" : "s"} shown in the Foam grid — filter the grid to narrow`
+                    : "Filter the Foam grid, tick rows, or type an SO in the top Search box";
               return (
                 <>
                   <Button

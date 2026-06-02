@@ -5499,6 +5499,36 @@ function LaborCostTab({
     [holidaysResp],
   );
 
+  // Payroll reconciliation — pull the SAME period's payslips so the Labor
+  // Cost buckets (logged factory hours × rate) can be reconciled against the
+  // full Total Payroll Cost. Labor Cost only counts workers who logged
+  // production-dept hours; office / sales / admin / drivers and the company's
+  // employer statutory contributions (EPF/SOCSO/EIS ER) never appear in
+  // working_hour_entries, so the buckets always undershoot payroll. We add two
+  // residual buckets below so the breakdown tallies EXACTLY to payroll.
+  //
+  // Derive YYYY-MM the same way the labor-cost day-rate does: prefer the
+  // month dropdown (`period`), else the From date. If From/To straddle two
+  // calendar months we still use the From month — the reconciliation note
+  // tells the operator the payroll figure is for a single calendar month.
+  const payrollPeriod = (period || from || "").slice(0, 7);
+  const payrollMonthLabel = useMemo(() => {
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ];
+    const y = payrollPeriod.slice(0, 4);
+    const mIdx = (Number(payrollPeriod.slice(5, 7)) || 1) - 1;
+    return `${monthNames[Math.min(11, Math.max(0, mIdx))]} ${y}`;
+  }, [payrollPeriod]);
+  const { data: reconPayslipResp } = useCachedJson<unknown>(
+    payrollPeriod ? `/api/payslips?period=${payrollPeriod}` : null,
+  );
+  const reconPayslips: PayslipData[] = useMemo(
+    () => asArray(reconPayslipResp) as PayslipData[],
+    [reconPayslipResp],
+  );
+
   const rows: LaborCostRow[] = useMemo(() => {
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
     const revData = plResp?.success ? plResp.data ?? {} : {};
@@ -5643,6 +5673,95 @@ function LaborCostTab({
   const overheadLaborCostSen =
     totalLaborCostSen - productionLaborCostSen - shortfallLaborCostSen - warehousingLaborCostSen;
 
+  // ---- Payroll reconciliation ----------------------------------------
+  // Total Payroll Cost = Σ gross pay + Σ employer statutory contributions,
+  // over every payslip in the same calendar month. This is the SAME formula
+  // the Payroll tab shows as "Total Payroll Cost" so the two screens agree.
+  // The category filter does NOT slice payroll (a worker's salary isn't
+  // category-tagged), so reconciliation only renders when no category filter
+  // is active — otherwise the buckets are a category subset and can't tally
+  // to the full payroll.
+  const payrollTotals = useMemo(() => {
+    let grossSen = 0;
+    let employerContribSen = 0;
+    for (const p of reconPayslips) {
+      grossSen += Number(p.grossPay) || 0;
+      employerContribSen +=
+        (Number(p.epfEmployer) || 0) +
+        (Number(p.socsoEmployer) || 0) +
+        (Number(p.eisEmployer) || 0);
+    }
+    return { grossSen, employerContribSen };
+  }, [reconPayslips]);
+
+  const totalGrossSen = payrollTotals.grossSen;
+  const employerContribSen = payrollTotals.employerContribSen;
+  // Full payroll cost the breakdown must reconcile to.
+  const totalPayrollCostSen = totalGrossSen + employerContribSen;
+  // Salary of workers with no logged factory hours (office / sales / admin /
+  // drivers / QC), PLUS any under-logged-hours difference. Residual against
+  // gross — by construction this makes the four labor buckets + this line sum
+  // to total gross, and adding employer contributions closes to full payroll.
+  const nonProductionSalarySen =
+    totalGrossSen -
+    (productionLaborCostSen +
+      warehousingLaborCostSen +
+      shortfallLaborCostSen +
+      overheadLaborCostSen);
+  // We only have payroll figures once payslips exist for the period. Hide the
+  // reconciliation panel (rather than show a misleading negative residual)
+  // when there are none or when a category filter is narrowing the buckets.
+  const hasPayroll = reconPayslips.length > 0;
+  const showReconciliation = hasPayroll && !categoryFilter;
+  // Display sum of every bucket — must equal totalPayrollCostSen exactly.
+  const reconciledSumSen =
+    productionLaborCostSen +
+    warehousingLaborCostSen +
+    shortfallLaborCostSen +
+    overheadLaborCostSen +
+    nonProductionSalarySen +
+    employerContribSen;
+  const reconcileDiffSen = reconciledSumSen - totalPayrollCostSen;
+
+  // Break the Non-production salary bucket down by department/group so Finance
+  // sees which non-production teams (admin / sales / drivers / QC) the residual
+  // belongs to. We attribute each payslip's gross to its department, then
+  // SUBTRACT the labor cost we already bucketed for that department from logged
+  // hours — what's left is the un-bucketed salary for that department. Sums
+  // back to nonProductionSalarySen.
+  const nonProductionByDept = useMemo(() => {
+    if (!showReconciliation) return [] as Array<{ code: string; name: string; salarySen: number }>;
+    // Labor cost already attributed to each department from logged hours.
+    const bucketedByDept = new Map<string, number>();
+    for (const r of rows) {
+      bucketedByDept.set(
+        r.departmentCode,
+        (bucketedByDept.get(r.departmentCode) ?? 0) + r.laborCostSen,
+      );
+    }
+    // Gross salary per department from payslips.
+    const grossByDept = new Map<string, number>();
+    for (const p of reconPayslips) {
+      const code = p.departmentCode || "UNASSIGNED";
+      grossByDept.set(code, (grossByDept.get(code) ?? 0) + (Number(p.grossPay) || 0));
+    }
+    const out: Array<{ code: string; name: string; salarySen: number }> = [];
+    for (const [code, gross] of grossByDept.entries()) {
+      const residual = gross - (bucketedByDept.get(code) ?? 0);
+      // Only surface departments that carry un-bucketed salary. Tiny rounding
+      // residuals on fully-logged production depts get hidden.
+      if (residual <= 50) continue;
+      const dept = allDepts.find((d) => d.code === code);
+      out.push({
+        code,
+        name: dept?.name ?? (code === "UNASSIGNED" ? "Unassigned" : code),
+        salarySen: residual,
+      });
+    }
+    out.sort((a, b) => b.salarySen - a.salarySen);
+    return out;
+  }, [showReconciliation, rows, reconPayslips, allDepts]);
+
   const loading = entriesLoading || plLoading;
 
   return (
@@ -5744,6 +5863,86 @@ function LaborCostTab({
             </CardContent>
           </Card>
         </div>
+
+        {/* Payroll reconciliation — proves the labor breakdown tallies to the
+            full Total Payroll Cost. Only shown for an un-filtered single month
+            (a worker's salary isn't category-tagged, so a category filter can't
+            reconcile to full payroll). */}
+        {showReconciliation && (
+          <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-4">
+            <div className="mb-3 flex items-center justify-between flex-wrap gap-2">
+              <h3 className="text-sm font-semibold text-[#1F1D1B] flex items-center gap-2">
+                <DollarSign className="h-4 w-4 text-[#6B5C32]" />
+                Payroll Reconciliation
+                <span className="text-xs font-normal text-[#6B7280]">
+                  ({payrollMonthLabel})
+                </span>
+              </h3>
+              {Math.abs(reconcileDiffSen) <= 1 ? (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-[#EEF3E4] px-3 py-1 text-xs font-semibold text-[#4F7C3A]">
+                  <Check className="h-3.5 w-3.5" /> Reconciled · 0 difference
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-[#F9E1DA] px-3 py-1 text-xs font-semibold text-[#9A3A2D]">
+                  Difference {formatCurrency(reconcileDiffSen)}
+                </span>
+              )}
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <tbody>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Production Labor</td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(productionLaborCostSen)}</td>
+                  </tr>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Borrowed (Warehousing)</td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(warehousingLaborCostSen)}</td>
+                  </tr>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Idle (Shortfall)</td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(shortfallLaborCostSen)}</td>
+                  </tr>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Overhead (Repair / Maintenance / etc.)</td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(overheadLaborCostSen)}</td>
+                  </tr>
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td className="py-1.5 pr-3 text-[#4B5563]">
+                      Non-production salary (office / sales / admin)
+                    </td>
+                    <td className={`py-1.5 text-right tabular-nums font-medium ${nonProductionSalarySen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {formatCurrency(nonProductionSalarySen)}
+                    </td>
+                  </tr>
+                  {/* Per-department breakdown of the non-production residual so
+                      Finance can see which team carries the un-bucketed salary. */}
+                  {nonProductionByDept.map((d) => (
+                    <tr key={`recon-np-${d.code}`} className="border-b border-[#E2DDD8]">
+                      <td className="py-1 pr-3 pl-6 text-xs text-[#6B7280]">↳ {d.name}</td>
+                      <td className="py-1 text-right tabular-nums text-xs text-[#6B7280]">{formatCurrency(d.salarySen)}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Employer contributions (EPF / SOCSO / EIS)</td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(employerContribSen)}</td>
+                  </tr>
+                  <tr className="border-t-2 border-[#6B5C32]">
+                    <td className="py-2 pr-3 font-semibold text-[#1F1D1B]">Total Payroll Cost</td>
+                    <td className="py-2 text-right tabular-nums font-bold text-[#1F1D1B]">{formatCurrency(totalPayrollCostSen)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p className="mt-3 text-xs text-[#6B7280] leading-relaxed">
+              Production-floor labor is costed from logged Working Hours; salaries of staff who don&rsquo;t clock factory hours
+              (office / sales / admin) and the company&rsquo;s EPF / SOCSO / EIS are added here so the breakdown reconciles to the
+              full payroll. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
+            </p>
+          </div>
+        )}
 
         {/* Production-vs-overhead ratio note */}
         <div className="mb-3 text-xs text-[#6B7280]">

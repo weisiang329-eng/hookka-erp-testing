@@ -34,6 +34,82 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-02-003 — Foam (and any dept) "Show / Print Packing Stickers" greyed out on the full sheet even with job-card rows ticked
+
+**Status:** 🟢 Fixed (2026-06-02)
+**Category:** production-orders
+
+**What happened (user-visible):**
+
+On the Foam department sheet (and any dept production sheet), the
+"Show Packing Stickers" / "Print Packing Stickers" buttons in the QR
+Stickers panel were greyed out and would not open, even after the
+operator ticked one or more job-card rows. Marked urgent — the operator
+could not print foam-bonding packing stickers at all on the default view.
+
+**Root cause:**
+
+The two buttons gated only on (a) a top-search term, or (b) the grid
+being filtered down to fewer than ~10 distinct SOs. The default Foam
+sheet loads 446 rows spanning dozens of SOs, so the "too many SOs" guard
+permanently disabled the buttons. Ticking rows in the grid — the natural
+way an operator narrows to a few cards — was not treated as a scope at
+all, so it never enabled the buttons.
+
+**Fix (file:line):**
+
+`src/pages/production/index.tsx` — made the ticked job-card rows
+(`selectedDeptRows`) a first-class scope. Carried each row's SO id onto
+the selection (`DeptRowLite.soId`, onSelectionChange ~5533). The
+packing-sticker fetch (`loadFoamPackingStickers` ~3892) now scopes to the
+SOs of the ticked rows when any are selected, ahead of the top-search
+path. The render gate (~6303) treats a selection of 1–10 distinct SOs as
+a valid scope, so ticking rows enables the buttons and the tooltip reads
+"Packing stickers for the N SO in your M ticked rows."
+
+**Verified:**
+
+Live on prod (commit 77ea7e43). Loaded the full Foam sheet (446 rows),
+ticked 2 rows of SV-2605-003 → buttons enabled, tooltip showed "1 SO in
+your 2 ticked rows", clicked Show → rendered "Packing Stickers preview ·
+1 sticker". No longer greyed out.
+
+---
+
+## BUG-2026-06-02-002 — Add Items picker search did not match by customer PO / SO / Ref
+
+**Status:** 🟢 Fixed (2026-06-02)
+**Category:** delivery-orders
+
+**What happened (user-visible):**
+
+In the Delivery Order "Add Items" picker, typing a customer PO number
+(e.g. "8891" for PO-008891) returned "No available production orders"
+even though that order existed and was ready to add. The picker showed
+the customer PO / SO / Ref columns but the search box ignored them.
+
+**Root cause:**
+
+The picker's filter (`addablePOs`, `src/pages/delivery/index.tsx` ~2213)
+matched the typed term only against `poNo`, `productCode`, `productName`,
+`customerName`, and our own `salesOrderNo`. The customer-side reference
+fields (`customerPOId`, `customerSO`, `customerReference`) were added to
+the display columns later but never wired into the search predicate, so
+searching by anything the customer calls the order found nothing.
+
+**Fix (file:line):**
+
+`src/pages/delivery/index.tsx` ~2213 — added `customerPOId`, `customerSO`,
+and `customerReference` to the `addablePOs` filter so the picker search
+matches the same customer-side fields it displays.
+
+**Verified:**
+
+Strict typecheck clean (`tsc -p tsconfig.app.json --noEmit`, exit 0).
+Committed on delivery-cluster (126f5d09).
+
+---
+
 ## BUG-2026-06-02-001 — Bulk-patch verify-readback always reverted the "Sent to floor" tick (and rackingNumber / overdue / actualMinutes) on the production grid
 
 **Status:** 🟢 Fixed (2026-06-02)

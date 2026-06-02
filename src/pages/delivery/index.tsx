@@ -2360,9 +2360,10 @@ export default function DeliveryPage() {
           id: i.id,
           salesOrderNo: i.salesOrderNo,
           poNo: i.poNo,
-          // Per-line customer PO (from /print-extras) — drives the print
-          // sort order; falls back to the row's own customerPOId.
-          customerPOId: ex?.customerPOId ?? i.customerPOId ?? "",
+          // Per-line customer PO — drives the print sort order. Comes off
+          // the DO line item itself (print-extras only carries the height
+          // fields, not customer PO), falling back to empty.
+          customerPOId: i.customerPOId ?? "",
           productCode: i.productCode,
           productName: i.productName,
           sizeLabel: i.sizeLabel,

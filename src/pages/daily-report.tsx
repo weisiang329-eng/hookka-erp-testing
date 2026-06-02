@@ -6,12 +6,13 @@
 // with a compact table of the offending records linking back to the source.
 // Plain tables / lists (NOT the DataGrid component). English only.
 // ===========================================================================
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useCachedJson } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
 import {
   Loader2,
   ClipboardCheck,
@@ -29,6 +30,8 @@ import {
   Timer,
   Layers,
   FlaskConical,
+  Settings,
+  X,
 } from "lucide-react";
 
 // ── API response types (mirror src/api/lib/compliance-report.ts) ────────────
@@ -59,12 +62,16 @@ interface SoNoDoRow {
   companySOId: string;
   customerName: string;
   status: string;
+  // Newer payloads carry whole-days-since-confirmation so we can age the row.
+  days?: number;
 }
 interface SoNoInvoiceRow {
   id: string;
   companySOId: string;
   customerName: string;
   status: string;
+  // Newer payloads carry whole-days-since-delivery/close.
+  days?: number;
 }
 interface OverdueRow {
   salesOrderId: string;
@@ -84,6 +91,9 @@ interface PoNotReceivedRow {
   status: string;
   orderDate: string;
   daysOpen: number;
+  // Present only when the PO is past its Expected Delivery Date — how many
+  // days past the promised arrival it now is.
+  expectedOverdueDays?: number;
 }
 interface WorkerRow {
   name: string;
@@ -104,6 +114,8 @@ interface ProcessSkipRow {
   doneDeptCompletedDate: string;
   blockedByDept: string;
   blockedByStatus: string;
+  // Newer payloads carry whole-days the earlier step has been idle / waiting.
+  days?: number;
 }
 interface MissingWipTimeRow {
   productCode: string;
@@ -159,6 +171,94 @@ interface ComplianceData {
   };
 }
 type ComplianceResp = { success?: boolean; data?: ComplianceData };
+
+// ── SOP grace-threshold config (kv_config: daily-report-config) ─────────────
+// The editable per-category grace windows. The backend independently falls
+// back to the same defaults, so an empty/unset config still renders.
+
+interface GraceDays {
+  doPendingDispatch: number;
+  doNotDelivered: number;
+  doNotInvoiced: number;
+  soWithoutDo: number;
+  soWithoutInvoice: number;
+  poNotReceived: number;
+  processSkips: number;
+}
+
+const DAILY_REPORT_CONFIG_KEY = "daily-report-config";
+
+const DEFAULT_GRACE_DAYS: GraceDays = {
+  doPendingDispatch: 1,
+  doNotDelivered: 1,
+  doNotInvoiced: 1,
+  soWithoutDo: 2,
+  soWithoutInvoice: 3,
+  poNotReceived: 14,
+  processSkips: 1,
+};
+
+// Field order + labels + helper copy for the settings panel. Driven off this
+// list so the panel and the defaults can never drift.
+const GRACE_FIELDS: {
+  key: keyof GraceDays;
+  label: string;
+  help: string;
+}[] = [
+  {
+    key: "doPendingDispatch",
+    label: "DO Pending Dispatch",
+    help: "Only flag a draft DO after N days.",
+  },
+  {
+    key: "doNotDelivered",
+    label: "DO Not Delivered",
+    help: "Only flag a dispatched DO after N days on the road.",
+  },
+  {
+    key: "doNotInvoiced",
+    label: "DO Not Invoiced",
+    help: "Only flag a delivered DO after N days uninvoiced.",
+  },
+  {
+    key: "soWithoutDo",
+    label: "SO Without DO",
+    help: "Only flag a confirmed SO after N days with no delivery order.",
+  },
+  {
+    key: "soWithoutInvoice",
+    label: "SO Without Invoice",
+    help: "Only flag a closed SO after N days with no invoice.",
+  },
+  {
+    key: "poNotReceived",
+    label: "PO Not Received",
+    help: "Only flag an open PO after N days with no goods receipt.",
+  },
+  {
+    key: "processSkips",
+    label: "Process Skips",
+    help: "Only flag an out-of-sequence step after N days idle.",
+  },
+];
+
+// Section anchor ids — referenced by both the count tiles (drill-in target)
+// and the rendered <Section> wrappers.
+const SECTION_IDS = {
+  doPendingDispatch: "sec-do-pending-dispatch",
+  doNotDelivered: "sec-do-not-delivered",
+  doNotInvoiced: "sec-do-not-invoiced",
+  soNoDo: "sec-so-no-do",
+  soNoInvoice: "sec-so-no-invoice",
+  overdueOrders: "sec-overdue-orders",
+  poNotReceived: "sec-po-not-received",
+  lowEfficiencyWorkers: "sec-low-efficiency-workers",
+  processSkips: "sec-process-skips",
+  missingWipTimes: "sec-missing-wip-times",
+  incompleteBoms: "sec-incomplete-boms",
+  rdStalled: "sec-rd-stalled",
+} as const;
+type SectionKey = keyof typeof SECTION_IDS;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -230,17 +330,69 @@ function CountTile({
   value,
   icon: Icon,
   highlight = false,
+  onClick,
 }: {
   label: string;
   value: number;
   icon: React.ElementType;
   highlight?: boolean;
+  // When provided AND value > 0 the tile becomes a drill-in button that
+  // reveals its detail section. Zero-count tiles are inert.
+  onClick?: () => void;
 }) {
   const clear = value === 0;
-  return (
+  const interactive = !highlight && !clear && !!onClick;
+
+  // Severity escalation for non-zero, non-total tiles: the bigger the backlog,
+  // the louder the tile. Keeps "needs attention" weighting obvious at a glance.
+  const sev = highlight
+    ? null
+    : clear
+      ? "clear"
+      : value >= 10
+        ? "red"
+        : value >= 5
+          ? "orange"
+          : "amber";
+
+  const tone =
+    highlight
+      ? "bg-[#1F1D1B] text-white border-[#1F1D1B]"
+      : sev === "red"
+        ? "bg-[#FEF2F2] border-[#FCA5A5]"
+        : sev === "orange"
+          ? "bg-[#FFF7ED] border-[#FED7AA]"
+          : sev === "amber"
+            ? "bg-[#FFFBEB] border-[#FDE68A]"
+            : "bg-white";
+
+  const valueColor =
+    highlight
+      ? "text-white"
+      : clear
+        ? "text-[#15803D]"
+        : sev === "red"
+          ? "text-[#B91C1C]"
+          : sev === "orange"
+            ? "text-[#C2410C]"
+            : "text-[#A16207]";
+
+  const iconColor = highlight
+    ? "text-[#C9A24B]"
+    : sev === "red"
+      ? "text-[#B91C1C]"
+      : sev === "orange"
+        ? "text-[#C2410C]"
+        : sev === "amber"
+          ? "text-[#A16207]"
+          : "text-[#6B5C32]";
+
+  const card = (
     <Card
-      className={`rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] ${
-        highlight ? "bg-[#1F1D1B] text-white border-[#1F1D1B]" : "bg-white"
+      className={`rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] transition-all ${tone} ${
+        interactive
+          ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(0,0,0,0.12)]"
+          : ""
       }`}
     >
       <CardContent className="p-3.5">
@@ -252,43 +404,60 @@ function CountTile({
           >
             {label}
           </p>
-          <Icon
-            className={`h-4 w-4 ${highlight ? "text-[#C9A24B]" : "text-[#6B5C32]"}`}
-          />
+          <Icon className={`h-4 w-4 ${iconColor}`} />
         </div>
         <p
-          className={`mt-1.5 text-2xl font-[800] tabular-nums leading-none ${
-            highlight
-              ? "text-white"
-              : clear
-                ? "text-[#15803D]"
-                : "text-[#1F1D1B]"
-          }`}
+          className={`mt-1.5 text-2xl font-[800] tabular-nums leading-none ${valueColor}`}
         >
           {value}
         </p>
       </CardContent>
     </Card>
   );
+
+  if (!interactive) return card;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C9A24B] focus-visible:ring-offset-1 rounded-xl"
+      aria-label={`${label}: ${value} — show details`}
+    >
+      {card}
+    </button>
+  );
 }
 
 // ── Section card ──────────────────────────────────────────────────────────
 
 function Section({
+  id,
   title,
   subtitle,
   count,
   icon: Icon,
+  highlighted = false,
   children,
 }: {
+  id: string;
   title: string;
   subtitle: string;
   count: number;
   icon: React.ElementType;
+  // Briefly emphasised after a tile drill-in.
+  highlighted?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <Card className="rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)] bg-white">
+    <Card
+      id={id}
+      className={`rounded-xl bg-white scroll-mt-24 transition-shadow duration-500 ${
+        highlighted
+          ? "shadow-[0_0_0_2px_#C9A24B,0_8px_24px_rgba(201,162,75,0.25)]"
+          : "shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+      }`}
+    >
       <CardHeader className="flex flex-row items-start justify-between gap-3 p-5 pb-3">
         <div className="flex items-start gap-3">
           <div className="rounded-lg bg-[#F5F2ED] p-2 mt-0.5">
@@ -369,16 +538,229 @@ function RecordLink({ to, label }: { to: string; label: string }) {
   );
 }
 
+// ── SOP threshold settings panel ───────────────────────────────────────────
+// Reads + writes kv_config('daily-report-config'). Edits the graceDays object;
+// merges back any other keys the config blob may carry so we never clobber
+// fields the UI doesn't surface.
+
+function SettingsPanel({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [grace, setGrace] = useState<GraceDays>(DEFAULT_GRACE_DAYS);
+  // Whatever else lived in the config blob — preserved on save.
+  const otherKeys = useRef<Record<string, unknown>>({});
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/kv-config/${DAILY_REPORT_CONFIG_KEY}`)
+      .then(
+        (r) =>
+          r.json() as Promise<{
+            data?: { graceDays?: Partial<GraceDays> } & Record<string, unknown>;
+          }>,
+      )
+      .then((j) => {
+        if (!alive) return;
+        const blob = j?.data ?? null;
+        if (blob && typeof blob === "object") {
+          const { graceDays, ...rest } = blob;
+          otherKeys.current = rest;
+          setGrace({ ...DEFAULT_GRACE_DAYS, ...(graceDays ?? {}) });
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setLoaded(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const setField = (key: keyof GraceDays, raw: string) => {
+    const n = Math.max(0, Math.round(Number(raw)));
+    setGrace((g) => ({ ...g, [key]: Number.isFinite(n) ? n : 0 }));
+  };
+
+  const save = async () => {
+    // Reject any non-finite / negative value before persisting.
+    for (const f of GRACE_FIELDS) {
+      const v = grace[f.key];
+      if (!Number.isFinite(v) || v < 0) {
+        toast.error(`${f.label}: enter a valid number of days (0 or more)`);
+        return;
+      }
+    }
+    setSaving(true);
+    try {
+      const merged = { ...otherKeys.current, graceDays: grace };
+      const res = await fetch(`/api/kv-config/${DAILY_REPORT_CONFIG_KEY}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(merged),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) {
+        toast.success("Thresholds saved — refreshing report");
+        onSaved();
+        onClose();
+      } else {
+        toast.error(j?.error || "Failed to save thresholds");
+      }
+    } catch {
+      toast.error("Failed to save thresholds");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:p-8"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Daily Report thresholds"
+      onClick={onClose}
+    >
+      <Card
+        className="w-full max-w-lg rounded-xl bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <CardHeader className="flex flex-row items-start justify-between gap-3 p-5 pb-3">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg bg-[#F5F2ED] p-2 mt-0.5">
+              <Settings className="h-4 w-4 text-[#6B5C32]" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Report Thresholds</CardTitle>
+              <p className="text-xs text-[#9CA3AF] mt-0.5">
+                Grace period before each category is flagged.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1 text-[#9CA3AF] hover:bg-[#F5F2ED] hover:text-[#1F1D1B]"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </CardHeader>
+        <CardContent className="p-5 pt-0">
+          {!loaded ? (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="h-6 w-6 animate-spin text-[#6B5C32]" />
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-[#F0ECE6]">
+                {GRACE_FIELDS.map((f) => (
+                  <div
+                    key={f.key}
+                    className="flex items-center justify-between gap-4 py-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#1F1D1B]">
+                        {f.label}
+                      </p>
+                      <p className="text-[11px] text-[#9CA3AF]">{f.help}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={grace[f.key]}
+                        onChange={(e) => setField(f.key, e.target.value)}
+                        className="w-20 rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-right text-sm tabular-nums text-[#1F1D1B] focus:border-[#C9A24B] focus:outline-none focus:ring-1 focus:ring-[#C9A24B]"
+                      />
+                      <span className="text-xs text-[#9CA3AF] w-8">days</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-5 flex items-center justify-between gap-3">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setGrace(DEFAULT_GRACE_DAYS)}
+                  disabled={saving}
+                >
+                  Reset to defaults
+                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={onClose}
+                    disabled={saving}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={save}
+                    disabled={saving}
+                  >
+                    {saving ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      "Save"
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────
 
 export default function DailyReportPage() {
-  const { data: raw, loading } =
+  const { data: raw, loading, refresh } =
     useCachedJson<ComplianceResp>("/api/reports/compliance.json");
 
   const data = useMemo<ComplianceData | null>(() => {
     if (!raw) return null;
     return raw.data ?? null;
   }, [raw]);
+
+  // Drill-in: which section is briefly emphasised after a tile click.
+  const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const drillTo = useCallback((key: SectionKey) => {
+    const el = document.getElementById(SECTION_IDS[key]);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    setActiveSection(key);
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setActiveSection(null), 1800);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    },
+    [],
+  );
+
+  // Settings panel open/closed.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (loading && !data) {
     return (
@@ -424,7 +806,24 @@ export default function DailyReportPage() {
             {formatDateLong(data.today)} · Hookka Manufacturing ERP
           </p>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setSettingsOpen(true)}
+          className="shrink-0"
+        >
+          <Settings className="h-4 w-4" />
+          Settings
+        </Button>
       </div>
+
+      {settingsOpen && (
+        <SettingsPanel
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => refresh()}
+        />
+      )}
 
       {/* Count strip */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -438,57 +837,73 @@ export default function DailyReportPage() {
           label="DO Pending Dispatch"
           value={counts.doPendingDispatch}
           icon={Truck}
+          onClick={() => drillTo("doPendingDispatch")}
         />
         <CountTile
           label="DO Not Delivered"
           value={counts.doNotDelivered}
           icon={PackageCheck}
+          onClick={() => drillTo("doNotDelivered")}
         />
         <CountTile
           label="DO Not Invoiced"
           value={counts.doNotInvoiced}
           icon={FileText}
+          onClick={() => drillTo("doNotInvoiced")}
         />
-        <CountTile label="SO Without DO" value={counts.soNoDo} icon={ShoppingCart} />
+        <CountTile
+          label="SO Without DO"
+          value={counts.soNoDo}
+          icon={ShoppingCart}
+          onClick={() => drillTo("soNoDo")}
+        />
         <CountTile
           label="SO Without Invoice"
           value={counts.soNoInvoice}
           icon={Receipt}
+          onClick={() => drillTo("soNoInvoice")}
         />
         <CountTile
           label="Overdue Orders"
           value={counts.overdueOrders}
           icon={CalendarClock}
+          onClick={() => drillTo("overdueOrders")}
         />
         <CountTile
           label="PO Not Received"
           value={counts.poNotReceived}
           icon={PackageX}
+          onClick={() => drillTo("poNotReceived")}
         />
         <CountTile
           label="Low-Efficiency Workers"
           value={counts.lowEfficiencyWorkers}
           icon={Users}
+          onClick={() => drillTo("lowEfficiencyWorkers")}
         />
         <CountTile
           label="Process Skips"
           value={counts.processSkips}
           icon={GitBranch}
+          onClick={() => drillTo("processSkips")}
         />
         <CountTile
           label="Missing WIP Times"
           value={counts.missingWipTimes}
           icon={Timer}
+          onClick={() => drillTo("missingWipTimes")}
         />
         <CountTile
           label="Incomplete BOMs"
           value={counts.incompleteBoms}
           icon={Layers}
+          onClick={() => drillTo("incompleteBoms")}
         />
         <CountTile
           label="R&D Stalled"
           value={counts.rdStalled}
           icon={FlaskConical}
+          onClick={() => drillTo("rdStalled")}
         />
       </div>
 
@@ -513,6 +928,8 @@ export default function DailyReportPage() {
       <div className="space-y-5">
         {/* DO pending dispatch */}
         <Section
+          id={SECTION_IDS.doPendingDispatch}
+          highlighted={activeSection === "doPendingDispatch"}
           title="Deliveries Pending Dispatch"
           subtitle="DOs still in draft for more than 1 day — load them onto a truck."
           count={counts.doPendingDispatch}
@@ -552,6 +969,8 @@ export default function DailyReportPage() {
 
         {/* DO not delivered */}
         <Section
+          id={SECTION_IDS.doNotDelivered}
+          highlighted={activeSection === "doNotDelivered"}
           title="Dispatched But Not Delivered"
           subtitle="On the road for more than 1 day with no delivery confirmation."
           count={counts.doNotDelivered}
@@ -591,6 +1010,8 @@ export default function DailyReportPage() {
 
         {/* DO not invoiced */}
         <Section
+          id={SECTION_IDS.doNotInvoiced}
+          highlighted={activeSection === "doNotInvoiced"}
           title="Delivered But Not Invoiced"
           subtitle="Delivered more than 1 day ago with no invoice raised — bill the customer."
           count={counts.doNotInvoiced}
@@ -630,6 +1051,8 @@ export default function DailyReportPage() {
 
         {/* SO without DO */}
         <Section
+          id={SECTION_IDS.soNoDo}
+          highlighted={activeSection === "soNoDo"}
           title="Sales Orders Without a Delivery Order"
           subtitle="Confirmed / ready-to-ship orders that have no delivery order yet."
           count={counts.soNoDo}
@@ -645,6 +1068,7 @@ export default function DailyReportPage() {
                     <Th>SO No.</Th>
                     <Th>Customer</Th>
                     <Th>Status</Th>
+                    <Th right>Waiting</Th>
                   </tr>
                 </thead>
                 <tbody>
@@ -660,6 +1084,13 @@ export default function DailyReportPage() {
                       <Td>
                         <Badge variant="status" status={r.status} />
                       </Td>
+                      <Td right>
+                        {typeof r.days === "number" ? (
+                          <DaysBadge days={r.days} />
+                        ) : (
+                          "—"
+                        )}
+                      </Td>
                     </tr>
                   ))}
                 </tbody>
@@ -670,6 +1101,8 @@ export default function DailyReportPage() {
 
         {/* SO without invoice */}
         <Section
+          id={SECTION_IDS.soNoInvoice}
+          highlighted={activeSection === "soNoInvoice"}
           title="Sales Orders Without an Invoice"
           subtitle="Delivered / closed orders with no invoice on record."
           count={counts.soNoInvoice}
@@ -685,6 +1118,7 @@ export default function DailyReportPage() {
                     <Th>SO No.</Th>
                     <Th>Customer</Th>
                     <Th>Status</Th>
+                    <Th right>Since</Th>
                   </tr>
                 </thead>
                 <tbody>
@@ -700,6 +1134,13 @@ export default function DailyReportPage() {
                       <Td>
                         <Badge variant="status" status={r.status} />
                       </Td>
+                      <Td right>
+                        {typeof r.days === "number" ? (
+                          <DaysBadge days={r.days} />
+                        ) : (
+                          "—"
+                        )}
+                      </Td>
                     </tr>
                   ))}
                 </tbody>
@@ -710,6 +1151,8 @@ export default function DailyReportPage() {
 
         {/* Overdue orders */}
         <Section
+          id={SECTION_IDS.overdueOrders}
+          highlighted={activeSection === "overdueOrders"}
           title="Overdue Orders"
           subtitle="Sales orders past their customer delivery date and not yet finished."
           count={counts.overdueOrders}
@@ -758,6 +1201,8 @@ export default function DailyReportPage() {
 
         {/* PO not received */}
         <Section
+          id={SECTION_IDS.poNotReceived}
+          highlighted={activeSection === "poNotReceived"}
           title="Purchase Orders Not Received"
           subtitle="Open for more than 14 days with no goods receipt or purchase invoice."
           count={counts.poNotReceived}
@@ -792,7 +1237,18 @@ export default function DailyReportPage() {
                       </Td>
                       <Td>{formatDate(r.orderDate)}</Td>
                       <Td right>
-                        <DaysBadge days={r.daysOpen} />
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <DaysBadge days={r.daysOpen} />
+                          {typeof r.expectedOverdueDays === "number" &&
+                          r.expectedOverdueDays > 0 ? (
+                            <span
+                              className="inline-flex items-center rounded-full border border-[#FCA5A5] bg-[#FEE2E2] px-2 py-0.5 text-[11px] font-semibold tabular-nums text-[#B91C1C]"
+                              title="Days past the expected delivery date"
+                            >
+                              Overdue {r.expectedOverdueDays}d
+                            </span>
+                          ) : null}
+                        </div>
                       </Td>
                     </tr>
                   ))}
@@ -804,6 +1260,8 @@ export default function DailyReportPage() {
 
         {/* Low-efficiency workers */}
         <Section
+          id={SECTION_IDS.lowEfficiencyWorkers}
+          highlighted={activeSection === "lowEfficiencyWorkers"}
           title="Low-Efficiency Workers"
           subtitle="Below 60% efficiency yesterday (production time ÷ clocked time)."
           count={counts.lowEfficiencyWorkers}
@@ -845,6 +1303,8 @@ export default function DailyReportPage() {
 
         {/* Process skips — production out-of-sequence */}
         <Section
+          id={SECTION_IDS.processSkips}
+          highlighted={activeSection === "processSkips"}
           title="Production Out of Sequence"
           subtitle="A later step is finished while an earlier step in the same branch is not — check the order of work."
           count={counts.processSkips}
@@ -862,6 +1322,7 @@ export default function DailyReportPage() {
                     <Th>Finished Step</Th>
                     <Th>Finished On</Th>
                     <Th>Still Waiting On</Th>
+                    <Th right>Idle</Th>
                   </tr>
                 </thead>
                 <tbody>
@@ -887,6 +1348,13 @@ export default function DailyReportPage() {
                           </span>
                         ) : null}
                       </Td>
+                      <Td right>
+                        {typeof r.days === "number" ? (
+                          <DaysBadge days={r.days} />
+                        ) : (
+                          "—"
+                        )}
+                      </Td>
                     </tr>
                   ))}
                 </tbody>
@@ -897,6 +1365,8 @@ export default function DailyReportPage() {
 
         {/* BOM / WIP gaps — missing WIP times + incomplete BOMs */}
         <Section
+          id={SECTION_IDS.missingWipTimes}
+          highlighted={activeSection === "missingWipTimes"}
           title="Missing WIP Times"
           subtitle="Products in production with no standard time set for a step — workers and scheduling have nothing to plan against."
           count={counts.missingWipTimes}
@@ -936,6 +1406,8 @@ export default function DailyReportPage() {
         </Section>
 
         <Section
+          id={SECTION_IDS.incompleteBoms}
+          highlighted={activeSection === "incompleteBoms"}
           title="Incomplete BOMs"
           subtitle="Products in production with no active bill of materials — costing and material planning cannot run."
           count={counts.incompleteBoms}
@@ -971,6 +1443,8 @@ export default function DailyReportPage() {
 
         {/* R&D stalled */}
         <Section
+          id={SECTION_IDS.rdStalled}
+          highlighted={activeSection === "rdStalled"}
           title="R&D Projects Stalled"
           subtitle="Active projects past their target launch date, or projects on hold — they need a push or a decision."
           count={counts.rdStalled}

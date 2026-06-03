@@ -541,6 +541,100 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
 // other list endpoints, but invoices are NOT archived (compliance/tax
 // retention rules). So this is a no-op on the invoices endpoint; the
 // query param is consumed-and-ignored rather than forwarded to SQL.
+// POST /api/invoices/backfill-customer-fields
+//
+// One-shot historical repair (Wei Siang 2026-06-03). Migration 0081 added
+// invoices.customerPOId / customerAddress / attention / customerPhone (snapshot
+// from the parent DO) with NO backfill, so EVERY pre-0081 invoice has them
+// blank — Customer PO can't be found, and the printed invoice shows no customer
+// address / contact. This copies each missing field from the invoice's linked
+// delivery order (whose customerPOId was itself just backfilled).
+//
+//   ?dry=1 → preview only. Idempotent (only fills blank fields). Temporary.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+app.post("/backfill-customer-fields", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+
+  const invRes = await c.var.DB.prepare(
+    `SELECT id, invoiceNo, deliveryOrderId, customerPOId, customerAddress, attention, customerPhone
+       FROM invoices
+      WHERE orgId = ?
+        AND deliveryOrderId IS NOT NULL AND deliveryOrderId <> ''
+        AND (customerPOId IS NULL OR customerPOId = ''
+          OR customerAddress IS NULL OR customerAddress = ''
+          OR attention IS NULL OR attention = ''
+          OR customerPhone IS NULL OR customerPhone = '')`,
+  )
+    .bind(orgId)
+    .all<{
+      id: string;
+      invoiceNo: string;
+      deliveryOrderId: string;
+      customerPOId: string | null;
+      customerAddress: string | null;
+      attention: string | null;
+      customerPhone: string | null;
+    }>();
+  const invs = invRes.results ?? [];
+
+  let scanned = 0;
+  let filled = 0;
+  const fieldsFilled = { customerPOId: 0, customerAddress: 0, attention: 0, customerPhone: 0 };
+  const samples: { invoiceNo: string; customerPOId: string }[] = [];
+  const updates: D1PreparedStatement[] = [];
+
+  for (const inv of invs) {
+    scanned++;
+    const d = await c.var.DB.prepare(
+      "SELECT customerPOId, deliveryAddress, contactPerson, contactPhone FROM delivery_orders WHERE id = ?",
+    )
+      .bind(inv.deliveryOrderId)
+      .first<{
+        customerPOId: string | null;
+        deliveryAddress: string | null;
+        contactPerson: string | null;
+        contactPhone: string | null;
+      }>();
+    if (!d) continue;
+
+    const blank = (v: string | null) => !v || v.trim() === "";
+    const po = blank(inv.customerPOId) ? (d.customerPOId ?? "").trim() : null;
+    const addr = blank(inv.customerAddress) ? (d.deliveryAddress ?? "").trim() : null;
+    const att = blank(inv.attention) ? (d.contactPerson ?? "").trim() : null;
+    const phone = blank(inv.customerPhone) ? (d.contactPhone ?? "").trim() : null;
+
+    if (!po && !addr && !att && !phone) continue;
+    filled++;
+    if (po) fieldsFilled.customerPOId++;
+    if (addr) fieldsFilled.customerAddress++;
+    if (att) fieldsFilled.attention++;
+    if (phone) fieldsFilled.customerPhone++;
+    if (samples.length < 10) samples.push({ invoiceNo: inv.invoiceNo, customerPOId: po ?? inv.customerPOId ?? "" });
+
+    if (!dry) {
+      updates.push(
+        c.var.DB.prepare(
+          `UPDATE invoices
+              SET customerPOId   = COALESCE(NULLIF(?, ''), customerPOId),
+                  customerAddress = COALESCE(NULLIF(?, ''), customerAddress),
+                  attention      = COALESCE(NULLIF(?, ''), attention),
+                  customerPhone  = COALESCE(NULLIF(?, ''), customerPhone)
+            WHERE id = ?`,
+        ).bind(po ?? "", addr ?? "", att ?? "", phone ?? "", inv.id),
+      );
+    }
+  }
+
+  if (!dry && updates.length > 0) {
+    await c.var.DB.batch(updates);
+  }
+
+  return c.json({ success: true, dry, scanned, filled, fieldsFilled, samples });
+});
+
 app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:read.
   const denied = await requirePermission(c, "invoices", "read");

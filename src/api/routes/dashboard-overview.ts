@@ -145,6 +145,14 @@ app.get("/", async (c) => {
       new Date(today.getFullYear(), today.getMonth(), 1),
     );
     const monthPrefix = todayISO.slice(0, 7); // current calendar month
+    // The two flow KPIs (This-Month Sales + This-Month Delivered) follow the
+    // SELECTED month when the operator picks one — both are reconstructible
+    // from dated records (SO date / DO effective date), so a past month shows
+    // that month's real total, not the current month. period="all" and the
+    // current month both resolve to monthPrefix (unchanged behaviour). The
+    // point-in-time state KPIs (Outstanding / Pending Delivery / Plant Load)
+    // are NOT month-scoped and keep their existing snapshot/live handling.
+    const kpiMonthPrefix = period === "all" ? monthPrefix : period;
     const yesterdayISO = (() => {
       const y = new Date(today);
       y.setDate(y.getDate() - 1);
@@ -901,7 +909,7 @@ app.get("/", async (c) => {
     let thisMonthDeliveredSen = 0;
     for (const di of delivItemsRes.results ?? []) {
       const info = doInfo.get(di.deliveryOrderId);
-      if (!info || !info.shipped || info.ym !== monthPrefix) continue;
+      if (!info || !info.shipped || info.ym !== kpiMonthPrefix) continue;
       thisMonthDeliveredSen +=
         priceForItem(
           soPriceIdx,
@@ -989,8 +997,9 @@ app.get("/", async (c) => {
     const salesMonths = [...salesMonthsSet].sort((a, b) =>
       b.localeCompare(a),
     );
-    // This-Month Sales = Σ confirmed-SO total for the current month.
-    const thisMonthSalesSen = soRevMap.get(monthPrefix) ?? 0;
+    // This-Month Sales = Σ confirmed-SO total for the selected month (current
+    // month for period="all"). soRevMap is built across all months.
+    const thisMonthSalesSen = soRevMap.get(kpiMonthPrefix) ?? 0;
     const aovByCustomer = [...aovMap.entries()]
       .map(([customerName, e]) => ({
         customerName,

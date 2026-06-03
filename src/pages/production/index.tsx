@@ -82,7 +82,7 @@ type OverdueSORow = {
 // ----- Overview sort / filter shared types (used by header sub-components) -----
 type OverviewSortKey =
   | "soId" | "product" | "customer" | "customerPO" | "specialOrder"
-  | "qty" | "due"
+  | "qty" | "customerDD" | "ourExpectedDD"
   | "FAB_CUT" | "FAB_SEW" | "FOAM" | "WOOD_CUT"
   | "FRAMING" | "WEBBING" | "UPHOLSTERY" | "PACKING";
 type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
@@ -91,10 +91,10 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
-const OVERVIEW_FIXED_COLS = ["soId", "product", "customer", "customerPO", "specialOrder", "qty", "due"] as const;
+const OVERVIEW_FIXED_COLS = ["soId", "product", "customer", "customerPO", "specialOrder", "qty", "customerDD", "ourExpectedDD"] as const;
 const OVERVIEW_COL_KEYS: string[] = [...OVERVIEW_FIXED_COLS, ...DEPARTMENTS.map((d) => d.code)];
 const OVERVIEW_DEFAULT_WIDTHS: Record<string, number> = {
-  soId: 120, product: 220, customer: 110, customerPO: 120, specialOrder: 130, qty: 50, due: 70,
+  soId: 120, product: 220, customer: 110, customerPO: 120, specialOrder: 130, qty: 50, customerDD: 104, ourExpectedDD: 118,
   FAB_CUT: 108, FAB_SEW: 108, FOAM: 108, WOOD_CUT: 108, FRAMING: 108, WEBBING: 108, UPHOLSTERY: 108, PACKING: 108,
 };
 const OVERVIEW_COLW_STORAGE = "prod-overview-colwidths-v1";
@@ -1039,8 +1039,12 @@ export default function ProductionPage({
     specialOrder: string;
     qtyMin: string; // string so empty box stays empty
     qtyMax: string;
-    dueFrom: string; // YYYY-MM-DD
-    dueTo: string;
+    // Date-range filters on the two order-level planning dates (replaced the
+    // old single targetEndDate "Due" column — Wei Siang 2026-06-03).
+    customerDDFrom: string; // YYYY-MM-DD
+    customerDDTo: string;
+    ourExpectedDDFrom: string;
+    ourExpectedDDTo: string;
     deptStatuses: Partial<Record<string, ("pending" | "overdue" | "done")[]>>;
     // Per-dept date-range filter (the displayed cell date — done cells use
     // latestCompleted; others use earliestDue). Independent of deptStatuses
@@ -1049,7 +1053,8 @@ export default function ProductionPage({
   };
   const emptyOverviewFilters: OverviewFilters = {
     soId: "", product: "", customers: [], customerPO: "", specialOrder: "",
-    qtyMin: "", qtyMax: "", dueFrom: "", dueTo: "",
+    qtyMin: "", qtyMax: "",
+    customerDDFrom: "", customerDDTo: "", ourExpectedDDFrom: "", ourExpectedDDTo: "",
     deptStatuses: {},
     deptDates: {},
   };
@@ -1191,7 +1196,8 @@ export default function ProductionPage({
       case "customerPO": return !!f.customerPO;
       case "specialOrder": return !!f.specialOrder;
       case "qty": return !!f.qtyMin || !!f.qtyMax;
-      case "due": return !!f.dueFrom || !!f.dueTo;
+      case "customerDD": return !!f.customerDDFrom || !!f.customerDDTo;
+      case "ourExpectedDD": return !!f.ourExpectedDDFrom || !!f.ourExpectedDDTo;
       default: {
         const arr = f.deptStatuses[col];
         const hasStatus = !!(arr && arr.length > 0);
@@ -1203,7 +1209,7 @@ export default function ProductionPage({
   }, [overviewFilters]);
   const anyOverviewFilterActive = useMemo(() => {
     const f = overviewFilters;
-    if (f.soId || f.product || f.customerPO || f.specialOrder || f.qtyMin || f.qtyMax || f.dueFrom || f.dueTo) return true;
+    if (f.soId || f.product || f.customerPO || f.specialOrder || f.qtyMin || f.qtyMax || f.customerDDFrom || f.customerDDTo || f.ourExpectedDDFrom || f.ourExpectedDDTo) return true;
     if (f.customers.length > 0) return true;
     for (const k of Object.keys(f.deptStatuses)) {
       if ((f.deptStatuses[k] || []).length > 0) return true;
@@ -2351,9 +2357,12 @@ export default function ProductionPage({
         if (f.specialOrder && !((o.specialOrder || "").toLowerCase().includes(f.specialOrder.toLowerCase()))) return false;
         if (f.qtyMin && Number(o.quantity) < Number(f.qtyMin)) return false;
         if (f.qtyMax && Number(o.quantity) > Number(f.qtyMax)) return false;
-        const dueVal = o.targetEndDate || "";
-        if (f.dueFrom && dueVal && dueVal < f.dueFrom) return false;
-        if (f.dueTo && dueVal && dueVal > f.dueTo) return false;
+        const custDD = o.customerDeliveryDate || "";
+        if (f.customerDDFrom && custDD && custDD < f.customerDDFrom) return false;
+        if (f.customerDDTo && custDD && custDD > f.customerDDTo) return false;
+        const ourDD = o.hookkaExpectedDD || "";
+        if (f.ourExpectedDDFrom && ourDD && ourDD < f.ourExpectedDDFrom) return false;
+        if (f.ourExpectedDDTo && ourDD && ourDD > f.ourExpectedDDTo) return false;
         // Dept status filters — only check depts the user actually picked.
         for (const deptCode of Object.keys(f.deptStatuses)) {
           const wanted = f.deptStatuses[deptCode] || [];
@@ -2401,7 +2410,8 @@ export default function ProductionPage({
           if (key === "customerPO") return cmpStr(a.customerPOId || "", b.customerPOId || "");
           if (key === "specialOrder") return cmpStr(a.specialOrder || "", b.specialOrder || "");
           if (key === "qty") return cmpNum(Number(a.quantity || 0), Number(b.quantity || 0));
-          if (key === "due") return cmpStr(a.targetEndDate || "", b.targetEndDate || "");
+          if (key === "customerDD") return cmpStr(a.customerDeliveryDate || "", b.customerDeliveryDate || "");
+          if (key === "ourExpectedDD") return cmpStr(a.hookkaExpectedDD || "", b.hookkaExpectedDD || "");
           // Department column — sort by earliest dept due date.
           const ca = cellAt(a, key);
           const cb = cellAt(b, key);
@@ -2420,6 +2430,24 @@ export default function ProductionPage({
     () => visibleOrders.filter((o) => selectedOverviewIds.has(o.id)),
     [visibleOrders, selectedOverviewIds],
   );
+  // Total production time (minutes) of the selected orders, scoped to the
+  // chosen batch department ("ALL" = every dept). Mirrors the dept-sheet
+  // footer's "Prod Time" = per-jc productionTimeMinutes × wipQty.
+  // (Wei Siang 2026-06-03: show the workload of a multi-select before applying.)
+  const overviewBatchTotalMin = useMemo(() => {
+    let sum = 0;
+    for (const o of selectedOverviewOrders) {
+      for (const jc of o.jobCards) {
+        if (overviewBatchDept !== "ALL" && jc.departmentCode !== overviewBatchDept) continue;
+        const perUnit =
+          Number((jc as JobCard & { productionTimeMinutes?: number }).productionTimeMinutes) ||
+          Number((jc as JobCard & { estMinutes?: number }).estMinutes) || 0;
+        const wipQty = (jc as JobCard & { wipQty?: number }).wipQty ?? 1;
+        sum += perUnit * (wipQty || 1);
+      }
+    }
+    return sum;
+  }, [selectedOverviewOrders, overviewBatchDept]);
   // Select-all is scoped to the CURRENTLY-VISIBLE (filtered + sorted) rows.
   const allOverviewVisibleSelected =
     visibleOrders.length > 0 && visibleOrders.every((o) => selectedOverviewIds.has(o.id));
@@ -4876,7 +4904,8 @@ export default function ProductionPage({
           <td class="prod"><b>${o.productCode || ""}</b><br/><small>${details.join(" · ")}</small></td>
           <td>${o.customerName || ""}</td>
           <td class="num">${o.quantity || ""}</td>
-          <td>${fmt(o.targetEndDate)}</td>
+          <td>${fmt(o.customerDeliveryDate || "")}</td>
+          <td>${fmt(o.hookkaExpectedDD || "")}</td>
           ${cells}
         </tr>`;
       }).join("");
@@ -4888,14 +4917,15 @@ export default function ProductionPage({
               <th>Product</th>
               <th>Customer</th>
               <th class="num">Qty</th>
-              <th>Due</th>
+              <th>Cust DD</th>
+              <th>Our DD</th>
               ${DEPARTMENTS.map((d) => `<th class="m">${d.name}</th>`).join("")}
             </tr>
           </thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
-      // 5 fixed columns (SO ID, Product, Customer, Qty, Due) + 8 dept matrix columns.
-      columnCount = 5 + DEPARTMENTS.length;
+      // 6 fixed columns (SO ID, Product, Customer, Qty, Cust DD, Our DD) + 8 dept matrix columns.
+      columnCount = 6 + DEPARTMENTS.length;
     } else {
       // Dept sub-tab: print template mirrors the on-screen Production Sheet
       // columns 1:1 so the operator sees the same data on paper. Trimmed to
@@ -6685,19 +6715,38 @@ export default function ProductionPage({
             )}
           />
           <OverviewHeader
-            label="Due"
-            sortKey="due"
+            label="Customer DD"
+            align="center"
+            sortKey="customerDD"
             sort={overviewSort}
             cycle={cycleOverviewSort}
-            filterCol="due"
-            filterActive={isFilterActive("due")}
+            filterCol="customerDD"
+            filterActive={isFilterActive("customerDD")}
             openFilterCol={openFilterCol}
             setOpenFilterCol={setOpenFilterCol}
             renderFilter={() => (
               <DateRangeFilter
-                from={overviewFilters.dueFrom}
-                to={overviewFilters.dueTo}
-                onChange={(from, to) => setOverviewFilters((p) => ({ ...p, dueFrom: from, dueTo: to }))}
+                from={overviewFilters.customerDDFrom}
+                to={overviewFilters.customerDDTo}
+                onChange={(from, to) => setOverviewFilters((p) => ({ ...p, customerDDFrom: from, customerDDTo: to }))}
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Our Expected DD"
+            align="center"
+            sortKey="ourExpectedDD"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="ourExpectedDD"
+            filterActive={isFilterActive("ourExpectedDD")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <DateRangeFilter
+                from={overviewFilters.ourExpectedDDFrom}
+                to={overviewFilters.ourExpectedDDTo}
+                onChange={(from, to) => setOverviewFilters((p) => ({ ...p, ourExpectedDDFrom: from, ourExpectedDDTo: to }))}
               />
             )}
           />
@@ -6861,45 +6910,15 @@ export default function ProductionPage({
                 {order.specialOrder || "—"}
               </div>
               <div className="px-2 py-1.5 text-xs text-center text-[#6B7280] flex items-center justify-center">{order.quantity}</div>
-              <div
-                className={`px-2 py-1.5 text-[11px] text-[#6B7280] flex items-center cursor-pointer hover:text-[#6B5C32] hover:underline transition-colors ${
-                  cellFlash[`${order.id}|DUE`] === "ok"
-                    ? "bg-green-100"
-                    : cellFlash[`${order.id}|DUE`] === "err"
-                      ? "bg-red-100"
-                      : ""
-                }`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openDatePicker(
-                    order.targetEndDate || "",
-                    (v) => {
-                      if (!v) return;
-                      setOrders((prev) =>
-                        prev.map((o) => o.id === order.id ? { ...o, targetEndDate: v } : o)
-                      );
-                      const flashKey = `${order.id}|DUE`;
-                      fetch(`/api/production-orders/${order.id}`, {
-                        method: "PATCH",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ targetEndDate: v }),
-                      }).then((res) => {
-                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                        invalidateCachePrefix("/api/production-orders");
-                        invalidateCachePrefix("/api/sales-orders");
-                        flashCell(flashKey, "ok");
-                        toast.success("Date updated");
-                      }).catch((err) => {
-                        flashCell(flashKey, "err");
-                        const detail = err instanceof Error ? err.message : "network error";
-                        toast.error(`Save failed (${detail})`);
-                      });
-                    },
-                    e.currentTarget,
-                  );
-                }}
-                title="Click to change due date"
-              >{fmtShortDate(order.targetEndDate)}</div>
+              {/* Customer DD + Our Expected DD — read-only planning dates (sourced
+                  from the SO). Replaced the old editable targetEndDate "Due"
+                  column on the Overview (Wei Siang 2026-06-03). */}
+              <div className="px-2 py-1.5 text-[11px] text-[#6B7280] flex items-center justify-center tabular-nums">
+                {order.customerDeliveryDate ? fmtShortDate(order.customerDeliveryDate) : "—"}
+              </div>
+              <div className="px-2 py-1.5 text-[11px] text-[#6B7280] flex items-center justify-center tabular-nums">
+                {order.hookkaExpectedDD ? fmtShortDate(order.hookkaExpectedDD) : "—"}
+              </div>
               {DEPARTMENTS.map((d) => {
                 const c = cellFor(order, d.code, visibleOrders);
                 const isActiveCol = false; // inside ALL view, no column highlighted
@@ -7004,6 +7023,12 @@ export default function ProductionPage({
                 <option key={d.code} value={d.code}>{d.name}</option>
               ))}
             </select>
+            {/* Total production time of the selection, scoped to the chosen
+                department — workload preview before applying. (Wei Siang 2026-06-03) */}
+            <span className="text-[12px] font-semibold text-[#5A4500]">
+              · Prod time: {overviewBatchTotalMin.toLocaleString()} min
+              <span className="font-normal text-[#7A6A35]"> ({(overviewBatchTotalMin / 60).toFixed(1)} h)</span>
+            </span>
             <button
               type="button"
               onClick={() => setOverviewBatchDueDateOpen(true)}

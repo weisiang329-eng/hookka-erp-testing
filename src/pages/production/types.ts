@@ -66,12 +66,13 @@ export type ProductionOrder = {
   startDate: string; targetEndDate: string; completedDate: string|null;
   rackingNumber: string; stockedIn: boolean;
   // Optional axes for the page-level Date Filter — present on the API
-  // response (rowToPO emits createdAt) but not always populated. The new
-  // customerDeliveryDate axis is a TODO: the production_orders payload
-  // doesn't expose it directly today; user needs to clarify which date
-  // they meant before this can fully wire up to a column.
+  // response (rowToPO emits createdAt) but not always populated.
   createdAt?: string;
+  // Planning dates sourced from the parent SO and merged onto each PO by the
+  // production-orders API (soDatesMap, production-orders.ts ~1254). Surfaced as
+  // the Overview "Customer DD" + "Our Expected DD" columns (Wei Siang 2026-06-03).
   customerDeliveryDate?: string;
+  hookkaExpectedDD?: string;
 };
 
 // Simplified 3-state palette per user spec:

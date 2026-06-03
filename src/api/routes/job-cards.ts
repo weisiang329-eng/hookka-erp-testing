@@ -422,15 +422,22 @@ function safeParseJson(s: string): unknown {
 //
 // This endpoint MUTATES NOTHING — pure read/dump. Safe to call repeatedly.
 // ---------------------------------------------------------------------------
+// NOTE: the db-pg compat layer reverse-maps EVERY result column name back to
+// its original camelCase via column-rename-map.json (falling back to
+// postgres.toCamel for ad-hoc aliases). So even though the SQL aliases these
+// columns to snake_case, the runtime row keys arrive camelCase. Read them as
+// camelCase here — reading snake_case silently yields undefined → null (the
+// 2026-06-03 "backup file is empty" bug). Only `payload` is unchanged by
+// toCamel, which is why originalDueDate kept working while the rest went null.
 type DueDateBackupRow = {
-  job_card_id: string;
-  production_order_id: string;
-  company_so_id: string | null;
-  po_no: string | null;
-  department_code: string | null;
-  current_due_date: string | null;
+  jobCardId: string;
+  productionOrderId: string;
+  companySOId: string | null;
+  poNo: string | null;
+  departmentCode: string | null;
+  currentDueDate: string | null;
   payload: string;
-  first_changed_at: string;
+  firstChangedAt: string;
 };
 
 app.get("/duedate-original-backup", async (c) => {
@@ -452,8 +459,8 @@ app.get("/duedate-original-backup", async (c) => {
   // org are excluded — exactly the multi-tenant boundary we want.
   //
   // Aliases are snake_case so Postgres (which folds unquoted identifiers to
-  // lowercase) preserves them; we read the snake_case keys here directly to
-  // stay driver-agnostic.
+  // lowercase) preserves them — but the db-pg layer then toCamel's every
+  // result key, so we read camelCase keys off the rows (see DueDateBackupRow).
   const sql = `
     WITH ranked AS (
       SELECT
@@ -495,14 +502,14 @@ app.get("/duedate-original-backup", async (c) => {
       originalDueDate = typeof from === "string" ? from : from == null ? null : String(from);
     }
     return {
-      jobCardId: r.job_card_id,
-      productionOrderId: r.production_order_id,
-      companySOId: r.company_so_id ?? null,
-      poNo: r.po_no ?? null,
-      departmentCode: r.department_code ?? null,
-      currentDueDate: r.current_due_date ?? null,
+      jobCardId: r.jobCardId,
+      productionOrderId: r.productionOrderId,
+      companySOId: r.companySOId ?? null,
+      poNo: r.poNo ?? null,
+      departmentCode: r.departmentCode ?? null,
+      currentDueDate: r.currentDueDate ?? null,
       originalDueDate,
-      firstChangedAt: r.first_changed_at,
+      firstChangedAt: r.firstChangedAt,
     };
   });
 

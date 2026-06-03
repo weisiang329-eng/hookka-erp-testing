@@ -3076,9 +3076,11 @@ export default function DeliveryPage() {
               sortable: true,
               render: (_value: unknown, row: DeliveryOrderRow) =>
                 row.invoiceNo ? (
-                  <span className="font-mono text-[13px] text-[#4F7C3A]">
-                    {row.invoiceNo}
-                  </span>
+                  // Match the normal doc-number style used everywhere else
+                  // (DO No. / SO No. / Invoice No. all render as type "docno" =
+                  // tabular-nums, default 12px text). Drops the olive-green
+                  // monospace that made this column look out of place.
+                  <span className="tabular-nums">{row.invoiceNo}</span>
                 ) : (
                   <span className="text-[#9CA3AF]">Not invoiced</span>
                 ),

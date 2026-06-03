@@ -3451,16 +3451,17 @@ export default function ProductionPage({
     if (activeTab !== "FAB_CUT") return [];
     // Scope to whatever the Fab Cut sheet is SHOWING — its column filters /
     // in-grid search applied — falling back to the full FAB_CUT set until
-    // the DataGrid reports. Mirrors how the Foam packing loader scopes to
-    // gridFilteredDeptRows' SO ids.
+    // the DataGrid reports. Mirrors how the FG preview loader scopes: by the
+    // per-line production-order id (row.poId === order.id), NOT the parent
+    // sales-order id. Scoping by SO id pulled EVERY line of the parent SO
+    // (e.g. 216-01/02/03/04 when only 216-04 + 216-01 were on screen), so the
+    // Fab Sew preview must constrain to exactly the line-rows the grid shows.
     const fabCutRows =
       (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
-    const soIds = new Set(
-      fabCutRows
-        .map((r) => r.salesOrderId || r.consignmentOrderId || "")
-        .filter(Boolean),
+    const poIds = new Set(
+      fabCutRows.map((r) => r.poId).filter(Boolean),
     );
-    if (soIds.size === 0) {
+    if (poIds.size === 0) {
       toast.info("No Fab Cut rows are visible. Adjust the filter and try again.");
       return [];
     }
@@ -3478,10 +3479,11 @@ export default function ProductionPage({
         toast.warning("Could not load production orders.");
         return [];
       }
-      // Keep only the orders for the SOs visible in the Fab Cut grid.
-      const scoped = all.filter((o) =>
-        soIds.has(o.salesOrderId || o.consignmentOrderId || ""),
-      );
+      // Keep only the production-order LINES visible in the Fab Cut grid
+      // (match by id — each grid row's poId is that line's order id). This is
+      // what makes 2 visible lines yield exactly those 2 lines' Fab Sew
+      // stickers instead of the whole parent SO's lines.
+      const scoped = all.filter((o) => poIds.has(o.id));
       if (scoped.length === 0) {
         toast.warning("Could not match the visible Fab Cut rows to any production orders.");
         return [];

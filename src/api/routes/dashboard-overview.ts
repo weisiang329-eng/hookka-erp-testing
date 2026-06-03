@@ -140,19 +140,18 @@ app.get("/", async (c) => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const todayISO = fmtISO(today);
     const monthStart = fmtISO(
       new Date(today.getFullYear(), today.getMonth(), 1),
     );
-    const monthPrefix = todayISO.slice(0, 7); // current calendar month
-    // The two flow KPIs (This-Month Sales + This-Month Delivered) follow the
-    // SELECTED month when the operator picks one — both are reconstructible
-    // from dated records (SO date / DO effective date), so a past month shows
-    // that month's real total, not the current month. period="all" and the
-    // current month both resolve to monthPrefix (unchanged behaviour). The
-    // point-in-time state KPIs (Outstanding / Pending Delivery / Plant Load)
-    // are NOT month-scoped and keep their existing snapshot/live handling.
-    const kpiMonthPrefix = period === "all" ? monthPrefix : period;
+    // The two flow KPIs (Sales + Delivered) reflect the SELECTED period:
+    //   - a specific month  → that month's total (reconstructible from the
+    //     SO date / DO delivered date; all source rows load unfiltered),
+    //   - All-time          → the cumulative total across every month.
+    // Delivered is keyed on the DO dispatch date (when goods shipped) so the
+    // dashboard agrees with the invoices, which are dated by dispatch.
+    // The point-in-time state KPIs (Outstanding / Pending / Plant Load) are
+    // NOT period-scoped — they always reflect "now" and are tagged live.
+    const kpiAllTime = period === "all";
     const yesterdayISO = (() => {
       const y = new Date(today);
       y.setDate(y.getDate() - 1);
@@ -899,7 +898,13 @@ app.get("/", async (c) => {
       { soId: string; shipped: boolean; ym: string }
     >();
     for (const d of delivDoRes.results ?? []) {
-      const eff = d.deliveredAt || d.dispatchedAt || d.created_at || "";
+      // Ship-month basis: prefer the dispatch date (when goods physically
+      // left the factory) over the delivered/sign-off date. The sign-off
+      // (deliveredAt) is often back-filled late and bunches goods into the
+      // wrong month; dispatch is the reliable "shipped" date and matches the
+      // invoice date (invoices are dated by dispatch). Falls back to delivered
+      // then created so nothing is dropped. (Wei Siang 2026-06-03.)
+      const eff = d.dispatchedAt || d.deliveredAt || d.created_at || "";
       doInfo.set(d.id, {
         soId: d.salesOrderId ?? "",
         shipped: SHIPPED_DO_STATUSES.has(d.status),
@@ -909,7 +914,8 @@ app.get("/", async (c) => {
     let thisMonthDeliveredSen = 0;
     for (const di of delivItemsRes.results ?? []) {
       const info = doInfo.get(di.deliveryOrderId);
-      if (!info || !info.shipped || info.ym !== kpiMonthPrefix) continue;
+      if (!info || !info.shipped) continue;
+      if (!kpiAllTime && info.ym !== period) continue;
       thisMonthDeliveredSen +=
         priceForItem(
           soPriceIdx,
@@ -997,9 +1003,12 @@ app.get("/", async (c) => {
     const salesMonths = [...salesMonthsSet].sort((a, b) =>
       b.localeCompare(a),
     );
-    // This-Month Sales = Σ confirmed-SO total for the selected month (current
-    // month for period="all"). soRevMap is built across all months.
-    const thisMonthSalesSen = soRevMap.get(kpiMonthPrefix) ?? 0;
+    // Sales KPI = Σ confirmed-SO total for the selected month, or the
+    // cumulative all-month total for All-time. soRevMap is built across all
+    // months, so summing its values gives the lifetime confirmed-SO revenue.
+    const thisMonthSalesSen = kpiAllTime
+      ? [...soRevMap.values()].reduce((a, b) => a + b, 0)
+      : (soRevMap.get(period) ?? 0);
     const aovByCustomer = [...aovMap.entries()]
       .map(([customerName, e]) => ({
         customerName,

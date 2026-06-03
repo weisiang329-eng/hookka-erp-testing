@@ -377,6 +377,7 @@ function KTile({
   delta = null,
   onClick,
   loading = false,
+  tag,
 }: {
   label: string;
   value: string;
@@ -386,6 +387,9 @@ function KTile({
   spark?: number[];
   delta?: number | null;
   onClick?: () => void;
+  // Optional small badge after the label (e.g. "live" for point-in-time
+  // state KPIs that do not move with the period selector).
+  tag?: string;
   // When true the value slot shows a pulsing skeleton — used for tiles
   // backed by a slower live fetch while the snapshot-fast tiles are
   // already painted (progressive render).
@@ -404,6 +408,11 @@ function KTile({
         <div className="flex items-start justify-between">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-[#5A5550]">
             {label}
+            {tag && (
+              <span className="ml-1.5 rounded bg-[#EEF2F0] px-1.5 py-0.5 text-[9px] font-medium normal-case tracking-normal text-[#15803D] align-middle">
+                {tag}
+              </span>
+            )}
             {onClick && (
               <span className="ml-1 text-[#C2BBAE] font-normal">›</span>
             )}
@@ -916,6 +925,32 @@ export default function DashboardBPage() {
     );
   }
 
+  // Flow-KPI labels follow the selected period: All-time → cumulative total,
+  // current month → "This-Month", a past month → that month. The state KPIs
+  // (Outstanding / Pending Delivery) are point-in-time and carry a "live" tag.
+  const isAllTime = period === "all";
+  const isCurrentMonth = period === CUR_YM;
+  const salesLabel = isAllTime
+    ? "Total Sales"
+    : isCurrentMonth
+      ? "This-Month Sales"
+      : `Sales · ${period}`;
+  const deliveredLabel = isAllTime
+    ? "Total Delivered"
+    : isCurrentMonth
+      ? "This-Month Delivered"
+      : `Delivered · ${period}`;
+  const salesSub = isAllTime
+    ? "all-time · confirmed SO"
+    : isCurrentMonth
+      ? "confirmed SO · current month"
+      : `${period} · confirmed SO`;
+  const deliveredSub = isAllTime
+    ? "all-time · shipped (by dispatch)"
+    : isCurrentMonth
+      ? "shipped value · current month"
+      : `${period} · shipped (by dispatch)`;
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -945,18 +980,18 @@ export default function DashboardBPage() {
       {/* KPI rail */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
         <KTile
-          label="This-Month Sales"
+          label={salesLabel}
           value={rm(ov.salesThisMonthSen)}
-          sub="confirmed SO · current month"
+          sub={salesSub}
           icon={DollarSign}
           accent={C_SO}
           spark={soSpark}
           delta={salesDelta}
         />
         <KTile
-          label="This-Month Delivered"
+          label={deliveredLabel}
           value={rm(ov.deliveredThisMonthSen)}
-          sub="item-level shipped value"
+          sub={deliveredSub}
           icon={Truck}
           accent={C_PROD}
           spark={delSpark}
@@ -969,6 +1004,7 @@ export default function DashboardBPage() {
           icon={Clock}
           accent={C_INV}
           loading={soL}
+          tag="live"
         />
         <KTile
           label="Pending Delivery"
@@ -977,6 +1013,7 @@ export default function DashboardBPage() {
           icon={Package}
           accent={C_GREEN}
           loading={pendingL}
+          tag="live"
         />
       </div>
 

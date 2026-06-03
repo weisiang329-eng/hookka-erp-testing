@@ -260,7 +260,12 @@ function soPoOfChain(r: ChainRawRow): string {
 }
 
 function laneOf(r: ChainRawRow): Lane | null {
-  const cat = (r.category ?? r.itemCategory ?? "").toUpperCase();
+  // The lane is the ORDER's itemCategory (BEDFRAME / SOFA / ACCESSORY). The job
+  // card's own `category` is a production/cost bucket ("CAT 10", "CAT 14", …),
+  // NOT a lane — reading it first made laneOf() return null and silently
+  // dropped every downstream card (sew/wood/framing/…). itemCategory is the
+  // reliable lane, so prefer it; keep category only as a last-ditch fallback.
+  const cat = (r.itemCategory ?? r.category ?? "").toUpperCase();
   if (cat === "BEDFRAME" || cat === "SOFA" || cat === "ACCESSORY") return cat as Lane;
   return null;
 }

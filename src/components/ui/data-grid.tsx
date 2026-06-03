@@ -73,6 +73,12 @@ export type Column<T> = {
   // visible value rather than always returning undefined and leaving rows
   // in input order. Only the value matters — direction stays user-controlled.
   sortAccessor?: (row: T) => string | number | null | undefined;
+  // Opt OUT of the default cell clipping. By default every cell truncates its
+  // content to the column's resolved width (ellipsis on overflow) so a long
+  // value — e.g. a comma-joined SO list — can't balloon the column; dragging
+  // the column wider reveals more. Set `noClip: true` for the rare cell that
+  // must wrap or render multi-line content.
+  noClip?: boolean;
 };
 
 export type ContextMenuItem = {
@@ -2772,6 +2778,14 @@ export function DataGrid<T extends Record<string, any>>({
                         const value = getNestedValue(row, col.key);
                         const stickyLeft = stickyOffsets.get(col.key);
                         const isSticky = stickyLeft !== undefined;
+                        // Clip overflow to the column's resolved width so long
+                        // values don't grow the column. Follows the live
+                        // (resizable, persisted) width, so dragging the column
+                        // wider reveals more text. Falls back to a sensible cap
+                        // for columns that declare no width. Opt out per column
+                        // with `noClip` (cells that must wrap / go multi-line).
+                        const clipWidth =
+                          colWidths[col.key] || col.width || "300px";
                         return (
                           <td
                             key={col.key}
@@ -2800,7 +2814,13 @@ export function DataGrid<T extends Record<string, any>>({
                               ...(isSticky ? { left: `${stickyLeft}px` } : {}),
                             }}
                           >
-                            <DefaultCellRenderer column={col} value={value} row={row} index={index} />
+                            {col.noClip ? (
+                              <DefaultCellRenderer column={col} value={value} row={row} index={index} />
+                            ) : (
+                              <div className="truncate" style={{ maxWidth: clipWidth }}>
+                                <DefaultCellRenderer column={col} value={value} row={row} index={index} />
+                              </div>
+                            )}
                           </td>
                         );
                       })}

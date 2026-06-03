@@ -617,6 +617,10 @@ async function buildDoDeliveredSoAndInvoice(
   db: D1Database,
   doRow: DoForDeliveredCascade,
   now: string,
+  // Org + actor for the auto-post ledger legs (DO delivered → invoice is
+  // created AND posted/SENT in the same batch, Wei Siang 2026-06-03).
+  orgId: string,
+  actorUserId: string | null,
 ): Promise<{
   statements: D1PreparedStatement[];
   rebuildInvoiceInsert: ((no: string) => D1PreparedStatement) | null;
@@ -735,7 +739,9 @@ async function buildDoDeliveredSoAndInvoice(
           doRow.hubName,
           computedTotal,
           computedTotal,
-          "DRAFT",
+          // Auto-confirmed: created already POSTED (SENT), with its ledger
+          // legs written below — not left as a DRAFT for a second manual step.
+          "SENT",
           invoiceDate,
           dueDate,
           0,
@@ -780,6 +786,58 @@ async function buildDoDeliveredSoAndInvoice(
     );
     createdInvoice = true;
     invoiceTotalSen = computedTotal;
+
+    // ---- Auto-post the just-created invoice (no DRAFT step) --------------
+    // Write the balanced double-entry ledger legs (DR receivable / CR revenue
+    // + GST) with the SAME builders the manual "post" and the under-billed
+    // repair use, so the accounting can't drift. The invoice row above is
+    // already status='SENT'; here we add its journal and flip the billed SOs
+    // + the DO to INVOICED — mirroring a manual post exactly. Can't double-
+    // post: this branch only runs when no invoice yet exists for the DO
+    // (existingInvoice guard above).
+    const { legs, taxSen } = await buildInvoiceLedgerLegs(
+      db,
+      orgId,
+      {
+        id: invId,
+        invoiceNo,
+        customerId: doRow.customerId,
+        subtotalSen: computedTotal,
+      },
+      actorUserId,
+      false,
+    );
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(
+      db,
+      orgId,
+      legs,
+    );
+    statements.push(
+      ...ledgerStmts,
+      db
+        .prepare("UPDATE invoices SET taxSen = ? WHERE id = ?")
+        .bind(taxSen, invId),
+    );
+    // SOs were advanced to DELIVERED above; now that they're billed, bump to
+    // INVOICED (matches the manual post's SO cascade).
+    for (const sid of soAdvanced) {
+      statements.push(
+        db
+          .prepare(
+            "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, sid),
+      );
+    }
+    // Flip the DO to INVOICED too — pushed last so it wins over any caller's
+    // own DELIVERED update batched ahead of dc.statements.
+    statements.push(
+      db
+        .prepare(
+          "UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, doRow.id),
+    );
   }
 
   return {
@@ -1316,11 +1374,21 @@ app.post("/backfill-delivered-cascade", async (c) => {
   // run self-dedupes via DB state but the Set keeps both consistent.
   const advancedSoSet = new Set<string>();
   const errors: { doId: string; doNo: string; error: string }[] = [];
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get(
+      "userId",
+    ) ?? null;
 
   for (const doRow of dos) {
     dosScanned++;
     try {
-      const dc = await buildDoDeliveredSoAndInvoice(c.var.DB, doRow, now);
+      const dc = await buildDoDeliveredSoAndInvoice(
+        c.var.DB,
+        doRow,
+        now,
+        orgId,
+        actorUserId,
+      );
       if (dc.statements.length === 0) continue;
       if (dc.createdInvoice) {
         invoicesCreated++;
@@ -4073,10 +4141,17 @@ app.put("/:id", async (c) => {
         // delivered, not "today" — pass the just-computed delivered timestamp
         // (nextDeliveredAt) so buildDoDeliveredSoAndInvoice dates the invoice
         // to the delivery, even though `existing` is the pre-update snapshot.
+        const cascadeOrgId = getOrgId(c);
+        const cascadeActorUserId =
+          (c as unknown as { get: (k: string) => string | undefined }).get(
+            "userId",
+          ) ?? null;
         const dc = await buildDoDeliveredSoAndInvoice(
           c.var.DB,
           { ...existing, deliveredAt: nextDeliveredAt ?? existing.deliveredAt },
           now,
+          cascadeOrgId,
+          cascadeActorUserId,
         );
         if (dc.statements.length > 0) {
           const base = statements.length;

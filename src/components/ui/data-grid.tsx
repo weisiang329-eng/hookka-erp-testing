@@ -347,14 +347,15 @@ function ColumnFilterDropdown<T>({
   anchorRect: { left: number; top: number };
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  // Date columns default to the "Date Filters" (range picker) tab — the
-  // Values year-rollup tree (e.g. "2026 (492)") is useless for dates since
-  // every distinct day is its own leaf. Non-date columns still default to
-  // the Values checkbox list. Wei Siang 2026-05-28. (setTab still lets the
-  // operator switch to Values on a date column if they really want to.)
-  const [tab, setTab] = useState<"values" | "text">(
-    columnType === "date" ? "text" : "values",
-  );
+  // All columns — including date columns — default to the "Values" tab.
+  // Date columns now render a FLAT, checkable list of individual dates
+  // (formatted "11 Jun") each with its row count, plus a row of quick
+  // chips (Overdue / Today / This Week / This Month), the same shape as
+  // the status/value columns. The old year▸month rollup tree was dropped
+  // (it was "useless for dates"). The "Date Filters" tab is retained for
+  // the custom dd/mm/yyyy range picker + period presets. Wei Siang
+  // 2026-06-03. (setTab still lets the operator switch tabs.)
+  const [tab, setTab] = useState<"values" | "text">("values");
   const [search, setSearch] = useState("");
   const [localText, setLocalText] = useState(textFilter.replace(/^[a-z_]+:/, ""));
   const [localTextMode, setLocalTextMode] = useState<string>(() => {
@@ -525,11 +526,12 @@ function ColumnFilterDropdown<T>({
     setChecked(next);
   };
 
-  // ----- Date column: Year ▸ Month ▸ Day tree + period presets -----
-  // Reuses the SAME checked/checkedRef/apply machinery as the value
-  // filter — it just renders a tree of the column's distinct dates and
-  // toggles whole years/months/days at once. Zero change to the
-  // row-filtering engine: OK still applies a Set<rawValue>.
+  // ----- Date column: flat value list + quick chips + period presets -----
+  // Reuses the SAME checked/checkedRef/apply machinery as the value filter.
+  // `parsedDates` (raw / count / ymd per distinct date) feeds the flat
+  // date-value list, the quick chips, and the custom range — one parse, no
+  // duplicate date math. Zero change to the row-filtering engine: OK still
+  // applies a Set<rawValue>.
   const isDateCol = columnType === "date";
   const MONTHS = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -544,37 +546,10 @@ function ColumnFilterDropdown<T>({
       return { raw, count, ymd: [d.getFullYear(), d.getMonth(), d.getDate()] as [number, number, number] };
     });
   }, [isDateCol, uniqueValues]);
-  const dateTree = useMemo(() => {
-    type Day = { day: number; raws: string[]; count: number };
-    type Mon = { mon: number; days: Map<number, Day>; raws: string[]; count: number };
-    type Yr = { yr: number; mons: Map<number, Mon>; raws: string[]; count: number };
-    const years = new Map<number, Yr>();
-    const noDate: string[] = [];
-    let noDateCount = 0;
-    for (const p of parsedDates) {
-      if (!p.ymd) { noDate.push(p.raw); noDateCount += p.count; continue; }
-      const [y, m, dd] = p.ymd;
-      let yr = years.get(y);
-      if (!yr) { yr = { yr: y, mons: new Map(), raws: [], count: 0 }; years.set(y, yr); }
-      yr.raws.push(p.raw); yr.count += p.count;
-      let mn = yr.mons.get(m);
-      if (!mn) { mn = { mon: m, days: new Map(), raws: [], count: 0 }; yr.mons.set(m, mn); }
-      mn.raws.push(p.raw); mn.count += p.count;
-      let dy = mn.days.get(dd);
-      if (!dy) { dy = { day: dd, raws: [], count: 0 }; mn.days.set(dd, dy); }
-      dy.raws.push(p.raw); dy.count += p.count;
-    }
-    return {
-      years: Array.from(years.values()).sort((a, b) => b.yr - a.yr),
-      noDate,
-      noDateCount,
-    };
-  }, [parsedDates]);
-  const [expY, setExpY] = useState<Set<number>>(new Set());
-  const [expM, setExpM] = useState<Set<string>>(new Set());
+  // Toggle a batch of raw date strings at once (the "(No date)" row).
+  // See toggleValue — assign checkedRef synchronously at click time, not
+  // inside the setChecked updater, so a same-tick OK click is fresh.
   const setRaws = (raws: string[], on: boolean) => {
-    // See toggleValue — assign checkedRef synchronously at click time,
-    // not inside the setChecked updater, so a same-tick OK click is fresh.
     const next = new Set(checkedRef.current);
     for (const r of raws) {
       if (on) next.add(r);
@@ -585,9 +560,6 @@ function ColumnFilterDropdown<T>({
   };
   const allRawsOn = (raws: string[]) =>
     raws.length > 0 && raws.every((r) => checked.has(r));
-  const someRawsOn = (raws: string[]) => raws.some((r) => checked.has(r));
-  const matchSearch = (label: string) =>
-    !search || label.toLowerCase().includes(search.toLowerCase());
   // Apply a [from,to] inclusive day range (period presets).
   const applyDateRange = (from: Date, to: Date) => {
     const f = new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime();
@@ -627,6 +599,117 @@ function ColumnFilterDropdown<T>({
     { label: "This Year", range: () => { const y = today0().getFullYear(); return [new Date(y, 0, 1), new Date(y, 11, 31)]; } },
     { label: "Next Year", range: () => { const y = today0().getFullYear() + 1; return [new Date(y, 0, 1), new Date(y, 11, 31)]; } },
   ];
+
+  // ----- Date column FLAT value list -----
+  // Distinct dates as a flat, chronologically-sorted, checkable list with
+  // "11 Jun"-style labels + row counts — the date-column analogue of the
+  // non-date `filteredValues` list. Blank/unparseable dates surface as a
+  // single "(No date)" row at the end so they stay filterable. Reuses the
+  // already-computed `parsedDates` (raw / count / ymd) — no new date math.
+  const DATE_MONTHS = MONTHS; // alias for label formatting (Jan…Dec)
+  const dateFlatValues = useMemo(() => {
+    if (!isDateCol) return [] as { raw: string; label: string; count: number; sortKey: number }[];
+    const dated = parsedDates
+      .filter((p) => p.ymd)
+      .map((p) => {
+        const [y, m, dd] = p.ymd as [number, number, number];
+        return {
+          raw: p.raw,
+          // "11 Jun" — drop the year unless the data spans multiple years,
+          // in which case append it so days don't collide visually.
+          label: `${String(dd).padStart(2, "0")} ${DATE_MONTHS[m]}`,
+          year: y,
+          count: p.count,
+          sortKey: new Date(y, m, dd).getTime(),
+        };
+      })
+      .sort((a, b) => a.sortKey - b.sortKey);
+    const years = new Set(dated.map((d) => d.year));
+    const multiYear = years.size > 1;
+    const out = dated.map((d) => ({
+      raw: d.raw,
+      label: multiYear ? `${d.label} ${d.year}` : d.label,
+      count: d.count,
+      sortKey: d.sortKey,
+    }));
+    // Blank / unparseable dates → single "(No date)" row at the bottom.
+    const blanks = parsedDates.filter((p) => !p.ymd);
+    if (blanks.length > 0) {
+      out.push({
+        raw: blanks.map((b) => b.raw).join(" "), // sentinel; not used as a real raw key
+        label: "(No date)",
+        count: blanks.reduce((s, b) => s + b.count, 0),
+        sortKey: Number.POSITIVE_INFINITY,
+      });
+    }
+    return out;
+  }, [isDateCol, parsedDates, DATE_MONTHS]);
+
+  // The blank raws (unparseable dates) as their own list — the "(No date)"
+  // row toggles all of them at once via `setRaws`.
+  const dateBlankRaws = useMemo(
+    () => (isDateCol ? parsedDates.filter((p) => !p.ymd).map((p) => p.raw) : []),
+    [isDateCol, parsedDates],
+  );
+
+  const dateFlatFiltered = useMemo(() => {
+    if (!search) return dateFlatValues;
+    const lower = search.toLowerCase();
+    return dateFlatValues.filter((d) => d.label.toLowerCase().includes(lower));
+  }, [dateFlatValues, search]);
+
+  // ----- Date column quick chips -----
+  // Exactly four buckets: Overdue / Today / This Week / This Month.
+  // Bucket math is REUSED from `datePresets` (Today / This Week / This
+  // Month) so it stays consistent with the "Date Filters" tab. "Overdue" =
+  // strictly before today (no matching preset exists, so it is computed
+  // with the same `today0()` boundary the presets use — a [−∞, yesterday]
+  // range). Each chip carries the raw date strings it covers (`matchValues`)
+  // + a total row count, so it slots straight into the existing
+  // multi-select `toggleChip` machinery (check those raws, then OK).
+  const dateChips = useMemo(() => {
+    if (!isDateCol)
+      return [] as { label: string; matchValues: string[]; rowCount: number }[];
+    const presetRange = (label: string): [Date, Date] | null => {
+      const p = datePresets.find((d) => d.label === label);
+      return p ? p.range() : null;
+    };
+    const inRange = (from: Date, to: Date) => {
+      const f = new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime();
+      const t = new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime();
+      return parsedDates.filter((pd) => {
+        if (!pd.ymd) return false; // chips never select blanks
+        const x = new Date(pd.ymd[0], pd.ymd[1], pd.ymd[2]).getTime();
+        return x >= f && x <= t;
+      });
+    };
+    const buckets: { label: string; entries: typeof parsedDates }[] = [];
+    // Overdue — strictly before today. Reuse the preset `today0()` boundary
+    // (yesterday is the inclusive upper bound) rather than inventing new math.
+    const overdueEntries = parsedDates.filter((pd) => {
+      if (!pd.ymd) return false;
+      const x = new Date(pd.ymd[0], pd.ymd[1], pd.ymd[2]).getTime();
+      return x < today0().getTime();
+    });
+    buckets.push({ label: "Overdue", entries: overdueEntries });
+    for (const label of ["Today", "This Week", "This Month"]) {
+      const r = presetRange(label);
+      buckets.push({ label, entries: r ? inRange(r[0], r[1]) : [] });
+    }
+    return buckets.map((b) => ({
+      label: b.label,
+      matchValues: b.entries.map((e) => e.raw),
+      rowCount: b.entries.reduce((s, e) => s + e.count, 0),
+    }));
+    // `datePresets` is rebuilt every render (it closes over today0/addDays/
+    // weekStart) but its range fns are PURE — the only inputs that change
+    // the chip output are isDateCol + parsedDates. Listing datePresets would
+    // recompute this memo every render for no benefit, so it is intentionally
+    // excluded. We reuse the preset math (not duplicate it) by reading the
+    // same `.range()` fns inside the memo body.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDateCol, parsedDates]);
+
   const [rngFrom, setRngFrom] = useState("");
   const [rngTo, setRngTo] = useState("");
 
@@ -741,202 +824,77 @@ function ColumnFilterDropdown<T>({
               })}
             </div>
           )}
-          {isDateCol ? (
-            /* Year ▸ Month ▸ Day tree — roomy rows for tablet taps */
-            <div className="max-h-[320px] overflow-y-auto border-t border-[#F0F0F0] py-1">
-              {dateTree.years.length === 0 && dateTree.noDate.length === 0 && (
-                <div className="px-3 py-3 text-[12px] text-[#999]">No dates</div>
-              )}
-              {dateTree.years.map((yr) => {
-                const yKey = String(yr.yr);
-                const yOpen = expY.has(yr.yr);
-                const yShown =
-                  matchSearch(yKey) ||
-                  Array.from(yr.mons.values()).some(
-                    (mn) =>
-                      matchSearch(`${MONTHS[mn.mon]} ${yKey}`) ||
-                      Array.from(mn.days.values()).some((dy) =>
-                        matchSearch(`${dy.day} ${MONTHS[mn.mon]} ${yKey}`),
-                      ),
-                  );
-                if (!yShown) return null;
+          {/* Quick date chips — date columns only (Overdue / Today / This
+              Week / This Month). Same chip style + multi-select machinery as
+              the status chips above: clicking checks/unchecks the dates in
+              that bucket, then OK applies. Bucket math reuses `datePresets`
+              (see `dateChips`). */}
+          {isDateCol && dateChips.length > 0 && (
+            <div className="flex flex-wrap gap-1 px-2 py-1.5 border-t border-[#F0F0F0] bg-[#FAF8F4]">
+              {dateChips.map(({ label, matchValues, rowCount }) => {
+                const chipOn = !allChecked && allRawsOn(matchValues);
+                const disabled = matchValues.length === 0;
                 return (
-                  <div key={yr.yr}>
-                    <div className="flex items-center gap-2 px-2 py-2 text-[12px] hover:bg-[#F0ECE9]">
-                      <button
-                        type="button"
-                        className="h-6 w-6 inline-flex items-center justify-center rounded text-[15px] leading-none text-[#666] hover:bg-[#E2DDD8]"
-                        onClick={() =>
-                          setExpY((p) => {
-                            const n = new Set(p);
-                            if (n.has(yr.yr)) n.delete(yr.yr);
-                            else n.add(yr.yr);
-                            return n;
-                          })
-                        }
-                      >
-                        {yOpen ? "−" : "+"}
-                      </button>
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 accent-[#6B5C32]"
-                        checked={allRawsOn(yr.raws)}
-                        ref={(el) => {
-                          if (el)
-                            el.indeterminate =
-                              !allRawsOn(yr.raws) && someRawsOn(yr.raws);
-                        }}
-                        onChange={(e) => setRaws(yr.raws, e.target.checked)}
-                      />
-                      {/* Click the label (fills the row) to expand/collapse,
-                          not just the tiny +/− button. Checkbox keeps its own
-                          click. Wei Siang 2026-05-28. */}
-                      <span
-                        className="font-semibold flex-1 cursor-pointer"
-                        onClick={() =>
-                          setExpY((p) => {
-                            const n = new Set(p);
-                            if (n.has(yr.yr)) n.delete(yr.yr);
-                            else n.add(yr.yr);
-                            return n;
-                          })
-                        }
-                      >
-                        {yr.yr}
-                      </span>
-                      <span
-                        className="text-[10px] text-[#AAA] cursor-pointer"
-                        onClick={() =>
-                          setExpY((p) => {
-                            const n = new Set(p);
-                            if (n.has(yr.yr)) n.delete(yr.yr);
-                            else n.add(yr.yr);
-                            return n;
-                          })
-                        }
-                      >
-                        {yr.count}
-                      </span>
-                    </div>
-                    {yOpen &&
-                      Array.from(yr.mons.values())
-                        .sort((a, b) => a.mon - b.mon)
-                        .map((mn) => {
-                          const mKey = `${yr.yr}-${mn.mon}`;
-                          const mOpen = expM.has(mKey);
-                          const mLabel = `${MONTHS[mn.mon]} ${yr.yr}`;
-                          const mShown =
-                            matchSearch(mLabel) ||
-                            Array.from(mn.days.values()).some((dy) =>
-                              matchSearch(`${dy.day} ${mLabel}`),
-                            );
-                          if (!mShown) return null;
-                          return (
-                            <div key={mKey}>
-                              <div className="flex items-center gap-2 pl-6 pr-2 py-2 text-[12px] hover:bg-[#F0ECE9]">
-                                <button
-                                  type="button"
-                                  className="h-6 w-6 inline-flex items-center justify-center rounded text-[15px] leading-none text-[#666] hover:bg-[#E2DDD8]"
-                                  onClick={() =>
-                                    setExpM((p) => {
-                                      const n = new Set(p);
-                                      if (n.has(mKey)) n.delete(mKey);
-                                      else n.add(mKey);
-                                      return n;
-                                    })
-                                  }
-                                >
-                                  {mOpen ? "−" : "+"}
-                                </button>
-                                <input
-                                  type="checkbox"
-                                  className="h-4 w-4 accent-[#6B5C32]"
-                                  checked={allRawsOn(mn.raws)}
-                                  ref={(el) => {
-                                    if (el)
-                                      el.indeterminate =
-                                        !allRawsOn(mn.raws) &&
-                                        someRawsOn(mn.raws);
-                                  }}
-                                  onChange={(e) =>
-                                    setRaws(mn.raws, e.target.checked)
-                                  }
-                                />
-                                <span
-                                  className="flex-1 cursor-pointer"
-                                  onClick={() =>
-                                    setExpM((p) => {
-                                      const n = new Set(p);
-                                      if (n.has(mKey)) n.delete(mKey);
-                                      else n.add(mKey);
-                                      return n;
-                                    })
-                                  }
-                                >
-                                  {MONTHS[mn.mon]}
-                                </span>
-                                <span
-                                  className="text-[10px] text-[#AAA] cursor-pointer"
-                                  onClick={() =>
-                                    setExpM((p) => {
-                                      const n = new Set(p);
-                                      if (n.has(mKey)) n.delete(mKey);
-                                      else n.add(mKey);
-                                      return n;
-                                    })
-                                  }
-                                >
-                                  {mn.count}
-                                </span>
-                              </div>
-                              {mOpen &&
-                                Array.from(mn.days.values())
-                                  .sort((a, b) => a.day - b.day)
-                                  .filter((dy) =>
-                                    matchSearch(`${dy.day} ${mLabel}`),
-                                  )
-                                  .map((dy) => (
-                                    <label
-                                      key={dy.day}
-                                      className="flex items-center gap-2 pl-16 pr-2 py-2 text-[12px] cursor-pointer hover:bg-[#F0ECE9]"
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        className="h-4 w-4 accent-[#6B5C32]"
-                                        checked={allRawsOn(dy.raws)}
-                                        onChange={(e) =>
-                                          setRaws(dy.raws, e.target.checked)
-                                        }
-                                      />
-                                      <span className="flex-1">
-                                        {String(dy.day).padStart(2, "0")}
-                                      </span>
-                                      <span className="text-[10px] text-[#AAA]">
-                                        {dy.count}
-                                      </span>
-                                    </label>
-                                  ))}
-                            </div>
-                          );
-                        })}
-                  </div>
+                  <button
+                    key={label}
+                    type="button"
+                    disabled={disabled}
+                    className={`rounded border px-2 py-0.5 text-[10px] transition-colors ${
+                      chipOn
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : "border-[#D0D0D0] bg-white text-[#333] hover:bg-[#F0ECE9]"
+                    } ${disabled ? "opacity-40 cursor-not-allowed hover:bg-white" : ""}`}
+                    onClick={() => { if (!disabled) toggleChip(matchValues); }}
+                    title={`${chipOn ? "Remove" : "Add"} ${label} (${rowCount} row${rowCount === 1 ? "" : "s"}) — chips stack; click OK to apply.`}
+                  >
+                    {label}{" "}
+                    <span className={chipOn ? "text-[#E8E0CC]" : "text-[#888]"}>
+                      ({rowCount})
+                    </span>
+                  </button>
                 );
               })}
-              {dateTree.noDate.length > 0 && matchSearch("no date") && (
-                <label className="flex items-center gap-2 px-2 py-2 text-[12px] cursor-pointer hover:bg-[#F0ECE9]">
-                  <span className="w-6" />
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-[#6B5C32]"
-                    checked={allRawsOn(dateTree.noDate)}
-                    onChange={(e) => setRaws(dateTree.noDate, e.target.checked)}
-                  />
-                  <span className="flex-1 italic text-[#888]">(No date)</span>
-                  <span className="text-[10px] text-[#AAA]">
-                    {dateTree.noDateCount}
-                  </span>
-                </label>
+            </div>
+          )}
+          {isDateCol ? (
+            /* Flat, chronologically-sorted list of individual dates — the
+               date-column analogue of the non-date value list below. Each
+               row is a checkbox with a "11 Jun" label + row count; toggling
+               filters exactly like the value-column checkboxes (same
+               `checked` / `toggleValue` / OK machinery). The "(No date)" row
+               toggles every blank/unparseable date at once. */
+            <div className="max-h-[260px] overflow-y-auto border-t border-[#F0F0F0]">
+              {dateFlatFiltered.length === 0 && (
+                <div className="px-3 py-3 text-[12px] text-[#999]">No dates</div>
               )}
+              {dateFlatFiltered.map((d) => {
+                const isBlankRow = d.label === "(No date)";
+                const onState = isBlankRow
+                  ? allRawsOn(dateBlankRaws)
+                  : checked.has(d.raw);
+                return (
+                  <label
+                    key={isBlankRow ? "__no_date__" : d.raw}
+                    className="flex items-center gap-2 px-3 py-1.5 text-[12px] text-[#333] cursor-pointer hover:bg-[#F0ECE9]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={onState}
+                      onChange={(e) => {
+                        if (isBlankRow) setRaws(dateBlankRaws, e.target.checked);
+                        else toggleValue(d.raw);
+                      }}
+                      className="h-4 w-4 accent-[#6B5C32]"
+                    />
+                    <span
+                      className={`truncate flex-1 ${isBlankRow ? "italic text-[#888]" : ""}`}
+                    >
+                      {d.label}
+                    </span>
+                    <span className="text-[10px] text-[#AAA]">{d.count}</span>
+                  </label>
+                );
+              })}
             </div>
           ) : (
             /* Values list (non-date) — bumped row height (py-0.5 → py-1.5)

@@ -26,6 +26,9 @@ import {
 } from "lucide-react";
 import { LeadTimeHistoryDialog } from "./LeadTimeHistoryDialog";
 import { EffectiveDateConfirmModal } from "../products/MaintenanceConfigHistoryDialog";
+import { useToast } from "@/components/ui/toast";
+import { csrfHeaders } from "@/lib/csrf";
+import { BatchActionToolbar, ApplyBatchDueDateDialog } from "../production/components/BatchActionToolbar";
 
 // ── Types matching mock-data ──
 
@@ -433,6 +436,7 @@ function utilizationColor(pct: number): { bar: string; text: string; bg: string 
 
 export default function PlanningPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<TabId>("capacity");
   // ?fields=minimal&include=jobCards → drops ~20 unused PO fields and the
   // piece_pics tree. jobCards still arrive (planning iterates order.jobCards
@@ -550,6 +554,19 @@ export default function PlanningPage() {
   const [trackerDateTo, setTrackerDateTo] = useState("");
   const [trackerSortField, setTrackerSortField] = useState<TrackerSortField>("poNo");
   const [trackerSortDir, setTrackerSortDir] = useState<TrackerSortDir>("asc");
+
+  // ── Master Tracker batch Due Date (multi-select) ──
+  // Each tracker row is a whole production order (one PO spans up to 8
+  // department job cards), so the batch action also needs a department scope:
+  // which department's job card gets the new due date. "ALL" writes the date
+  // to every department job card on each selected order. Mirrors the
+  // production page: same ApplyBatchDueDateDialog, same
+  // /api/production-orders/bulk-patch endpoint, same toast + refetch. The
+  // department scope is the only tracker-specific addition, because its rows
+  // are orders not individual job cards.
+  const [selectedTrackerIds, setSelectedTrackerIds] = useState<Set<string>>(new Set());
+  const [trackerBatchDept, setTrackerBatchDept] = useState<string>("ALL");
+  const [trackerBatchDueDateOpen, setTrackerBatchDueDateOpen] = useState(false);
 
   // Lead times config state (editable table)
   type LeadTimeCat = "BEDFRAME" | "SOFA";
@@ -1302,6 +1319,92 @@ export default function PlanningPage() {
     } else {
       setTrackerSortField(field);
       setTrackerSortDir("asc");
+    }
+  };
+
+  // The currently-selected tracker orders (intersect the id set with the live
+  // list so a row that was filtered out / removed can't linger in the
+  // selection).
+  const selectedTrackerOrders = useMemo(
+    () => orders.filter((o) => selectedTrackerIds.has(o.id)),
+    [orders, selectedTrackerIds],
+  );
+
+  const allTrackerFilteredSelected =
+    filteredTrackerOrders.length > 0 &&
+    filteredTrackerOrders.every((o) => selectedTrackerIds.has(o.id));
+
+  const toggleTrackerRow = (id: string) => {
+    setSelectedTrackerIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleTrackerSelectAll = () => {
+    setSelectedTrackerIds((prev) => {
+      if (filteredTrackerOrders.every((o) => prev.has(o.id))) {
+        // All visible already selected → clear just the visible ones.
+        const next = new Set(prev);
+        for (const o of filteredTrackerOrders) next.delete(o.id);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const o of filteredTrackerOrders) next.add(o.id);
+      return next;
+    });
+  };
+
+  // Batch Due Date apply — reuses the EXACT endpoint + patch shape the
+  // production page + folder detail page use:
+  // POST /api/production-orders/bulk-patch { patches: [{ poId, jobCardId, dueDate }] }.
+  // Builds one patch per (selected order × matching department job card),
+  // scoped to trackerBatchDept ("ALL" → every dept job card on the order).
+  // dueDate only — status is intentionally untouched (schedule vs progress).
+  const applyTrackerBatchDueDate = async (date: string) => {
+    setTrackerBatchDueDateOpen(false);
+    const patches: Array<{ poId: string; jobCardId: string; dueDate: string }> = [];
+    for (const order of selectedTrackerOrders) {
+      for (const jc of order.jobCards) {
+        if (trackerBatchDept !== "ALL" && jc.departmentCode !== trackerBatchDept) continue;
+        patches.push({ poId: order.id, jobCardId: jc.id, dueDate: date });
+      }
+    }
+    if (patches.length === 0) {
+      toast.error(
+        trackerBatchDept === "ALL"
+          ? "Selected orders have no job cards to update."
+          : `No ${TRACKER_DEPARTMENTS.find((d) => d.code === trackerBatchDept)?.name ?? trackerBatchDept} job cards on the selected orders.`,
+      );
+      return;
+    }
+    try {
+      const res = await fetch("/api/production-orders/bulk-patch", {
+        method: "POST",
+        headers: csrfHeaders(),
+        body: JSON.stringify({ patches }),
+        credentials: "include",
+      });
+      const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
+      const failed = (j.results || []).filter((x) => !x.success);
+      if (failed.length > 0) {
+        toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+      } else {
+        const scope = trackerBatchDept === "ALL"
+          ? "all departments"
+          : (TRACKER_DEPARTMENTS.find((d) => d.code === trackerBatchDept)?.name ?? trackerBatchDept);
+        const verb = date ? "Set due date" : "Cleared due date";
+        toast.success(`${verb} (${scope}) on ${selectedTrackerOrders.length} order${selectedTrackerOrders.length === 1 ? "" : "s"}.`);
+      }
+      // Drop the cached matrix + force this page's hook to refetch so the new
+      // dates show. Same invalidate prefix the production page uses.
+      invalidateCachePrefix("/api/production-orders");
+      refreshOrders();
+      setSelectedTrackerIds(new Set());
+    } catch (err) {
+      toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -2540,7 +2643,16 @@ export default function PlanningPage() {
                 <table className="w-full text-xs whitespace-nowrap">
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                      <th className="h-9 px-2 text-left font-medium text-[#374151] sticky left-0 bg-[#F0ECE9] z-10 cursor-pointer" onClick={() => toggleTrackerSort("poNo")}>
+                      <th className="h-9 w-9 px-2 text-center font-medium text-[#374151] sticky left-0 bg-[#F0ECE9] z-20">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all visible orders"
+                          checked={allTrackerFilteredSelected}
+                          onChange={toggleTrackerSelectAll}
+                          className="cursor-pointer align-middle"
+                        />
+                      </th>
+                      <th className="h-9 px-2 text-left font-medium text-[#374151] sticky left-9 bg-[#F0ECE9] z-10 cursor-pointer" onClick={() => toggleTrackerSort("poNo")}>
                         <div className="flex items-center gap-1">SO ID <TrackerSortIcon field="poNo" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Sales Order</th>
@@ -2584,22 +2696,35 @@ export default function PlanningPage() {
                   <tbody>
                     {filteredTrackerOrders.length === 0 ? (
                       <tr>
-                        <td colSpan={27} className="py-12 text-center text-[#9CA3AF] text-sm">
+                        <td colSpan={28} className="py-12 text-center text-[#9CA3AF] text-sm">
                           No production orders match the current filters.
                         </td>
                       </tr>
                     ) : (
                       filteredTrackerOrders.map((order) => {
                         const overdue = getOverdueDisplay(order);
+                        const isSelected = selectedTrackerIds.has(order.id);
                         return (
                           <tr
                             key={order.id}
-                            className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                            className={`border-b border-[#E2DDD8] cursor-pointer ${isSelected ? "bg-[#FFF8E6] hover:bg-[#FBEFC9]" : "hover:bg-[#FAF9F7]"}`}
                             onDoubleClick={() => {
                               if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
                             }}
                           >
-                            <td className="px-2 py-1.5 font-medium doc-number sticky left-0 bg-white z-10">
+                            <td
+                              className={`px-2 py-1.5 text-center sticky left-0 z-10 ${isSelected ? "bg-[#FFF8E6]" : "bg-white"}`}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <input
+                                type="checkbox"
+                                aria-label={`Select order ${order.poNo}`}
+                                checked={isSelected}
+                                onChange={() => toggleTrackerRow(order.id)}
+                                className="cursor-pointer align-middle"
+                              />
+                            </td>
+                            <td className={`px-2 py-1.5 font-medium doc-number sticky left-9 z-10 ${isSelected ? "bg-[#FFF8E6]" : "bg-white"}`}>
                               {order.poNo}
                             </td>
                             <td className="px-2 py-1.5 doc-number text-[#4B5563]">{order.salesOrderNo}</td>
@@ -2688,6 +2813,54 @@ export default function PlanningPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Batch Due Date — multi-select rows, pick a department scope + a
+              date, Apply. Reuses the production page's BatchActionToolbar +
+              ApplyBatchDueDateDialog + /api/production-orders/bulk-patch
+              endpoint. The department scope picker is tracker-specific: each
+              row is a whole order spanning up to 8 dept job cards, so the
+              operator chooses which department's due date to set (or all). */}
+          {selectedTrackerOrders.length > 0 && (
+            <div className="sticky bottom-[68px] left-3 right-3 z-30 flex items-center gap-2 rounded-md border border-[#C9A227] bg-[#FFF8E6] px-3 py-2 shadow-md">
+              <span className="text-[12px] font-semibold text-[#5A4500]">Due Date department:</span>
+              <select
+                value={trackerBatchDept}
+                onChange={(e) => setTrackerBatchDept(e.target.value)}
+                className="h-8 rounded border border-[#D4CFC7] bg-white px-2 text-[12px] text-[#3A2E22] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+              >
+                <option value="ALL">All departments</option>
+                {TRACKER_DEPARTMENTS.map((dept) => (
+                  <option key={dept.code} value={dept.code}>{dept.name}</option>
+                ))}
+              </select>
+              <span className="text-[11px] text-[#9C7A1E]">
+                {trackerBatchDept === "ALL"
+                  ? "Sets the date on every department job card of the selected orders."
+                  : `Sets the date on the ${TRACKER_DEPARTMENTS.find((d) => d.code === trackerBatchDept)?.name} job card of the selected orders.`}
+              </span>
+            </div>
+          )}
+
+          <BatchActionToolbar
+            count={selectedTrackerOrders.length}
+            onClear={() => setSelectedTrackerIds(new Set())}
+            onApplyDueDate={() => setTrackerBatchDueDateOpen(true)}
+            // The tracker only exposes the batch Due Date action — completion
+            // date, PIC, and folder archiving live on the Production page where
+            // rows are individual job cards. These no-op handlers are required
+            // by the shared toolbar's prop contract; their buttons stay but
+            // inform the operator where to go.
+            onApplyDate={() => toast.error("Apply Completion is on the Production page (per-job-card). Use Apply Due Date here.")}
+            onApplyPic={() => toast.error("Apply PIC is on the Production page (per-job-card).")}
+            onSaveToFolder={() => toast.error("Save to Folder is on the Production page (per-job-card).")}
+          />
+
+          <ApplyBatchDueDateDialog
+            open={trackerBatchDueDateOpen}
+            count={selectedTrackerOrders.length}
+            onCancel={() => setTrackerBatchDueDateOpen(false)}
+            onApply={applyTrackerBatchDueDate}
+          />
         </div>
       )}
 

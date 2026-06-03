@@ -464,8 +464,11 @@ type DoForDeliveredCascade = {
   customerPOId: string | null;
   hubId: string | null;
   hubName: string | null;
-  // Delivered timestamp + planned delivery date — the invoice date follows the
-  // delivered date, not "today" (Wei Siang 2026-06-03).
+  // Dispatch / delivered timestamps + planned delivery date. The invoice date
+  // follows the DISPATCH date (when goods physically shipped) — the reliable
+  // basis, since deliveredAt is often back-filled late at sign-off. Falls back
+  // to delivered, then planned delivery date, then today (Wei Siang 2026-06-03).
+  dispatchedAt: string | null;
   deliveredAt: string | null;
   deliveryDate: string | null;
 };
@@ -679,17 +682,20 @@ async function buildDoDeliveredSoAndInvoice(
 
     const invId = genInvoiceId();
     const invoiceNo = await nextInvoiceNo(db);
-    // Invoice date = the date the DO was DELIVERED, not "today" (Wei Siang
-    // 2026-06-03). Prefer the delivered timestamp, then the planned delivery
-    // date, then fall back to now for any path that somehow lacks both.
-    const deliveredDate =
+    // Invoice date = the DISPATCH date (when goods physically left), not the
+    // sign-off date and not "today" (Wei Siang 2026-06-03). deliveredAt is
+    // often back-filled late at sign-off and would bunch revenue into the
+    // wrong month; dispatch is the reliable ship date. Fall back to delivered,
+    // then the planned delivery date, then now.
+    const shipDate =
+      (doRow.dispatchedAt && doRow.dispatchedAt.split("T")[0]) ||
       (doRow.deliveredAt && doRow.deliveredAt.split("T")[0]) ||
       (doRow.deliveryDate && doRow.deliveryDate.split("T")[0]) ||
       now.split("T")[0];
-    const invoiceDate = deliveredDate;
-    // Due date stays relative to the invoice (delivered) date so terms remain
+    const invoiceDate = shipDate;
+    // Due date stays relative to the invoice (dispatch) date so terms remain
     // consistent with when the invoice is dated.
-    const due = new Date(`${deliveredDate}T00:00:00.000Z`);
+    const due = new Date(`${shipDate}T00:00:00.000Z`);
     due.setDate(due.getDate() + 30);
     const dueDate = due.toISOString().split("T")[0];
     // Combined invoice spans multiple SOs — anchor the header SO to the

@@ -1029,7 +1029,7 @@ app.post("/backfill-customer-po", async (c) => {
       const r = await c.var.DB.prepare(
         `SELECT so.customerPOId AS po, COUNT(*) AS n
            FROM delivery_order_items di
-           JOIN sales_orders so ON so.companySO = di.salesOrderNo
+           JOIN sales_orders so ON so.companySOId = di.salesOrderNo
           WHERE di.deliveryOrderId = ?
             AND so.customerPOId IS NOT NULL AND so.customerPOId <> ''
           GROUP BY so.customerPOId

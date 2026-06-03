@@ -194,6 +194,7 @@ export default function FramingDeptPage() {
   return (
     <DepartmentSchedulePage
       departmentName="Framing"
+      upstream={[{ label: "Wood Cutting", route: "/planning/dept/wood-cutting" }]}
       icon={<Frame className="h-4 w-4 text-[#F97316]" />}
       accentColor="#F97316"
       snapshot={snapshot as unknown as Snapshot}

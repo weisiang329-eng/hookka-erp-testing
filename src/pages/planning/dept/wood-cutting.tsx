@@ -154,6 +154,7 @@ export default function WoodCuttingDeptPage() {
   return (
     <DepartmentSchedulePage
       departmentName="Wood Cutting"
+      upstream={[{ label: "Fabric Sewing", route: "/planning/dept/fabric-sewing" }]}
       icon={<Axe className="h-4 w-4 text-[#F59E0B]" />}
       accentColor="#F59E0B"
       snapshot={snapshot as unknown as Snapshot}

@@ -159,6 +159,7 @@ export default function FabricSewingDeptPage() {
   return (
     <DepartmentSchedulePage
       departmentName="Fabric Sewing"
+      upstream={[{ label: "Fabric Cutting", route: "/planning/dept/fabric-cutting" }]}
       icon={<Workflow className="h-4 w-4 text-[#6366F1]" />}
       accentColor="#6366F1"
       snapshot={snapshot as unknown as Snapshot}

@@ -130,6 +130,7 @@ export default function PackingDeptPage() {
     <DepartmentSchedulePage
       departmentName="Packing"
       subtitle="Final packing — follows upholstery, no capacity cap"
+      upstream={[{ label: "Upholstery", route: "/planning/dept/upholstery" }]}
       icon={<Package className="h-4 w-4 text-[#06B6D4]" />}
       accentColor="#06B6D4"
       snapshot={snapshot as unknown as Snapshot}

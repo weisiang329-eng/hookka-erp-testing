@@ -136,6 +136,7 @@ export default function FoamBondingDeptPage() {
     <DepartmentSchedulePage
       departmentName="Foam Bonding"
       subtitle="Sofa foam bonding — back-end stage after framing"
+      upstream={[{ label: "Framing", route: "/planning/dept/framing" }]}
       icon={<Layers className="h-4 w-4 text-[#8B5CF6]" />}
       accentColor="#8B5CF6"
       snapshot={snapshot as unknown as Snapshot}

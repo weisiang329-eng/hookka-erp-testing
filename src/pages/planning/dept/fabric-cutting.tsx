@@ -199,6 +199,7 @@ export default function FabricCuttingDeptPage() {
   return (
     <DepartmentSchedulePage
       departmentName="Fabric Cutting"
+      upstream={[]}
       icon={<Scissors className="h-4 w-4 text-[#3B82F6]" />}
       accentColor="#3B82F6"
       snapshot={snapshot as unknown as Snapshot}

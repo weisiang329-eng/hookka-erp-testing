@@ -132,6 +132,7 @@ export default function WebbingDeptPage() {
     <DepartmentSchedulePage
       departmentName="Webbing"
       subtitle="Same day as framing — runs in parallel, no separate schedule"
+      upstream={[{ label: "Framing (same day)", route: "/planning/dept/framing" }]}
       icon={<LayoutGrid className="h-4 w-4 text-[#10B981]" />}
       accentColor="#10B981"
       snapshot={snapshot as unknown as Snapshot}

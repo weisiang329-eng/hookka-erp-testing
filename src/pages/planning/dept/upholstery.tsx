@@ -134,6 +134,10 @@ export default function UpholsteryDeptPage() {
     <DepartmentSchedulePage
       departmentName="Upholstery"
       subtitle="Subcontract upholstery — bedframe & sofa lanes"
+      upstream={[
+        { label: "Webbing (bedframe)", route: "/planning/dept/webbing" },
+        { label: "Foam Bonding (sofa)", route: "/planning/dept/foam-bonding" },
+      ]}
       icon={<Sofa className="h-4 w-4 text-[#F43F5E]" />}
       accentColor="#F43F5E"
       snapshot={snapshot as unknown as Snapshot}

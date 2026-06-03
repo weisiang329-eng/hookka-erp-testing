@@ -24,7 +24,7 @@
 // cell renders as-is.
 // ---------------------------------------------------------------------------
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { fetchJson, passthrough } from "@/lib/fetch-json";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,7 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
+  CornerLeftUp,
 } from "lucide-react";
 
 // ── Snapshot typing ────────────────────────────────────────────────────────
@@ -611,6 +612,14 @@ export type ExtraSheet = {
   wideCol: number | null;
 };
 
+// ── Upstream department reference ──────────────────────────────────────────
+// Each department's schedule floors on the stage before it (e.g. framing =
+// wood-cut day + 1). This reference lets the operator jump to the upstream
+// department's page and check the previous stage's plan before reading this
+// one. `route` is a dept route such as "/planning/dept/wood-cutting"; pass an
+// empty array (or omit) for the first stage, which has no upstream.
+export type Upstream = { label: string; route: string };
+
 // ── Page ───────────────────────────────────────────────────────────────────
 export type DepartmentSchedulePageProps = {
   /** Display name, e.g. "Fabric Cutting". */
@@ -643,6 +652,11 @@ export type DepartmentSchedulePageProps = {
   logicIntro?: string;
   /** Optional downstream sheets (Framing) rendered below the main result. */
   extraSheets?: ExtraSheet[];
+  /** Optional upstream department(s) this stage depends on. Rendered as a
+   *  small reference near the top with react-router links so the operator can
+   *  jump to the previous stage's plan. Omit (or pass []) for the first stage,
+   *  which shows a "First stage" note instead. */
+  upstream?: Upstream[];
 };
 
 export default function DepartmentSchedulePage(props: DepartmentSchedulePageProps) {
@@ -764,6 +778,32 @@ export default function DepartmentSchedulePage(props: DepartmentSchedulePageProp
           )}
         </p>
       </div>
+
+      {/* Upstream department reference — the previous stage(s) this schedule
+          floors on. Lets the operator jump back and check that plan first. */}
+      {props.upstream && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#E2DDD8] bg-white px-4 py-3">
+          <CornerLeftUp className="h-4 w-4 shrink-0 text-[#6B5C32]" />
+          <span className="text-xs font-semibold text-[#4B4642]">
+            {props.upstream.length > 1 ? "Upstream departments:" : "Upstream department:"}
+          </span>
+          {props.upstream.length === 0 ? (
+            <span className="text-xs text-[#6B7280]">First stage — scheduled from orders.</span>
+          ) : (
+            <span className="flex flex-wrap items-center gap-1.5">
+              {props.upstream.map((u) => (
+                <Link
+                  key={u.route}
+                  to={u.route}
+                  className="inline-flex items-center rounded-full border border-[#C9B27A] bg-[#FBF4E6] px-2.5 py-0.5 text-xs font-semibold text-[#6B5C32] hover:bg-[#F4E9CE]"
+                >
+                  {u.label}
+                </Link>
+              ))}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* (a) Scheduling Process — explanation at top, collapsed by default */}
       <CollapsibleCard

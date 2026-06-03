@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-03-006 — Due-date "original backup" export came back with SO / PO / Department / Current-Due all blank (only the original date filled)
+
+**Status:** 🟢 Fixed (2026-06-03) — shipped to main, deployed + verified live.
+**Category:** data-migration
+
+**Symptom:** Owner opened the `duedate-original-backup.csv` produced by `GET /api/job-cards/duedate-original-backup` and reported it was "empty inside" — every row had a value in the Original Due Date column but SO, PO No, Department, and Current Due Date were all blank. (Same blank-export class as the invoice-address bug, BUG-2026-06-03-004, but the opposite leg of the d1-compat layer.)
+
+**Root cause:** The db-pg compat layer (`src/api/lib/db-pg.ts`, the `snakeToCamel` table built from column-rename-map.json + `postgres.toCamel` fallback) reverse-maps **every result column name back to camelCase** on the way out. The endpoint aliased its SELECT columns to snake_case (`AS company_so_id`, `AS po_no`, `AS department_code`, `AS current_due_date`, `AS job_card_id`) and then read those snake_case keys off the rows (`r.company_so_id`, etc.). At runtime the keys arrive camelCase (`companySOId`, `poNo`, `departmentCode`, `currentDueDate`, `jobCardId`), so every snake read was `undefined` → coalesced to null. Only `r.payload` survived (toCamel leaves it unchanged), which is exactly why `originalDueDate` — parsed from `payload` in JS — kept working while the four joined columns went blank.
+
+**Fix:** Read the camelCase result keys and update the `DueDateBackupRow` type + comments to match (src/api/routes/job-cards.ts ~L425, ~L497). The SQL aliases were left snake_case (Postgres folds unquoted identifiers to lowercase); only the JS-side reads changed. Swept all routes for the same smell (snake-case aliases + snake-case row reads) — this endpoint was the only real instance; every other match was a CTE reference inside the SQL string, not a JS row read.
+
+**Verified:** Live endpoint now returns 8,324 rows, 8,273 with SO+dept populated, all with current due dates (e.g. `SO-2603-013 FRAMING orig 2026-03-25 → cur 2026-05-16`). The owner already received the correct file directly via a raw snake_case Supabase export in the meantime.
+
+---
+
 ## BUG-2026-06-03-005 — Production "Current Dept" derived from an UNORDERED job-card scan, so it didn't reflect the order's true chain position
 
 **Status:** 🟢 Fixed (2026-06-03) — shipped to main, deployed.

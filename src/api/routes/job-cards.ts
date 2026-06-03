@@ -395,4 +395,170 @@ function safeParseJson(s: string): unknown {
   }
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/job-cards/duedate-original-backup[?format=csv]
+//
+// One-shot, READ-ONLY recovery dump. A bulk write (~2026-06-01) overwrote the
+// dueDate on ~3,876 job cards with no backup file saved. The job_card_events
+// audit log captured every change as a DUE_DATE_CHANGED event whose payload
+// JSON carries { from, to }. For each job card we surface the `from` value of
+// its EARLIEST DUE_DATE_CHANGED event — that `from` is the original dueDate as
+// it stood immediately before the first recorded change (which, for cards only
+// touched by the bulk overwrite, IS the pre-overwrite value).
+//
+// Logic: a single batched query (no per-card loops). A CTE ranks the
+// DUE_DATE_CHANGED events per job card with ROW_NUMBER() OVER (PARTITION BY
+// jobCardId ORDER BY ts ASC, id ASC) and we keep rank 1 = earliest. We return
+// the raw payload TEXT and parse `from` in JS rather than relying on a
+// Postgres JSON operator, because payload is stored as plain TEXT (not jsonb)
+// and the d1-compat layer makes ->>' fragile across SQLite/Postgres. The dump
+// joins job_cards (current dueDate + department) and production_orders
+// (companySOId + poNo) so every row reads as "SO-XXXX dept → original date".
+//
+// Output:
+//   default  JSON { generatedAt, count, rows: [...] }
+//   ?format=csv  text/csv with a Content-Disposition attachment header so the
+//                browser saves it as a file.
+//
+// This endpoint MUTATES NOTHING — pure read/dump. Safe to call repeatedly.
+// ---------------------------------------------------------------------------
+type DueDateBackupRow = {
+  job_card_id: string;
+  production_order_id: string;
+  company_so_id: string | null;
+  po_no: string | null;
+  department_code: string | null;
+  current_due_date: string | null;
+  payload: string;
+  first_changed_at: string;
+};
+
+app.get("/duedate-original-backup", async (c) => {
+  // Read-only production data — gate behind job-cards:read (admins hold the
+  // *:* wildcard and pass automatically).
+  const denied = await requirePermission(c, "job-cards", "read");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+
+  // Earliest DUE_DATE_CHANGED event per job card (rank 1), joined to the
+  // current job_cards row + its production order for SO/PO/dept context.
+  //
+  // Org scoping: job_card_events has no orgId column (the sibling
+  // /:id/events route also filters on jobCardId alone), so we scope through
+  // the INNER JOIN to production_orders.orgId, which IS tenant-stamped
+  // (migration 0049). An INNER JOIN here means events whose PO is in another
+  // org are excluded — exactly the multi-tenant boundary we want.
+  //
+  // Aliases are snake_case so Postgres (which folds unquoted identifiers to
+  // lowercase) preserves them; we read the snake_case keys here directly to
+  // stay driver-agnostic.
+  const sql = `
+    WITH ranked AS (
+      SELECT
+        e.jobCardId          AS job_card_id,
+        e.productionOrderId  AS production_order_id,
+        e.payload            AS payload,
+        e.ts                 AS ts,
+        ROW_NUMBER() OVER (
+          PARTITION BY e.jobCardId
+          ORDER BY e.ts ASC, e.id ASC
+        ) AS rn
+      FROM job_card_events e
+      WHERE e.eventType = 'DUE_DATE_CHANGED'
+    )
+    SELECT
+      r.job_card_id           AS job_card_id,
+      r.production_order_id    AS production_order_id,
+      po.companySOId           AS company_so_id,
+      po.poNo                  AS po_no,
+      jc.departmentCode        AS department_code,
+      jc.dueDate               AS current_due_date,
+      r.payload                AS payload,
+      r.ts                     AS first_changed_at
+    FROM ranked r
+    JOIN production_orders po       ON po.id = r.production_order_id AND po.orgId = ?
+    LEFT JOIN job_cards jc          ON jc.id = r.job_card_id
+    WHERE r.rn = 1
+    ORDER BY po.companySOId, jc.departmentCode, r.job_card_id
+  `;
+
+  const res = await db.prepare(sql).bind(orgId).all<DueDateBackupRow>();
+  const raw = res.results ?? [];
+
+  const rows = raw.map((r) => {
+    let originalDueDate: string | null = null;
+    const parsed = safeParseJson(r.payload);
+    if (parsed && typeof parsed === "object" && "from" in (parsed as object)) {
+      const from = (parsed as { from?: unknown }).from;
+      originalDueDate = typeof from === "string" ? from : from == null ? null : String(from);
+    }
+    return {
+      jobCardId: r.job_card_id,
+      productionOrderId: r.production_order_id,
+      companySOId: r.company_so_id ?? null,
+      poNo: r.po_no ?? null,
+      departmentCode: r.department_code ?? null,
+      currentDueDate: r.current_due_date ?? null,
+      originalDueDate,
+      firstChangedAt: r.first_changed_at,
+    };
+  });
+
+  const generatedAt = new Date().toISOString();
+
+  const format = (c.req.query("format") ?? "").toLowerCase();
+  if (format === "csv") {
+    const header = [
+      "Job Card Id",
+      "SO",
+      "PO No",
+      "Department",
+      "Current Due Date",
+      "Original Due Date",
+      "First Changed At",
+    ];
+    const lines = [header.map(csvCell).join(",")];
+    for (const r of rows) {
+      lines.push(
+        [
+          r.jobCardId,
+          r.companySOId ?? "",
+          r.poNo ?? "",
+          r.departmentCode ?? "",
+          r.currentDueDate ?? "",
+          r.originalDueDate ?? "",
+          r.firstChangedAt,
+        ]
+          .map(csvCell)
+          .join(","),
+      );
+    }
+    // Trailing newline so the file ends cleanly; \r\n for Excel-friendly CSV.
+    const body = lines.join("\r\n") + "\r\n";
+    const fileStamp = generatedAt.slice(0, 19).replace(/[:T]/g, "-");
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="duedate-original-backup-${fileStamp}.csv"`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  return c.json({ generatedAt, count: rows.length, rows });
+});
+
+// Quote a CSV cell only when needed (comma, quote, CR or LF), doubling any
+// embedded quotes per RFC 4180. Keeps simple values unquoted for readability.
+function csvCell(value: string | number | null | undefined): string {
+  const s = value == null ? "" : String(value);
+  if (/[",\r\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
 export default app;

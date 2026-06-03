@@ -5854,6 +5854,325 @@ app.post("/:id/scan-complete", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/production-orders/:id/scan-complete-dept
+//
+// One-sticker-per-variant fan-out completion (FAB_CUT / FAB_SEW only).
+//
+// A sofa variant (one production_orders row) breaks into several WIP
+// compartments — BASE / CUSHION / ARMREST — each its own job card in the SAME
+// department. The shop floor prints ONE QR sticker per variant (sentinel
+// op="FG-<DEPT>"); scanning it must complete ALL of that variant's compartment
+// job cards in that ONE department, in a single scan. Owner-confirmed
+// (Wei Siang 2026-06-03): one worker sews/cuts the whole variant, so attributing
+// every compartment's labour to the scanning worker is correct.
+//
+// This is the fan-out twin of /scan-complete. It deliberately does NOT run the
+// FIFO same-spec piece redirect (that path routes a single piece to the
+// oldest-due card across OTHER POs — wrong for a whole-variant assembly scan,
+// which belongs to THIS PO). Grouping key = (productionOrderId, departmentCode);
+// compartments can never live on a different PO, so it can't over-complete.
+//
+// Per-card side effects mirror /scan-complete exactly (piece_pics fill →
+// JC COMPLETED → applyWipInventoryChange → postJobCardLabor); the PO rollup +
+// SO/CO cascade run ONCE at the end. Idempotency: each real jcId claims its own
+// wip_cascade_log ticket and postJobCardLabor is keyed per jcId, and the card
+// set is filtered to status NOT IN (COMPLETED,TRANSFERRED) — a re-scan finds
+// nothing to do and returns success-empty.
+// ---------------------------------------------------------------------------
+app.post("/:id/scan-complete-dept", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const poId = c.req.param("id");
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po) {
+    return c.json({ success: false, error: "Production order not found" }, 404);
+  }
+  if (po.status === "ON_HOLD") {
+    return c.json(
+      {
+        success: false,
+        code: "PO_ON_HOLD",
+        error: "This Production Order is ON_HOLD. Supervisor must resume before scanning.",
+      },
+      409,
+    );
+  }
+  if (po.status === "CANCELLED") {
+    return c.json(
+      {
+        success: false,
+        code: "PO_CANCELLED",
+        error: "This Production Order has been cancelled and cannot be scanned.",
+      },
+      409,
+    );
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const { deptCode, workerId } = (body || {}) as {
+    deptCode?: string;
+    workerId?: string;
+  };
+  const forced = body?.force === true;
+  if (!deptCode || !workerId) {
+    return c.json(
+      { success: false, error: "deptCode and workerId are required" },
+      400,
+    );
+  }
+  // Only the two departments that use one-sticker-per-variant fan-out. Reject
+  // everything else so a stray FG-<DEPT> sentinel can't bulk-complete a
+  // bedframe/wood chain that is supposed to be scanned per piece.
+  if (deptCode !== "FAB_CUT" && deptCode !== "FAB_SEW") {
+    return c.json(
+      {
+        success: false,
+        code: "DEPT_NOT_SUPPORTED",
+        error: `scan-complete-dept only supports FAB_CUT / FAB_SEW (got ${deptCode}).`,
+      },
+      400,
+    );
+  }
+
+  // Worker-auth binding — identical to /scan-complete.
+  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
+    "userId",
+  );
+  const workerToken = c.req.header("x-worker-token");
+  if (!ctxUserId) {
+    const resolvedWorkerId = await resolveWorkerToken(db, workerToken);
+    if (!resolvedWorkerId || resolvedWorkerId !== workerId) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Worker auth mismatch — workerId does not match the session token.",
+          code: "AUTH_MISMATCH",
+        },
+        403,
+      );
+    }
+  }
+  const worker = await db
+    .prepare("SELECT id, name FROM workers WHERE id = ?")
+    .bind(workerId)
+    .first<{ id: string; name: string }>();
+  if (!worker) {
+    return c.json({ success: false, error: "Worker not found" }, 400);
+  }
+
+  // The compartment set for this variant in this department. Already-finished
+  // cards are excluded so a double-scan is a no-op (idempotent).
+  const cardsRes = await db
+    .prepare(
+      "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND status NOT IN ('COMPLETED','TRANSFERRED')",
+    )
+    .bind(poId, deptCode)
+    .all<JobCardRow>();
+  const cards = cardsRes.results ?? [];
+  if (cards.length === 0) {
+    const freshEmpty = await fetchPO(db, poId);
+    return c.json({
+      success: true,
+      data: {
+        deptCode,
+        completedJcIds: [],
+        completedCount: 0,
+        alreadyComplete: true,
+        workerName: worker.name,
+        po: freshEmpty,
+      },
+    });
+  }
+
+  // Prerequisite gate — soft-warn (202) if ANY compartment's upstream dept
+  // hasn't completed, unless the worker already acknowledged and re-posted
+  // with force:true. Mirrors /scan-complete's single-card gate.
+  const anyPrereqUnmet = cards.some((jc) => jc.prerequisiteMet !== 1);
+  if (anyPrereqUnmet && !forced) {
+    return c.json(
+      {
+        success: false,
+        requiresConfirmation: true,
+        warning: {
+          code: "PREREQUISITE_NOT_MET",
+          message: "Earlier dept hasn't completed. Continue anyway?",
+        },
+        data: { deptCode, blockedBy: "UPSTREAM_NOT_COMPLETED" },
+      },
+      202,
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+  const today = nowIso.split("T")[0];
+  const completedJcIds: string[] = [];
+
+  for (const jc of cards) {
+    if (jc.prerequisiteMet !== 1 && forced) {
+      await db
+        .prepare(
+          `INSERT INTO scan_override_audit
+             (id, workerId, workerName, jobCardId, productionOrderId,
+              overrideCode, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, 'PREREQUISITE_NOT_MET', 'force scan-dept', ?)`,
+        )
+        .bind(
+          `soa-${crypto.randomUUID().slice(0, 8)}`,
+          workerId,
+          worker.name,
+          jc.id,
+          jc.productionOrderId,
+          nowIso,
+        )
+        .run();
+    }
+
+    await ensurePiecePicsForJc(db, jc);
+    // Fill every still-empty pic1 slot with the scanning worker so the whole
+    // card (all pieces) completes in this one scan. Slots already claimed by
+    // someone else are left untouched (they still count as "done").
+    const slotsRes = await db
+      .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
+      .bind(jc.id)
+      .all<PiecePicRow>();
+    for (const slot of slotsRes.results ?? []) {
+      if (slot.pic1Id) continue;
+      await db
+        .prepare(
+          `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?`,
+        )
+        .bind(worker.id, worker.name, nowIso, nowIso, slot.id)
+        .run();
+    }
+
+    const allSlotsRes = await db
+      .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
+      .bind(jc.id)
+      .all<PiecePicRow>();
+    const slotList = allSlotsRes.results ?? [];
+    const allPiecesDone = slotList.length > 0 && slotList.every((s) => !!s.pic1Id);
+
+    const mergedJc: JobCardRow = { ...jc };
+    let jcJustCompleted = false;
+    if (allPiecesDone && jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") {
+      mergedJc.status = "COMPLETED";
+      mergedJc.completedDate = today;
+      mergedJc.overdue = "COMPLETED";
+      jcJustCompleted = true;
+    } else if (jc.status === "WAITING") {
+      mergedJc.status = "IN_PROGRESS";
+    }
+    const firstWithPic1 = slotList.find((s) => s.pic1Id);
+    const firstWithPic2 = slotList.find((s) => s.pic2Id);
+    if (!mergedJc.pic1Id && firstWithPic1) {
+      mergedJc.pic1Id = firstWithPic1.pic1Id;
+      mergedJc.pic1Name = firstWithPic1.pic1Name ?? "";
+    }
+    if (!mergedJc.pic2Id && firstWithPic2) {
+      mergedJc.pic2Id = firstWithPic2.pic2Id;
+      mergedJc.pic2Name = firstWithPic2.pic2Name ?? "";
+    }
+
+    await db
+      .prepare(
+        `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
+           pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
+      )
+      .bind(
+        mergedJc.status,
+        mergedJc.completedDate,
+        mergedJc.overdue,
+        mergedJc.pic1Id,
+        mergedJc.pic1Name ?? "",
+        mergedJc.pic2Id,
+        mergedJc.pic2Name ?? "",
+        mergedJc.id,
+      )
+      .run();
+
+    scheduleFireAndForget(c, fireAndForgetSyncJc(c, mergedJc, po));
+
+    if (jcJustCompleted) {
+      const siblings = await db
+        .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
+        .bind(poId)
+        .all<JobCardRow>();
+      await applyWipInventoryChange(
+        db,
+        po,
+        mergedJc,
+        "COMPLETED",
+        siblings.results ?? [],
+        jc.status,
+        { orgId: getOrgId(c), source: "SCAN" },
+      );
+      await postJobCardLabor(db, mergedJc.id, poId);
+      completedJcIds.push(mergedJc.id);
+    }
+  }
+
+  // ---- PO rollup + SO/CO cascade — run ONCE (mirror /scan-complete) ---------
+  const poJcsRes = await db
+    .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
+    .bind(poId)
+    .all<JobCardRow>();
+  const poJcs = poJcsRes.results ?? [];
+  const deptRank = (code: string | null | undefined): number => {
+    const idx = DEPT_ORDER.indexOf((code ?? "") as (typeof DEPT_ORDER)[number]);
+    return idx >= 0 ? idx : DEPT_ORDER.length;
+  };
+  const frontier = poJcs
+    .filter((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED")
+    .reduce<JobCardRow | null>((earliest, j) => {
+      if (!earliest) return j;
+      return deptRank(j.departmentCode) < deptRank(earliest.departmentCode)
+        ? j
+        : earliest;
+    }, null);
+  const newCurrentDept = frontier?.departmentCode || "PACKING";
+  await db
+    .prepare(
+      `UPDATE production_orders SET currentDepartment = ?, updated_at = ? WHERE id = ?`,
+    )
+    .bind(newCurrentDept, nowIso, poId)
+    .run();
+
+  let recomputed: Awaited<ReturnType<typeof recomputePoStatusAndProgress>> | null = null;
+  try {
+    recomputed = await recomputePoStatusAndProgress(db, poId);
+  } catch (err) {
+    console.error("[recomputePoStatusAndProgress] scan-complete-dept failed", {
+      poId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (recomputed?.after?.status === "COMPLETED") {
+    await postProductionOrderCompletion(db, poId);
+    await cascadePoCompletionToSO(db, po.salesOrderId);
+    await cascadePoCompletionToCO(db, po.consignmentOrderId);
+  }
+  await cascadeUpholsteryToSO(db, poId);
+  await cascadeUpholsteryToCO(db, poId);
+
+  const freshPo = await fetchPO(db, poId);
+  return c.json({
+    success: true,
+    data: {
+      deptCode,
+      completedJcIds,
+      completedCount: completedJcIds.length,
+      workerName: worker.name,
+      po: freshPo,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/production-orders/:id
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {

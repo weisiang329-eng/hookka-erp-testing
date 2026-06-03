@@ -1440,6 +1440,24 @@ export default function ProductionPage({
   // section explicitly.
   const [showQRStrip, setShowQRStrip] = useState(false);
   const [showFgPreview, setShowFgPreview] = useState(false);
+  // FAB_CUT-only "pull the next stage" sticker pair. On the Fab Cut tab the
+  // operator can also print the downstream Fabric Sewing (FAB_SEW) QR
+  // stickers for the SAME orders the Fab Cut grid is showing — so cut + sew
+  // stickers leave the cutting station together. Mirrors the Foam Bonding →
+  // Packing Show/Print split, but sourced from each order's FAB_SEW job
+  // cards (the WIP dept stickers, same kind as onScreenStickers /
+  // JobCardSticker) instead of FG stickers. Lazy like every other QR strip:
+  // the fabSewStickersForFabCut memo only builds once intent is signalled
+  // (Show clicked) so Fab Cut tab entry stays cheap — no extra render cost
+  // until the operator actually asks for the sewing stickers.
+  const [showFabSewStrip, setShowFabSewStrip] = useState(false);
+  // Set true the first time the operator clicks "Show Fab Sew QR" or
+  // "Print Fab Sew Stickers". Gates the fabSewStickersForFabCut memo so the
+  // FAB_SEW row scan + sticker fan-out doesn't run on plain Fab Cut entry.
+  const [fabSewIntent, setFabSewIntent] = useState(false);
+  // Loading flag shown on the "Print Fab Sew Stickers" button while the
+  // batch of QRs pre-renders (mirrors printingJobCards for the native pair).
+  const [printingFabSew, setPrintingFabSew] = useState(false);
   // Collapse both on tab change so the new tab starts fast; user re-opens
   // per tab if they actually need the QR grid.
   /* eslint-disable react-hooks/set-state-in-effect -- collapse panels on tab change */
@@ -3393,6 +3411,113 @@ export default function ProductionPage({
     return stickers;
   }, [filteredOrders, activeTab, wipNameFor, deptRows, gridFilteredDeptRows]);
 
+  // FAB_CUT only: the downstream Fabric Sewing (FAB_SEW) stickers for the
+  // SAME orders the Fab Cut grid is currently showing. This is a parallel to
+  // `onScreenStickers`, but instead of deriving from the ACTIVE dept's rows
+  // (FAB_CUT here), it derives from each visible order's FAB_SEW job-card
+  // rows. The output is the exact same JobCardSticker shape — fed through the
+  // same large tile + the same #batch-jobcard-print container — so a Fab Sew
+  // sticker pulled from the Fab Cut tab is byte-identical to one printed from
+  // the Fab Sew tab itself.
+  //
+  // Why source from `baseRows`: `deptRows`/`gridFilteredDeptRows` only carry
+  // the active (FAB_CUT) dept's rows. `baseRows` is the precomputed flat list
+  // for EVERY dept (tagged with `_deptCode`), so the FAB_SEW rows for the
+  // visible POs are already built there — no extra fetch, no rebuild. We just
+  // filter to `_deptCode === "FAB_SEW"`, scope to the Fab Cut grid's visible
+  // PO ids, and run the identical dept-tab fan-out loop from onScreenStickers
+  // (skip CUSHION/ARMREST/HEADREST sub-components, BASE→productCode WIP label,
+  // piecesToCut piece fan-out, p=N&t=M payload).
+  //
+  // Lazy: returns [] until the operator signals intent (`fabSewIntent`, flipped
+  // by Show Fab Sew QR / Print Fab Sew Stickers) so plain Fab Cut tab entry
+  // never pays for this second scan.
+  const fabSewStickersForFabCut = useMemo<JobCardSticker[]>(() => {
+    if (activeTab !== "FAB_CUT" || !fabSewIntent) return [];
+    const stickers: JobCardSticker[] = [];
+    const orderById = new Map(filteredOrders.map((o) => [o.id, o] as const));
+    // Scope to whatever the Fab Cut sheet is SHOWING — its column filters /
+    // in-grid search applied — falling back to the full FAB_CUT set until the
+    // DataGrid reports. Mirrors how onScreenStickers + the Foam packing flow
+    // scope to the grid's visible rows.
+    const fabCutRows =
+      (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
+    const visiblePoIds = new Set(fabCutRows.map((r) => r.poId));
+    // Pull the FAB_SEW rows for exactly those POs out of the all-dept flat
+    // list. Strip the internal `_deptCode` marker so the shape matches DeptRow.
+    const fabSewRows = baseRows.filter(
+      (r) => r._deptCode === "FAB_SEW" && visiblePoIds.has(r.poId),
+    );
+    for (const row of fabSewRows) {
+      const order = orderById.get(row.poId);
+      if (!order) continue;
+      // Same FAB_SEW rule as onScreenStickers: the operator sews the whole
+      // upholstery assembly in one pass — skip the Back Cushion / Armrest /
+      // Headrest sub-component JCs; the BASE sticker travels with the assembly.
+      if (
+        row.wipType === "CUSHION" ||
+        row.wipType === "ARMREST" ||
+        row.wipType === "HEADREST"
+      ) {
+        continue;
+      }
+      const opId = row.jobCardId;
+      const pieceCount = Math.max(1, row.piecesToCut || 1);
+      const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
+      // BASE on FAB_SEW shows the variant-qualified product code as the WIP
+      // label (e.g. "5540-1A(LHF)"), not the long fabric-encoded string —
+      // identical to the FAB_SEW branch of onScreenStickers.
+      const stickerWipName =
+        row.wipType === "BASE"
+          ? row.productCode || row.model || row.wip || ""
+          : row.wip;
+      for (let p = 1; p <= pieceCount; p++) {
+        stickers.push({
+          key: pieceCount > 1 ? `fabsew:${row.id}:${p}` : `fabsew:${row.id}`,
+          poNo: order.poNo,
+          deptCode: "FAB_SEW",
+          jobCardId: opId,
+          wipName: stickerWipName,
+          wipCode: "",
+          sizeLabel: row.size || "",
+          qty: displayQty,
+          customerPOId: row.customerPOId || "",
+          customerState: row.customerState || "",
+          customerName: row.customerName || "",
+          customerRef: row.customerRef || "",
+          salesOrderNo: row.salesOrderNo || "",
+          model: row.model || "",
+          wipType: row.wipType || "",
+          category: row.category || "",
+          colour: row.colour || "",
+          gap: row.gap || "",
+          divan: row.divan || "",
+          leg: row.leg || "",
+          totalHeight: row.totalHeight || "",
+          specialOrder: row.specialOrder || "",
+          pieceNo: p,
+          totalPieces: pieceCount,
+          qrPayload: generateStickerData(
+            order.poNo,
+            "FAB_SEW",
+            opId,
+            "/worker/scan",
+            pieceCount > 1 ? p : undefined,
+            pieceCount > 1 ? pieceCount : undefined,
+          ),
+        });
+      }
+    }
+    return stickers;
+  }, [
+    activeTab,
+    fabSewIntent,
+    filteredOrders,
+    baseRows,
+    deptRows,
+    gridFilteredDeptRows,
+  ]);
+
   // Build + trigger batch print for job-card stickers. Fires once state is
   // rendered into the hidden container via the useEffect below.
   const handlePrintJobCardStickers = useCallback(async () => {
@@ -3427,6 +3552,150 @@ export default function ProductionPage({
       setPrintingJobCards(false);
     }
   }, [onScreenStickers, activeTab, toast]);
+
+  // FAB_CUT only: Show / Print the downstream Fab Sew stickers. Mirrors the
+  // native Show QR / Print All pair, but acts on `fabSewStickersForFabCut`.
+  //
+  // Show: flips intent (so the memo builds) + toggles the on-screen strip.
+  // First click pays the build cost; subsequent toggles are instant.
+  const handleShowFabSewStrip = useCallback(() => {
+    setFabSewIntent(true);
+    setShowFabSewStrip((v) => !v);
+  }, []);
+
+  // Print: builds the same FAB_SEW batch and pushes it into the SAME hidden
+  // #batch-jobcard-print container via setJobCardStickers — exactly like
+  // handlePrintJobCardStickers. Because we're on the FAB_CUT tab, the print
+  // container's `useLargeSticker` flag is already true, so the FAB_SEW tiles
+  // render through the 100×150mm large layout identical to the Fab Sew tab.
+  // We force intent on first so the memo has populated before we read it; if
+  // it's still building (synchronous useMemo, so it isn't) we fall back to an
+  // info toast.
+  const handlePrintFabSewStickers = useCallback(async () => {
+    setFabSewIntent(true);
+    const source = fabSewStickersForFabCut;
+    if (source.length === 0) {
+      toast.info("No Fab Sew job cards for the orders in the current Fab Cut filter.");
+      return;
+    }
+    // Same mega-print guard-rail as the native pair.
+    if (source.length > 500) {
+      const ok = window.confirm(
+        `This will print ${source.length} Fab Sew stickers (${source.length} pages of 100×150 mm). Continue?`,
+      );
+      if (!ok) return;
+    }
+    setPrintingFabSew(true);
+    try {
+      // Re-generate every QR locally — same reason as the native print path:
+      // the 300 ms print timeout can't wait on hundreds of external HTTP QRs.
+      const batch: JobCardSticker[] = await Promise.all(
+        source.map(async (s) => ({
+          ...s,
+          qrDataUrl: await getQRCodeDataURL(s.qrPayload, 300),
+        })),
+      );
+      setFgStickers([]); // never mix modes in one print job
+      setJobCardStickers(batch);
+    } finally {
+      setPrintingFabSew(false);
+    }
+  }, [fabSewStickersForFabCut, toast]);
+
+  // Shared 230×380px on-screen sticker tile (the FAB_CUT / FAB_SEW large
+  // tile). Extracted so the native QR Stickers strip AND the FAB_CUT "Show
+  // Fab Sew QR" strip render through the exact same markup — a Fab Sew tile
+  // pulled from the Fab Cut tab is then pixel-identical to one shown on the
+  // Fab Sew tab (and, since it's the same JobCardSticker shape, identical to
+  // its 100×150mm print page too). Wei Siang 2026-05-15 layout (mockup #3):
+  // PO No headline → Customer/Model/WIP → Size/Colour/Gap/Divan/Leg/Total H/
+  // Notes → QR + Fab Cut / Fab Sew sign-off lines + Qty.
+  const renderLargeStickerTile = useCallback((s: JobCardSticker) => (
+    <div
+      key={s.key}
+      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2 overflow-hidden"
+      style={{ width: "230px", height: "380px" }}
+      title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
+    >
+      <div className="text-center font-bold leading-tight" style={{ fontSize: "16px" }}>
+        {s.poNo}
+      </div>
+      <div className="border-t border-black my-1" />
+      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
+        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
+        <div className="flex items-baseline gap-1">
+          <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
+          <span
+            className="flex-1 break-words"
+            style={{
+              fontSize: "12px",
+              lineHeight: 1.2,
+            }}
+          >: {s.customerName || "—"}</span>
+        </div>
+        <div className="flex items-baseline gap-1">
+          <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
+          <span className="font-bold" style={{ fontSize: "16px" }}>: {s.model || "—"}</span>
+        </div>
+        {s.wipName && (
+          <div className="flex items-baseline gap-1">
+            <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
+            <span
+              className="flex-1 break-words"
+              style={{
+                fontSize: "11px",
+                lineHeight: 1.2,
+              }}
+            >: {s.wipName}</span>
+          </div>
+        )}
+      </div>
+      <div className="border-t border-[#E6E0D9] my-1" />
+      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
+        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
+        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
+        {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
+        {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
+        {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
+        {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
+        <div className="flex items-baseline gap-1">
+          <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
+          <span
+            className="flex-1 break-words"
+            style={{
+              fontSize: "11px",
+              lineHeight: 1.2,
+            }}
+          >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
+        </div>
+      </div>
+      <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
+        <div className="flex items-end gap-2 pt-1">
+          <QRImg data={s.qrPayload} size={84} alt="Job card QR" className="block shrink-0" />
+          <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between text-[11px]">
+            <div className="space-y-3">
+              <div className="flex items-end gap-1">
+                <span className="font-semibold whitespace-nowrap text-[10px]">Fab Cut :</span>
+                <span className="flex-1 border-b border-black h-[22px]" />
+              </div>
+              <div className="flex items-end gap-1">
+                <span className="font-semibold whitespace-nowrap text-[10px]">Fab Sew :</span>
+                <span className="flex-1 border-b border-black h-[22px]" />
+              </div>
+            </div>
+            <div className="flex items-baseline justify-between mt-1">
+              <span className="font-bold" style={{ fontSize: "13px" }}>Qty {s.qty}</span>
+              {s.totalPieces > 1 && (
+                <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
+                  {s.pieceNo} of {s.totalPieces}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  ), []);
 
   // Race-guard token — incremented on every loadFgStickers call so a slow
   // earlier fetch can't OVERWRITE a faster newer one. When user changes a
@@ -4132,6 +4401,19 @@ export default function ProductionPage({
     setFoamPrintStickers([]);
     setShowFoamPackingPreview(false);
   }, [fltSearch, gridFilteredDeptRows]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Leaving the Fab Cut tab → collapse the Fab Sew strip and drop intent, so
+  // re-entering Fab Cut is cheap again (no FAB_SEW row scan until the operator
+  // asks). The fabSewStickersForFabCut memo already gates on the same
+  // activeTab + intent, so this only resets the UI flags.
+  /* eslint-disable react-hooks/set-state-in-effect -- collapse Fab Sew strip on tab leave */
+  useEffect(() => {
+    if (activeTab !== "FAB_CUT") {
+      setShowFabSewStrip(false);
+      setFabSewIntent(false);
+    }
+  }, [activeTab]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Grid-filter scoped FG stickers — single source of truth shared by the
@@ -6501,6 +6783,42 @@ export default function ProductionPage({
                 </>
               );
             })()}
+            {/* FAB_CUT-only: pull the downstream Fab Sew QR stickers for the
+                same orders the Fab Cut grid is showing — so the cutting
+                station can also print the next-stage sewing stickers. Mirrors
+                the native Show QR / Print All pair (and the Foam → Packing
+                split), but acts on `fabSewStickersForFabCut`. The native Fab
+                Cut Show QR / Print All buttons above are untouched. */}
+            {activeTab === "FAB_CUT" && (() => {
+              // Count only meaningful once intent has fired (memo is gated);
+              // before that the label just invites the operator to load.
+              const count = fabSewStickersForFabCut.length;
+              return (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleShowFabSewStrip}
+                    title="Show the downstream Fabric Sewing QR stickers for the orders in the current Fab Cut filter"
+                  >
+                    {showFabSewStrip
+                      ? "Hide Fab Sew QR"
+                      : fabSewIntent && count > 0
+                        ? `Show Fab Sew QR (${count})`
+                        : "Show Fab Sew QR"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePrintFabSewStickers}
+                    disabled={printingFabSew}
+                    title="Print the downstream Fabric Sewing QR stickers for the orders in the current Fab Cut filter"
+                  >
+                    {printingFabSew ? "Generating…" : "Print Fab Sew Stickers"}
+                  </Button>
+                </>
+              );
+            })()}
           </div>
         </div>
         {onScreenStickers.length === 0 ? (
@@ -6524,123 +6842,10 @@ export default function ProductionPage({
                 // Other dept tabs keep the old compact 180px tile.
                 const useLargeTile = activeTab === "FAB_CUT" || activeTab === "FAB_SEW";
                 if (useLargeTile) {
-                  return (
-                    <div
-                      key={s.key}
-                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2 overflow-hidden"
-                      style={{ width: "230px", height: "380px" }}
-                      title={`${s.customerPOId || s.poNo} · ${s.model} · Qty ${s.qty}`}
-                    >
-                      {/* Wei Siang 2026-05-15: "FG sticker 你就做到很好啊"
-                          — mirror FG sticker proportions / fonts exactly.
-                          Same 230×380px tile, same 10px row fonts, same
-                          16px title, same w-[72px] label column, same
-                          space-y-[2px] density. Only the BOTTOM block
-                          differs: instead of FG's QR + piece-position,
-                          Fab Cut/Sew puts QR (smaller) + Fabric Cutting /
-                          Fabric Sewing sign-off lines + Qty. */}
-                      <div className="text-center font-bold leading-tight" style={{ fontSize: "16px" }}>
-                        {s.poNo}
-                      </div>
-                      <div className="border-t border-black my-1" />
-                      {/* Wei Siang 2026-05-15: template MUST be uniform across
-                          all stickers — same row count, same heights, same
-                          positions. Long-value rows (Customer Name, WIP,
-                          Notes) use a smaller value font + truncate so they
-                          stay on 1 line regardless of content length.
-                          Short-value rows (PO No, Size, Colour, etc.) keep
-                          the bigger 12px font. */}
-                      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">PO No</span>: {s.customerPOId || "—"}</div>
-                        <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
-                          {/* Wei Siang 2026-05-15: long-value cells
-                              (Customer Name, WIP, Notes) wrap freely
-                              via break-words at slightly smaller font.
-                              No line-clamp / truncation — Wei Siang's
-                              rule: "你不可以删啊 我还是要看得到东西".
-                              Container-level overflow-hidden on the
-                              tile is the only bound; in practice tiles
-                              have enough vertical slack since sofa
-                              skips Gap/Divan/Total H rows. */}
-                          <span
-                            className="flex-1 break-words"
-                            style={{
-                              fontSize: "12px",
-                              lineHeight: 1.2,
-                            }}
-                          >: {s.customerName || "—"}</span>
-                        </div>
-                        <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[100px] font-semibold text-[#6B7280]">Model</span>
-                          <span className="font-bold" style={{ fontSize: "16px" }}>: {s.model || "—"}</span>
-                        </div>
-                        {s.wipName && (
-                          <div className="flex items-baseline gap-1">
-                            <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
-                            <span
-                              className="flex-1 break-words"
-                              style={{
-                                fontSize: "11px",
-                                lineHeight: 1.2,
-                              }}
-                            >: {s.wipName}</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[13px] leading-tight text-[#1F1D1B]">
-                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel || "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Colour</span>: {s.colour || "—"}</div>
-                        {s.gap && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Gap</span>: {s.gap}</div>}
-                        {s.divan && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Divan</span>: {s.divan}</div>}
-                        {s.leg && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Leg</span>: {s.leg}</div>}
-                        {s.totalHeight && <div><span className="inline-block w-[100px] font-semibold text-[#6B7280]">Total H</span>: {s.totalHeight}</div>}
-                        <div className="flex items-baseline gap-1">
-                          <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
-                          <span
-                            className="flex-1 break-words"
-                            style={{
-                              fontSize: "11px",
-                              lineHeight: 1.2,
-                            }}
-                          >: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</span>
-                        </div>
-                      </div>
-                      {/* Bottom block: QR on left + sign-off + Qty on
-                          right. Same dashed-top + mt-auto pattern as
-                          FG sticker's QR+piece-position section.
-                          Wei Siang 2026-05-15: bigger top info + more
-                          space between Fabric Cutting / Fabric Sewing
-                          sign-off lines (factory operator writes name
-                          + date on each line). */}
-                      <div className="mt-auto pt-1 border-t border-dashed border-[#6B5C32]">
-                        <div className="flex items-end gap-2 pt-1">
-                          <QRImg data={s.qrPayload} size={84} alt="Job card QR" className="block shrink-0" />
-                          <div className="flex-1 min-w-0 self-stretch flex flex-col justify-between text-[11px]">
-                            <div className="space-y-3">
-                              <div className="flex items-end gap-1">
-                                <span className="font-semibold whitespace-nowrap text-[10px]">Fab Cut :</span>
-                                <span className="flex-1 border-b border-black h-[22px]" />
-                              </div>
-                              <div className="flex items-end gap-1">
-                                <span className="font-semibold whitespace-nowrap text-[10px]">Fab Sew :</span>
-                                <span className="flex-1 border-b border-black h-[22px]" />
-                              </div>
-                            </div>
-                            <div className="flex items-baseline justify-between mt-1">
-                              <span className="font-bold" style={{ fontSize: "13px" }}>Qty {s.qty}</span>
-                              {s.totalPieces > 1 && (
-                                <span className="font-semibold text-[#6B7280]" style={{ fontSize: "10px" }}>
-                                  {s.pieceNo} of {s.totalPieces}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
+                  // Reuse the shared 230×380px large tile so the on-
+                  // screen preview is identical to the print page and to
+                  // the FAB_CUT Fab Sew strip below.
+                  return renderLargeStickerTile(s);
                 }
                 // Default 180px compact tile for other dept tabs
                 return (
@@ -6700,6 +6905,40 @@ export default function ProductionPage({
                 );
               })}
             </div>
+          </div>
+        )}
+        {/* FAB_CUT-only: on-screen preview of the downstream Fab Sew QR
+            stickers for the orders the Fab Cut grid is showing. Lives INSIDE
+            the QR Stickers panel (alongside the Foam → Packing preview), so
+            the operator's mental model stays "this panel = stickers I can pull
+            from this dept". Each tile is rendered through the SAME
+            renderLargeStickerTile helper the native FAB_CUT / FAB_SEW strip
+            uses, so a Fab Sew tile pulled here is pixel-identical to one on
+            the Fab Sew tab — and to its 100×150mm print page. Gated on
+            showFabSewStrip so it only mounts the <QRImg> tree on intent. */}
+        {activeTab === "FAB_CUT" && showFabSewStrip && fabSewStickersForFabCut.length > 0 && (
+          <div className="border-t border-[#F0F0F0]">
+            <div className="px-4 py-2 bg-[#FAF8F4] border-b border-[#F0F0F0] text-xs text-[#6B5C32] font-semibold flex items-center justify-between">
+              <span>
+                Fab Sew Stickers preview · {fabSewStickersForFabCut.length} sticker
+                {fabSewStickersForFabCut.length === 1 ? "" : "s"}
+              </span>
+              <span className="text-[#8A7F73] font-normal">
+                Same layout, size, content as the Fab Sew dept print
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <div className="flex gap-3 p-3 min-w-min">
+                {fabSewStickersForFabCut.map((s) => renderLargeStickerTile(s))}
+              </div>
+            </div>
+          </div>
+        )}
+        {/* FAB_CUT-only: empty-state hint when the operator clicked Show but
+            no FAB_SEW job cards exist for the visible Fab Cut orders. */}
+        {activeTab === "FAB_CUT" && showFabSewStrip && fabSewStickersForFabCut.length === 0 && (
+          <div className="border-t border-[#F0F0F0] px-4 py-6 text-center text-xs text-[#9A918A]">
+            No Fab Sew job cards for the orders in the current Fab Cut filter.
           </div>
         )}
         {/* Foam-only Packing-sticker on-screen preview. Lives INSIDE

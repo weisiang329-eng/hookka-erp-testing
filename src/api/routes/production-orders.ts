@@ -1141,6 +1141,15 @@ async function attachCustomerSO(
     salesOrderId: string;
     consignmentOrderId: string;
     customerSO: string;
+    // 2026-06-03: the PO row carries snapshot copies of customerPOId /
+    // customerReference, but those snapshots are sparsely populated on the
+    // production_orders table — the live values live on the joined
+    // sales_orders row (customerPOId / customerPO + reference). Same batch
+    // join already loads the SO, so we enrich both here too (preferring the
+    // populated SO values, PO snapshot as fallback). Mirrors the Delivery
+    // page fix (commit 2c548b60): *Id column first, plain column next.
+    customerPOId?: string;
+    customerReference?: string;
     // 2026-05-28: planning aid — surface the customer's requested delivery
     // date + Hookka's internal expected DD on the production sheet so the
     // operator can plan against the real promise without flipping to the SO.
@@ -1158,6 +1167,9 @@ async function attachCustomerSO(
     new Set(pos.map((p) => p.consignmentOrderId).filter(Boolean)),
   );
   const soMap = new Map<string, string>();
+  // SO id → enriched customer PO / reference (prefer-*Id resolved). Populated
+  // from the same SO chunk query below (no extra round-trip).
+  const soRefMap = new Map<string, { customerPOId: string; reference: string }>();
   const coMap = new Map<string, string>();
   // SO id → { customerDeliveryDate, hookkaExpectedDD }. Populated from the
   // same SO chunk query below (no extra round-trip).
@@ -1185,12 +1197,15 @@ async function attachCustomerSO(
       soChunks.map((slice) =>
         db
           .prepare(
-            `SELECT id, customerSOId, customerDeliveryDate, hookkaExpectedDD FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
+            `SELECT id, customerSOId, customerPOId, customerPO, reference, customerDeliveryDate, hookkaExpectedDD FROM sales_orders WHERE id IN (${slice.map(() => "?").join(",")})`,
           )
           .bind(...slice)
           .all<{
             id: string;
             customerSOId: string | null;
+            customerPOId: string | null;
+            customerPO: string | null;
+            reference: string | null;
             customerDeliveryDate: string | null;
             hookkaExpectedDD: string | null;
           }>(),
@@ -1210,6 +1225,12 @@ async function attachCustomerSO(
   for (const res of soResults) {
     for (const r of res.results ?? []) {
       soMap.set(r.id, r.customerSOId || "");
+      // Prefer the populated *Id column, then the plain column. Mirrors the
+      // Delivery page resolution (commit 2c548b60).
+      soRefMap.set(r.id, {
+        customerPOId: r.customerPOId || r.customerPO || "",
+        reference: r.reference || "",
+      });
       soDatesMap.set(r.id, {
         customerDeliveryDate: (r.customerDeliveryDate || "").slice(0, 10),
         hookkaExpectedDD: (r.hookkaExpectedDD || "").slice(0, 10),
@@ -1222,6 +1243,14 @@ async function attachCustomerSO(
   for (const p of pos) {
     p.customerSO =
       soMap.get(p.salesOrderId) || coMap.get(p.consignmentOrderId) || "";
+    // Enrich customerPOId / customerReference from the joined SO, preferring
+    // the populated SO values over the (sparse) production_orders snapshot.
+    // CO-origin POs (no salesOrderId) keep their existing snapshot values.
+    const ref = soRefMap.get(p.salesOrderId);
+    if (ref) {
+      p.customerPOId = ref.customerPOId || p.customerPOId || "";
+      p.customerReference = ref.reference || p.customerReference || "";
+    }
     const dates = soDatesMap.get(p.salesOrderId);
     p.customerDeliveryDate = dates?.customerDeliveryDate || "";
     p.hookkaExpectedDD = dates?.hookkaExpectedDD || "";
@@ -5832,6 +5861,19 @@ app.get("/:id", async (c) => {
   if (!po) {
     return c.json({ success: false, error: "Production order not found" }, 404);
   }
+  // fetchPO does not batch-join the SO, so customerSO would be "" and
+  // customerPOId / customerReference would carry only the (sparse) PO
+  // snapshot. Run the same enrichment as the list endpoints so a single-PO
+  // fetch resolves Customer SO / PO / Ref from the populated sales_orders
+  // columns (mirrors commit 2c548b60 on the Delivery page).
+  await attachCustomerSO(
+    c.var.DB,
+    [po] as Array<{
+      salesOrderId: string;
+      consignmentOrderId: string;
+      customerSO: string;
+    }>,
+  );
   return c.json({ success: true, data: po });
 });
 

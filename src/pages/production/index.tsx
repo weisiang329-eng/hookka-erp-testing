@@ -3806,10 +3806,13 @@ export default function ProductionPage({
         try {
           const r = await fetch(`/api/sales-orders/${encodeURIComponent(id)}`);
           const j = (await r.json().catch(() => null)) as
-            | { success?: boolean; data?: { customerSO?: string | null } }
+            | { success?: boolean; data?: { customerSO?: string | null; customerSOId?: string | null } }
             | null;
           if (j?.success && j.data) {
-            customerSOBySo.set(id, j.data.customerSO || "");
+            // Prefer the populated customerSOId column over the sparse
+            // customerSO column (same resolution as the Delivery page fix,
+            // commit 2c548b60).
+            customerSOBySo.set(id, j.data.customerSOId || j.data.customerSO || "");
           }
         } catch {
           // tolerate single-fetch failure — sticker just shows "—"

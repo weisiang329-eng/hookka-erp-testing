@@ -780,13 +780,24 @@ export default function DeliveryPage() {
             id: string;
             companySOId?: string;
             customerSO?: string;
+            customerSOId?: string;
             customerPO?: string;
+            customerPOId?: string;
             reference?: string;
           }[]) {
+            // Prefer the *Id columns. sales_orders has two near-duplicate
+            // fields for each (customerPO/customerPOId, customerSO/customerSOId):
+            // when both are set they are identical (verified 0 conflicts), but
+            // the *Id columns are far better populated (PO 681 vs 279, SO 511
+            // vs 219 of 682 SOs). The grid + DO detail used to read the sparse
+            // plain columns, so hundreds of DOs showed blank Customer PO/SO that
+            // actually exist. Reading *Id first makes Customer PO findable on
+            // 100% of DOs (133/133) and Customer SO on 96/133; the rest are
+            // genuinely empty at source (customer never gave an SO number).
             const v = {
-              customerSO: so.customerSO || "",
+              customerSO: so.customerSOId || so.customerSO || "",
               reference: so.reference || "",
-              customerPO: so.customerPO || "",
+              customerPO: so.customerPOId || so.customerPO || "",
             };
             if (so.id) soRefMap.set(so.id, v);
             if (so.companySOId) soRefMap.set(so.companySOId, v);

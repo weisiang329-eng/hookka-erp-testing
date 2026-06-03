@@ -2283,6 +2283,9 @@ app.post("/", async (c) => {
       customerName: string | null;
       customerState: string | null;
       customerPOId: string | null;
+      customerSOId: string | null;
+      customerSO: string | null;
+      reference: string | null;
       companySO: string | null;
       companySOId: string | null;
       hubId: string | null;
@@ -2291,6 +2294,7 @@ app.post("/", async (c) => {
     if (salesOrderId) {
       salesOrderRow = await c.var.DB.prepare(
         `SELECT id, customerId, customerName, customerState, customerPOId,
+                customerSOId, customerSO, reference,
                 companySO, companySOId, hubId, hookkaExpectedDD
            FROM sales_orders WHERE id = ?`,
       )
@@ -2644,7 +2648,8 @@ app.post("/", async (c) => {
       c.var.DB.prepare(
         `INSERT INTO delivery_orders (
            id, doNo, salesOrderId, companySO, companySOId, customerId,
-           customerPOId, customerName, customerState, hubId, hubName,
+           customerPOId, customerSOId, customerSO, reference,
+           customerName, customerState, hubId, hubName,
            deliveryAddress, contactPerson, contactPhone, deliveryDate,
            hookkaExpectedDD, driverId, driverName, driverContactPerson,
            driverPhone, vehicleId, vehicleNo, vehicleType, totalM3,
@@ -2654,7 +2659,7 @@ app.post("/", async (c) => {
            proofOfDelivery, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?)`,
+                   ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         doNo,
@@ -2663,6 +2668,13 @@ app.post("/", async (c) => {
         salesOrderRow?.companySOId ?? body.companySOId ?? null,
         customerRow.id,
         salesOrderRow?.customerPOId ?? body.customerPOId ?? null,
+        // Snapshot the customer's own SO no. + reference onto the DO at
+        // creation (single-SO path; multi-SO DOs leave these null and the UI
+        // live-joins per line). Mirrors the customerPOId snapshot above so a DO
+        // is a durable, self-contained document — Wei Siang 2026-06-03.
+        salesOrderRow?.customerSOId ?? body.customerSOId ?? null,
+        salesOrderRow?.customerSO ?? body.customerSO ?? null,
+        salesOrderRow?.reference ?? body.reference ?? null,
         customerRow.name,
         salesOrderRow?.customerState ?? body.customerState ?? null,
         defaultHub?.id ?? null,

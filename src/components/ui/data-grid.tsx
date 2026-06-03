@@ -659,9 +659,9 @@ function ColumnFilterDropdown<T>({
   }, [dateFlatValues, search]);
 
   // ----- Date column quick chips -----
-  // Exactly four buckets: Overdue / Today / This Week / This Month.
-  // Bucket math is REUSED from `datePresets` (Today / This Week / This
-  // Month) so it stays consistent with the "Date Filters" tab. "Overdue" =
+  // Five buckets: Overdue / Today / Tomorrow / This Week / This Month.
+  // Bucket math is REUSED from `datePresets` (Today / Tomorrow / This Week /
+  // This Month) so it stays consistent with the "Date Filters" tab. "Overdue" =
   // strictly before today (no matching preset exists, so it is computed
   // with the same `today0()` boundary the presets use — a [−∞, yesterday]
   // range). Each chip carries the raw date strings it covers (`matchValues`)
@@ -692,7 +692,7 @@ function ColumnFilterDropdown<T>({
       return x < today0().getTime();
     });
     buckets.push({ label: "Overdue", entries: overdueEntries });
-    for (const label of ["Today", "This Week", "This Month"]) {
+    for (const label of ["Today", "Tomorrow", "This Week", "This Month"]) {
       const r = presetRange(label);
       buckets.push({ label, entries: r ? inRange(r[0], r[1]) : [] });
     }

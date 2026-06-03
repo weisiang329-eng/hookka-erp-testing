@@ -5,7 +5,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatDate } from "@/lib/utils";
 import { ArrowLeft, Search, ChevronUp, ChevronDown, Factory, BarChart3 } from "lucide-react";
-import { useCachedJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
+import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
+import { BatchActionToolbar, ApplyBatchDueDateDialog } from "./components/BatchActionToolbar";
+
+function csrfHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  const csrf = readCsrfCookie();
+  if (csrf) h[CSRF_HEADER_NAME] = csrf;
+  return h;
+}
 
 type JobCard = {
   id: string; departmentId: string; departmentCode: string; departmentName: string; sequence: number;
@@ -107,8 +117,9 @@ function getDeptEfficiency(orders: ProductionOrder[]) {
 
 export default function MasterTrackerPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (per-dept JC lookup uses them).
-  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards");
+  const { data: ordersResp, loading, refresh } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards");
   const orders: ProductionOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
     [ordersResp]
@@ -124,6 +135,18 @@ export default function MasterTrackerPage() {
   // Sorting
   const [sortField, setSortField] = useState<SortField>("poNo");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Multi-select + batch Due Date. Each tracker row is a whole production
+  // order (one PO spans up to 8 department job cards), so the batch action
+  // also needs a department scope: which department's job card gets the new
+  // due date. "ALL" writes the date to every department job card on each
+  // selected order. Mirrors index.tsx / folder-detail.tsx: same
+  // ApplyBatchDueDateDialog, same /api/production-orders/bulk-patch endpoint,
+  // same toast + optimistic refetch behaviour. The only addition the tracker
+  // needs is this department scope, because its rows are orders not job cards.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDept, setBatchDept] = useState<string>("ALL");
+  const [batchDueDateOpen, setBatchDueDateOpen] = useState(false);
 
   const filteredOrders = useMemo(() => {
     let result = [...orders];
@@ -184,6 +207,88 @@ export default function MasterTrackerPage() {
     } else {
       setSortField(field);
       setSortDir("asc");
+    }
+  };
+
+  // The currently-selected orders (intersect the id set with the live list so
+  // a row that was filtered out / removed can't linger in the selection).
+  const selectedOrders = useMemo(
+    () => orders.filter((o) => selectedIds.has(o.id)),
+    [orders, selectedIds],
+  );
+
+  const allFilteredSelected =
+    filteredOrders.length > 0 && filteredOrders.every((o) => selectedIds.has(o.id));
+
+  const toggleRow = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      if (filteredOrders.every((o) => prev.has(o.id))) {
+        // All visible already selected → clear just the visible ones.
+        const next = new Set(prev);
+        for (const o of filteredOrders) next.delete(o.id);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const o of filteredOrders) next.add(o.id);
+      return next;
+    });
+  };
+
+  // Batch Due Date apply — reuses the EXACT endpoint + patch shape from
+  // index.tsx (L6199-6210) and folder-detail.tsx (L615-626):
+  // POST /api/production-orders/bulk-patch { patches: [{ poId, jobCardId, dueDate }] }.
+  // Builds one patch per (selected order × matching department job card),
+  // scoped to batchDept ("ALL" → every dept job card on the order). dueDate
+  // only — status is intentionally untouched (schedule vs progress).
+  const applyBatchDueDate = async (date: string) => {
+    setBatchDueDateOpen(false);
+    const patches: Array<{ poId: string; jobCardId: string; dueDate: string }> = [];
+    for (const order of selectedOrders) {
+      for (const jc of order.jobCards) {
+        if (batchDept !== "ALL" && jc.departmentCode !== batchDept) continue;
+        patches.push({ poId: order.id, jobCardId: jc.id, dueDate: date });
+      }
+    }
+    if (patches.length === 0) {
+      toast.error(
+        batchDept === "ALL"
+          ? "Selected orders have no job cards to update."
+          : `No ${DEPARTMENTS.find((d) => d.code === batchDept)?.name ?? batchDept} job cards on the selected orders.`,
+      );
+      return;
+    }
+    try {
+      const res = await fetch("/api/production-orders/bulk-patch", {
+        method: "POST",
+        headers: csrfHeaders(),
+        body: JSON.stringify({ patches }),
+        credentials: "include",
+      });
+      const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
+      const failed = (j.results || []).filter((x) => !x.success);
+      if (failed.length > 0) {
+        toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+      } else {
+        const scope = batchDept === "ALL" ? "all departments" : (DEPARTMENTS.find((d) => d.code === batchDept)?.name ?? batchDept);
+        const verb = date ? "Set due date" : "Cleared due date";
+        toast.success(`${verb} (${scope}) on ${selectedOrders.length} order${selectedOrders.length === 1 ? "" : "s"}.`);
+      }
+      // Drop the cached matrix + force this page's hook to refetch so the new
+      // dates show. Same invalidate prefix the production page uses.
+      invalidateCachePrefix("/api/production-orders");
+      refresh();
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -350,7 +455,16 @@ export default function MasterTrackerPage() {
             <table className="w-full text-xs whitespace-nowrap">
               <thead>
                 <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                  <th className="h-9 px-2 text-left font-medium text-[#374151] sticky left-0 bg-[#F0ECE9] z-10 cursor-pointer" onClick={() => toggleSort("poNo")}>
+                  <th className="h-9 w-9 px-2 text-center font-medium text-[#374151] sticky left-0 bg-[#F0ECE9] z-20">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible orders"
+                      checked={allFilteredSelected}
+                      onChange={toggleSelectAll}
+                      className="cursor-pointer align-middle"
+                    />
+                  </th>
+                  <th className="h-9 px-2 text-left font-medium text-[#374151] sticky left-9 bg-[#F0ECE9] z-10 cursor-pointer" onClick={() => toggleSort("poNo")}>
                     <div className="flex items-center gap-1">SO ID <SortIcon active={sortField === "poNo"} dir={sortDir} /></div>
                   </th>
                   <th className="h-9 px-2 text-left font-medium text-[#374151]">Sales Order</th>
@@ -394,24 +508,37 @@ export default function MasterTrackerPage() {
               <tbody>
                 {filteredOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={27} className="py-12 text-center text-[#9CA3AF] text-sm">
+                    <td colSpan={28} className="py-12 text-center text-[#9CA3AF] text-sm">
                       No production orders match the current filters.
                     </td>
                   </tr>
                 ) : (
                   filteredOrders.map((order) => {
                     const overdue = getOverdueDisplay(order);
+                    const isSelected = selectedIds.has(order.id);
                     return (
                       <tr
                         key={order.id}
-                        className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                        className={`border-b border-[#E2DDD8] cursor-pointer ${isSelected ? "bg-[#FFF8E6] hover:bg-[#FBEFC9]" : "hover:bg-[#FAF9F7]"}`}
                         onClick={() => {
                           if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
                           else if (order.consignmentOrderId)
                             navigate(`/consignment/${order.consignmentOrderId}`);
                         }}
                       >
-                        <td className="px-2 py-1.5 font-medium doc-number sticky left-0 bg-white z-10">
+                        <td
+                          className={`px-2 py-1.5 text-center sticky left-0 z-10 ${isSelected ? "bg-[#FFF8E6]" : "bg-white"}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`Select order ${order.poNo}`}
+                            checked={isSelected}
+                            onChange={() => toggleRow(order.id)}
+                            className="cursor-pointer align-middle"
+                          />
+                        </td>
+                        <td className={`px-2 py-1.5 font-medium doc-number sticky left-9 z-10 ${isSelected ? "bg-[#FFF8E6]" : "bg-white"}`}>
                           {order.poNo}
                         </td>
                         <td className="px-2 py-1.5 doc-number text-[#4B5563]">{order.salesOrderNo}</td>
@@ -494,6 +621,54 @@ export default function MasterTrackerPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Batch Due Date — multi-select rows, pick a department scope + a date,
+          Apply. Reuses the production page's BatchActionToolbar +
+          ApplyBatchDueDateDialog + /api/production-orders/bulk-patch endpoint.
+          The department scope picker is tracker-specific: each row is a whole
+          order spanning up to 8 dept job cards, so the operator chooses which
+          department's due date to set (or all). */}
+      {selectedOrders.length > 0 && (
+        <div className="sticky bottom-[68px] left-3 right-3 z-30 flex items-center gap-2 rounded-md border border-[#C9A227] bg-[#FFF8E6] px-3 py-2 shadow-md">
+          <span className="text-[12px] font-semibold text-[#5A4500]">Due Date department:</span>
+          <select
+            value={batchDept}
+            onChange={(e) => setBatchDept(e.target.value)}
+            className="h-8 rounded border border-[#D4CFC7] bg-white px-2 text-[12px] text-[#3A2E22] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+          >
+            <option value="ALL">All departments</option>
+            {DEPARTMENTS.map((dept) => (
+              <option key={dept.code} value={dept.code}>{dept.name}</option>
+            ))}
+          </select>
+          <span className="text-[11px] text-[#9C7A1E]">
+            {batchDept === "ALL"
+              ? "Sets the date on every department job card of the selected orders."
+              : `Sets the date on the ${DEPARTMENTS.find((d) => d.code === batchDept)?.name} job card of the selected orders.`}
+          </span>
+        </div>
+      )}
+
+      <BatchActionToolbar
+        count={selectedOrders.length}
+        onClear={() => setSelectedIds(new Set())}
+        onApplyDueDate={() => setBatchDueDateOpen(true)}
+        // The tracker only exposes the batch Due Date action — completion
+        // date, PIC, and folder archiving live on the Production page where
+        // rows are individual job cards. These no-op handlers are required by
+        // the shared toolbar's prop contract; their buttons stay but inform
+        // the operator where to go.
+        onApplyDate={() => toast.error("Apply Completion is on the Production page (per-job-card). Use Apply Due Date here.")}
+        onApplyPic={() => toast.error("Apply PIC is on the Production page (per-job-card).")}
+        onSaveToFolder={() => toast.error("Save to Folder is on the Production page (per-job-card).")}
+      />
+
+      <ApplyBatchDueDateDialog
+        open={batchDueDateOpen}
+        count={selectedOrders.length}
+        onCancel={() => setBatchDueDateOpen(false)}
+        onApply={applyBatchDueDate}
+      />
     </div>
   );
 }

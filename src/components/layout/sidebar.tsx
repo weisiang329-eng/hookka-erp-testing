@@ -70,7 +70,7 @@ const navigationGroups: NavGroup[] = [
     label: "OVERVIEW",
     items: [
       { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-      { name: "Daily Report", href: "/daily-report", icon: ClipboardCheck },
+      { name: "Hookka Report", href: "/daily-report", icon: ClipboardCheck },
       { name: "Notifications", href: "/notifications", icon: Bell },
       { name: "Forecasting", href: "/analytics/forecast", icon: TrendingUp },
     ],

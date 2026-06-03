@@ -734,6 +734,210 @@ function SettingsPanel({
 
 // ── Page ──────────────────────────────────────────────────────────────────
 
+// ===========================================================================
+// Hookka Report — the "news" layer.
+//
+// Wei Siang 2026-06-04: re-skin the Daily Report so each day's data reads like
+// a newspaper — a masthead, a lead story, and one headline article per active
+// exception group. The underlying compliance data + the detailed tables ("The
+// Full Record") are unchanged; this only adds the front-page presentation.
+// English only (UI rule).
+// ===========================================================================
+type NewsRecord = { primary: string; secondary?: string; to?: string; tag?: string };
+type NewsArticle = {
+  key: SectionKey;
+  desk: string;
+  headline: string;
+  lead: string;
+  count: number;
+  score: number; // ranking weight — the highest becomes the lead story
+  records: NewsRecord[];
+  total: number;
+  moreTo: string;
+};
+
+const plS = (n: number) => (n === 1 ? "" : "s");
+
+// Turn the day's compliance groups into ranked news articles. Pure function —
+// no data fetching. Severity weights put money + delivery stories up top and
+// data-hygiene stories at the bottom; ties break on count.
+function buildHookkaArticles(
+  counts: ComplianceData["counts"],
+  groups: ComplianceData["groups"],
+): NewsArticle[] {
+  const arts: NewsArticle[] = [];
+
+  if (groups.overdueOrders.length) {
+    const rows = [...groups.overdueOrders].sort((a, b) => b.daysOverdue - a.daysOverdue);
+    const w = rows[0];
+    arts.push({
+      key: "overdueOrders", desk: "Delivery Desk",
+      headline: `${counts.overdueOrders} Order${plS(counts.overdueOrders)} Now Past Due`,
+      lead: `${w.customerName} has waited longest — ${w.daysOverdue} day${plS(w.daysOverdue)} beyond the promised date.${rows.length > 1 ? ` ${counts.overdueOrders} orders sit late across the book.` : ""}`,
+      count: counts.overdueOrders, score: 950 + counts.overdueOrders,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.companySOId, secondary: `${r.customerName}${r.productSummary ? ` · ${r.productSummary}` : ""}`, to: `/sales/${r.salesOrderId}`, tag: `${r.daysOverdue}d late` })),
+      total: rows.length, moreTo: "/sales",
+    });
+  }
+  if (groups.doNotInvoiced.length) {
+    const rows = [...groups.doNotInvoiced].sort((a, b) => b.daysSinceDelivered - a.daysSinceDelivered);
+    arts.push({
+      key: "doNotInvoiced", desk: "Billing Desk",
+      headline: `Billing Backlog: ${counts.doNotInvoiced} Delivered Order${plS(counts.doNotInvoiced)} Unbilled`,
+      lead: `Goods are out the door but the invoices haven't followed — the oldest has gone ${rows[0].daysSinceDelivered} day${plS(rows[0].daysSinceDelivered)} since delivery.`,
+      count: counts.doNotInvoiced, score: 880 + counts.doNotInvoiced,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.doNo, secondary: r.customerName, tag: `${r.daysSinceDelivered}d` })),
+      total: rows.length, moreTo: "/delivery",
+    });
+  }
+  if (groups.soNoInvoice.length) {
+    const rows = groups.soNoInvoice;
+    arts.push({
+      key: "soNoInvoice", desk: "Billing Desk",
+      headline: `${counts.soNoInvoice} Closed Sale${plS(counts.soNoInvoice)} Still Awaiting an Invoice`,
+      lead: `Completed orders that haven't been billed yet — revenue waiting to be booked.`,
+      count: counts.soNoInvoice, score: 820 + counts.soNoInvoice,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.companySOId, secondary: `${r.customerName} · ${r.status}`, to: `/sales/${r.id}`, tag: r.days ? `${r.days}d` : undefined })),
+      total: rows.length, moreTo: "/sales",
+    });
+  }
+  if (groups.doPendingDispatch.length) {
+    const rows = [...groups.doPendingDispatch].sort((a, b) => b.daysWaiting - a.daysWaiting);
+    arts.push({
+      key: "doPendingDispatch", desk: "Dispatch Dock",
+      headline: `${counts.doPendingDispatch} Delivery Order${plS(counts.doPendingDispatch)} Idle on the Dock`,
+      lead: `Drafted but not yet sent out — the longest has sat ${rows[0].daysWaiting} day${plS(rows[0].daysWaiting)} waiting for a truck.`,
+      count: counts.doPendingDispatch, score: 760 + counts.doPendingDispatch,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.doNo, secondary: r.customerName, tag: `${r.daysWaiting}d` })),
+      total: rows.length, moreTo: "/delivery",
+    });
+  }
+  if (groups.doNotDelivered.length) {
+    const rows = [...groups.doNotDelivered].sort((a, b) => b.daysSinceDispatch - a.daysSinceDispatch);
+    arts.push({
+      key: "doNotDelivered", desk: "Delivery Desk",
+      headline: `${counts.doNotDelivered} Shipment${plS(counts.doNotDelivered)} Out, Delivery Unconfirmed`,
+      lead: `On the road but no delivery has been logged back — the oldest left ${rows[0].daysSinceDispatch} day${plS(rows[0].daysSinceDispatch)} ago.`,
+      count: counts.doNotDelivered, score: 700 + counts.doNotDelivered,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.doNo, secondary: r.customerName, tag: `${r.daysSinceDispatch}d` })),
+      total: rows.length, moreTo: "/delivery",
+    });
+  }
+  if (groups.soNoDo.length) {
+    const rows = groups.soNoDo;
+    arts.push({
+      key: "soNoDo", desk: "Sales Desk",
+      headline: `${counts.soNoDo} Sales Order${plS(counts.soNoDo)} Without a Delivery Order`,
+      lead: `Confirmed sales that haven't been turned into a delivery order yet.`,
+      count: counts.soNoDo, score: 640 + counts.soNoDo,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.companySOId, secondary: `${r.customerName} · ${r.status}`, to: `/sales/${r.id}`, tag: r.days ? `${r.days}d` : undefined })),
+      total: rows.length, moreTo: "/sales",
+    });
+  }
+  if (groups.processSkips.length) {
+    const rows = groups.processSkips;
+    arts.push({
+      key: "processSkips", desk: "Production Desk",
+      headline: `Out of Sequence: ${counts.processSkips} Order${plS(counts.processSkips)} Skipped a Step`,
+      lead: `A later department finished before an earlier one — ${rows[0].doneDept} ran ahead of ${rows[0].blockedByDept} on ${rows[0].poNo}.`,
+      count: counts.processSkips, score: 560 + counts.processSkips,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.poNo, secondary: `${r.doneDept} ahead of ${r.blockedByDept}`, to: r.salesOrderId ? `/sales/${r.salesOrderId}` : "/production", tag: r.days ? `${r.days}d` : undefined })),
+      total: rows.length, moreTo: "/production",
+    });
+  }
+  if (groups.poNotReceived.length) {
+    const rows = [...groups.poNotReceived].sort((a, b) => (b.expectedOverdueDays || 0) - (a.expectedOverdueDays || 0) || b.daysOpen - a.daysOpen);
+    const w = rows[0];
+    arts.push({
+      key: "poNotReceived", desk: "Procurement Desk",
+      headline: `Supply Watch: ${counts.poNotReceived} Purchase Order${plS(counts.poNotReceived)} Yet to Arrive`,
+      lead: `${w.supplierName}'s order has been open ${w.daysOpen} day${plS(w.daysOpen)}${w.expectedOverdueDays ? `, now ${w.expectedOverdueDays} day${plS(w.expectedOverdueDays)} past its promised arrival` : ""}.`,
+      count: counts.poNotReceived, score: 500 + counts.poNotReceived,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.poNo, secondary: r.supplierName, to: `/procurement/${r.id}`, tag: r.expectedOverdueDays ? `${r.expectedOverdueDays}d late` : `${r.daysOpen}d` })),
+      total: rows.length, moreTo: "/procurement",
+    });
+  }
+  if (groups.lowEfficiencyWorkers.length) {
+    const rows = [...groups.lowEfficiencyWorkers].sort((a, b) => a.efficiencyPct - b.efficiencyPct);
+    arts.push({
+      key: "lowEfficiencyWorkers", desk: "The Floor",
+      headline: `${counts.lowEfficiencyWorkers} on the Floor Below Pace Today`,
+      lead: `${rows[0].name} (${rows[0].departmentName}) came in lowest at ${rows[0].efficiencyPct}% of standard.`,
+      count: counts.lowEfficiencyWorkers, score: 440 + counts.lowEfficiencyWorkers,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.name, secondary: r.departmentName, tag: `${r.efficiencyPct}%` })),
+      total: rows.length, moreTo: "/daily-report",
+    });
+  }
+  if (groups.incompleteBoms.length) {
+    const rows = groups.incompleteBoms;
+    arts.push({
+      key: "incompleteBoms", desk: "Data Desk",
+      headline: `${counts.incompleteBoms} Bill${plS(counts.incompleteBoms)} of Materials Left Incomplete`,
+      lead: `Products that can't cost or plan cleanly until their BOM is finished — starting with ${rows[0].productCode}.`,
+      count: counts.incompleteBoms, score: 300 + counts.incompleteBoms,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.productCode, secondary: r.reason })),
+      total: rows.length, moreTo: "/products",
+    });
+  }
+  if (groups.missingWipTimes.length) {
+    const rows = groups.missingWipTimes;
+    arts.push({
+      key: "missingWipTimes", desk: "Data Desk",
+      headline: `Data Gap: ${counts.missingWipTimes} Product${plS(counts.missingWipTimes)} Missing WIP Times`,
+      lead: `No standard minutes set for these jobs, so efficiency can't be measured — e.g. ${rows[0].productCode} at ${rows[0].departmentCode}.`,
+      count: counts.missingWipTimes, score: 250 + counts.missingWipTimes,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.productCode, secondary: `${r.departmentCode} · ${r.examplePoNo}` })),
+      total: rows.length, moreTo: "/products",
+    });
+  }
+  if (groups.rdStalled.length) {
+    const rows = groups.rdStalled;
+    arts.push({
+      key: "rdStalled", desk: "R&D Desk",
+      headline: `R&D Desk: ${counts.rdStalled} Project${plS(counts.rdStalled)} Stalled`,
+      lead: `Development work that hasn't moved and may be holding up new products.`,
+      count: counts.rdStalled, score: 200 + counts.rdStalled,
+      records: rows.slice(0, 4).map((r) => ({ primary: r.name || "—", to: `/rd/${r.id}` })),
+      total: rows.length, moreTo: "/rd",
+    });
+  }
+
+  return arts.sort((a, b) => b.score - a.score);
+}
+
+// Compact news-style record list shown inside each article.
+function ArticleRecords({ records, total, moreTo }: { records: NewsRecord[]; total: number; moreTo: string }) {
+  return (
+    <ul className="mt-2 border-t border-[#E2DDD8] divide-y divide-[#EDE8E2]">
+      {records.map((rec, i) => {
+        const inner = (
+          <div className="flex items-baseline justify-between gap-2 py-1">
+            <span className="min-w-0">
+              <span className="font-semibold text-[#1F1D1B] doc-number">{rec.primary}</span>
+              {rec.secondary && <span className="block truncate text-[11px] text-[#6B7280]">{rec.secondary}</span>}
+            </span>
+            {rec.tag && <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-[#9A3A2D] tabular-nums">{rec.tag}</span>}
+          </div>
+        );
+        return rec.to ? (
+          <li key={i}>
+            <Link to={rec.to} className="-mx-1 block rounded px-1 hover:bg-[#FAF8F4]">{inner}</Link>
+          </li>
+        ) : (
+          <li key={i} className="-mx-1 px-1">{inner}</li>
+        );
+      })}
+      {total > records.length && (
+        <li className="pt-1.5">
+          <Link to={moreTo} className="text-[11px] font-semibold text-[#6B5C32] hover:underline">
+            + {total - records.length} more →
+          </Link>
+        </li>
+      )}
+    </ul>
+  );
+}
+
 export default function DailyReportPage() {
   const { data: raw, loading, refresh } =
     useCachedJson<ComplianceResp>("/api/reports/compliance.json");
@@ -792,30 +996,102 @@ export default function DailyReportPage() {
   }
 
   const { counts, groups } = data;
+  const articles = buildHookkaArticles(counts, groups);
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-bold text-[#1F1D1B]">Daily Report</h1>
-          <p className="text-xs text-[#6B7280]">
-            Process &amp; SOP exceptions — what needs attention today
-          </p>
-          <p className="text-[11px] text-[#9CA3AF] mt-1">
-            {formatDateLong(data.today)} · Hookka Manufacturing ERP
+      {/* ── Masthead ─────────────────────────────────────────────── */}
+      <header className="border-y-[3px] border-double border-[#1F1D1B] py-3">
+        <div className="flex items-center justify-between px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6B7280]">
+          <span>Hookka Manufacturing</span>
+          <span className="hidden sm:inline">Daily Factory Edition</span>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="inline-flex items-center gap-1 hover:text-[#1F1D1B]"
+          >
+            <Settings className="h-3 w-3" /> Settings
+          </button>
+        </div>
+        <h1 className="mt-1 text-center font-serif text-4xl font-black tracking-tight text-[#1F1D1B] sm:text-5xl">
+          The Hookka Report
+        </h1>
+        <div className="mt-1 flex items-center justify-center gap-3 border-t border-[#1F1D1B] pt-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6B7280]">
+          <span>{formatDateLong(data.today)}</span>
+          <span className="text-[#C9A24B]">◆</span>
+          <span>{counts.total} {counts.total === 1 ? "Story" : "Stories"} on the Floor</span>
+        </div>
+      </header>
+
+      {/* ── Front page ───────────────────────────────────────────── */}
+      {counts.total === 0 ? (
+        <div className="border border-[#DCF1E3] bg-[#F7FBF8] p-8 text-center">
+          <CheckCircle2 className="mx-auto mb-2 h-8 w-8 text-[#15803D]" />
+          <h2 className="font-serif text-2xl font-bold text-[#15803D]">A Quiet Day on the Floor</h2>
+          <p className="mt-1 text-sm text-[#4B7A58]">
+            Nothing flagged across delivery, billing, production or the supply line. The presses are quiet.
           </p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setSettingsOpen(true)}
-          className="shrink-0"
-        >
-          <Settings className="h-4 w-4" />
-          Settings
-        </Button>
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-3">
+          {articles[0] && (
+            <article className="border-b-2 border-[#1F1D1B] pb-5 lg:col-span-2">
+              <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#9A3A2D]">
+                {articles[0].desk} · Lead Story
+              </p>
+              <h2 className="mt-1 font-serif text-3xl font-black leading-[1.1] text-[#1F1D1B] sm:text-4xl">
+                {articles[0].headline}
+              </h2>
+              <p className="mt-2 font-serif text-[15px] leading-relaxed text-[#3A352F]">
+                <span className="float-left mr-2 font-serif text-5xl font-black leading-[0.8] text-[#1F1D1B]">
+                  {articles[0].lead.charAt(0)}
+                </span>
+                {articles[0].lead.slice(1)}
+              </p>
+              <ArticleRecords records={articles[0].records} total={articles[0].total} moreTo={articles[0].moreTo} />
+            </article>
+          )}
+          <aside className="h-fit border border-[#1F1D1B] bg-[#FAF8F4] p-4">
+            <p className="border-b border-[#1F1D1B] pb-1 text-center font-serif text-sm font-bold uppercase tracking-wide text-[#1F1D1B]">
+              By the Numbers
+            </p>
+            <dl className="mt-2 space-y-1">
+              {articles.map((a) => (
+                <div key={a.key} className="flex items-baseline justify-between gap-2 text-[12px]">
+                  <dt className="truncate text-[#6B7280]">{a.desk}</dt>
+                  <dd className="shrink-0 font-bold tabular-nums text-[#1F1D1B]">{a.count}</dd>
+                </div>
+              ))}
+              <div className="mt-1 flex items-baseline justify-between border-t border-[#1F1D1B] pt-1 text-[13px]">
+                <dt className="font-serif font-bold text-[#1F1D1B]">Total Stories</dt>
+                <dd className="font-black tabular-nums text-[#9A3A2D]">{counts.total}</dd>
+              </div>
+            </dl>
+          </aside>
+        </div>
+      )}
+
+      {/* Secondary articles — newspaper columns */}
+      {articles.length > 1 && (
+        <div className="columns-1 gap-6 sm:columns-2 lg:columns-3 [&>*]:mb-6 [&>*]:break-inside-avoid">
+          {articles.slice(1).map((a) => (
+            <article key={a.key} className="break-inside-avoid border-t-2 border-[#1F1D1B] pt-2">
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#9A3A2D]">{a.desk}</p>
+              <h3 className="mt-0.5 font-serif text-lg font-bold leading-tight text-[#1F1D1B]">{a.headline}</h3>
+              <p className="mt-1 text-[12px] leading-relaxed text-[#4B463F]">{a.lead}</p>
+              <ArticleRecords records={a.records} total={a.total} moreTo={a.moreTo} />
+            </article>
+          ))}
+        </div>
+      )}
+
+      {/* ── The full record (original detailed tables below) ──────── */}
+      <div className="flex items-center gap-3 pt-2">
+        <div className="h-px flex-1 bg-[#1F1D1B]" />
+        <span className="font-serif text-xs font-bold uppercase tracking-[0.18em] text-[#6B7280]">
+          The Full Record
+        </span>
+        <div className="h-px flex-1 bg-[#1F1D1B]" />
       </div>
 
       {settingsOpen && (

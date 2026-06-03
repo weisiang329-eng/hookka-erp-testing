@@ -977,6 +977,98 @@ app.get("/po-values", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-customer-po
+//
+// One-shot historical repair (Wei Siang 2026-06-03). Old DOs never snapshotted
+// their Sales Order's Customer PO, so ~41% of DOs show a blank Customer PO and
+// the operator can't find orders by it. Every Sales Order DOES carry a
+// customerPOId; this copies it onto each DO that is missing one — preferring the
+// DO's own primary salesOrderId, then falling back to the most common non-empty
+// customerPOId across the DO's items' sales orders (joined by SO number).
+//
+//   ?dry=1  → preview only: counts + samples, no writes.
+//   (default) → execute: one batched UPDATE.
+//
+// Idempotent: only touches DOs whose customerPOId is NULL/empty; re-running is a
+// no-op once filled. Temporary migration endpoint; delete once backfilled.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-customer-po", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+
+  const dosRes = await c.var.DB.prepare(
+    "SELECT id, doNo, salesOrderId FROM delivery_orders WHERE orgId = ? AND (customerPOId IS NULL OR customerPOId = '')",
+  )
+    .bind(orgId)
+    .all<{ id: string; doNo: string; salesOrderId: string | null }>();
+  const dos = dosRes.results ?? [];
+
+  let scanned = 0;
+  let filled = 0;
+  let stillEmpty = 0;
+  const samples: { doNo: string; po: string }[] = [];
+  const updates: D1PreparedStatement[] = [];
+
+  for (const d of dos) {
+    scanned++;
+    let po: string | null = null;
+    // 1) Prefer the DO's own primary sales order.
+    if (d.salesOrderId) {
+      const so = await c.var.DB.prepare(
+        "SELECT customerPOId FROM sales_orders WHERE id = ?",
+      )
+        .bind(d.salesOrderId)
+        .first<{ customerPOId: string | null }>();
+      if (so?.customerPOId && so.customerPOId.trim()) po = so.customerPOId.trim();
+    }
+    // 2) Fall back to the most common non-empty PO across the DO's items' SOs.
+    if (!po) {
+      const r = await c.var.DB.prepare(
+        `SELECT so.customerPOId AS po, COUNT(*) AS n
+           FROM delivery_order_items di
+           JOIN sales_orders so ON so.companySO = di.salesOrderNo
+          WHERE di.deliveryOrderId = ?
+            AND so.customerPOId IS NOT NULL AND so.customerPOId <> ''
+          GROUP BY so.customerPOId
+          ORDER BY n DESC
+          LIMIT 1`,
+      )
+        .bind(d.id)
+        .first<{ po: string }>();
+      if (r?.po && r.po.trim()) po = r.po.trim();
+    }
+    if (po) {
+      filled++;
+      if (samples.length < 10) samples.push({ doNo: d.doNo, po });
+      if (!dry) {
+        updates.push(
+          c.var.DB.prepare(
+            "UPDATE delivery_orders SET customerPOId = ? WHERE id = ?",
+          ).bind(po, d.id),
+        );
+      }
+    } else {
+      stillEmpty++;
+    }
+  }
+
+  if (!dry && updates.length > 0) {
+    await c.var.DB.batch(updates);
+  }
+
+  return c.json({
+    success: true,
+    dry,
+    scanned,
+    filled,
+    stillEmpty,
+    samples,
+  });
+});
+
 // POST /api/delivery-orders/backfill-delivered-cascade
 //
 // One-shot historical repair (Wei Siang 2026-05-16). Every DO that is

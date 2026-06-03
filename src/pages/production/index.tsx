@@ -3500,17 +3500,26 @@ export default function ProductionPage({
       // Headrest. Skip those sub-component JCs in the sticker list.
       // The BASE sticker is the one that travels with the assembly.
       if (
-        activeTab === "FAB_SEW" &&
+        (activeTab === "FAB_SEW" || activeTab === "FAB_CUT") &&
         (row.wipType === "CUSHION" ||
           row.wipType === "ARMREST" ||
           row.wipType === "HEADREST")
       ) {
         continue;
       }
-      // Each JC gets its own sticker — no FG-FAB_CUT sentinel anymore.
-      // Operators scan once per JC, going through the standard
-      // scan-complete flow (scan-complete-dept fan-out is dead).
-      const opId = row.jobCardId;
+      // FAB_CUT / FAB_SEW: ONE sticker per sofa variant — the BASE represents
+      // the whole variant (CUSHION/ARMREST/HEADREST skipped above). Its QR
+      // encodes the FG-<DEPT> sentinel, so scanning routes to scan-complete-dept,
+      // which fans out and marks EVERY compartment job card of this variant in
+      // this department complete in one scan (Wei Siang 2026-06-03: one worker
+      // does the whole variant). Every other dept keeps per-JC stickers + the
+      // standard /scan-complete flow. The variant PO travels in the QR `po` param.
+      const opId =
+        activeTab === "FAB_SEW"
+          ? "FG-FAB_SEW"
+          : activeTab === "FAB_CUT"
+            ? "FG-FAB_CUT"
+            : row.jobCardId;
       // qty > 1 fans the row into N physical piece stickers, each with
       // its own p=N&t=M marker so the worker portal can reject double-
       // scans. qty=1 stays single-sticker.
@@ -3526,7 +3535,15 @@ export default function ProductionPage({
       // cutting-recipe panel count), NOT qty (the order quantity, always
       // 1). See BUG-2026-06-01-001: qty used to carry the piece count;
       // it now carries order quantity, so the piece count moved here.
-      const pieceCount = Math.max(1, row.piecesToCut || 1);
+      // Sentinel depts (FAB_CUT/FAB_SEW) are ONE sticker per variant — a single
+      // scan completes the whole variant, so no per-piece fan-out here; the
+      // displayQty below still shows the total piece count on that one sticker.
+      // (Wei Siang 2026-06-03 supersedes the 2026-05-15 per-piece fan-out for
+      // these two depts only; every other dept keeps the per-piece stickers.)
+      const pieceCount =
+        activeTab === "FAB_SEW" || activeTab === "FAB_CUT"
+          ? 1
+          : Math.max(1, row.piecesToCut || 1);
       const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
       // Wei Siang 2026-05-15: BASE on FAB_SEW shows the variant-
       // qualified product code (e.g. "5540-1A(LHF)" / "5540-2A(RHF)")
@@ -3670,8 +3687,12 @@ export default function ProductionPage({
         ) {
           continue;
         }
-        const opId = row.jobCardId;
-        const pieceCount = Math.max(1, row.piecesToCut || 1);
+        // FAB_SEW variant sticker — sentinel opId so a scan fans out to
+        // scan-complete-dept (completes base+cushion+armrest of this variant in
+        // one scan). One sticker per variant; no per-piece fan-out. Mirrors the
+        // FAB_SEW branch of onScreenStickers. (Wei Siang 2026-06-03)
+        const opId = "FG-FAB_SEW";
+        const pieceCount = 1;
         const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
         // BASE on FAB_SEW shows the variant-qualified product code as the WIP
         // label (e.g. "5540-1A(LHF)"), not the long fabric-encoded string —

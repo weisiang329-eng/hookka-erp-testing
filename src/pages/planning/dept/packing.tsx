@@ -32,6 +32,7 @@ const CALENDAR_CONFIG: CalendarConfig = {
     "Pieces",
     "Customer DD",
     "Uph done",
+    "Upstream",
   ],
   laneCol: 1,
   groupKeyCol: 2, // SO ID — non-empty only on the SO's first row

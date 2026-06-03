@@ -539,7 +539,7 @@ export function runCutting(input: SchedulerInput): CuttingRun {
       const rows = input.cards.filter((r) => r.lane === lane);
       const gs = buildGroups(rows, lane, cal, cfg);
       const ownPool = new Map<number, number>();
-      scheduleLane(gs, cal, (d) => cfg.laneCap[lane], ownPool); // own capacity
+      scheduleLane(gs, cal, () => cfg.laneCap[lane], ownPool); // own capacity
       laneGroups[lane] = gs;
     }
     laneGroups[lane].forEach((g, i) => {
@@ -570,6 +570,7 @@ export function runCutting(input: SchedulerInput): CuttingRun {
     "Customer DD",
     "Our Expected DD",
     "Batch Deadline (earliest cust. DD)",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
 
@@ -617,6 +618,8 @@ export function runCutting(input: SchedulerInput): CuttingRun {
         r.customerDd ?? "",
         r.expectedDd ?? "",
         first ? deadlineLabel(g) : "",
+        // Fabric Cutting is the chain head — no upstream department.
+        "—",
       ]);
     });
   }

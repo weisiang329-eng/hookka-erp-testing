@@ -44,6 +44,7 @@ const CALENDAR_CONFIG: CalendarConfig = {
     "Customer DD",
     "Our Expected DD",
     "Batch Deadline",
+    "Upstream",
   ],
   laneCol: 1,
   groupKeyCol: 2, // Cut # — non-empty only on a cut's first row

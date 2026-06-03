@@ -307,8 +307,16 @@ function renderSewing(
   cal: Calendar,
   chain: ChainConfig,
   generatedAt: string,
+  cutLastDay: Map<string, number>,
 ): ScheduleSnapshot {
   const capOf = (lane: Lane): number => chain.sewCapMin[lane as keyof ChainConfig["sewCapMin"]] ?? 0;
+
+  // Upstream (Fabric Cutting) day for one sewing line, matched on its PO/Line
+  // key (soPo). Display only — does not feed any scheduling math.
+  const upstreamDate = (c: SewCard): Cell => {
+    const cd = cutLastDay.get(c.card.soPo);
+    return cd !== undefined ? fmtMonDayDow(cd) : "—";
+  };
 
   const calHeaders: Cell[] = [
     "Lane",
@@ -322,6 +330,7 @@ function renderSewing(
     "Mins",
     "Customer DD",
     "Fabric",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
   const REASON_LABEL: Record<SewCard["reason"], string> = {
@@ -382,6 +391,7 @@ function renderSewing(
       c.sewMins,
       c.card.customerDd ?? "",
       REASON_LABEL[c.reason],
+      upstreamDate(c),
     ]);
   }
 
@@ -602,6 +612,7 @@ function renderWood(
     "Customer",
     "Customer DD",
     "Sew done",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
 
@@ -629,6 +640,8 @@ function renderWood(
     const modelsTxt = u.models.join(" + ");
     const sizesTxt = u.sizes.join(" / ");
     const sewTxt = u.sewDone !== null ? fmtMonDayDow(u.sewDone) : "Done / no sew";
+    // Upstream (Fabric Sewing) day for this whole SO unit. Display only.
+    const upTxt = u.sewDone !== null ? fmtMonDayDow(u.sewDone) : "—";
     u.cards.forEach((c, i) => {
       const first = i === 0;
       calRows.push([
@@ -643,6 +656,7 @@ function renderWood(
         first ? c.customer : "",
         c.customerDd ?? "",
         first ? sewTxt : "",
+        first ? upTxt : "",
       ]);
     });
   }
@@ -1039,6 +1053,7 @@ function renderFraming(
     "Customer",
     "Customer DD",
     "Wood done",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
 
@@ -1065,6 +1080,8 @@ function renderFraming(
     const webTxt = u.web.length ? `${u.web.length} pc / ${u.webMin} min` : "-";
     const hbfTxt = u.hbf.length ? `${u.hbf.length} pc / ${u.hbfMin} min` : "-";
     const wdTxt = u.woodDone !== null ? fmtMonDayDow(u.woodDone) : "Done / no wood";
+    // Upstream (Wood Cutting) day for this whole SO unit. Display only.
+    const upTxt = u.woodDone !== null ? fmtMonDayDow(u.woodDone) : "—";
     u.cards.forEach((c, i) => {
       const first = i === 0;
       calRows.push([
@@ -1081,6 +1098,7 @@ function renderFraming(
         first ? c.customer : "",
         c.customerDd ?? "",
         first ? wdTxt : "",
+        first ? upTxt : "",
       ]);
     });
   }
@@ -1293,6 +1311,7 @@ function renderFoamBonding(
     "Foam Mins",
     "Customer DD",
     "Frame done",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
   const sorted = [...fr.foamUnits].sort((a, b) =>
@@ -1309,6 +1328,8 @@ function renderFoamBonding(
       calRows.push(sep);
     }
     const frameDoneTxt = fmtMonDayDow(u.frameDay);
+    // Upstream (Framing) day for this sofa SO unit. Display only.
+    const upTxt = frameDoneTxt;
     calRows.push([
       "",
       "Sofa",
@@ -1321,6 +1342,7 @@ function renderFoamBonding(
       u.baMin + u.bcMin,
       "",
       frameDoneTxt,
+      upTxt,
     ]);
   }
 
@@ -1393,6 +1415,7 @@ function renderUpholstery(
     "Mins",
     "Customer DD",
     "Upstream done",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
   const sorted = [...fr.uphUnits].sort((a, b) =>
@@ -1416,6 +1439,8 @@ function renderUpholstery(
       calRows.push(sep);
     }
     const upTxt = u.upstream !== null ? fmtMonDayDow(u.upstream) : "Done / day 1";
+    // Upstream (Framing for bedframe, Foam Bonding for sofa) day. Display only.
+    const upColTxt = u.upstream !== null ? fmtMonDayDow(u.upstream) : "—";
     u.cards.forEach((c, i) => {
       const first = i === 0;
       calRows.push([
@@ -1428,6 +1453,7 @@ function renderUpholstery(
         c.mins,
         first ? c.customerDd ?? "" : "",
         first ? upTxt : "",
+        first ? upColTxt : "",
       ]);
     });
   }
@@ -1513,6 +1539,7 @@ function renderPacking(
     "Pieces",
     "Customer DD",
     "Uph done",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
   const sorted = [...fr.packUnits].sort((a, b) =>
@@ -1530,6 +1557,8 @@ function renderPacking(
       calRows.push(sep);
     }
     const upTxt = u.uphDay !== null ? fmtMonDayDow(u.uphDay) : "Done / day 1";
+    // Upstream (Upholstery) day for this whole SO unit. Display only.
+    const upColTxt = u.uphDay !== null ? fmtMonDayDow(u.uphDay) : "—";
     u.cards.forEach((c, i) => {
       const first = i === 0;
       calRows.push([
@@ -1541,6 +1570,7 @@ function renderPacking(
         Math.max(1, c.sets),
         first ? c.customerDd ?? "" : "",
         first ? upTxt : "",
+        first ? upColTxt : "",
       ]);
     });
   }
@@ -1618,6 +1648,7 @@ function renderWebbing(
     "Webbing Pieces",
     "Webbing Mins",
     "Customer DD",
+    "Upstream",
   ];
   const calRows: Cell[][] = [calHeaders];
   const withWeb = fr.units.filter((u) => u.web.length > 0);
@@ -1636,6 +1667,9 @@ function renderWebbing(
       calRows.push(sep);
     }
     const cdd = u.cards.find((c) => c.customerDd)?.customerDd ?? "";
+    // Upstream (Wood Cutting) day — webbing rides framing, whose upstream is
+    // wood cutting. Display only.
+    const upTxt = u.woodDone !== null ? fmtMonDayDow(u.woodDone) : "—";
     calRows.push([
       "",
       LANE_LABEL[u.lane],
@@ -1645,6 +1679,7 @@ function renderWebbing(
       u.web.length,
       u.webMin,
       cdd,
+      upTxt,
     ]);
   }
 
@@ -1741,7 +1776,7 @@ export function computeChain(input: ChainInput): ChainOutput {
 
   return {
     cutting: cut.snapshot,
-    sewing: renderSewing(sew, cal, chain, input.generatedAt),
+    sewing: renderSewing(sew, cal, chain, input.generatedAt, cut.cutLastDay),
     woodCutting: renderWood(wood, cal, chain, input.generatedAt),
     framing: renderFraming(fr, cal, chain, input.generatedAt),
     foamBonding: renderFoamBonding(fr, cal, chain, input.generatedAt),

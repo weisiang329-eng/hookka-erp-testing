@@ -55,6 +55,9 @@ type DeliveryOrderRow = {
   companySOId: string | null;
   customerId: string;
   customerPOId: string | null;
+  customerSOId: string | null;
+  customerSO: string | null;
+  reference: string | null;
   customerName: string;
   customerState: string | null;
   hubId: string | null;
@@ -175,6 +178,32 @@ async function loadHubStateMap(
   return map;
 }
 
+// Loads { deliveryOrderId → invoiceNo } for every DO that has been transferred
+// to an invoice (invoices.deliveryOrderId = do.id, one invoice per DO). Feeds
+// the "Transfer To" column on the Delivered tab so the operator can see which
+// invoice a delivered DO became. One org-scoped query, not per-row.
+async function loadDoInvoiceMap(
+  db: D1Database,
+  orgId: string,
+): Promise<Map<string, string>> {
+  const res = await db
+    .prepare(
+      `SELECT deliveryOrderId, invoiceNo
+         FROM invoices
+        WHERE orgId = ? AND deliveryOrderId IS NOT NULL AND deliveryOrderId <> ''`,
+    )
+    .bind(orgId)
+    .all<{ deliveryOrderId: string; invoiceNo: string }>();
+  const map = new Map<string, string>();
+  for (const r of res.results ?? []) {
+    // One invoice per DO; if a DO somehow has more than one, keep the first.
+    if (r.deliveryOrderId && !map.has(r.deliveryOrderId)) {
+      map.set(r.deliveryOrderId, r.invoiceNo);
+    }
+  }
+  return map;
+}
+
 // Loads { productCode → unitM3 } for the given codes. Used by every DO
 // read path so legacy items (itemM3=0) get backfilled on the fly.
 async function loadProductM3Map(
@@ -220,6 +249,9 @@ function rowToOrder(
     companySOId: row.companySOId ?? "",
     customerId: row.customerId,
     customerPOId: row.customerPOId ?? "",
+    customerSOId: row.customerSOId ?? "",
+    customerSO: row.customerSO ?? "",
+    reference: row.reference ?? "",
     customerName: row.customerName,
     customerState: row.customerState ?? "",
     hubState,
@@ -432,6 +464,10 @@ type DoForDeliveredCascade = {
   customerPOId: string | null;
   hubId: string | null;
   hubName: string | null;
+  // Delivered timestamp + planned delivery date — the invoice date follows the
+  // delivered date, not "today" (Wei Siang 2026-06-03).
+  deliveredAt: string | null;
+  deliveryDate: string | null;
 };
 
 // An SO at/past DELIVERED, or cancelled, must not be touched by a
@@ -643,8 +679,17 @@ async function buildDoDeliveredSoAndInvoice(
 
     const invId = genInvoiceId();
     const invoiceNo = await nextInvoiceNo(db);
-    const invoiceDate = now.split("T")[0];
-    const due = new Date();
+    // Invoice date = the date the DO was DELIVERED, not "today" (Wei Siang
+    // 2026-06-03). Prefer the delivered timestamp, then the planned delivery
+    // date, then fall back to now for any path that somehow lacks both.
+    const deliveredDate =
+      (doRow.deliveredAt && doRow.deliveredAt.split("T")[0]) ||
+      (doRow.deliveryDate && doRow.deliveryDate.split("T")[0]) ||
+      now.split("T")[0];
+    const invoiceDate = deliveredDate;
+    // Due date stays relative to the invoice (delivered) date so terms remain
+    // consistent with when the invoice is dated.
+    const due = new Date(`${deliveredDate}T00:00:00.000Z`);
     due.setDate(due.getDate() + 30);
     const dueDate = due.toISOString().split("T")[0];
     // Combined invoice spans multiple SOs — anchor the header SO to the
@@ -798,13 +843,15 @@ app.get("/", async (c) => {
     ]);
     const itemRows = items.results ?? [];
     const orderRows = orders.results ?? [];
-    const [m3Map, hubStateMap] = await Promise.all([
+    const [m3Map, hubStateMap, invoiceMap] = await Promise.all([
       loadProductM3Map(db, itemRows.map((i) => i.productCode)),
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
+      loadDoInvoiceMap(db, orgId),
     ]);
     const data = orderRows.map((o) => {
       const order = rowToOrderList(o, itemRows, m3Map, hubStateMap);
       order.valueSen = valueMap.get(o.id) ?? 0;
+      order.invoiceNo = invoiceMap.get(o.id) ?? "";
       return order;
     });
     return c.json({ success: true, data, total: data.length });
@@ -842,14 +889,16 @@ app.get("/", async (c) => {
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const [m3Map, hubStateMap, valueMap] = await Promise.all([
+  const [m3Map, hubStateMap, valueMap, invoiceMap] = await Promise.all([
     loadProductM3Map(db, items.map((i) => i.productCode)),
     loadHubStateMap(db, orderRows.map((o) => o.hubId)),
     loadDoValueMap(db, orgId),
+    loadDoInvoiceMap(db, orgId),
   ]);
   const data = orderRows.map((o) => {
     const order = rowToOrderList(o, items, m3Map, hubStateMap);
     order.valueSen = valueMap.get(o.id) ?? 0;
+    order.invoiceNo = invoiceMap.get(o.id) ?? "";
     return order;
   });
   return c.json({ success: true, data, page, limit, total });
@@ -1065,6 +1114,155 @@ app.post("/backfill-customer-po", async (c) => {
     scanned,
     filled,
     stillEmpty,
+    samples,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-customer-so
+//
+// One-shot historical repair (Wei Siang 2026-06-03). Sibling of
+// backfill-customer-po. Migration 0146 added delivery_orders.customerSOId /
+// customerSO / reference (the customer's own SO number + reference, shown as
+// the "Customer SO" / "Customer Ref" columns) with NO backfill, so every DO
+// has them blank even though the linked sales orders carry the values. This
+// copies each missing field from the DO's primary salesOrderId, else from the
+// most-common non-empty value across the DO's items' sales orders (joined by
+// the INTERNAL SO number: delivery_order_items.salesOrderNo = sales_orders.
+// companySOId).
+//
+//   ?dry=1  → preview only: counts + samples, no writes.
+//   (default) → execute: one batched UPDATE.
+//
+// Idempotent: only touches DOs whose customerSOId AND customerSO AND reference
+// are all NULL/empty; re-running is a no-op once filled. Each field is filled
+// independently via COALESCE so a partially-filled DO keeps what it has.
+// Temporary migration endpoint; delete once backfilled.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-customer-so", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+
+  const dosRes = await c.var.DB.prepare(
+    `SELECT id, doNo, salesOrderId, customerSOId, customerSO, reference
+       FROM delivery_orders
+      WHERE orgId = ?
+        AND (customerSOId IS NULL OR customerSOId = '')
+        AND (customerSO IS NULL OR customerSO = '')
+        AND (reference IS NULL OR reference = '')`,
+  )
+    .bind(orgId)
+    .all<{
+      id: string;
+      doNo: string;
+      salesOrderId: string | null;
+      customerSOId: string | null;
+      customerSO: string | null;
+      reference: string | null;
+    }>();
+  const dos = dosRes.results ?? [];
+
+  let scanned = 0;
+  let filled = 0;
+  let stillEmpty = 0;
+  const fieldsFilled = { customerSOId: 0, customerSO: 0, reference: 0 };
+  const samples: {
+    doNo: string;
+    customerSOId: string;
+    customerSO: string;
+    reference: string;
+  }[] = [];
+  const updates: D1PreparedStatement[] = [];
+
+  for (const d of dos) {
+    scanned++;
+    let ref: {
+      customerSOId: string | null;
+      customerSO: string | null;
+      reference: string | null;
+    } | null = null;
+
+    // 1) Prefer the DO's own primary sales order.
+    if (d.salesOrderId) {
+      ref = await c.var.DB.prepare(
+        "SELECT customerSOId, customerSO, reference FROM sales_orders WHERE id = ?",
+      )
+        .bind(d.salesOrderId)
+        .first<{
+          customerSOId: string | null;
+          customerSO: string | null;
+          reference: string | null;
+        }>();
+    }
+
+    // 2) Fall back, PER FIELD, to the most common non-empty value across the
+    //    DO's items' sales orders (joined by internal SO number companySOId).
+    const pickMostCommon = async (col: string): Promise<string | null> => {
+      const r = await c.var.DB.prepare(
+        `SELECT so.${col} AS v, COUNT(*) AS n
+           FROM delivery_order_items di
+           JOIN sales_orders so ON so.companySOId = di.salesOrderNo
+          WHERE di.deliveryOrderId = ?
+            AND so.${col} IS NOT NULL AND so.${col} <> ''
+          GROUP BY so.${col}
+          ORDER BY n DESC
+          LIMIT 1`,
+      )
+        .bind(d.id)
+        .first<{ v: string }>();
+      return r?.v && r.v.trim() ? r.v.trim() : null;
+    };
+
+    let soId = ref?.customerSOId && ref.customerSOId.trim() ? ref.customerSOId.trim() : null;
+    let so = ref?.customerSO && ref.customerSO.trim() ? ref.customerSO.trim() : null;
+    let refn = ref?.reference && ref.reference.trim() ? ref.reference.trim() : null;
+    if (!soId) soId = await pickMostCommon("customerSOId");
+    if (!so) so = await pickMostCommon("customerSO");
+    if (!refn) refn = await pickMostCommon("reference");
+
+    if (!soId && !so && !refn) {
+      stillEmpty++;
+      continue;
+    }
+    filled++;
+    if (soId) fieldsFilled.customerSOId++;
+    if (so) fieldsFilled.customerSO++;
+    if (refn) fieldsFilled.reference++;
+    if (samples.length < 10) {
+      samples.push({
+        doNo: d.doNo,
+        customerSOId: soId ?? "",
+        customerSO: so ?? "",
+        reference: refn ?? "",
+      });
+    }
+    if (!dry) {
+      updates.push(
+        c.var.DB.prepare(
+          `UPDATE delivery_orders
+              SET customerSOId = COALESCE(NULLIF(?, ''), customerSOId),
+                  customerSO   = COALESCE(NULLIF(?, ''), customerSO),
+                  reference    = COALESCE(NULLIF(?, ''), reference)
+            WHERE id = ?`,
+        ).bind(soId ?? "", so ?? "", refn ?? "", d.id),
+      );
+    }
+  }
+
+  if (!dry && updates.length > 0) {
+    await c.var.DB.batch(updates);
+  }
+
+  return c.json({
+    success: true,
+    dry,
+    scanned,
+    filled,
+    stillEmpty,
+    fieldsFilled,
     samples,
   });
 });
@@ -3853,9 +4051,13 @@ app.put("/:id", async (c) => {
       // IN_PRODUCTION/READY_TO_SHIP and creating no invoice
       // (BUG-2026-05-16-005). Shared with the historical backfill.
       {
+        // The auto-created invoice must be dated to when the DO was
+        // delivered, not "today" — pass the just-computed delivered timestamp
+        // (nextDeliveredAt) so buildDoDeliveredSoAndInvoice dates the invoice
+        // to the delivery, even though `existing` is the pre-update snapshot.
         const dc = await buildDoDeliveredSoAndInvoice(
           c.var.DB,
-          existing,
+          { ...existing, deliveredAt: nextDeliveredAt ?? existing.deliveredAt },
           now,
         );
         if (dc.statements.length > 0) {

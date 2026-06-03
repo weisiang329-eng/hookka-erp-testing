@@ -27,6 +27,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { DEPT_ORDER } from "../lib/lead-times";
 import {
   backfillAllJobCards,
   buildWebhookHmacPayload,
@@ -227,10 +228,24 @@ app.post("/apps-script-webhook", async (c) => {
       ).length;
       const progress = Math.round((completed / list.length) * 100);
       const allDone = completed === list.length;
-      const activeDept = list.find(
-        (j) => j.status === "IN_PROGRESS" || j.status === "WAITING",
-      );
-      const currentDept = activeDept?.departmentCode || "PACKING";
+      // Frontier = earliest department in the chain (DEPT_ORDER) that still
+      // has a not-yet-done job card. A plain `find` of the first incomplete JC
+      // reads rows in arbitrary DB order (no ORDER BY), so the reported dept
+      // need not reflect the order's true chain position — same fix as the
+      // PATCH + scan paths in production-orders.ts.
+      const deptRank = (code: string | null | undefined): number => {
+        const idx = DEPT_ORDER.indexOf((code ?? "") as (typeof DEPT_ORDER)[number]);
+        return idx >= 0 ? idx : DEPT_ORDER.length;
+      };
+      const frontier = list
+        .filter((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED")
+        .reduce<(typeof list)[number] | null>((earliest, j) => {
+          if (!earliest) return j;
+          return deptRank(j.departmentCode) < deptRank(earliest.departmentCode)
+            ? j
+            : earliest;
+        }, null);
+      const currentDept = frontier?.departmentCode || "PACKING";
       const today = new Date().toISOString().split("T")[0];
       await db
         .prepare(

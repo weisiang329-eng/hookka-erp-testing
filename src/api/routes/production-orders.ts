@@ -62,6 +62,7 @@ import {
   loadLeadTimes,
   leadDaysFor,
   addDays,
+  DEPT_ORDER,
   type LeadTimeMap,
 } from "../lib/lead-times";
 import {
@@ -4012,14 +4013,34 @@ async function applyPoUpdate(
       }
     }
 
-    // currentDepartment is the dept of the next JC the floor will work on.
+    // currentDepartment is the production frontier: the EARLIEST department
+    // in the chain (DEPT_ORDER) that still has a not-yet-done job card. The
+    // old code did a plain `find` of the first IN_PROGRESS/WAITING JC in raw
+    // DB order — `SELECT * FROM job_cards` has no ORDER BY, so the row order
+    // is arbitrary (rowid/insertion), and the reported dept could jump around
+    // and not reflect how far down the chain the order actually is (e.g. a
+    // line whose true frontier is WEBBING showing PACKING, or vice versa).
+    // Ranking the incomplete JCs by DEPT_ORDER index makes currentDepartment
+    // monotonically advance down the chain. Falls back to PACKING when every
+    // JC is done (the recompute below flips status to COMPLETED in that case).
     // PO.status / progress / completedDate are recomputed by
     // recomputePoStatusAndProgress() below — no longer derived here.
     const refreshedJcs = allJcRows.map((j) => (j.id === updated.id ? updated : j));
-    const activeDept = refreshedJcs.find(
-      (j) => j.status === "IN_PROGRESS" || j.status === "WAITING",
-    );
-    updatedCurrentDept = activeDept?.departmentCode ?? "PACKING";
+    const deptRank = (code: string | null | undefined): number => {
+      const idx = DEPT_ORDER.indexOf(
+        (code ?? "") as (typeof DEPT_ORDER)[number],
+      );
+      return idx >= 0 ? idx : DEPT_ORDER.length; // unknown depts sort last
+    };
+    const frontier = refreshedJcs
+      .filter((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED")
+      .reduce<JobCardRow | null>((earliest, j) => {
+        if (!earliest) return j;
+        return deptRank(j.departmentCode) < deptRank(earliest.departmentCode)
+          ? j
+          : earliest;
+      }, null);
+    updatedCurrentDept = frontier?.departmentCode ?? "PACKING";
   }
 
   // PO-level scalar fields.
@@ -5726,10 +5747,24 @@ app.post("/:id/scan-complete", async (c) => {
     .bind(target.po.id)
     .all<JobCardRow>();
   const poJcs = poJcsRes.results ?? [];
-  const activeDept = poJcs.find(
-    (j) => j.status === "IN_PROGRESS" || j.status === "WAITING",
-  );
-  const newCurrentDept = activeDept?.departmentCode || "PACKING";
+  // Frontier = earliest department in the chain (DEPT_ORDER) that still has a
+  // not-yet-done job card. A plain `find` of the first IN_PROGRESS/WAITING JC
+  // reads rows in arbitrary DB order (no ORDER BY) and could report a dept
+  // that doesn't reflect the order's true position in the chain — the same
+  // bug as the PATCH path above. Rank incomplete JCs by DEPT_ORDER index.
+  const scanDeptRank = (code: string | null | undefined): number => {
+    const idx = DEPT_ORDER.indexOf((code ?? "") as (typeof DEPT_ORDER)[number]);
+    return idx >= 0 ? idx : DEPT_ORDER.length;
+  };
+  const scanFrontier = poJcs
+    .filter((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED")
+    .reduce<JobCardRow | null>((earliest, j) => {
+      if (!earliest) return j;
+      return scanDeptRank(j.departmentCode) < scanDeptRank(earliest.departmentCode)
+        ? j
+        : earliest;
+    }, null);
+  const newCurrentDept = scanFrontier?.departmentCode || "PACKING";
 
   await db
     .prepare(

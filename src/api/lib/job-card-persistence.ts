@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { productionOrders, workers, salesOrders } from "@/lib/mock-data";
 import type { PiecePic } from "@/lib/mock-data";
+import { DEPT_ORDER } from "./lead-times";
 
 // ---------------------------------------------------------------------------
 // jobCard persistence — Option B
@@ -215,10 +216,23 @@ export function applyOverridesOnce() {
     } else if (done > 0) {
       po.status = "IN_PROGRESS";
     }
-    const active = po.jobCards.find(
-      (j) => j.status === "IN_PROGRESS" || j.status === "WAITING",
-    );
-    po.currentDepartment = active?.departmentCode || po.currentDepartment || "PACKING";
+    // Frontier = earliest department in the chain (DEPT_ORDER) that still has
+    // a not-yet-done job card, so the rehydrated currentDepartment matches the
+    // production D1 recompute. A plain `find` of the first incomplete JC reads
+    // the array in seed/overlay order, which need not be chain order.
+    const overlayDeptRank = (code: string | null | undefined): number => {
+      const idx = DEPT_ORDER.indexOf((code ?? "") as (typeof DEPT_ORDER)[number]);
+      return idx >= 0 ? idx : DEPT_ORDER.length;
+    };
+    const frontier = po.jobCards
+      .filter((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED")
+      .reduce<(typeof po.jobCards)[number] | null>((earliest, j) => {
+        if (!earliest) return j;
+        return overlayDeptRank(j.departmentCode) < overlayDeptRank(earliest.departmentCode)
+          ? j
+          : earliest;
+      }, null);
+    po.currentDepartment = frontier?.departmentCode || po.currentDepartment || "PACKING";
   }
 
   // Cascade to SO status — every upholstery job complete across sibling POs

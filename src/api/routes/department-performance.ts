@@ -35,6 +35,10 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import {
+  writeEmployeeStateSnapshot,
+  type EmployeeStateMetrics,
+} from "../lib/employee-state-snapshot";
 
 const app = new Hono<Env>();
 
@@ -495,6 +499,51 @@ app.get("/", async (c) => {
   } catch (e) {
     console.warn("[department-performance-snapshot] write-back failed:", e);
   }
+
+  // Employee state daily snapshot (2026-06-03). The Employees page state
+  // metrics (Headcount / Working Minutes / Labor Cost / Efficiency) are
+  // point-in-time counts not reconstructible for a PAST period from
+  // current-state-only tables. Capture a daily row from now on, reusing the
+  // totals this handler ALREADY computed — fire-and-forget via waitUntil so
+  // the Employees page render is never slowed (no added compute, no added
+  // fetch on the page). Idempotent on (org_id, snap_date).
+  //
+  // Only capture when this request reflects today's LIVE, FULL-SCOPE state:
+  // the default unfiltered view ending today. A filtered (dept/category) or
+  // past-range view must never be written back as "today's" snapshot.
+  // labor_cost_sen is not computed by this handler → stored as 0 (additive
+  // column; a future labor-cost-aware caller can populate it).
+  // See src/api/lib/employee-state-snapshot.ts and
+  // migrations-postgres/0146_employee_state_snapshots.sql.
+  try {
+    const isFullScope = !departmentCode && !category;
+    const endsToday = toStr === defaultTo;
+    if (isFullScope && endsToday) {
+      const metrics: EmployeeStateMetrics = {
+        activeHeadcount: workerIds.size,
+        totalWorkingMinutes: totalWorking,
+        laborCostSen: 0,
+        avgEfficiencyPct:
+          totalWorking > 0
+            ? Math.round((totalProduction / totalWorking) * 100)
+            : 0,
+        range: { from: fromStr, to: toStr },
+      };
+      const write = writeEmployeeStateSnapshot(
+        c.var.DB,
+        orgId,
+        defaultTo,
+        metrics,
+      ).catch((e) =>
+        console.warn("[employee-state-snapshot] write failed:", e),
+      );
+      if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(write);
+      else void write;
+    }
+  } catch (e) {
+    console.warn("[employee-state-snapshot] capture skipped:", e);
+  }
+
   return c.json({
     success: true,
     ..._snap_payload,

@@ -33,6 +33,7 @@ import {
   ensureHookkaDDBufferSeeded,
   loadHookkaDDBuffer,
   hookkaDDBufferFor,
+  loadLeadTimeSettings,
 } from "../../lib/lead-times";
 import {
   breakBomIntoWips,
@@ -374,6 +375,15 @@ export async function createProductionOrdersForOrder(
   const leadTimes = await loadLeadTimes(db);
   const hookkaDDBuffer = await loadHookkaDDBuffer(db);
 
+  // Global ON/OFF toggle for lead-time auto-scheduling (kv_config →
+  // 'lead-time-settings'). Default TRUE = current behaviour. When OFF, every
+  // job_card dueDate written below is left BLANK ("") so staff fill it in
+  // manually instead of the reverse-scheduler "making a mess". Lead-time math,
+  // targetEndDate, and the schedule anchor are all unchanged — only the
+  // dueDate values that land on job_cards are blanked.
+  const leadTimeSettings = await loadLeadTimeSettings(db);
+  const blankDueDates = !leadTimeSettings.autoScheduleEnabled;
+
   // ---- Idempotency guard (PO-level) ----
   // If any LIVE PO already exists for this source order, return the existing
   // set. CANCELLED rows are excluded so a cancel + re-confirm cycle (after
@@ -600,7 +610,8 @@ export async function createProductionOrdersForOrder(
               deptCode: p.deptCode,
               deptId: deptMeta.id,
               deptName: deptMeta.name,
-              dueDate: addDays(anchor, -leadDays),
+              // Auto-schedule OFF => leave dueDate blank for manual entry.
+              dueDate: blankDueDates ? "" : addDays(anchor, -leadDays),
               category: p.category,
               minutes: p.minutes,
               branchKey: p.branchKey ?? "",
@@ -625,7 +636,8 @@ export async function createProductionOrdersForOrder(
               deptCode: p.deptCode,
               deptId: deptMeta.id,
               deptName: deptMeta.name,
-              dueDate: cursor,
+              // Auto-schedule OFF => leave dueDate blank for manual entry.
+              dueDate: blankDueDates ? "" : cursor,
               category: p.category,
               minutes: p.minutes,
               branchKey: p.branchKey ?? "",
@@ -820,7 +832,8 @@ export async function createProductionOrdersForOrder(
               deptMeta.name,
               99, // high sequence so nothing else treats this as "first in chain"
               "WAITING",
-              packingAnchor || poTargetEnd,
+              // Auto-schedule OFF => leave FG-level dueDate blank too.
+              blankDueDates ? "" : packingAnchor || poTargetEnd,
               "FG",
               productCode,
               "FG",

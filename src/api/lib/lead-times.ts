@@ -219,6 +219,81 @@ export function hookkaDDBufferFor(
   return DEFAULT_HOOKKA_DD_BUFFER[normalized];
 }
 
+// ---------------------------------------------------------------------------
+// Lead-time settings — single org-scoped flag controlling whether SO confirm
+// (and the header-date re-cascade + recalc-all sweep) auto-computes job_card
+// dueDates from the per-dept lead times.
+//
+// Storage: reuses the generic kv_config key/value table (migration 0009) under
+// key 'lead-time-settings'. No new table / migration / camelCase column — the
+// value is a JSON blob { autoScheduleEnabled: boolean }. Missing row =>
+// default TRUE (current behaviour) so existing orgs see no change until they
+// flip the toggle on the Planning > Lead Times page.
+//
+// When autoScheduleEnabled === false, the builder / re-cascade / recalc leave
+// dueDate BLANK ("") so staff fill it in manually instead of the scheduler
+// "making a mess".
+// ---------------------------------------------------------------------------
+
+export type LeadTimeSettings = { autoScheduleEnabled: boolean };
+
+export const LEAD_TIME_SETTINGS_KEY = "lead-time-settings";
+
+export const DEFAULT_LEAD_TIME_SETTINGS: LeadTimeSettings = {
+  autoScheduleEnabled: true,
+};
+
+// Read the org-scoped lead-time settings from kv_config. Any missing /
+// malformed row resolves to the safe default (auto-schedule ON) so the
+// SO-confirm path is byte-for-byte unchanged unless the operator explicitly
+// turned the toggle OFF.
+export async function loadLeadTimeSettings(
+  db: D1Database,
+): Promise<LeadTimeSettings> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind(LEAD_TIME_SETTINGS_KEY)
+      .first<{ value: string }>();
+    if (!row || typeof row.value !== "string") {
+      return { ...DEFAULT_LEAD_TIME_SETTINGS };
+    }
+    const parsed = JSON.parse(row.value) as Record<string, unknown>;
+    return {
+      autoScheduleEnabled:
+        typeof parsed.autoScheduleEnabled === "boolean"
+          ? parsed.autoScheduleEnabled
+          : DEFAULT_LEAD_TIME_SETTINGS.autoScheduleEnabled,
+    };
+  } catch {
+    // Malformed JSON / missing table => fail safe to current behaviour (ON).
+    return { ...DEFAULT_LEAD_TIME_SETTINGS };
+  }
+}
+
+// Upsert the lead-time settings blob into kv_config. Mirrors the kv-config
+// route's ON CONFLICT shape (excluded.* uses the real snake_case column name
+// because the d1-compat camelCase translator doesn't follow into EXCLUDED.*).
+export async function saveLeadTimeSettings(
+  db: D1Database,
+  settings: LeadTimeSettings,
+): Promise<void> {
+  const value = JSON.stringify({
+    autoScheduleEnabled: settings.autoScheduleEnabled,
+  });
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(LEAD_TIME_SETTINGS_KEY, value, now)
+    .run();
+}
+
 // Add N days to an ISO-date string (YYYY-MM-DD), returning YYYY-MM-DD.
 // Subtract by passing a negative N.
 export function addDays(isoDate: string, days: number): string {

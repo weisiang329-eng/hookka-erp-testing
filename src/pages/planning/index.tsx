@@ -570,6 +570,12 @@ export default function PlanningPage() {
   const [showLtSaveModal, setShowLtSaveModal] = useState(false);
   const [recalcRunning, setRecalcRunning] = useState(false);
   const [recalcResult, setRecalcResult] = useState<string | null>(null);
+  // Global ON/OFF toggle for lead-time auto-scheduling of due dates. Sourced
+  // from the GET /api/production/leadtimes payload (default TRUE). When OFF,
+  // SO confirm leaves job-card due dates blank for manual entry and the
+  // Recalculate Existing POs action is disabled.
+  const [autoScheduleEnabled, setAutoScheduleEnabled] = useState(true);
+  const [autoScheduleSaving, setAutoScheduleSaving] = useState(false);
   // History dialog (scheduled future-dated changes). Mirrors the products
   // MasterPriceHistoryDialog pattern. `pendingSummary` is sourced from the
   // GET /api/production/leadtimes response so the trigger button can show
@@ -598,11 +604,14 @@ export default function PlanningPage() {
         SOFA?: Record<string, number>;
         hookkaDDBuffer?: unknown;
         pending?: { count?: number; nearestEffectiveFrom?: string | null };
+        autoScheduleEnabled?: boolean;
       };
       setLeadTimes({
         BEDFRAME: dd.BEDFRAME ?? {},
         SOFA: dd.SOFA ?? {},
       });
+      // Default TRUE when the field is absent (older payload / fresh org).
+      setAutoScheduleEnabled(dd.autoScheduleEnabled !== false);
       if (dd.hookkaDDBuffer && typeof dd.hookkaDDBuffer === "object") {
         const b = dd.hookkaDDBuffer as { BEDFRAME?: number; SOFA?: number };
         setHookkaDDBuffer({
@@ -649,6 +658,35 @@ export default function PlanningPage() {
       setLtSavedAt(new Date().toLocaleTimeString());
     } finally {
       setLtSaving(false);
+    }
+  };
+
+  // Flip the global lead-time auto-schedule toggle. When turned OFF, new SO
+  // confirms leave job-card due dates blank for staff to fill manually, and
+  // the Recalculate Existing POs action becomes a no-op so manual dates are
+  // preserved. Optimistic local update with rollback on failure.
+  const toggleAutoSchedule = async (next: boolean) => {
+    setAutoScheduleSaving(true);
+    setAutoScheduleEnabled(next);
+    try {
+      const res = await fetch("/api/production/leadtimes/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoScheduleEnabled: next }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+      } | null;
+      if (!json?.success) {
+        setAutoScheduleEnabled(!next); // rollback
+      } else {
+        invalidateCachePrefix("/api/production/leadtimes");
+        refreshLeadTimes();
+      }
+    } catch {
+      setAutoScheduleEnabled(!next); // rollback
+    } finally {
+      setAutoScheduleSaving(false);
     }
   };
 
@@ -2668,8 +2706,51 @@ export default function PlanningPage() {
                     offset from customer DD; other depts are offsets from Hookka
                     Expected DD. Used by SO confirm to auto-schedule job cards.
                   </p>
+                  {!autoScheduleEnabled && (
+                    <p className="mt-1 text-xs font-medium text-[#B8601A]">
+                      Auto-schedule is OFF — new SO confirms leave job-card due
+                      dates blank for staff to fill in manually.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
+                  {/* Global ON/OFF toggle for lead-time auto-scheduling.
+                    * OFF => SO confirm leaves job-card due dates blank for
+                    * staff to fill manually. Default ON = current behaviour. */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-[#1F1D1B]">
+                      Auto-schedule due dates
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={autoScheduleEnabled}
+                      aria-label="Auto-schedule due dates"
+                      disabled={autoScheduleSaving}
+                      onClick={() => toggleAutoSchedule(!autoScheduleEnabled)}
+                      title={
+                        autoScheduleEnabled
+                          ? "ON — new SO confirms auto-compute job-card due dates from lead times"
+                          : "OFF — new SO confirms leave job-card due dates blank for manual entry"
+                      }
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                        autoScheduleEnabled ? "bg-[#6B5C32]" : "bg-[#D6CDB8]"
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                          autoScheduleEnabled ? "translate-x-6" : "translate-x-1"
+                        }`}
+                      />
+                    </button>
+                    <span
+                      className={`text-xs font-semibold ${
+                        autoScheduleEnabled ? "text-[#6B5C32]" : "text-[#B8601A]"
+                      }`}
+                    >
+                      {autoScheduleEnabled ? "ON" : "OFF"}
+                    </span>
+                  </div>
                   {ltSavedAt && (
                     <span className="text-xs text-[#6B5C32]">Saved {ltSavedAt}</span>
                   )}
@@ -2725,8 +2806,12 @@ export default function PlanningPage() {
                   <Button
                     variant="outline"
                     onClick={recalcAllDueDates}
-                    disabled={ltSaving || recalcRunning}
-                    title="Rewrite every existing production order's job-card dueDates using the saved lead times"
+                    disabled={ltSaving || recalcRunning || !autoScheduleEnabled}
+                    title={
+                      autoScheduleEnabled
+                        ? "Rewrite every existing production order's job-card dueDates using the saved lead times"
+                        : "Auto-schedule is OFF — existing due dates are left untouched"
+                    }
                   >
                     {recalcRunning ? (
                       <>

@@ -27,6 +27,7 @@ import {
   hookkaDDBufferFor,
   loadLeadTimes,
   leadDaysFor,
+  loadLeadTimeSettings,
 } from "../lib/lead-times";
 import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { resolveCustomerPriceAsOf } from "./customer-products";
@@ -3472,25 +3473,31 @@ app.put("/:id", async (c) => {
           departmentCode: string | null;
           completedDate: string | null;
         };
-        const [posRes, jcsRes, leadTimes, hookkaDDBuffer] = await Promise.all([
-          c.var.DB
-            .prepare(
-              `SELECT id, itemCategory FROM production_orders WHERE salesOrderId = ?`,
-            )
-            .bind(id)
-            .all<PoLite>(),
-          c.var.DB
-            .prepare(
-              `SELECT jc.id, jc.productionOrderId, jc.departmentCode, jc.completedDate
-                 FROM job_cards jc
-                 JOIN production_orders po ON po.id = jc.productionOrderId
-                WHERE po.salesOrderId = ?`,
-            )
-            .bind(id)
-            .all<JcLite>(),
-          loadLeadTimes(c.var.DB),
-          loadHookkaDDBuffer(c.var.DB),
-        ]);
+        const [posRes, jcsRes, leadTimes, hookkaDDBuffer, leadTimeSettings] =
+          await Promise.all([
+            c.var.DB
+              .prepare(
+                `SELECT id, itemCategory FROM production_orders WHERE salesOrderId = ?`,
+              )
+              .bind(id)
+              .all<PoLite>(),
+            c.var.DB
+              .prepare(
+                `SELECT jc.id, jc.productionOrderId, jc.departmentCode, jc.completedDate
+                   FROM job_cards jc
+                   JOIN production_orders po ON po.id = jc.productionOrderId
+                  WHERE po.salesOrderId = ?`,
+              )
+              .bind(id)
+              .all<JcLite>(),
+            loadLeadTimes(c.var.DB),
+            loadHookkaDDBuffer(c.var.DB),
+            loadLeadTimeSettings(c.var.DB),
+          ]);
+        // Auto-schedule OFF => header-date change still moves PO targetEndDate
+        // (the delivery anchor) but must NOT overwrite job_card dueDates, so
+        // any dates staff entered manually are preserved.
+        const autoSchedule = leadTimeSettings.autoScheduleEnabled;
         const pos = posRes.results ?? [];
         const jcs = jcsRes.results ?? [];
         const anchorByPoId = new Map<string, string>();
@@ -3520,7 +3527,8 @@ app.put("/:id", async (c) => {
         const poCategoryById = new Map<string, string>();
         for (const po of pos) poCategoryById.set(po.id, po.itemCategory || "BEDFRAME");
 
-        for (const jc of jcs) {
+        // Auto-schedule OFF => leave every JC dueDate untouched (manual entry).
+        for (const jc of autoSchedule ? jcs : []) {
           // Skip work that's already done — re-dating completed JCs is wrong.
           if (jc.completedDate && jc.completedDate !== "") continue;
           const anchor = anchorByPoId.get(jc.productionOrderId);

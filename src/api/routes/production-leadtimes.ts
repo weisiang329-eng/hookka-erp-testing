@@ -21,6 +21,8 @@ import {
   loadHookkaDDBuffer,
   leadDaysFor,
   addDays,
+  loadLeadTimeSettings,
+  saveLeadTimeSettings,
   type LeadTimeMap,
   type HookkaDDBuffer,
 } from "../lib/lead-times";
@@ -44,6 +46,10 @@ type LeadTimesResponse = {
   SOFA: Record<string, number>;
   hookkaDDBuffer: HookkaDDBuffer;
   pending: PendingSummary;
+  // Global ON/OFF toggle for lead-time auto-scheduling of due dates. Default
+  // TRUE = current behaviour (SO confirm auto-computes job_card dueDates).
+  // When false, SO confirm / re-cascade / recalc-all leave dueDates blank.
+  autoScheduleEnabled: boolean;
 };
 
 // Row shapes for the history table responses. Mirrors product_prices
@@ -168,21 +174,46 @@ async function loadPendingSummary(
 
 async function buildResponsePayload(db: D1Database): Promise<LeadTimesResponse> {
   const asOf = todayIso();
-  const [lead, buffer, pending] = await Promise.all([
+  const [lead, buffer, pending, settings] = await Promise.all([
     loadLeadTimes(db, asOf),
     loadHookkaDDBuffer(db, asOf),
     loadPendingSummary(db, asOf),
+    loadLeadTimeSettings(db),
   ]);
   return {
     BEDFRAME: lead.BEDFRAME ?? {},
     SOFA: lead.SOFA ?? {},
     hookkaDDBuffer: buffer,
     pending,
+    autoScheduleEnabled: settings.autoScheduleEnabled,
   };
 }
 
 // GET /
 app.get("/", async (c) => {
+  const data = await buildResponsePayload(c.var.DB);
+  return c.json({ success: true, data });
+});
+
+// PUT /settings — flip the global lead-time auto-schedule toggle.
+// Body: { autoScheduleEnabled: boolean }. Persisted to kv_config
+// (key 'lead-time-settings'). Default (missing row) = TRUE so existing
+// orgs keep current behaviour until they explicitly turn it OFF.
+app.put("/settings", async (c) => {
+  const denied = await requirePermission(c, "production-leadtimes", "update");
+  if (denied) return denied;
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object") {
+    return c.json({ success: false, error: "Body must be an object" }, 400);
+  }
+  const raw = (body as Record<string, unknown>).autoScheduleEnabled;
+  if (typeof raw !== "boolean") {
+    return c.json(
+      { success: false, error: "autoScheduleEnabled (boolean) is required" },
+      400,
+    );
+  }
+  await saveLeadTimeSettings(c.var.DB, { autoScheduleEnabled: raw });
   const data = await buildResponsePayload(c.var.DB);
   return c.json({ success: true, data });
 });
@@ -280,6 +311,19 @@ app.post("/recalc-all", async (c) => {
   const denied = await requirePermission(c, "production-leadtimes", "create");
   if (denied) return denied;
   try {
+    // Auto-schedule OFF => recalc is a no-op so manually-entered due dates are
+    // never overwritten. Server-side gate regardless of UI state.
+    const settings = await loadLeadTimeSettings(c.var.DB);
+    if (!settings.autoScheduleEnabled) {
+      return c.json({
+        success: true,
+        updatedPOs: 0,
+        updatedJCs: 0,
+        skipped: 0,
+        autoScheduleDisabled: true,
+      });
+    }
+
     const [leadTimes, hookkaBuffer] = await Promise.all([
       loadLeadTimes(c.var.DB),
       loadHookkaDDBuffer(c.var.DB),

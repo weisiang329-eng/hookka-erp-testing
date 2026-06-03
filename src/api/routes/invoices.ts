@@ -559,7 +559,7 @@ app.post("/backfill-customer-fields", async (c) => {
   const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
 
   const invRes = await c.var.DB.prepare(
-    `SELECT id, invoiceNo, deliveryOrderId, customerPOId, customerAddress, attention, customerPhone
+    `SELECT id, invoiceNo, deliveryOrderId, customerId, customerPOId, customerAddress, attention, customerPhone
        FROM invoices
       WHERE orgId = ?
         AND deliveryOrderId IS NOT NULL AND deliveryOrderId <> ''
@@ -573,6 +573,7 @@ app.post("/backfill-customer-fields", async (c) => {
       id: string;
       invoiceNo: string;
       deliveryOrderId: string;
+      customerId: string | null;
       customerPOId: string | null;
       customerAddress: string | null;
       attention: string | null;
@@ -582,9 +583,19 @@ app.post("/backfill-customer-fields", async (c) => {
 
   let scanned = 0;
   let filled = 0;
-  const fieldsFilled = { customerPOId: 0, customerAddress: 0, attention: 0, customerPhone: 0 };
+  const fieldsFilled = {
+    customerPOId: 0,
+    customerAddress: 0,
+    attention: 0,
+    customerPhone: 0,
+  };
+  // How many of the address/phone fills came from the CUSTOMER master (the
+  // 2nd pass) rather than the DO, for the dry-run report.
+  const fromCustomerMaster = { customerAddress: 0, customerPhone: 0 };
   const samples: { invoiceNo: string; customerPOId: string }[] = [];
   const updates: D1PreparedStatement[] = [];
+
+  const blank = (v: string | null) => !v || v.trim() === "";
 
   for (const inv of invs) {
     scanned++;
@@ -600,11 +611,36 @@ app.post("/backfill-customer-fields", async (c) => {
       }>();
     if (!d) continue;
 
-    const blank = (v: string | null) => !v || v.trim() === "";
     const po = blank(inv.customerPOId) ? (d.customerPOId ?? "").trim() : null;
-    const addr = blank(inv.customerAddress) ? (d.deliveryAddress ?? "").trim() : null;
+    let addr = blank(inv.customerAddress) ? (d.deliveryAddress ?? "").trim() : null;
     const att = blank(inv.attention) ? (d.contactPerson ?? "").trim() : null;
-    const phone = blank(inv.customerPhone) ? (d.contactPhone ?? "").trim() : null;
+    let phone = blank(inv.customerPhone) ? (d.contactPhone ?? "").trim() : null;
+
+    // 2nd pass — 87 invoices stayed blank on address/phone because their DO
+    // had none. Fall back to the CUSTOMER master (customers.companyAddress /
+    // customers.phone) via the invoice's customerId so the printed invoice
+    // still shows the customer's address. Only fills what's STILL blank (the
+    // invoice value is empty AND the DO contributed nothing). attention has no
+    // customer-master equivalent — left to the DO contact only.
+    const needAddr = blank(inv.customerAddress) && !addr;
+    const needPhone = blank(inv.customerPhone) && !phone;
+    if ((needAddr || needPhone) && inv.customerId) {
+      const cust = await c.var.DB.prepare(
+        "SELECT companyAddress, phone FROM customers WHERE id = ?",
+      )
+        .bind(inv.customerId)
+        .first<{ companyAddress: string | null; phone: string | null }>();
+      if (cust) {
+        if (needAddr && cust.companyAddress && cust.companyAddress.trim()) {
+          addr = cust.companyAddress.trim();
+          fromCustomerMaster.customerAddress++;
+        }
+        if (needPhone && cust.phone && cust.phone.trim()) {
+          phone = cust.phone.trim();
+          fromCustomerMaster.customerPhone++;
+        }
+      }
+    }
 
     if (!po && !addr && !att && !phone) continue;
     filled++;
@@ -632,7 +668,110 @@ app.post("/backfill-customer-fields", async (c) => {
     await c.var.DB.batch(updates);
   }
 
-  return c.json({ success: true, dry, scanned, filled, fieldsFilled, samples });
+  return c.json({
+    success: true,
+    dry,
+    scanned,
+    filled,
+    fieldsFilled,
+    fromCustomerMaster,
+    samples,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/invoices/backfill-date-from-delivery
+//
+// One-shot historical repair (Wei Siang 2026-06-03). An invoice's date must
+// equal the date its DO was DELIVERED, not the day the invoice row happened to
+// be created. The live transition now does this (delivery-orders.ts), but
+// every pre-fix invoice was dated "today" at creation. This walks each invoice
+// linked to a delivered DO and resets invoiceDate to that DO's delivered date
+// (deliveredAt → deliveryDate fallback). dueDate is re-derived as
+// deliveredDate + 30 days so terms stay anchored to the (corrected) date.
+//
+//   ?dry=1 → preview only: how many would change + samples (old→new).
+// Idempotent: skips invoices whose date already equals the delivered date, and
+// skips DOs with no resolvable delivered date. Temporary migration endpoint.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-date-from-delivery", async (c) => {
+  const denied = await requirePermission(c, "invoices", "update");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+
+  const invRes = await c.var.DB.prepare(
+    `SELECT i.id, i.invoiceNo, i.invoiceDate AS oldDate,
+            d.deliveredAt, d.deliveryDate, d.status AS doStatus
+       FROM invoices i
+       JOIN delivery_orders d ON d.id = i.deliveryOrderId
+      WHERE i.orgId = ?
+        AND i.deliveryOrderId IS NOT NULL AND i.deliveryOrderId <> ''
+        AND d.status IN ('DELIVERED','INVOICED')`,
+  )
+    .bind(orgId)
+    .all<{
+      id: string;
+      invoiceNo: string;
+      oldDate: string | null;
+      deliveredAt: string | null;
+      deliveryDate: string | null;
+      doStatus: string;
+    }>();
+  const invs = invRes.results ?? [];
+
+  let scanned = 0;
+  let changed = 0;
+  let skippedNoDate = 0;
+  let alreadyMatching = 0;
+  const samples: { invoiceNo: string; oldDate: string; newDate: string }[] = [];
+  const updates: D1PreparedStatement[] = [];
+
+  const datePart = (v: string | null): string =>
+    v && v.trim() ? v.trim().split("T")[0] : "";
+
+  for (const inv of invs) {
+    scanned++;
+    const newDate = datePart(inv.deliveredAt) || datePart(inv.deliveryDate);
+    if (!newDate) {
+      skippedNoDate++;
+      continue;
+    }
+    const oldDate = datePart(inv.oldDate);
+    if (oldDate === newDate) {
+      alreadyMatching++;
+      continue;
+    }
+    changed++;
+    if (samples.length < 10) {
+      samples.push({ invoiceNo: inv.invoiceNo, oldDate, newDate });
+    }
+    if (!dry) {
+      const due = new Date(`${newDate}T00:00:00.000Z`);
+      due.setDate(due.getDate() + 30);
+      const dueDate = due.toISOString().split("T")[0];
+      updates.push(
+        c.var.DB.prepare(
+          "UPDATE invoices SET invoiceDate = ?, dueDate = ? WHERE id = ?",
+        ).bind(newDate, dueDate, inv.id),
+      );
+    }
+  }
+
+  if (!dry && updates.length > 0) {
+    await c.var.DB.batch(updates);
+  }
+
+  return c.json({
+    success: true,
+    dry,
+    scanned,
+    changed,
+    skippedNoDate,
+    alreadyMatching,
+    samples,
+  });
 });
 
 app.get("/", async (c) => {

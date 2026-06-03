@@ -34,6 +34,69 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-03-005 — Production "Current Dept" derived from an UNORDERED job-card scan, so it didn't reflect the order's true chain position
+
+**Status:** 🟢 Fixed (2026-06-03) — shipped to main, deployed.
+**Category:** production-orders
+
+**Symptom:** In "Linked Production Orders", a line at WEBBING showed 35% while a sibling line at PACKING (a later stage) showed only 36% — Current Dept and progress looked inconsistent / non-monotonic between sibling lines.
+
+**Root cause:** Three live writers derived `production_orders.currentDepartment` with a plain `find` of the first IN_PROGRESS/WAITING job card over `SELECT * FROM job_cards WHERE productionOrderId = ?` — with **no ORDER BY**, so the row order was arbitrary (insertion/rowid). The reported department therefore didn't track the order's real frontier.
+
+**Fix:** Compute `currentDepartment` as the production FRONTIER — the earliest dept in the canonical `DEPT_ORDER` (src/api/lib/lead-times.ts) that still has a not-done (COMPLETED/TRANSFERRED) job card. Applied at all three writers (production-orders.ts PATCH + worker-scan, sheets-sync.ts) + the dev overlay (job-card-persistence.ts). Progress (`donePieces/totalPieces`) was already correct. Existing wrong values self-correct on the next scan of each PO.
+
+---
+
+## BUG-2026-06-03-004 — Naming a camelCase column not in the d1-compat rename map threw "column customeraddress does not exist"
+
+**Status:** 🟢 Fixed (2026-06-03) — shipped to main.
+**Category:** data-migration, infrastructure
+
+**Symptom:** The new invoice customer-fields backfill 500'd: `column "customeraddress" does not exist`.
+
+**Root cause:** Routes talk camelCase SQL that d1-compat renames to snake_case at runtime. `customerAddress` / `customerPhone` were absent from `column-rename-map.json` because every prior query used `SELECT *` and never NAMED them — so Postgres lowercased the unmapped identifier to `customeraddress`, which doesn't exist (real column `customer_address`).
+
+**Fix:** Added `customerAddress → customer_address` and `customerPhone → customer_phone` to src/api/lib/column-rename-map.json (`attention` is already lowercase = its column). Lesson: any new route SQL that explicitly names a camelCase column must have it in the rename map.
+
+---
+
+## BUG-2026-06-03-003 — Invoice Date was "today", not the DO's Delivered date (209 invoices wrong)
+
+**Status:** 🟢 Fixed (2026-06-03) — shipped + 209 invoices backfilled, verified invoiceDate == deliveredAt.
+**Category:** delivery-orders, data-integrity
+
+**Symptom:** When a DO flips to DELIVERED its invoice auto-creates, but the invoice date was set to "today" instead of the actual delivered/delivery date. Dry-run found 209/209 invoices with a date NOT matching their DO's delivered date.
+
+**Fix:** `buildDoDeliveredSoAndInvoice` (delivery-orders.ts) now sets the new invoice's `invoiceDate` to the DO's `deliveredAt` (→ deliveryDate fallback), dueDate = delivered + 30. One-shot `POST /api/invoices/backfill-date-from-delivery` repaired the 209 historical invoices. Temporary endpoint, delete after.
+
+---
+
+## BUG-2026-06-03-002 — Snapshot/denormalization gap: Customer PO/SO + invoice address blank on hundreds of rows (the "snapshot dropped data" the owner feared)
+
+**Status:** 🟢 Fixed (2026-06-03) — DO + Invoice fields backfilled (54 DO POs, 125 invoice POs, 88 invoice addresses → 0 empty); DO Customer-SO columns + backfill shipped but pending migration 0147 apply.
+**Category:** data-integrity, delivery-orders
+
+**Symptom:** ~41% of DOs had a blank Customer PO; ALL 125 invoices had blank Customer PO + customer address/attention/phone. Owner couldn't find orders by PO; printed invoices showed no customer address.
+
+**Root cause:** Two structural flaws in copy-from-parent denormalization. (a) **Multi-parent** — a DO can cover many SOs, so `salesOrderRow?.customerPOId` is null when there's no single primary SO. (b) **No backfill on migrations** — migrations 0081/0126 ADDED the snapshot columns with zero backfill, so every pre-migration row was blank; the gap then propagated DO → Invoice. The source data (sales_orders.customerPOId/customerSOId) was always present.
+
+**Fix:** One-shot backfills copying from the linked parent — `POST /api/delivery-orders/backfill-customer-po` (and `/backfill-customer-so`) joining items' `salesOrderNo` to `sales_orders.companySOId` (the internal SO number lives in companySOId, NOT companySO), and `POST /api/invoices/backfill-customer-fields` (from the DO, then falling back to the customer master for address/phone). Lesson recorded: future migrations adding a denormalized column MUST ship a backfill; multi-parent fields shouldn't snapshot a single parent.
+
+---
+
+## BUG-2026-06-03-001 — Live planning scheduler dropped EVERY downstream-department card (7 of 8 dept pages empty)
+
+**Status:** 🟢 Fixed (2026-06-03) — one-line fix shipped + verified (all 8 depts now populate: sewing 434, framing 685, upholstery 769 rows…).
+**Category:** scheduling, production-orders
+
+**Symptom:** After the live English scheduler shipped, Fab Cut showed 151 rows but the other 7 departments (sewing/wood/framing/foam/uph/packing/webbing) returned empty calendars — despite each dept having hundreds of WAITING job cards.
+
+**Root cause:** `laneOf()` in planning-schedule.ts read the job card's own `category` FIRST (`r.category ?? r.itemCategory`). But `job_cards.category` holds a production/cost bucket — "CAT 10", "CAT 14" — NOT a BEDFRAME/SOFA/ACCESSORY lane. So laneOf returned null and `if (!laneOf(r)) continue;` skipped every downstream card. Fab Cut worked only because its path reads `itemCategory` (the order's true lane) directly.
+
+**Fix:** `laneOf()` now prefers `itemCategory` (the reliable order-level lane): `(r.itemCategory ?? r.category)`. All downstream cards now classify and schedule.
+
+---
+
 ## BUG-2026-06-02-009 — Employee Master accepted 7.5 hrs/day in the form but the database silently rounded it to 8 (INTEGER column)
 
 **Status:** 🟢 Fixed (2026-06-02) — shipped to main (commit `351152cb`), migration `0144` applied to prod, deployed.

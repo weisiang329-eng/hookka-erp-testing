@@ -6794,6 +6794,10 @@ export default function ProductionPage({
                 right: 0,
                 transform: `translateY(${virtualRow.start}px)`,
               }}
+              // Single-click anywhere on the row toggles its selection (the
+              // operator asked to tick by clicking the row, not just the small
+              // checkbox). Double-click still opens the order.
+              onClick={() => toggleOverviewRow(order.id)}
               onDoubleClick={() => {
                 if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
                 else if (order.consignmentOrderId)
@@ -6967,9 +6971,15 @@ export default function ProductionPage({
             The department scope picker is matrix-specific: each row is a whole
             order spanning up to 8 dept job cards, so the operator chooses which
             department's due date to set (or all). (Wei Siang 2026-06-03) */}
+        {/* Batch Due Date bar — ONLY the department scope picker + Apply Due
+            Date + Clear (Wei Siang 2026-06-03: the Overview needs just these;
+            Completion / PIC / Save-to-Folder live on the dept sheet). */}
         {selectedOverviewOrders.length > 0 && (
-          <div className="sticky bottom-[68px] left-3 right-3 z-30 flex items-center gap-2 rounded-md border border-[#C9A227] bg-[#FFF8E6] px-3 py-2 shadow-md">
-            <span className="text-[12px] font-semibold text-[#5A4500]">Due Date department:</span>
+          <div className="sticky bottom-3 left-3 right-3 z-30 flex flex-wrap items-center gap-2 rounded-md border border-[#C9A227] bg-[#FFF8E6] px-3 py-2 shadow-md">
+            <span className="text-[12px] font-semibold text-[#5A4500]">
+              {selectedOverviewOrders.length} selected
+            </span>
+            <span className="text-[12px] text-[#5A4500]">· Due Date department:</span>
             <select
               value={overviewBatchDept}
               onChange={(e) => setOverviewBatchDept(e.target.value)}
@@ -6980,26 +6990,27 @@ export default function ProductionPage({
                 <option key={d.code} value={d.code}>{d.name}</option>
               ))}
             </select>
-            <span className="text-[11px] text-[#9C7A1E]">
+            <button
+              type="button"
+              onClick={() => setOverviewBatchDueDateOpen(true)}
+              className="h-8 rounded-md bg-[#6B5C32] px-3 text-[12px] font-semibold text-white hover:bg-[#5A4D2A]"
+            >
+              Apply Due Date
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedOverviewIds(new Set())}
+              className="h-8 rounded-md border border-[#D4CFC7] bg-white px-3 text-[12px] text-[#5A5550] hover:bg-[#F5F2ED]"
+            >
+              Clear
+            </button>
+            <span className="ml-auto text-[11px] text-[#9C7A1E]">
               {overviewBatchDept === "ALL"
                 ? "Sets the date on every department job card of the selected orders."
                 : `Sets the date on the ${DEPARTMENTS.find((d) => d.code === overviewBatchDept)?.name} job card of the selected orders.`}
             </span>
           </div>
         )}
-
-        <BatchActionToolbar
-          count={selectedOverviewOrders.length}
-          onClear={() => setSelectedOverviewIds(new Set())}
-          onApplyDueDate={() => setOverviewBatchDueDateOpen(true)}
-          // The Overview matrix only exposes the batch Due Date action —
-          // completion date, PIC, and folder archiving live on the dept sheet
-          // (per-job-card). These no-op handlers satisfy the shared toolbar's
-          // prop contract; their buttons point the operator to the right place.
-          onApplyDate={() => toast.error("Apply Completion is on the department sheet (per-job-card).")}
-          onApplyPic={() => toast.error("Apply PIC is on the department sheet (per-job-card).")}
-          onSaveToFolder={() => toast.error("Save to Folder is on the department sheet (per-job-card).")}
-        />
 
         <ApplyBatchDueDateDialog
           open={overviewBatchDueDateOpen}

@@ -46,6 +46,11 @@ import {
   todayISO,
 } from "./utils";
 import type { BaseRowsResponse } from "./baserows.worker";
+// Pure row-builder shared with baserows.worker.ts. The FAB_SEW sticker
+// loader (Fab Cut tab) runs this synchronously on a freshly-fetched,
+// all-dept order set so its DeptRow output is byte-identical to the grid's
+// — see loadFabSewStickers.
+import { buildOnePickerEntry, buildBaseRows, type PickerByDept } from "./baserows-core";
 import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
@@ -1447,14 +1452,19 @@ export default function ProductionPage({
   // Packing Show/Print split, but sourced from each order's FAB_SEW job
   // cards (the WIP dept stickers, same kind as onScreenStickers /
   // JobCardSticker) instead of FG stickers. Lazy like every other QR strip:
-  // the fabSewStickersForFabCut memo only builds once intent is signalled
-  // (Show clicked) so Fab Cut tab entry stays cheap — no extra render cost
-  // until the operator actually asks for the sewing stickers.
+  // the FAB_SEW stickers are only FETCHED + built once intent is signalled
+  // (Show / Print clicked) so Fab Cut tab entry stays cheap — no extra
+  // render cost until the operator actually asks for the sewing stickers.
   const [showFabSewStrip, setShowFabSewStrip] = useState(false);
-  // Set true the first time the operator clicks "Show Fab Sew QR" or
-  // "Print Fab Sew Stickers". Gates the fabSewStickersForFabCut memo so the
-  // FAB_SEW row scan + sticker fan-out doesn't run on plain Fab Cut entry.
-  const [fabSewIntent, setFabSewIntent] = useState(false);
+  // The built FAB_SEW stickers for the orders visible in the Fab Cut grid.
+  // Populated by loadFabSewStickers (an on-click fetch of every dept's job
+  // cards — see the loader for why a fetch is required instead of reading
+  // the in-memory dept-scoped rows). Empty until the operator clicks Show /
+  // Print, and cleared on filter change + tab leave.
+  const [fabSewStickers, setFabSewStickers] = useState<JobCardSticker[]>([]);
+  // True while loadFabSewStickers is fetching + building. Shown on both the
+  // Show and Print buttons (mirrors loadingFoamPrint for the Foam pair).
+  const [loadingFabSew, setLoadingFabSew] = useState(false);
   // Loading flag shown on the "Print Fab Sew Stickers" button while the
   // batch of QRs pre-renders (mirrors printingJobCards for the native pair).
   const [printingFabSew, setPrintingFabSew] = useState(false);
@@ -3411,112 +3421,152 @@ export default function ProductionPage({
     return stickers;
   }, [filteredOrders, activeTab, wipNameFor, deptRows, gridFilteredDeptRows]);
 
-  // FAB_CUT only: the downstream Fabric Sewing (FAB_SEW) stickers for the
-  // SAME orders the Fab Cut grid is currently showing. This is a parallel to
-  // `onScreenStickers`, but instead of deriving from the ACTIVE dept's rows
-  // (FAB_CUT here), it derives from each visible order's FAB_SEW job-card
-  // rows. The output is the exact same JobCardSticker shape — fed through the
-  // same large tile + the same #batch-jobcard-print container — so a Fab Sew
-  // sticker pulled from the Fab Cut tab is byte-identical to one printed from
-  // the Fab Sew tab itself.
+  // FAB_CUT only: load + build the downstream Fabric Sewing (FAB_SEW)
+  // stickers for the SAME orders the Fab Cut grid is currently showing.
+  // Output is the exact same JobCardSticker shape — fed through the same
+  // large tile + the same #batch-jobcard-print container — so a Fab Sew
+  // sticker pulled from the Fab Cut tab is byte-identical to one printed
+  // from the Fab Sew tab itself.
   //
-  // Why source from `baseRows`: `deptRows`/`gridFilteredDeptRows` only carry
-  // the active (FAB_CUT) dept's rows. `baseRows` is the precomputed flat list
-  // for EVERY dept (tagged with `_deptCode`), so the FAB_SEW rows for the
-  // visible POs are already built there — no extra fetch, no rebuild. We just
-  // filter to `_deptCode === "FAB_SEW"`, scope to the Fab Cut grid's visible
-  // PO ids, and run the identical dept-tab fan-out loop from onScreenStickers
-  // (skip CUSHION/ARMREST/HEADREST sub-components, BASE→productCode WIP label,
-  // piecesToCut piece fan-out, p=N&t=M payload).
+  // Why a FETCH (not the in-memory baseRows): on the FAB_CUT tab the page
+  // loads orders DEPT-SCOPED — the production-orders fetch carries
+  // `&dept=FAB_CUT`, so the in-memory orders / baseRows contain ONLY
+  // FAB_CUT job cards. There are zero FAB_SEW rows to find in memory, so
+  // the old baseRows-sourced memo always produced "No Fab Sew job cards".
+  // We copy the Foam Bonding → Packing fix: on click, re-fetch
+  // /api/production-orders?fields=minimal&include=jobCards WITHOUT `&dept=`
+  // (so every department's job cards come back), scope to the SO ids
+  // currently visible in the Fab Cut grid, then build the FAB_SEW rows
+  // client-side with the SAME pure builder the grid's worker runs
+  // (buildBaseRows in "full" mode — all-dept output, tagged `_deptCode`).
   //
-  // Lazy: returns [] until the operator signals intent (`fabSewIntent`, flipped
-  // by Show Fab Sew QR / Print Fab Sew Stickers) so plain Fab Cut tab entry
-  // never pays for this second scan.
-  const fabSewStickersForFabCut = useMemo<JobCardSticker[]>(() => {
-    if (activeTab !== "FAB_CUT" || !fabSewIntent) return [];
-    const stickers: JobCardSticker[] = [];
-    const orderById = new Map(filteredOrders.map((o) => [o.id, o] as const));
+  // The fan-out loop is identical to the old memo / the FAB_SEW branch of
+  // onScreenStickers: skip CUSHION/ARMREST/HEADREST sub-components,
+  // BASE→productCode WIP label, piecesToCut piece fan-out, p=N&t=M payload.
+  //
+  // Lazy: only runs on click of Show Fab Sew QR / Print Fab Sew Stickers
+  // (sets loadingFabSew while in flight, stores into fabSewStickers) so
+  // plain Fab Cut tab entry never pays for this fetch.
+  const loadFabSewStickers = useCallback(async (): Promise<JobCardSticker[]> => {
+    if (activeTab !== "FAB_CUT") return [];
     // Scope to whatever the Fab Cut sheet is SHOWING — its column filters /
-    // in-grid search applied — falling back to the full FAB_CUT set until the
-    // DataGrid reports. Mirrors how onScreenStickers + the Foam packing flow
-    // scope to the grid's visible rows.
+    // in-grid search applied — falling back to the full FAB_CUT set until
+    // the DataGrid reports. Mirrors how the Foam packing loader scopes to
+    // gridFilteredDeptRows' SO ids.
     const fabCutRows =
       (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
-    const visiblePoIds = new Set(fabCutRows.map((r) => r.poId));
-    // Pull the FAB_SEW rows for exactly those POs out of the all-dept flat
-    // list. Strip the internal `_deptCode` marker so the shape matches DeptRow.
-    const fabSewRows = baseRows.filter(
-      (r) => r._deptCode === "FAB_SEW" && visiblePoIds.has(r.poId),
+    const soIds = new Set(
+      fabCutRows
+        .map((r) => r.salesOrderId || r.consignmentOrderId || "")
+        .filter(Boolean),
     );
-    for (const row of fabSewRows) {
-      const order = orderById.get(row.poId);
-      if (!order) continue;
-      // Same FAB_SEW rule as onScreenStickers: the operator sews the whole
-      // upholstery assembly in one pass — skip the Back Cushion / Armrest /
-      // Headrest sub-component JCs; the BASE sticker travels with the assembly.
-      if (
-        row.wipType === "CUSHION" ||
-        row.wipType === "ARMREST" ||
-        row.wipType === "HEADREST"
-      ) {
-        continue;
-      }
-      const opId = row.jobCardId;
-      const pieceCount = Math.max(1, row.piecesToCut || 1);
-      const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
-      // BASE on FAB_SEW shows the variant-qualified product code as the WIP
-      // label (e.g. "5540-1A(LHF)"), not the long fabric-encoded string —
-      // identical to the FAB_SEW branch of onScreenStickers.
-      const stickerWipName =
-        row.wipType === "BASE"
-          ? row.productCode || row.model || row.wip || ""
-          : row.wip;
-      for (let p = 1; p <= pieceCount; p++) {
-        stickers.push({
-          key: pieceCount > 1 ? `fabsew:${row.id}:${p}` : `fabsew:${row.id}`,
-          poNo: order.poNo,
-          deptCode: "FAB_SEW",
-          jobCardId: opId,
-          wipName: stickerWipName,
-          wipCode: "",
-          sizeLabel: row.size || "",
-          qty: displayQty,
-          customerPOId: row.customerPOId || "",
-          customerState: row.customerState || "",
-          customerName: row.customerName || "",
-          customerRef: row.customerRef || "",
-          salesOrderNo: row.salesOrderNo || "",
-          model: row.model || "",
-          wipType: row.wipType || "",
-          category: row.category || "",
-          colour: row.colour || "",
-          gap: row.gap || "",
-          divan: row.divan || "",
-          leg: row.leg || "",
-          totalHeight: row.totalHeight || "",
-          specialOrder: row.specialOrder || "",
-          pieceNo: p,
-          totalPieces: pieceCount,
-          qrPayload: generateStickerData(
-            order.poNo,
-            "FAB_SEW",
-            opId,
-            "/worker/scan",
-            pieceCount > 1 ? p : undefined,
-            pieceCount > 1 ? pieceCount : undefined,
-          ),
-        });
-      }
+    if (soIds.size === 0) {
+      toast.info("No Fab Cut rows are visible. Adjust the filter and try again.");
+      return [];
     }
-    return stickers;
-  }, [
-    activeTab,
-    fabSewIntent,
-    filteredOrders,
-    baseRows,
-    deptRows,
-    gridFilteredDeptRows,
-  ]);
+    setLoadingFabSew(true);
+    try {
+      const res = await fetch(
+        "/api/production-orders?fields=minimal&include=jobCards",
+        { credentials: "include" },
+      );
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; data?: ProductionOrder[] }
+        | null;
+      const all: ProductionOrder[] = json?.success && Array.isArray(json.data) ? json.data : [];
+      if (all.length === 0) {
+        toast.warning("Could not load production orders.");
+        return [];
+      }
+      // Keep only the orders for the SOs visible in the Fab Cut grid.
+      const scoped = all.filter((o) =>
+        soIds.has(o.salesOrderId || o.consignmentOrderId || ""),
+      );
+      if (scoped.length === 0) {
+        toast.warning("Could not match the visible Fab Cut rows to any production orders.");
+        return [];
+      }
+      // Build the all-dept DeptRow list for the scoped orders with the SAME
+      // pure pass the grid's worker runs, so the FAB_SEW rows (and every
+      // field the fan-out reads) are byte-identical to the Fab Sew tab's.
+      const today = todayISO();
+      const pickerIndex = new Map<string, PickerByDept>();
+      for (const o of scoped) pickerIndex.set(o.id, buildOnePickerEntry(o));
+      const builtRows = buildBaseRows(scoped, pickerIndex, "full", "FAB_SEW", today);
+      const fabSewRows = builtRows.filter((r) => r._deptCode === "FAB_SEW");
+      const orderById = new Map(scoped.map((o) => [o.id, o] as const));
+      const stickers: JobCardSticker[] = [];
+      for (const row of fabSewRows) {
+        const order = orderById.get(row.poId);
+        if (!order) continue;
+        // Same FAB_SEW rule as onScreenStickers: the operator sews the whole
+        // upholstery assembly in one pass — skip the Back Cushion / Armrest /
+        // Headrest sub-component JCs; the BASE sticker travels with the
+        // assembly.
+        if (
+          row.wipType === "CUSHION" ||
+          row.wipType === "ARMREST" ||
+          row.wipType === "HEADREST"
+        ) {
+          continue;
+        }
+        const opId = row.jobCardId;
+        const pieceCount = Math.max(1, row.piecesToCut || 1);
+        const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
+        // BASE on FAB_SEW shows the variant-qualified product code as the WIP
+        // label (e.g. "5540-1A(LHF)"), not the long fabric-encoded string —
+        // identical to the FAB_SEW branch of onScreenStickers.
+        const stickerWipName =
+          row.wipType === "BASE"
+            ? row.productCode || row.model || row.wip || ""
+            : row.wip;
+        for (let p = 1; p <= pieceCount; p++) {
+          stickers.push({
+            key: pieceCount > 1 ? `fabsew:${row.id}:${p}` : `fabsew:${row.id}`,
+            poNo: order.poNo,
+            deptCode: "FAB_SEW",
+            jobCardId: opId,
+            wipName: stickerWipName,
+            wipCode: "",
+            sizeLabel: row.size || "",
+            qty: displayQty,
+            customerPOId: row.customerPOId || "",
+            customerState: row.customerState || "",
+            customerName: row.customerName || "",
+            customerRef: row.customerRef || "",
+            salesOrderNo: row.salesOrderNo || "",
+            model: row.model || "",
+            wipType: row.wipType || "",
+            category: row.category || "",
+            colour: row.colour || "",
+            gap: row.gap || "",
+            divan: row.divan || "",
+            leg: row.leg || "",
+            totalHeight: row.totalHeight || "",
+            specialOrder: row.specialOrder || "",
+            pieceNo: p,
+            totalPieces: pieceCount,
+            qrPayload: generateStickerData(
+              order.poNo,
+              "FAB_SEW",
+              opId,
+              "/worker/scan",
+              pieceCount > 1 ? p : undefined,
+              pieceCount > 1 ? pieceCount : undefined,
+            ),
+          });
+        }
+      }
+      setFabSewStickers(stickers);
+      return stickers;
+    } catch (err) {
+      console.error("[loadFabSewStickers] failed", err);
+      toast.error("Failed to load Fab Sew stickers.");
+      return [];
+    } finally {
+      setLoadingFabSew(false);
+    }
+  }, [activeTab, gridFilteredDeptRows, deptRows, toast]);
 
   // Build + trigger batch print for job-card stickers. Fires once state is
   // rendered into the hidden container via the useEffect below.
@@ -3554,28 +3604,35 @@ export default function ProductionPage({
   }, [onScreenStickers, activeTab, toast]);
 
   // FAB_CUT only: Show / Print the downstream Fab Sew stickers. Mirrors the
-  // native Show QR / Print All pair, but acts on `fabSewStickersForFabCut`.
+  // Foam Bonding Show Packing Preview / Print Packing pair, but acts on the
+  // fetched-and-built `fabSewStickers`.
   //
-  // Show: flips intent (so the memo builds) + toggles the on-screen strip.
-  // First click pays the build cost; subsequent toggles are instant.
-  const handleShowFabSewStrip = useCallback(() => {
-    setFabSewIntent(true);
-    setShowFabSewStrip((v) => !v);
-  }, []);
+  // Show: if already showing, just hide (keep the loaded stickers around so
+  // a re-show without changing filter is instant). Otherwise fetch + build
+  // (loadFabSewStickers) and reveal the on-screen tile strip. The first
+  // click pays the fetch; the loading flag drives the button label.
+  const handleShowFabSewStrip = useCallback(async () => {
+    if (showFabSewStrip) {
+      setShowFabSewStrip(false);
+      return;
+    }
+    const stickers = await loadFabSewStickers();
+    if (stickers.length === 0) return;
+    setShowFabSewStrip(true);
+  }, [showFabSewStrip, loadFabSewStickers]);
 
-  // Print: builds the same FAB_SEW batch and pushes it into the SAME hidden
-  // #batch-jobcard-print container via setJobCardStickers — exactly like
-  // handlePrintJobCardStickers. Because we're on the FAB_CUT tab, the print
-  // container's `useLargeSticker` flag is already true, so the FAB_SEW tiles
-  // render through the 100×150mm large layout identical to the Fab Sew tab.
-  // We force intent on first so the memo has populated before we read it; if
-  // it's still building (synchronous useMemo, so it isn't) we fall back to an
-  // info toast.
+  // Print: if the preview already loaded the stickers, print those directly
+  // (operator can WYSIWYG check before printing). Otherwise fetch + build,
+  // then push the batch into the SAME hidden #batch-jobcard-print container
+  // via setJobCardStickers — exactly like handlePrintJobCardStickers.
+  // Because we're on the FAB_CUT tab, the print container's `useLargeSticker`
+  // flag is already true, so the FAB_SEW tiles render through the 100×150mm
+  // large layout identical to the Fab Sew tab.
   const handlePrintFabSewStickers = useCallback(async () => {
-    setFabSewIntent(true);
-    const source = fabSewStickersForFabCut;
+    const source =
+      fabSewStickers.length > 0 ? fabSewStickers : await loadFabSewStickers();
     if (source.length === 0) {
-      toast.info("No Fab Sew job cards for the orders in the current Fab Cut filter.");
+      // loadFabSewStickers already surfaced the reason via toast.
       return;
     }
     // Same mega-print guard-rail as the native pair.
@@ -3600,7 +3657,7 @@ export default function ProductionPage({
     } finally {
       setPrintingFabSew(false);
     }
-  }, [fabSewStickersForFabCut, toast]);
+  }, [fabSewStickers, loadFabSewStickers]);
 
   // Shared 230×380px on-screen sticker tile (the FAB_CUT / FAB_SEW large
   // tile). Extracted so the native QR Stickers strip AND the FAB_CUT "Show
@@ -4403,17 +4460,27 @@ export default function ProductionPage({
   }, [fltSearch, gridFilteredDeptRows]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Leaving the Fab Cut tab → collapse the Fab Sew strip and drop intent, so
-  // re-entering Fab Cut is cheap again (no FAB_SEW row scan until the operator
-  // asks). The fabSewStickersForFabCut memo already gates on the same
-  // activeTab + intent, so this only resets the UI flags.
+  // Leaving the Fab Cut tab → collapse the Fab Sew strip and DROP the loaded
+  // stickers, so re-entering Fab Cut is cheap again (no FAB_SEW fetch until
+  // the operator clicks Show / Print). loadFabSewStickers gates on
+  // activeTab === "FAB_CUT", so this just resets the UI + cached data.
   /* eslint-disable react-hooks/set-state-in-effect -- collapse Fab Sew strip on tab leave */
   useEffect(() => {
     if (activeTab !== "FAB_CUT") {
       setShowFabSewStrip(false);
-      setFabSewIntent(false);
+      setFabSewStickers([]);
     }
   }, [activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Fab Cut filter scope changed → invalidate any loaded Fab Sew preview so
+  // the next Show / Print fetches fresh against the new visible orders.
+  // Mirrors the Foam packing invalidation above.
+  /* eslint-disable react-hooks/set-state-in-effect -- intentional cache invalidation on filter change */
+  useEffect(() => {
+    setFabSewStickers([]);
+    setShowFabSewStrip(false);
+  }, [gridFilteredDeptRows]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Grid-filter scoped FG stickers — single source of truth shared by the
@@ -6787,31 +6854,35 @@ export default function ProductionPage({
                 same orders the Fab Cut grid is showing — so the cutting
                 station can also print the next-stage sewing stickers. Mirrors
                 the native Show QR / Print All pair (and the Foam → Packing
-                split), but acts on `fabSewStickersForFabCut`. The native Fab
-                Cut Show QR / Print All buttons above are untouched. */}
+                split), but acts on the fetched-and-built `fabSewStickers`.
+                The native Fab Cut Show QR / Print All buttons above are
+                untouched. */}
             {activeTab === "FAB_CUT" && (() => {
-              // Count only meaningful once intent has fired (memo is gated);
-              // before that the label just invites the operator to load.
-              const count = fabSewStickersForFabCut.length;
+              // Count is only meaningful once the stickers have been fetched +
+              // built (on click); before that the label just invites the load.
+              const count = fabSewStickers.length;
               return (
                 <>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={handleShowFabSewStrip}
+                    disabled={loadingFabSew}
                     title="Show the downstream Fabric Sewing QR stickers for the orders in the current Fab Cut filter"
                   >
-                    {showFabSewStrip
-                      ? "Hide Fab Sew QR"
-                      : fabSewIntent && count > 0
-                        ? `Show Fab Sew QR (${count})`
-                        : "Show Fab Sew QR"}
+                    {loadingFabSew
+                      ? "Loading…"
+                      : showFabSewStrip
+                        ? "Hide Fab Sew QR"
+                        : count > 0
+                          ? `Show Fab Sew QR (${count})`
+                          : "Show Fab Sew QR"}
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={handlePrintFabSewStickers}
-                    disabled={printingFabSew}
+                    disabled={printingFabSew || loadingFabSew}
                     title="Print the downstream Fabric Sewing QR stickers for the orders in the current Fab Cut filter"
                   >
                     {printingFabSew ? "Generating…" : "Print Fab Sew Stickers"}
@@ -6916,12 +6987,12 @@ export default function ProductionPage({
             uses, so a Fab Sew tile pulled here is pixel-identical to one on
             the Fab Sew tab — and to its 100×150mm print page. Gated on
             showFabSewStrip so it only mounts the <QRImg> tree on intent. */}
-        {activeTab === "FAB_CUT" && showFabSewStrip && fabSewStickersForFabCut.length > 0 && (
+        {activeTab === "FAB_CUT" && showFabSewStrip && fabSewStickers.length > 0 && (
           <div className="border-t border-[#F0F0F0]">
             <div className="px-4 py-2 bg-[#FAF8F4] border-b border-[#F0F0F0] text-xs text-[#6B5C32] font-semibold flex items-center justify-between">
               <span>
-                Fab Sew Stickers preview · {fabSewStickersForFabCut.length} sticker
-                {fabSewStickersForFabCut.length === 1 ? "" : "s"}
+                Fab Sew Stickers preview · {fabSewStickers.length} sticker
+                {fabSewStickers.length === 1 ? "" : "s"}
               </span>
               <span className="text-[#8A7F73] font-normal">
                 Same layout, size, content as the Fab Sew dept print
@@ -6929,14 +7000,14 @@ export default function ProductionPage({
             </div>
             <div className="overflow-x-auto">
               <div className="flex gap-3 p-3 min-w-min">
-                {fabSewStickersForFabCut.map((s) => renderLargeStickerTile(s))}
+                {fabSewStickers.map((s) => renderLargeStickerTile(s))}
               </div>
             </div>
           </div>
         )}
         {/* FAB_CUT-only: empty-state hint when the operator clicked Show but
             no FAB_SEW job cards exist for the visible Fab Cut orders. */}
-        {activeTab === "FAB_CUT" && showFabSewStrip && fabSewStickersForFabCut.length === 0 && (
+        {activeTab === "FAB_CUT" && showFabSewStrip && fabSewStickers.length === 0 && (
           <div className="border-t border-[#F0F0F0] px-4 py-6 text-center text-xs text-[#9A918A]">
             No Fab Sew job cards for the orders in the current Fab Cut filter.
           </div>

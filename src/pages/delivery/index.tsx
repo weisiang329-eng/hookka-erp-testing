@@ -132,6 +132,10 @@ type DeliveryOrderRow = {
   contactPhone: string;
   deliveryDate: string;
   remarks: string;
+  // Invoice this DO was transferred to (invoices.deliveryOrderId = do.id, one
+  // invoice per DO). Returned by the DO list endpoint; shown as "Transfer To"
+  // on the Delivered tab. Empty string when no invoice references the DO yet.
+  invoiceNo: string;
 };
 
 // A saved packing list (one truck run grouping several DOs). Mirrors the
@@ -257,6 +261,7 @@ function mapDOToRow(
     contactPhone: d.contactPhone || "",
     deliveryDate: d.deliveryDate || "",
     remarks: d.remarks || "",
+    invoiceNo: ((d as Record<string, unknown>).invoiceNo as string) || "",
   };
 }
 
@@ -3046,6 +3051,29 @@ export default function DeliveryPage() {
           </div>
         ),
       },
+      // Transfer To — the invoice this delivered DO became (invoices.
+      // deliveryOrderId = do.id). Only shown on the Delivered tab, where the
+      // operator wants to see at a glance which DOs have already been turned
+      // into an invoice (e.g. INV-2605-xxx) and which still need transferring.
+      ...(activeTab === "delivered"
+        ? [
+            {
+              key: "invoiceNo",
+              label: "Transfer To",
+              type: "text" as const,
+              width: "150px",
+              sortable: true,
+              render: (_value: unknown, row: DeliveryOrderRow) =>
+                row.invoiceNo ? (
+                  <span className="font-mono text-[13px] text-[#4F7C3A]">
+                    {row.invoiceNo}
+                  </span>
+                ) : (
+                  <span className="text-[#9CA3AF]">Not invoiced</span>
+                ),
+            } as Column<DeliveryOrderRow>,
+          ]
+        : []),
       // Transport Co. = the 3PL provider COMPANY (e.g. "Express Logistics
       // Sdn Bhd"). delivery_orders.driverId column holds the provider's id
       // (legacy column name, kept post-3PL refactor) - look up the actual
@@ -3093,7 +3121,7 @@ export default function DeliveryPage() {
         ),
       },
     ],
-    [selectedIds, providers, doPackingMap]
+    [selectedIds, providers, doPackingMap, activeTab]
   );
 
   // ---------- Context menu ----------

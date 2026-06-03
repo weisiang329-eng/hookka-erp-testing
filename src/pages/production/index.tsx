@@ -1533,6 +1533,14 @@ export default function ProductionPage({
   // per PO/JC). "total" → handlePrintTotalListing (rows merged on
   // model+spec so the floor sees "make N of X").
   const [printMode, setPrintMode] = useState<"detailed" | "total">("detailed");
+  // Replaces the native browser window.confirm "Mark all as Sent?" prompt shown
+  // at print time with a system-styled dialog. When set, the dialog renders; its
+  // buttons re-invoke the print handler with the decision (true = mark + print,
+  // false = print only) — crucially from the button-click gesture, so the
+  // window.open print popup the handler opens is not pop-up-blocked.
+  const [printSentPrompt, setPrintSentPrompt] = useState<
+    { count: number; which: "schedule" | "total" } | null
+  >(null);
 
   const fetchOrders = useCallback(() => {
     invalidateCachePrefix("/api/production-orders");
@@ -4787,7 +4795,7 @@ export default function ProductionPage({
     }
   }, [toast]);
 
-  const handlePrintSchedule = useCallback(() => {
+  const handlePrintSchedule = useCallback((markDecision: boolean | null = null) => {
     const today = new Date().toLocaleDateString("en-MY", {
       year: "numeric", month: "short", day: "numeric",
     });
@@ -4919,18 +4927,20 @@ export default function ProductionPage({
       // Sent checkbox uses (patchJobCardRef.current → distributedAt), which
       // coalesces through the drafts buffer into one bulk-patch call; we then
       // flush immediately (saveAllNow) instead of waiting out the debounce.
-      // The window.confirm below is synchronous, so it stays inside the click
-      // gesture and never trips the pop-up blocker on window.open. We do NOT
-      // await the save before printing — the optimistic state already ticks
-      // the checkboxes and the printout is built from in-memory rows.
+      // Mark-as-Sent gate. On the first (operator) click markDecision is null:
+      // we hand off to the system-styled dialog, which re-invokes this handler
+      // with the decision from its OWN button-click gesture (so the window.open
+      // print popup below is not pop-up-blocked). markDecision === true marks
+      // every unsent row before printing; false prints only. We do NOT await the
+      // save before printing — the optimistic state already ticks the checkboxes
+      // and the printout is built from in-memory rows.
       const unsentPrintRows = printRows.filter((r) => !r.distributedAt && r.jobCardId);
       if (unsentPrintRows.length > 0) {
-        const markSent = window.confirm(
-          `Mark all ${unsentPrintRows.length} item(s) in this schedule as Sent (distributed to the department)?\n\n` +
-            "Yes — tick every Sent box and print.\n" +
-            "No — print only, leave the Sent boxes unchanged.",
-        );
-        if (markSent) {
+        if (markDecision === null) {
+          setPrintSentPrompt({ count: unsentPrintRows.length, which: "schedule" });
+          return;
+        }
+        if (markDecision === true) {
           const now = new Date().toISOString();
           for (const r of unsentPrintRows) {
             patchJobCardRef.current(r.poId, r.jobCardId, { distributedAt: now });
@@ -5256,7 +5266,7 @@ export default function ProductionPage({
   // Overview grouping key: productCode | sizeLabel | fabricCode. Same
   // principle: divan/leg/gap encode model variants, not separate items.
   // For per-PO progress detail, use Detailed mode.
-  const handlePrintTotalListing = useCallback(() => {
+  const handlePrintTotalListing = useCallback((markDecision: boolean | null = null) => {
     const today = new Date().toLocaleDateString("en-MY", {
       year: "numeric", month: "short", day: "numeric",
     });
@@ -5417,14 +5427,16 @@ export default function ProductionPage({
       // to the floor. Marks EXACTLY this printRows source set (the unmerged
       // dept job cards behind the merged WIP buckets), skipping rows already
       // Sent, via the same per-JC distributedAt patch the Sent checkbox uses.
+      // markDecision === null → hand off to the styled dialog (which re-invokes
+      // this handler with the decision from its own button gesture). See the
+      // identical gate in handlePrintSchedule for the pop-up-blocker rationale.
       const unsentPrintRows = printRows.filter((r) => !r.distributedAt && r.jobCardId);
       if (unsentPrintRows.length > 0) {
-        const markSent = window.confirm(
-          `Mark all ${unsentPrintRows.length} item(s) in this schedule as Sent (distributed to the department)?\n\n` +
-            "Yes — tick every Sent box and print.\n" +
-            "No — print only, leave the Sent boxes unchanged.",
-        );
-        if (markSent) {
+        if (markDecision === null) {
+          setPrintSentPrompt({ count: unsentPrintRows.length, which: "total" });
+          return;
+        }
+        if (markDecision === true) {
           const now = new Date().toISOString();
           for (const r of unsentPrintRows) {
             patchJobCardRef.current(r.poId, r.jobCardId, { distributedAt: now });
@@ -5733,8 +5745,10 @@ export default function ProductionPage({
           </label>
           <Button
             variant="outline"
-            onClick={
-              printMode === "total" ? handlePrintTotalListing : handlePrintSchedule
+            onClick={() =>
+              printMode === "total"
+                ? handlePrintTotalListing()
+                : handlePrintSchedule()
             }
           >
             Print Schedule
@@ -8124,6 +8138,59 @@ export default function ProductionPage({
         onClose={() => setStockDialogOpen(false)}
         onCreated={fetchOrders}
       />
+
+      {/* Mark-as-Sent prompt shown at print time — a system-styled replacement
+          for the native browser window.confirm ("erp.hookka.com says…"). Its
+          buttons re-invoke the matching print handler with the decision, from
+          THIS button-click gesture, so the handler's window.open print popup is
+          not pop-up-blocked. Mounted at the root so it overlays everything. */}
+      {printSentPrompt && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/30">
+          <div className="w-[420px] rounded-md border border-[#E6E0D9] bg-white p-4 shadow-lg">
+            <h3 className="mb-2 text-[14px] font-semibold text-[#3A2E22]">
+              Mark items as Sent?
+            </h3>
+            <p className="mb-4 text-[12px] leading-relaxed text-[#6B5E50]">
+              Printing this schedule hands the work to the floor. Mark all{" "}
+              <strong>{printSentPrompt.count}</strong> item
+              {printSentPrompt.count === 1 ? "" : "s"} in it as{" "}
+              <strong>Sent</strong> (distributed to the department)?
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setPrintSentPrompt(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  const which = printSentPrompt.which;
+                  setPrintSentPrompt(null);
+                  if (which === "total") handlePrintTotalListing(false);
+                  else handlePrintSchedule(false);
+                }}
+              >
+                Print only
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  const which = printSentPrompt.which;
+                  setPrintSentPrompt(null);
+                  if (which === "total") handlePrintTotalListing(true);
+                  else handlePrintSchedule(true);
+                }}
+              >
+                Mark all &amp; print
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* PatchFailureModal removed 2026-05-12 — failures now surface as
           toast.error from flushDrafts. Cell auto-reverts on failure, so the

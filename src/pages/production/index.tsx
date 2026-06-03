@@ -98,6 +98,13 @@ const OVERVIEW_DEFAULT_WIDTHS: Record<string, number> = {
   FAB_CUT: 108, FAB_SEW: 108, FOAM: 108, WOOD_CUT: 108, FRAMING: 108, WEBBING: 108, UPHOLSTERY: 108, PACKING: 108,
 };
 const OVERVIEW_COLW_STORAGE = "prod-overview-colwidths-v1";
+// Width (px) of the leading multi-select checkbox gutter prepended to the
+// Overview matrix grid. Kept OUT of OVERVIEW_COL_KEYS so it isn't sortable,
+// filterable, or resizable — it's a fixed gutter, not a data column. The
+// header + every body row prepend a `${OVERVIEW_SELECT_COL_W}px` track to
+// the shared grid template so they stay column-aligned. (Wei Siang 2026-06-03:
+// batch set-due-date on the Overview, mirroring the dept sheet + tracker.)
+const OVERVIEW_SELECT_COL_W = 36;
 const OverviewResizeCtx = createContext<{ start: (e: React.MouseEvent, key: string) => void; reset: (key: string) => void } | null>(null);
 
 // ----- Overview header cell — sort indicator + filter popover trigger -----
@@ -1066,6 +1073,18 @@ export default function ProductionPage({
   const [overviewFilters, setOverviewFilters] = useState<OverviewFilters>(initialOverviewState.filters);
   const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);
 
+  // ── Overview matrix: multi-select → batch set due date ──
+  // Wei Siang 2026-06-03: tick rows in the Overview, pick a department scope
+  // ("All departments" or one dept), pick a date, Apply — sets that due date
+  // across the selected orders' job cards. Mirrors the dept-sheet batch toolbar
+  // and the planning tracker's analog. Selection is keyed by ORDER id (each
+  // matrix row is one ProductionOrder spanning up to 8 dept job cards) and is
+  // deliberately SEPARATE from `selectedDeptRows` (the dept-sheet's per-job-card
+  // selection) so the two views never clobber each other.
+  const [selectedOverviewIds, setSelectedOverviewIds] = useState<Set<string>>(new Set());
+  const [overviewBatchDept, setOverviewBatchDept] = useState<string>("ALL");
+  const [overviewBatchDueDateOpen, setOverviewBatchDueDateOpen] = useState(false);
+
   // ── Overview matrix: user-resizable column widths ──
   // colKey -> px. Empty = use OVERVIEW_DEFAULT_WIDTHS. Persisted per-browser.
   const [overviewColWidths, setOverviewColWidths] = useState<Record<string, number>>(() => {
@@ -1079,12 +1098,15 @@ export default function ProductionPage({
     (key: string) => overviewColWidths[key] ?? OVERVIEW_DEFAULT_WIDTHS[key] ?? 100,
     [overviewColWidths],
   );
+  // Leading `OVERVIEW_SELECT_COL_W`px track = the multi-select checkbox
+  // gutter. The header row + every body row reuse this same template, so the
+  // gutter keeps them aligned without touching the resizable data columns.
   const overviewTemplate = useMemo(
-    () => OVERVIEW_COL_KEYS.map((k) => `${overviewColW(k)}px`).join(" "),
+    () => `${OVERVIEW_SELECT_COL_W}px ${OVERVIEW_COL_KEYS.map((k) => `${overviewColW(k)}px`).join(" ")}`,
     [overviewColW],
   );
   const overviewMinWidth = useMemo(
-    () => OVERVIEW_COL_KEYS.reduce((s, k) => s + overviewColW(k), 0),
+    () => OVERVIEW_SELECT_COL_W + OVERVIEW_COL_KEYS.reduce((s, k) => s + overviewColW(k), 0),
     [overviewColW],
   );
   const resetOverviewWidth = useCallback((key: string) => {
@@ -2381,6 +2403,106 @@ export default function ProductionPage({
     }
     return rows;
   }, [filteredOrders, activeTab, deferredOverviewSort, deferredOverviewFilters]);
+
+  // ── Overview multi-select (batch set due date) ──
+  // The selected orders, intersected with the live `visibleOrders` so a row
+  // that got filtered out / removed can't linger in the selection or in the
+  // batch toolbar's count.
+  const selectedOverviewOrders = useMemo(
+    () => visibleOrders.filter((o) => selectedOverviewIds.has(o.id)),
+    [visibleOrders, selectedOverviewIds],
+  );
+  // Select-all is scoped to the CURRENTLY-VISIBLE (filtered + sorted) rows.
+  const allOverviewVisibleSelected =
+    visibleOrders.length > 0 && visibleOrders.every((o) => selectedOverviewIds.has(o.id));
+  const someOverviewVisibleSelected =
+    !allOverviewVisibleSelected && visibleOrders.some((o) => selectedOverviewIds.has(o.id));
+  const toggleOverviewRow = useCallback((id: string) => {
+    setSelectedOverviewIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleOverviewSelectAll = useCallback(() => {
+    setSelectedOverviewIds((prev) => {
+      // All visible already selected → clear just the visible ones; else add
+      // every visible row to the selection.
+      if (visibleOrders.length > 0 && visibleOrders.every((o) => prev.has(o.id))) {
+        const next = new Set(prev);
+        for (const o of visibleOrders) next.delete(o.id);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const o of visibleOrders) next.add(o.id);
+      return next;
+    });
+  }, [visibleOrders]);
+
+  // Batch Due Date apply — reuses the EXACT endpoint + patch shape the dept
+  // sheet + planning tracker + folder detail page use:
+  //   POST /api/production-orders/bulk-patch { patches: [{ poId, jobCardId, dueDate }] }
+  // Builds one patch per (selected order × matching department job card),
+  // scoped to overviewBatchDept ("ALL" → every dept job card on the order).
+  // dueDate only — status is intentionally untouched (schedule vs progress).
+  const applyOverviewBatchDueDate = useCallback(async (date: string) => {
+    setOverviewBatchDueDateOpen(false);
+    const patches: Array<{ poId: string; jobCardId: string; dueDate: string }> = [];
+    for (const order of selectedOverviewOrders) {
+      for (const jc of order.jobCards) {
+        if (overviewBatchDept !== "ALL" && jc.departmentCode !== overviewBatchDept) continue;
+        patches.push({ poId: order.id, jobCardId: jc.id, dueDate: date });
+      }
+    }
+    if (patches.length === 0) {
+      toast.error(
+        overviewBatchDept === "ALL"
+          ? "Selected orders have no job cards to update."
+          : `No ${DEPARTMENTS.find((d) => d.code === overviewBatchDept)?.name ?? overviewBatchDept} job cards on the selected orders.`,
+      );
+      return;
+    }
+    try {
+      const res = await fetch("/api/production-orders/bulk-patch", {
+        method: "POST",
+        headers: csrfHeaders(),
+        body: JSON.stringify({ patches }),
+        credentials: "include",
+      });
+      const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
+      const failed = (j.results || []).filter((x) => !x.success);
+      if (failed.length > 0) {
+        toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
+      } else {
+        const scope = overviewBatchDept === "ALL"
+          ? "all departments"
+          : (DEPARTMENTS.find((d) => d.code === overviewBatchDept)?.name ?? overviewBatchDept);
+        const verb = date ? "Set due date" : "Cleared due date";
+        toast.success(`${verb} (${scope}) on ${selectedOverviewOrders.length} order${selectedOverviewOrders.length === 1 ? "" : "s"}.`);
+      }
+      // Optimistic local write so the new dates show before the refetch lands —
+      // mirrors the dept-sheet batch handler. Then drop the cached matrix +
+      // refetch so any server-side recompute (overdue colouring) reconciles.
+      const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+      setOrders((prev) =>
+        prev.map((po) => {
+          if (!patches.some((p) => p.poId === po.id)) return po;
+          return {
+            ...po,
+            jobCards: po.jobCards.map((jc) =>
+              patchedJcIds.has(jc.id) ? { ...jc, dueDate: date || "" } : jc,
+            ),
+          };
+        }),
+      );
+      invalidateCachePrefix("/api/production-orders");
+      refreshOrders();
+      setSelectedOverviewIds(new Set());
+    } catch (err) {
+      toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [selectedOverviewOrders, overviewBatchDept, toast, refreshOrders]);
 
   // Overview matrix row virtualization. Pre-fix: every order in
   // visibleOrders was rendered to a hand-rolled CSS-grid <div>, so a
@@ -6430,6 +6552,21 @@ export default function ProductionPage({
           className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9] relative z-20"
           style={{ gridTemplateColumns: overviewTemplate, minWidth: overviewMinWidth }}
         >
+          {/* Select-all checkbox gutter. Scopes to the currently-visible
+              (filtered + sorted) rows = visibleOrders. */}
+          <div className="flex items-center justify-center px-1.5 py-2.5">
+            <input
+              type="checkbox"
+              aria-label="Select all visible orders"
+              checked={allOverviewVisibleSelected}
+              ref={(el) => {
+                if (el) el.indeterminate = someOverviewVisibleSelected;
+              }}
+              onChange={toggleOverviewSelectAll}
+              disabled={visibleOrders.length === 0}
+              className="cursor-pointer align-middle"
+            />
+          </div>
           <OverviewHeader
             label="SO ID"
             sortKey="soId"
@@ -6618,10 +6755,14 @@ export default function ProductionPage({
           {overviewRowVirtualizer.getVirtualItems().map((virtualRow) => {
             const order = visibleOrders[virtualRow.index];
             if (!order) return null;
+            const isSelected = selectedOverviewIds.has(order.id);
             // Lifecycle row styling — amber background for ON_HOLD, grey +
             // strikethrough for CANCELLED. Matches the dept DataGrid rule.
-            const rowCls =
-              order.status === "ON_HOLD"
+            // A ticked row gets the same warm highlight the dept sheet / tracker
+            // use, overriding the lifecycle tint so the selection reads clearly.
+            const rowCls = isSelected
+              ? "bg-[#FFF8E6] hover:bg-[#FBEFC9]"
+              : order.status === "ON_HOLD"
                 ? "bg-[#FEF6D8] hover:bg-[#FBEBAE]"
                 : order.status === "CANCELLED"
                   ? "bg-[#F3F4F6] text-[#9CA3AF] line-through hover:bg-[#E5E7EB]"
@@ -6659,6 +6800,21 @@ export default function ProductionPage({
                   navigate(`/consignment/${order.consignmentOrderId}`);
               }}
             >
+              {/* Multi-select checkbox gutter. stopPropagation keeps the tick
+                  from triggering the row's double-click navigation. */}
+              <div
+                className="flex items-center justify-center"
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  aria-label={`Select order ${order.poNo}`}
+                  checked={isSelected}
+                  onChange={() => toggleOverviewRow(order.id)}
+                  className="cursor-pointer align-middle"
+                />
+              </div>
               <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">
                 <span className="truncate">{order.poNo}</span>
                 {pillLabel && (
@@ -6804,6 +6960,53 @@ export default function ProductionPage({
           <span>{visibleOrders.length} of {orders.length} work orders</span>
           <span>{overallDone}/{overallTotal} cells complete</span>
         </div>
+
+        {/* Batch Due Date — multi-select rows, pick a department scope + a
+            date, Apply. Reuses the dept sheet's BatchActionToolbar +
+            ApplyBatchDueDateDialog + /api/production-orders/bulk-patch endpoint.
+            The department scope picker is matrix-specific: each row is a whole
+            order spanning up to 8 dept job cards, so the operator chooses which
+            department's due date to set (or all). (Wei Siang 2026-06-03) */}
+        {selectedOverviewOrders.length > 0 && (
+          <div className="sticky bottom-[68px] left-3 right-3 z-30 flex items-center gap-2 rounded-md border border-[#C9A227] bg-[#FFF8E6] px-3 py-2 shadow-md">
+            <span className="text-[12px] font-semibold text-[#5A4500]">Due Date department:</span>
+            <select
+              value={overviewBatchDept}
+              onChange={(e) => setOverviewBatchDept(e.target.value)}
+              className="h-8 rounded border border-[#D4CFC7] bg-white px-2 text-[12px] text-[#3A2E22] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+            >
+              <option value="ALL">All departments</option>
+              {DEPARTMENTS.map((d) => (
+                <option key={d.code} value={d.code}>{d.name}</option>
+              ))}
+            </select>
+            <span className="text-[11px] text-[#9C7A1E]">
+              {overviewBatchDept === "ALL"
+                ? "Sets the date on every department job card of the selected orders."
+                : `Sets the date on the ${DEPARTMENTS.find((d) => d.code === overviewBatchDept)?.name} job card of the selected orders.`}
+            </span>
+          </div>
+        )}
+
+        <BatchActionToolbar
+          count={selectedOverviewOrders.length}
+          onClear={() => setSelectedOverviewIds(new Set())}
+          onApplyDueDate={() => setOverviewBatchDueDateOpen(true)}
+          // The Overview matrix only exposes the batch Due Date action —
+          // completion date, PIC, and folder archiving live on the dept sheet
+          // (per-job-card). These no-op handlers satisfy the shared toolbar's
+          // prop contract; their buttons point the operator to the right place.
+          onApplyDate={() => toast.error("Apply Completion is on the department sheet (per-job-card).")}
+          onApplyPic={() => toast.error("Apply PIC is on the department sheet (per-job-card).")}
+          onSaveToFolder={() => toast.error("Save to Folder is on the department sheet (per-job-card).")}
+        />
+
+        <ApplyBatchDueDateDialog
+          open={overviewBatchDueDateOpen}
+          count={selectedOverviewOrders.length}
+          onCancel={() => setOverviewBatchDueDateOpen(false)}
+          onApply={applyOverviewBatchDueDate}
+        />
       </div>
       )}
 

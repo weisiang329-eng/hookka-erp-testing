@@ -4788,6 +4788,37 @@ export default function ProductionPage({
         if (fltDueTo && r.dueDate && r.dueDate > fltDueTo) return false;
         return true;
       });
+      // Mark-as-Sent at print time (dept sub-tab only). Printing the
+      // schedule IS the act of handing it to the floor, so offer a one-click
+      // "tick every Sent box" instead of the operator clicking each row.
+      // Operates on EXACTLY the printRows set above (respects page-level +
+      // grid filters and the per-row due filter). Skips rows already Sent so
+      // we don't re-stamp distributedAt. Writes via the SAME per-JC patch the
+      // Sent checkbox uses (patchJobCardRef.current → distributedAt), which
+      // coalesces through the drafts buffer into one bulk-patch call; we then
+      // flush immediately (saveAllNow) instead of waiting out the debounce.
+      // The window.confirm below is synchronous, so it stays inside the click
+      // gesture and never trips the pop-up blocker on window.open. We do NOT
+      // await the save before printing — the optimistic state already ticks
+      // the checkboxes and the printout is built from in-memory rows.
+      const unsentPrintRows = printRows.filter((r) => !r.distributedAt && r.jobCardId);
+      if (unsentPrintRows.length > 0) {
+        const markSent = window.confirm(
+          `Mark all ${unsentPrintRows.length} item(s) in this schedule as Sent (distributed to the department)?\n\n` +
+            "Yes — tick every Sent box and print.\n" +
+            "No — print only, leave the Sent boxes unchanged.",
+        );
+        if (markSent) {
+          const now = new Date().toISOString();
+          for (const r of unsentPrintRows) {
+            patchJobCardRef.current(r.poId, r.jobCardId, { distributedAt: now });
+          }
+          // Flush the staged distributedAt writes now rather than waiting for
+          // the 2s debounce, so the "Sent" state persists right after print.
+          saveAllNow();
+          toast.success(`Marked ${unsentPrintRows.length} item(s) as Sent`);
+        }
+      }
       // Sum the per-jc prodTime (productionTimeMinutes × wipQty) on the
       // dept rows we're actually printing. Mirrors the on-screen Total
       // footer at line 5292+ so the printed total matches what the
@@ -5086,6 +5117,7 @@ export default function ProductionPage({
     filteredOrders.length,
     fltSearch, fltCustomer, fltState, fltCategory, fltDueFrom, fltDueTo, incompleteOnly,
     gridFilterIdSet, gridFilteredDeptRows,
+    saveAllNow, toast,
   ]);
 
   // "Total Listing" — sibling to handlePrintSchedule. Same filter inputs,
@@ -5258,6 +5290,27 @@ export default function ProductionPage({
       const printRows = gridFilterIdSet
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
+      // Mark-as-Sent at print time (dept sub-tab only) — same intent as
+      // handlePrintSchedule: printing the Total Listing also hands the work
+      // to the floor. Marks EXACTLY this printRows source set (the unmerged
+      // dept job cards behind the merged WIP buckets), skipping rows already
+      // Sent, via the same per-JC distributedAt patch the Sent checkbox uses.
+      const unsentPrintRows = printRows.filter((r) => !r.distributedAt && r.jobCardId);
+      if (unsentPrintRows.length > 0) {
+        const markSent = window.confirm(
+          `Mark all ${unsentPrintRows.length} item(s) in this schedule as Sent (distributed to the department)?\n\n` +
+            "Yes — tick every Sent box and print.\n" +
+            "No — print only, leave the Sent boxes unchanged.",
+        );
+        if (markSent) {
+          const now = new Date().toISOString();
+          for (const r of unsentPrintRows) {
+            patchJobCardRef.current(r.poId, r.jobCardId, { distributedAt: now });
+          }
+          saveAllNow();
+          toast.success(`Marked ${unsentPrintRows.length} item(s) as Sent`);
+        }
+      }
       // Mirror the dept branch in handlePrintSchedule: DeptRow.prodTime
       // already has productionTimeMinutes × wipQty baked in for this
       // dept's job cards, so a flat sum gives the correct total.
@@ -5479,6 +5532,7 @@ export default function ProductionPage({
   }, [
     activeTab, activeDept, visibleOrders, deptRows,
     fltSearch, fltCustomer, fltState, fltCategory, fltDueFrom, fltDueTo, incompleteOnly, gridFilterIdSet, deptColumns,
+    saveAllNow, toast,
   ]);
 
   // NOTE: loading is intentionally NOT an early-return — that previously

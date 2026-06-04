@@ -258,7 +258,18 @@ function joinInflight<T>(url: string): Promise<T> {
     // so the worker can stitch every fetch from this tab onto one trace.
     headers: { traceparent: buildTraceparent() },
   })
-    .then((r) => r.json())
+    .then((r) => {
+      // Treat any non-2xx as a HARD failure so the caller KEEPS its
+      // last-known-good cached data instead of overwriting a populated
+      // list with the parsed error body. A transient 500/503 (DB
+      // connection contention under load) must never blank a page that
+      // was already showing data. Wei Siang 2026-06-04 ("我的系统为什么
+      // 东西空去了"): a load-induced 500 on /api/sales-orders was wiping
+      // the list AND poisoning localStorage with the empty error envelope,
+      // so the page stayed blank even after navigating away and back.
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+      return r.json();
+    })
     .then((j) => {
       // Catch-all stub guard (2026-04-26): the backend's /api/* fallback in
       // worker.ts returns `{success:true, data:[], _stub:true, path}` for
@@ -300,6 +311,21 @@ function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const name = (err as { name?: unknown }).name;
   return name === "AbortError";
+}
+
+// A 200-OK response can still be semantically degraded: the worker's
+// catch-all returns `{success:true,data:[],_stub:true}` for an unmounted
+// route, and handled backend errors return `{success:false,error}`.
+// Writing either into state/cache replaces a populated list with
+// emptiness — the same blank-page failure mode as a raw 500. Callers use
+// this to keep last-known-good data instead of overwriting it.
+//
+// NOTE: a genuine empty dataset is `{success:true,data:[]}` (no _stub,
+// success !== false) — that is NOT degraded and correctly renders empty.
+function isDegradedResponse(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const o = raw as { _stub?: unknown; success?: unknown };
+  return o._stub === true || o.success === false;
 }
 
 type UseCachedJsonResult<T> = {
@@ -405,6 +431,20 @@ export function useCachedJson<T = unknown>(
 
           console.warn(`[slow-fetch] url=${joinedUrl} dur_ms=${dur}`);
         }
+        // Blank-page guard (2026-06-04): a 200-OK but degraded response
+        // (unmounted-route _stub envelope, or {success:false}) must not
+        // overwrite a populated cache with emptiness. If we already hold a
+        // non-degraded copy, keep showing it and surface an error instead
+        // of blanking the page. Only fall through to write/show the
+        // degraded body when we have nothing better to show (first load).
+        if (isDegradedResponse(raw)) {
+          const prior = readCache<T>(joinedUrl);
+          if (prior && !isDegradedResponse(prior.data)) {
+            setData(prior.data);
+            setError("degraded response — kept last-known-good data");
+            return;
+          }
+        }
         // Canonicalise Hono's `{ success, data }` envelope into `data` only
         // when we're confident that's what the caller wants. We DO NOT strip
         // the envelope here — callers decide how to interpret the response —
@@ -485,6 +525,11 @@ export async function cachedFetchJson<T = unknown>(
   const cached = readCache<T>(url);
   try {
     const raw = await joinInflight<T>(url);
+    // Same blank-page guard as useCachedJson: don't let a degraded 200
+    // (unmounted-route _stub / {success:false}) replace good cached data.
+    if (isDegradedResponse(raw) && cached && !isDegradedResponse(cached.data)) {
+      return cached.data;
+    }
     writeCache<T>(url, raw);
     return raw;
   } catch (err) {

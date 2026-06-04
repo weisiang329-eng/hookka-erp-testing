@@ -912,8 +912,20 @@ app.get("/", async (c) => {
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
       loadDoInvoiceMap(db, orgId),
     ]);
+    // De-quadratic (2026-06-04): group items by deliveryOrderId ONCE so each
+    // rowToOrderList gets only its own items instead of re-scanning ALL items
+    // (rowToOrder + rowToOrderList each filter the full array per row). GET
+    // /api/delivery-orders was P95 10-19s — this O(orders × items) scan was a
+    // top driver. Output byte-identical: the per-row filters still run, over a
+    // pre-narrowed list.
+    const itemsByDO = new Map<string, DeliveryOrderItemRow[]>();
+    for (const it of itemRows) {
+      const arr = itemsByDO.get(it.deliveryOrderId);
+      if (arr) arr.push(it);
+      else itemsByDO.set(it.deliveryOrderId, [it]);
+    }
     const data = orderRows.map((o) => {
-      const order = rowToOrderList(o, itemRows, m3Map, hubStateMap);
+      const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap);
       order.valueSen = valueMap.get(o.id) ?? 0;
       order.invoiceNo = invoiceMap.get(o.id) ?? "";
       return order;
@@ -959,8 +971,15 @@ app.get("/", async (c) => {
     loadDoValueMap(db, orgId),
     loadDoInvoiceMap(db, orgId),
   ]);
+  // De-quadratic: same per-DO grouping as the full-list branch above.
+  const itemsByDO = new Map<string, DeliveryOrderItemRow[]>();
+  for (const it of items) {
+    const arr = itemsByDO.get(it.deliveryOrderId);
+    if (arr) arr.push(it);
+    else itemsByDO.set(it.deliveryOrderId, [it]);
+  }
   const data = orderRows.map((o) => {
-    const order = rowToOrderList(o, items, m3Map, hubStateMap);
+    const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap);
     order.valueSen = valueMap.get(o.id) ?? 0;
     order.invoiceNo = invoiceMap.get(o.id) ?? "";
     return order;

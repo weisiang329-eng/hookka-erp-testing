@@ -368,8 +368,40 @@ async function sendInviteEmail(
     expiresInHours: INVITE_TTL_HOURS,
   });
 
-  // --- Primary path: enqueue into outbox_emails (durable, retried) ---
-  let enqueueError: string | null = null;
+  // --- Primary path: send immediately (direct), like password reset. ---
+  // Invites used to be ENQUEUED into outbox_emails and wait for the GitHub cron
+  // drain — but that cron is throttled to multi-hour gaps and sometimes fails
+  // outright (2026-06-04 had a ~7h window, 13:06→19:49 MYT, with no successful
+  // drain), so an invite clicked in the afternoon sat unsent until evening — the
+  // "afternoon broken" symptom. Send directly so the recipient gets it in
+  // seconds; the outbox stays as a durable fallback below if the direct send
+  // fails. (2026-06-05 — afternoon-invite-delay fix.)
+  const env = c.env as {
+    RESEND_API_KEY?: string;
+    BREVO_API_KEY?: string;
+    RESEND_FROM_EMAIL?: string;
+  };
+  const from =
+    env.RESEND_FROM_EMAIL ||
+    "Hookka Manufacturing ERP <noreply@hookka.com>";
+  if (env.RESEND_API_KEY || env.BREVO_API_KEY) {
+    const direct = await sendMail(env, from, {
+      to: invite.email,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+    });
+    if (direct.ok) {
+      return { ok: true, id: direct.id };
+    }
+    console.warn(
+      `[users.invite] direct send failed for ${invite.email}: ${direct.error ?? "unknown"}; enqueuing to outbox as durable fallback.`,
+    );
+  }
+
+  // --- Durable fallback: enqueue into outbox_emails for the drain to retry. ---
+  // Reached only when the immediate send failed (provider blip) or no provider
+  // is configured. An invite must never be silently lost.
   try {
     const res = await enqueueEmail(c, {
       to: invite.email,
@@ -377,45 +409,14 @@ async function sendInviteEmail(
       html: tpl.html,
       text: tpl.text,
     });
-    return { ok: true, id: res.id };
+    return { ok: true, id: res.id, viaFallback: true };
   } catch (err) {
-    enqueueError = err instanceof Error ? err.message : "enqueue failed";
-    console.warn(
-      `[users.invite] outbox enqueue failed for ${invite.email}: ${enqueueError}. Falling through to direct send.`,
-    );
-  }
-
-  // --- Fallback path: direct Resend POST -----------------------------
-  // Only useful if RESEND_API_KEY is configured. Otherwise the helper
-  // returns { ok: false, error: "RESEND_API_KEY not configured" } which
-  // we surface verbatim — gives the admin actionable feedback.
-  const env = c.env as {
-    RESEND_API_KEY?: string;
-    BREVO_API_KEY?: string;
-    RESEND_FROM_EMAIL?: string;
-  };
-  if (!env.RESEND_API_KEY && !env.BREVO_API_KEY) {
+    const enqueueError = err instanceof Error ? err.message : "enqueue failed";
     return {
       ok: false,
-      error: `Outbox enqueue failed (${enqueueError}) and no email provider configured for direct fallback.`,
+      error: `Direct send failed and outbox enqueue also failed (${enqueueError}).`,
     };
   }
-  const from =
-    env.RESEND_FROM_EMAIL ||
-    "Hookka Manufacturing ERP <noreply@hookka.com>";
-  const direct = await sendMail(env, from, {
-    to: invite.email,
-    subject: tpl.subject,
-    html: tpl.html,
-    text: tpl.text,
-  });
-  if (direct.ok) {
-    return { ok: true, id: direct.id, viaFallback: true };
-  }
-  return {
-    ok: false,
-    error: `Outbox enqueue failed (${enqueueError}); direct send also failed (${direct.error ?? "unknown"}).`,
-  };
 }
 
 // POST /api/users/invite — create + send invite

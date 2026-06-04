@@ -129,6 +129,11 @@ export default function UsersPage() {
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
     null,
   );
+  // Which pending invite is currently being re-emailed — drives a spinner +
+  // disabled state on that row's Resend button so the click gives IMMEDIATE
+  // feedback. (Before: the only feedback was the top-of-page banner, which is
+  // off-screen when you're scrolled down to the invite list — felt dead.)
+  const [resendingToken, setResendingToken] = useState<string | null>(null);
   // Manual-copy fallback: when the Clipboard API + execCommand both
   // refuse (e.g. plain HTTP, sandboxed iframe), we render a small modal
   // with the URL pre-selected so the user can Ctrl/Cmd+C themselves.
@@ -334,25 +339,38 @@ export default function UsersPage() {
   };
 
   const resendInvite = async (inv: InviteRow) => {
-    const res = await fetch(`/api/users/invites/${inv.token}/resend`, {
-      method: "POST",
-    });
-    const json = (await res.json()) as ApiEnvelope<{
-      emailSent: boolean;
-      emailError?: string;
-    }>;
-    if (json.success && json.data) {
-      if (json.data.emailSent) {
-        showFlash("ok", `Invite email resent to ${inv.email}`);
+    setResendingToken(inv.token);
+    try {
+      const res = await fetch(`/api/users/invites/${inv.token}/resend`, {
+        method: "POST",
+      });
+      const json = (await res.json()) as ApiEnvelope<{
+        emailSent: boolean;
+        emailError?: string;
+      }>;
+      if (json.success && json.data) {
+        if (json.data.emailSent) {
+          showFlash("ok", `Invite email resent to ${inv.email}`);
+        } else {
+          showFlash(
+            "err",
+            `Email not sent: ${json.data.emailError ?? "unknown"}`,
+          );
+        }
+        fetchInvites();
       } else {
-        showFlash(
-          "err",
-          `Email not sent: ${json.data.emailError ?? "unknown"}`,
-        );
+        showFlash("err", json.error ?? "Failed to resend");
       }
-      fetchInvites();
-    } else {
-      showFlash("err", json.error ?? "Failed to resend");
+    } catch (err) {
+      // Previously there was NO try/catch: a network error or a non-JSON
+      // response made `res.json()` throw, the handler died, and the operator
+      // saw absolutely nothing. Always surface a result now.
+      showFlash(
+        "err",
+        `Failed to resend: ${err instanceof Error ? err.message : "network error"}`,
+      );
+    } finally {
+      setResendingToken(null);
     }
   };
 
@@ -386,7 +404,11 @@ export default function UsersPage() {
         {flash && (
           <div
             className={
-              "flex items-center gap-2 rounded-md px-4 py-2 text-sm " +
+              // Fixed bottom-right so the confirmation is ALWAYS on-screen,
+              // even when the operator is scrolled down to the Pending Invites
+              // list to click Resend (the old in-flow banner at the top was
+              // off-screen there — the root of "no reaction / never told me").
+              "fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-md px-4 py-3 text-sm shadow-lg " +
               (flash.kind === "ok"
                 ? "bg-[#EEF3E4] border border-[#C6DBA8] text-[#4F7C3A]"
                 : "bg-[#FCE4E4] border border-[#E8B2A1] text-[#9A3A2D]")
@@ -617,9 +639,17 @@ export default function UsersPage() {
                             variant="ghost"
                             size="sm"
                             onClick={() => resendInvite(inv)}
+                            disabled={resendingToken === inv.token}
                             title="Resend email"
                           >
-                            <RefreshCw className="h-3.5 w-3.5" />
+                            <RefreshCw
+                              className={
+                                "h-3.5 w-3.5" +
+                                (resendingToken === inv.token
+                                  ? " animate-spin"
+                                  : "")
+                              }
+                            />
                           </Button>
                           <Button
                             variant="ghost"

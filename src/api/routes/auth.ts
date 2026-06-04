@@ -759,9 +759,22 @@ app.post("/forgot-password", async (c) => {
       text,
     });
     if (!result.ok) {
+      // Durable fallback — a reset link must never be silently lost. The direct
+      // send failed (provider blip / timeout / rate-limit), so enqueue it to the
+      // outbox: the drain retries it (with backoff) and the failure is now a
+      // visible row instead of a dropped email. (2026-06-04 reset reliability.)
       console.warn(
-        `[auth/forgot-password] email send failed for ${email}: ${result.error}`,
+        `[auth/forgot-password] direct send failed for ${email}: ${result.error}; enqueuing to outbox`,
       );
+      try {
+        const { enqueueEmail } = await import("../lib/email-outbox");
+        await enqueueEmail(c, { to: email, subject, html, text });
+      } catch (e) {
+        console.error(
+          "[auth/forgot-password] outbox fallback ALSO failed:",
+          e instanceof Error ? e.message : String(e),
+        );
+      }
     }
   } catch (err) {
     console.warn(

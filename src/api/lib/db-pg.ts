@@ -94,12 +94,13 @@ export function getSql(databaseUrl: string): Sql {
         prepare: false,
         fetch_types: false,
         idle_timeout: 0,
-        // Bound connection establishment so a stalled Hyperdrive/pooler socket
-        // FAILS FAST instead of hanging the whole request for tens of seconds.
-        // Wei Siang 2026-06-04: a connection-layer stall froze every API call
-        // (even /api/auth/me) >9s — without a ceiling a bad socket just hangs.
-        // The non-Hyperdrive fallback branch already sets connect_timeout: 10.
-        connect_timeout: 10,
+        // 2026-06-04 EMERGENCY REVERT: connect_timeout removed from the
+        // Hyperdrive (prod) branch. Under DB contention a 10s cap converted
+        // slow-but-working requests into fast-fail 500s, which blanked the
+        // Sales/Delivery lists — the operator saw "all data gone" when the
+        // rows were intact, just not returned in time. Real cause is
+        // heavy-query load (fixed by the de-quadratic list builds in this
+        // branch). Restores the connection config that ran for months.
         types: { bigint: bigintAsNumber },
         transform: { column: { from: columnFrom } },
       })

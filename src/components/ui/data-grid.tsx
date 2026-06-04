@@ -13,6 +13,7 @@ import React, {
   useEffect,
   useCallback,
   useMemo,
+  useDeferredValue,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn, formatDateDMY, formatNumber, formatRM, getStatusColor } from "@/lib/utils";
@@ -1758,6 +1759,13 @@ export function DataGrid<T extends Record<string, any>>({
   };
   const seeded = readFilterState();
   const [searchText, setSearchText] = useState(initialSearch ?? seeded?.searchText ?? "");
+  // Deferred copy of the search value. The <input> stays bound to searchText
+  // (instant caret/echo), but the heavy filter+sort AND the parent
+  // onSearchChange notification read deferredSearch — so a fast typist no
+  // longer blocks the main thread re-filtering the whole grid on every key
+  // (and on Sales, no longer re-fetches the whole dataset per keystroke).
+  // Same data shown, just deferred a frame. (Wei Siang 2026-06-04 input-lag fix)
+  const deferredSearch = useDeferredValue(searchText);
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>(
     seeded?.columnFilters ?? {},
   );
@@ -2019,9 +2027,9 @@ export function DataGrid<T extends Record<string, any>>({
   const filteredData = useMemo(() => {
     let result = data;
 
-    // Global search
-    if (searchText) {
-      const lower = searchText.toLowerCase();
+    // Global search (deferred — see deferredSearch above)
+    if (deferredSearch) {
+      const lower = deferredSearch.toLowerCase();
       result = result.filter(row =>
         visibleColumns.some(col => {
           const val = getNestedValue(row, col.key);
@@ -2055,7 +2063,7 @@ export function DataGrid<T extends Record<string, any>>({
     }
 
     return result;
-  }, [data, searchText, columnFilters, columnValueFilters, visibleColumns]);
+  }, [data, deferredSearch, columnFilters, columnValueFilters, visibleColumns]);
 
   // All unique group values (for group filter dropdown)
   const allGroupValues = useMemo(() => {
@@ -2212,9 +2220,9 @@ export function DataGrid<T extends Record<string, any>>({
   // non-memoised handler can't loop.
   useEffect(() => {
     if (!onSearchChange) return;
-    onSearchChange(searchText);
+    onSearchChange(deferredSearch);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchText]);
+  }, [deferredSearch]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, row: T) => {
     if (!contextMenuItems) return;

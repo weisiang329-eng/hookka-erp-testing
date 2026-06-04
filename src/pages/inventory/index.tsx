@@ -1065,6 +1065,21 @@ const rmColumns: Column<RawMaterial>[] = [
   },
 ];
 
+// ── Inventory in-memory snapshot (SWR) ─────────────────────────────
+// Re-entering the Inventory tab re-runs a 7-endpoint load and blanks behind a
+// full "Loading inventory…" gate on every single visit. Keep the last
+// successfully-loaded dataset at module scope so a revisit paints instantly
+// from it while a background refresh runs — instead of blanking. Scope: per
+// browser tab (Hookka is single-org); lost on hard reload (cachedFetchJson
+// still warms raw-materials/products there). (2026-06-04 blank-every-visit.)
+let invSnapshot: {
+  products: Product[];
+  rawMaterials: RawMaterial[];
+  poData: ProductionOrderLike[];
+  backendWipRows: BackendWipRow[];
+  poToDOState: Map<string, "DRAFT" | "DISPATCHED">;
+} | null = null;
+
 // ============================================================
 // Component
 // ============================================================
@@ -1120,19 +1135,19 @@ export default function InventoryPage() {
   // RM batches / FG batches have no D1 endpoint yet → always []. This
   // means weighted-average cost helpers return 0, which is correct for
   // a freshly-cleared DB.
-  const [products, setProducts] = useState<Product[]>([]);
-  const [liveRawMaterials, setLiveRawMaterials] = useState<RawMaterial[]>([]);
-  const [poData, setPoData] = useState<ProductionOrderLike[]>([]);
+  const [products, setProducts] = useState<Product[]>(invSnapshot?.products ?? []);
+  const [liveRawMaterials, setLiveRawMaterials] = useState<RawMaterial[]>(invSnapshot?.rawMaterials ?? []);
+  const [poData, setPoData] = useState<ProductionOrderLike[]>(invSnapshot?.poData ?? []);
   // Map<poId, "DRAFT" | "DISPATCHED"> built from /api/delivery-orders so
   // deriveFGStock can split completed POs into Available vs Reserved
   // and exclude already-dispatched ones.
-  const [poToDOState, setPoToDOState] = useState<Map<string, "DRAFT" | "DISPATCHED">>(new Map());
+  const [poToDOState, setPoToDOState] = useState<Map<string, "DRAFT" | "DISPATCHED">>(invSnapshot?.poToDOState ?? new Map());
   // Raw rows from /api/inventory/wip — the wip_items ledger view.
   // Each row corresponds to one wip_items row with stock_qty != 0;
   // negatives are skipped-upstream stubs and live in the same list as
   // positives so the grid is a single uniform render.
-  const [backendWipRows, setBackendWipRows] = useState<BackendWipRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [backendWipRows, setBackendWipRows] = useState<BackendWipRow[]>(invSnapshot?.backendWipRows ?? []);
+  const [loading, setLoading] = useState(!invSnapshot);
 
   useEffect(() => {
     let cancelled = false;
@@ -1315,6 +1330,13 @@ export default function InventoryPage() {
       setPoData(pos);
       setBackendWipRows(wipRows);
       setPoToDOState(merged);
+      // Remember this dataset so re-entering Inventory paints instantly (SWR)
+      // instead of re-blanking through the full reload. Only snapshot a
+      // non-empty load — a degraded/stub response must not poison the cache
+      // with blanks (last-known-good philosophy).
+      if (inv.products.length || inv.rawMaterials.length || pos.length) {
+        invSnapshot = { products: inv.products, rawMaterials: inv.rawMaterials, poData: pos, backendWipRows: wipRows, poToDOState: merged };
+      }
       setLoading(false);
     })();
 

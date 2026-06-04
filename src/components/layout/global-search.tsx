@@ -227,11 +227,14 @@ function useApiSearch(query: string) {
           .then((data) => {
             const items = pickRecords(data, "salesOrders", "orders");
             items.forEach((item) => {
-              const num = item.soNumber || item.orderNumber || "";
+              // Real field is companySOId (the SO number). soNumber/orderNumber
+              // never existed on the payload, so labels were blank before.
+              const num = item.companySOId || item.soNumber || item.orderNumber || item.id || "";
+              const po = item.customerPOId || item.customerPO || "";
               collected.push({
                 id: `so-${item.id}`,
                 label: num,
-                description: item.customerName || item.company || "",
+                description: [item.customerName || item.company, po && `PO ${po}`].filter(Boolean).join(" · "),
                 href: `/sales/${item.id}`,
                 icon: ShoppingCart,
                 category: "sales_orders",

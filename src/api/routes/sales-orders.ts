@@ -970,16 +970,28 @@ app.get("/", async (c) => {
   const limit = Math.min(500, Math.max(1, rawLimit));
   const offset = (page - 1) * limit;
 
+  // Optional server-side search — used by the global Ctrl+K palette (?search=).
+  // Index-backed (pg_trgm GIN, migration 0150) ILIKE '%term%' over the columns
+  // operators actually type: Company SO / Customer SO / Customer PO / customer
+  // name / reference. Partial match, so "8585" finds "POO-008585". Fires ONLY
+  // when `search` is present — the Sales LIST page's own search uses the
+  // non-paginated branch above and is completely untouched.
+  const searchTerm = (c.req.query("search") || c.req.query("q") || "").trim();
+  const searchClause = searchTerm
+    ? ` AND (company_so_id ILIKE ? OR customer_so_id ILIKE ? OR customer_po_id ILIKE ? OR customer_name ILIKE ? OR COALESCE(reference,'') ILIKE ?)`
+    : "";
+  const searchBinds = searchTerm ? Array(5).fill(`%${searchTerm}%`) : [];
+
   const [countRes, pageRes] = await Promise.all([
     db
-      .prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql} ${orgWhere}`)
-      .bind(...orgParams)
+      .prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql} ${orgWhere}${searchClause}`)
+      .bind(...orgParams, ...searchBinds)
       .first<{ n: number }>(),
     db
       .prepare(
-        `SELECT * FROM ${soSourceSql} ${orgWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM ${soSourceSql} ${orgWhere}${searchClause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       )
-      .bind(...orgParams, limit, offset)
+      .bind(...orgParams, ...searchBinds, limit, offset)
       .all<SalesOrderRow>(),
   ]);
   const total = countRes?.n ?? 0;

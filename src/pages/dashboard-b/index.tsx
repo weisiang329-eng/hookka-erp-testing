@@ -1789,77 +1789,9 @@ export default function DashboardBPage() {
                   </table>
                 </div>
               </div>
-              {(ov.monthlySales ?? []).length > 0 && (
-                <div className="mt-5 border-t border-[#F0ECE6] pt-4">
-                  <p className="text-[11px] font-semibold text-[#5A5550] uppercase tracking-wider mb-2">
-                    Monthly — Bedframe Units &amp; Sofa Sets
-                    <span className="ml-2 font-normal normal-case tracking-normal text-[#9CA3AF]">
-                      click a month for the customer breakdown
-                    </span>
-                  </p>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-                    {(ov.monthlySales ?? []).map((m) => {
-                      const who =
-                        ov.monthlySalesByCustomer?.[m.month] ?? [];
-                      return (
-                        <button
-                          key={m.month}
-                          type="button"
-                          disabled={who.length === 0}
-                          onClick={() =>
-                            who.length &&
-                            setDrill({
-                              title: `${m.month} — by customer`,
-                              subtitle:
-                                "Who contributed this month's bedframe units / sofa sets",
-                              node: (
-                                <MiniTable
-                                  cols={[
-                                    "Customer",
-                                    "Bedframe units",
-                                    "Sofa sets",
-                                  ]}
-                                  rows={who.map((c) => [
-                                    c.customer,
-                                    c.bedframeUnits
-                                      ? c.bedframeUnits.toLocaleString()
-                                      : "—",
-                                    c.sofaSets
-                                      ? c.sofaSets.toLocaleString()
-                                      : "—",
-                                  ])}
-                                />
-                              ),
-                            })
-                          }
-                          className={`rounded-lg border border-[#F0ECE6] bg-[#FAF8F4] px-3 py-2 text-left transition-colors ${
-                            who.length
-                              ? "cursor-pointer hover:bg-[#F0ECE6]"
-                              : "opacity-60"
-                          }`}
-                        >
-                          <p className="text-[11px] text-[#5A5550] tabular-nums">
-                            {m.month}
-                            {who.length > 0 && (
-                              <span className="text-[#C2BBAE]"> · who ›</span>
-                            )}
-                          </p>
-                          <p className="text-sm font-bold text-[#1F1D1B] tabular-nums mt-0.5">
-                            {m.bedframeUnits.toLocaleString()}{" "}
-                            <span className="text-[10px] font-normal text-[#9CA3AF]">
-                              bf
-                            </span>{" "}
-                            {m.sofaSets.toLocaleString()}{" "}
-                            <span className="text-[10px] font-normal text-[#9CA3AF]">
-                              sofa
-                            </span>
-                          </p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+              {/* Monthly multi-month bedframe/sofa strip removed 2026-06-05 —
+                  owner views one month at a time and doesn't need the
+                  cross-month breakdown here. */}
               <p className="mt-3 text-[11px] text-[#9CA3AF]">
                 Concentration:{" "}
                 <span className="font-semibold text-[#1F1D1B]">

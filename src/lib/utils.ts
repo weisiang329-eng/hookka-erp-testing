@@ -15,17 +15,32 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// Per-currency cache — constructing Intl.NumberFormat per money cell was a
+// chunk of grid render cost. Almost every call is MYR, so this is effectively
+// one cached formatter. Output byte-identical. (2026-06-04 perf pass.)
+const CURRENCY_FMTS = new Map<string, Intl.NumberFormat>();
 export function formatCurrency(sen: number, currency = "MYR"): string {
   const amount = sen / 100;
-  return new Intl.NumberFormat("en-MY", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-  }).format(amount);
+  let fmt = CURRENCY_FMTS.get(currency);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat("en-MY", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+    });
+    CURRENCY_FMTS.set(currency, fmt);
+  }
+  return fmt.format(amount);
 }
 
+// Hoisted once at module load. Constructing Intl.NumberFormat is the single
+// most expensive formatting primitive (~tens of µs); the data grid calls
+// formatNumber for every visible numeric cell on every render, so a fresh
+// construct per call was a measurable chunk of the front-end jank
+// (longTaskCount). Output is byte-identical. (2026-06-04 perf pass.)
+const NUM_FMT = new Intl.NumberFormat("en-MY");
 export function formatNumber(n: number): string {
-  return new Intl.NumberFormat("en-MY").format(n);
+  return NUM_FMT.format(n);
 }
 
 export function formatDate(date: Date | string): string {
@@ -188,9 +203,15 @@ export function formatDateDMY(dateStr: string | Date): string {
 /**
  * Format sen (cents) to "RM 1,234.56" display string.
  */
+// Cached formatter (was `amount.toLocaleString(...)` per call, which builds an
+// internal Intl object each time). Output byte-identical. (2026-06-04 perf.)
+const RM_FMT = new Intl.NumberFormat("en-MY", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 export function formatRM(sen: number): string {
   const amount = sen / 100;
-  return `RM ${amount.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `RM ${RM_FMT.format(amount)}`;
 }
 
 /**

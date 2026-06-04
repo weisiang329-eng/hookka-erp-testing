@@ -915,8 +915,21 @@ app.get("/", async (c) => {
           .bind(...orgParams)
           .all<SalesOrderItemRow>(),
       ]);
+      // De-quadratic (2026-06-04): group items by salesOrderId ONCE so each
+      // rowToSOList does an O(1) lookup instead of re-scanning EVERY item.
+      // This branch is the heaviest Sales read (full list + ALL items — hit
+      // on every search/filter and by the dashboard); the old
+      // O(orders × items) scan was a top driver of the slow/blank-under-load
+      // behaviour. Output is byte-identical: rowToSO still filters+sorts the
+      // items it is handed, just over a pre-narrowed per-SO list.
+      const itemsBySO = new Map<string, SalesOrderItemRow[]>();
+      for (const it of items.results ?? []) {
+        const arr = itemsBySO.get(it.salesOrderId);
+        if (arr) arr.push(it);
+        else itemsBySO.set(it.salesOrderId, [it]);
+      }
       const data = (sos.results ?? []).map((s) =>
-        rowToSOList(s, items.results ?? []),
+        rowToSOList(s, itemsBySO.get(s.id) ?? []),
       );
       return { success: true as const, data, total: data.length };
     };
@@ -982,7 +995,15 @@ app.get("/", async (c) => {
       .all<SalesOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const data = soRows.map((s) => rowToSOList(s, items));
+  // De-quadratic: same per-SO grouping as the full-list branch above so the
+  // paginated path is O(items) not O(rows × items). Output byte-identical.
+  const itemsBySO = new Map<string, SalesOrderItemRow[]>();
+  for (const it of items) {
+    const arr = itemsBySO.get(it.salesOrderId);
+    if (arr) arr.push(it);
+    else itemsBySO.set(it.salesOrderId, [it]);
+  }
+  const data = soRows.map((s) => rowToSOList(s, itemsBySO.get(s.id) ?? []));
   return c.json({ success: true, data, page, limit, total });
 });
 

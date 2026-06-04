@@ -475,7 +475,11 @@ export default function SalesPage() {
     URL.revokeObjectURL(url);
   };
 
-  const columns: Column<SalesOrder>[] = [
+  // Memoized: a fresh `columns` array every render made the DataGrid's
+  // filteredData/sortedData memos (which depend on columns) recompute over the
+  // full ~690-row dataset on EVERY unrelated re-render (poll, selection,
+  // search-mirror). Its only external dep is linkedPOMap. (2026-06-04 jank fix.)
+  const columns: Column<SalesOrder>[] = useMemo<Column<SalesOrder>[]>(() => [
     { key: "companySOId", label: "Company SO", type: "docno", width: "130px", sortable: true },
     { key: "customerSOId", label: "Customer SO", type: "docno", width: "120px", sortable: true },
     { key: "customerPOId", label: "Customer PO", type: "docno", width: "120px", sortable: true },
@@ -579,7 +583,7 @@ export default function SalesPage() {
     },
     { key: "totalSen", label: "Total", type: "currency", width: "100px", sortable: true },
     { key: "status", label: "Status", type: "status", width: "100px", sortable: true },
-  ];
+  ], [linkedPOMap]);
 
   const getContextMenuItems = (row: SalesOrder): ContextMenuItem[] => [
     {

@@ -423,13 +423,13 @@ export default function WorkerScanPage() {
           matches = await findMatches(parsed.poNo, deptHint);
         }
         if (matches.length === 1) {
-          // Auto-submit on unambiguous QR scan — the operator wanted
-          // "scan = instant complete", no extra Confirm tap. We still
-          // call setResult so the lookup card paints briefly while
-          // the POST is in flight, then the success state takes over
-          // (or a soft-warning Confirm dialog shows on 202).
+          // Show the lookup card and STOP — the worker must tap the big
+          // "Complete" button to commit. (Wei Siang 2026-06-04: a bare scan
+          // auto-completing was too easy to trigger by accident — a stray
+          // QR in view would mark a job done. Require an explicit confirm
+          // tap. The lookup card already renders the item details + a
+          // Complete / Cancel pair; handleConfirmScan runs only on tap.)
           setResult({ kind: "lookup", ...matches[0], piece });
-          await handleConfirmScan({ ctx: { ...matches[0], piece } });
         } else if (matches.length > 1) {
           setResult({ kind: "choices", options: matches, piece });
         } else {

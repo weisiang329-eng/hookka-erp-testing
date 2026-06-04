@@ -94,6 +94,12 @@ export function getSql(databaseUrl: string): Sql {
         prepare: false,
         fetch_types: false,
         idle_timeout: 0,
+        // Bound connection establishment so a stalled Hyperdrive/pooler socket
+        // FAILS FAST instead of hanging the whole request for tens of seconds.
+        // Wei Siang 2026-06-04: a connection-layer stall froze every API call
+        // (even /api/auth/me) >9s — without a ceiling a bad socket just hangs.
+        // The non-Hyperdrive fallback branch already sets connect_timeout: 10.
+        connect_timeout: 10,
         types: { bigint: bigintAsNumber },
         transform: { column: { from: columnFrom } },
       })

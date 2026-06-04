@@ -432,10 +432,14 @@ app.get("/", async (c) => {
         }>(),
       // Top fabrics by ACTUAL production consumption (RM_ISSUE meters),
       // split Bedframe vs Sofa via the consuming PO's category (same
-      // join the fabric-cost-excl query uses).
+      // join the fabric-cost-excl query uses). Carries the consumption
+      // month (cl.date) so the headline figures (per-category Avg cost/m
+      // + per-fabric "used") can be scoped to the selected period; the
+      // JS rollup sums across months for All-time / the selected month.
       db
         .prepare(
           `SELECT po.itemCategory AS "cat", rm.itemCode AS "fabCode",
+                  substr(cl.date::text, 1, 7) AS "ym",
                   MAX(rm.description) AS "fabName",
                   COALESCE(SUM(cl.qty),0) AS "meters",
                   COALESCE(SUM(cl.totalCostSen),0) AS "costSen"
@@ -446,12 +450,13 @@ app.get("/", async (c) => {
               AND cl.refType = 'PRODUCTION_ORDER'
               AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')
               AND po.itemCategory IN ('BEDFRAME','SOFA')
-            GROUP BY po.itemCategory, rm.itemCode`,
+            GROUP BY po.itemCategory, rm.itemCode, substr(cl.date::text, 1, 7)`,
         )
         .bind(orgId)
         .all<{
           cat: string;
           fabCode: string;
+          ym: string | null;
           fabName: string;
           meters: number;
           costSen: number;
@@ -1399,7 +1404,12 @@ app.get("/", async (c) => {
         maxSen: Math.round(Number(r.maxUnitSen) || 0),
       });
     }
-    // Historical used (categorised) per fabric, keyed by category.
+    // Used (categorised) per fabric, keyed by category. Scoped to the
+    // selected period: All-time sums every month; a specific YYYY-MM keeps
+    // only that month's RM_ISSUE rows. Rows now arrive split by month, so
+    // accumulate (do NOT overwrite) — a fabric used across several months
+    // would otherwise keep only its last month. The per-category Avg cost/m
+    // headline and the per-fabric "Used" column both read this map.
     const fabUsedByCat = new Map<
       string,
       Map<string, { fabName: string; meters: number; costSen: number }>
@@ -1407,15 +1417,18 @@ app.get("/", async (c) => {
     for (const r of fabTopRes.results ?? []) {
       const cat = (r.cat ?? "").toUpperCase();
       if (cat !== "BEDFRAME" && cat !== "SOFA") continue;
+      // Honour the selected month for the headline; All-time keeps every row.
+      if (!kpiAllTime && r.ym !== period) continue;
       let m = fabUsedByCat.get(cat);
       if (!m) {
         m = new Map();
         fabUsedByCat.set(cat, m);
       }
+      const prev = m.get(r.fabCode ?? "");
       m.set(r.fabCode ?? "", {
-        fabName: r.fabName ?? "",
-        meters: Number(r.meters) || 0,
-        costSen: Number(r.costSen) || 0,
+        fabName: r.fabName ?? prev?.fabName ?? "",
+        meters: (prev?.meters ?? 0) + (Number(r.meters) || 0),
+        costSen: (prev?.costSen ?? 0) + (Number(r.costSen) || 0),
       });
     }
     // Per-category weighted avg fabric cost / meter (all issued to

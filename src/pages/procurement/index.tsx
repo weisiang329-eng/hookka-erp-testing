@@ -4,6 +4,7 @@ import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PageSkeleton } from "@/components/ui/skeleton";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
@@ -1492,11 +1493,9 @@ export default function ProcurementPage() {
   }, [navigate, fetchData, allSuppliers]);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
-      </div>
-    );
+    // Shaped page skeleton instead of a bare centered spinner — fixes the
+    // "整页空白转圈" feel on cold load. Display-only; no data path touched.
+    return <PageSkeleton />;
   }
 
   return (

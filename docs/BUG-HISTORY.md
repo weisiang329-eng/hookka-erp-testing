@@ -34,6 +34,51 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-05-001 — Invitation emails arrived hours late ("broken in the afternoon") because they queued behind a throttled cron
+
+**Status:** 🟢 Fixed (2026-06-05) — shipped to prod (349a4a34); deploy green, mechanism confirmed against Brevo logs.
+**Category:** infrastructure
+
+**Symptom:** Owner reported invites "often break, especially in the afternoon" — an invite clicked in the afternoon wouldn't arrive for hours.
+
+**Root cause:** `sendInviteEmail` (`src/api/routes/users.ts:357`) ENQUEUED every invite into `outbox_emails` and relied on the GitHub Actions cron (`.github/workflows/process-email-outbox.yml`, declared `*/5`) to drain it. GitHub throttles that schedule to multi-hour gaps and it sometimes fails outright — on 2026-06-04 there was a ~7h window (13:06→19:49 MYT; the 16:57 run failed) with **no successful drain**. So an afternoon invite sat queued until the evening drain. Brevo logs confirmed it: those invites Delivered at 19:50 — afternoon-queued, evening-sent. (Brevo deliverability was fine — every email that reached it was Delivered + Opened, 0 bounce/spam/blocked.)
+
+**Fix:** `src/api/routes/users.ts` — flipped `sendInviteEmail` to **send-direct-first** (immediate `sendMail`), keeping the outbox as a durable fallback only if the direct send fails. Mirrors the password-reset path + its BUG-2026-06-04-005 fallback. Invite now reaches the recipient in seconds regardless of the cron.
+
+**Verified:** tsc + build:strict clean; deploy 349a4a34 green. Brevo logs were the diagnostic ground truth; the queue→immediate flip removes the multi-hour wait by construction.
+
+---
+
+## BUG-2026-06-04-005 — Password-reset email silently lost whenever the direct send hiccupped
+
+**Status:** 🟢 Fixed (2026-06-04) — shipped to prod (77fc23c0).
+**Category:** infrastructure
+
+**Symptom:** Owner reported reset-password emails "broke" intermittently (2–3×). The email simply never arrived, with no error surfaced and no way to tell why.
+
+**Root cause:** `/api/auth/forgot-password` (`src/api/routes/auth.ts:755`) sent the reset link with a single direct `sendMail` and only `console.warn`'d on `!result.ok`. Any transient provider blip (timeout / momentary Brevo API failure) dropped the link with no retry, no outbox row, no trace. Brevo logs showed the resets that DID reach it were Delivered + Opened — so it wasn't deliverability or domain auth; it was the rare immediate-send failures vanishing silently (and unrecoverably — the error was only a console.warn).
+
+**Fix:** `src/api/routes/auth.ts` — on `!result.ok`, enqueue the reset into `outbox_emails` (durable, retried by the drain) instead of dropping it. The failure now leaves a visible row carrying the provider error, so future failures are both recoverable and diagnosable.
+
+**Verified:** tsc + build:strict clean; shipped (77fc23c0). Forward-looking: the next send failure lands as an outbox row, not a lost email.
+
+---
+
+## BUG-2026-06-04-004 — Delivery Order showed a cancelled invoice number instead of the active re-issued one
+
+**Status:** 🟢 Fixed (2026-06-04) — shipped + verified live (18 → 0).
+**Category:** delivery-orders
+
+**Symptom:** 18 DOs displayed an invoice number whose amount no longer matched the DO. E.g. DO-2605-002 (RM 4,532, 6 items) showed INV-2605-035 — a CANCELLED invoice with 4 lines zeroed (RM 1,144) — instead of its live re-issued INV-2605-117 (RM 4,532, exact match). Clicking through landed on a voided invoice.
+
+**Root cause:** `loadDoInvoiceMap` (`src/api/routes/delivery-orders.ts:185`) built the DO→invoice map with `SELECT deliveryOrderId, invoiceNo FROM invoices WHERE …` — **no status filter and no ORDER BY**. For a DO invoiced → cancelled → re-issued, the un-ordered scan kept the older cancelled invoice. (Money was never wrong — every DO's value matched its ACTIVE invoice; only the displayed pointer was stale. Found during a full DO-amount audit: 137 DOs, 0 active-invoice mismatches, 18 stale cancelled pointers.)
+
+**Fix:** `src/api/routes/delivery-orders.ts` — added `AND status <> 'CANCELLED'` + `ORDER BY createdAt DESC` so the map keeps the newest active invoice per DO. Display-only; no money/data touched.
+
+**Verified:** Live re-query post-deploy (71a69447): 137 DOs with invoices, **0** still pointing at a cancelled invoice (was 18); DO-2605-002 now shows INV-2605-117.
+
+---
+
 ## BUG-2026-06-04-001 — Sales (then every) list page showed "0 / blank" under load; owner believed all data had been deleted
 
 **Status:** 🟢 Fixed (2026-06-04) — recovered live (DB restart + deploys); all tables verified returning data.

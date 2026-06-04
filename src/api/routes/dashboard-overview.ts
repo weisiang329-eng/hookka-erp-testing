@@ -335,7 +335,7 @@ app.get("/", async (c) => {
              FROM cost_ledger cl
              JOIN raw_materials rm ON rm.id = cl.itemId
             WHERE rm.orgId = ? AND cl.type = 'RM_ISSUE'
-              AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')`,
+              AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')${kpiAllTime ? "" : ` AND substr(cl.date::text, 1, 7) = '${period}'`}`,
         )
         .bind(orgId)
         .first<{ sen: number; qty: number }>(),
@@ -347,7 +347,7 @@ app.get("/", async (c) => {
              JOIN production_orders po ON po.id = cl.refId
             WHERE po.orgId = ? AND cl.type = 'RM_ISSUE' AND cl.refType = 'PRODUCTION_ORDER'
               AND rm.itemGroup IN ('${FABRIC_ITEM_GROUPS.join("','")}')
-              AND po.itemCategory NOT IN ('BEDFRAME','SOFA')`,
+              AND po.itemCategory NOT IN ('BEDFRAME','SOFA')${kpiAllTime ? "" : ` AND substr(cl.date::text, 1, 7) = '${period}'`}`,
         )
         .bind(orgId)
         .first<{ sen: number; qty: number }>(),

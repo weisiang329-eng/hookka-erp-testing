@@ -366,14 +366,12 @@ export default function InvoicesPage() {
     { label: "Refresh", action: () => { refreshInvoices(); refreshInvStats(); } },
   ], [navigate, refreshInvoices, refreshInvStats]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64 text-[#6B7280]">
-        Loading...
-      </div>
-    );
-  }
-
+  // 2026-06-04: removed the full-page `if (loading) return <Loading…>` gate.
+  // It blanked the WHOLE page (no header / KPI cards / tabs) on cold load.
+  // Now the shell renders immediately; the grid shows skeleton rows
+  // (loading prop) and the KPI cards show "—" until /stats lands (below),
+  // so nothing flashes a misleading "0". Pure display change — no data path
+  // touched. (Front-end loading-smoothness pass.)
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -396,7 +394,7 @@ export default function InvoicesPage() {
           <CardContent className="p-2.5 flex items-center justify-between">
             <div>
               <p className="text-xs text-[#6B7280]">Total Invoices</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{totalInvoices}</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{invStatsResp ? totalInvoices : "—"}</p>
             </div>
             <FileText className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
@@ -406,7 +404,7 @@ export default function InvoicesPage() {
             <div>
               <p className="text-xs text-[#6B7280]">Outstanding</p>
               <p className="text-xl font-bold text-[#1F1D1B]">
-                {formatCurrency(outstandingSen)}
+                {invStatsResp ? formatCurrency(outstandingSen) : "—"}
               </p>
             </div>
             <DollarSign className="h-5 w-5 text-[#6B5C32]" />
@@ -417,7 +415,7 @@ export default function InvoicesPage() {
             <div>
               <p className="text-xs text-[#6B7280]">Collected (MTD)</p>
               <p className="text-xl font-bold text-[#4F7C3A]">
-                {formatCurrency(paidMTDSen)}
+                {invStatsResp ? formatCurrency(paidMTDSen) : "—"}
               </p>
             </div>
             <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
@@ -427,7 +425,7 @@ export default function InvoicesPage() {
           <CardContent className="p-2.5 flex items-center justify-between">
             <div>
               <p className="text-xs text-[#6B7280]">Overdue</p>
-              <p className="text-xl font-bold text-[#9A3A2D]">{overdueCount}</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{invStatsResp ? overdueCount : "—"}</p>
             </div>
             <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
@@ -587,6 +585,7 @@ export default function InvoicesPage() {
               <DataGrid<Invoice>
                 columns={invoiceGridColumns}
                 data={filteredInvoices}
+                loading={loading}
                 keyField="id"
                 virtualize
                 selectable

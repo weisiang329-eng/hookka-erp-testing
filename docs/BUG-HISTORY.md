@@ -34,6 +34,51 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-04-001 — Sales (then every) list page showed "0 / blank" under load; owner believed all data had been deleted
+
+**Status:** 🟢 Fixed (2026-06-04) — recovered live (DB restart + deploys); all tables verified returning data.
+**Category:** infrastructure
+
+**Symptom:** Sales Orders went blank ("东西空去了"), then progressively every page (customers / production / delivery) showed 0 records / RM 0.00. Owner believed the database had been wiped. Live probe from the owner's browser: `/api/health` = 18ms but `/api/sales-orders` = **500 after 15s**, and customers/production also 500'd — every DB-backed read timed out while the Worker itself was healthy. Data was 100% intact.
+
+**Root cause:** A connection-exhaustion death-spiral. (1) The Sales/Delivery list builds were O(orders × items) — `rowToSOList`/`rowToOrderList` re-scanned the full items array per row (~690 SOs × thousands of items) plus per-request freshness-probe scans; under workday load these held DB connections for seconds. (2) `connect_timeout: 10`, added to the Hyperdrive client earlier the same day (`db-pg.ts`), converted slow-but-eventually-succeeding connections into fast-fail 500s; the SPA's retries/20s polling turned that into a connection storm → Supavisor pool exhausted → every query 500'd. (3) `useCachedJson` did `.then(r => r.json())` with no `r.ok` check, so the transient 500 body overwrote populated React state AND localStorage (cache poisoning) — the page stayed blank even after navigating away.
+
+**Fix:** `src/lib/cached-fetch.ts` — `joinInflight` throws on any non-2xx (callers keep last-known-good); degraded-200 guard (`_stub`/`{success:false}` never overwrite a good cache). `src/api/routes/sales-orders.ts` + `delivery-orders.ts` — de-quadratic list builds (group items by FK into a Map once → O(items), byte-identical output). `src/api/lib/db-pg.ts` — reverted `connect_timeout` on the Hyperdrive branch. Immediate recovery: owner restarted the Supabase DB (cleared the exhausted pool).
+
+**Verified:** Post-restart live probe — `/api/sales-orders` 200 / n=690, customers 200, production 200 / n=1253, delivery 200 / n=137. All data back, fast.
+
+---
+
+## BUG-2026-06-04-002 — Global Ctrl+K search returned the newest 5 records regardless of what you typed
+
+**Status:** 🟢 Fixed (2026-06-04) — shipped + verified live.
+**Category:** ui-frontend
+
+**Symptom:** The command palette (Ctrl+K) appeared not to search — typing anything returned the same most-recent records, and Sales results had blank labels.
+
+**Root cause:** Two layers. (1) The palette sent `?search=<q>` to `/api/sales-orders|customers|products|delivery-orders|invoices`, but none of those endpoints read `search` — they returned default newest-N. (2) The frontend mapped `item.soNumber/doNumber/invoiceNumber`, which never existed on the payloads (real fields: `companySOId/doNo/invoiceNo`) → blank labels.
+
+**Fix:** pg_trgm GIN indexes on every searched column (migration `0150`, applied live) so `ILIKE '%term%'` is index-backed (partial/substring — "8585" finds "POO-008585"). Added an optional `search`/`q` param to all 5 list endpoints, firing ONLY when present (list pages unchanged → zero regression); products short-circuits to a lightweight lookup. `src/components/layout/global-search.tsx` — fixed field mappings + extended `ApiRecord`.
+
+**Verified:** Live — `?search=8585` returns exactly the 2 SOs whose Customer PO contains 8585; no-search still returns all 690.
+
+---
+
+## BUG-2026-06-04-003 — User Management "Resend invite" gave no visible feedback
+
+**Status:** 🟢 Fixed (2026-06-04) — shipped + deployed.
+**Category:** ui-frontend
+
+**Symptom:** Clicking Resend on a pending invite did nothing visible — "no reaction, never told me it completed."
+
+**Root cause:** In `src/pages/settings/Users.tsx`: (1) the success/error banner rendered in-flow at the TOP of the page while the Resend button is down in the Pending Invites list → the "✓ resent" confirmation popped up off-screen; (2) `resendInvite` had no try/catch — a network error / non-JSON response made `res.json()` throw and the handler died silently; (3) no per-click feedback. (Backend `/invites/:token/resend` was correct — it enqueues to the durable outbox.)
+
+**Fix:** banner → `position: fixed` bottom-right (always visible); wrapped the handler in try/catch (always surfaces a result); the Resend button spins + disables while sending. Display-only.
+
+**Verified:** tsc + build clean; deployed. (Separately flagged: the outbox drain cron is GitHub-throttled to ~hourly and one run failed during the DB jam.)
+
+---
+
 ## BUG-2026-06-03-006 — Due-date "original backup" export came back with SO / PO / Department / Current-Due all blank (only the original date filled)
 
 **Status:** 🟢 Fixed (2026-06-03) — shipped to main, deployed + verified live.

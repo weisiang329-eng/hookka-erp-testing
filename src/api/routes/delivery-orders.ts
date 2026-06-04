@@ -938,16 +938,23 @@ app.get("/", async (c) => {
   const limit = Math.min(500, Math.max(1, rawLimit));
   const offset = (page - 1) * limit;
 
+  // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
+  // match on DO number + customer name; fires only when present, so the
+  // Delivery list page (no search param) is untouched.
+  const dq = (c.req.query("search") || c.req.query("q") || "").trim();
+  const dWhere = dq ? " AND (do_no ILIKE ? OR customer_name ILIKE ?)" : "";
+  const dBinds = dq ? [`%${dq}%`, `%${dq}%`] : [];
+
   const [countRes, pageRes] = await Promise.all([
     db
-      .prepare("SELECT COUNT(*) AS n FROM delivery_orders WHERE orgId = ?")
-      .bind(orgId)
+      .prepare(`SELECT COUNT(*) AS n FROM delivery_orders WHERE orgId = ?${dWhere}`)
+      .bind(orgId, ...dBinds)
       .first<{ n: number }>(),
     db
       .prepare(
-        "SELECT * FROM delivery_orders WHERE orgId = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        `SELECT * FROM delivery_orders WHERE orgId = ?${dWhere} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
       )
-      .bind(orgId, limit, offset)
+      .bind(orgId, ...dBinds, limit, offset)
       .all<DeliveryOrderRow>(),
   ]);
   const total = countRes?.n ?? 0;

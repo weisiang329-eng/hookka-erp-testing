@@ -116,9 +116,17 @@ function genId(): string {
 // GET /api/customers — list all customers + their hubs (org-scoped)
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
+  // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
+  // match on name/code; fires ONLY when present, so the Customers list page
+  // (no search param) returns the full list exactly as before.
+  const q = (c.req.query("search") || c.req.query("q") || "").trim();
+  const custWhere = q
+    ? "WHERE orgId = ? AND (name ILIKE ? OR COALESCE(code,'') ILIKE ?) ORDER BY code LIMIT 20"
+    : "WHERE orgId = ? ORDER BY code";
+  const custBinds = q ? [orgId, `%${q}%`, `%${q}%`] : [orgId];
   const [customers, hubs] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM customers WHERE orgId = ? ORDER BY code")
-      .bind(orgId)
+    c.var.DB.prepare(`SELECT * FROM customers ${custWhere}`)
+      .bind(...custBinds)
       .all<CustomerRow>(),
     c.var.DB.prepare("SELECT * FROM delivery_hubs WHERE orgId = ?")
       .bind(orgId)

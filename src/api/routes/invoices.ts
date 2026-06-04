@@ -798,6 +798,14 @@ app.get("/", async (c) => {
     where.push("status = ?");
     params.push(status);
   }
+  // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
+  // match on invoice number + customer name; fires only when present, so the
+  // Invoices list page (no search param) is untouched.
+  const q = (c.req.query("search") || c.req.query("q") || "").trim();
+  if (q) {
+    where.push("(invoiceNo ILIKE ? OR COALESCE(customerName, '') ILIKE ?)");
+    params.push(`%${q}%`, `%${q}%`);
+  }
   const clause = `WHERE ${where.join(" AND ")}`;
 
   if (!paginate) {

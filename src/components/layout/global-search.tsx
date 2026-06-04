@@ -170,6 +170,14 @@ interface ApiRecord {
   code?: string;
   description?: string;
   customerName?: string;
+  // Real payload field names the live-record search mapping reads (the
+  // soNumber/doNumber/invoiceNumber above never existed on the API payload).
+  companySOId?: string;
+  customerSOId?: string;
+  customerPOId?: string;
+  customerPO?: string;
+  doNo?: string;
+  invoiceNo?: string;
 }
 
 type UnknownObj = Record<string, unknown>;
@@ -285,7 +293,7 @@ function useApiSearch(query: string) {
           .then((data) => {
             const items = pickRecords(data, "deliveryOrders", "orders");
             items.forEach((item) => {
-              const num = item.doNumber || item.orderNumber || "";
+              const num = item.doNo || item.doNumber || item.orderNumber || item.id || "";
               collected.push({
                 id: `do-${item.id}`,
                 label: num,
@@ -304,7 +312,7 @@ function useApiSearch(query: string) {
           .then((data) => {
             const items = pickRecords(data, "invoices");
             items.forEach((item) => {
-              const num = item.invoiceNumber || "";
+              const num = item.invoiceNo || item.invoiceNumber || item.id || "";
               collected.push({
                 id: `inv-${item.id}`,
                 label: num,

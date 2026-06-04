@@ -399,6 +399,19 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
 // snapshot for SKUs that have no ACTIVE template yet.
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
+  // Global Ctrl+K palette: lightweight, index-backed search returning ONLY
+  // matching products (id/code/name); skips the heavy BOM / working-time
+  // joins below so the palette stays fast. Fires only when ?search= present —
+  // the Products list page (no search param) is unchanged.
+  const q = (c.req.query("search") || c.req.query("q") || "").trim();
+  if (q) {
+    const matches = await c.var.DB.prepare(
+      "SELECT id, code, name FROM products WHERE orgId = ? AND status = 'ACTIVE' AND (name ILIKE ? OR COALESCE(code,'') ILIKE ?) ORDER BY code LIMIT 20",
+    )
+      .bind(orgId, `%${q}%`, `%${q}%`)
+      .all<{ id: string; code: string; name: string }>();
+    return c.json({ success: true, data: matches.results ?? [] });
+  }
   const today = new Date().toISOString().slice(0, 10);
   const [products, boms, dwts, tpls, priceOverlays] = await Promise.all([
     c.var.DB.prepare(

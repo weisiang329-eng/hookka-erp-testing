@@ -186,17 +186,24 @@ async function loadDoInvoiceMap(
   db: D1Database,
   orgId: string,
 ): Promise<Map<string, string>> {
+  // Exclude CANCELLED invoices and take the newest active one, so a DO that was
+  // invoiced → cancelled → re-issued shows its LIVE invoice number, not the dead
+  // one. (2026-06-04: 18 DOs displayed a cancelled invoice whose amount no longer
+  // matched the DO; the active re-issue matched the DO exactly.)
   const res = await db
     .prepare(
       `SELECT deliveryOrderId, invoiceNo
          FROM invoices
-        WHERE orgId = ? AND deliveryOrderId IS NOT NULL AND deliveryOrderId <> ''`,
+        WHERE orgId = ? AND deliveryOrderId IS NOT NULL AND deliveryOrderId <> ''
+          AND status <> 'CANCELLED'
+        ORDER BY createdAt DESC`,
     )
     .bind(orgId)
     .all<{ deliveryOrderId: string; invoiceNo: string }>();
   const map = new Map<string, string>();
   for (const r of res.results ?? []) {
-    // One invoice per DO; if a DO somehow has more than one, keep the first.
+    // Rows come newest-active-first (cancelled already filtered out), so the
+    // first row we keep per DO is its current live invoice.
     if (r.deliveryOrderId && !map.has(r.deliveryOrderId)) {
       map.set(r.deliveryOrderId, r.invoiceNo);
     }

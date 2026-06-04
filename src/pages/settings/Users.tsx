@@ -697,6 +697,11 @@ export default function UsersPage() {
                   className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
                 >
                   <option value="SUPER_ADMIN">SUPER_ADMIN</option>
+                  {/* Viewer = the built-in READ_ONLY role (maps to *:read in
+                      rbac.ts LEGACY_ROLE_DEFAULTS): can SEE everything, every
+                      mutation is blocked 403 server-side. For demos / tours.
+                      (Wei Siang 2026-06-04) */}
+                  <option value="READ_ONLY">Viewer (read-only)</option>
                 </select>
               </div>
             </div>

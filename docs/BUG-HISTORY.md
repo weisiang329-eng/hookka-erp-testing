@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-05-002 — FG / packing stickers showed "Houzs KL" for every order, even SBH / SRW / PG
+
+**Status:** 🟢 Fixed (2026-06-05) — shipped (1e6d4dc3); verified on prod: 746/746 PACKED units match their SO's hub.
+**Category:** production
+
+**Symptom:** Every production FG sticker printed "Houzs KL" as the branch/hub, even for orders shipping to Sabah (SBH), Sarawak (SRW), or Penang (PG). Wrong branch on the physical box label.
+
+**Root cause:** `generateFGUnitsForPO` (`src/api/routes/fg-units.ts:381-387`) stamped each FG unit's `customerHub` from the customer's DEFAULT delivery hub — `SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1` — which ignores the order entirely. Houzs Century's default hub is KL, so every Houzs unit got "Houzs KL" regardless of the order's actual hub. The value was frozen on the row at PO-completion, so it never followed Sales Order edits either. The SO already carried the correct hub in `sales_orders.hubName`; it just wasn't read.
+
+**Fix:** `src/api/routes/fg-units.ts` GET /api/fg-units list — resolve the hub LIVE from the order: `SELECT fg.*, COALESCE(so.hubName, co.hubName) AS "resolvedHub"` with `LEFT JOIN sales_orders so ON so.id = fg.soId`, `LEFT JOIN production_orders po ON po.id = fg.poId`, `LEFT JOIN consignment_orders co ON co.id = po.consignmentOrderId`; the row-mapper prefers `resolvedHub` over the stored `customerHub` (WHERE/ORDER BY qualified with `fg.`). Every sticker now reflects the real branch, already-stamped units auto-correct (no backfill), and the hub follows SO edits — the three things the owner asked for.
+
+**Verified:** Live prod cross-check (1e6d4dc3): 796 PACKED units, customerHub now spread across Houzs KL/SRW/PG/SBH (14 SBH) + Carress/The Conts; **746/746 units with an SO match their SO's hubName, 0 mismatches**.
+
+---
+
 ## BUG-2026-06-05-001 — Invitation emails arrived hours late ("broken in the afternoon") because they queued behind a throttled cron
 
 **Status:** 🟢 Fixed (2026-06-05) — shipped to prod (349a4a34); deploy green, mechanism confirmed against Brevo logs.

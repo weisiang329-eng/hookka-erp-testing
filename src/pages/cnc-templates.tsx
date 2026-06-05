@@ -87,6 +87,16 @@ function variantSuffix(code: string): string {
   return m ? m[1].trim() : "";
 }
 
+// A clean MODEL name for the card: the product name with its variant config
+// token removed, so "SOFA 5535 1A(LHF)" reads as "SOFA 5535". Bedframe names
+// (no dash variant) pass through unchanged.
+function cleanModelName(name: string, code: string): string {
+  const suf = variantSuffix(code);
+  let out = String(name ?? "").trim();
+  if (suf) out = out.split(suf).join(" ").replace(/\s{2,}/g, " ").trim();
+  return out;
+}
+
 // Which bed-size bucket a bedframe template belongs to. Looks at both the
 // size label (e.g. "6FT") and the product-code variant suffix (e.g. "-(K)").
 // Order matters: test the more specific "Super Single" before "Single", and
@@ -232,7 +242,11 @@ export default function CncTemplatesPage() {
       const base = baseProductCode(p.code);
       if (!base) continue;
       if (!byCode.has(base)) byCode.set(base, p);
-      if (!nameByCode.has(base) && p.name) nameByCode.set(base, p.name);
+      // Prefer the bare-model product's name; otherwise clean the variant
+      // token out of a variant SKU's name ("SOFA 5535 1A(LHF)" → "SOFA 5535").
+      if (p.name && (!nameByCode.has(base) || p.code === base)) {
+        nameByCode.set(base, cleanModelName(p.name, p.code));
+      }
     }
     return { productByCode: byCode, productNameByCode: nameByCode };
   }, [products]);

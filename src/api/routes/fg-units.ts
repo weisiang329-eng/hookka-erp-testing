@@ -777,6 +777,9 @@ app.post("/backfill-hub", async (c) => {
     scanned: rows.length,
     wouldUpdate: stale.length,
     moves,
+    // Full per-unit before/after so a dry-run can be saved as a restore point
+    // (id -> from) BEFORE executing. ~190 rows, small payload.
+    units: stale.map((r) => ({ id: r.id, from: r.customerHub ?? "", to: r.resolvedHub })),
   });
 });
 

@@ -4923,7 +4923,9 @@ export default function ProductionPage({
       }
       const rowsHtml = visibleOrders.map((o) => {
         const cells = DEPARTMENTS.map((d) => {
-          const c = cellFor(o, d.code, visibleOrders);
+          // Full order list for the FAB_CUT sibling-walk (same fix as the
+          // on-screen Overview render — a filter must not blank borrowed cuts).
+          const c = cellFor(o, d.code, orders);
           if (c.state === "empty") return `<td class="m empty"></td>`;
           if (c.state === "done") {
             return `<td class="m done">✓<br/><small>${fmt(c.latestCompleted || c.earliestDue)}</small></td>`;
@@ -6984,7 +6986,14 @@ export default function ProductionPage({
                 {order.hookkaExpectedDD ? fmtShortDate(order.hookkaExpectedDD) : "—"}
               </div>
               {DEPARTMENTS.map((d) => {
-                const c = cellFor(order, d.code, visibleOrders);
+                // FAB_CUT sibling-walk (cellFor "Option C") must search the
+                // FULL order list, not visibleOrders. A column filter (e.g.
+                // FAB SEW = Overdue) can hide the ONE sibling that actually
+                // holds the set's fabric-cut JC; with visibleOrders the walk
+                // then fails and the borrowed FAB_CUT vanishes from every other
+                // piece in the set. Wei Siang 2026-06-05: "no filter → Fab Cut
+                // is there; filter → same row's Fab Cut disappears."
+                const c = cellFor(order, d.code, orders);
                 const isActiveCol = false; // inside ALL view, no column highlighted
                 // Flash state for this dept cell. The cell may contain
                 // multiple JCs (a sofa with multiple WIPs in one dept) — we

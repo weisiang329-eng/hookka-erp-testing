@@ -97,6 +97,24 @@ function cleanModelName(name: string, code: string): string {
   return out;
 }
 
+// Pull the frame size (e.g. "6FT", "3.5FT") out of a product name for the card
+// badge. Empty when the name has no FT size (e.g. sofas).
+function frameSizeBadge(name: string): string {
+  const m = String(name ?? "").match(/\(\s*(\d+(?:\.\d+)?)\s*FT\s*\)/i);
+  return m ? `${m[1]}FT` : "";
+}
+
+// Card display name with the noisy/repetitive bits stripped: the "(6FT)" size
+// (shown as a badge instead) and the "(183X190CM)" mattress dimension.
+// "HILTON BEDFRAME (6FT) (183X190CM)" → "HILTON BEDFRAME".
+function cardDisplayName(name: string): string {
+  return String(name ?? "")
+    .replace(/\(\s*\d+(?:\.\d+)?\s*FT\s*\)/gi, "")
+    .replace(/\(\s*\d+\s*[xX]\s*\d+\s*CM\s*\)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 // Which bed-size bucket a bedframe template belongs to. Looks at both the
 // size label (e.g. "6FT") and the product-code variant suffix (e.g. "-(K)").
 // Order matters: test the more specific "Super Single" before "Single", and
@@ -616,24 +634,39 @@ export default function CncTemplatesPage() {
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                     {rows.map((m) => {
                       const fileCount = m.templates.length;
+                      const sizeBadge = frameSizeBadge(m.name);
+                      const cardName = cardDisplayName(m.name);
                       return (
                         <button
                           key={m.code}
                           type="button"
                           onClick={() => goModel(m.code)}
-                          className="flex flex-col items-start rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] transition-colors"
+                          className="flex min-h-[76px] flex-col rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] hover:shadow-sm transition-all"
                         >
-                          <span className="text-sm font-semibold text-[#1F1D1B]">{m.code}</span>
-                          {m.name && (
-                            <span className="text-[11px] text-[#6B7280] truncate w-full">{m.name}</span>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="truncate text-sm font-semibold text-[#1F1D1B]">
+                              {m.code}
+                            </span>
+                            {sizeBadge && (
+                              <span className="shrink-0 rounded bg-[#F3F0EA] px-1.5 py-0.5 text-[10px] font-medium text-[#6B5C32]">
+                                {sizeBadge}
+                              </span>
+                            )}
+                          </div>
+                          {cardName && (
+                            <span className="mt-0.5 truncate text-[11px] text-[#6B7280]">
+                              {cardName}
+                            </span>
                           )}
-                          <span
-                            className={`mt-1 text-[11px] ${fileCount ? "text-[#3E6570]" : "text-[#B7B0A8] italic"}`}
-                          >
-                            {fileCount
-                              ? `${fileCount} template${fileCount === 1 ? "" : "s"}`
-                              : "No files yet"}
-                          </span>
+                          <div className="mt-auto pt-2">
+                            {fileCount ? (
+                              <span className="inline-flex items-center rounded-full bg-[#E0EDF0] px-2 py-0.5 text-[10px] font-medium text-[#3E6570]">
+                                {fileCount} template{fileCount === 1 ? "" : "s"}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] italic text-[#B7B0A8]">No files yet</span>
+                            )}
+                          </div>
                         </button>
                       );
                     })}
@@ -692,16 +725,18 @@ export default function CncTemplatesPage() {
                 key={b.key}
                 type="button"
                 onClick={() => goBucket(b.key)}
-                className="flex flex-col items-start rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] transition-colors"
+                className="flex min-h-[72px] flex-col rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] hover:shadow-sm transition-all"
               >
-                <span className="text-sm font-semibold text-[#1F1D1B]">{b.key}</span>
-                <span
-                  className={`mt-1 text-[11px] ${b.templates.length ? "text-[#3E6570]" : "text-[#B7B0A8] italic"}`}
-                >
-                  {b.templates.length
-                    ? `${b.templates.length} template${b.templates.length === 1 ? "" : "s"}`
-                    : "Empty"}
-                </span>
+                <span className="truncate text-sm font-semibold text-[#1F1D1B]">{b.key}</span>
+                <div className="mt-auto pt-2">
+                  {b.templates.length ? (
+                    <span className="inline-flex items-center rounded-full bg-[#E0EDF0] px-2 py-0.5 text-[10px] font-medium text-[#3E6570]">
+                      {b.templates.length} template{b.templates.length === 1 ? "" : "s"}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] italic text-[#B7B0A8]">Empty</span>
+                  )}
+                </div>
               </button>
             ))}
 

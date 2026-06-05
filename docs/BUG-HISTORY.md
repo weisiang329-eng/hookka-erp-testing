@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-001 — Payroll reconciliation: "Under-logged factory hours (by department)" line (RM36) didn't match its per-department children (RM4,587)
+
+**Status:** 🟢 Fixed (2026-06-06) — shipped to prod (48623ccc); deploy green; verified live on erp.hookka.com (May 2026 shows "Reconciled · 0 difference").
+**Category:** payroll-reporting
+
+**Symptom:** On Employees → Labor Cost → Payroll Reconciliation, the residual line labelled "Under-logged factory hours (by department)" showed a small net value (RM 36.15) but its indented per-department children (Framing RM 1,708, Fabric Sewing RM 1,419, …) summed to RM 4,587 — parent and children didn't reconcile. Owner flagged "amount对不上".
+
+**Root cause:** Two different quantities under one parent. The line value is `nonProductionSalarySen = totalGross − totalLaborCost` (a balancing residual — small by design because the Idle/Overhead buckets already absorb most non-productive time). The children were `nonProductionByDept = gross_dept − bucketed_dept` filtered by `if (residual <= 50) continue`, which surfaced only the POSITIVE-residual departments and hid the negatives. Departments go negative because cross-department borrowing / OT make a dept's bucketed labor exceed its own payroll (`bucketed` keys on dept-of-logging `r.departmentCode`; `gross` keys on dept-of-assignment `p.departmentCode`). The hidden negatives (~−RM 4,551) net the visible positives back to RM 36; showing only the positives overstated it ~127×. (`src/pages/employees.tsx` — useMemo ~5967, render ~6527.)
+
+**Fix (split into two, owner's pick):** `src/pages/employees.tsx` — removed `nonProductionByDept` + its children from the reconciliation table and relabelled the line "Unbucketed salary (net balancing)" so it reads as the balancing residual it is (table still sums to Total Payroll → "0 difference"). Added `underLoggedByDept` in the "who & why" panel: a CLEAN per-department under-logged roll-up aggregated from the per-WORKER gaps (gross − own logged value), not polluted by borrowing, summing to the unlogged-factory subtotal.
+
+**Verified:** tsc + build clean; deployed; live on prod for May 2026 — recon line now "Unbucketed salary (net balancing) RM 36.15" with no mismatched children + "Reconciled · 0 difference"; new By-department roll-up shows Upholstery RM 265 / Framing RM 262 / … (the true under-logged figures, ~7× smaller than the old borrowing-polluted ones).
+
+---
+
 ## BUG-2026-06-05-005 — Production Overview "Overdue" column filter left the matrix blank; different users saw different overdue sets
 
 **Status:** 🟢 Fixed (2026-06-05) — shipped to prod (61193269); deploy green. Frontend-interaction bug — final confirmation is the owner filtering Overdue live.

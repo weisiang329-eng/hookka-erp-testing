@@ -108,3 +108,83 @@ export async function updateCncTemplate(
   }
   return body.data;
 }
+
+// One cutting file (any of the three kinds) attached to a manual create.
+export type CncFileSet = Partial<Record<"dgt" | "prj" | "emf", File>>;
+
+// Fields for a manually-created CNC template. productCode + displayName are
+// required (the server enforces both). The size parameter is carried in
+// `totalHeight` for BOTH categories — it reads as the total height (cm) for a
+// bedframe and as the seat size for a sofa; the library UI relabels it per
+// category. Files are optional, so the operator can pre-create an empty slot
+// and upload the .dgt/.prj/.emf later.
+export type CncTemplateCreate = {
+  productCode: string;
+  displayName: string;
+  sizeLabel?: string;
+  pieceLabel?: string;
+  totalHeight?: string;
+  fabricWidth?: string;
+  files?: CncFileSet;
+};
+
+/**
+ * Manually create one CNC template (POST /api/cnc-templates, multipart) and
+ * return the created row. Files are optional. Throws a clear message on failure
+ * (e.g. a 503 when storage isn't configured) so the caller can toast it.
+ */
+export async function createCncTemplate(
+  input: CncTemplateCreate,
+): Promise<CncTemplate> {
+  const fd = new FormData();
+  fd.append("productCode", input.productCode);
+  fd.append("displayName", input.displayName);
+  if (input.sizeLabel != null) fd.append("sizeLabel", input.sizeLabel);
+  if (input.pieceLabel != null) fd.append("pieceLabel", input.pieceLabel);
+  if (input.totalHeight != null) fd.append("totalHeight", input.totalHeight);
+  if (input.fabricWidth != null) fd.append("fabricWidth", input.fabricWidth);
+  for (const kind of ["dgt", "prj", "emf"] as const) {
+    const f = input.files?.[kind];
+    if (f && f.size > 0) fd.append(kind, f);
+  }
+
+  const res = await fetch("/api/cnc-templates", { method: "POST", body: fd });
+
+  let body: { success?: boolean; data?: CncTemplate; error?: string } = {};
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    // Non-JSON — fall through to the status-based message below.
+  }
+
+  if (res.status === 503) {
+    throw new Error(
+      body.error || "File storage isn't configured yet. Ask an admin to set it up.",
+    );
+  }
+  if (!res.ok || body.success === false || !body.data) {
+    throw new Error(body.error || `Create failed (HTTP ${res.status}).`);
+  }
+  return body.data;
+}
+
+/**
+ * Delete one CNC template (DELETE /api/cnc-templates/:id). Removes the stored
+ * files and the row. Throws a clear message on failure.
+ */
+export async function deleteCncTemplate(id: string): Promise<void> {
+  const res = await fetch(`/api/cnc-templates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+  let body: { success?: boolean; error?: string } = {};
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    // Non-JSON — fall through to the status-based message below.
+  }
+
+  if (!res.ok || body.success === false) {
+    throw new Error(body.error || `Delete failed (HTTP ${res.status}).`);
+  }
+}

@@ -1,77 +1,134 @@
 // ---------------------------------------------------------------------------
-// /cnc-templates — CNC Cutting Templates library.
+// /cnc-templates — CNC Cutting Templates library (two-level drill-down).
 //
-// Lists every fabric-cutting file for the BUYI E-DIGIT cutter, grouped by
-// product code. Each row exposes DGT / PRJ / EMF download buttons (each an
-// anchor to GET /api/cnc-templates/:id/file/:kind, which 302-redirects to the
-// real download URL). Client-side search filters the loaded list by
-// productCode / displayName / pieceLabel.
+// Level 1  Models      — every bedframe / sofa model (from the product
+//                        catalogue, plus any model that already has files),
+//                        grouped by Bedframe / Sofa / Other.
+// Level 2  Size / seat — click a model to open its size buckets:
+//                          · BEDFRAME → Single / Super Single / Queen / King
+//                            (always shown, even when empty, so the operator
+//                            can fill them in).
+//                          · SOFA     → the seat-config buckets it already has
+//                            (2A, 1A, …) plus any Combo the operator creates.
+// Level 3  Files       — click a bucket to see the actual cutting templates
+//                        (DGT / PRJ / EMF), with Add, Upload, Edit and Delete.
+//
+// The size parameter is stored in the existing `totalHeight` field for BOTH
+// categories — it reads as the total height (cm) for a bedframe and as the seat
+// size for a sofa; the UI labels it per category. Category itself is DERIVED
+// from the product catalogue (matched on the model code), so no schema change
+// is needed. Everything is also manually creatable.
+//
+// File BYTES live in Supabase Storage; this page only ever sees metadata +
+// hasDgt/hasPrj/hasEmf booleans. Downloads anchor to
+// GET /api/cnc-templates/:id/file/:kind (a 302 to a short-lived signed URL).
 // ---------------------------------------------------------------------------
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { useCachedJson, invalidateCache } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { SkeletonTable } from "@/components/ui/skeleton";
-import { Scissors, Search, Upload, Loader2, Pencil, Check, X } from "lucide-react";
+import {
+  Scissors,
+  Search,
+  Upload,
+  Loader2,
+  Pencil,
+  Check,
+  X,
+  Plus,
+  Trash2,
+  ArrowLeft,
+  ChevronRight,
+  Bed,
+  Sofa,
+  Package,
+} from "lucide-react";
 import { useToast } from "@/components/ui/toast";
-import { uploadCncFiles, updateCncTemplate } from "@/lib/cnc-import";
+import {
+  uploadCncFiles,
+  updateCncTemplate,
+  createCncTemplate,
+  deleteCncTemplate,
+} from "@/lib/cnc-import";
 import type { CncTemplate } from "@/components/cnc/CncTemplatePanel";
 import type { Product } from "@/types";
 
-// Editable-field draft for the inline row editor. Mirrors the metadata columns
-// the operator can change (model re-assignment, size, piece, height, etc.).
-type EditDraft = {
-  productCode: string;
-  displayName: string;
-  sizeLabel: string;
-  pieceLabel: string;
-  totalHeight: string;
-  fabricWidth: string;
-};
+type Category = "BEDFRAME" | "SOFA" | "OTHER";
+
+// Standard bed sizes, always shown for a bedframe model (pre-built buckets).
+const BED_SIZES = ["Single", "Super Single", "Queen", "King"] as const;
+
+// Standard sofa seat sizes (matches SEAT_HEIGHT_OPTIONS / variants-config).
+const SEAT_SIZE_OPTIONS = ["24", "26", "28", "30", "32", "35"] as const;
 
 type CncTemplatesResponse = { success?: boolean; data?: CncTemplate[] };
-
 type ProductsResponse = { success?: boolean; data?: Product[] };
 
-// Auto-suggest a sensible file/display name for a chosen product. The naming
-// rule the owner wants:
-//   - SOFA     → reflect the SEAT SIZE (defaultVariants.seatHeight, else sizeLabel)
-//   - BEDFRAME → reflect the TOTAL HEIGHT (divanHeight + legHeight if both known,
-//                else sizeLabel)
-// Falls back to the product code + name when no size/height is available, so the
-// field is never blank. The operator can always edit the result.
-function suggestTemplateName(p: Product): string {
-  const code = (p.code || "").trim();
-  const dv = p.defaultVariants || {};
-
-  if (p.category === "SOFA") {
-    const seat = (dv.seatHeight || p.sizeLabel || "").trim();
-    return seat ? `${code} ${seat}`.trim() : `${code} ${p.name || ""}`.trim();
-  }
-
-  if (p.category === "BEDFRAME") {
-    // divanHeight / legHeight are stored as inch strings (e.g. `8"`).
-    // parseFloat stops at the `"`, so we get the numeric inches to sum.
-    const divan = Number.parseFloat((dv.divanHeight || "").trim());
-    const leg = Number.parseFloat((dv.legHeight || "").trim());
-    if (Number.isFinite(divan) && Number.isFinite(leg)) {
-      // Round to 2 dp then drop any trailing zeros, so "20.00" reads as "20"
-      // and "20.50" as "20.5". Keep the inch mark — the source values are
-      // inches, so the total is inches too.
-      const total = divan + leg;
-      const totalStr = String(Number(total.toFixed(2)));
-      return `${code} ${totalStr}"`.trim();
-    }
-    const label = (p.sizeLabel || "").trim();
-    return label ? `${code} ${label}`.trim() : `${code} ${p.name || ""}`.trim();
-  }
-
-  // ACCESSORY / anything else: just code + name.
-  return `${code} ${p.name || ""}`.trim();
+// Strip the variant suffix so SKU codes collapse to their model code:
+//   "1013-(K)" / "1013 King" → "1013". Cutting templates are filed by the
+// leading code token, so the model card groups all variants together.
+function baseProductCode(code: string): string {
+  const raw = String(code ?? "").trim();
+  if (!raw) return raw;
+  return raw.split(/\s|-\(/)[0].trim();
 }
 
-// Per-kind download button. Renders as an anchor the browser follows to the
-// backend's 302-redirect download URL. Opens in a new tab so the library page
-// stays open.
+// Which bed-size bucket a bedframe template belongs to. Looks at both the
+// size label (e.g. "6FT") and the product-code variant suffix (e.g. "-(K)").
+// Order matters: test the more specific "Super Single" before "Single", and
+// "(SS)" before "(S)".
+function bedBucketOf(t: { sizeLabel?: string; productCode?: string }): string | null {
+  const hay = `${t.productCode ?? ""} ${t.sizeLabel ?? ""}`.toLowerCase();
+  if (/super\s*single|\bss\b|\(ss\)|\b4\s*ft\b|\b4ft\b/.test(hay)) return "Super Single";
+  if (/\bsingle\b|\(s\)|\b3\s*ft\b|\b3ft\b|3'/.test(hay)) return "Single";
+  if (/\bqueen\b|\(q\)|\b5\s*ft\b|\b5ft\b|5'/.test(hay)) return "Queen";
+  if (/\bking\b|\(k\)|\b6\s*ft\b|\b6ft\b|6'/.test(hay)) return "King";
+  return null;
+}
+
+// Does a size label look like a sofa seat config (2A, 1A(LHF), 3S, NA, …)?
+function looksLikeSeatConfig(sizeLabel: string): boolean {
+  return /^[1-3]\s*(na|a|s)(\(lhf\)|\(rhf\))?$/i.test(sizeLabel.trim());
+}
+
+// Best-effort category for a model from its product (if matched) or, failing
+// that, from the shape of its templates.
+function deriveCategory(product: Product | undefined, templates: CncTemplate[]): Category {
+  if (product?.category === "BEDFRAME") return "BEDFRAME";
+  if (product?.category === "SOFA") return "SOFA";
+  if (templates.some((t) => bedBucketOf(t))) return "BEDFRAME";
+  if (templates.some((t) => looksLikeSeatConfig(t.sizeLabel))) return "SOFA";
+  return "OTHER";
+}
+
+// Auto-suggest a file/display name for a manual create. Keeps the operator from
+// staring at a blank field; always editable.
+function suggestName(opts: {
+  code: string;
+  bucket: string;
+  sizeValue: string;
+  piece: string;
+  category: Category;
+}): string {
+  const parts = [opts.code.trim(), opts.bucket.trim()];
+  if (opts.sizeValue.trim()) {
+    parts.push(opts.category === "SOFA" ? opts.sizeValue.trim() : `${opts.sizeValue.trim()}cm`);
+  }
+  if (opts.piece.trim()) parts.push(opts.piece.trim());
+  return parts.filter(Boolean).join(" ");
+}
+
+// Group multiple picked files into the {dgt,prj,emf} slots by extension.
+function filesByKind(files: File[]): Partial<Record<"dgt" | "prj" | "emf", File>> {
+  const out: Partial<Record<"dgt" | "prj" | "emf", File>> = {};
+  for (const f of files) {
+    const ext = f.name.split(".").pop()?.toLowerCase();
+    if (ext === "dgt" || ext === "prj" || ext === "emf") out[ext] = f;
+  }
+  return out;
+}
+
+// Per-kind download button → backend 302-redirect download URL, new tab.
 function FileButton({
   templateId,
   kind,
@@ -86,6 +143,7 @@ function FileButton({
       href={`/api/cnc-templates/${templateId}/file/${kind}`}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
       className="inline-flex items-center rounded-md border border-[#A8CAD2] bg-[#E0EDF0] px-2 py-0.5 text-[11px] font-medium text-[#3E6570] hover:bg-[#D2E4E8] transition-colors"
     >
       {label}
@@ -93,80 +151,184 @@ function FileButton({
   );
 }
 
+// ---------------------------------------------------------------------------
+
+type ModelGroup = {
+  code: string;
+  name: string;
+  category: Category;
+  templates: CncTemplate[];
+};
+
+type EditDraft = {
+  productCode: string;
+  displayName: string;
+  sizeLabel: string;
+  pieceLabel: string;
+  totalHeight: string;
+  fabricWidth: string;
+};
+
+type CreateDraft = {
+  productCode: string;
+  bucket: string; // bed size (BF) or seat config (SOFA) → sizeLabel
+  sizeValue: string; // total height cm (BF) or seat size (SOFA) → totalHeight
+  pieceLabel: string;
+  displayName: string;
+  nameEdited: boolean;
+  files: File[];
+};
+
 export default function CncTemplatesPage() {
-  const [query, setQuery] = useState("");
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
-  // Upload-time model picker. The operator picks which product the files are
-  // for (instead of relying on the filename), and gets an auto-suggested name
-  // they can override before uploading.
-  const [pickedProduct, setPickedProduct] = useState<Product | null>(null);
-  const [modelSearch, setModelSearch] = useState("");
-  const [modelOpen, setModelOpen] = useState(false);
-  const [suggestedName, setSuggestedName] = useState("");
-  const modelBoxRef = useRef<HTMLDivElement>(null);
+  // Drill-down navigation: null model = Level 1; model + null bucket = Level 2;
+  // model + bucket = Level 3.
+  const [navModel, setNavModel] = useState<string | null>(null);
+  const [navBucket, setNavBucket] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
+  const { data, loading, refresh } = useCachedJson<CncTemplatesResponse>(
+    "/api/cnc-templates",
+  );
   const { data: productsData } = useCachedJson<ProductsResponse>("/api/products");
+
+  const templates = useMemo(
+    () => (Array.isArray(data?.data) ? data!.data! : []),
+    [data],
+  );
   const products = useMemo(
     () => (Array.isArray(productsData?.data) ? productsData!.data! : []),
     [productsData],
   );
 
-  // Filter the (large, ~250) product list as the operator types. Match on code
-  // or name; cap at 50 results so the dropdown stays light.
-  const filteredProducts = useMemo(() => {
-    const q = modelSearch.trim().toLowerCase();
-    const base = q
-      ? products.filter(
-          (p) =>
-            (p.code || "").toLowerCase().includes(q) ||
-            (p.name || "").toLowerCase().includes(q),
-        )
-      : products;
-    return base.slice(0, 50);
-  }, [products, modelSearch]);
-
-  // Choosing a model seeds the auto-suggested name (editable afterwards).
-  const selectProduct = (p: Product) => {
-    setPickedProduct(p);
-    setSuggestedName(suggestTemplateName(p));
-    setModelOpen(false);
-    setModelSearch("");
+  const refreshAll = () => {
+    invalidateCachePrefix("/api/cnc-templates");
+    refresh();
   };
 
-  const clearPickedProduct = () => {
-    setPickedProduct(null);
-    setSuggestedName("");
-    setModelSearch("");
-  };
+  // -------------------------------------------------------------------------
+  // Build the model list: every bedframe/sofa product (grouped by base code)
+  // unioned with any model code that already has templates.
+  // -------------------------------------------------------------------------
+  const { productByCode, productNameByCode } = useMemo(() => {
+    const byCode = new Map<string, Product>();
+    const nameByCode = new Map<string, string>();
+    for (const p of products) {
+      const base = baseProductCode(p.code);
+      if (!base) continue;
+      if (!byCode.has(base)) byCode.set(base, p);
+      if (!nameByCode.has(base) && p.name) nameByCode.set(base, p.name);
+    }
+    return { productByCode: byCode, productNameByCode: nameByCode };
+  }, [products]);
 
-  // Close the model dropdown on outside click.
-  useEffect(() => {
-    if (!modelOpen) return;
-    const onMouseDown = (e: MouseEvent) => {
-      if (modelBoxRef.current && !modelBoxRef.current.contains(e.target as Node)) {
-        setModelOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
-  }, [modelOpen]);
+  const models = useMemo(() => {
+    const map = new Map<string, CncTemplate[]>();
+    // Seed from catalogue (so empty models are pre-built and fillable).
+    for (const p of products) {
+      if (p.category !== "BEDFRAME" && p.category !== "SOFA") continue;
+      const base = baseProductCode(p.code);
+      if (base && !map.has(base)) map.set(base, []);
+    }
+    // Add models that already own templates.
+    for (const t of templates) {
+      const base = baseProductCode(t.productCode) || "—";
+      if (!map.has(base)) map.set(base, []);
+      map.get(base)!.push(t);
+    }
+    const list: ModelGroup[] = [];
+    for (const [code, ts] of map.entries()) {
+      const product = productByCode.get(code);
+      list.push({
+        code,
+        name: productNameByCode.get(code) || product?.name || "",
+        category: deriveCategory(product, ts),
+        templates: ts,
+      });
+    }
+    return list.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  }, [templates, products, productByCode, productNameByCode]);
 
-  // Inline row editor: which row is open + its working draft + save spinner.
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<EditDraft | null>(null);
-  const [savingEdit, setSavingEdit] = useState(false);
+  // Level 1 search over code / name / templates' piece+display.
+  const filteredModels = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return models;
+    return models.filter(
+      (m) =>
+        m.code.toLowerCase().includes(q) ||
+        m.name.toLowerCase().includes(q) ||
+        m.templates.some((t) =>
+          `${t.displayName} ${t.pieceLabel} ${t.sizeLabel}`.toLowerCase().includes(q),
+        ),
+    );
+  }, [models, query]);
 
-  const { data, loading, refresh } = useCachedJson<CncTemplatesResponse>(
-    "/api/cnc-templates",
+  const currentModel = useMemo(
+    () => models.find((m) => m.code === navModel) || null,
+    [models, navModel],
   );
 
-  // Open the editor for a row, seeding the draft from its current values.
+  // Level 2 buckets for the current model.
+  const buckets = useMemo(() => {
+    if (!currentModel) return [] as { key: string; templates: CncTemplate[]; preset: boolean }[];
+    if (currentModel.category === "BEDFRAME") {
+      const out: { key: string; preset: boolean; templates: CncTemplate[] }[] =
+        BED_SIZES.map((name) => ({
+          key: name as string,
+          preset: true,
+          templates: currentModel.templates.filter((t) => bedBucketOf(t) === name),
+        }));
+      const others = currentModel.templates.filter((t) => !bedBucketOf(t));
+      if (others.length) out.push({ key: "Other", preset: false, templates: others });
+      return out;
+    }
+    // SOFA / OTHER → bucket by seat config (size label).
+    const map = new Map<string, CncTemplate[]>();
+    for (const t of currentModel.templates) {
+      const key = (t.sizeLabel || "").trim() || "No seat config";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(t);
+    }
+    return [...map.entries()]
+      .map(([key, ts]) => ({ key, preset: false, templates: ts }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }, [currentModel]);
+
+  const currentBucketTemplates = useMemo(() => {
+    if (!currentModel || navBucket == null) return [];
+    const b = buckets.find((x) => x.key === navBucket);
+    return b ? b.templates : [];
+  }, [currentModel, navBucket, buckets]);
+
+  // -------------------------------------------------------------------------
+  // Bulk upload (filename-parsed, optionally scoped to a model).
+  // -------------------------------------------------------------------------
+  const [uploading, setUploading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const handleUpload = async (files: File[], scopeCode?: string) => {
+    if (files.length === 0) return;
+    setUploading(true);
+    try {
+      const msg = await uploadCncFiles(files, { productCode: scopeCode });
+      toast.success(msg);
+      refreshAll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // Inline edit (re-assign model / fix size / piece / height / name).
+  // -------------------------------------------------------------------------
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [edit, setEdit] = useState<EditDraft | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
   const startEdit = (t: CncTemplate) => {
     setEditingId(t.id);
-    setDraft({
+    setEdit({
       productCode: t.productCode || "",
       displayName: t.displayName || "",
       sizeLabel: t.sizeLabel || "",
@@ -175,40 +337,27 @@ export default function CncTemplatesPage() {
       fabricWidth: t.fabricWidth || "",
     });
   };
-
   const cancelEdit = () => {
     setEditingId(null);
-    setDraft(null);
+    setEdit(null);
   };
-
-  // Save the edited metadata. Requires a model + display name (server enforces
-  // the same). On success, drop the cached list so the row re-groups under its
-  // (possibly new) model and refetches.
   const saveEdit = async () => {
-    if (!editingId || !draft) return;
-    if (!draft.productCode.trim()) {
-      toast.error("Please enter a model (product code).");
-      return;
-    }
-    if (!draft.displayName.trim()) {
-      toast.error("Display name cannot be empty.");
-      return;
-    }
+    if (!editingId || !edit) return;
+    if (!edit.productCode.trim()) return toast.error("Please enter a model (product code).");
+    if (!edit.displayName.trim()) return toast.error("Display name cannot be empty.");
     setSavingEdit(true);
     try {
       await updateCncTemplate(editingId, {
-        productCode: draft.productCode.trim(),
-        displayName: draft.displayName.trim(),
-        sizeLabel: draft.sizeLabel.trim(),
-        pieceLabel: draft.pieceLabel.trim(),
-        totalHeight: draft.totalHeight.trim(),
-        fabricWidth: draft.fabricWidth.trim(),
+        productCode: edit.productCode.trim(),
+        displayName: edit.displayName.trim(),
+        sizeLabel: edit.sizeLabel.trim(),
+        pieceLabel: edit.pieceLabel.trim(),
+        totalHeight: edit.totalHeight.trim(),
+        fabricWidth: edit.fabricWidth.trim(),
       });
       toast.success("Template updated.");
-      setEditingId(null);
-      setDraft(null);
-      invalidateCache("/api/cnc-templates");
-      refresh();
+      cancelEdit();
+      refreshAll();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Save failed.");
     } finally {
@@ -216,394 +365,818 @@ export default function CncTemplatesPage() {
     }
   };
 
-  // Bulk-upload chosen files, then refresh the library list. The server parses
-  // each filename into product/size/width/piece — the operator just picks the
-  // .dgt/.prj/.emf files.
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const input = e.target;
-    const files = Array.from(input.files || []);
-    input.value = ""; // allow re-selecting the same files later
-    if (files.length === 0) return;
-
-    setUploading(true);
+  // -------------------------------------------------------------------------
+  // Delete one template.
+  // -------------------------------------------------------------------------
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const handleDelete = async (t: CncTemplate) => {
+    if (
+      !window.confirm(
+        `Delete "${t.displayName || t.id}"? This removes its DGT / PRJ / EMF files. This cannot be undone.`,
+      )
+    )
+      return;
+    setDeletingId(t.id);
     try {
-      const msg = await uploadCncFiles(files, {
-        // Operator-chosen model wins over the filename-parsed code; the
-        // auto-suggested (editable) name wins over the filename-derived one.
-        productCode: pickedProduct?.code,
-        displayName: pickedProduct ? suggestedName : undefined,
-      });
-      toast.success(msg);
-      // Drop the cached list so the new rows show immediately, then refetch.
-      invalidateCache("/api/cnc-templates");
-      refresh();
+      await deleteCncTemplate(t.id);
+      toast.success("Template deleted.");
+      refreshAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Upload failed.");
+      toast.error(err instanceof Error ? err.message : "Delete failed.");
     } finally {
-      setUploading(false);
+      setDeletingId(null);
     }
   };
 
-  const templates = useMemo(
-    () => (Array.isArray(data?.data) ? data!.data! : []),
-    [data],
-  );
-
-  // Client-side search over productCode / displayName / pieceLabel.
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return templates;
-    return templates.filter((t) =>
-      [t.productCode, t.displayName, t.pieceLabel]
-        .filter(Boolean)
-        .some((v) => v.toLowerCase().includes(q)),
-    );
-  }, [templates, query]);
-
-  // Group the filtered rows by productCode. Keep group order stable + sorted
-  // so the library reads predictably.
-  const groups = useMemo(() => {
-    const map = new Map<string, CncTemplate[]>();
-    for (const t of filtered) {
-      const key = t.productCode || "—";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(t);
+  // -------------------------------------------------------------------------
+  // Manual create (Add cutting file), scoped to a model + bucket + category.
+  // -------------------------------------------------------------------------
+  const [creating, setCreating] = useState(false);
+  const [createDraft, setCreateDraft] = useState<CreateDraft | null>(null);
+  const createCategory: Category = currentModel?.category ?? "OTHER";
+  const openCreate = (presetBucket: string) => {
+    if (!currentModel) return;
+    const seedBucket =
+      presetBucket && presetBucket !== "Other" && presetBucket !== "No seat config"
+        ? presetBucket
+        : "";
+    setCreateDraft({
+      productCode: currentModel.code,
+      bucket: seedBucket,
+      sizeValue: "",
+      pieceLabel: "",
+      displayName: "",
+      nameEdited: false,
+      files: [],
+    });
+  };
+  const closeCreate = () => setCreateDraft(null);
+  // Keep the auto-suggested name in sync until the operator edits it.
+  const createSuggested = createDraft
+    ? suggestName({
+        code: createDraft.productCode,
+        bucket: createDraft.bucket,
+        sizeValue: createDraft.sizeValue,
+        piece: createDraft.pieceLabel,
+        category: createCategory,
+      })
+    : "";
+  const submitCreate = async () => {
+    if (!createDraft) return;
+    if (!createDraft.productCode.trim()) return toast.error("Model (product code) is required.");
+    const displayName = (createDraft.nameEdited ? createDraft.displayName : createSuggested).trim();
+    if (!displayName) return toast.error("Please enter a display name.");
+    setCreating(true);
+    try {
+      const saved = await createCncTemplate({
+        productCode: createDraft.productCode.trim(),
+        displayName,
+        sizeLabel: createDraft.bucket.trim(),
+        totalHeight: createDraft.sizeValue.trim(),
+        pieceLabel: createDraft.pieceLabel.trim(),
+        files: filesByKind(createDraft.files),
+      });
+      toast.success("Cutting template added.");
+      refreshAll();
+      closeCreate();
+      // Jump to the bucket the new template landed in so it's visible.
+      if (currentModel?.category === "BEDFRAME") {
+        setNavBucket(bedBucketOf(saved) || createDraft.bucket || navBucket);
+      } else {
+        setNavBucket((saved.sizeLabel || createDraft.bucket || navBucket || "").trim() || navBucket);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Create failed.");
+    } finally {
+      setCreating(false);
     }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filtered]);
+  };
 
+  // Navigation helpers — always clear the transient edit/create panels so they
+  // never leak across screens. (Done here, not in an effect, to avoid the
+  // set-state-in-effect cascade.)
+  const goModels = () => {
+    cancelEdit();
+    closeCreate();
+    setNavModel(null);
+    setNavBucket(null);
+  };
+  const goModel = (code: string) => {
+    cancelEdit();
+    closeCreate();
+    setNavModel(code);
+    setNavBucket(null);
+  };
+  const goModelView = () => {
+    cancelEdit();
+    closeCreate();
+    setNavBucket(null);
+  };
+  const goBucket = (key: string) => {
+    cancelEdit();
+    closeCreate();
+    setNavBucket(key);
+  };
+
+  const sizeColLabel = createCategory === "SOFA" ? "Seat Size" : "Total H (cm)";
+
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header + breadcrumb */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">CNC Cutting Templates</h1>
-          <p className="text-xs text-[#6B7280]">
-            Fabric-cutting files for the BUYI E-DIGIT cutter, by product &amp; size
-          </p>
-        </div>
-      </div>
-
-      {/* Search */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="relative max-w-sm flex-1 min-w-[200px]">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9CA3AF]" />
-          <input
-            type="text"
-            placeholder="Search by product code, name, or piece…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="w-full rounded-md border border-[#E2DDD8] bg-white pl-8 pr-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-          />
-        </div>
-      </div>
-
-      {/* Upload panel: pick the model (so the file isn't guessed from its name),
-          review the auto-suggested name, then choose the .dgt/.prj/.emf files. */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-end gap-3 flex-wrap">
-            {/* Model picker — searchable combobox over /api/products. */}
-            <div className="relative min-w-[240px] flex-1 max-w-sm" ref={modelBoxRef}>
-              <label className="block text-[11px] font-medium text-[#6B7280] mb-1">
-                Model (product)
-              </label>
-              {pickedProduct ? (
-                <div className="flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-2 text-sm">
-                  <span className="min-w-0 flex-1 truncate text-[#1F1D1B]">
-                    <span className="font-medium">{pickedProduct.code}</span>
-                    <span className="text-[#6B7280]"> — {pickedProduct.name}</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={clearPickedProduct}
-                    className="shrink-0 text-[#9CA3AF] hover:text-[#6B5C32]"
-                    title="Clear selected model"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ) : (
-                <input
-                  type="text"
-                  value={modelSearch}
-                  onChange={(e) => {
-                    setModelSearch(e.target.value);
-                    setModelOpen(true);
-                  }}
-                  onFocus={() => setModelOpen(true)}
-                  placeholder="Search code or name…"
-                  autoComplete="off"
-                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                />
-              )}
-              {modelOpen && !pickedProduct && (
-                <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg">
-                  {filteredProducts.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-[#9CA3AF] italic">
-                      No matching products
-                    </div>
-                  ) : (
-                    filteredProducts.map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => selectProduct(p)}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[#F3F0EA]"
-                      >
-                        <span className="font-medium text-[#1F1D1B]">{p.code}</span>
-                        <span className="min-w-0 flex-1 truncate text-[#6B7280]">{p.name}</span>
-                        {p.category && (
-                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-[#9CA3AF]">
-                            {p.category}
-                          </span>
-                        )}
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Auto-suggested (editable) file name. */}
-            <div className="min-w-[200px] flex-1 max-w-sm">
-              <label className="block text-[11px] font-medium text-[#6B7280] mb-1">
-                File name (auto-suggested)
-              </label>
-              <input
-                type="text"
-                value={suggestedName}
-                onChange={(e) => setSuggestedName(e.target.value)}
-                disabled={!pickedProduct}
-                placeholder={pickedProduct ? "" : "Pick a model first"}
-                className="w-full rounded-md border border-[#E2DDD8] bg-white px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32] disabled:bg-[#F3F4F6] disabled:text-[#9CA3AF]"
-              />
-            </div>
-
-            {/* Bulk upload: opens a hidden multi-file picker (.dgt/.prj/.emf). */}
+          <div className="mt-0.5 flex items-center gap-1 text-xs text-[#6B7280]">
             <button
               type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              className="inline-flex items-center gap-2 rounded-md bg-[#6B5C32] px-3 py-2 text-sm font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+              onClick={goModels}
+              className={navModel ? "hover:text-[#6B5C32] hover:underline" : "font-medium text-[#1F1D1B]"}
             >
-              {uploading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Upload className="h-4 w-4" />
-              )}
-              {uploading ? "Uploading…" : "Upload files"}
+              All models
             </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".dgt,.prj,.emf"
-              multiple
-              className="hidden"
-              onChange={handleUpload}
+            {currentModel && (
+              <>
+                <ChevronRight className="h-3 w-3 text-[#C9C2BA]" />
+                <button
+                  type="button"
+                  onClick={goModelView}
+                  className={navBucket ? "hover:text-[#6B5C32] hover:underline" : "font-medium text-[#1F1D1B]"}
+                >
+                  {currentModel.code}
+                </button>
+              </>
+            )}
+            {currentModel && navBucket && (
+              <>
+                <ChevronRight className="h-3 w-3 text-[#C9C2BA]" />
+                <span className="font-medium text-[#1F1D1B]">{navBucket}</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ===================== LEVEL 1 — model grid ===================== */}
+      {!currentModel && (
+        <>
+          {/* Search */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="relative max-w-sm flex-1 min-w-[200px]">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9CA3AF]" />
+              <input
+                type="text"
+                placeholder="Search model code, name, or piece…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="w-full rounded-md border border-[#E2DDD8] bg-white pl-8 pr-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+            </div>
+          </div>
+
+          {/* Bulk upload card (filename-parsed; pick a model to file it under). */}
+          <BulkUploadCard
+            products={products}
+            uploading={uploading}
+            inputRef={uploadInputRef}
+            onUpload={handleUpload}
+          />
+
+          {loading && templates.length === 0 ? (
+            <SkeletonTable rows={6} columns={4} />
+          ) : (
+            (["BEDFRAME", "SOFA", "OTHER"] as Category[]).map((cat) => {
+              const rows = filteredModels.filter((m) => m.category === cat);
+              if (rows.length === 0) return null;
+              return (
+                <div key={cat} className="space-y-2">
+                  <h2 className="flex items-center gap-1.5 text-sm font-semibold text-[#6B7280] uppercase tracking-wide px-1">
+                    {cat === "BEDFRAME" ? (
+                      <Bed className="h-4 w-4" />
+                    ) : cat === "SOFA" ? (
+                      <Sofa className="h-4 w-4" />
+                    ) : (
+                      <Package className="h-4 w-4" />
+                    )}
+                    {cat === "OTHER" ? "Other / Unsorted" : cat}
+                    <span className="font-normal text-[#9CA3AF]">({rows.length})</span>
+                  </h2>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                    {rows.map((m) => {
+                      const fileCount = m.templates.length;
+                      return (
+                        <button
+                          key={m.code}
+                          type="button"
+                          onClick={() => goModel(m.code)}
+                          className="flex flex-col items-start rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] transition-colors"
+                        >
+                          <span className="text-sm font-semibold text-[#1F1D1B]">{m.code}</span>
+                          {m.name && (
+                            <span className="text-[11px] text-[#6B7280] truncate w-full">{m.name}</span>
+                          )}
+                          <span
+                            className={`mt-1 text-[11px] ${fileCount ? "text-[#3E6570]" : "text-[#B7B0A8] italic"}`}
+                          >
+                            {fileCount
+                              ? `${fileCount} template${fileCount === 1 ? "" : "s"}`
+                              : "No files yet"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })
+          )}
+
+          {!loading && filteredModels.length === 0 && (
+            <Card>
+              <CardContent className="p-12 text-center">
+                <Scissors className="h-10 w-10 text-[#E2DDD8] mx-auto mb-3" strokeWidth={1.5} />
+                <p className="text-sm font-medium text-[#1F1D1B]">No models found</p>
+                <p className="text-xs text-[#6B7280] mt-1">
+                  {query ? "Try a different search term." : "Add a product, then upload its cutting files."}
+                </p>
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
+
+      {/* ===================== LEVEL 2 — size / seat buckets ===================== */}
+      {currentModel && navBucket == null && (
+        <>
+          <button
+            type="button"
+            onClick={goModels}
+            className="inline-flex items-center gap-1 text-xs font-medium text-[#6B5C32] hover:underline"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" /> All models
+          </button>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-[#F3F0EA] px-2.5 py-1 text-xs font-medium text-[#6B5C32]">
+              {currentModel.category === "BEDFRAME" ? (
+                <Bed className="h-3.5 w-3.5" />
+              ) : currentModel.category === "SOFA" ? (
+                <Sofa className="h-3.5 w-3.5" />
+              ) : (
+                <Package className="h-3.5 w-3.5" />
+              )}
+              {currentModel.category === "OTHER" ? "Unsorted" : currentModel.category}
+            </span>
+            {/* Bulk upload scoped to this model. */}
+            <ScopedUploadButton
+              uploading={uploading}
+              onPick={(files) => handleUpload(files, currentModel.code)}
             />
           </div>
 
-          <p className="mt-2 text-[11px] text-[#8B8580]">
-            Pick the model so the file is filed under the right product instead of
-            being guessed from its name. Sofas suggest a name from the seat size;
-            bedframes from the total height. Leave the model blank to keep using the
-            filename. <span className="font-medium text-[#6B5C32]">.dgt</span> and{" "}
-            <span className="font-medium text-[#6B5C32]">.emf</span> are machine files for the BUYI
-            cutter; <span className="font-medium text-[#6B5C32]">.prj</span> is the project file.
-          </p>
-        </CardContent>
-      </Card>
-
-      {/* Loading skeleton */}
-      {loading && templates.length === 0 ? (
-        <SkeletonTable rows={6} columns={6} />
-      ) : groups.length === 0 ? (
-        /* Empty state */
-        <Card>
-          <CardContent className="p-12 text-center">
-            <Scissors className="h-10 w-10 text-[#E2DDD8] mx-auto mb-3" strokeWidth={1.5} />
-            <p className="text-sm font-medium text-[#1F1D1B]">
-              {templates.length === 0 ? "No CNC templates yet" : "No matching templates"}
-            </p>
-            <p className="text-xs text-[#6B7280] mt-1">
-              {templates.length === 0
-                ? "Cutting files will appear here once they are linked to a product."
-                : "Try a different search term."}
-            </p>
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="space-y-6">
-          {groups.map(([code, rows]) => (
-            <div key={code} className="space-y-2">
-              {/* Product code section header */}
-              <h2 className="text-sm font-semibold text-[#6B7280] uppercase tracking-wide px-1">
-                {code}
-                <span className="ml-2 font-normal text-[#9CA3AF]">
-                  ({rows.length} template{rows.length === 1 ? "" : "s"})
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {buckets.map((b) => (
+              <button
+                key={b.key}
+                type="button"
+                onClick={() => goBucket(b.key)}
+                className="flex flex-col items-start rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] transition-colors"
+              >
+                <span className="text-sm font-semibold text-[#1F1D1B]">{b.key}</span>
+                <span
+                  className={`mt-1 text-[11px] ${b.templates.length ? "text-[#3E6570]" : "text-[#B7B0A8] italic"}`}
+                >
+                  {b.templates.length
+                    ? `${b.templates.length} template${b.templates.length === 1 ? "" : "s"}`
+                    : "Empty"}
                 </span>
-              </h2>
+              </button>
+            ))}
 
-              <Card>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-[10px] font-medium text-[#6B7280] uppercase border-b border-[#E2DDD8]">
-                        <th className="px-3 py-2">Display Name</th>
-                        <th className="px-3 py-2">Size</th>
-                        <th className="px-3 py-2">Piece</th>
-                        <th className="px-3 py-2">Total H (cm)</th>
-                        <th className="px-3 py-2">Fabric Width</th>
-                        <th className="px-3 py-2">Files</th>
-                        <th className="px-3 py-2 text-right">Edit</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((t) => (
-                        <Fragment key={t.id}>
-                          <tr className="border-b border-[#F3F4F6] last:border-0">
-                            <td className="px-3 py-2 text-[#111827]">{t.displayName}</td>
-                            <td className="px-3 py-2 text-[#6B7280]">{t.sizeLabel || "—"}</td>
-                            <td className="px-3 py-2 text-[#6B7280]">{t.pieceLabel || "—"}</td>
-                            <td className="px-3 py-2 text-[#6B7280]">
-                              {t.totalHeight ? `${t.totalHeight} cm` : "—"}
-                            </td>
-                            <td className="px-3 py-2 text-[#6B7280]">{t.fabricWidth || "—"}</td>
-                            <td className="px-3 py-2">
-                              <div className="flex items-center gap-1.5">
-                                {t.hasDgt && <FileButton templateId={t.id} kind="dgt" label="DGT" />}
-                                {t.hasPrj && <FileButton templateId={t.id} kind="prj" label="PRJ" />}
-                                {t.hasEmf && <FileButton templateId={t.id} kind="emf" label="EMF" />}
-                                {!t.hasDgt && !t.hasPrj && !t.hasEmf && (
-                                  <span className="text-[11px] text-[#9CA3AF] italic">No files</span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="px-3 py-2 text-right">
+            {/* Sofa: add a new seat config / combo bucket. */}
+            {currentModel.category !== "BEDFRAME" && (
+              <button
+                type="button"
+                onClick={() => {
+                  goBucket("");
+                  openCreate("");
+                }}
+                className="flex flex-col items-center justify-center rounded-lg border border-dashed border-[#CDBf9b] bg-[#FCFBF8] px-3 py-2.5 text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
+              >
+                <Plus className="h-4 w-4" />
+                <span className="mt-1 text-[11px] font-medium">New config / Combo</span>
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ===================== LEVEL 3 — templates in a bucket ===================== */}
+      {currentModel && navBucket != null && (
+        <>
+          <button
+            type="button"
+            onClick={goModelView}
+            className="inline-flex items-center gap-1 text-xs font-medium text-[#6B5C32] hover:underline"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" /> {currentModel.code}
+          </button>
+
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <h2 className="text-sm font-semibold text-[#1F1D1B]">
+              {currentModel.code}
+              {navBucket ? ` · ${navBucket}` : ""}
+            </h2>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => openCreate(navBucket || "")}
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#4D4224] transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5" /> Add cutting file
+              </button>
+              <ScopedUploadButton
+                uploading={uploading}
+                onPick={(files) => handleUpload(files, currentModel.code)}
+              />
+            </div>
+          </div>
+
+          {/* Create form (category-aware). */}
+          {createDraft && (
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-semibold text-[#1F1D1B]">
+                  <Plus className="h-4 w-4 text-[#6B5C32]" /> New cutting template
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                    Model (product code)
+                    <input
+                      type="text"
+                      value={createDraft.productCode}
+                      onChange={(e) => setCreateDraft({ ...createDraft, productCode: e.target.value })}
+                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                    />
+                  </label>
+
+                  {/* Bucket: bed-size select (BF) or seat-config text (Sofa). */}
+                  {createCategory === "BEDFRAME" ? (
+                    <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                      Bed Size
+                      <select
+                        value={createDraft.bucket}
+                        onChange={(e) =>
+                          setCreateDraft({ ...createDraft, bucket: e.target.value })
+                        }
+                        className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                      >
+                        <option value="">— pick —</option>
+                        {BED_SIZES.map((b) => (
+                          <option key={b} value={b}>
+                            {b}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                      Seat Config / Combo
+                      <input
+                        type="text"
+                        value={createDraft.bucket}
+                        onChange={(e) => setCreateDraft({ ...createDraft, bucket: e.target.value })}
+                        placeholder="e.g. 2A, 1A(LHF), or L(L)+2A(R)"
+                        className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                      />
+                    </label>
+                  )}
+
+                  {/* Size value: total height cm (BF) or seat size (Sofa). */}
+                  {createCategory === "SOFA" ? (
+                    <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                      Seat Size
+                      <select
+                        value={createDraft.sizeValue}
+                        onChange={(e) => setCreateDraft({ ...createDraft, sizeValue: e.target.value })}
+                        className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                      >
+                        <option value="">— pick —</option>
+                        {SEAT_SIZE_OPTIONS.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                      Total Height (cm)
+                      <input
+                        type="text"
+                        value={createDraft.sizeValue}
+                        onChange={(e) => setCreateDraft({ ...createDraft, sizeValue: e.target.value })}
+                        placeholder="e.g. 20"
+                        className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                      />
+                    </label>
+                  )}
+
+                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                    Piece (optional)
+                    <input
+                      type="text"
+                      value={createDraft.pieceLabel}
+                      onChange={(e) => setCreateDraft({ ...createDraft, pieceLabel: e.target.value })}
+                      placeholder="e.g. ARM / CUSHION / DIVAN"
+                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
+                    Display Name
+                    <input
+                      type="text"
+                      value={createDraft.nameEdited ? createDraft.displayName : createSuggested}
+                      onChange={(e) =>
+                        setCreateDraft({ ...createDraft, displayName: e.target.value, nameEdited: true })
+                      }
+                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                    />
+                  </label>
+                </div>
+
+                {/* Optional file picker — can also be left empty and uploaded later. */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <label className="inline-flex items-center gap-1.5 rounded-md border border-[#A8CAD2] bg-[#E0EDF0] px-2.5 py-1 text-[11px] font-medium text-[#3E6570] hover:bg-[#D2E4E8] cursor-pointer transition-colors">
+                    <Upload className="h-3.5 w-3.5" />
+                    Choose files (.dgt / .prj / .emf)
+                    <input
+                      type="file"
+                      accept=".dgt,.prj,.emf"
+                      multiple
+                      className="hidden"
+                      onChange={(e) =>
+                        setCreateDraft({
+                          ...createDraft,
+                          files: Array.from(e.target.files || []),
+                        })
+                      }
+                    />
+                  </label>
+                  {createDraft.files.length > 0 && (
+                    <span className="text-[11px] text-[#6B7280]">
+                      {createDraft.files.map((f) => f.name).join(", ")}
+                    </span>
+                  )}
+                  <span className="text-[11px] text-[#9CA3AF] italic">
+                    Files optional — you can add them later.
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={closeCreate}
+                    disabled={creating}
+                    className="inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50 transition-colors"
+                  >
+                    <X className="h-3.5 w-3.5" /> Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={submitCreate}
+                    disabled={creating}
+                    className="inline-flex items-center gap-1 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                    {creating ? "Adding…" : "Add template"}
+                  </button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Templates table */}
+          {currentBucketTemplates.length === 0 && !createDraft ? (
+            <Card>
+              <CardContent className="p-10 text-center">
+                <Scissors className="h-9 w-9 text-[#E2DDD8] mx-auto mb-2.5" strokeWidth={1.5} />
+                <p className="text-sm font-medium text-[#1F1D1B]">No cutting files here yet</p>
+                <p className="text-xs text-[#6B7280] mt-1">
+                  Use “Add cutting file” or “Upload files” to fill this {navBucket ? `${navBucket} ` : ""}slot.
+                </p>
+              </CardContent>
+            </Card>
+          ) : currentBucketTemplates.length > 0 ? (
+            <Card>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[10px] font-medium text-[#6B7280] uppercase border-b border-[#E2DDD8]">
+                      <th className="px-3 py-2">Display Name</th>
+                      <th className="px-3 py-2">{currentModel.category === "BEDFRAME" ? "Bed Size" : "Seat Config"}</th>
+                      <th className="px-3 py-2">Piece</th>
+                      <th className="px-3 py-2">{sizeColLabel}</th>
+                      <th className="px-3 py-2">Files</th>
+                      <th className="px-3 py-2 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentBucketTemplates.map((t) => (
+                      <Fragment key={t.id}>
+                        <tr className="border-b border-[#F3F4F6] last:border-0">
+                          <td className="px-3 py-2 text-[#111827]">{t.displayName}</td>
+                          <td className="px-3 py-2 text-[#6B7280]">{t.sizeLabel || "—"}</td>
+                          <td className="px-3 py-2 text-[#6B7280]">{t.pieceLabel || "—"}</td>
+                          <td className="px-3 py-2 text-[#6B7280]">
+                            {t.totalHeight
+                              ? currentModel.category === "BEDFRAME"
+                                ? `${t.totalHeight} cm`
+                                : t.totalHeight
+                              : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-1.5">
+                              {t.hasDgt && <FileButton templateId={t.id} kind="dgt" label="DGT" />}
+                              {t.hasPrj && <FileButton templateId={t.id} kind="prj" label="PRJ" />}
+                              {t.hasEmf && <FileButton templateId={t.id} kind="emf" label="EMF" />}
+                              {!t.hasDgt && !t.hasPrj && !t.hasEmf && (
+                                <span className="text-[11px] text-[#9CA3AF] italic">No files</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center justify-end gap-1.5">
                               <button
                                 type="button"
                                 onClick={() => (editingId === t.id ? cancelEdit() : startEdit(t))}
                                 className="inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] bg-white px-2 py-1 text-[11px] font-medium text-[#6B5C32] hover:bg-[#F3F0EA] transition-colors"
-                                title="Edit this template (re-assign model, fix size / piece / height)"
+                                title="Edit (re-assign model, fix size / piece / height)"
                               >
-                                <Pencil className="h-3 w-3" />
-                                Edit
+                                <Pencil className="h-3 w-3" /> Edit
                               </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(t)}
+                                disabled={deletingId === t.id}
+                                className="inline-flex items-center gap-1 rounded-md border border-[#E7C9C4] bg-white px-2 py-1 text-[11px] font-medium text-[#B4453A] hover:bg-[#FBEEEC] disabled:opacity-50 transition-colors"
+                                title="Delete this template"
+                              >
+                                {deletingId === t.id ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-3 w-3" />
+                                )}
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                        {editingId === t.id && edit && (
+                          <tr className="bg-[#FAF9F7] border-b border-[#E2DDD8]">
+                            <td colSpan={6} className="px-3 py-3">
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                {(
+                                  [
+                                    ["productCode", "Model (product code)", "e.g. 5535"],
+                                    ["displayName", "Display Name", ""],
+                                    ["sizeLabel", "Size / Seat config", "e.g. King / 2A"],
+                                    ["pieceLabel", "Piece", "e.g. ARM / CUSHION"],
+                                    ["totalHeight", "Height (cm) / Seat size", "e.g. 20 / 28"],
+                                    ["fabricWidth", "Fabric Width", ""],
+                                  ] as [keyof EditDraft, string, string][]
+                                ).map(([field, label, ph]) => (
+                                  <label
+                                    key={field}
+                                    className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]"
+                                  >
+                                    {label}
+                                    <input
+                                      type="text"
+                                      value={edit[field]}
+                                      onChange={(e) => setEdit({ ...edit, [field]: e.target.value })}
+                                      placeholder={ph}
+                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                                    />
+                                  </label>
+                                ))}
+                              </div>
+                              <div className="mt-3 flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={cancelEdit}
+                                  disabled={savingEdit}
+                                  className="inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50 transition-colors"
+                                >
+                                  <X className="h-3.5 w-3.5" /> Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={saveEdit}
+                                  disabled={savingEdit}
+                                  className="inline-flex items-center gap-1 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                >
+                                  {savingEdit ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Check className="h-3.5 w-3.5" />
+                                  )}
+                                  {savingEdit ? "Saving…" : "Save"}
+                                </button>
+                              </div>
                             </td>
                           </tr>
-                          {editingId === t.id && draft && (
-                            <tr className="bg-[#FAF9F7] border-b border-[#E2DDD8]">
-                              <td colSpan={7} className="px-3 py-3">
-                                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
-                                    Model (product code)
-                                    <input
-                                      type="text"
-                                      value={draft.productCode}
-                                      onChange={(e) =>
-                                        setDraft({ ...draft, productCode: e.target.value })
-                                      }
-                                      placeholder="e.g. 5535"
-                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                                    />
-                                  </label>
-                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
-                                    Display Name
-                                    <input
-                                      type="text"
-                                      value={draft.displayName}
-                                      onChange={(e) =>
-                                        setDraft({ ...draft, displayName: e.target.value })
-                                      }
-                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                                    />
-                                  </label>
-                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
-                                    Size
-                                    <input
-                                      type="text"
-                                      value={draft.sizeLabel}
-                                      onChange={(e) =>
-                                        setDraft({ ...draft, sizeLabel: e.target.value })
-                                      }
-                                      placeholder="e.g. 6FT / 2S"
-                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                                    />
-                                  </label>
-                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
-                                    Piece
-                                    <input
-                                      type="text"
-                                      value={draft.pieceLabel}
-                                      onChange={(e) =>
-                                        setDraft({ ...draft, pieceLabel: e.target.value })
-                                      }
-                                      placeholder="e.g. ARM / CUSHION"
-                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                                    />
-                                  </label>
-                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
-                                    Total H (cm)
-                                    <input
-                                      type="text"
-                                      value={draft.totalHeight}
-                                      onChange={(e) =>
-                                        setDraft({ ...draft, totalHeight: e.target.value })
-                                      }
-                                      placeholder="e.g. 20"
-                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                                    />
-                                  </label>
-                                  <label className="flex flex-col gap-1 text-[11px] font-medium text-[#6B7280]">
-                                    Fabric Width
-                                    <input
-                                      type="text"
-                                      value={draft.fabricWidth}
-                                      onChange={(e) =>
-                                        setDraft({ ...draft, fabricWidth: e.target.value })
-                                      }
-                                      className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                                    />
-                                  </label>
-                                </div>
-                                <div className="mt-3 flex items-center justify-end gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={cancelEdit}
-                                    disabled={savingEdit}
-                                    className="inline-flex items-center gap-1 rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs font-medium text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50 transition-colors"
-                                  >
-                                    <X className="h-3.5 w-3.5" />
-                                    Cancel
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={saveEdit}
-                                    disabled={savingEdit}
-                                    className="inline-flex items-center gap-1 rounded-md bg-[#6B5C32] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                  >
-                                    {savingEdit ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <Check className="h-3.5 w-3.5" />
-                                    )}
-                                    {savingEdit ? "Saving…" : "Save"}
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-            </div>
-          ))}
-        </div>
+                        )}
+                      </Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          ) : null}
+        </>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bulk-upload card with a searchable model picker (Level 1). Files are
+// filename-parsed; picking a model files every file under it.
+// ---------------------------------------------------------------------------
+function BulkUploadCard({
+  products,
+  uploading,
+  inputRef,
+  onUpload,
+}: {
+  products: Product[];
+  uploading: boolean;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onUpload: (files: File[], scopeCode?: string) => void;
+}) {
+  const [picked, setPicked] = useState<Product | null>(null);
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const base = q
+      ? products.filter(
+          (p) =>
+            (p.code || "").toLowerCase().includes(q) ||
+            (p.name || "").toLowerCase().includes(q),
+        )
+      : products;
+    return base.slice(0, 50);
+  }, [products, search]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="flex items-end gap-3 flex-wrap">
+          <div className="relative min-w-[240px] flex-1 max-w-sm" ref={boxRef}>
+            <label className="block text-[11px] font-medium text-[#6B7280] mb-1">
+              Model (product) — optional
+            </label>
+            {picked ? (
+              <div className="flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-white px-2.5 py-2 text-sm">
+                <span className="min-w-0 flex-1 truncate text-[#1F1D1B]">
+                  <span className="font-medium">{picked.code}</span>
+                  <span className="text-[#6B7280]"> — {picked.name}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPicked(null)}
+                  className="shrink-0 text-[#9CA3AF] hover:text-[#6B5C32]"
+                  title="Clear selected model"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setOpen(true);
+                }}
+                onFocus={() => setOpen(true)}
+                placeholder="Search code or name…"
+                autoComplete="off"
+                className="w-full rounded-md border border-[#E2DDD8] bg-white px-2.5 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+            )}
+            {open && !picked && (
+              <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg">
+                {filtered.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-[#9CA3AF] italic">No matching products</div>
+                ) : (
+                  filtered.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setPicked(p);
+                        setOpen(false);
+                        setSearch("");
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[#F3F0EA]"
+                    >
+                      <span className="font-medium text-[#1F1D1B]">{p.code}</span>
+                      <span className="min-w-0 flex-1 truncate text-[#6B7280]">{p.name}</span>
+                      {p.category && (
+                        <span className="shrink-0 text-[10px] uppercase tracking-wide text-[#9CA3AF]">
+                          {p.category}
+                        </span>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className="inline-flex items-center gap-2 rounded-md bg-[#6B5C32] px-3 py-2 text-sm font-medium text-white hover:bg-[#4D4224] disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+          >
+            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            {uploading ? "Uploading…" : "Upload files"}
+          </button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".dgt,.prj,.emf"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files || []);
+              e.target.value = "";
+              if (files.length) onUpload(files, picked?.code);
+            }}
+          />
+        </div>
+
+        <p className="mt-2 text-[11px] text-[#8B8580]">
+          Pick a model so the files are filed under the right product instead of being guessed from
+          the name. Leave it blank to use the filename. <span className="font-medium text-[#6B5C32]">.dgt</span>{" "}
+          and <span className="font-medium text-[#6B5C32]">.emf</span> are machine files for the BUYI cutter;{" "}
+          <span className="font-medium text-[#6B5C32]">.prj</span> is the project file.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Small "Upload files" button that opens a file picker and hands the files back.
+function ScopedUploadButton({
+  uploading,
+  onPick,
+}: {
+  uploading: boolean;
+  onPick: (files: File[]) => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => ref.current?.click()}
+        disabled={uploading}
+        className="inline-flex items-center gap-1.5 rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs font-medium text-[#6B5C32] hover:bg-[#F3F0EA] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+        Upload files
+      </button>
+      <input
+        ref={ref}
+        type="file"
+        accept=".dgt,.prj,.emf"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = "";
+          if (files.length) onPick(files);
+        }}
+      />
+    </>
   );
 }

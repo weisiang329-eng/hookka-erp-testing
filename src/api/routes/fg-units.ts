@@ -123,7 +123,11 @@ function rowToFGUnit(r: FGUnitRow) {
     mfdDate: r.mfdDate,
     status: r.status,
   };
-  if (r.customerHub) out.customerHub = r.customerHub;
+  // Prefer the live-resolved hub (the list query JOINs the order and supplies
+  // it); fall back to the value stored on the unit for the other read paths
+  // that don't resolve it.
+  const liveHub = (r as { resolvedHub?: string | null }).resolvedHub;
+  if (liveHub || r.customerHub) out.customerHub = liveHub || r.customerHub;
   if (r.packerId) out.packerId = r.packerId;
   if (r.packerName) out.packerName = r.packerName;
   if (r.packedAt) out.packedAt = r.packedAt;
@@ -499,26 +503,37 @@ app.get("/", async (c) => {
 
   // Sprint 4: org scope is the leading WHERE predicate.
   const orgId = getOrgId(c);
-  const clauses: string[] = ["orgId = ?"];
+  const clauses: string[] = ["fg.orgId = ?"];
   const binds: unknown[] = [orgId];
   if (poId) {
-    clauses.push("poId = ?");
+    clauses.push("fg.poId = ?");
     binds.push(poId);
   }
   if (soId) {
-    clauses.push("soId = ?");
+    clauses.push("fg.soId = ?");
     binds.push(soId);
   }
   if (status) {
-    clauses.push("status = ?");
+    clauses.push("fg.status = ?");
     binds.push(status);
   }
   if (serial) {
-    clauses.push("(unitSerial = ? OR shortCode = ?)");
+    clauses.push("(fg.unitSerial = ? OR fg.shortCode = ?)");
     binds.push(serial, serial);
   }
   const where = `WHERE ${clauses.join(" AND ")}`;
-  const sql = `SELECT * FROM fg_units ${where} ORDER BY id ASC`;
+  // Resolve the customer hub LIVE from the order, not the value stamped at
+  // FG-unit creation. The stamp (generateFGUnitsForPO) used the customer's
+  // DEFAULT delivery hub, so SBH/SRW/PG orders all showed "Houzs KL". Pull the
+  // SO's chosen hub (or the CO's for consignment-origin units); fall back to the
+  // stored value only when the order carries no hub. Makes every sticker reflect
+  // the real branch AND follow Sales Order edits, no backfill. (2026-06-05)
+  const sql = `SELECT fg.*, COALESCE(so.hubName, co.hubName) AS "resolvedHub"
+         FROM fg_units fg
+         LEFT JOIN sales_orders so ON so.id = fg.soId
+         LEFT JOIN production_orders po ON po.id = fg.poId
+         LEFT JOIN consignment_orders co ON co.id = po.consignmentOrderId
+        ${where} ORDER BY fg.id ASC`;
 
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)

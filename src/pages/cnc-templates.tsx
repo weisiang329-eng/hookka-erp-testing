@@ -55,8 +55,34 @@ import type { Product } from "@/types";
 
 type Category = "BEDFRAME" | "SOFA" | "OTHER";
 
-// Standard bed sizes, always shown for a bedframe model (pre-built buckets).
-const BED_SIZES = ["Single", "Super Single", "Queen", "King"] as const;
+// Fallback bed sizes for a bedframe model that has no sized product variants
+// yet. The real buckets are DERIVED per-model from the products' sizeLabels
+// (see bedSizesByBase), so non-standard / custom sizes (200×200, 220×220, …)
+// appear automatically — we do NOT hard-limit to the four standard sizes.
+const STANDARD_BED_SIZE_LABELS = ["3FT", "3.5FT", "5FT", "6FT"] as const;
+
+// Friendly label for a bedframe size: the four standard FT sizes get their bed
+// name; anything else (custom / oversized) shows its dimension. Display only —
+// the bucket KEY stays the raw size label so no size is ever lost or merged.
+function prettyBedSize(label: string): string {
+  const k = String(label ?? "").trim().toUpperCase().replace(/\s/g, "");
+  const names: Record<string, string> = {
+    "6FT": "King",
+    "5FT": "Queen",
+    "3.5FT": "Super Single",
+    "3FT": "Single",
+  };
+  if (names[k]) return names[k];
+  const m = k.match(/^(\d+)CMX(\d+)CM$/);
+  if (m) return `${m[1]}×${m[2]}`;
+  return String(label ?? "").trim();
+}
+
+// Sort key for bed sizes: FT sizes (3–6) sort ahead of cm dimensions (150+).
+function bedSizeSortKey(label: string): number {
+  const n = Number.parseFloat(String(label ?? ""));
+  return Number.isFinite(n) ? n : 99999;
+}
 
 // Standard sofa seat sizes (matches SEAT_HEIGHT_OPTIONS / variants-config).
 const SEAT_SIZE_OPTIONS = ["24", "26", "28", "30", "32", "35"] as const;
@@ -285,6 +311,32 @@ export default function CncTemplatesPage() {
     return m;
   }, [products]);
 
+  // Per bedframe model, the size buckets pulled from the catalogue — every
+  // sizeLabel its product variants come in (6FT / 5FT / 3.5FT / 3FT, plus
+  // non-standard 200×200 / 220×220 / custom dimensions). Plus a
+  // sizeCode→sizeLabel map so a template coded "1003-(SK)" with no sizeLabel
+  // still lands in the matching bucket.
+  const { bedSizesByBase, bedSizeCodeToLabel } = useMemo(() => {
+    const byBase = new Map<string, Set<string>>();
+    const codeToLabel = new Map<string, string>();
+    for (const p of products) {
+      if (p.category !== "BEDFRAME") continue;
+      const base = baseProductCode(p.code);
+      const sl = (p.sizeLabel || "").trim();
+      if (base && sl) {
+        if (!byBase.has(base)) byBase.set(base, new Set());
+        byBase.get(base)!.add(sl);
+      }
+      if (sl) {
+        const suf = variantSuffix(p.code).replace(/[()]/g, "").trim().toUpperCase();
+        const code2 = (p.sizeCode || "").trim().toUpperCase();
+        if (suf && !codeToLabel.has(suf)) codeToLabel.set(suf, sl);
+        if (code2 && !codeToLabel.has(code2)) codeToLabel.set(code2, sl);
+      }
+    }
+    return { bedSizesByBase: byBase, bedSizeCodeToLabel: codeToLabel };
+  }, [products]);
+
   const models = useMemo(() => {
     const map = new Map<string, CncTemplate[]>();
     // Seed from catalogue (so empty models are pre-built and fillable).
@@ -331,19 +383,39 @@ export default function CncTemplatesPage() {
     [models, navModel],
   );
 
+  // Display label for a bucket key — bed sizes get a friendly name (King / 6FT,
+  // or the raw dimension for custom sizes); sofa seat-configs pass through.
+  const bucketDisplay = (key: string): string =>
+    currentModel?.category === "BEDFRAME" ? prettyBedSize(key) : key;
+
   // Level 2 buckets for the current model.
   const buckets = useMemo(() => {
-    if (!currentModel) return [] as { key: string; templates: CncTemplate[]; preset: boolean }[];
+    type Bucket = { key: string; label: string; preset: boolean; templates: CncTemplate[] };
+    if (!currentModel) return [] as Bucket[];
     if (currentModel.category === "BEDFRAME") {
-      const out: { key: string; preset: boolean; templates: CncTemplate[] }[] =
-        BED_SIZES.map((name) => ({
-          key: name as string,
-          preset: true,
-          templates: currentModel.templates.filter((t) => bedBucketOf(t) === name),
-        }));
-      const others = currentModel.templates.filter((t) => !bedBucketOf(t));
-      if (others.length) out.push({ key: "Other", preset: false, templates: others });
-      return out;
+      // Sizes this model actually comes in (from the catalogue); fall back to
+      // the standard FT sizes only when the model has no sized variants.
+      const avail = [...(bedSizesByBase.get(currentModel.code) ?? [])];
+      const sizes = avail.length ? avail : [...STANDARD_BED_SIZE_LABELS];
+      // A template's bucket = its own sizeLabel, else its code suffix mapped
+      // through the catalogue ("1003-(SK)" → "200CMX200CM"), else the suffix.
+      const keyOf = (t: CncTemplate): string => {
+        const sl = (t.sizeLabel || "").trim();
+        if (sl) return sl;
+        const suf = variantSuffix(t.productCode).replace(/[()]/g, "").trim().toUpperCase();
+        if (suf && bedSizeCodeToLabel.has(suf)) return bedSizeCodeToLabel.get(suf)!;
+        return suf || "Other";
+      };
+      const map = new Map<string, CncTemplate[]>();
+      for (const s of sizes) map.set(s, []);
+      for (const t of currentModel.templates) {
+        const k = keyOf(t);
+        if (!map.has(k)) map.set(k, []);
+        map.get(k)!.push(t);
+      }
+      return [...map.entries()]
+        .map(([key, ts]): Bucket => ({ key, label: prettyBedSize(key), preset: sizes.includes(key), templates: ts }))
+        .sort((a, b) => bedSizeSortKey(a.key) - bedSizeSortKey(b.key) || a.key.localeCompare(b.key));
     }
     // SOFA / OTHER → bucket by seat config. Seed the standard configs from the
     // catalogue (so they show even when empty), then slot each template by its
@@ -359,9 +431,9 @@ export default function CncTemplatesPage() {
       map.get(key)!.push(t);
     }
     return [...map.entries()]
-      .map(([key, ts]) => ({ key, preset: seeded.has(key), templates: ts }))
+      .map(([key, ts]): Bucket => ({ key, label: key, preset: seeded.has(key), templates: ts }))
       .sort((a, b) => a.key.localeCompare(b.key));
-  }, [currentModel, sofaConfigsByBase]);
+  }, [currentModel, sofaConfigsByBase, bedSizesByBase, bedSizeCodeToLabel]);
 
   const currentBucketTemplates = useMemo(() => {
     if (!currentModel || navBucket == null) return [];
@@ -509,7 +581,7 @@ export default function CncTemplatesPage() {
       closeCreate();
       // Jump to the bucket the new template landed in so it's visible.
       if (currentModel?.category === "BEDFRAME") {
-        setNavBucket(bedBucketOf(saved) || createDraft.bucket || navBucket);
+        setNavBucket((saved.sizeLabel || createDraft.bucket || navBucket || "").trim() || navBucket);
       } else {
         setNavBucket((saved.sizeLabel || createDraft.bucket || navBucket || "").trim() || navBucket);
       }
@@ -548,6 +620,14 @@ export default function CncTemplatesPage() {
 
   const sizeColLabel = createCategory === "SOFA" ? "Seat Size" : "Total H (cm)";
 
+  // Bed-size dropdown options for the create form — the sizes this model comes
+  // in (from the catalogue), or the standard FT sizes if it has none yet.
+  const bedSizeOptions = (() => {
+    const avail = currentModel ? [...(bedSizesByBase.get(currentModel.code) ?? [])] : [];
+    const list = avail.length ? avail : [...STANDARD_BED_SIZE_LABELS];
+    return list.sort((a, b) => bedSizeSortKey(a) - bedSizeSortKey(b) || a.localeCompare(b));
+  })();
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
@@ -580,7 +660,7 @@ export default function CncTemplatesPage() {
             {currentModel && navBucket && (
               <>
                 <ChevronRight className="h-3 w-3 text-[#C9C2BA]" />
-                <span className="font-medium text-[#1F1D1B]">{navBucket}</span>
+                <span className="font-medium text-[#1F1D1B]">{bucketDisplay(navBucket)}</span>
               </>
             )}
           </div>
@@ -727,7 +807,7 @@ export default function CncTemplatesPage() {
                 onClick={() => goBucket(b.key)}
                 className="flex min-h-[72px] flex-col rounded-lg border border-[#E2DDD8] bg-white px-3 py-2.5 text-left hover:border-[#6B5C32] hover:bg-[#FAF9F7] hover:shadow-sm transition-all"
               >
-                <span className="truncate text-sm font-semibold text-[#1F1D1B]">{b.key}</span>
+                <span className="truncate text-sm font-semibold text-[#1F1D1B]">{b.label}</span>
                 <div className="mt-auto pt-2">
                   {b.templates.length ? (
                     <span className="inline-flex items-center rounded-full bg-[#E0EDF0] px-2 py-0.5 text-[10px] font-medium text-[#3E6570]">
@@ -772,7 +852,7 @@ export default function CncTemplatesPage() {
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <h2 className="text-sm font-semibold text-[#1F1D1B]">
               {currentModel.code}
-              {navBucket ? ` · ${navBucket}` : ""}
+              {navBucket ? ` · ${bucketDisplay(navBucket)}` : ""}
             </h2>
             <div className="flex items-center gap-2">
               <button
@@ -819,9 +899,9 @@ export default function CncTemplatesPage() {
                         className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                       >
                         <option value="">— pick —</option>
-                        {BED_SIZES.map((b) => (
+                        {bedSizeOptions.map((b) => (
                           <option key={b} value={b}>
-                            {b}
+                            {prettyBedSize(b)}
                           </option>
                         ))}
                       </select>

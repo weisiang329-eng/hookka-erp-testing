@@ -96,6 +96,10 @@ type Worker = {
   icNumber: string;
   passportNumber: string;
   nationality: string;
+  /** Per-worker efficiency bonus config (migration 0151). efficiencyAllowanceSen
+   *  = bonus in sen paid when efficiency over the period >= threshold. */
+  efficiencyAllowanceSen?: number;
+  efficiencyThresholdPct?: number;
 };
 
 type PayslipData = {
@@ -1243,6 +1247,9 @@ type WorkerFormData = {
   status: string;
   /** Resignation date (YYYY-MM-DD); "" when not resigned. */
   resignedAt: string;
+  /** Efficiency bonus config — allowance in sen, threshold percent (0–100). */
+  efficiencyAllowanceSen: number;
+  efficiencyThresholdPct: number;
 };
 
 const emptyForm: WorkerFormData = {
@@ -1268,6 +1275,8 @@ const emptyForm: WorkerFormData = {
   nationality: "",
   status: "ACTIVE",
   resignedAt: "",
+  efficiencyAllowanceSen: 0,
+  efficiencyThresholdPct: 0,
 };
 
 // PIN-modal state. The single-worker dialog has two phases:
@@ -1642,6 +1651,8 @@ function EmployeeMasterTab({
       nationality: w.nationality,
       status: w.status,
       resignedAt: w.resignedAt ?? "",
+      efficiencyAllowanceSen: w.efficiencyAllowanceSen ?? 0,
+      efficiencyThresholdPct: w.efficiencyThresholdPct ?? 0,
     });
   };
 
@@ -1653,6 +1664,23 @@ function EmployeeMasterTab({
     const isResigned = editForm.status === "RESIGNED";
     if (isResigned && !/^\d{4}-\d{2}-\d{2}$/.test(editForm.resignedAt || "")) {
       toast.error("A resignation date is required when status is Resigned.");
+      return;
+    }
+    // Efficiency bonus config — reject out-of-range with the SAME message the
+    // backend PUT returns, so the operator gets an instant identical reject
+    // instead of a delayed 400 (frontend+backend unified validation).
+    const effAllowanceSen = editForm.efficiencyAllowanceSen ?? 0;
+    const effThresholdPct = editForm.efficiencyThresholdPct ?? 0;
+    if (!Number.isFinite(effAllowanceSen) || effAllowanceSen < 0) {
+      toast.error("Efficiency allowance must be 0 or more.");
+      return;
+    }
+    if (
+      !Number.isFinite(effThresholdPct) ||
+      effThresholdPct < 0 ||
+      effThresholdPct > 100
+    ) {
+      toast.error("Efficiency threshold must be between 0 and 100.");
       return;
     }
     // Backend rejects a non-empty resignedAt unless status is RESIGNED, so
@@ -1987,6 +2015,69 @@ function EmployeeMasterTab({
           ) : (
             <span title="OT premium multiplier (hourly rate × this for OT hours)">
               {mult.toFixed(1)}×
+            </span>
+          );
+        },
+      },
+      {
+        // Efficiency Allowance amount (sen, shown as RM). Flat bonus paid when
+        // the worker's efficiency over the payroll period reaches the threshold
+        // below. Stored in sen like basicSalarySen. Phase-1 config column; the
+        // Payroll entitlement engine (Phase 2) decides pay/no-pay.
+        key: "efficiencyAllowanceSen",
+        label: "Eff. Allowance (RM)",
+        align: "right",
+        sortable: true,
+        render: (_value, row) =>
+          editingId === row.id ? (
+            <Input
+              type="number" onFocus={(e) => e.currentTarget.select()}
+              min={0}
+              value={(editForm.efficiencyAllowanceSen ?? 0) / 100}
+              onChange={(e) =>
+                setEditForm((f) => ({
+                  ...f,
+                  efficiencyAllowanceSen: Math.round(parseFloat(e.target.value) * 100) || 0,
+                }))
+              }
+              className="h-8 w-24 text-xs"
+              title="Flat bonus paid when this worker's efficiency over the payroll period reaches the threshold %"
+            />
+          ) : (
+            <span className="font-medium">
+              {row.efficiencyAllowanceSen ? formatRM(row.efficiencyAllowanceSen) : "—"}
+            </span>
+          ),
+      },
+      {
+        // Efficiency Threshold % — the efficiency the worker must reach over the
+        // payroll period to earn the allowance above. 0–100; rejected out of
+        // range at Save AND on the backend (same message). 0 shows as "—".
+        key: "efficiencyThresholdPct",
+        label: "Eff. Threshold %",
+        align: "center",
+        width: "110px",
+        render: (_value, row) => {
+          const pct = row.efficiencyThresholdPct ?? 0;
+          return editingId === row.id ? (
+            <Input
+              type="number" onFocus={(e) => e.currentTarget.select()}
+              min={0}
+              max={100}
+              step={1}
+              value={editForm.efficiencyThresholdPct}
+              onChange={(e) =>
+                setEditForm((f) => ({
+                  ...f,
+                  efficiencyThresholdPct: parseFloat(e.target.value) || 0,
+                }))
+              }
+              className="h-8 w-16 text-xs"
+              title="Efficiency % this worker must reach over the payroll period to earn the allowance"
+            />
+          ) : (
+            <span title="Efficiency % required to earn the allowance">
+              {pct ? `${pct}%` : "—"}
             </span>
           );
         },

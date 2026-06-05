@@ -50,6 +50,13 @@ type WorkerRow = {
   // staff. Set together with status = 'RESIGNED' so payroll stops after the
   // resignation month.
   resignedAt: string | null;
+  // Per-worker efficiency bonus config (migration 0151). efficiencyAllowanceSen
+  // = the flat bonus (money, in sen) paid when the worker's efficiency over the
+  // selected payroll period reaches efficiencyThresholdPct. Both default 0 on
+  // existing rows, so no one earns a bonus until the operator sets a real
+  // amount. The Payroll entitlement engine (Phase 2) consumes these.
+  efficiencyAllowanceSen: number;
+  efficiencyThresholdPct: number | null;
 };
 
 type DepartmentRow = {
@@ -116,6 +123,8 @@ function rowToWorker(row: WorkerRow) {
     passportNumber: row.passportNumber ?? "",
     nationality: row.nationality ?? "",
     resignedAt: row.resignedAt ?? "",
+    efficiencyAllowanceSen: row.efficiencyAllowanceSen ?? 0,
+    efficiencyThresholdPct: row.efficiencyThresholdPct ?? 0,
   };
 }
 
@@ -169,11 +178,33 @@ app.post("/", async (c) => {
       socsoEnabled,
       eisEnabled,
       pcbEnabled,
+      efficiencyAllowanceSen,
+      efficiencyThresholdPct,
     } = body;
 
     if (!name || !empNo) {
       return c.json(
         { success: false, error: "name and empNo are required" },
+        400,
+      );
+    }
+
+    // Efficiency bonus config — reject out-of-range rather than normalize
+    // (mirrors the frontend Save guard). Allowance is money in sen (>= 0);
+    // threshold is a percentage (0–100). Undefined → default 0.
+    const effAllowanceSen =
+      efficiencyAllowanceSen == null ? 0 : Math.round(Number(efficiencyAllowanceSen));
+    const effThresholdPct =
+      efficiencyThresholdPct == null ? 0 : Number(efficiencyThresholdPct);
+    if (!Number.isFinite(effAllowanceSen) || effAllowanceSen < 0) {
+      return c.json(
+        { success: false, error: "Efficiency allowance must be 0 or more." },
+        400,
+      );
+    }
+    if (!Number.isFinite(effThresholdPct) || effThresholdPct < 0 || effThresholdPct > 100) {
+      return c.json(
+        { success: false, error: "Efficiency threshold must be between 0 and 100." },
         400,
       );
     }
@@ -216,8 +247,9 @@ app.post("/", async (c) => {
       `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, departmentCodes, categories, position,
          phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier,
          epfEnabled, socsoEnabled, eisEnabled, pcbEnabled,
-         joinDate, icNumber, passportNumber, nationality)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         joinDate, icNumber, passportNumber, nationality,
+         efficiencyAllowanceSen, efficiencyThresholdPct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -245,6 +277,8 @@ app.post("/", async (c) => {
         "",
         "",
         "",
+        effAllowanceSen,
+        effThresholdPct,
       )
       .run();
 
@@ -389,6 +423,34 @@ app.put("/:id", async (c) => {
       nextResignedAt = null;
     }
 
+    // Efficiency bonus config — reject out-of-range (same guard as POST +
+    // the frontend Save handler). Undefined in the body keeps the existing
+    // value (partial-update friendly).
+    const nextEffAllowanceSen =
+      body.efficiencyAllowanceSen == null
+        ? existing.efficiencyAllowanceSen ?? 0
+        : Math.round(Number(body.efficiencyAllowanceSen));
+    const nextEffThresholdPct =
+      body.efficiencyThresholdPct == null
+        ? existing.efficiencyThresholdPct ?? 0
+        : Number(body.efficiencyThresholdPct);
+    if (!Number.isFinite(nextEffAllowanceSen) || nextEffAllowanceSen < 0) {
+      return c.json(
+        { success: false, error: "Efficiency allowance must be 0 or more." },
+        400,
+      );
+    }
+    if (
+      !Number.isFinite(nextEffThresholdPct) ||
+      nextEffThresholdPct < 0 ||
+      nextEffThresholdPct > 100
+    ) {
+      return c.json(
+        { success: false, error: "Efficiency threshold must be between 0 and 100." },
+        400,
+      );
+    }
+
     const merged = {
       name: body.name ?? existing.name,
       empNo: body.empNo ?? existing.empNo,
@@ -427,6 +489,8 @@ app.put("/:id", async (c) => {
       passportNumber: body.passportNumber ?? existing.passportNumber ?? "",
       nationality: body.nationality ?? existing.nationality ?? "",
       resignedAt: nextResignedAt,
+      efficiencyAllowanceSen: nextEffAllowanceSen,
+      efficiencyThresholdPct: nextEffThresholdPct,
     };
 
     await c.var.DB.prepare(
@@ -435,7 +499,8 @@ app.put("/:id", async (c) => {
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
          workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
          epfEnabled = ?, socsoEnabled = ?, eisEnabled = ?, pcbEnabled = ?,
-         joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?
+         joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?, resignedAt = ?,
+         efficiencyAllowanceSen = ?, efficiencyThresholdPct = ?
        WHERE id = ?`,
     )
       .bind(
@@ -461,6 +526,8 @@ app.put("/:id", async (c) => {
         merged.passportNumber,
         merged.nationality,
         merged.resignedAt,
+        merged.efficiencyAllowanceSen,
+        merged.efficiencyThresholdPct,
         id,
       )
       .run();

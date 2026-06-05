@@ -1761,6 +1761,13 @@ function EmployeeMasterTab({
         key: "departmentCode",
         label: "Departments",
         sortable: true,
+        // The inline-edit DepartmentMultiSelect popover is an absolute-positioned
+        // <div>. Without noClip the DataGrid wraps every cell in an overflow:hidden
+        // "truncate" box (data-grid.tsx ~2786) that clips the panel to invisibility
+        // — the operator clicks the Department dropdown and "nothing happens".
+        // Position/Category are native <select> so the browser paints them above
+        // the clip; this custom dropdown is the only one affected. Wei Siang 2026-06-05.
+        noClip: true,
         render: (_value, row) => {
           const deptNamesOf = (codes: string[]) =>
             codes

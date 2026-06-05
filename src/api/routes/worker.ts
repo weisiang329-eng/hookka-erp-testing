@@ -403,6 +403,83 @@ app.get("/scan-lookup", async (c) => {
 });
 
 // ============================================================
+// POST /api/worker/packing-rack
+// Body: { jobCardId, rackingNumber }
+//
+// Lets a Packing worker set/update the warehouse rack number from the phone —
+// either while completing OR by re-scanning an already-COMPLETED packing card
+// (so it is intentionally NOT gated on card status). Writes job_cards.racking-
+// Number and mirrors it onto the PO, the same contract as the dashboard rack
+// dropdown (PATCH /api/production-orders/:id { jobCardId, rackingNumber }). The
+// value is validated against the warehouse rack catalog (rack_locations.rack) —
+// reject, don't normalize. Empty string clears the rack.
+// ============================================================
+app.post("/packing-rack", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const body = await c.req.json().catch(() => ({}));
+  const { jobCardId, rackingNumber } = (body || {}) as {
+    jobCardId?: string;
+    rackingNumber?: string;
+  };
+  if (!jobCardId || rackingNumber == null) {
+    return c.json(
+      { success: false, error: "jobCardId and rackingNumber are required" },
+      400,
+    );
+  }
+  const jc = await c.var.DB.prepare(
+    "SELECT id, productionOrderId, departmentCode FROM job_cards WHERE id = ?",
+  )
+    .bind(jobCardId)
+    .first<{
+      id: string;
+      productionOrderId: string;
+      departmentCode: string | null;
+    }>();
+  if (!jc) {
+    return c.json({ success: false, error: "Job card not found" }, 404);
+  }
+  if ((jc.departmentCode || "").toUpperCase() !== "PACKING") {
+    return c.json(
+      { success: false, error: "Rack number applies to Packing cards only." },
+      400,
+    );
+  }
+  const rack = String(rackingNumber).trim();
+  // Reject anything not in the warehouse rack catalog (the dashboard dropdown
+  // constrains this; the endpoint must too).
+  if (rack) {
+    const slot = await c.var.DB.prepare(
+      "SELECT rack FROM rack_locations WHERE rack = ? LIMIT 1",
+    )
+      .bind(rack)
+      .first<{ rack: string }>();
+    if (!slot) {
+      return c.json(
+        {
+          success: false,
+          error: `Rack "${rack}" is not a known warehouse location.`,
+        },
+        400,
+      );
+    }
+  }
+  const nowIso = new Date().toISOString();
+  await c.var.DB.prepare(
+    "UPDATE job_cards SET rackingNumber = ? WHERE id = ?",
+  )
+    .bind(rack || null, jobCardId)
+    .run();
+  await c.var.DB.prepare(
+    "UPDATE production_orders SET rackingNumber = ?, updated_at = ? WHERE id = ?",
+  )
+    .bind(rack || null, nowIso, jc.productionOrderId)
+    .run();
+  return c.json({ success: true, data: { jobCardId, rackingNumber: rack } });
+});
+
+// ============================================================
 // POST /api/worker/clock
 // Body: { action: 'CLOCK_IN' | 'CLOCK_OUT' }
 // ============================================================

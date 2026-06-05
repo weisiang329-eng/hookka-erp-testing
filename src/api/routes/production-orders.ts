@@ -5295,8 +5295,17 @@ app.post("/resync-po-numbers", async (c) => {
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete", async (c) => {
-  const denied = await requirePermission(c, "production-orders", "create");
-  if (denied) return denied;
+  // Two auth paths (mirrors scan-complete-dept): a dashboard user goes through
+  // RBAC; a shop-floor worker token is bound below and restricted to PACKING
+  // (the only per-piece sticker routed here from the phone — Fab Cut/Sew use
+  // scan-complete-dept, Sew/Uph use scan-complete-shared).
+  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
+    "userId",
+  );
+  if (ctxUserId) {
+    const denied = await requirePermission(c, "production-orders", "create");
+    if (denied) return denied;
+  }
   const db = c.var.DB;
   const scannedId = c.req.param("id");
   const scannedPo = await db
@@ -5362,9 +5371,7 @@ app.post("/:id/scan-complete", async (c) => {
   //      trust body.workerId as-is (admin scanner in src/pages/production/scan).
   //   2. A worker token (x-worker-token header) — body.workerId must match
   //      the worker_tokens row; otherwise 403.
-  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
-    "userId",
-  );
+  // ctxUserId was already resolved at the top of the handler (to gate RBAC).
   const workerToken = c.req.header("x-worker-token");
   if (!ctxUserId) {
     // No dashboard auth → must be a worker call; verify the token binds to
@@ -5389,6 +5396,22 @@ app.post("/:id/scan-complete", async (c) => {
     .first<JobCardRow>();
   if (!scannedJc) {
     return c.json({ success: false, error: "Job card not found" }, 404);
+  }
+  // Worker-token scan-complete is limited to PACKING (its per-piece sticker is
+  // the only one routed here from the phone). Dashboard users keep scanning any
+  // dept; a worker scanning a non-PACKING sticker is rejected.
+  if (
+    !ctxUserId &&
+    (scannedJc.departmentCode || "").toUpperCase() !== "PACKING"
+  ) {
+    return c.json(
+      {
+        success: false,
+        code: "DEPT_NOT_ALLOWED",
+        error: "Worker scan via this sticker is only enabled for Packing.",
+      },
+      403,
+    );
   }
   const worker = await db
     .prepare("SELECT id, name FROM workers WHERE id = ?")

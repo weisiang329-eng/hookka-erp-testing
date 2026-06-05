@@ -101,11 +101,19 @@ const WORKER_SCAN_COMPLETE_DEPT_RE =
 const WORKER_SCAN_COMPLETE_SHARED_RE =
   /^\/api\/production-orders\/[^/]+\/scan-complete-shared$/;
 
+// Per-piece worker scan completion — the PACKING phone sticker routes here. The
+// `$` anchor keeps this from matching scan-complete-dept / scan-complete-shared.
+// The handler rejects any non-PACKING dept for worker-token callers, so opening
+// the path only enables "a logged-in worker completing PACKING".
+const WORKER_SCAN_COMPLETE_RE =
+  /^\/api\/production-orders\/[^/]+\/scan-complete$/;
+
 function isPublicPath(path: string, method: string): boolean {
   if (PUBLIC_PATHS.includes(path)) return true;
   if (method === "GET" && FG_UNIT_PUBLIC_GET_RE.test(path)) return true;
   if (method === "POST" && WORKER_SCAN_COMPLETE_DEPT_RE.test(path)) return true;
   if (method === "POST" && WORKER_SCAN_COMPLETE_SHARED_RE.test(path)) return true;
+  if (method === "POST" && WORKER_SCAN_COMPLETE_RE.test(path)) return true;
   for (const pfx of PUBLIC_PREFIXES) {
     if (path === pfx || path.startsWith(pfx)) return true;
   }

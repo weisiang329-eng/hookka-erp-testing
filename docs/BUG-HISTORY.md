@@ -34,6 +34,51 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-05-005 — Production Overview "Overdue" column filter left the matrix blank; different users saw different overdue sets
+
+**Status:** 🟢 Fixed (2026-06-05) — shipped to prod (61193269); deploy green. Frontend-interaction bug — final confirmation is the owner filtering Overdue live.
+**Category:** ui-frontend
+
+**Symptom:** On the Production Tracking **Overview**, ticking "Overdue" on a department column blanked the visible rows (a tall empty area), and two users saw different empty-row counts (3 vs 10) for the same data.
+
+**Root cause:** Two defects. (1) The Overview matrix uses a hand-rolled `@tanstack/react-virtual` body (`src/pages/production/index.tsx` ~2563 setup, ~6871 render). When a column filter narrowed `visibleOrders` sharply, the virtualizer kept its prior scroll offset whose row indices no longer existed, so the viewport rendered nothing while the container stayed tall — blank. Per-user scroll/measure state → different blank counts. (2) Cell "overdue" was derived client-side from `new Date().toISOString().slice(0,10)` (UTC) in `utils.ts` `cellFor` + `todayISO`, so before 08:00 MYT (and across device timezones) users computed a different "today" → different overdue sets.
+
+**Fix:** `src/pages/production/index.tsx` — reset `overviewBodyRef` scrollTop to 0 in a `useEffect` keyed on `overviewFilters` (re-anchors the virtualizer after a filter), and clip `getVirtualItems()` to `visibleOrders.length`. `src/pages/production/utils.ts` — `todayISO()` + `cellFor` now compute the Malaysia-local (UTC+8, no DST) date so overdue is identical for every user.
+
+**Verified:** tsc + build:strict clean; deployed. Frontend-only display bug — owner confirms live by filtering Overdue (not script-reproducible).
+
+---
+
+## BUG-2026-06-05-004 — Packing sticker STILL printed "Houzs KL" — the BUG-...-002 live-JOIN fixed an unused list endpoint, not the sticker's own path
+
+**Status:** 🟢 Fixed (2026-06-05) — shipped to prod (146e503f) + backfill executed; verified: sticker path now returns "Houzs PG", 190 units backfilled, 0 mismatches. Supersedes the partial fix in BUG-2026-06-05-002.
+**Category:** production
+
+**Symptom:** After BUG-2026-06-05-002, the Packing / Foam **FG Sticker Preview** STILL showed "Houzs KL" for SBH/SRW/PG orders.
+
+**Root cause:** Same origin as -002 — `generateFGUnitsForPO` stamped `customerHub` from the customer's DEFAULT delivery hub. -002's read-time JOIN only touched `GET /api/fg-units` (a list endpoint **not used by the sticker**). The Packing/Foam previews + print (`src/pages/production/index.tsx:7377/7591/8049`) read the STORED `customerHub` via `POST /api/fg-units/generate/:poId`, which was still the wrong default-hub value. Owner wanted the stored value fixed at source ("开单抓 / 改单跟着改 / 旧单补").
+
+**Fix:** (1) `generateFGUnitsForPO` (`fg-units.ts`) now stamps from `sales_orders.hubName` / `consignment_orders.hubName`, falling back to the default hub only when the order has none. (2) On-edit propagation: SO PUT (`sales-orders.ts`) + CO hub-change (`consignment-orders.ts`) update in-stock FG units' `customerHub` so stickers follow order edits (shipped/delivered units untouched). (3) One-shot `POST /api/fg-units/backfill-hub` (dry-run default, `?execute=1`) re-stamped existing units; response includes per-unit before/after as a restore point.
+
+**Verified:** prod backfill executed — **190 units updated** (KL→PG 144, KL→SRW 28, KL→SBH 14, ∅→KL 4), re-dry-run = **0 remaining mismatches**; sticker path (`generate/pord-so-b3cbd103-02`) now returns "Houzs PG". 190-row before-snapshot saved for restore.
+
+---
+
+## BUG-2026-06-05-003 — "Apply Date" showed green success but never saved — for users logged in with Google
+
+**Status:** 🟢 Fixed (2026-06-05) — shipped to prod (f00642b4); login flow intact; owner's Google user confirms by re-login.
+**Category:** auth-rbac
+
+**Symptom:** One Super-Admin's batch "Apply Due Date" (Production Tracking) showed a success toast, but the date reverted after refresh. Another Super-Admin (the owner) had no problem. Not a permission issue (both wildcard-pass RBAC).
+
+**Root cause:** The Google OAuth login route (`src/api/routes/auth-oauth.ts`) set ONLY the `hookka_session` cookie, never `hookka_csrf` (password + TOTP login set both). So Google-logged-in users sent no `X-CSRF-Token`, and EVERY mutating request was rejected **403 by the CSRF middleware** (`auth-middleware.ts:250`) — before RBAC even ran. The frontend batch handlers read `(j.results || [])` with **no `res.ok` check**, so a 403 (no `results` key) read as zero failures → green success; the optimistic local write then reverted on the next poll. Affected every Google-login user's writes, not just date edits.
+
+**Fix:** (1) `auth-oauth.ts` now issues `hookka_csrf` alongside `hookka_session` (mirrors password login). (2) 9 `bulk-patch` batch handlers (Production / Tracker / Planning / Folder) check `res.ok` before reading `results` and show a red "Save failed — …" toast (surfacing `missingPermission`) instead of fake success. The drafts auto-save path already checked `res.ok` — left untouched.
+
+**Verified:** tsc + build + tests clean; deployed; prod login still valid (CSRF-protected POST succeeded with the cookie). Owner's Google user re-logs in to pick up the new cookie + confirm Apply Date.
+
+---
+
 ## BUG-2026-06-05-002 — FG / packing stickers showed "Houzs KL" for every order, even SBH / SRW / PG
 
 **Status:** 🟢 Fixed (2026-06-05) — shipped (1e6d4dc3); verified on prod: 746/746 PACKED units match their SO's hub.

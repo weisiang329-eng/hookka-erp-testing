@@ -64,13 +64,27 @@ const SEAT_SIZE_OPTIONS = ["24", "26", "28", "30", "32", "35"] as const;
 type CncTemplatesResponse = { success?: boolean; data?: CncTemplate[] };
 type ProductsResponse = { success?: boolean; data?: Product[] };
 
-// Strip the variant suffix so SKU codes collapse to their model code:
-//   "1013-(K)" / "1013 King" → "1013". Cutting templates are filed by the
-// leading code token, so the model card groups all variants together.
+// Collapse a SKU code to its MODEL code: everything before the first dash or
+// space.
+//   "1005-(K)"      → "1005"   (bedframe bed-size variant)
+//   "5535-1A(LHF)"  → "5535"   (sofa seat-config variant)
+//   "5530-STOOL"    → "5530"
+//   "1003(A)"       → "1003(A)" (parenthesised model variant, NO dash — kept
+//                                as its own model, e.g. Hilton vs Hilton-A)
+// So all of a model's variants group under one card, and the suffix becomes the
+// Level-2 bucket (bed size / seat config).
 function baseProductCode(code: string): string {
   const raw = String(code ?? "").trim();
   if (!raw) return raw;
-  return raw.split(/\s|-\(/)[0].trim();
+  return raw.split(/[\s-]/)[0].trim();
+}
+
+// The variant suffix after the first dash/space — the inverse of
+// baseProductCode. "5535-1A(LHF)" → "1A(LHF)", "1005-(K)" → "(K)", "5535" → "".
+function variantSuffix(code: string): string {
+  const raw = String(code ?? "").trim();
+  const m = raw.match(/^[^\s-]+[\s-]+(.+)$/);
+  return m ? m[1].trim() : "";
 }
 
 // Which bed-size bucket a bedframe template belongs to. Looks at both the
@@ -223,6 +237,22 @@ export default function CncTemplatesPage() {
     return { productByCode: byCode, productNameByCode: nameByCode };
   }, [products]);
 
+  // Per sofa model, the seat-config buckets pulled from the catalogue — e.g.
+  // 5535 → {1A(LHF), 1A(RHF), 2A(LHF), ..., CNR, STOOL}. These pre-build the
+  // Level-2 buckets (shown even when empty) so the operator just fills them.
+  const sofaConfigsByBase = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const p of products) {
+      if (p.category !== "SOFA") continue;
+      const base = baseProductCode(p.code);
+      const suf = variantSuffix(p.code);
+      if (!base || !suf) continue;
+      if (!m.has(base)) m.set(base, new Set());
+      m.get(base)!.add(suf);
+    }
+    return m;
+  }, [products]);
+
   const models = useMemo(() => {
     const map = new Map<string, CncTemplate[]>();
     // Seed from catalogue (so empty models are pre-built and fillable).
@@ -283,17 +313,23 @@ export default function CncTemplatesPage() {
       if (others.length) out.push({ key: "Other", preset: false, templates: others });
       return out;
     }
-    // SOFA / OTHER → bucket by seat config (size label).
+    // SOFA / OTHER → bucket by seat config. Seed the standard configs from the
+    // catalogue (so they show even when empty), then slot each template by its
+    // code suffix ("5535-1A(LHF)" → "1A(LHF)") or its size label.
+    const seeded = sofaConfigsByBase.get(currentModel.code) ?? new Set<string>();
     const map = new Map<string, CncTemplate[]>();
+    for (const cfg of seeded) map.set(cfg, []);
     for (const t of currentModel.templates) {
-      const key = (t.sizeLabel || "").trim() || "No seat config";
+      const key =
+        (variantSuffix(t.productCode) || t.sizeLabel || "").trim() ||
+        "No seat config";
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(t);
     }
     return [...map.entries()]
-      .map(([key, ts]) => ({ key, preset: false, templates: ts }))
+      .map(([key, ts]) => ({ key, preset: seeded.has(key), templates: ts }))
       .sort((a, b) => a.key.localeCompare(b.key));
-  }, [currentModel]);
+  }, [currentModel, sofaConfigsByBase]);
 
   const currentBucketTemplates = useMemo(() => {
     if (!currentModel || navBucket == null) return [];

@@ -2344,7 +2344,12 @@ export default function ProductionPage({
         const k = `${o.id}|${dept}`;
         let v = cellCache.get(k);
         if (!v) {
-          v = cellFor(o, dept, filteredOrders);
+          // Full `orders` (not filteredOrders) so the FAB_CUT sibling-walk can
+          // always resolve the anchor — matches the render site (~6996). With
+          // filteredOrders, a page-level filter hiding the anchor would read a
+          // borrowed FAB_CUT as "empty" and could wrongly drop the row when a
+          // FAB_CUT column-status / date filter is also active.
+          v = cellFor(o, dept, orders);
           cellCache.set(k, v);
         }
         return v;

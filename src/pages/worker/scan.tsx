@@ -41,7 +41,6 @@ import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { parseStickerData } from "@/lib/qr-utils";
 import { deriveWipName } from "@/lib/wip-name";
-import { fetchJson } from "@/lib/fetch-json";
 import { z } from "zod";
 
 // Loose passthrough envelopes — runtime validation at boundaries while
@@ -311,7 +310,14 @@ export default function WorkerScanPage() {
       term: string,
       deptHint?: string,
     ): Promise<WipOption[]> => {
-      const data = await fetchJson("/api/production-orders", POListEnvelope);
+      // Worker-scoped lookup: returns ONLY the PO(s) matching `term`, gated by
+      // X-Worker-Token (workerFetch attaches it). Replaces the old
+      // fetchJson("/api/production-orders") which pulled the whole list and
+      // 401'd for worker callers — that endpoint is dashboard-only.
+      const qs = new URLSearchParams({ q: term });
+      if (deptHint) qs.set("dept", deptHint);
+      const res = await workerFetch(`/api/worker/scan-lookup?${qs.toString()}`);
+      const data = POListEnvelope.parse(await res.json());
       if (!data.success || !data.data) return [];
       const orders = data.data as unknown as Order[];
       // Job-card id — unique → return the single hit and stop.

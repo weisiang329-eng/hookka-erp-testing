@@ -680,7 +680,11 @@ function rowToMinimalJobCard(
   };
 }
 
-function rowToMinimalPO(
+// Exported so the worker portal's scan-lookup (worker.ts) can reuse the exact
+// same PO+jobCards shape the Production page consumes — the /worker/scan page's
+// Order/JobCard types are a view of this output. Reusing it (rather than
+// re-assembling) keeps the scan card from silently missing a field.
+export function rowToMinimalPO(
   row: ProductionOrderRow,
   jobCards: JobCardRow[] = [],
   piecesDoneByJc: Map<string, number> = new Map(),
@@ -5880,8 +5884,22 @@ app.post("/:id/scan-complete", async (c) => {
 // nothing to do and returns success-empty.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete-dept", async (c) => {
-  const denied = await requirePermission(c, "production-orders", "create");
-  if (denied) return denied;
+  // Two auth paths (mirrors /scan-complete): a dashboard user (userId stamped
+  // by auth-middleware) is authorised via RBAC; a shop-floor worker call
+  // carries only X-Worker-Token — no dashboard session — so userRole is unset
+  // and requirePermission would 401 it BEFORE the token binding below ever
+  // runs. Gate the RBAC check behind "is there a dashboard user" so the worker
+  // path falls through to the resolveWorkerToken bind (which 403s an absent /
+  // mismatched token). auth-middleware only lets this POST through unauthenticated
+  // for X-Worker-Token callers (WORKER_SCAN_COMPLETE_DEPT_RE), so the public
+  // surface is exactly "a logged-in worker completing FAB_CUT / FAB_SEW".
+  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
+    "userId",
+  );
+  if (ctxUserId) {
+    const denied = await requirePermission(c, "production-orders", "create");
+    if (denied) return denied;
+  }
   const db = c.var.DB;
   const poId = c.req.param("id");
   const po = await db
@@ -5938,10 +5956,8 @@ app.post("/:id/scan-complete-dept", async (c) => {
     );
   }
 
-  // Worker-auth binding — identical to /scan-complete.
-  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
-    "userId",
-  );
+  // Worker-auth binding — identical to /scan-complete. ctxUserId was already
+  // resolved at the top of the handler (to gate the RBAC check); reuse it.
   const workerToken = c.req.header("x-worker-token");
   if (!ctxUserId) {
     const resolvedWorkerId = await resolveWorkerToken(db, workerToken);

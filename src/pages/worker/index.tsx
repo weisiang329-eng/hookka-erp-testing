@@ -253,6 +253,13 @@ export default function WorkerHomePage() {
   // Wei Siang 2026-05-10: Clock-in + Scan Job Card not yet live for workers.
   // Hide the two action cards on the home page until rollout.
   const SHOW_CLOCK_AND_SCAN = false;
+  // Wei Siang 2026-06-05: re-enable the shop-floor QR scan for the two merged-
+  // sticker departments (Fab Cut / Fab Sew) ONLY. Clock-in, the stat grid and
+  // report-issue stay hidden until their own rollout, so scan gets its own gate
+  // rather than riding SHOW_CLOCK_AND_SCAN. The completion backend hard-limits
+  // to FAB_CUT / FAB_SEW regardless — this just controls who sees the entry.
+  const SCAN_DEPTS = ["FAB_CUT", "FAB_SEW"];
+  const SHOW_SCAN = SCAN_DEPTS.includes(data.worker.departmentCode);
 
   return (
     <div className="space-y-4 pt-2">
@@ -338,8 +345,8 @@ export default function WorkerHomePage() {
       </div>
       )}
 
-      {/* Big scan button */}
-      {SHOW_CLOCK_AND_SCAN && (
+      {/* Big scan button — Fab Cut / Fab Sew only (see SHOW_SCAN). */}
+      {SHOW_SCAN && (
       <Link
         to="/worker/scan"
         className="block w-full h-20 rounded-xl bg-[#6B5C32] hover:bg-[#5a4d2a] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all"

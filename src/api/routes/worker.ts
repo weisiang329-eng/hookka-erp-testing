@@ -23,6 +23,14 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
 import { computeMonthlyLabor, absenceCutoffDay } from "../../lib/labor-engine";
+import {
+  rowToMinimalPO,
+  // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
+  // JobCardRow (used by /today etc.). These are the FULL row shapes that
+  // rowToMinimalPO consumes — a SELECT * returns them at runtime.
+  type ProductionOrderRow as PoRowFull,
+  type JobCardRow as JcRowFull,
+} from "./production-orders";
 
 const app = new Hono<Env>();
 
@@ -328,6 +336,70 @@ app.get("/today", async (c) => {
       earningsSen,
     },
   });
+});
+
+// ============================================================
+// GET /api/worker/scan-lookup?q=<poNo|orderId|jobCardId>&dept=<DEPT>
+//
+// Read-only PO lookup for the /worker phone scanner. The scan page used to
+// pull the WHOLE dashboard-only /api/production-orders list (multi-MB) and
+// match client-side, which 401'd for an X-Worker-Token caller. This returns
+// ONLY the PO(s) matching the scanned/typed term, in the exact rowToMinimalPO
+// shape the scan page already consumes — so the lookup card never silently
+// loses a field. `dept` trims each PO's jobCards to that department (the
+// Fab Cut / Fab Sew sentinel path passes it); the client re-filters anyway,
+// so it is purely a payload saver. LIMIT caps fan-out — a real scan is
+// unambiguous. Exact (case-sensitive) match: the QR encodes the stored poNo
+// verbatim; manual entry must type it as shown.
+// ============================================================
+app.get("/scan-lookup", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+
+  const term = (c.req.query("q") ?? "").trim();
+  if (!term) return c.json({ success: true, data: [] });
+  const deptHint = (c.req.query("dept") ?? "").trim().toUpperCase() || null;
+
+  // PO number / PO id first; fall back to a job-card id (other-dept per-piece
+  // stickers encode the jc id directly in op=).
+  let poRows =
+    (
+      await c.var.DB.prepare(
+        "SELECT * FROM production_orders WHERE poNo = ? OR id = ? LIMIT 5",
+      )
+        .bind(term, term)
+        .all<PoRowFull>()
+    ).results ?? [];
+
+  if (poRows.length === 0) {
+    poRows =
+      (
+        await c.var.DB.prepare(
+          `SELECT po.* FROM production_orders po
+             JOIN job_cards jc ON jc.productionOrderId = po.id
+            WHERE jc.id = ? LIMIT 5`,
+        )
+          .bind(term)
+          .all<PoRowFull>()
+      ).results ?? [];
+  }
+
+  if (poRows.length === 0) return c.json({ success: true, data: [] });
+
+  const poIds = poRows.map((p) => p.id);
+  const placeholders = poIds.map(() => "?").join(", ");
+  let jcSql = `SELECT * FROM job_cards WHERE productionOrderId IN (${placeholders})`;
+  const binds: string[] = [...poIds];
+  if (deptHint) {
+    jcSql += " AND departmentCode = ?";
+    binds.push(deptHint);
+  }
+  const jcRows =
+    (await c.var.DB.prepare(jcSql).bind(...binds).all<JcRowFull>()).results ??
+    [];
+
+  const data = poRows.map((po) => rowToMinimalPO(po, jcRows));
+  return c.json({ success: true, data });
 });
 
 // ============================================================

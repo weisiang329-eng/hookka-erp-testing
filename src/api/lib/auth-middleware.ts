@@ -82,9 +82,22 @@ const PUBLIC_PREFIXES = [
 // the internet can dump inventory or mutate unit status.
 const FG_UNIT_PUBLIC_GET_RE = /^\/api\/fg-units\/[^/]+$/;
 
+// Shop-floor QR scan completion for the two merged-sticker departments
+// (Fab Cut / Fab Sew). The /worker phone portal carries only X-Worker-Token —
+// no dashboard session — so this POST must bypass the dashboard gate. It is
+// NOT unguarded: the handler (production-orders.ts /:id/scan-complete-dept)
+// binds body.workerId to the token via resolveWorkerToken (403 on mismatch)
+// AND hard-rejects any deptCode other than FAB_CUT / FAB_SEW. So opening just
+// this one POST lets a Fab Cut/Fab Sew worker complete their own dept's cards
+// and nothing else under /api/production-orders. The sibling /scan-complete
+// (per-piece, any dept) stays dashboard-only on purpose.
+const WORKER_SCAN_COMPLETE_DEPT_RE =
+  /^\/api\/production-orders\/[^/]+\/scan-complete-dept$/;
+
 function isPublicPath(path: string, method: string): boolean {
   if (PUBLIC_PATHS.includes(path)) return true;
   if (method === "GET" && FG_UNIT_PUBLIC_GET_RE.test(path)) return true;
+  if (method === "POST" && WORKER_SCAN_COMPLETE_DEPT_RE.test(path)) return true;
   for (const pfx of PUBLIC_PREFIXES) {
     if (path === pfx || path.startsWith(pfx)) return true;
   }

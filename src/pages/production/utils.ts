@@ -16,7 +16,11 @@ export const DEPARTMENTS = [
 // the production grid (and the API call that backs it) only loads POs
 // whose targetEndDate falls on today by default.
 export function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  // Malaysia-local date (UTC+8, no DST). `new Date().toISOString()` is UTC, so
+  // before 08:00 MYT it returns YESTERDAY — which mis-classified cells as
+  // "pending" instead of "overdue", and made different users (different
+  // timezones / device clocks) see different overdue sets for the same data.
+  return new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 export function fmtShortDate(iso: string): string {
@@ -95,7 +99,9 @@ export function cellFor(
   let state: CellState;
   if (done === cards.length) state = "done";
   else {
-    const today = new Date().toISOString().slice(0, 10);
+    // Malaysia-local "today" (see todayISO) so overdue is consistent for all
+    // users regardless of their browser timezone / clock.
+    const today = todayISO();
     state = earliestDue && earliestDue < today ? "overdue" : "pending";
   }
   // Off-leadtime signal: any JC whose persisted dueDate doesn't match

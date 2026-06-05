@@ -2566,6 +2566,14 @@ export default function ProductionPage({
     estimateSize: () => 36,
     overscan: 8,
   });
+  // When a column filter narrows the matrix, reset the body scroll to the top
+  // so the row virtualizer re-anchors. Without this it can hold a stale scroll
+  // offset whose row indices no longer exist after the filter, leaving the
+  // visible area blank (Wei Siang's "整列变空白" — and different users saw
+  // different empty-row counts depending on their prior scroll position).
+  useEffect(() => {
+    if (overviewBodyRef.current) overviewBodyRef.current.scrollTop = 0;
+  }, [overviewFilters]);
 
   // Unique customer + state options for the filter dropdowns, derived
   // live from the order set so they auto-update when data changes.
@@ -6868,7 +6876,10 @@ export default function ProductionPage({
               width: "100%",
             }}
           >
-          {overviewRowVirtualizer.getVirtualItems().map((virtualRow) => {
+          {overviewRowVirtualizer
+            .getVirtualItems()
+            .filter((virtualRow) => virtualRow.index < visibleOrders.length)
+            .map((virtualRow) => {
             const order = visibleOrders[virtualRow.index];
             if (!order) return null;
             const isSelected = selectedOverviewIds.has(order.id);

@@ -2506,7 +2506,15 @@ export default function ProductionPage({
         body: JSON.stringify({ patches }),
         credentials: "include",
       });
-      const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }> };
+      const j = (await res.json()) as { results?: Array<{ success: boolean; error?: string }>; error?: string; missingPermission?: string };
+      if (!res.ok) {
+        toast.error(
+          j.missingPermission
+            ? "Save failed — you don't have permission to make this change. Nothing was saved."
+            : `Save failed — ${j.error ?? `error ${res.status}`}. Nothing was saved.`,
+        );
+        return;
+      }
       const failed = (j.results || []).filter((x) => !x.success);
       if (failed.length > 0) {
         toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
@@ -6386,7 +6394,15 @@ export default function ProductionPage({
               body: JSON.stringify({ patches }),
               credentials: "include",
             });
-            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
+            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }>; error?: string; missingPermission?: string };
+            if (!res.ok) {
+              toast.error(
+                j.missingPermission
+                  ? "Save failed — you don't have permission to make this change. Nothing was saved."
+                  : `Save failed — ${j.error ?? `error ${res.status}`}. Nothing was saved.`,
+              );
+              return;
+            }
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) {
               toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
@@ -6449,7 +6465,15 @@ export default function ProductionPage({
               body: JSON.stringify({ patches }),
               credentials: "include",
             });
-            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
+            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }>; error?: string; missingPermission?: string };
+            if (!res.ok) {
+              toast.error(
+                j.missingPermission
+                  ? "Save failed — you don't have permission to make this change. Nothing was saved."
+                  : `Save failed — ${j.error ?? `error ${res.status}`}. Nothing was saved.`,
+              );
+              return;
+            }
             const failed = (j.results || []).filter((x) => !x.success);
             if (failed.length > 0) {
               toast.error(`${failed.length} of ${patches.length} failed: ${failed[0].error ?? "unknown"}`);
@@ -6508,7 +6532,15 @@ export default function ProductionPage({
               body: JSON.stringify({ patches }),
               credentials: "include",
             });
-            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }> };
+            const j = (await res.json()) as { success?: boolean; results?: Array<{ success: boolean; error?: string }>; error?: string; missingPermission?: string };
+            if (!res.ok) {
+              toast.error(
+                j.missingPermission
+                  ? "Save failed — you don't have permission to make this change. Nothing was saved."
+                  : `Save failed — ${j.error ?? `error ${res.status}`}. Nothing was saved.`,
+              );
+              return;
+            }
             const failed = (j.results || []).filter((x) => !x.success);
             const slots = [pic1 !== undefined ? "PIC 1" : null, pic2 !== undefined ? "PIC 2" : null].filter(Boolean).join(" + ");
             if (failed.length > 0) {

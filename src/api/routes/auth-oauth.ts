@@ -33,6 +33,7 @@ import {
 } from "../lib/oauth-google";
 import { checkLoginRateLimit, clientIp } from "../lib/rate-limit";
 import { emitAudit } from "../lib/audit";
+import { CSRF_COOKIE } from "../lib/auth-middleware";
 
 const app = new Hono<Env>();
 
@@ -207,15 +208,31 @@ app.get("/google/callback", async (c) => {
   // Set cookie + redirect to next. The frontend reads the bearer token from
   // the cookie on first paint, then keeps it in memory for subsequent
   // Authorization headers. Cookie is HttpOnly so XSS can't lift it.
+  const sessionMaxAge = Math.floor(SESSION_TTL_MS / 1000);
   const cookieParts = [
     `hookka_session=${sessionToken}`,
     `Path=/`,
-    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    `Max-Age=${sessionMaxAge}`,
     `HttpOnly`,
     `SameSite=Lax`,
     `Secure`,
   ];
-  c.header("Set-Cookie", cookieParts.join("; "));
+  // CSRF double-submit cookie. The OAuth path previously set ONLY the session
+  // cookie, so Google-login users never received `hookka_csrf` — their api
+  // client sent no X-CSRF-Token, and EVERY mutating request was rejected 403 by
+  // the CSRF middleware (BUG-2026-06-05: "Apply Date shows success but never
+  // persists" for OAuth users; password/TOTP login already set both cookies).
+  // Mirror the password login's csrf cookie: NOT HttpOnly (the client must read
+  // and echo it), Secure + SameSite=Strict, same Max-Age as the session.
+  const csrfParts = [
+    `${CSRF_COOKIE}=${crypto.randomUUID()}`,
+    `Path=/`,
+    `Max-Age=${sessionMaxAge}`,
+    `SameSite=Strict`,
+    `Secure`,
+  ];
+  c.header("Set-Cookie", cookieParts.join("; "), { append: true });
+  c.header("Set-Cookie", csrfParts.join("; "), { append: true });
   return c.redirect(safeNext(decoded.next), 302);
 });
 

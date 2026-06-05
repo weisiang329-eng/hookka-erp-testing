@@ -576,6 +576,23 @@ export default function WorkerScanPage() {
     };
   }, [stopLiveScan]);
 
+  // The bottom-nav "Scan" tab deep-links here as /worker/scan?camera=1 so one
+  // tap jumps straight to the live camera — no Scan QR button tap. Auto-open
+  // the camera once on mount when that flag is present; a plain /worker/scan
+  // visit (e.g. for manual entry) does NOT auto-open. startLiveScan owns its
+  // permission/error handling, so a denied camera just surfaces the normal
+  // error state rather than throwing.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot: auto-open the
+     camera on mount when the nav tab deep-links with ?camera=1; startLiveScan's
+     internal setState is intentional (same pattern as the ?op= hydrate above) */
+  useEffect(() => {
+    if (params.get("camera") === "1") {
+      startLiveScan();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   // ---------- File-based decode (camera capture / gallery upload) ----------
 
   const decodeFromFile = useCallback(

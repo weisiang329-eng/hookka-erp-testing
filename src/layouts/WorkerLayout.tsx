@@ -13,7 +13,7 @@
 // ============================================================
 import { Outlet, useLocation, useNavigate, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Home, Wallet, User, Globe, Users } from "lucide-react";
+import { Home, Wallet, User, Globe, Users, ScanLine } from "lucide-react";
 import {
   useT,
   useApplyHtmlLang,
@@ -165,11 +165,16 @@ export default function WorkerLayout() {
       </main>
 
       {/* ----- Bottom tab bar (hidden on login) ----- */}
-      {/* Wei Siang 2026-05-10: Scan tab hidden until rollout. */}
+      {/* Wei Siang 2026-06-05: Scan promoted to a permanent bottom-nav tab so
+          a worker can jump straight to the camera from anywhere — no Home ->
+          Scan Job Card -> Scan QR detour. The tab deep-links to
+          /worker/scan?camera=1 which auto-opens the live camera. Shown to every
+          worker (any dept can scan the Fab Cut / Fab Sew / Packing stickers;
+          the completion endpoints enforce which sticker depts are allowed). */}
       {!isLogin && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-[#D8D2CC] shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
           <div
-            className={`max-w-md mx-auto grid ${isLeader ? "grid-cols-4" : "grid-cols-3"}`}
+            className={`max-w-md mx-auto grid ${isLeader ? "grid-cols-5" : "grid-cols-4"}`}
           >
             <TabButton
               to="/worker"
@@ -185,6 +190,12 @@ export default function WorkerLayout() {
                 label={t("nav.team")}
               />
             )}
+            <TabButton
+              to="/worker/scan?camera=1"
+              active={pathname.startsWith("/worker/scan")}
+              icon={<ScanLine className="h-5 w-5" />}
+              label={t("nav.scan")}
+            />
             <TabButton
               to="/worker/pay"
               active={pathname.startsWith("/worker/pay")}

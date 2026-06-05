@@ -5958,44 +5958,13 @@ function LaborCostTab({
     employerContribSen;
   const reconcileDiffSen = reconciledSumSen - totalPayrollCostSen;
 
-  // Break the Non-production salary bucket down by department/group so Finance
-  // sees which non-production teams (admin / sales / drivers / QC) the residual
-  // belongs to. We attribute each payslip's gross to its department, then
-  // SUBTRACT the labor cost we already bucketed for that department from logged
-  // hours — what's left is the un-bucketed salary for that department. Sums
-  // back to nonProductionSalarySen.
-  const nonProductionByDept = useMemo(() => {
-    if (!showReconciliation) return [] as Array<{ code: string; name: string; salarySen: number }>;
-    // Labor cost already attributed to each department from logged hours.
-    const bucketedByDept = new Map<string, number>();
-    for (const r of rows) {
-      bucketedByDept.set(
-        r.departmentCode,
-        (bucketedByDept.get(r.departmentCode) ?? 0) + r.laborCostSen,
-      );
-    }
-    // Gross salary per department from payslips.
-    const grossByDept = new Map<string, number>();
-    for (const p of reconPayslips) {
-      const code = p.departmentCode || "UNASSIGNED";
-      grossByDept.set(code, (grossByDept.get(code) ?? 0) + (Number(p.grossPay) || 0));
-    }
-    const out: Array<{ code: string; name: string; salarySen: number }> = [];
-    for (const [code, gross] of grossByDept.entries()) {
-      const residual = gross - (bucketedByDept.get(code) ?? 0);
-      // Only surface departments that carry un-bucketed salary. Tiny rounding
-      // residuals on fully-logged production depts get hidden.
-      if (residual <= 50) continue;
-      const dept = deptByCode.get(code);
-      out.push({
-        code,
-        name: dept?.name ?? (code === "UNASSIGNED" ? "Unassigned" : code),
-        salarySen: residual,
-      });
-    }
-    out.sort((a, b) => b.salarySen - a.salarySen);
-    return out;
-  }, [showReconciliation, rows, reconPayslips, allDepts]);
+  // [REMOVED] nonProductionByDept — the old "residual by department" used
+  // gross_dept − bucketed_dept and filtered to residual > 50, which surfaced
+  // only the positive-residual departments and dropped the negative ones
+  // (cross-department borrowing / OT make a dept's bucketed labor exceed its own
+  // payroll). The visible rows therefore summed to far more than the net
+  // residual line — a confusing mismatch. The clean per-department under-logged
+  // figure is now `underLoggedByDept` (aggregated from the per-worker gaps).
 
   // ---- Per-employee itemisation of the Non-production salary residual ------
   // Finance can't accept a department-level residual — they need WHO and WHY.
@@ -6366,6 +6335,20 @@ function LaborCostTab({
     employeeResidual.nonProdSubtotalSen + employeeResidual.underLoggedSubtotalSen;
   const employeeResidualRemainderSen = nonProductionSalarySen - employeeItemisedSumSen;
 
+  // Clean per-department under-logged total — aggregated from the PER-WORKER
+  // gaps (each worker's gross − their OWN logged value), so it is NOT polluted
+  // by cross-department borrowing the way the old gross-minus-bucketed
+  // breakdown was. Sums to the unlogged-factory subtotal below.
+  const underLoggedByDept = useMemo(() => {
+    const m = new Map<string, { code: string; name: string; gapSen: number }>();
+    for (const e of employeeResidual.underLoggedFactory) {
+      const cur = m.get(e.deptCode) ?? { code: e.deptCode, name: e.deptName, gapSen: 0 };
+      cur.gapSen += e.gapSen;
+      m.set(e.deptCode, cur);
+    }
+    return [...m.values()].sort((a, b) => b.gapSen - a.gapSen);
+  }, [employeeResidual.underLoggedFactory]);
+
   const loading = entriesLoading || plLoading;
 
   return (
@@ -6516,20 +6499,19 @@ function LaborCostTab({
                     <td className="py-1.5 pr-3 text-[#4B5563]">
                       {employeeResidual.nonProductionStaff.length > 0
                         ? "Non-production salary (office / sales / admin)"
-                        : "Under-logged factory hours (by department)"}
+                        : "Unbucketed salary (net balancing)"}
                     </td>
                     <td className={`py-1.5 text-right tabular-nums font-medium ${nonProductionSalarySen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
                       {formatCurrency(nonProductionSalarySen)}
                     </td>
                   </tr>
-                  {/* Per-department breakdown of the non-production residual so
-                      Finance can see which team carries the un-bucketed salary. */}
-                  {nonProductionByDept.map((d) => (
-                    <tr key={`recon-np-${d.code}`} className="border-b border-[#E2DDD8]">
-                      <td className="py-1 pr-3 pl-6 text-xs text-[#6B7280]">↳ {d.name}</td>
-                      <td className="py-1 text-right tabular-nums text-xs text-[#6B7280]">{formatCurrency(d.salarySen)}</td>
-                    </tr>
-                  ))}
+                  {/* The per-department residual breakdown was REMOVED here: it
+                      summed only the positive-residual departments and hid the
+                      negative ones (cross-department borrowing / OT), so the rows
+                      never added up to this net line (a confusing mismatch). The
+                      real, clean per-department under-logged figure now lives in
+                      the "who & why" panel below, aggregated from the per-worker
+                      gaps. */}
                   <tr className="border-b border-[#E2DDD8]">
                     <td className="py-1.5 pr-3 text-[#4B5563]">Employer contributions (EPF / SOCSO / EIS)</td>
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(employerContribSen)}</td>
@@ -6625,6 +6607,27 @@ function LaborCostTab({
                 <AlertTriangle className="h-3.5 w-3.5" />
                 Factory workers with unlogged hours (data gap — record their Working Hours)
               </p>
+              {/* Clean per-department roll-up of the under-logged gaps (sums to
+                  the Subtotal below). This is the real "by department" figure —
+                  the misleading one on the reconciliation line above was removed. */}
+              {underLoggedByDept.length > 0 && (
+                <div className="mb-2 rounded-md border border-[#E7C9C1] bg-white px-3 py-2">
+                  <p className="mb-1 text-[11px] font-medium text-[#6B7280]">By department</p>
+                  <div className="space-y-0.5">
+                    {underLoggedByDept.map((d) => (
+                      <div
+                        key={`ul-dept-${d.code}`}
+                        className="flex items-center justify-between text-xs"
+                      >
+                        <span className="text-[#6B7280]">↳ {d.name}</span>
+                        <span className="tabular-nums font-medium text-[#9A3A2D]">
+                          {formatCurrency(d.gapSen)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
                 <table className="w-full text-sm">
                   <thead>

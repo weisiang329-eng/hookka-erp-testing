@@ -38,6 +38,7 @@ import {
   type SiblingPo,
 } from "../lib/fabric-usage";
 import { resolveWorkerToken } from "./worker-auth";
+import { workerCoversDept } from "../../lib/worker";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
@@ -6182,6 +6183,403 @@ app.post("/:id/scan-complete-dept", async (c) => {
       deptCode,
       completedJcIds,
       completedCount: completedJcIds.length,
+      workerName: worker.name,
+      po: freshPo,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/production-orders/:id/scan-complete-shared
+//
+// The shared per-compartment Sew/Uph sticker. ONE QR per compartment carries
+// po + wipKey (NO department). The completing department is decided by WHO
+// scans — their Employee-Master dept coverage:
+//   - Sewing section (covers FAB_SEW / FAB_CUT, the 女部 cut+sew group that
+//     cross within their section) → complete the compartment's FAB_SEW card.
+//     One person per set: the scan fills every pic1 slot, the card completes,
+//     a re-scan is "already done" (no pic2 — sewing never shares).
+//   - Upholstery section (covers UPHOLSTERY, the 男部) → complete the
+//     compartment's UPHOLSTERY card. Upholstery MAY be shared: first scan =
+//     pic1 (card completes), a second different worker = pic2 (minutes split
+//     50/50 at read time), a third = PIC_FULL.
+// Order protection: an UPHOLSTERY scan is blocked until the sibling FAB_SEW
+// card (same po + wipKey) is COMPLETED ("Sewing not done yet").
+// Body: { wipKey, workerId, force? }. Worker-token only (auth-middleware opens
+// just this POST for X-Worker-Token callers); the worker-token binding below
+// is the security gate.
+// ---------------------------------------------------------------------------
+app.post("/:id/scan-complete-shared", async (c) => {
+  const db = c.var.DB;
+  const poId = c.req.param("id");
+  const body = await c.req.json().catch(() => ({}));
+  const { wipKey, workerId } = (body || {}) as { wipKey?: string; workerId?: string };
+  const forced = body?.force === true;
+  if (!wipKey || !workerId) {
+    return c.json(
+      { success: false, error: "wipKey and workerId are required" },
+      400,
+    );
+  }
+
+  // Worker-auth binding (mirrors scan-complete-dept). No dashboard userId →
+  // bind body.workerId to the x-worker-token so a worker can't post "as" someone
+  // else.
+  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
+    "userId",
+  );
+  if (ctxUserId) {
+    // Dashboard caller — gate on RBAC (mirrors scan-complete-dept).
+    const denied = await requirePermission(c, "production-orders", "create");
+    if (denied) return denied;
+  } else {
+    // Shop-floor worker — bind body.workerId to the x-worker-token.
+    const workerToken = c.req.header("x-worker-token");
+    const resolvedWorkerId = await resolveWorkerToken(db, workerToken);
+    if (!resolvedWorkerId || resolvedWorkerId !== workerId) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Worker auth mismatch — workerId does not match the session token.",
+          code: "AUTH_MISMATCH",
+        },
+        403,
+      );
+    }
+  }
+
+  const worker = await db
+    .prepare(
+      "SELECT id, name, departmentCode, departmentCodes FROM workers WHERE id = ?",
+    )
+    .bind(workerId)
+    .first<{
+      id: string;
+      name: string;
+      departmentCode: string | null;
+      departmentCodes: string | null;
+    }>();
+  if (!worker) {
+    return c.json({ success: false, error: "Worker not found" }, 400);
+  }
+
+  // Resolve the scanning SECTION → target department. Cut+Sew workers (女部)
+  // cross within their section, so anyone covering FAB_SEW or FAB_CUT (and NOT
+  // upholstery) is the Sewing side; an UPHOLSTERY worker is the Upholstery side.
+  let deptCodes: string[] = [];
+  try {
+    const arr = worker.departmentCodes ? JSON.parse(worker.departmentCodes) : null;
+    if (Array.isArray(arr)) {
+      deptCodes = arr.filter(
+        (x): x is string => typeof x === "string" && x.length > 0,
+      );
+    }
+  } catch {
+    /* fall back to single code below */
+  }
+  if (deptCodes.length === 0 && worker.departmentCode) {
+    deptCodes = [worker.departmentCode];
+  }
+  const wk = { departmentCode: worker.departmentCode, departmentCodes: deptCodes };
+  const isSewSection =
+    workerCoversDept(wk, "FAB_SEW") || workerCoversDept(wk, "FAB_CUT");
+  const isUphSection = workerCoversDept(wk, "UPHOLSTERY");
+  let targetDept: "FAB_SEW" | "UPHOLSTERY";
+  if (isUphSection && !isSewSection) {
+    targetDept = "UPHOLSTERY";
+  } else if (isSewSection && !isUphSection) {
+    targetDept = "FAB_SEW";
+  } else if (!isSewSection && !isUphSection) {
+    return c.json(
+      {
+        success: false,
+        code: "SECTION_UNKNOWN",
+        error: "Worker is in neither the Sewing nor the Upholstery section.",
+      },
+      403,
+    );
+  } else {
+    // Covers BOTH (rare — sections don't normally cross). Disambiguate by stage
+    // order: Sewing first, then Upholstery.
+    const sew = await db
+      .prepare(
+        "SELECT status FROM job_cards WHERE productionOrderId = ? AND wipKey = ? AND departmentCode = 'FAB_SEW'",
+      )
+      .bind(poId, wipKey)
+      .first<{ status: string }>();
+    const sewDone =
+      !!sew && (sew.status === "COMPLETED" || sew.status === "TRANSFERRED");
+    targetDept = sewDone ? "UPHOLSTERY" : "FAB_SEW";
+  }
+
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po) {
+    return c.json({ success: false, error: "Production order not found" }, 404);
+  }
+  if (po.status === "ON_HOLD") {
+    return c.json(
+      {
+        success: false,
+        code: "PO_ON_HOLD",
+        error: "This Production Order is ON_HOLD. Supervisor must resume before scanning.",
+      },
+      409,
+    );
+  }
+  if (po.status === "CANCELLED") {
+    return c.json(
+      {
+        success: false,
+        code: "PO_CANCELLED",
+        error: "This Production Order has been cancelled and cannot be scanned.",
+      },
+      409,
+    );
+  }
+
+  // The compartment's card for the resolved department.
+  const card = await db
+    .prepare(
+      "SELECT * FROM job_cards WHERE productionOrderId = ? AND wipKey = ? AND departmentCode = ?",
+    )
+    .bind(poId, wipKey, targetDept)
+    .first<JobCardRow>();
+  if (!card) {
+    return c.json(
+      {
+        success: false,
+        code: "NO_CARD",
+        error: `No ${targetDept} card for this compartment.`,
+      },
+      404,
+    );
+  }
+
+  // Order protection: Upholstery cannot start before Sewing is done.
+  if (targetDept === "UPHOLSTERY") {
+    const sew = await db
+      .prepare(
+        "SELECT status FROM job_cards WHERE productionOrderId = ? AND wipKey = ? AND departmentCode = 'FAB_SEW'",
+      )
+      .bind(poId, wipKey)
+      .first<{ status: string }>();
+    if (sew && sew.status !== "COMPLETED" && sew.status !== "TRANSFERRED") {
+      return c.json(
+        {
+          success: false,
+          code: "SEWING_NOT_DONE",
+          error: "Fabric Sewing for this compartment is not completed yet.",
+        },
+        409,
+      );
+    }
+  }
+
+  // Prerequisite soft-warn (mirror scan-complete-dept) — unless forced.
+  if (card.prerequisiteMet !== 1 && !forced) {
+    return c.json(
+      {
+        success: false,
+        requiresConfirmation: true,
+        warning: {
+          code: "PREREQUISITE_NOT_MET",
+          message: "Earlier dept hasn't completed. Continue anyway?",
+        },
+        data: { deptCode: targetDept, blockedBy: "UPSTREAM_NOT_COMPLETED" },
+      },
+      202,
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+  const today = nowIso.split("T")[0];
+
+  // --- Fill PIC slots ---
+  await ensurePiecePicsForJc(db, card);
+  const slotsRes = await db
+    .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
+    .bind(card.id)
+    .all<PiecePicRow>();
+  let filled = false; // did this scan claim any slot?
+  let picFull = false; // upholstery: both pic1+pic2 already taken by others?
+  for (const slot of slotsRes.results ?? []) {
+    if (!slot.pic1Id) {
+      await db
+        .prepare(
+          "UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?",
+        )
+        .bind(worker.id, worker.name, nowIso, nowIso, slot.id)
+        .run();
+      filled = true;
+    } else if (slot.pic1Id === worker.id) {
+      // same worker re-scanning this slot — no-op.
+    } else if (targetDept === "UPHOLSTERY" && !slot.pic2Id) {
+      // Upholstery share: a SECOND worker joins as pic2 (minutes split at read).
+      await db
+        .prepare(
+          "UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?",
+        )
+        .bind(worker.id, worker.name, nowIso, slot.id)
+        .run();
+      filled = true;
+    } else if (
+      targetDept === "UPHOLSTERY" &&
+      slot.pic2Id &&
+      slot.pic2Id !== worker.id
+    ) {
+      picFull = true;
+    }
+    // FAB_SEW: pic1 taken by someone else → single-person, no pic2.
+  }
+
+  if (!filled) {
+    if (picFull) {
+      return c.json(
+        {
+          success: false,
+          code: "PIC_FULL",
+          error: "This compartment's Upholstery already has 2 people.",
+        },
+        409,
+      );
+    }
+    const freshEmpty = await fetchPO(db, poId);
+    return c.json({
+      success: true,
+      data: {
+        deptCode: targetDept,
+        wipKey,
+        completedJcId: null,
+        alreadyComplete: true,
+        workerName: worker.name,
+        po: freshEmpty,
+      },
+    });
+  }
+
+  // --- Roll the card status + side-effects (mirror scan-complete-dept loop) ---
+  const allSlotsRes = await db
+    .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
+    .bind(card.id)
+    .all<PiecePicRow>();
+  const slotList = allSlotsRes.results ?? [];
+  const allPiecesDone = slotList.length > 0 && slotList.every((s) => !!s.pic1Id);
+  const mergedJc: JobCardRow = { ...card };
+  let jcJustCompleted = false;
+  if (
+    allPiecesDone &&
+    card.status !== "COMPLETED" &&
+    card.status !== "TRANSFERRED"
+  ) {
+    mergedJc.status = "COMPLETED";
+    mergedJc.completedDate = today;
+    mergedJc.overdue = "COMPLETED";
+    jcJustCompleted = true;
+  } else if (card.status === "WAITING") {
+    mergedJc.status = "IN_PROGRESS";
+  }
+  const firstWithPic1 = slotList.find((s) => s.pic1Id);
+  const firstWithPic2 = slotList.find((s) => s.pic2Id);
+  if (!mergedJc.pic1Id && firstWithPic1) {
+    mergedJc.pic1Id = firstWithPic1.pic1Id;
+    mergedJc.pic1Name = firstWithPic1.pic1Name ?? "";
+  }
+  if (!mergedJc.pic2Id && firstWithPic2) {
+    mergedJc.pic2Id = firstWithPic2.pic2Id;
+    mergedJc.pic2Name = firstWithPic2.pic2Name ?? "";
+  }
+
+  await db
+    .prepare(
+      `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
+         pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
+    )
+    .bind(
+      mergedJc.status,
+      mergedJc.completedDate,
+      mergedJc.overdue,
+      mergedJc.pic1Id,
+      mergedJc.pic1Name ?? "",
+      mergedJc.pic2Id,
+      mergedJc.pic2Name ?? "",
+      mergedJc.id,
+    )
+    .run();
+
+  scheduleFireAndForget(c, fireAndForgetSyncJc(c, mergedJc, po));
+
+  if (jcJustCompleted) {
+    const siblings = await db
+      .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
+      .bind(poId)
+      .all<JobCardRow>();
+    await applyWipInventoryChange(
+      db,
+      po,
+      mergedJc,
+      "COMPLETED",
+      siblings.results ?? [],
+      card.status,
+      { orgId: getOrgId(c), source: "SCAN" },
+    );
+    await postJobCardLabor(db, mergedJc.id, poId);
+  }
+
+  // --- PO rollup + SO/CO cascade (mirror scan-complete-dept tail) ---
+  const poJcsRes = await db
+    .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
+    .bind(poId)
+    .all<JobCardRow>();
+  const poJcs = poJcsRes.results ?? [];
+  const deptRank = (code: string | null | undefined): number => {
+    const idx = DEPT_ORDER.indexOf((code ?? "") as (typeof DEPT_ORDER)[number]);
+    return idx >= 0 ? idx : DEPT_ORDER.length;
+  };
+  const frontier = poJcs
+    .filter((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED")
+    .reduce<JobCardRow | null>((earliest, j) => {
+      if (!earliest) return j;
+      return deptRank(j.departmentCode) < deptRank(earliest.departmentCode)
+        ? j
+        : earliest;
+    }, null);
+  const newCurrentDept = frontier?.departmentCode || "PACKING";
+  await db
+    .prepare(
+      `UPDATE production_orders SET currentDepartment = ?, updated_at = ? WHERE id = ?`,
+    )
+    .bind(newCurrentDept, nowIso, poId)
+    .run();
+
+  let recomputed: Awaited<ReturnType<typeof recomputePoStatusAndProgress>> | null =
+    null;
+  try {
+    recomputed = await recomputePoStatusAndProgress(db, poId);
+  } catch (err) {
+    console.error("[recomputePoStatusAndProgress] scan-complete-shared failed", {
+      poId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (recomputed?.after?.status === "COMPLETED") {
+    await postProductionOrderCompletion(db, poId);
+    await cascadePoCompletionToSO(db, po.salesOrderId);
+    await cascadePoCompletionToCO(db, po.consignmentOrderId);
+  }
+  await cascadeUpholsteryToSO(db, poId);
+  await cascadeUpholsteryToCO(db, poId);
+
+  const freshPo = await fetchPO(db, poId);
+  return c.json({
+    success: true,
+    data: {
+      deptCode: targetDept,
+      wipKey,
+      completedJcId: jcJustCompleted ? mergedJc.id : null,
       workerName: worker.name,
       po: freshPo,
     },

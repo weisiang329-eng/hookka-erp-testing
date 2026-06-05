@@ -57,21 +57,57 @@ export function generateStickerData(
 }
 
 /**
- * Parse scanned QR data back into structured fields. `pieceNo` / `totalPieces`
- * are optional — older stickers printed before the per-piece encoding existed
- * return them as undefined and the scanner treats them as "single piece".
+ * Shared per-compartment Sew/Uph sticker. ONE sticker per compartment that BOTH
+ * the Fabric Sewing worker and the Upholstery worker scan — the completing
+ * department is decided by WHO scans (their Employee-Master dept), NOT by the
+ * sticker. So the payload carries the PO + the compartment key (`wk` = wipKey)
+ * and deliberately omits `dept`/`op`. The same wipKey is shared by the
+ * compartment's FAB_SEW and UPHOLSTERY job cards (they differ only in
+ * departmentCode), so the backend resolves the right card from po+wk+scannerDept.
+ */
+export function generateSharedStickerData(
+  poNo: string,
+  wipKey: string,
+  basePath: string = "/worker/scan",
+): string {
+  const baseUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+  return `${baseUrl}${basePath}?po=${encodeURIComponent(poNo)}&wk=${encodeURIComponent(wipKey)}`;
+}
+
+/**
+ * Parse scanned QR data back into structured fields. Two shapes share one
+ * return type (opId/deptCode optional so existing callers compile unchanged):
+ *   - Per-piece / dept sticker: `op` + `dept` + `po` (+ optional `p`/`t`).
+ *   - Shared Sew/Uph sticker: `wk` (wipKey) + `po`, no `op`/`dept` — `wipKey`
+ *     is set and the scanner routes to the shared resolver, supplying the
+ *     department from the logged-in worker.
+ * `pieceNo` / `totalPieces` are optional — older stickers printed before the
+ * per-piece encoding existed return them as undefined ("single piece").
  */
 export function parseStickerData(
   url: string,
-): { opId: string; deptCode: string; poNo: string; pieceNo?: number; totalPieces?: number } | null {
+): {
+  opId?: string;
+  deptCode?: string;
+  poNo: string;
+  pieceNo?: number;
+  totalPieces?: number;
+  wipKey?: string;
+} | null {
   try {
     const u = new URL(url);
+    const poNo = u.searchParams.get("po");
+    if (!poNo) return null;
+    // Shared Sew/Uph compartment sticker — wipKey + po, dept supplied by scanner.
+    const wk = u.searchParams.get("wk");
+    if (wk) {
+      return { poNo, wipKey: wk };
+    }
     const opId = u.searchParams.get("op");
     const deptCode = u.searchParams.get("dept");
-    const poNo = u.searchParams.get("po");
     const pStr = u.searchParams.get("p");
     const tStr = u.searchParams.get("t");
-    if (opId && deptCode && poNo) {
+    if (opId && deptCode) {
       const pieceNo = pStr ? Number(pStr) : undefined;
       const totalPieces = tStr ? Number(tStr) : undefined;
       return {

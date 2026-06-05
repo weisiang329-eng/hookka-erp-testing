@@ -94,10 +94,18 @@ const FG_UNIT_PUBLIC_GET_RE = /^\/api\/fg-units\/[^/]+$/;
 const WORKER_SCAN_COMPLETE_DEPT_RE =
   /^\/api\/production-orders\/[^/]+\/scan-complete-dept$/;
 
+// Shared per-compartment Sew/Uph scan (the merged sticker scanned by either a
+// sewing or an upholstery worker; the handler resolves the dept from WHO scans
+// and binds the worker token + restricts to FAB_SEW/UPHOLSTERY by construction).
+// Same safety shape as scan-complete-dept: open the path, the handler is the gate.
+const WORKER_SCAN_COMPLETE_SHARED_RE =
+  /^\/api\/production-orders\/[^/]+\/scan-complete-shared$/;
+
 function isPublicPath(path: string, method: string): boolean {
   if (PUBLIC_PATHS.includes(path)) return true;
   if (method === "GET" && FG_UNIT_PUBLIC_GET_RE.test(path)) return true;
   if (method === "POST" && WORKER_SCAN_COMPLETE_DEPT_RE.test(path)) return true;
+  if (method === "POST" && WORKER_SCAN_COMPLETE_SHARED_RE.test(path)) return true;
   for (const pfx of PUBLIC_PREFIXES) {
     if (path === pfx || path.startsWith(pfx)) return true;
   }

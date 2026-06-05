@@ -2164,6 +2164,21 @@ app.patch("/:id/hub", async (c) => {
       if (a) stmts.push(a);
     }
 
+    // 6c. fg_units — packing-sticker branch. Propagate the new hub to this
+    //     CO's in-stock FG units so their packing stickers follow the hub
+    //     change. Hub change is blocked once goods leave (guard above), so
+    //     these are all pre-dispatch; the status filter is belt-and-braces.
+    //     Part of the BUG-2026-06-05 sticker-hub fix.
+    if (poRows.length > 0) {
+      stmts.push(
+        c.var.DB
+          .prepare(
+            "UPDATE fg_units SET customerHub = ? WHERE poId IN (SELECT id FROM production_orders WHERE consignmentOrderId = ?) AND status NOT IN ('LOADED','DELIVERED','RETURNED')",
+          )
+          .bind(hub.shortName, co.id),
+      );
+    }
+
     await c.var.DB.batch(stmts);
 
     // 7b. Belt-and-braces snapshot invalidation. The cache-aside helpers

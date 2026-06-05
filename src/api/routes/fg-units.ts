@@ -370,18 +370,25 @@ export async function generateFGUnitsForPO(
   let parentCustomerId: string | null = null;
   if (po.salesOrderId) {
     const so = await db
-      .prepare("SELECT id, customerId FROM sales_orders WHERE id = ?")
+      .prepare("SELECT id, customerId, hubName FROM sales_orders WHERE id = ?")
       .bind(po.salesOrderId)
-      .first<SalesOrderMini>();
+      .first<SalesOrderMini & { hubName?: string | null }>();
     parentCustomerId = so?.customerId ?? null;
+    if (so?.hubName) hubShort = so.hubName;
   } else if (po.consignmentOrderId) {
     const co = await db
-      .prepare("SELECT id, customerId FROM consignment_orders WHERE id = ?")
+      .prepare("SELECT id, customerId, hubName FROM consignment_orders WHERE id = ?")
       .bind(po.consignmentOrderId)
-      .first<{ id: string; customerId: string | null }>();
+      .first<{ id: string; customerId: string | null; hubName?: string | null }>();
     parentCustomerId = co?.customerId ?? null;
+    if (co?.hubName) hubShort = co.hubName;
   }
-  if (parentCustomerId) {
+  // Stamp the ORDER's own hub (sales_orders.hubName / consignment_orders.hubName).
+  // Fall back to the customer's DEFAULT delivery hub ONLY when the order itself
+  // carries no hub. Previously this ALWAYS used the default hub, so every unit got
+  // the customer's KL default regardless of where the order actually ships —
+  // BUG-2026-06-05: Houzs SBH / SRW / PG stickers all printed "Houzs KL".
+  if (!hubShort && parentCustomerId) {
     const hub = await db
       .prepare(
         "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1",
@@ -705,6 +712,72 @@ app.post("/generate/:poId", async (c) => {
     generated: result.generated,
   };
   return result.generated ? c.json(body, 201) : c.json(body);
+});
+
+// POST /api/fg-units/backfill-hub?execute=1
+// One-shot data fix (BUG-2026-06-05): existing FG units were stamped with the
+// customer's DEFAULT delivery hub instead of the order's hub, so SBH / SRW / PG
+// orders printed "Houzs KL". Re-resolve each in-stock unit's hub from its order
+// (sales_orders.hubName / consignment_orders.hubName) and rewrite the stored
+// customerHub. DRY-RUN by default (reports counts only); pass ?execute=1 to
+// write. Idempotent + safe to re-run; shipped/delivered units are left alone.
+app.post("/backfill-hub", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "create");
+  if (denied) return denied;
+  const execute = c.req.query("execute") === "1";
+  const orgId = getOrgId(c);
+
+  const rows =
+    (
+      await c.var.DB.prepare(
+        `SELECT fg.id, fg.customerHub, fg.status,
+                COALESCE(so.hubName, co.hubName) AS "resolvedHub"
+           FROM fg_units fg
+           LEFT JOIN sales_orders so ON so.id = fg.soId
+           LEFT JOIN production_orders po ON po.id = fg.poId
+           LEFT JOIN consignment_orders co ON co.id = po.consignmentOrderId
+          WHERE fg.orgId = ?
+            AND fg.status NOT IN ('LOADED', 'DELIVERED', 'RETURNED')`,
+      )
+        .bind(orgId)
+        .all<{
+          id: string;
+          customerHub: string | null;
+          status: string | null;
+          resolvedHub: string | null;
+        }>()
+    ).results ?? [];
+
+  // Only rewrite rows whose order carries a hub that differs from the stored one.
+  const stale = rows.filter(
+    (r) => r.resolvedHub && r.resolvedHub !== (r.customerHub ?? ""),
+  );
+
+  // old -> new breakdown so the operator can sanity-check before executing.
+  const moves: Record<string, number> = {};
+  for (const r of stale) {
+    const key = `${r.customerHub || "(empty)"} -> ${r.resolvedHub}`;
+    moves[key] = (moves[key] ?? 0) + 1;
+  }
+
+  if (execute && stale.length > 0) {
+    const stmts = stale.map((r) =>
+      c.var.DB
+        .prepare("UPDATE fg_units SET customerHub = ? WHERE id = ?")
+        .bind(r.resolvedHub, r.id),
+    );
+    for (let i = 0; i < stmts.length; i += 50) {
+      await c.var.DB.batch(stmts.slice(i, i + 50));
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: execute ? "executed" : "dry-run",
+    scanned: rows.length,
+    wouldUpdate: stale.length,
+    moves,
+  });
 });
 
 // POST /api/fg-units/scan

@@ -3189,6 +3189,18 @@ app.put("/:id", async (c) => {
       ),
     );
 
+    // Branch follows the order: propagate the (possibly edited) hub to this
+    // SO's in-stock FG units so their packing stickers reflect the current
+    // hub. Shipped/delivered units are left alone (their sticker is already
+    // printed). Part of the BUG-2026-06-05 sticker-hub fix.
+    if (hubName) {
+      statements.push(
+        c.var.DB.prepare(
+          "UPDATE fg_units SET customerHub = ? WHERE soId = ? AND status NOT IN ('LOADED','DELIVERED','RETURNED')",
+        ).bind(hubName, id),
+      );
+    }
+
     // --- DRAFT -> CONFIRMED cascade: auto-create production_orders ---
     let createdProductionOrders: CreatedProductionOrder[] = [];
     if (isDraftToConfirmed) {

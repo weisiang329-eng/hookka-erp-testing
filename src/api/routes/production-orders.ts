@@ -6298,6 +6298,23 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { workerId } = (body || {}) as { workerId?: string };
   const forced = body?.force === true;
+  // Per-compartment + per-piece refinement (the new shared "wk" sticker). Both
+  // optional and ADDITIVE — an older shared sticker that carries neither keeps
+  // the whole-dept, all-pieces fan-out below exactly as before, so stickers
+  // already printed on the shop floor still scan and complete.
+  //   - wipKey : complete ONLY the compartment card with this wipKey (e.g. just
+  //     the Divan, not the Headboard that shares the same bedframe PO) instead
+  //     of every card of the resolved department.
+  //   - pieceNo: bind ONLY this physical piece's slot — a qty=2 Divan prints two
+  //     stickers (p=1 / p=2); each completes one piece and the card finishes
+  //     once both pieces have been scanned.
+  const wipKey =
+    typeof body?.wipKey === "string" && body.wipKey.length > 0
+      ? body.wipKey
+      : undefined;
+  const rawPieceNo = Number(body?.pieceNo);
+  const pieceNo =
+    Number.isFinite(rawPieceNo) && rawPieceNo > 0 ? rawPieceNo : undefined;
   if (!workerId) {
     return c.json({ success: false, error: "workerId is required" }, 400);
   }
@@ -6384,9 +6401,11 @@ app.post("/:id/scan-complete-shared", async (c) => {
     // order: Sewing first, then Upholstery.
     const sewOpen = await db
       .prepare(
-        "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
+        wipKey
+          ? "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND wipKey = ? AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1"
+          : "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
       )
-      .bind(poId)
+      .bind(...(wipKey ? [poId, wipKey] : [poId]))
       .first();
     targetDept = sewOpen ? "FAB_SEW" : "UPHOLSTERY";
   }
@@ -6423,11 +6442,15 @@ app.post("/:id/scan-complete-shared", async (c) => {
   // variant is its OWN production_orders row, so this completes the WHOLE
   // variant's dept in one scan (BASE + CUSHION + ARMREST), never another
   // variant — mirrors scan-complete-dept's (po, dept) fan-out.
+  // wipKey narrows to the single compartment card; without it, every card of
+  // the resolved dept on this PO (legacy whole-variant fan-out).
   const cardsRes = await db
     .prepare(
-      "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND status NOT IN ('COMPLETED','TRANSFERRED')",
+      wipKey
+        ? "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND wipKey = ? AND status NOT IN ('COMPLETED','TRANSFERRED')"
+        : "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND status NOT IN ('COMPLETED','TRANSFERRED')",
     )
-    .bind(poId, targetDept)
+    .bind(...(wipKey ? [poId, targetDept, wipKey] : [poId, targetDept]))
     .all<JobCardRow>();
   const cards = cardsRes.results ?? [];
   if (cards.length === 0) {
@@ -6447,11 +6470,17 @@ app.post("/:id/scan-complete-shared", async (c) => {
   // Order protection: Upholstery cannot start before this variant's Sewing is
   // fully done (every FAB_SEW card on the PO completed).
   if (targetDept === "UPHOLSTERY") {
+    // Per-compartment order protection: this compartment's Upholstery waits on
+    // ITS OWN Fabric Sewing (same wipKey), not the whole variant — so a finished
+    // Divan can move to upholstery while the Headboard is still being sewn.
+    // Without a wipKey (legacy sticker) it falls back to the PO-wide check.
     const sewOpen = await db
       .prepare(
-        "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
+        wipKey
+          ? "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND wipKey = ? AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1"
+          : "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
       )
-      .bind(poId)
+      .bind(...(wipKey ? [poId, wipKey] : [poId]))
       .first();
     if (sewOpen) {
       return c.json(
@@ -6496,8 +6525,16 @@ app.post("/:id/scan-complete-shared", async (c) => {
       .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
       .bind(card.id)
       .all<PiecePicRow>();
+    // Per-piece: a "wk" sticker carries p=<pieceNo>, so bind ONLY that physical
+    // piece's slot. Without pieceNo (legacy sticker) fill every slot at once.
+    // Completion is still judged over ALL slots (allSlotsRes below), so the card
+    // only flips COMPLETED once every piece has been scanned.
+    const slotsToFill =
+      pieceNo != null
+        ? (slotsRes.results ?? []).filter((s) => s.pieceNo === pieceNo)
+        : (slotsRes.results ?? []);
     let filled = false;
-    for (const slot of slotsRes.results ?? []) {
+    for (const slot of slotsToFill) {
       if (!slot.pic1Id) {
         await db
           .prepare(

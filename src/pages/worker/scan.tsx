@@ -62,6 +62,9 @@ const ScanCompleteEnvelope = z
     data: z
       .object({
         assignedSlot: z.number().optional(),
+        // Shared / dept fan-out endpoints (scan-complete-shared / -dept) return
+        // the department they actually completed; used to label the ✓ card.
+        deptCode: z.string().optional(),
         jobCard: z.unknown().optional(),
         fifoRedirected: z.boolean().optional(),
         scannedPoNo: z.string().optional(),
@@ -161,7 +164,16 @@ type PieceInfo = { pieceNo: number; totalPieces: number };
 
 type Result =
   | { kind: "idle" }
-  | { kind: "lookup"; order: Order; jobCard: JobCard; piece?: PieceInfo }
+  | {
+      kind: "lookup";
+      order: Order;
+      jobCard: JobCard;
+      piece?: PieceInfo;
+      // Shared Sew/Uph compartment sticker (carries wk= but no op/dept). When
+      // set, Complete routes to scan-complete-shared with this wipKey and the
+      // server decides FAB_SEW vs UPHOLSTERY from the worker's own section.
+      wipKey?: string;
+    }
   // When manual entry by PO number, or a QR whose opId went stale, yields
   // multiple matching job cards (e.g. a bedframe PO produces both Divan
   // and Headboard), surface them all so the worker disambiguates. Never
@@ -174,6 +186,9 @@ type Result =
       order: Order;
       jobCard: JobCard;
       piece?: PieceInfo;
+      // Carried through so the "Continue" re-post (force:true) routes back to
+      // scan-complete-shared for a shared compartment sticker.
+      wipKey?: string;
       warning: { code: string; message: string };
     }
   | {
@@ -456,7 +471,7 @@ export default function WorkerScanPage() {
       // number in the box, not the raw sentinel — the worker shouldn't see
       // "FG-FABCUT".
       setInput(
-        /^FG-[A-Z_]+$/.test(primaryTerm) && parsed?.poNo
+        (parsed?.wipKey || /^FG-[A-Z_]+$/.test(primaryTerm)) && parsed?.poNo
           ? parsed.poNo
           : primaryTerm,
       );
@@ -465,6 +480,45 @@ export default function WorkerScanPage() {
       setRackChoice("");
       setRackSaved(false);
       try {
+        // Shared Sew/Uph compartment sticker (carries wk=<wipKey>, no op/dept).
+        // Resolve the ONE compartment card on this PO whose wipKey matches and
+        // show it directly — never the multi-card chooser. ("Scan, then it asks
+        // which thing" was the bug: a Divan sticker must complete the Divan, not
+        // prompt Divan-vs-Headboard.) The completing department is decided
+        // server-side from the worker's section; for the lookup card we show the
+        // earliest-incomplete dept of this compartment (Sewing if its sewing
+        // isn't done yet, else Upholstery) so the shown dept matches the tap.
+        if (parsed?.wipKey && parsed?.poNo) {
+          const wipKey = parsed.wipKey;
+          const wkCards = (await findMatches(parsed.poNo)).filter(
+            (m) => (m.jobCard.wipKey || "") === wipKey,
+          );
+          if (wkCards.length > 0) {
+            const sew = wkCards.find(
+              (m) => m.jobCard.departmentCode === "FAB_SEW",
+            );
+            const uph = wkCards.find(
+              (m) => m.jobCard.departmentCode === "UPHOLSTERY",
+            );
+            const sewOpen =
+              !!sew &&
+              sew.jobCard.status !== "COMPLETED" &&
+              sew.jobCard.status !== "TRANSFERRED";
+            const pick = (sewOpen ? sew : (uph ?? sew)) ?? wkCards[0];
+            if (pick) {
+              setResult({
+                kind: "lookup",
+                order: pick.order,
+                jobCard: pick.jobCard,
+                piece,
+                wipKey,
+              });
+              return;
+            }
+          }
+          // wipKey didn't resolve on this PO — fall through to the normal
+          // lookup / error paths so the worker still gets a meaningful message.
+        }
         // Merged FG-level sticker — opId is a dept sentinel, not a real jc id,
         // so findMatches by opId would be empty. Jump to the PO lookup filtered
         // by the dept embedded in the sentinel. FAB_CUT / FAB_SEW swap the
@@ -803,18 +857,32 @@ export default function WorkerScanPage() {
   // Used by the confirm dialog's Continue button after the worker
   // acknowledges the warning on a prior 202 round-trip.
   async function handleConfirmScan(
-    opts?: { force?: boolean; ctx?: { order: Order; jobCard: JobCard; piece?: PieceInfo } },
+    opts?: {
+      force?: boolean;
+      ctx?: { order: Order; jobCard: JobCard; piece?: PieceInfo; wipKey?: string };
+    },
   ) {
     // Accept either a caller-supplied ctx (auto-submit path right after
     // QR decode, before React has flushed the new `result`), a fresh
     // lookup, or a confirm-dialog continue. All three carry the
-    // order+jobCard context we need to re-post.
+    // order+jobCard context we need to re-post (plus wipKey for a shared
+    // compartment sticker, so Complete / Continue route to the shared resolver).
     const ctx =
       opts?.ctx ??
       (result.kind === "lookup"
-        ? { order: result.order, jobCard: result.jobCard, piece: result.piece }
+        ? {
+            order: result.order,
+            jobCard: result.jobCard,
+            piece: result.piece,
+            wipKey: result.wipKey,
+          }
         : result.kind === "confirm"
-          ? { order: result.order, jobCard: result.jobCard, piece: result.piece }
+          ? {
+              order: result.order,
+              jobCard: result.jobCard,
+              piece: result.piece,
+              wipKey: result.wipKey,
+            }
           : null);
     if (!ctx) return;
     if (!workerId) {
@@ -834,18 +902,28 @@ export default function WorkerScanPage() {
       //   - FG-FAB_CUT (and any other FG-<DEPT>) → scan-complete-dept with the
       //     sticker's own dept.
       // A real jc id (non-FG, e.g. Packing) is the per-piece FIFO route below.
+      // Shared Sew/Uph compartment sticker (wk=). Routes to scan-complete-shared
+      // with the compartment's wipKey + the physical piece; the server resolves
+      // FAB_SEW vs UPHOLSTERY from the worker's section. Takes precedence over
+      // the legacy FG-FAB_SEW sentinel path below (kept for stickers printed for
+      // wipKey-less rows).
+      const sharedWk = ctx.wipKey;
       const fgMatch = /^FG-([A-Z_]+)$/.exec(ctx.jobCard.id);
       const fgDept = fgMatch?.[1];
+      const isShared = !!sharedWk || fgDept === "FAB_SEW";
       const endpoint =
-        fgDept === "FAB_SEW"
+        isShared
           ? `/api/production-orders/${ctx.order.id}/scan-complete-shared`
           : fgDept
             ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
             : `/api/production-orders/${ctx.order.id}/scan-complete`;
       const payload =
-        fgDept === "FAB_SEW"
+        isShared
           ? {
               workerId,
+              // wipKey: complete only THIS compartment (Divan, not Headboard).
+              // Absent for an old FG-FAB_SEW sentinel sticker (whole-dept).
+              ...(sharedWk ? { wipKey: sharedWk } : {}),
               // per-piece: which physical piece this sticker is (from QR p=)
               pieceNo: ctx.piece?.pieceNo,
               ...(opts?.force ? { force: true } : {}),
@@ -882,6 +960,7 @@ export default function WorkerScanPage() {
           order: ctx.order,
           jobCard: ctx.jobCard,
           piece: ctx.piece,
+          wipKey: ctx.wipKey,
           warning: data.warning || {
             code: "UNKNOWN",
             message: t("common.error"),
@@ -897,7 +976,15 @@ export default function WorkerScanPage() {
           // fall back to the scanned card so the ✓ card renders a real WIP
           // name + dept instead of crashing on wipNameFor(undefined).
           slot: (data.data.assignedSlot as 1 | 2) ?? 1,
-          jobCard: (data.data.jobCard as JobCard) ?? ctx.jobCard,
+          // For a shared sticker, stamp the dept the SERVER actually completed
+          // (FAB_SEW vs UPHOLSTERY, resolved from the worker's section) so the ✓
+          // card shows the right department, not whichever compartment card we
+          // happened to display before the tap.
+          jobCard: (() => {
+            const base = (data.data.jobCard as JobCard) ?? ctx.jobCard;
+            const respDept = data.data.deptCode;
+            return respDept ? { ...base, departmentCode: respDept } : base;
+          })(),
           order: ctx.order,
           piece: ctx.piece,
           // FIFO diagnostic — server tells us if the scan was routed to a

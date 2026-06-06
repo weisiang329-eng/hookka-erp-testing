@@ -6215,34 +6215,34 @@ app.post("/:id/scan-complete-dept", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/production-orders/:id/scan-complete-shared
 //
-// The shared per-compartment Sew/Uph sticker. ONE QR per compartment carries
-// po + wipKey (NO department). The completing department is decided by WHO
-// scans — their Employee-Master dept coverage:
-//   - Sewing section (covers FAB_SEW / FAB_CUT, the 女部 cut+sew group that
-//     cross within their section) → complete the compartment's FAB_SEW card.
-//     One person per set: the scan fills every pic1 slot, the card completes,
-//     a re-scan is "already done" (no pic2 — sewing never shares).
-//   - Upholstery section (covers UPHOLSTERY, the 男部) → complete the
-//     compartment's UPHOLSTERY card. Upholstery MAY be shared: first scan =
-//     pic1 (card completes), a second different worker = pic2 (minutes split
-//     50/50 at read time), a third = PIC_FULL.
-// Order protection: an UPHOLSTERY scan is blocked until the sibling FAB_SEW
-// card (same po + wipKey) is COMPLETED ("Sewing not done yet").
-// Body: { wipKey, workerId, force? }. Worker-token only (auth-middleware opens
-// just this POST for X-Worker-Token callers); the worker-token binding below
-// is the security gate.
+// The shared Sew/Uph sticker — the EXISTING per-variant Fabric Sewing sticker
+// (one QR per sofa variant / bedframe piece). The QR carries only `po` (the
+// variant's own production order); the completing DEPARTMENT is decided by WHO
+// scans, from their Employee-Master dept coverage:
+//   - Sewing section (covers FAB_SEW / FAB_CUT — the cut+sew group cross within
+//     their section) → completes this variant's FABRIC SEWING. One scan fans
+//     out across every compartment card (BASE + CUSHION + ARMREST) of FAB_SEW
+//     on the PO; sewing is single-person (fills pic1, no pic2 — never shares).
+//   - Upholstery section (covers UPHOLSTERY) → completes this variant's
+//     UPHOLSTERY, same per-PO fan-out. Upholstery MAY be shared: 1st worker =
+//     pic1, a 2nd different worker = pic2 (minutes split 50/50 at read time),
+//     a 3rd = PIC_FULL.
+// Each sofa variant is its OWN production_orders row, so the (po, dept) fan-out
+// completes ONLY that variant — never a sibling variant on the same customer PO.
+// Order protection: an UPHOLSTERY scan is blocked until ALL of this variant's
+// FAB_SEW cards are COMPLETED ("Sewing not done yet"). The whole SO flips to
+// Ready-to-ship via cascadeUpholstery* once every variant's upholstery is done.
+// Body: { workerId, force? }. Worker-token only (auth-middleware opens just this
+// POST for X-Worker-Token callers); the worker-token binding below is the gate.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete-shared", async (c) => {
   const db = c.var.DB;
   const poId = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
-  const { wipKey, workerId } = (body || {}) as { wipKey?: string; workerId?: string };
+  const { workerId } = (body || {}) as { workerId?: string };
   const forced = body?.force === true;
-  if (!wipKey || !workerId) {
-    return c.json(
-      { success: false, error: "wipKey and workerId are required" },
-      400,
-    );
+  if (!workerId) {
+    return c.json({ success: false, error: "workerId is required" }, 400);
   }
 
   // Worker-auth binding (mirrors scan-complete-dept). No dashboard userId →
@@ -6325,15 +6325,13 @@ app.post("/:id/scan-complete-shared", async (c) => {
   } else {
     // Covers BOTH (rare — sections don't normally cross). Disambiguate by stage
     // order: Sewing first, then Upholstery.
-    const sew = await db
+    const sewOpen = await db
       .prepare(
-        "SELECT status FROM job_cards WHERE productionOrderId = ? AND wipKey = ? AND departmentCode = 'FAB_SEW'",
+        "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
       )
-      .bind(poId, wipKey)
-      .first<{ status: string }>();
-    const sewDone =
-      !!sew && (sew.status === "COMPLETED" || sew.status === "TRANSFERRED");
-    targetDept = sewDone ? "UPHOLSTERY" : "FAB_SEW";
+      .bind(poId)
+      .first();
+    targetDept = sewOpen ? "FAB_SEW" : "UPHOLSTERY";
   }
 
   const po = await db
@@ -6364,38 +6362,46 @@ app.post("/:id/scan-complete-shared", async (c) => {
     );
   }
 
-  // The compartment's card for the resolved department.
-  const card = await db
+  // All not-yet-done cards of the resolved department on this PO. For sofa each
+  // variant is its OWN production_orders row, so this completes the WHOLE
+  // variant's dept in one scan (BASE + CUSHION + ARMREST), never another
+  // variant — mirrors scan-complete-dept's (po, dept) fan-out.
+  const cardsRes = await db
     .prepare(
-      "SELECT * FROM job_cards WHERE productionOrderId = ? AND wipKey = ? AND departmentCode = ?",
+      "SELECT * FROM job_cards WHERE productionOrderId = ? AND departmentCode = ? AND status NOT IN ('COMPLETED','TRANSFERRED')",
     )
-    .bind(poId, wipKey, targetDept)
-    .first<JobCardRow>();
-  if (!card) {
-    return c.json(
-      {
-        success: false,
-        code: "NO_CARD",
-        error: `No ${targetDept} card for this compartment.`,
+    .bind(poId, targetDept)
+    .all<JobCardRow>();
+  const cards = cardsRes.results ?? [];
+  if (cards.length === 0) {
+    const freshEmpty = await fetchPO(db, poId);
+    return c.json({
+      success: true,
+      data: {
+        deptCode: targetDept,
+        completedJcIds: [],
+        alreadyComplete: true,
+        workerName: worker.name,
+        po: freshEmpty,
       },
-      404,
-    );
+    });
   }
 
-  // Order protection: Upholstery cannot start before Sewing is done.
+  // Order protection: Upholstery cannot start before this variant's Sewing is
+  // fully done (every FAB_SEW card on the PO completed).
   if (targetDept === "UPHOLSTERY") {
-    const sew = await db
+    const sewOpen = await db
       .prepare(
-        "SELECT status FROM job_cards WHERE productionOrderId = ? AND wipKey = ? AND departmentCode = 'FAB_SEW'",
+        "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
       )
-      .bind(poId, wipKey)
-      .first<{ status: string }>();
-    if (sew && sew.status !== "COMPLETED" && sew.status !== "TRANSFERRED") {
+      .bind(poId)
+      .first();
+    if (sewOpen) {
       return c.json(
         {
           success: false,
           code: "SEWING_NOT_DONE",
-          error: "Fabric Sewing for this compartment is not completed yet.",
+          error: "Fabric Sewing for this item is not completed yet.",
         },
         409,
       );
@@ -6403,7 +6409,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
   }
 
   // Prerequisite soft-warn (mirror scan-complete-dept) — unless forced.
-  if (card.prerequisiteMet !== 1 && !forced) {
+  if (cards.some((jc) => jc.prerequisiteMet !== 1) && !forced) {
     return c.json(
       {
         success: false,
@@ -6420,52 +6426,128 @@ app.post("/:id/scan-complete-shared", async (c) => {
 
   const nowIso = new Date().toISOString();
   const today = nowIso.split("T")[0];
+  const completedJcIds: string[] = [];
+  let anyFilled = false; // did this scan claim any slot on any card?
+  let anyPicFull = false; // upholstery: a card's pic1+pic2 already taken by others
 
-  // --- Fill PIC slots ---
-  await ensurePiecePicsForJc(db, card);
-  const slotsRes = await db
-    .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
-    .bind(card.id)
-    .all<PiecePicRow>();
-  let filled = false; // did this scan claim any slot?
-  let picFull = false; // upholstery: both pic1+pic2 already taken by others?
-  for (const slot of slotsRes.results ?? []) {
-    if (!slot.pic1Id) {
-      await db
-        .prepare(
-          "UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?",
-        )
-        .bind(worker.id, worker.name, nowIso, nowIso, slot.id)
-        .run();
-      filled = true;
-    } else if (slot.pic1Id === worker.id) {
-      // same worker re-scanning this slot — no-op.
-    } else if (targetDept === "UPHOLSTERY" && !slot.pic2Id) {
-      // Upholstery share: a SECOND worker joins as pic2 (minutes split at read).
-      await db
-        .prepare(
-          "UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?",
-        )
-        .bind(worker.id, worker.name, nowIso, slot.id)
-        .run();
-      filled = true;
-    } else if (
-      targetDept === "UPHOLSTERY" &&
-      slot.pic2Id &&
-      slot.pic2Id !== worker.id
-    ) {
-      picFull = true;
+  // One scan fans out across EVERY compartment card of this dept on the PO.
+  // Sewing fills pic1 (single person, no pic2); Upholstery lets a 2nd worker
+  // join as pic2 (minutes split 50/50 at read time).
+  for (const card of cards) {
+    await ensurePiecePicsForJc(db, card);
+    const slotsRes = await db
+      .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
+      .bind(card.id)
+      .all<PiecePicRow>();
+    let filled = false;
+    for (const slot of slotsRes.results ?? []) {
+      if (!slot.pic1Id) {
+        await db
+          .prepare(
+            "UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?",
+          )
+          .bind(worker.id, worker.name, nowIso, nowIso, slot.id)
+          .run();
+        filled = true;
+      } else if (slot.pic1Id === worker.id) {
+        // same worker re-scanning this slot — no-op.
+      } else if (targetDept === "UPHOLSTERY" && !slot.pic2Id) {
+        await db
+          .prepare(
+            "UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?",
+          )
+          .bind(worker.id, worker.name, nowIso, slot.id)
+          .run();
+        filled = true;
+      } else if (
+        targetDept === "UPHOLSTERY" &&
+        slot.pic2Id &&
+        slot.pic2Id !== worker.id
+      ) {
+        anyPicFull = true;
+      }
+      // FAB_SEW: pic1 taken by someone else → single-person, no pic2.
     }
-    // FAB_SEW: pic1 taken by someone else → single-person, no pic2.
+    if (filled) anyFilled = true;
+
+    const allSlotsRes = await db
+      .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
+      .bind(card.id)
+      .all<PiecePicRow>();
+    const slotList = allSlotsRes.results ?? [];
+    const allPiecesDone =
+      slotList.length > 0 && slotList.every((s) => !!s.pic1Id);
+    const mergedJc: JobCardRow = { ...card };
+    let jcJustCompleted = false;
+    if (
+      allPiecesDone &&
+      card.status !== "COMPLETED" &&
+      card.status !== "TRANSFERRED"
+    ) {
+      mergedJc.status = "COMPLETED";
+      mergedJc.completedDate = today;
+      mergedJc.overdue = "COMPLETED";
+      jcJustCompleted = true;
+    } else if (card.status === "WAITING" && filled) {
+      mergedJc.status = "IN_PROGRESS";
+    }
+    const firstWithPic1 = slotList.find((s) => s.pic1Id);
+    const firstWithPic2 = slotList.find((s) => s.pic2Id);
+    if (!mergedJc.pic1Id && firstWithPic1) {
+      mergedJc.pic1Id = firstWithPic1.pic1Id;
+      mergedJc.pic1Name = firstWithPic1.pic1Name ?? "";
+    }
+    if (!mergedJc.pic2Id && firstWithPic2) {
+      mergedJc.pic2Id = firstWithPic2.pic2Id;
+      mergedJc.pic2Name = firstWithPic2.pic2Name ?? "";
+    }
+
+    if (filled || jcJustCompleted) {
+      await db
+        .prepare(
+          `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
+             pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
+        )
+        .bind(
+          mergedJc.status,
+          mergedJc.completedDate,
+          mergedJc.overdue,
+          mergedJc.pic1Id,
+          mergedJc.pic1Name ?? "",
+          mergedJc.pic2Id,
+          mergedJc.pic2Name ?? "",
+          mergedJc.id,
+        )
+        .run();
+      scheduleFireAndForget(c, fireAndForgetSyncJc(c, mergedJc, po));
+    }
+
+    if (jcJustCompleted) {
+      const siblings = await db
+        .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
+        .bind(poId)
+        .all<JobCardRow>();
+      await applyWipInventoryChange(
+        db,
+        po,
+        mergedJc,
+        "COMPLETED",
+        siblings.results ?? [],
+        card.status,
+        { orgId: getOrgId(c), source: "SCAN" },
+      );
+      await postJobCardLabor(db, mergedJc.id, poId);
+      completedJcIds.push(mergedJc.id);
+    }
   }
 
-  if (!filled) {
-    if (picFull) {
+  if (!anyFilled) {
+    if (anyPicFull) {
       return c.json(
         {
           success: false,
           code: "PIC_FULL",
-          error: "This compartment's Upholstery already has 2 people.",
+          error: "This item's Upholstery already has 2 people.",
         },
         409,
       );
@@ -6475,81 +6557,12 @@ app.post("/:id/scan-complete-shared", async (c) => {
       success: true,
       data: {
         deptCode: targetDept,
-        wipKey,
-        completedJcId: null,
+        completedJcIds: [],
         alreadyComplete: true,
         workerName: worker.name,
         po: freshEmpty,
       },
     });
-  }
-
-  // --- Roll the card status + side-effects (mirror scan-complete-dept loop) ---
-  const allSlotsRes = await db
-    .prepare("SELECT * FROM piece_pics WHERE jobCardId = ?")
-    .bind(card.id)
-    .all<PiecePicRow>();
-  const slotList = allSlotsRes.results ?? [];
-  const allPiecesDone = slotList.length > 0 && slotList.every((s) => !!s.pic1Id);
-  const mergedJc: JobCardRow = { ...card };
-  let jcJustCompleted = false;
-  if (
-    allPiecesDone &&
-    card.status !== "COMPLETED" &&
-    card.status !== "TRANSFERRED"
-  ) {
-    mergedJc.status = "COMPLETED";
-    mergedJc.completedDate = today;
-    mergedJc.overdue = "COMPLETED";
-    jcJustCompleted = true;
-  } else if (card.status === "WAITING") {
-    mergedJc.status = "IN_PROGRESS";
-  }
-  const firstWithPic1 = slotList.find((s) => s.pic1Id);
-  const firstWithPic2 = slotList.find((s) => s.pic2Id);
-  if (!mergedJc.pic1Id && firstWithPic1) {
-    mergedJc.pic1Id = firstWithPic1.pic1Id;
-    mergedJc.pic1Name = firstWithPic1.pic1Name ?? "";
-  }
-  if (!mergedJc.pic2Id && firstWithPic2) {
-    mergedJc.pic2Id = firstWithPic2.pic2Id;
-    mergedJc.pic2Name = firstWithPic2.pic2Name ?? "";
-  }
-
-  await db
-    .prepare(
-      `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
-         pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
-    )
-    .bind(
-      mergedJc.status,
-      mergedJc.completedDate,
-      mergedJc.overdue,
-      mergedJc.pic1Id,
-      mergedJc.pic1Name ?? "",
-      mergedJc.pic2Id,
-      mergedJc.pic2Name ?? "",
-      mergedJc.id,
-    )
-    .run();
-
-  scheduleFireAndForget(c, fireAndForgetSyncJc(c, mergedJc, po));
-
-  if (jcJustCompleted) {
-    const siblings = await db
-      .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
-      .bind(poId)
-      .all<JobCardRow>();
-    await applyWipInventoryChange(
-      db,
-      po,
-      mergedJc,
-      "COMPLETED",
-      siblings.results ?? [],
-      card.status,
-      { orgId: getOrgId(c), source: "SCAN" },
-    );
-    await postJobCardLabor(db, mergedJc.id, poId);
   }
 
   // --- PO rollup + SO/CO cascade (mirror scan-complete-dept tail) ---
@@ -6601,8 +6614,8 @@ app.post("/:id/scan-complete-shared", async (c) => {
     success: true,
     data: {
       deptCode: targetDept,
-      wipKey,
-      completedJcId: jcJustCompleted ? mergedJc.id : null,
+      completedJcIds,
+      completedCount: completedJcIds.length,
       workerName: worker.name,
       po: freshPo,
     },

@@ -332,13 +332,22 @@ app.post("/", async (c) => {
     // Owner-flagged unworked-hour docks for the period (Labor Cost under-recorded
     // review), summed per worker. The engine values them at the worker's
     // ÷working-days hourly rate and subtracts from basic earned.
-    const dedRes = await c.var.DB.prepare(
-      "SELECT workerId, hours FROM payroll_hour_deductions WHERE date LIKE ?",
-    )
-      .bind(`${period}-%`)
-      .all<{ workerId: string; hours: number }>();
+    // Resilient read: if migration 0152 hasn't been applied yet the table won't
+    // exist — treat that as "no docks" so payroll still generates rather than
+    // 500-ing. Once the table is created, docks take effect on the next regen.
+    let dedResults: Array<{ workerId: string; hours: number }> = [];
+    try {
+      const dedRes = await c.var.DB.prepare(
+        "SELECT workerId, hours FROM payroll_hour_deductions WHERE date LIKE ?",
+      )
+        .bind(`${period}-%`)
+        .all<{ workerId: string; hours: number }>();
+      dedResults = dedRes.results ?? [];
+    } catch (e) {
+      console.warn("[payslips] payroll_hour_deductions read skipped:", e);
+    }
     const deductionHoursByWorker = new Map<string, number>();
-    for (const r of dedRes.results ?? []) {
+    for (const r of dedResults) {
       deductionHoursByWorker.set(
         r.workerId,
         (deductionHoursByWorker.get(r.workerId) ?? 0) + (Number(r.hours) || 0),

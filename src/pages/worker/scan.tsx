@@ -263,6 +263,15 @@ export default function WorkerScanPage() {
   // Today's perf snapshot — loaded on mount, refreshed after each scan
   const [today, setToday] = useState<TodaySnapshot | null>(null);
 
+  // Packing rack picker — shown AFTER a Packing completion (Wei Siang: scan →
+  // Complete → then pick the rack below). Options come from /api/worker/racks
+  // (the warehouse catalog, Rack 1-20); the choice is saved via
+  // /api/worker/packing-rack. Reset per scan in handleConfirmScan.
+  const [racks, setRacks] = useState<{ rack: string; occupied: boolean }[]>([]);
+  const [rackChoice, setRackChoice] = useState("");
+  const [savingRack, setSavingRack] = useState(false);
+  const [rackSaved, setRackSaved] = useState(false);
+
   // Pull worker ID from cached /me so we can auto-attribute the scan.
   const workerId = (() => {
     try {
@@ -295,6 +304,43 @@ export default function WorkerScanPage() {
     loadToday();
   }, [loadToday]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Warehouse rack catalog for the Packing rack picker (loaded once on mount).
+  const loadRacks = useCallback(async () => {
+    try {
+      const res = await workerFetch("/api/worker/racks");
+      const j = (await res.json()) as {
+        success?: boolean;
+        data?: { rack: string; occupied: boolean }[];
+      };
+      if (j.success && Array.isArray(j.data)) setRacks(j.data);
+    } catch {
+      /* leave empty — the picker just won't populate */
+    }
+  }, []);
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot rack catalog load on mount */
+  useEffect(() => {
+    loadRacks();
+  }, [loadRacks]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Save the chosen rack onto the packing job card (works even after complete).
+  const saveRack = useCallback(async (jobCardId: string, rack: string) => {
+    if (!rack) return;
+    setSavingRack(true);
+    try {
+      const res = await workerFetch("/api/worker/packing-rack", {
+        method: "POST",
+        body: JSON.stringify({ jobCardId, rackingNumber: rack }),
+      });
+      const j = (await res.json()) as { success?: boolean };
+      if (res.ok && j.success) setRackSaved(true);
+    } catch {
+      /* leave unsaved — the worker can tap Save again */
+    } finally {
+      setSavingRack(false);
+    }
+  }, []);
 
   // Pure lookup — no state mutation.
   //
@@ -697,6 +743,8 @@ export default function WorkerScanPage() {
       return;
     }
     setLoading(true);
+    setRackChoice("");
+    setRackSaved(false);
     try {
       // FG-level merged sticker. The QR's opId is the sentinel "FG-<DEPT>" so
       // one scan flips every matching dept card on the PO. Two routes:
@@ -1144,6 +1192,44 @@ export default function WorkerScanPage() {
             </p>
           )}
           <p className="text-xs opacity-75 mt-1">PIC slot {result.slot}</p>
+
+          {/* Packing rack picker — Wei Siang: after Complete, pick the rack
+              below. Options from the warehouse catalog; saved independently of
+              the completion (also works when re-scanning a finished card). */}
+          {result.jobCard.departmentCode === "PACKING" && (
+            <div className="mt-4 bg-white/10 rounded-lg p-3 text-left">
+              <p className="text-xs font-semibold opacity-90 mb-1.5">
+                Rack number
+              </p>
+              {rackSaved ? (
+                <p className="text-sm font-semibold">✓ Rack saved: {rackChoice}</p>
+              ) : (
+                <div className="flex gap-2">
+                  <select
+                    value={rackChoice}
+                    onChange={(e) => setRackChoice(e.target.value)}
+                    className="flex-1 h-10 rounded bg-white text-[#1F1D1B] text-sm px-2"
+                  >
+                    <option value="">— Select rack —</option>
+                    {racks.map((r) => (
+                      <option key={r.rack} value={r.rack}>
+                        {r.rack}
+                        {r.occupied ? " (occupied)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={!rackChoice || savingRack}
+                    onClick={() => saveRack(result.jobCard.id, rackChoice)}
+                    className="h-10 px-4 rounded bg-white text-[#1F1D1B] font-semibold text-sm disabled:opacity-50"
+                  >
+                    {savingRack ? "…" : "Save"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           <button
             type="button"

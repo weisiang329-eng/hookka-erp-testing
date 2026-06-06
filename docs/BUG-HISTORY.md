@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-004 — Payroll absence rated ÷26 again (was ÷24), with a "Non-productive paid (absence)" reconciliation line so Labor Cost still ties out
+
+**Status:** 🟡 Built on branch `feat/payroll-reconcile`; tests 507/0 + typecheck + build green. PENDING merge + May regenerate + live verify. Supersedes the ÷24 decision in BUG-2026-06-06-003.
+**Category:** payroll-reporting
+
+**Why:** ÷24 (BUG-003) made absence reconcile cleanly but docked absent workers MORE than the conventional ÷26 "ordinary rate of pay". Owner wants payroll absence at the standard ÷26 AND Labor Cost to keep recording each worked day at its true ÷working-days value AND the two to still tally. Those three can't all hold by forcing one divisor — the ÷26-vs-÷24 gap on absent days is real money (paid above production value), so it needs its own home, not the under-recorded residual.
+
+**Change:**
+- `src/lib/labor-engine.ts` — absence deduction back to ÷26 (`payrollDailyRateSen`); part-month proration stays ÷working-days (`costingDailyRateSen`) because those are days actually served/produced. OT unchanged (÷26).
+- `src/pages/employees.tsx` (Labor Cost reconciliation) — new line "Non-productive paid (absence)" = Σ absentDays × (÷working-days − ÷26 day rate), carved OUT of the residual; the "Under-recorded hours" residual is now pure (came-but-short only); per-worker under-logged gaps exclude their own absence leniency. Reconciled-sum check updated so the "Reconciled · 0" badge holds.
+- `tests/labor-engine.test.mjs` — absence test back to ÷26 (deduction 20385, basic 244615); new lock test: part-month prorate stays ÷working-days.
+
+**Expected (May 2026, verify after regenerate):** "Non-productive paid (absence)" ≈ RM125; "Under-recorded hours" ≈ RM470 (unchanged, pure); absence column drops ÷24→÷26; reconciliation stays green.
+
+---
+
 ## BUG-2026-06-06-003 — Labor Cost ↔ Payroll: absence rated ÷26 (payroll) vs ÷working-days (cost) left a ~RM3/absent-day artifact masking the real under-recorded total
 
 **Status:** 🟢 Fixed (2026-06-06) — shipped to prod (347bedeb + relabel); May payslips regenerated; verified live: residual now equals under-recorded hours exactly (RM469.81 = per-department roll-up = per-worker gaps); Total Payroll Cost RM62,657.25 = Payroll Gross + employer.

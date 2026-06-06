@@ -186,7 +186,7 @@ test("computeMonthlyLabor: full attendance — payroll gross equals production c
 
 // ── computeMonthlyLabor: ANN, absent 2 days ─────────────────────────────────
 
-test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷ working-days (reconciles with cost)", () => {
+test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷26; gap vs cost = non-productive paid", () => {
   // Drop the first two 8 h days → 22 days present, still 15 h OT.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
@@ -198,14 +198,42 @@ test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷ working-days
   });
   assert.equal(r.daysWorked, 22);
   assert.equal(r.payroll.absentDays, 2);
-  // Absence now uses the WORKING-DAYS divisor (26 − 2 holidays = 24), the same
-  // rate cost removes per unworked day: 2 × 265000/24 = 22083.33 → 22083 sen.
-  assert.equal(r.payroll.absenceDeductionSen, 22_083);
-  assert.equal(r.payroll.basicEarnedSen, 242_917); // 265000 − 22083 → RM2,429.17
-  assert.equal(r.payroll.grossSen, 271_583); // 242917 + 28666 (OT, ÷26) → RM2,715.83
-  // The whole point of the ÷ working-days change: an absent worker's basic
-  // earned now equals the production-cost regular figure, so payroll reconciles
-  // with Labor Cost (leaving only under-recorded hours as the gap).
+  // Absence is docked at the nominal ÷26 day rate (ordinary rate of pay):
+  // 2 × 265000/26 = 20384.6 → 20385 sen.
+  assert.equal(r.payroll.absenceDeductionSen, 20_385);
+  assert.equal(r.payroll.basicEarnedSen, 244_615); // 265000 − 20385 → RM2,446.15
+  assert.equal(r.payroll.grossSen, 273_281); // 244615 + 28666 (OT, ÷26) → RM2,732.81
+  // Cost removes the 2 unworked days at the higher ÷working-days rate, so basic
+  // earned is HIGHER than production-cost regular. That gap (paid above
+  // production value on absent days) is the "non-productive paid (absence)"
+  // reconciliation line — here 244615 − 242917 = 1698 sen (RM16.98).
+  assert.equal(r.cost.regularCostSen, 242_917);
+  assert.equal(r.payroll.basicEarnedSen - r.cost.regularCostSen, 1_698);
+});
+
+test("computeMonthlyLabor: part-month prorate uses ÷working-days (matches cost), not ÷26", () => {
+  // Joined mid-May (day 18). prorateToService pays days SERVED × the
+  // ÷working-days rate — the SAME rate production cost uses — so a part-month
+  // worker's basic earned equals production-cost regular exactly (no leniency
+  // gap; the ÷26 absence rule does not apply to days outside employment).
+  const r = labor.computeMonthlyLabor({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: [
+      { date: "2026-05-18", hours: 8 },
+      { date: "2026-05-19", hours: 8 },
+      { date: "2026-05-20", hours: 8 },
+      { date: "2026-05-21", hours: 8 },
+      { date: "2026-05-22", hours: 8 },
+    ],
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+    employmentStartDay: 18,
+    prorateToService: true,
+  });
+  assert.equal(r.daysWorked, 5);
+  assert.equal(r.payroll.basicEarnedSen, 55_208); // 5 × 265000/24 = 55208.33 → 55208
   assert.equal(r.payroll.basicEarnedSen, r.cost.regularCostSen);
 });
 

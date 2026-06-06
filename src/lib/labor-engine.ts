@@ -326,12 +326,17 @@ export function computeMonthlyLabor(
     month,
     publicHolidays,
   );
-  // Two divisors. OT is rated on the nominal working-days basis (÷26). Absence,
-  // part-month proration AND production cost all use the WORKING-DAYS divisor
-  // (working days − public holidays) so a day missed — or a part-month day —
-  // docks EXACTLY what labor cost removes. Payroll then reconciles with Labor
-  // Cost, leaving only under-recorded hours (came but logged < a full day) as the
-  // residual. [Owner decision 2026-06-06: unify absence onto ÷ working-days.]
+  // Two divisors, on purpose:
+  //   • PAYROLL absence + all OT → ÷ nominal workingDaysPerMonth (26): a missed
+  //     day is docked the contractual ÷26 "ordinary rate of pay".
+  //   • PRODUCTION COST + part-month proration → ÷ (workingDaysPerMonth −
+  //     public holidays): a logged day of output, or a part-month day served, is
+  //     valued at this higher ÷working-days rate (holidays absorbed into it).
+  // They differ only on absent days — payroll docks ÷26, production loses
+  // ÷working-days. That gap (paid above production value on absent days) is shown
+  // as a "non-productive paid (absence)" line in the Labor Cost reconciliation, so
+  // Payroll and Labor Cost still tie out and the under-recorded residual stays
+  // pure. [Owner decision 2026-06-06: absence ÷26, part-month prorate ÷working-days.]
   // Clamped to ≥1 so it never divides by 0.
   const costingDivisor = Math.max(1, workingDaysPerMonth - holidaysInMonth);
 
@@ -363,9 +368,11 @@ export function computeMonthlyLabor(
   // can't make absences negative or inflate prorated pay.
   const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
   const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
-  // Absence docks the WORKING-DAYS day rate (÷ working days − holidays), the same
-  // rate labor cost removes for an unworked day, so the two reconcile exactly.
-  const absenceDeductionSen = Math.round(absentDays * costingDailyRateSen);
+  // Absence docks the nominal ÷26 day rate (the contractual ordinary rate of pay),
+  // which is LESS than the ÷working-days rate production loses for that unworked
+  // day; the difference is reconciled as "non-productive paid (absence)" on the
+  // Labor Cost screen, not left in the under-recorded residual.
+  const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
   // Full-month worker → entitled to the FULL monthly salary, minus absences.
   // Partial-month worker (joined and/or resigned mid-month) → entitled only to
   // the days actually served (days worked × daily rate); days outside their

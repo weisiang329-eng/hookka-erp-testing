@@ -6054,16 +6054,48 @@ function LaborCostTab({
   const employerContribSen = payrollTotals.employerContribSen;
   // Full payroll cost the breakdown must reconcile to.
   const totalPayrollCostSen = totalGrossSen + employerContribSen;
+  // Absence "non-productive paid": absent days are docked at the nominal ÷26
+  // ordinary rate, but production loses the higher ÷working-days rate for the
+  // same unworked day. Carve that difference (paid above production value on
+  // absent days) onto its own reconciliation line so the under-recorded residual
+  // stays pure. Holidays are already absorbed into the ÷working-days rate, so a
+  // fully-attended worker contributes 0 here.
+  const absenceLeniencyByPayslip = useMemo(() => {
+    const m = new Map<string, number>();
+    const [hY, hM] = (period || from).slice(0, 7).split("-").map(Number);
+    const holidays = hY && hM ? countPublicHolidaysInMonth(hY, hM, holidayList) : 0;
+    for (const p of reconPayslips) {
+      const absent = Number(p.absentDays) || 0;
+      if (absent <= 0) continue;
+      const monthDays = p.workingDays > 0 ? p.workingDays : 26;
+      const costingDivisor = Math.max(1, monthDays - holidays);
+      const costEquivalentSen = Math.round(
+        (absent * (Number(p.basicSalary) || 0)) / costingDivisor,
+      );
+      const leniency = Math.max(
+        0,
+        costEquivalentSen - (Number(p.absenceDeductionSen) || 0),
+      );
+      if (leniency > 0) m.set(p.id, leniency);
+    }
+    return m;
+  }, [reconPayslips, period, from, holidayList]);
+  const absencePaidAboveCostSen = useMemo(
+    () => [...absenceLeniencyByPayslip.values()].reduce((s, v) => s + v, 0),
+    [absenceLeniencyByPayslip],
+  );
+
   // Salary of workers with no logged factory hours (office / sales / admin /
   // drivers / QC), PLUS any under-logged-hours difference. Residual against
-  // gross — by construction this makes the four labor buckets + this line sum
-  // to total gross, and adding employer contributions closes to full payroll.
+  // gross — by construction the labor buckets + the absence line + this residual
+  // sum to total gross, and adding employer contributions closes to full payroll.
   const nonProductionSalarySen =
     totalGrossSen -
     (productionLaborCostSen +
       warehousingLaborCostSen +
       shortfallLaborCostSen +
-      overheadLaborCostSen);
+      overheadLaborCostSen +
+      absencePaidAboveCostSen);
   // We only have payroll figures once payslips exist for the period. Hide the
   // reconciliation panel (rather than show a misleading negative residual)
   // when there are none or when a category filter is narrowing the buckets.
@@ -6088,6 +6120,7 @@ function LaborCostTab({
     warehousingLaborCostSen +
     shortfallLaborCostSen +
     overheadLaborCostSen +
+    absencePaidAboveCostSen +
     nonProductionSalarySen +
     employerContribSen;
   const reconcileDiffSen = reconciledSumSen - totalPayrollCostSen;
@@ -6435,9 +6468,12 @@ function LaborCostTab({
         nonProductionStaff.push({ id: p.id, name, deptCode: code, deptName, grossSen });
         continue;
       }
-      // Factory-department worker: residual = paid − logged-hours value.
+      // Factory-department worker: residual = paid − logged-hours value, less the
+      // absence leniency (which is already shown on its own reconciliation line),
+      // so this gap is PURE under-recorded hours (came but logged < a full day).
       const loggedValueSen = p.employeeId ? loggedValueByWorker.get(p.employeeId) ?? 0 : 0;
-      const gapSen = grossSen - loggedValueSen;
+      const gapSen =
+        grossSen - loggedValueSen - (absenceLeniencyByPayslip.get(p.id) ?? 0);
       // A production worker fully reconciled (gap ≈ 0) is not a data gap. Use a
       // small tolerance so rounding noise doesn't flag a fully-logged worker.
       if (gapSen > 50) {
@@ -6458,7 +6494,7 @@ function LaborCostTab({
     const nonProdSubtotalSen = nonProductionStaff.reduce((s, r) => s + r.grossSen, 0);
     const underLoggedSubtotalSen = underLoggedFactory.reduce((s, r) => s + r.gapSen, 0);
     return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
-  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker]);
+  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip]);
 
   // The two subtotals must SUM to the Non-production salary residual bucket so
   // the whole thing still reconciles to Total Payroll. Any tiny remainder
@@ -6630,6 +6666,15 @@ function LaborCostTab({
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(overheadLaborCostSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
+                    <td
+                      className="py-1.5 pr-3 text-[#4B5563]"
+                      title="Absent days are docked at the standard daily rate, slightly less than a day's production value, so this small difference is paid time with no output. (Public-holiday cost is already absorbed into the day rate.)"
+                    >
+                      Non-productive paid (absence)
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(absencePaidAboveCostSen)}</td>
+                  </tr>
+                  <tr className="border-b border-[#E2DDD8]">
                     <td className="py-1.5 pr-3 text-[#4B5563]">
                       {employeeResidual.nonProductionStaff.length > 0
                         ? "Non-production salary (office / sales / admin)"
@@ -6661,7 +6706,9 @@ function LaborCostTab({
             <p className="mt-3 text-xs text-[#6B7280] leading-relaxed">
               Production-floor labor is costed from logged Working Hours; salaries of staff who don&rsquo;t clock factory hours
               (office / sales / admin) and the company&rsquo;s EPF / SOCSO / EIS are added here so the breakdown reconciles to the
-              full payroll. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
+              full payroll. &ldquo;Non-productive paid (absence)&rdquo; is the small extra paid on absent days &mdash; absence is docked at
+              the standard daily rate, slightly less than the day&rsquo;s production value, so the difference is paid time with no
+              output. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
             </p>
           </div>
         )}

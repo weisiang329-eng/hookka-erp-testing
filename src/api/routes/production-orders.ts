@@ -4504,6 +4504,36 @@ function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
   return `pos:${orgId}:v${version}:${qs}`;
 }
 
+// After a worker QR scan completes job cards, the operator-facing production
+// dept sheets read from a cache-aside snapshot (production_orders_list_snapshot)
+// plus the KV list cache. The snapshot freshness probe compares MAX(updated_at)
+// across production_orders (updated_at is TEXT, stored as ISO "…T…Z") and
+// job_cards (TIMESTAMP, "… …") — a lexical compare over mixed formats the
+// codebase documents as unreliable ("the probe lies"; see snapshot.ts
+// invalidateHubChangeSnapshots). So a scan could leave the dept sheet showing
+// the pre-scan status (e.g. Fab Cut stuck PENDING while the card is already
+// COMPLETED — the SO-2605-305-03 report, 2026-06-06). Explicitly bump the KV
+// version AND wipe the per-org snapshot rows so the next operator fetch
+// recomputes fresh — for EVERY scan dept (Fab Cut / Fab Sew / Upholstery /
+// Packing). Best-effort: never throws into the scan's success path.
+async function invalidateProductionCachesAfterScan(
+  c: Context<Env>,
+): Promise<void> {
+  try {
+    const orgId = getOrgId(c);
+    await bumpPoListCacheVersion(c, orgId);
+    await c.var.DB
+      .prepare(`DELETE FROM production_orders_list_snapshot WHERE org_id = ?`)
+      .bind(orgId)
+      .run();
+  } catch (err) {
+    console.warn(
+      "[invalidateProductionCachesAfterScan] failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam
@@ -5755,7 +5785,7 @@ app.post("/:id/scan-complete", async (c) => {
   await db
     .prepare(
       `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
-         pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
+         pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?, updated_at = NOW() WHERE id = ?`,
     )
     .bind(
       mergedJc.status,
@@ -5854,6 +5884,8 @@ app.post("/:id/scan-complete", async (c) => {
   }
   await cascadeUpholsteryToSO(db, target.po.id);
   await cascadeUpholsteryToCO(db, target.po.id);
+
+  await invalidateProductionCachesAfterScan(c);
 
   const freshPo = await fetchPO(db, target.po.id);
   const jcOut = freshPo?.jobCards.find((j) => j.id === target.jc.id);
@@ -6121,7 +6153,7 @@ app.post("/:id/scan-complete-dept", async (c) => {
     await db
       .prepare(
         `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
-           pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
+           pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?, updated_at = NOW() WHERE id = ?`,
       )
       .bind(
         mergedJc.status,
@@ -6198,6 +6230,8 @@ app.post("/:id/scan-complete-dept", async (c) => {
   }
   await cascadeUpholsteryToSO(db, poId);
   await cascadeUpholsteryToCO(db, poId);
+
+  await invalidateProductionCachesAfterScan(c);
 
   const freshPo = await fetchPO(db, poId);
   return c.json({
@@ -6506,7 +6540,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
       await db
         .prepare(
           `UPDATE job_cards SET status = ?, completedDate = ?, overdue = ?,
-             pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ? WHERE id = ?`,
+             pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?, updated_at = NOW() WHERE id = ?`,
         )
         .bind(
           mergedJc.status,
@@ -6608,6 +6642,8 @@ app.post("/:id/scan-complete-shared", async (c) => {
   }
   await cascadeUpholsteryToSO(db, poId);
   await cascadeUpholsteryToCO(db, poId);
+
+  await invalidateProductionCachesAfterScan(c);
 
   const freshPo = await fetchPO(db, poId);
   return c.json({

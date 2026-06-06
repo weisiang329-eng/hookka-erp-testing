@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-002 — Payroll table columns didn't add up (Basic − Absence + OT ≠ Gross): part-month proration was hidden
+
+**Status:** 🟢 Fixed (2026-06-06) — shipped to prod (bd69d030); deploy green; verified live (May 2026: Basic 61,900.00 − Absence 1,498.09 − Part-month 2,917.30 + OT 4,364.43 = Gross 61,849.04).
+**Category:** payroll-reporting
+
+**Symptom:** On Employees → Payroll, the totals row didn't add up by eye: Basic (RM 61,900) + OT (RM 4,364) − Absence (RM 1,498) = RM 64,766, but Gross showed RM 61,849 — off by RM 2,917. Owner flagged "上下对不上".
+
+**Root cause:** Display, NOT a calc error. Payslip generation correctly prorates a mid-month joiner/resigner to days served (`src/api/routes/payslips.ts:354-399` sets `prorateToService` from `joinDate`/`resignedAt`; the engine pays days-served × rate, and pre-join/post-resign days are NOT charged as absence). So for those workers Gross < full Basic, but that reduction sat in neither the Basic column (showed full salary) nor the Absence column (proration isn't absence) — no column carried it, so the table looked un-addable. The RM 2,917.30 was the combined proration of 3 part-month workers (e.g. SAN LIN AUNG: 1 day served = RM 78.85 vs full RM 2,050).
+
+**Fix:** `src/pages/employees.tsx` — added a "Part-month" column = `Basic − Absence − (Gross − OT − allowances)` (zero for full-month workers) to the header, every row, the totals row, and the per-row Pay Summary. Every row now reads Basic − Absence − Part-month + OT = Gross and the totals tie out exactly. Display only — no change to pay math.
+
+**Correction logged:** an earlier sub-agent audit (it read a STALE branch) wrongly reported join/resign proration as ABSENT — the live code DOES implement it (`payslips.ts:354-399`). Verify against live code, not stale checkouts. (Salary effective-dating still to be re-verified live.)
+
+**Verified:** tsc + build clean; deployed; live May 2026 totals reconcile (see Status).
+
+---
+
 ## BUG-2026-06-06-001 — Payroll reconciliation: "Under-logged factory hours (by department)" line (RM36) didn't match its per-department children (RM4,587)
 
 **Status:** 🟢 Fixed (2026-06-06) — shipped to prod (48623ccc); deploy green; verified live on erp.hookka.com (May 2026 shows "Reconciled · 0 difference").

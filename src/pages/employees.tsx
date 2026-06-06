@@ -322,10 +322,10 @@ function WorkerDayDrillIn({
                               type="button"
                               onClick={() => onAction("idle", workerId, d.date, d.short)}
                               disabled={!!busyKey}
-                              title="Came but no work to do — still paid. Logs the short hours as Idle so the gap closes (no pay change)."
+                              title="Came but had no work to do — keep paying for these hours (standby / waiting, not the worker's fault). Logged as idle; pay unchanged."
                               className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
                             >
-                              {busyKey === `${workerId}|${d.date}|idle` ? "…" : "Idle"}
+                              {busyKey === `${workerId}|${d.date}|idle` ? "…" : "Keep pay"}
                             </button>
                             <button
                               type="button"

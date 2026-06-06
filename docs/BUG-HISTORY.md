@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-007 — Effective-dated salary (mid-month raise, day-weighted) + "Idle" button → "Keep pay"
+
+**Status:** 🟢 Shipped + verified live (2026-06-06). Migration 0153 applied to prod (Supabase SQL editor, no-RLS like every table; `_migrations` tracker updated). Code deployed (759fe585); rename deployed separately (610c266f).
+**Category:** payroll-reporting
+
+**What:** A worker's salary can now change mid-month (a raise) with an effective date.
+- New table `worker_salary_history` (worker_id, effective_from, basic_salary_sen); `workers.basic_salary_sen` stays the current snapshot + fallback. Migration backfilled one baseline row per worker (verified live: 35 rows = 35 workers).
+- `labor-engine.salaryAsOfSen` + `effectiveSalarySenForMonth` (day-weighted: each working day at the salary effective that day, averaged — exact for a no-change month, and exact for basic pay on a mid-month raise) — pure + tested.
+- Payroll (`payslips.ts`) uses the effective monthly salary for pay / statutory / the stored snapshot. The Labor Cost reconciliation rates (4 useMemos) use the SAME figure via `GET /api/workers/salary/effective?period=`, so a raise reconciles and past months use their historical salary.
+- Employee Master UI: edit Basic Salary → a prompt asks "Effective from?" (default today, can back/post-date) → `POST /:id/salary-history`. An inline salary edit also corrects the in-effect row.
+- `worker_salary_history` GET/POST/DELETE endpoints (payslips→workers perms); resilient reads (fall back to scalar if the table is absent).
+- Renamed the under-recorded **"Idle"** action button to **"Keep pay"** (clearer opposite of "Deduct"; action + bucket unchanged).
+
+**Verified live (May 2026):** effective salary == current scalar for all 35 workers (0 mismatches) → Total Payroll Cost RM62,775.52 UNCHANGED (a verified no-op until a raise is recorded). Salary-change round-trip: POST a future-dated change (201) → recorded, current scalar untouched (not yet effective) → DELETE undo restores. typecheck (API+app) + 517 tests + build green.
+
+**NOT done (optional follow-ups):** the reconciliation **"Idle (Shortfall)" bucket** line still reads "Idle" (only the button was renamed); the **Department Labor** view + the early-duplicate rate site (`employees.tsx:~3698`) still rate off the current scalar (only the Labor Cost tab uses the effective salary) — both matter only after a real mid-month salary change.
+
+---
+
 ## BUG-2026-06-06-006 — Under-recorded hours made actionable: Idle / Deduct + Undo (Phase 2)
 
 **Status:** 🟢 Shipped + verified live (2026-06-06). Migration 0152 applied to prod via Supabase SQL editor (no-RLS, matching every other table; `_migrations` tracker row added so the runner skips it). Code deployed (df4a30b5).

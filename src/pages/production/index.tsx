@@ -4691,13 +4691,17 @@ export default function ProductionPage({
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Fab Cut filter scope changed → invalidate any loaded Fab Sew preview so
-  // the next Show / Print fetches fresh against the new visible orders.
-  // Mirrors the Foam packing invalidation above.
+  // the next Show / Print fetches fresh against the new visible orders. Key on
+  // the STABLE foamScopeKey (sorted po-id signature), NOT the raw
+  // gridFilteredDeptRows reference — that reference churns on every 20s poll /
+  // serve-stale revalidate even when the filtered set is unchanged, which used
+  // to auto-close a just-opened Fab Sew QR strip a beat after it rendered (the
+  // same bug as the Foam packing preview above). 2026-06-06.
   /* eslint-disable react-hooks/set-state-in-effect -- intentional cache invalidation on filter change */
   useEffect(() => {
     setFabSewStickers([]);
     setShowFabSewStrip(false);
-  }, [gridFilteredDeptRows]);
+  }, [foamScopeKey]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Grid-filter scoped FG stickers — single source of truth shared by the

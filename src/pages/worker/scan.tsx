@@ -453,6 +453,8 @@ export default function WorkerScanPage() {
       setInput(primaryTerm);
       setLoading(true);
       setResult({ kind: "idle" });
+      setRackChoice("");
+      setRackSaved(false);
       try {
         // Merged FG-level sticker (e.g. FG-FAB_CUT) — opId is a dept
         // sentinel, not a real jc id, so findMatches by opId would come
@@ -1113,6 +1115,49 @@ export default function WorkerScanPage() {
                 </span>
               </div>
             )}
+            {/* Re-scan-to-fill-rack: a Packing card that's ALREADY completed
+                shows the rack picker right here, so the worker can come back any
+                time and fill / change the rack (Wei Siang: "I can fill it
+                later"). A fresh card has no picker here — it completes first and
+                the success screen shows the picker. */}
+            {result.jobCard.departmentCode === "PACKING" &&
+              (result.jobCard.status === "COMPLETED" ||
+                result.jobCard.status === "TRANSFERRED") && (
+                <div className="bg-[#F0ECE9] rounded-lg p-3">
+                  <p className="text-xs font-semibold text-[#5A5550] mb-1.5">
+                    Rack number
+                  </p>
+                  {rackSaved ? (
+                    <p className="text-sm font-semibold text-[#3E6570]">
+                      ✓ Rack saved: {rackChoice}
+                    </p>
+                  ) : (
+                    <div className="flex gap-2">
+                      <select
+                        value={rackChoice}
+                        onChange={(e) => setRackChoice(e.target.value)}
+                        className="flex-1 h-10 rounded border border-[#D8D2CC] text-sm px-2"
+                      >
+                        <option value="">— Select rack —</option>
+                        {racks.map((r) => (
+                          <option key={r.rack} value={r.rack}>
+                            {r.rack}
+                            {r.occupied ? " (occupied)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!rackChoice || savingRack}
+                        onClick={() => saveRack(result.jobCard.id, rackChoice)}
+                        className="h-10 px-4 rounded bg-[#3E6570] text-white font-semibold text-sm disabled:opacity-50"
+                      >
+                        {savingRack ? "…" : "Save"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             <button
               type="button"
               onClick={() => handleConfirmScan()}

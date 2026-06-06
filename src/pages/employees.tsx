@@ -5961,7 +5961,7 @@ function LaborCostTab({
   // tab — KPI cards, per-dept rollup — narrows to just the chosen product
   // category so an operator can answer "what did
   // {Sofa|Bedframe|Accessory} cost / earn / produce on this date range".
-  // Borrowed (Warehousing) and Idle (Shortfall) are NOT category-tagged
+  // Borrowed (Warehousing) and Shortfall are NOT category-tagged
   // labor — they show their per-period totals regardless of filter so
   // operators don't lose sight of them.
   const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
@@ -6132,7 +6132,7 @@ function LaborCostTab({
               departmentCode: "PRODUCTION_SHORTFALL",
               category: "",
               hours: hrs,
-              notes: "Idle — marked from Labor Cost review",
+              notes: "Keep pay — no work (Labor Cost review)",
             }),
           });
           if (!r.ok) throw new Error(`idle ${r.status}`);
@@ -6957,7 +6957,7 @@ function LaborCostTab({
           </Card>
           <Card>
             <CardContent className="p-3" title="Hours billed to PRODUCTION_SHORTFALL — paid time with no work to do">
-              <p className="text-xs text-[#6B7280]">Idle (Shortfall)</p>
+              <p className="text-xs text-[#6B7280]">Shortfall</p>
               <p className={`text-lg font-bold ${shortfallLaborCostSen > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
                 {formatCurrency(shortfallLaborCostSen)}
               </p>
@@ -7002,7 +7002,7 @@ function LaborCostTab({
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(warehousingLaborCostSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">Idle (Shortfall)</td>
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Shortfall</td>
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(shortfallLaborCostSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
@@ -7546,7 +7546,7 @@ function LaborCostTab({
                             ? "bg-[#FAEFCB]/40 border-l-4 border-l-[#9C6F1E]"
                             : "bg-[#F3F4F6]/40";
                         const bucketLabel = r.isShortfall
-                          ? "Idle (Shortfall)"
+                          ? "Shortfall"
                           : r.isWarehousing
                             ? "Borrowed (Warehousing)"
                             : "Overhead";

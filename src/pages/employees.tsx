@@ -1472,6 +1472,17 @@ function EmployeeMasterTab({
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
+  // After a salary edit, ask WHEN it takes effect (a raise can be back/post-dated)
+  // — recorded as a worker_salary_history row rather than a silent overwrite.
+  const [salaryChangePrompt, setSalaryChangePrompt] = useState<{
+    workerId: string;
+    workerName: string;
+    newSalarySen: number;
+    oldSalarySen: number;
+    effectiveFrom: string;
+    submitting: boolean;
+    error: string | null;
+  } | null>(null);
   // Per-row Departments multi-select popover state lives inside
   // DepartmentMultiSelect (rendered in the column below) so DataGrid cell
   // memoization can't strand it un-rendered. (Categories is a native select,
@@ -1728,11 +1739,21 @@ function EmployeeMasterTab({
     // Backend rejects a non-empty resignedAt unless status is RESIGNED, so
     // send "" whenever the worker is not resigned.
     const resignedAt = isResigned ? (editForm.resignedAt || "") : "";
+    // A salary change is recorded with an EFFECTIVE DATE via a follow-up prompt,
+    // not silently overwritten — so keep the salary scalar untouched in THIS PUT
+    // and open the prompt once the rest of the row has saved.
+    const originalWorker = workers.find((w) => w.id === editingId);
+    const newSalarySen = editForm.basicSalarySen;
+    const salaryChanged =
+      !!originalWorker && newSalarySen !== originalWorker.basicSalarySen;
+    const keptSalarySen = salaryChanged
+      ? originalWorker!.basicSalarySen
+      : editForm.basicSalarySen;
     setSaving(true);
     const payload =
       editForm.position === "Operator Leader"
-        ? { ...editForm, resignedAt }
-        : { ...editForm, resignedAt, categories: [] };
+        ? { ...editForm, resignedAt, basicSalarySen: keptSalarySen }
+        : { ...editForm, resignedAt, categories: [], basicSalarySen: keptSalarySen };
     // 2026-05-27 verifiedSave migration. Worker master-data drives
     // payroll, statutory toggles, and OT — a stale-cache silent
     // overwrite would mis-pay workers. Read back and confirm.
@@ -1759,7 +1780,20 @@ function EmployeeMasterTab({
     });
     if (result.ok) {
       setEditingId(null);
-      refreshWorkers();
+      if (salaryChanged && originalWorker) {
+        // Other fields saved; now ask WHEN the new salary takes effect.
+        setSalaryChangePrompt({
+          workerId: originalWorker.id,
+          workerName: editForm.name || originalWorker.name,
+          newSalarySen,
+          oldSalarySen: originalWorker.basicSalarySen,
+          effectiveFrom: new Date().toISOString().slice(0, 10),
+          submitting: false,
+          error: null,
+        });
+      } else {
+        refreshWorkers();
+      }
     } else if (result.reason === "mismatch") {
       toast.error(formatMismatchError(result.diffs));
     } else if (result.reason === "http") {
@@ -1773,6 +1807,43 @@ function EmployeeMasterTab({
       toast.error(`Save failed: ${result.details}`);
     }
     setSaving(false);
+  };
+
+  // Record the salary change at the chosen effective date (a worker_salary_history
+  // row). The backend re-syncs the current scalar, so payroll picks it up.
+  const confirmSalaryChange = async () => {
+    if (!salaryChangePrompt) return;
+    const { workerId, newSalarySen, effectiveFrom } = salaryChangePrompt;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      setSalaryChangePrompt({
+        ...salaryChangePrompt,
+        error: "Pick an effective date.",
+      });
+      return;
+    }
+    setSalaryChangePrompt({ ...salaryChangePrompt, submitting: true, error: null });
+    try {
+      const r = await fetch(`/api/workers/${workerId}/salary-history`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ effectiveFrom, basicSalarySen: newSalarySen }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setSalaryChangePrompt(null);
+      refreshWorkers();
+      toast.success("Salary change recorded.");
+    } catch {
+      setSalaryChangePrompt((p) =>
+        p ? { ...p, submitting: false, error: "Failed to record — please try again." } : p,
+      );
+    }
+  };
+
+  // Cancel the prompt — the new amount is discarded; the row's other edits
+  // already saved and the salary stays at its previous value.
+  const cancelSalaryChange = () => {
+    setSalaryChangePrompt(null);
+    refreshWorkers();
   };
 
   const handleDelete = async (id: string) => {
@@ -2588,6 +2659,93 @@ function EmployeeMasterTab({
       </CardContent>
 
       {/* Per-worker PIN modal — two phases: configure then reveal. */}
+      {salaryChangePrompt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={salaryChangePrompt.submitting ? undefined : cancelSalaryChange}
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-[#1F1D1B]">
+                  Salary change — effective from?
+                </h3>
+                <div className="mt-1 text-xs text-[#6B7280]">
+                  {salaryChangePrompt.workerName}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={cancelSalaryChange}
+                disabled={salaryChangePrompt.submitting}
+                className="rounded p-1 text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-40"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-[#6B7280]">Basic salary</span>
+                <span className="tabular-nums">
+                  <span className="text-[#9CA3AF] line-through">
+                    {formatRM(salaryChangePrompt.oldSalarySen)}
+                  </span>
+                  <span className="mx-1.5 text-[#9CA3AF]">→</span>
+                  <span className="font-semibold text-[#1F1D1B]">
+                    {formatRM(salaryChangePrompt.newSalarySen)}
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <label className="block text-xs font-medium text-[#4B5563] mb-1">
+              Effective from
+            </label>
+            <Input
+              type="date"
+              value={salaryChangePrompt.effectiveFrom}
+              onChange={(e) =>
+                setSalaryChangePrompt((p) =>
+                  p ? { ...p, effectiveFrom: e.target.value, error: null } : p,
+                )
+              }
+              className="w-full"
+            />
+            <p className="mt-1.5 text-[11px] text-[#6B7280] leading-relaxed">
+              The new salary applies from this date. Payroll day-weights a mid-month
+              change; earlier months are unaffected. You can back- or post-date it.
+            </p>
+
+            {salaryChangePrompt.error && (
+              <p className="mt-2 text-xs text-[#9A3A2D]">{salaryChangePrompt.error}</p>
+            )}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={cancelSalaryChange}
+                disabled={salaryChangePrompt.submitting}
+                className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm text-[#4B5563] hover:bg-[#F3F4F6] disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmSalaryChange}
+                disabled={salaryChangePrompt.submitting}
+                className="rounded-md bg-[#6B5C32] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#5A4D2A] disabled:opacity-50"
+              >
+                {salaryChangePrompt.submitting ? "Saving…" : "Confirm change"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {pinModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"

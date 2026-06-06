@@ -403,6 +403,27 @@ app.get("/scan-lookup", async (c) => {
 });
 
 // ============================================================
+// GET /api/worker/racks
+//
+// The warehouse rack catalog (Rack 1-20) for the Packing scan page's rack
+// dropdown — same source as the dashboard packing schedule (rack_locations),
+// exposed to the worker token (the dashboard /api/warehouse is not worker-
+// public). Returns each rack + whether it's occupied so the picker can hint.
+// ============================================================
+app.get("/racks", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const res = await c.var.DB.prepare(
+    "SELECT rack, status FROM rack_locations ORDER BY rack",
+  ).all<{ rack: string; status: string }>();
+  const racks = (res.results ?? []).map((r) => ({
+    rack: r.rack,
+    occupied: r.status === "OCCUPIED",
+  }));
+  return c.json({ success: true, data: racks });
+});
+
+// ============================================================
 // POST /api/worker/packing-rack
 // Body: { jobCardId, rackingNumber }
 //

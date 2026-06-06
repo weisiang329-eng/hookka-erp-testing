@@ -4823,6 +4823,32 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     return totals.grossPay + totals.epfEmployer + totals.socsoEmployer + totals.eisEmployer;
   }, [totals]);
 
+  // Part-month proration, surfaced so the Payroll columns reconcile by eye. A
+  // mid-month joiner/resigner is paid (days served × daily rate), so not all of
+  // their full Basic is earned — and that shortfall is NOT charged as absence.
+  // This column is the gap between full Basic and basic-earned that isn't
+  // absence: proration = Basic − Absence − (Gross − OT − allowances). Zero for a
+  // full-month worker. With it, every row reads Basic − Absence − Part-month +
+  // OT = Gross, and the totals tie out exactly (display only — no pay math here).
+  const prorationSenOf = (r: PayslipData) =>
+    Math.max(
+      0,
+      r.basicSalary - (r.absenceDeductionSen || 0) - (r.grossPay - r.totalOT - (r.allowances || 0)),
+    );
+  const totalProrationSen = useMemo(
+    () =>
+      payslipData.reduce(
+        (s, r) =>
+          s +
+          Math.max(
+            0,
+            r.basicSalary - (r.absenceDeductionSen || 0) - (r.grossPay - r.totalOT - (r.allowances || 0)),
+          ),
+        0,
+      ),
+    [payslipData],
+  );
+
   const months = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -5021,6 +5047,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Basic (RM)</th>
                     <th className="h-10 px-2 text-center font-medium text-[#374151] whitespace-nowrap">Days</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Absence</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Part-month</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Wk</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Sun</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT PH</th>
@@ -5057,6 +5084,9 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                             ? <span>−{formatCurrency(r.absenceDeductionSen)}<span className="text-[10px] text-[#9CA3AF]"> ({r.absentDays}d)</span></span>
                             : "-"}
                         </td>
+                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]" title="Part-month: joined / resigned mid-month, paid for days served">
+                          {prorationSenOf(r) > 1 ? `−${formatCurrency(prorationSenOf(r))}` : "-"}
+                        </td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otWeekdayHours}h</td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otSundayHours > 0 ? `${r.otSundayHours}h` : "-"}</td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otPHHours > 0 ? `${r.otPHHours}h` : "-"}</td>
@@ -5086,7 +5116,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                       {/* Expanded Detail Row */}
                       {expandedRow === r.id && (
                         <tr className="bg-[#FDFCFB]">
-                          <td colSpan={18} className="px-6 py-4">
+                          <td colSpan={19} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                               {/* OT Calculation Breakdown */}
                               <div className="space-y-2">
@@ -5158,6 +5188,18 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                                     <span>Basic Salary</span>
                                     <span className="font-semibold">{fmtSen(r.basicSalary)}</span>
                                   </div>
+                                  {r.absenceDeductionSen > 0 && (
+                                    <div className="flex justify-between text-[#9A3A2D]">
+                                      <span>Less: Absence ({r.absentDays}d)</span>
+                                      <span className="font-semibold">({fmtSen(r.absenceDeductionSen)})</span>
+                                    </div>
+                                  )}
+                                  {prorationSenOf(r) > 1 && (
+                                    <div className="flex justify-between text-[#9A3A2D]">
+                                      <span>Less: Part-month (joined / resigned mid-month)</span>
+                                      <span className="font-semibold">({fmtSen(prorationSenOf(r))})</span>
+                                    </div>
+                                  )}
                                   <div className="flex justify-between">
                                     <span>Total OT</span>
                                     <span className="font-semibold text-[#6B5C32]">{fmtSen(r.totalOT)}</span>
@@ -5202,6 +5244,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <td className="h-10 px-3 text-right">{formatCurrency(totals.basicSalary)}</td>
                     <td className="h-10 px-2"></td>
                     <td className="h-10 px-3 text-right text-[#9A3A2D]">{totals.absenceDeductionSen > 0 ? `−${formatCurrency(totals.absenceDeductionSen)}` : "-"}</td>
+                    <td className="h-10 px-3 text-right text-[#9A3A2D]">{totalProrationSen > 0 ? `−${formatCurrency(totalProrationSen)}` : "-"}</td>
                     <td className="h-10 px-2 text-right">{totals.otWeekdayHours}h</td>
                     <td className="h-10 px-2 text-right">{totals.otSundayHours > 0 ? `${totals.otSundayHours}h` : "-"}</td>
                     <td className="h-10 px-2 text-right">{totals.otPHHours > 0 ? `${totals.otPHHours}h` : "-"}</td>

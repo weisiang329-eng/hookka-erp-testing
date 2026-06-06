@@ -3645,6 +3645,21 @@ function DepartmentLaborTab({
     return m;
   }, [workers]);
 
+  // Each worker's day-weighted EFFECTIVE salary for the period (same figure as
+  // the Labor Cost tab + the payslips), so a mid-month raise costs each dept
+  // correctly. With no salary change this equals the current scalar — a no-op.
+  const deptSalaryPeriod = (period || dateFrom || "").slice(0, 7);
+  const { data: effSalaryResp } = useCachedJson<{ data?: Record<string, number> }>(
+    deptSalaryPeriod ? `/api/workers/salary/effective?period=${deptSalaryPeriod}` : null,
+  );
+  const effSalaryOf = useCallback(
+    (w: { id: string; basicSalarySen: number }) => {
+      const v = (effSalaryResp?.data ?? {})[w.id];
+      return typeof v === "number" ? v : w.basicSalarySen;
+    },
+    [effSalaryResp],
+  );
+
   // Project onto the canonical departments list so non-production depts
   // (R&D, Warehousing, ...) show up even when they have zero hours, and
   // the row order matches Efficiency Overview (production first, in
@@ -3695,8 +3710,9 @@ function DepartmentLaborTab({
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const regularDays = Math.max(1, monthDays - holidays);
-      const regularRateSen = w.basicSalarySen / regularDays / stdHours;
-      const otBaseRateSen = w.basicSalarySen / monthDays / stdHours;
+      const effSalarySen = effSalaryOf(w);
+      const regularRateSen = effSalarySen / regularDays / stdHours;
+      const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
       const otTotalH = Math.max(0, totalH - stdHours);
@@ -3734,7 +3750,7 @@ function DepartmentLaborTab({
         estCostSen: Math.round(cell?.costSen ?? 0),
       };
     });
-  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter, holidayList]);
+  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf]);
 
   const totals = useMemo(() => {
     return rows.reduce(

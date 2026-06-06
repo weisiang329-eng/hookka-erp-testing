@@ -181,6 +181,60 @@ export function isSnapshotFresh(
 }
 
 // ---------------------------------------------------------------------------
+// In-isolate single-flight registry (stampede protection).
+//
+// When several requests all find the snapshot stale/cold for the SAME
+// (table, org, cacheKey) at once, only ONE runs computeFresh(); the others
+// await its result. This flattens the "five operators open the same dept
+// sheet at the same moment" spike that would otherwise fire five simultaneous
+// full recomputes at the DB — the overload ("爆") case. Scope is the Worker
+// isolate (module-global Map); best-effort across isolates, which is plenty at
+// our scale — an isolate routinely serves a burst of concurrent requests, and
+// that is exactly where a stampede would form.
+// ---------------------------------------------------------------------------
+const inFlightComputes = new Map<string, Promise<Record<string, unknown>>>();
+
+function flightKey(tableName: string, orgId: string, cacheKey: string): string {
+  return `${tableName}::${orgId}::${cacheKey}`;
+}
+
+// computeFresh() + write-back, single-flighted by flightKey. Concurrent callers
+// share one in-flight promise; the entry clears when it settles.
+async function computeAndStore<T extends Record<string, unknown>>(
+  db: D1Database,
+  config: SnapshotConfig,
+  orgId: string,
+  computeFresh: () => Promise<T>,
+  cacheKey: string,
+  currentMax: string | null,
+): Promise<T> {
+  const key = flightKey(config.tableName, orgId, cacheKey);
+  const existing = inFlightComputes.get(key);
+  if (existing) return existing as Promise<T>;
+  const p = (async () => {
+    const data = await computeFresh();
+    try {
+      await writeSnapshot(
+        db,
+        config,
+        orgId,
+        data,
+        currentMax ?? new Date().toISOString(),
+        cacheKey,
+      );
+    } catch (e) {
+      console.warn(`[${config.tableName}] write-back failed:`, e);
+    }
+    return data;
+  })();
+  inFlightComputes.set(key, p as Promise<Record<string, unknown>>);
+  void p.finally(() => {
+    inFlightComputes.delete(key);
+  });
+  return p;
+}
+
+// ---------------------------------------------------------------------------
 // High-level wrapper — the only function endpoint handlers normally need.
 //
 // Returns the payload. If the snapshot is fresh, returns the cached
@@ -197,16 +251,36 @@ export async function withSnapshot<T extends Record<string, unknown>>(
   orgId: string,
   computeFresh: () => Promise<T>,
   cacheKey: string = "",
-  // Optional Hono context — when supplied we emit cache.hit / cache.miss
-  // counters to Analytics Engine so the /admin/health dashboard can show
-  // a real cache hit ratio instead of the placeholder 0. Passing this is
-  // backwards-compatible (no-op when omitted).
-  c?: { env: unknown },
+  // Optional Hono context. Two uses, both backwards-compatible (no-op when
+  // omitted): (1) emit cache.hit / cache.miss counters to Analytics Engine;
+  // (2) `executionCtx.waitUntil` powers the serve-stale background refresh
+  // below. The `executionCtx` getter throws outside a Worker isolate (tests,
+  // local node), so we read it via optional chaining — those paths simply
+  // fall back to a synchronous recompute.
+  c?: {
+    env: unknown;
+    executionCtx?: { waitUntil(p: Promise<unknown>): void };
+  },
+  opts?: {
+    // Serve-stale-while-revalidate. When the snapshot is stale BUT a prior
+    // copy exists, return that copy immediately and refresh in the background
+    // (needs a Worker runtime for waitUntil). Removes the ~2-3s recompute wait
+    // from the read path — the lag ("卡") case. Opt-in per endpoint, so the
+    // brief one-revalidation staleness is only accepted where it's fine
+    // (production sheets, dashboards). Cold (no prior copy) still computes
+    // synchronously — we can't serve nothing.
+    staleWhileRevalidate?: boolean;
+    // Fired once after a background revalidation writes fresh data. The
+    // production list uses it to bump its KV-layer version so the edge cache
+    // stops serving the stale body it cached during the SWR window.
+    onRevalidated?: () => void | Promise<void>;
+  },
 ): Promise<T> {
   const [snap, currentMax] = await Promise.all([
     readSnapshot(db, config, orgId, cacheKey),
     getMaxSourceUpdatedAt(db, config),
   ]);
+
   if (isSnapshotFresh(snap, currentMax) && snap) {
     if (c) {
       try {
@@ -216,26 +290,63 @@ export async function withSnapshot<T extends Record<string, unknown>>(
     }
     return snap.data as T;
   }
+
   if (c) {
     try {
       const { emitCounter } = await import("./observability");
       emitCounter(c as never, "cache.miss", { resource: config.tableName });
     } catch { /* swallow */ }
   }
-  const data = await computeFresh();
-  try {
-    await writeSnapshot(
-      db,
-      config,
-      orgId,
-      data,
-      currentMax ?? new Date().toISOString(),
-      cacheKey,
-    );
-  } catch (e) {
-    console.warn(`[${config.tableName}] write-back failed:`, e);
+
+  // Serve-stale-while-revalidate: a stale-but-present snapshot + a Worker
+  // runtime → hand back the old copy now and refresh in the background. The
+  // refresh is single-flighted; only the request that actually starts it wires
+  // up waitUntil + onRevalidated (concurrent stale reads just serve the copy).
+  if (opts?.staleWhileRevalidate && snap) {
+    // The executionCtx getter throws outside a Worker isolate (tests, local
+    // node); guard so those paths fall through to a synchronous recompute
+    // rather than erroring.
+    let waitUntil: ((p: Promise<unknown>) => void) | undefined;
+    try {
+      const ctx = c?.executionCtx;
+      if (ctx?.waitUntil) waitUntil = ctx.waitUntil.bind(ctx);
+    } catch {
+      waitUntil = undefined;
+    }
+    if (waitUntil) {
+      const key = flightKey(config.tableName, orgId, cacheKey);
+      if (!inFlightComputes.has(key)) {
+        const refresh = computeAndStore(
+          db,
+          config,
+          orgId,
+          computeFresh,
+          cacheKey,
+          currentMax,
+        );
+        waitUntil(
+          refresh
+            .then(() => opts.onRevalidated?.())
+            .catch((e) =>
+              console.warn(`[${config.tableName}] revalidate failed:`, e),
+            ),
+        );
+      }
+      return snap.data as T;
+    }
   }
-  return data;
+
+  // Cold (no prior copy), SWR not enabled, or no Worker runtime → recompute
+  // synchronously, still single-flighted so concurrent cold reads don't
+  // stampede the DB.
+  return computeAndStore<T>(
+    db,
+    config,
+    orgId,
+    computeFresh,
+    cacheKey,
+    currentMax,
+  );
 }
 
 // ---------------------------------------------------------------------------

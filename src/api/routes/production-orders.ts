@@ -4516,14 +4516,27 @@ function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
 // version AND wipe the per-org snapshot rows so the next operator fetch
 // recomputes fresh — for EVERY scan dept (Fab Cut / Fab Sew / Upholstery /
 // Packing). Best-effort: never throws into the scan's success path.
+//
+// 2026-06-06: changed from DELETE to mark-stale (built_from = epoch) so the
+// serve-stale-while-revalidate read path keeps the prior copy to hand back
+// instantly instead of paying a cold recompute on the next operator open.
 async function invalidateProductionCachesAfterScan(
   c: Context<Env>,
 ): Promise<void> {
   try {
     const orgId = getOrgId(c);
     await bumpPoListCacheVersion(c, orgId);
+    // Mark the dept-sheet snapshots stale WITHOUT deleting them: keep the prior
+    // copy so the serve-stale-while-revalidate read path can hand it back
+    // instantly (no cold ~2-3s recompute) and refresh in the background.
+    // built_from = epoch forces isSnapshotFresh() false on the next read,
+    // regardless of the (mixed TEXT/TIMESTAMP) updated_at probe.
     await c.var.DB
-      .prepare(`DELETE FROM production_orders_list_snapshot WHERE org_id = ?`)
+      .prepare(
+        `UPDATE production_orders_list_snapshot
+            SET built_from = '1970-01-01T00:00:00.000Z'
+          WHERE org_id = ?`,
+      )
       .bind(orgId)
       .run();
   } catch (err) {
@@ -4684,6 +4697,16 @@ app.get("/", async (c) => {
         return { success: true, data, total: data.length };
       },
       snapshotCacheKey,
+      c,
+      {
+        // Serve-stale-while-revalidate: a stale dept sheet is returned
+        // instantly (no ~2-3s recompute wait) and refreshed in the background.
+        // onRevalidated bumps this endpoint's KV version when the refresh lands
+        // so the 60s edge cache stops serving the stale body it cached during
+        // the SWR window — next read picks up the fresh snapshot.
+        staleWhileRevalidate: true,
+        onRevalidated: () => bumpPoListCacheVersion(c, orgId),
+      },
     );
     const body = JSON.stringify(cached);
     if (cacheKeyForWrite && kvCache) {

@@ -207,6 +207,9 @@ type WorkerDayRow = {
   logged: number;
   expected: number;
   short: number;
+  /** RM value of the short hours at the worker's ÷working-days hourly rate
+   *  (what a Deduct would dock). Meaningful for "under" rows. */
+  shortValueSen: number;
   type: "absent" | "under" | "pending" | "ok";
 };
 type WorkerDayBreakdown = {
@@ -273,7 +276,7 @@ function WorkerDayDrillIn({
           </thead>
           <tbody>
             {breakdown.rows
-              .filter((d) => d.type !== "ok")
+              .filter((d) => d.type !== "ok" && d.type !== "absent")
               .map((d) => {
                 const chip =
                   d.type === "absent"
@@ -308,7 +311,7 @@ function WorkerDayDrillIn({
                       {d.type === "absent"
                         ? `−${formatRM(breakdown.perDayDeductionSen)}`
                         : d.type === "under"
-                          ? `${d.short.toFixed(1)} h`
+                          ? `${d.short.toFixed(1)} h · −${formatRM(d.shortValueSen)}`
                           : "— (recent)"}
                     </td>
                     {onAction && (
@@ -340,7 +343,7 @@ function WorkerDayDrillIn({
                   </tr>
                 );
               })}
-            {breakdown.rows.filter((d) => d.type !== "ok").length === 0 && (
+            {breakdown.rows.filter((d) => d.type !== "ok" && d.type !== "absent").length === 0 && (
               <tr>
                 <td colSpan={onAction ? 6 : 5} className="py-2 px-2 text-center text-[#9CA3AF]">
                   {emptyLabel}
@@ -6381,6 +6384,17 @@ function LaborCostTab({
       const perDayDeductionSen = w
         ? Math.round(w.basicSalarySen / (w.workingDaysPerMonth || 26))
         : 0;
+      // Hourly rate for valuing under-recorded short hours — ÷working-days basis
+      // (the same rate a Deduct docks): salary ÷ (working days − holidays) ÷ std.
+      const [hbY, hbM] = (period || from).slice(0, 7).split("-").map(Number);
+      const holidaysInPeriod =
+        hbY && hbM ? countPublicHolidaysInMonth(hbY, hbM, holidayList) : 0;
+      const costingHourlyRateSen =
+        w && w.basicSalarySen
+          ? w.basicSalarySen /
+            Math.max(1, (w.workingDaysPerMonth || 26) - holidaysInPeriod) /
+            Math.max(1, expected)
+          : 0;
       // Resigned workers: days AFTER their last day (resignedAt, inclusive) are
       // neither worked nor absent — they have left. Such days are skipped so the
       // breakdown never shows post-departure "absences".
@@ -6437,7 +6451,7 @@ function LaborCostTab({
         // Outside the employment window (before joining or after leaving) →
         // excluded (not absent, not short).
         if ((leftIso && date > leftIso) || (joinedIso && date < joinedIso)) {
-          return { date, logged, expected, short: 0, type: "ok" as const };
+          return { date, logged, expected, short: 0, shortValueSen: 0, type: "ok" as const };
         }
         const short = Math.max(0, expected - logged);
         totalShort += short;
@@ -6460,7 +6474,14 @@ function LaborCostTab({
         } else {
           type = "ok";
         }
-        return { date, logged, expected, short, type };
+        return {
+          date,
+          logged,
+          expected,
+          short,
+          shortValueSen: Math.round(short * costingHourlyRateSen),
+          type,
+        };
       });
       const absenceDeductionSen = absentDays * perDayDeductionSen;
       return {
@@ -6474,7 +6495,7 @@ function LaborCostTab({
         perDayDeductionSen,
       };
     },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList],
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from],
   );
 
   // Set of department codes the labor buckets cover (the 8 production depts +
@@ -6806,9 +6827,9 @@ function LaborCostTab({
                   <tr className="border-b border-[#E2DDD8]">
                     <td
                       className="py-1.5 pr-3 text-[#4B5563]"
-                      title="Absent days are docked at the standard daily rate, slightly less than a day's production value, so this small difference is paid time with no output. (Public-holiday cost is already absorbed into the day rate.)"
+                      title="Payroll docks an absent day at the standard ÷26 day rate, but production cost values a day at ÷working-days (after public holidays). This line is only that small rate difference — NOT a no-show deduction. Real absences are already deducted in Payroll."
                     >
-                      Non-productive paid (absence)
+                      Working-day rate adjustment
                     </td>
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(absencePaidAboveCostSen)}</td>
                   </tr>
@@ -6844,9 +6865,9 @@ function LaborCostTab({
             <p className="mt-3 text-xs text-[#6B7280] leading-relaxed">
               Production-floor labor is costed from logged Working Hours; salaries of staff who don&rsquo;t clock factory hours
               (office / sales / admin) and the company&rsquo;s EPF / SOCSO / EIS are added here so the breakdown reconciles to the
-              full payroll. &ldquo;Non-productive paid (absence)&rdquo; is the small extra paid on absent days &mdash; absence is docked at
-              the standard daily rate, slightly less than the day&rsquo;s production value, so the difference is paid time with no
-              output. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
+              full payroll. &ldquo;Working-day rate adjustment&rdquo; is only the small gap between the ÷26 pay rate and the
+              ÷working-days cost rate on absent days &mdash; NOT a no-show deduction (real absences are already deducted in
+              Payroll). Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
             </p>
           </div>
         )}

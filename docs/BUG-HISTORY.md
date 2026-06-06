@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-008 — Worker QR scan + production-sticker batch (real-device testing): 5 fixes
+
+**Status:** 🟢 Shipped + verified live (2026-06-06). Merged to main (671c223a — the 4; c1e728e4 — the twin); deploys green; production-page fixes verified on prod. The two worker-phone-scan fixes verified by code + 513 tests; final confirmation on owner's real-device scan.
+**Category:** production-orders
+
+Surfaced during Wei Siang's real-device testing of the worker QR scan portal. Five independent issues:
+
+1. **Fab Cut / Fab Sew "tapped Complete, still like this" (success-card crash).** scan-complete-dept (FAB_CUT) and scan-complete-shared (FAB_SEW) return `{deptCode, completedJcIds, completedCount, po}` with NO `jobCard` — the worker success card called `wipNameFor(undefined)` → threw, so the ✓ screen never rendered even though the DB completion succeeded. Fix (`worker/scan.tsx`): `jobCard: (data.data.jobCard) ?? ctx.jobCard`, `slot ?? 1`. Audited: only FAB_CUT/FAB_SEW hit a no-jobCard response; all other depts return jobCard.
+
+2. **"FG-FABCUT" sentinel leaked into the scan input box.** `setInput(primaryTerm)` showed the raw `FG-FAB_CUT` sentinel; fix shows the PO number for an FG-sentinel sticker.
+
+3. **"Show/Print Packing Stickers" ignored the grid filter.** `loadFoamPackingStickers` scoped by the parent `salesOrderId` (shared by sibling lines -01/-02/-03), so a grid filtered to one line emitted 9 stickers (all siblings). Fix: scope by per-line `poId`. Verified live: filtered to SO-2605-305-03 → exactly 3 stickers, all -03.
+
+4. **Foam packing-sticker preview auto-closed on every poll.** A reset `useEffect` keyed on the `gridFilteredDeptRows` array reference, which churns on every 20s poll / serve-stale revalidate (the SWR perf change worsened it). Fix: key on a stable sorted-poId signature (`foamScopeKey`). Verified live: preview stays open across a poll cycle.
+
+5. **Fab Sew QR preview auto-closed (twin of #4).** Same reference-churn bug on the Fab Cut tab's "Show QR" Fab Sew strip. Fix: key on `foamScopeKey`. Shipped separately (c1e728e4).
+
+**Verified live (prod):** Foam page renders with 0 console errors; "Show Packing Stickers" filtered to one SO returns exactly 3 stickers (no sibling leak); preview stays open across a poll. #1/#2 are worker-phone-scan paths — code-fixed + 513 tests green; owner to confirm on a real-device scan.
+
+---
+
 ## BUG-2026-06-06-007 — Effective-dated salary (mid-month raise, day-weighted) + "Idle" button → "Keep pay"
 
 **Status:** 🟢 Shipped + verified live (2026-06-06). Migration 0153 applied to prod (Supabase SQL editor, no-RLS like every table; `_migrations` tracker updated). Code deployed (759fe585); rename deployed separately (610c266f).

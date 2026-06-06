@@ -34,6 +34,30 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-001 — Shared Sew/Uph sticker now completes ONE compartment + ONE piece; Packing sticker scannable
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit ecebd973; Cloudflare Pages deploy green). Pre-ship: typecheck + 516 tests + production build clean. Live prod data verified (multi-compartment sofas with DISTINCT wip_keys per compartment; qty=2 Divan cards present). Final per-piece WRITE confirmation on the owner's real-device scan (the scan-complete path is worker-auth only — not pokeable via dashboard back-door).
+**Category:** production-orders
+
+The per-piece / per-compartment Fab-Sew / Upholstery stickers were already PRINTING (`generateSharedStickerData`, `wk=<wipKey>&p=<pieceNo>`) since the BUG-2026-06-06-008 session, but the SCAN side + backend were still on the old `FG-FAB_SEW` whole-dept sentinel. So a new `wk` sticker fell through to the multi-card chooser ("scan 了还来问是哪个东西") and one scan completed EVERY compartment of the dept at once (a sofa's BASE + CUSHION + ARMREST, or a bedframe's Divan + Headboard).
+
+**Backend (`scan-complete-shared`, additive + backward-compatible):**
+- accept `wipKey` → complete ONLY that compartment card (the Divan, not the Headboard; the BASE, not CUSHION + ARMREST) instead of every dept card on the PO.
+- accept `pieceNo` → bind ONLY that physical piece's slot; the card flips COMPLETED once every piece is scanned (qty=2 Divan = 2 stickers p=1 / p=2). Completion still judged over ALL `piece_pics` slots, so partial scans leave the card IN_PROGRESS.
+- per-compartment order protection: a compartment's Upholstery waits on its OWN Fabric Sewing (same wipKey), not the whole variant — a finished Divan can move to upholstery while the Headboard is still being sewn.
+- no `wipKey` / no `pieceNo` (older printed sticker) → unchanged whole-dept / all-piece fan-out, so stickers already on the floor still scan.
+
+**Frontend (`worker/scan.tsx`):**
+- `handleDecoded`: a `wk` sticker resolves the ONE matching compartment and shows it directly (never the chooser); displays the earliest-incomplete dept so the shown department matches what the Complete tap will finish.
+- `handleConfirmScan`: routes `wk` → `scan-complete-shared {workerId, wipKey, pieceNo}`; the ✓ card stamps the dept the SERVER actually completed (FAB_SEW vs UPHOLSTERY, resolved from the worker's section).
+- `Result` type carries `wipKey` through lookup → confirm → force re-post; `ScanCompleteEnvelope` gains `deptCode`.
+
+**Also shipped (same overhaul):** Packing / FG sticker now scannable for completion ("Packing 扫了没反应") — `/track` → `/worker/scan?op=FG-PACKING`; plus the qr-parser `p`/`t` fix for the shared sticker (markers were dropped on the `wk` branch).
+
+Keeps the explicit Complete tap (Wei Siang: "没事点 complete 才算 complete").
+
+---
+
 ## BUG-2026-06-06-008 — Worker QR scan + production-sticker batch (real-device testing): 5 fixes
 
 **Status:** 🟢 Shipped + verified live (2026-06-06). Merged to main (671c223a — the 4; c1e728e4 — the twin); deploys green; production-page fixes verified on prod. The two worker-phone-scan fixes verified by code + 513 tests; final confirmation on owner's real-device scan.

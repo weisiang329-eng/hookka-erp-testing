@@ -8,6 +8,7 @@
 import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { emitAudit } from "../lib/audit";
 import { hashPin } from "../lib/auth-utils";
 
@@ -959,6 +960,63 @@ app.post("/:id/salary-history", async (c) => {
     { success: true, data: { id: rowId, effectiveFrom, basicSalarySen: salarySen, note } },
     201,
   );
+});
+
+// GET /salary/effective?period=YYYY-MM — each worker's day-weighted effective
+// salary (sen) for the month, so the Labor Cost reconciliation rates match the
+// payslips (which use the same figure). Past months use their historical salary.
+// 2-segment path so it never collides with GET /:id.
+app.get("/salary/effective", async (c) => {
+  const denied = await requirePermission(c, "workers", "read");
+  if (denied) return denied;
+  const period = c.req.query("period") ?? "";
+  if (!/^\d{4}-\d{2}$/.test(period)) {
+    return c.json({ success: false, error: "period (YYYY-MM) required" }, 400);
+  }
+  const [y, m] = period.split("-").map(Number);
+  const phRow = await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string | null }>();
+  const publicHolidays = new Set<string>();
+  if (phRow?.value) {
+    try {
+      const parsed = JSON.parse(phRow.value);
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) if (typeof d === "string") publicHolidays.add(d);
+      }
+    } catch {
+      /* malformed → no holidays */
+    }
+  }
+  const wRes = await c.var.DB.prepare("SELECT id, basicSalarySen FROM workers")
+    .all<{ id: string; basicSalarySen: number }>();
+  const histByWorker = new Map<
+    string,
+    Array<{ effectiveFrom: string; basicSalarySen: number }>
+  >();
+  try {
+    const hRes = await c.var.DB.prepare(
+      "SELECT workerId, basicSalarySen, effectiveFrom FROM worker_salary_history",
+    ).all<{ workerId: string; basicSalarySen: number; effectiveFrom: string }>();
+    for (const r of hRes.results ?? []) {
+      const a = histByWorker.get(r.workerId) ?? [];
+      a.push({ effectiveFrom: r.effectiveFrom, basicSalarySen: Number(r.basicSalarySen) || 0 });
+      histByWorker.set(r.workerId, a);
+    }
+  } catch {
+    /* table not migrated yet → everyone falls back to their scalar */
+  }
+  const data: Record<string, number> = {};
+  for (const w of wRes.results ?? []) {
+    data[w.id] = effectiveSalarySenForMonth(
+      histByWorker.get(w.id) ?? [],
+      Number(w.basicSalarySen) || 0,
+      y,
+      m,
+      publicHolidays,
+    );
+  }
+  return c.json({ success: true, data });
 });
 
 // DELETE /:id/salary-history/:rowId — remove a dated row (undo a mis-entry),

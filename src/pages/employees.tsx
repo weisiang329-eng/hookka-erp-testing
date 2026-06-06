@@ -6078,6 +6078,25 @@ function LaborCostTab({
     [reconPayslipResp],
   );
 
+  // Each worker's day-weighted EFFECTIVE salary for the period (handles a
+  // mid-month / past raise) so the reconciliation rates match the payslips. With
+  // no salary changes this equals the current scalar, so it's a no-op until a
+  // raise is recorded. Falls back to the worker's scalar on miss.
+  const { data: effSalaryResp } = useCachedJson<{ data?: Record<string, number> }>(
+    payrollPeriod ? `/api/workers/salary/effective?period=${payrollPeriod}` : null,
+  );
+  const effSalaryByWorker = useMemo(() => {
+    const m = new Map<string, number>();
+    const d = effSalaryResp?.data ?? {};
+    for (const k of Object.keys(d)) m.set(k, Number(d[k]) || 0);
+    return m;
+  }, [effSalaryResp]);
+  const effSalaryOf = useCallback(
+    (w: { id: string; basicSalarySen: number }) =>
+      effSalaryByWorker.get(w.id) ?? w.basicSalarySen,
+    [effSalaryByWorker],
+  );
+
   // ---- Under-recorded review: docks + actions -----------------------------
   // Owner-applied short-hour docks for the month (the same table payslip
   // generation reads). Drives the "Docked this month" undo list below.
@@ -6230,11 +6249,14 @@ function LaborCostTab({
       if (!w || !w.basicSalarySen) continue;
       // Per-worker rates — OT threshold, hours/day and days/month all come
       // from this worker's own Employee Master figures (no hard-coded 9 h).
+      // Salary = the month's EFFECTIVE (day-weighted) figure so the rate matches
+      // the payslip after a raise (no-op when the salary never changed).
+      const effSalarySen = effSalaryOf(w);
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const regularDays = Math.max(1, monthDays - holidays);
-      const regularRateSen = w.basicSalarySen / regularDays / stdHours;
-      const otBaseRateSen = w.basicSalarySen / monthDays / stdHours;
+      const regularRateSen = effSalarySen / regularDays / stdHours;
+      const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
       const otTotalH = Math.max(0, totalH - stdHours);
@@ -6293,7 +6315,7 @@ function LaborCostTab({
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter, holidayList]);
+  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter, holidayList, effSalaryOf]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
@@ -6472,8 +6494,9 @@ function LaborCostTab({
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const regularDays = Math.max(1, monthDays - holidays);
-      const regularRateSen = w.basicSalarySen / regularDays / stdHours;
-      const otBaseRateSen = w.basicSalarySen / monthDays / stdHours;
+      const effSalarySen = effSalaryOf(w);
+      const regularRateSen = effSalarySen / regularDays / stdHours;
+      const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
       const otTotalH = Math.max(0, totalH - stdHours);
@@ -6488,7 +6511,7 @@ function LaborCostTab({
       out.set(workerId, (out.get(workerId) ?? 0) + dayValue);
     }
     return out;
-  }, [entriesResp, workersById, period, from, holidayList]);
+  }, [entriesResp, workersById, period, from, holidayList, effSalaryOf]);
 
   // Per-(worker, date) logged HOURS — used by the per-worker drill-in so the
   // owner can see which DAY each worker's hours weren't recorded. This is a
@@ -6537,10 +6560,12 @@ function LaborCostTab({
     (workerId: string): WorkerDayBreakdown => {
       const w = workersById.get(workerId);
       const expected = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      // Salary = the month's EFFECTIVE (day-weighted) figure, matching payroll.
+      const effSalarySen = w ? effSalaryOf(w) : 0;
       // Per-day salary deduction for a full no-show: one day's basic pay
-      // (basicSalarySen ÷ working days per month, default 26 days).
+      // (salary ÷ working days per month, default 26 days).
       const perDayDeductionSen = w
-        ? Math.round(w.basicSalarySen / (w.workingDaysPerMonth || 26))
+        ? Math.round(effSalarySen / (w.workingDaysPerMonth || 26))
         : 0;
       // Hourly rate for valuing under-recorded short hours — ÷working-days basis
       // (the same rate a Deduct docks): salary ÷ (working days − holidays) ÷ std.
@@ -6548,8 +6573,8 @@ function LaborCostTab({
       const holidaysInPeriod =
         hbY && hbM ? countPublicHolidaysInMonth(hbY, hbM, holidayList) : 0;
       const costingHourlyRateSen =
-        w && w.basicSalarySen
-          ? w.basicSalarySen /
+        w && effSalarySen
+          ? effSalarySen /
             Math.max(1, (w.workingDaysPerMonth || 26) - holidaysInPeriod) /
             Math.max(1, expected)
           : 0;
@@ -6653,7 +6678,7 @@ function LaborCostTab({
         perDayDeductionSen,
       };
     },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from],
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf],
   );
 
   // Set of department codes the labor buckets cover (the 8 production depts +
@@ -6717,8 +6742,9 @@ function LaborCostTab({
       // Indicative value of the missing hours at the worker's regular rate.
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const regularDays = Math.max(1, monthDays - holidays);
-      const regularRateSen = w.basicSalarySen
-        ? w.basicSalarySen / regularDays / stdHours
+      const effSalarySen = effSalaryOf(w);
+      const regularRateSen = effSalarySen
+        ? effSalarySen / regularDays / stdHours
         : 0;
       const dept = deptByCode.get(w.departmentCode);
       out.push({
@@ -6747,6 +6773,7 @@ function LaborCostTab({
     period,
     from,
     holidayList,
+    effSalaryOf,
   ]);
 
   // Classify every active worker with a payslip into one of the two lists.

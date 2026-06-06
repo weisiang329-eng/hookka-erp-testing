@@ -11,8 +11,10 @@
 //
 // Camera path (primary):
 //   - Tap "Scan QR" → open an in-page full-screen camera overlay
-//     driven by getUserMedia. Each frame runs through jsQR; on first
-//     decode we auto-submit and close the overlay. Feels instant.
+//     driven by getUserMedia. Frames go through the phone's native
+//     BarcodeDetector when present (Android Chrome — fast, reads small /
+//     blurry stickers), else a jsQR fallback (iOS Safari). On first decode
+//     we auto-submit and close the overlay. Feels instant.
 //     Requires HTTPS on non-localhost origins (see vite.config).
 //   - "Upload photos" picks ONE OR MANY images from the gallery. Files
 //     are queued and decoded one at a time; after each scan-complete
@@ -527,17 +529,38 @@ export default function WorkerScanPage() {
     if (liveScanning) return;
     setResult({ kind: "idle" });
     try {
-      // Prefer the rear camera. Keep resolution modest so decode stays
-      // fast on low-end phones.
+      // Prefer the rear camera. Ask for a sharp feed (1080p) — small or
+      // arm's-length QR stickers need the extra detail to lock on. The
+      // native detector handles full-res fine, and the jsQR fallback
+      // downscales from a sharper source than before.
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
         audio: false,
       });
       streamRef.current = stream;
+      // Best-effort: ask the camera for continuous autofocus. A big reason a
+      // QR "won't scan" is the lens sitting at a fixed focus so the sticker
+      // stays blurry — continuous AF keeps it sharp as the worker moves the
+      // phone. Silently ignored on hardware/browsers that don't expose it.
+      try {
+        const track = stream.getVideoTracks()[0];
+        const caps = track?.getCapabilities?.() as
+          | (MediaTrackCapabilities & { focusMode?: string[] })
+          | undefined;
+        if (caps?.focusMode && caps.focusMode.includes("continuous")) {
+          await track.applyConstraints({
+            advanced: [
+              { focusMode: "continuous" } as unknown as MediaTrackConstraintSet,
+            ],
+          });
+        }
+      } catch {
+        /* focus tuning is a nicety, never block the scan on it */
+      }
       setLiveScanning(true);
       // Video element attach + RAF loop happens in the effect below.
     } catch {
@@ -563,50 +586,91 @@ export default function WorkerScanPage() {
     }
     const canvas = scanCanvasRef.current;
 
+    // Primary path: the phone's native, hardware-accelerated QR detector
+    // (Android Chrome). It reads small / angled / slightly-blurred stickers
+    // straight off the live <video> — the cases where jsQR struggles. We
+    // fall back to jsQR (iOS Safari, older browsers) when it's absent, or
+    // mid-session if a device exposes it but throws on detect.
+    let nativeDetector: BarcodeDetectorLike | null = null;
+    if (typeof window !== "undefined" && window.BarcodeDetector) {
+      try {
+        nativeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+      } catch {
+        nativeDetector = null;
+      }
+    }
+
     let stopped = false;
     let lastDecode = 0;
-    const THROTTLE_MS = 120; // ~8 decodes / second
+    // Native detect is cheap → scan more often (~16/s); jsQR is heavier (~11/s).
+    const THROTTLE_MS = nativeDetector ? 60 : 90;
 
-    const tick = () => {
+    const onHit = (data: string) => {
+      if (stopped || !data) return;
+      stopped = true;
+      stopLiveScan();
+      void handleDecoded(data);
+    };
+
+    const tick = async () => {
       if (stopped) return;
       const now = performance.now();
-      if (now - lastDecode >= THROTTLE_MS && video.videoWidth > 0 && video.readyState >= 2) {
+      if (
+        now - lastDecode >= THROTTLE_MS &&
+        video.videoWidth > 0 &&
+        video.readyState >= 2
+      ) {
         lastDecode = now;
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-        // Downscale so jsQR doesn't chew on 1280x720 every tick.
-        const scale = Math.min(1, 640 / Math.max(vw, vh));
-        const cw = Math.max(1, Math.round(vw * scale));
-        const ch = Math.max(1, Math.round(vh * scale));
-        canvas.width = cw;
-        canvas.height = ch;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, cw, ch);
-          let imageData: ImageData | null = null;
+        if (nativeDetector) {
           try {
-            imageData = ctx.getImageData(0, 0, cw, ch);
-          } catch {
-            // CORS-tainted canvas — shouldn't happen with local video,
-            // but guard anyway so the loop doesn't die.
-            imageData = null;
-          }
-          if (imageData) {
-            const code = jsQR(imageData.data, cw, ch, {
-              inversionAttempts: "dontInvert",
-            });
-            if (code && code.data) {
-              stopped = true;
-              stopLiveScan();
-              void handleDecoded(code.data);
+            const codes = await nativeDetector.detect(video);
+            if (stopped) return;
+            if (codes.length > 0 && codes[0].rawValue) {
+              onHit(codes[0].rawValue);
               return;
+            }
+          } catch {
+            // Exposed but flaky — drop to jsQR for the rest of the session.
+            nativeDetector = null;
+          }
+        } else {
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          // Keep more detail than before (960px vs 640px) so small stickers
+          // held at arm's length still resolve their finder patterns.
+          const scale = Math.min(1, 960 / Math.max(vw, vh));
+          const cw = Math.max(1, Math.round(vw * scale));
+          const ch = Math.max(1, Math.round(vh * scale));
+          canvas.width = cw;
+          canvas.height = ch;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, cw, ch);
+            let imageData: ImageData | null = null;
+            try {
+              imageData = ctx.getImageData(0, 0, cw, ch);
+            } catch {
+              // CORS-tainted canvas — shouldn't happen with local video,
+              // but guard anyway so the loop doesn't die.
+              imageData = null;
+            }
+            if (imageData) {
+              // attemptBoth also reads inverted (light-on-dark) prints; the
+              // small extra cost is worth the higher hit rate on a phone.
+              const code = jsQR(imageData.data, cw, ch, {
+                inversionAttempts: "attemptBoth",
+              });
+              if (code && code.data) {
+                onHit(code.data);
+                return;
+              }
             }
           }
         }
       }
-      rafRef.current = requestAnimationFrame(tick);
+      rafRef.current = requestAnimationFrame(() => void tick());
     };
-    rafRef.current = requestAnimationFrame(tick);
+    rafRef.current = requestAnimationFrame(() => void tick());
 
     return () => {
       stopped = true;
@@ -1308,8 +1372,9 @@ export default function WorkerScanPage() {
       {/* ==========================================================
           LIVE CAMERA OVERLAY
           Full-viewport camera feed with a transparent aiming frame.
-          Frames are sampled ~8×/sec by the RAF loop above; first jsQR
-          hit closes the overlay and auto-submits via handleDecoded.
+          Frames are sampled ~16×/sec (native) or ~11×/sec (jsQR) by the RAF
+          loop above; the first decode closes the overlay and auto-submits
+          via handleDecoded.
           ========================================================== */}
       {liveScanning && (
         <div className="fixed inset-0 z-50 bg-black flex flex-col">

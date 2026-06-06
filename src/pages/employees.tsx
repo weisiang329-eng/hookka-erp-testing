@@ -6542,7 +6542,7 @@ function LaborCostTab({
                     <td className="py-1.5 pr-3 text-[#4B5563]">
                       {employeeResidual.nonProductionStaff.length > 0
                         ? "Non-production salary (office / sales / admin)"
-                        : "Unbucketed salary (net balancing)"}
+                        : "Under-recorded hours (paid, not yet logged)"}
                     </td>
                     <td className={`py-1.5 text-right tabular-nums font-medium ${nonProductionSalarySen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
                       {formatCurrency(nonProductionSalarySen)}

@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-003 — Labor Cost ↔ Payroll: absence rated ÷26 (payroll) vs ÷working-days (cost) left a ~RM3/absent-day artifact masking the real under-recorded total
+
+**Status:** 🟢 Fixed (2026-06-06) — shipped to prod (347bedeb + relabel); May payslips regenerated; verified live: residual now equals under-recorded hours exactly (RM469.81 = per-department roll-up = per-worker gaps); Total Payroll Cost RM62,657.25 = Payroll Gross + employer.
+**Category:** payroll-reporting
+
+**Symptom:** Owner expects Labor Cost, Department Labor and Payroll to tally for a month, with the ONLY gap being under-recorded hours (a worker who came but logged < a full day — payroll doesn't deduct, but Labor doesn't add that cost either). Instead the "net balancing" residual was a small RM36 that didn't match the per-worker under-recorded list (~RM470).
+
+**Root cause:** Payroll deducted an absent day at salary÷26 (`workingDaysPerMonth`), but Labor Cost removes an unworked day at salary÷(working days − holidays) = ÷24 for May (2 public holidays). So each absent day left a ~RM3 artifact (salary × (1/24 − 1/26)) in the residual that was NOT under-recording — and it OFFSET the real under-recording, masking it down to RM36. (`src/lib/labor-engine.ts` — payroll used `payrollDailyRateSen` ÷26 for absence + part-month proration.)
+
+**Fix:** `src/lib/labor-engine.ts` — absence deduction AND part-month proration now use the WORKING-DAYS divisor (`costingDailyRateSen`, the same one cost uses), so an absent / part-month worker's basic-earned equals the production-cost figure exactly. OT stays ÷26 (already matched the OT cost figure). `src/pages/employees.tsx` — relabelled the now-pure residual line "Under-recorded hours (paid, not yet logged)". Changes a real payslip figure (absent workers docked ÷working-days, slightly more than ÷26); May regenerated to apply. Engine unit test updated; full suite 506/0.
+
+**Verified:** live May 2026 after regenerate — residual RM469.81 = By-department roll-up (Framing 242.01 + Upholstery 199.30 + Fabric Cutting 18.98 + Wood Cutting 9.49) = per-worker gaps; Total Payroll Cost 62,657.25 reconciles to Payroll.
+
+---
+
 ## BUG-2026-06-06-002 — Payroll table columns didn't add up (Basic − Absence + OT ≠ Gross): part-month proration was hidden
 
 **Status:** 🟢 Fixed (2026-06-06) — shipped to prod (bd69d030); deploy green; verified live (May 2026: Basic 61,900.00 − Absence 1,498.09 − Part-month 2,917.30 + OT 4,364.43 = Gross 61,849.04).

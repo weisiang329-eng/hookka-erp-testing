@@ -465,17 +465,23 @@ export default function WorkerScanPage() {
       setRackChoice("");
       setRackSaved(false);
       try {
-        // Merged FG-level sticker (e.g. FG-FAB_CUT) — opId is a dept
-        // sentinel, not a real jc id, so findMatches by opId would come
-        // back empty. Jump straight to the PO lookup, filtered by the
-        // dept embedded in the sentinel, and swap the match's jobCard id
-        // to the sentinel so downstream scan-complete routes to the
-        // fan-out endpoint.
+        // Merged FG-level sticker — opId is a dept sentinel, not a real jc id,
+        // so findMatches by opId would be empty. Jump to the PO lookup filtered
+        // by the dept embedded in the sentinel. FAB_CUT / FAB_SEW swap the
+        // match's jobCard id to the sentinel so it routes to the fan-out
+        // endpoints (scan-complete-dept / -shared). Any OTHER FG sticker (e.g.
+        // FG-PACKING on the finished-good packing label) KEEPS its real jc id
+        // so it routes to the normal per-piece /scan-complete (and the PACKING
+        // success card shows the rack picker).
         const fgMatch = /^FG-([A-Z_]+)$/.exec(primaryTerm);
+        const isFanoutSentinel =
+          fgMatch?.[1] === "FAB_CUT" || fgMatch?.[1] === "FAB_SEW";
         let matches = fgMatch && parsed?.poNo
           ? (await findMatches(parsed.poNo, fgMatch[1])).map((m) => ({
               ...m,
-              jobCard: { ...m.jobCard, id: primaryTerm },
+              jobCard: isFanoutSentinel
+                ? { ...m.jobCard, id: primaryTerm }
+                : m.jobCard,
             }))
           : await findMatches(primaryTerm, deptHint);
         if (matches.length === 0 && parsed?.poNo && parsed.poNo !== primaryTerm && !fgMatch) {

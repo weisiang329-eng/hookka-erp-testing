@@ -7490,7 +7490,7 @@ export default function ProductionPage({
                         <div className="mt-auto pt-1 border-t border-dashed border-black flex items-end gap-1">
                           <QRImg
                             eager
-                            data={typeof window !== "undefined" ? `${window.location.origin}/track?s=${encodeURIComponent(s.unitSerial)}` : ""}
+                            data={typeof window !== "undefined" ? `${window.location.origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}` : ""}
                             size={pillowPair ? 60 : 80}
                             alt="FG QR"
                             className="block"
@@ -7516,7 +7516,7 @@ export default function ProductionPage({
                             <div className="text-center min-w-0">
                               <QRImg
                                 eager
-                                data={typeof window !== "undefined" ? `${window.location.origin}/track?s=${encodeURIComponent(pillowPair.unitSerial)}` : ""}
+                                data={typeof window !== "undefined" ? `${window.location.origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(pillowPair.poNo)}&p=${pillowPair.pieceNo}&t=${pillowPair.totalPieces}` : ""}
                                 size={50}
                                 alt="Pillow QR"
                                 className="block"
@@ -7654,7 +7654,11 @@ export default function ProductionPage({
                     typeof window !== "undefined" && window.location?.origin
                       ? window.location.origin
                       : "";
-                  const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
+                  // FG/packing sticker QR = a worker-scan completion code (Wei Siang
+                  // 2026-06-06: the /track tracking page isn't used; this sticker
+                  // is scanned at Packing to mark the unit done + assign a rack).
+                  // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
+                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}`;
                   // Wei Siang 2026-05-15: drop the parent customer name
                   // when a hub is set — "Houzs Century (Houzs KL)" wrapped
                   // to two lines on the 100mm-wide sticker and ate too
@@ -8117,7 +8121,11 @@ export default function ProductionPage({
                 typeof window !== "undefined" && window.location?.origin
                   ? window.location.origin
                   : "";
-              const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
+              // FG/packing sticker QR = a worker-scan completion code (Wei Siang
+                  // 2026-06-06: the /track tracking page isn't used; this sticker
+                  // is scanned at Packing to mark the unit done + assign a rack).
+                  // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
+                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}`;
               // Hub-only when set — see on-screen tile comment above.
               const customerLine = s.customerHub || s.customerName;
               // Legs / Pillow render INSIDE their primary's print page —

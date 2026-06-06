@@ -186,7 +186,7 @@ test("computeMonthlyLabor: full attendance — payroll gross equals production c
 
 // ── computeMonthlyLabor: ANN, absent 2 days ─────────────────────────────────
 
-test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷26", () => {
+test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷ working-days (reconciles with cost)", () => {
   // Drop the first two 8 h days → 22 days present, still 15 h OT.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
@@ -198,10 +198,15 @@ test("computeMonthlyLabor: ANN absent 2 days — payroll deducts ÷26", () => {
   });
   assert.equal(r.daysWorked, 22);
   assert.equal(r.payroll.absentDays, 2);
-  // 2 × 265000/26 = 20384.62 → 20385 sen.
-  assert.equal(r.payroll.absenceDeductionSen, 20_385);
-  assert.equal(r.payroll.basicEarnedSen, 244_615); // RM2,446.15
-  assert.equal(r.payroll.grossSen, 273_281); // 244615 + 28666 → RM2,732.81
+  // Absence now uses the WORKING-DAYS divisor (26 − 2 holidays = 24), the same
+  // rate cost removes per unworked day: 2 × 265000/24 = 22083.33 → 22083 sen.
+  assert.equal(r.payroll.absenceDeductionSen, 22_083);
+  assert.equal(r.payroll.basicEarnedSen, 242_917); // 265000 − 22083 → RM2,429.17
+  assert.equal(r.payroll.grossSen, 271_583); // 242917 + 28666 (OT, ÷26) → RM2,715.83
+  // The whole point of the ÷ working-days change: an absent worker's basic
+  // earned now equals the production-cost regular figure, so payroll reconciles
+  // with Labor Cost (leaving only under-recorded hours as the gap).
+  assert.equal(r.payroll.basicEarnedSen, r.cost.regularCostSen);
 });
 
 test("computeMonthlyLabor: ANN absent 2 days — production cost is days-worked based", () => {

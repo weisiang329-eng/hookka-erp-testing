@@ -326,8 +326,13 @@ export function computeMonthlyLabor(
     month,
     publicHolidays,
   );
-  // Payroll: ÷ nominal working days (26). Production cost: ÷ working days
-  // left after public holidays — clamped to ≥1 so it never divides by 0.
+  // Two divisors. OT is rated on the nominal working-days basis (÷26). Absence,
+  // part-month proration AND production cost all use the WORKING-DAYS divisor
+  // (working days − public holidays) so a day missed — or a part-month day —
+  // docks EXACTLY what labor cost removes. Payroll then reconciles with Labor
+  // Cost, leaving only under-recorded hours (came but logged < a full day) as the
+  // residual. [Owner decision 2026-06-06: unify absence onto ÷ working-days.]
+  // Clamped to ≥1 so it never divides by 0.
   const costingDivisor = Math.max(1, workingDaysPerMonth - holidaysInMonth);
 
   const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth;
@@ -358,14 +363,16 @@ export function computeMonthlyLabor(
   // can't make absences negative or inflate prorated pay.
   const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
   const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
-  const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
+  // Absence docks the WORKING-DAYS day rate (÷ working days − holidays), the same
+  // rate labor cost removes for an unworked day, so the two reconcile exactly.
+  const absenceDeductionSen = Math.round(absentDays * costingDailyRateSen);
   // Full-month worker → entitled to the FULL monthly salary, minus absences.
   // Partial-month worker (joined and/or resigned mid-month) → entitled only to
   // the days actually served (days worked × daily rate); days outside their
   // employment window are simply unpaid, NOT charged as absence.
   // prorateToService selects between the two.
   const basicEarnedSen = input.prorateToService
-    ? Math.round(workedWithinWindow * payrollDailyRateSen)
+    ? Math.round(workedWithinWindow * costingDailyRateSen)
     : Math.max(0, basicSalarySen - absenceDeductionSen);
   const otPaySen = Math.round(otHours * otHourlyRateSen);
   const grossSen = basicEarnedSen + otPaySen;

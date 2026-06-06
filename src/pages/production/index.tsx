@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData, generateSharedStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -3556,13 +3556,15 @@ export default function ProductionPage({
       // cutting-recipe panel count), NOT qty (the order quantity, always
       // 1). See BUG-2026-06-01-001: qty used to carry the piece count;
       // it now carries order quantity, so the piece count moved here.
-      // Sentinel depts (FAB_CUT/FAB_SEW) are ONE sticker per variant — a single
-      // scan completes the whole variant, so no per-piece fan-out here; the
-      // displayQty below still shows the total piece count on that one sticker.
-      // (Wei Siang 2026-06-03 supersedes the 2026-05-15 per-piece fan-out for
-      // these two depts only; every other dept keeps the per-piece stickers.)
+      // FAB_CUT stays ONE sticker per variant (one worker cuts the whole
+      // variant — Wei Siang 2026-06-03). FAB_SEW now fans out PER PIECE like
+      // every other dept (Wei Siang 2026-06-06: a qty-2 Divan = 2 Fab Sew
+      // stickers, scan each to complete that piece). The shared FG-FAB_SEW
+      // sentinel is kept (one sticker still serves both Sewing and Upholstery —
+      // the completing dept is decided by who scans, and pieceNo flows in the
+      // QR p=/t= so the backend completes just the scanned piece).
       const pieceCount =
-        activeTab === "FAB_SEW" || activeTab === "FAB_CUT"
+        activeTab === "FAB_CUT"
           ? 1
           : Math.max(1, row.piecesToCut || 1);
       const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
@@ -3603,14 +3605,27 @@ export default function ProductionPage({
           specialOrder: row.specialOrder || "",
           pieceNo: p,
           totalPieces: pieceCount,
-          qrPayload: generateStickerData(
-            order.poNo,
-            activeTab,
-            opId,
-            "/worker/scan",
-            pieceCount > 1 ? p : undefined,
-            pieceCount > 1 ? pieceCount : undefined,
-          ),
+          // FAB_SEW = the SHARED Sew/Uph sticker: encode the compartment id
+          // (wk=wipKey) + piece so the scanner completes JUST this piece for
+          // whichever dept the scanning worker belongs to. Falls back to the
+          // FG-FAB_SEW sentinel (whole-dept) only if the row has no wipKey.
+          qrPayload:
+            activeTab === "FAB_SEW" && row.wipKey
+              ? generateSharedStickerData(
+                  order.poNo,
+                  row.wipKey,
+                  "/worker/scan",
+                  pieceCount > 1 ? p : undefined,
+                  pieceCount > 1 ? pieceCount : undefined,
+                )
+              : generateStickerData(
+                  order.poNo,
+                  activeTab,
+                  opId,
+                  "/worker/scan",
+                  pieceCount > 1 ? p : undefined,
+                  pieceCount > 1 ? pieceCount : undefined,
+                ),
         });
       }
     }
@@ -3708,12 +3723,12 @@ export default function ProductionPage({
         ) {
           continue;
         }
-        // FAB_SEW variant sticker — sentinel opId so a scan fans out to
-        // scan-complete-dept (completes base+cushion+armrest of this variant in
-        // one scan). One sticker per variant; no per-piece fan-out. Mirrors the
-        // FAB_SEW branch of onScreenStickers. (Wei Siang 2026-06-03)
+        // FAB_SEW shared sticker — sentinel opId (one sticker serves both
+        // Sewing and Upholstery; completing dept decided by who scans). Fans
+        // out PER PIECE (Wei Siang 2026-06-06), mirroring the FAB_SEW branch of
+        // onScreenStickers — a qty-2 Divan = 2 stickers, scan each.
         const opId = "FG-FAB_SEW";
-        const pieceCount = 1;
+        const pieceCount = Math.max(1, row.piecesToCut || 1);
         const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
         // BASE on FAB_SEW shows the variant-qualified product code as the WIP
         // label (e.g. "5540-1A(LHF)"), not the long fabric-encoded string —
@@ -3748,14 +3763,25 @@ export default function ProductionPage({
             specialOrder: row.specialOrder || "",
             pieceNo: p,
             totalPieces: pieceCount,
-            qrPayload: generateStickerData(
-              order.poNo,
-              "FAB_SEW",
-              opId,
-              "/worker/scan",
-              pieceCount > 1 ? p : undefined,
-              pieceCount > 1 ? pieceCount : undefined,
-            ),
+            // Shared Sew/Uph sticker: encode compartment id (wk) + piece so a
+            // scan completes just this piece for the scanner's dept. Falls back
+            // to the FG-FAB_SEW sentinel (whole-dept) only without a wipKey.
+            qrPayload: row.wipKey
+              ? generateSharedStickerData(
+                  order.poNo,
+                  row.wipKey,
+                  "/worker/scan",
+                  pieceCount > 1 ? p : undefined,
+                  pieceCount > 1 ? pieceCount : undefined,
+                )
+              : generateStickerData(
+                  order.poNo,
+                  "FAB_SEW",
+                  opId,
+                  "/worker/scan",
+                  pieceCount > 1 ? p : undefined,
+                  pieceCount > 1 ? pieceCount : undefined,
+                ),
           });
         }
       }

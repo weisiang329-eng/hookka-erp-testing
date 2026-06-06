@@ -844,7 +844,12 @@ export default function WorkerScanPage() {
             : `/api/production-orders/${ctx.order.id}/scan-complete`;
       const payload =
         fgDept === "FAB_SEW"
-          ? { workerId, ...(opts?.force ? { force: true } : {}) }
+          ? {
+              workerId,
+              // per-piece: which physical piece this sticker is (from QR p=)
+              pieceNo: ctx.piece?.pieceNo,
+              ...(opts?.force ? { force: true } : {}),
+            }
           : fgDept
             ? { deptCode: fgDept, workerId, ...(opts?.force ? { force: true } : {}) }
             : {

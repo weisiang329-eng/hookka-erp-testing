@@ -398,6 +398,11 @@ export const buildBaseRows = (
           ? (o.productCode || "").split("-")[0]
           : (o.productCode || ""),
         productCode: o.productCode || "",
+        // Compartment id — links a piece's FAB_SEW & UPHOLSTERY job cards (they
+        // share a wipKey, differ only by departmentCode). Carried onto the row
+        // so the per-compartment shared Sew/Uph sticker can encode it (wk=) and
+        // the scanner completes just that piece, not the whole order.
+        wipKey: jc.wipKey || "",
         wip: jc.wipLabel || jc.wipCode || (() => {
           // Derive WIP code from PO data when job card doesn't carry it
           if (o.itemCategory === "BEDFRAME") {

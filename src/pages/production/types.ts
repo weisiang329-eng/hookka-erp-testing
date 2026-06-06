@@ -151,6 +151,11 @@ export type DeptRow = {
   // they're sewing (1A LHF / 2A RHF / etc.), not just the bare base
   // model number.
   productCode: string;
+  // Compartment id (job_cards.wipKey) — links this piece's FAB_SEW &
+  // UPHOLSTERY cards (same wipKey, differ only by departmentCode). Drives the
+  // per-compartment shared Sew/Uph sticker (wk=) so a scan completes just this
+  // piece. Empty string when the card carries no wipKey.
+  wipKey: string;
   wip: string;
   category: string;     // SOFA / BEDFRAME / ACCESSORY (from PO/SO item)
   wipType: string;      // DIVAN / HEADBOARD / SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST

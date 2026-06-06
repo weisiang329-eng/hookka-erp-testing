@@ -235,6 +235,15 @@ export type MonthlyLaborInput = {
    * worker employed the whole month.
    */
   prorateToService?: boolean;
+  /**
+   * Hours the owner has explicitly docked from this worker this month, set per
+   * day from the Labor Cost "Under-recorded hours" review when the short time is
+   * NOT to be paid (it was neither a data-entry miss to backfill nor idle-but-
+   * paid standby). Valued at the worker's ÷working-days hourly rate and
+   * subtracted from basic earned, so the under-recorded gap closes and Payroll
+   * reconciles with Labor Cost. Default 0.
+   */
+  shortHourDeductionHours?: number;
 };
 
 /** What one worker's month costs and earns. All money fields in sen. */
@@ -261,7 +270,9 @@ export type MonthlyLaborResult = {
     absentDays: number;
     /** Money docked for those absent days. */
     absenceDeductionSen: number;
-    /** Basic pay actually earned = full salary − absence deduction. */
+    /** Money docked for owner-flagged unworked hours (under-recorded review). */
+    shortHourDeductionSen: number;
+    /** Basic pay actually earned = full salary − absence − short-hour dock. */
     basicEarnedSen: number;
     /** Overtime pay. */
     otPaySen: number;
@@ -373,14 +384,27 @@ export function computeMonthlyLabor(
   // day; the difference is reconciled as "non-productive paid (absence)" on the
   // Labor Cost screen, not left in the under-recorded residual.
   const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
+  // Owner-flagged unworked hours (under-recorded review) are valued at the
+  // worker's ÷working-days hourly rate and docked from basic earned, so the
+  // worker's pay drops by exactly the production value Labor Cost never credited
+  // → their under-recorded gap closes.
+  const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
+  const shortHourDeductionSen =
+    workingHoursPerDay > 0
+      ? Math.round(shortHourDeductionHours * (costingDailyRateSen / workingHoursPerDay))
+      : 0;
   // Full-month worker → entitled to the FULL monthly salary, minus absences.
   // Partial-month worker (joined and/or resigned mid-month) → entitled only to
   // the days actually served (days worked × daily rate); days outside their
   // employment window are simply unpaid, NOT charged as absence.
-  // prorateToService selects between the two.
-  const basicEarnedSen = input.prorateToService
-    ? Math.round(workedWithinWindow * costingDailyRateSen)
-    : Math.max(0, basicSalarySen - absenceDeductionSen);
+  // prorateToService selects between the two; either way the owner's explicit
+  // short-hour dock is then subtracted.
+  const basicEarnedSen = Math.max(
+    0,
+    (input.prorateToService
+      ? Math.round(workedWithinWindow * costingDailyRateSen)
+      : Math.max(0, basicSalarySen - absenceDeductionSen)) - shortHourDeductionSen,
+  );
   const otPaySen = Math.round(otHours * otHourlyRateSen);
   const grossSen = basicEarnedSen + otPaySen;
 
@@ -401,6 +425,7 @@ export function computeMonthlyLabor(
       fullSalarySen: basicSalarySen,
       absentDays,
       absenceDeductionSen,
+      shortHourDeductionSen,
       basicEarnedSen,
       otPaySen,
       grossSen,

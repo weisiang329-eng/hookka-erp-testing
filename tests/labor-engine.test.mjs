@@ -237,6 +237,25 @@ test("computeMonthlyLabor: part-month prorate uses ÷working-days (matches cost)
   assert.equal(r.payroll.basicEarnedSen, r.cost.regularCostSen);
 });
 
+test("computeMonthlyLabor: short-hour deduction docks ÷working-days hourly from earned", () => {
+  // ANN full attendance, but the owner docks 5 unworked hours (under-recorded
+  // review). ÷working-days hourly = 265000/24/8 = 1380.21 sen; 5h → 6901 sen.
+  const r = labor.computeMonthlyLabor({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: annFullMonth,
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+    shortHourDeductionHours: 5,
+  });
+  assert.equal(r.payroll.shortHourDeductionSen, 6_901); // 5 × 265000/24/8
+  assert.equal(r.payroll.basicEarnedSen, 265_000 - 6_901); // full salary − dock
+  assert.equal(r.payroll.grossSen, 265_000 - 6_901 + 28_666); // OT unchanged
+  // The dock does not touch production cost — that stays hours/day based.
+  assert.equal(r.cost.regularCostSen, 265_000);
+});
+
 test("computeMonthlyLabor: ANN absent 2 days — production cost is days-worked based", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,

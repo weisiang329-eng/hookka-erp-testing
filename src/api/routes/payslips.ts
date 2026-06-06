@@ -329,6 +329,22 @@ app.post("/", async (c) => {
       daysByWorker.set(r.workerId, arr);
     }
 
+    // Owner-flagged unworked-hour docks for the period (Labor Cost under-recorded
+    // review), summed per worker. The engine values them at the worker's
+    // ÷working-days hourly rate and subtracts from basic earned.
+    const dedRes = await c.var.DB.prepare(
+      "SELECT workerId, hours FROM payroll_hour_deductions WHERE date LIKE ?",
+    )
+      .bind(`${period}-%`)
+      .all<{ workerId: string; hours: number }>();
+    const deductionHoursByWorker = new Map<string, number>();
+    for (const r of dedRes.results ?? []) {
+      deductionHoursByWorker.set(
+        r.workerId,
+        (deductionHoursByWorker.get(r.workerId) ?? 0) + (Number(r.hours) || 0),
+      );
+    }
+
     // Absences are only counted for elapsed working days, minus a data-entry
     // grace: a finished month counts the whole month; the current month stops
     // ABSENCE_GRACE_WORKING_DAYS working days back from today, so the most
@@ -397,6 +413,8 @@ app.post("/", async (c) => {
         employmentEndDay: resignedDay,
         // Joined OR resigned mid-month → prorate to days served.
         prorateToService: joinedDay !== undefined || resignedDay !== undefined,
+        // Owner-flagged unworked hours docked from this worker this period.
+        shortHourDeductionHours: deductionHoursByWorker.get(worker.id) ?? 0,
       });
 
       const allowances = 0;

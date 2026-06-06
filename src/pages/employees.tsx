@@ -230,11 +230,22 @@ function WorkerDayDrillIn({
   idPrefix,
   breakdown,
   emptyLabel,
+  workerId,
+  onAction,
+  busyKey,
 }: {
   name: string;
   idPrefix: string;
   breakdown: WorkerDayBreakdown;
   emptyLabel: string;
+  workerId?: string;
+  onAction?: (
+    action: "idle" | "deduct",
+    workerId: string,
+    date: string,
+    shortHours: number,
+  ) => void;
+  busyKey?: string | null;
 }) {
   return (
     <>
@@ -257,6 +268,7 @@ function WorkerDayDrillIn({
               <th className="py-1 px-2 text-right font-medium">Logged hrs</th>
               <th className="py-1 px-2 text-right font-medium">Expected hrs</th>
               <th className="py-1 px-2 text-right font-medium">Short</th>
+              {onAction && <th className="py-1 px-2 text-right font-medium">Action</th>}
             </tr>
           </thead>
           <tbody>
@@ -299,12 +311,38 @@ function WorkerDayDrillIn({
                           ? `${d.short.toFixed(1)} h`
                           : "— (recent)"}
                     </td>
+                    {onAction && (
+                      <td className="py-1 px-2 text-right whitespace-nowrap">
+                        {d.type === "under" && workerId ? (
+                          <span className="inline-flex gap-1 justify-end">
+                            <button
+                              type="button"
+                              onClick={() => onAction("idle", workerId, d.date, d.short)}
+                              disabled={!!busyKey}
+                              title="Came but no work to do — still paid. Logs the short hours as Idle so the gap closes (no pay change)."
+                              className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
+                            >
+                              {busyKey === `${workerId}|${d.date}|idle` ? "…" : "Idle"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onAction("deduct", workerId, d.date, d.short)}
+                              disabled={!!busyKey}
+                              title="Did not work these hours and won't be paid for them — docks them from this month's pay."
+                              className="rounded border border-[#E2B8AE] px-1.5 py-0.5 text-[10px] text-[#9A3A2D] hover:bg-[#FBEAE6] disabled:opacity-40"
+                            >
+                              {busyKey === `${workerId}|${d.date}|deduct` ? "…" : "Deduct"}
+                            </button>
+                          </span>
+                        ) : null}
+                      </td>
+                    )}
                   </tr>
                 );
               })}
             {breakdown.rows.filter((d) => d.type !== "ok").length === 0 && (
               <tr>
-                <td colSpan={5} className="py-2 px-2 text-center text-[#9CA3AF]">
+                <td colSpan={onAction ? 6 : 5} className="py-2 px-2 text-center text-[#9CA3AF]">
                   {emptyLabel}
                 </td>
               </tr>
@@ -318,6 +356,7 @@ function WorkerDayDrillIn({
               <td className="py-1 px-2 text-right tabular-nums font-bold text-[#9A3A2D]">
                 −{formatRM(breakdown.absenceDeductionSen)} · {breakdown.underHours.toFixed(1)} h
               </td>
+              {onAction && <td />}
             </tr>
           </tfoot>
         </table>
@@ -5794,7 +5833,7 @@ function LaborCostTab({
     () => `/api/working-hour-entries?from=${from}&to=${to}`,
     [from, to],
   );
-  const { data: entriesResp, loading: entriesLoading } = useCachedJson<{
+  const { data: entriesResp, loading: entriesLoading, refresh: refreshEntries } = useCachedJson<{
     success?: boolean;
     data?: WorkingHourEntry[];
   }>(entriesUrl);
@@ -5870,12 +5909,111 @@ function LaborCostTab({
     const mIdx = (Number(payrollPeriod.slice(5, 7)) || 1) - 1;
     return `${monthNames[Math.min(11, Math.max(0, mIdx))]} ${y}`;
   }, [payrollPeriod]);
-  const { data: reconPayslipResp } = useCachedJson<unknown>(
+  const { data: reconPayslipResp, refresh: refreshRecon } = useCachedJson<unknown>(
     payrollPeriod ? `/api/payslips?period=${payrollPeriod}` : null,
   );
   const reconPayslips: PayslipData[] = useMemo(
     () => asArray(reconPayslipResp) as PayslipData[],
     [reconPayslipResp],
+  );
+
+  // ---- Under-recorded review: docks + actions -----------------------------
+  // Owner-applied short-hour docks for the month (the same table payslip
+  // generation reads). Drives the "Docked this month" undo list below.
+  const { data: deductionsResp, refresh: refreshDeductions } = useCachedJson<{
+    data?: Array<{ id: string; workerId: string; date: string; hours: number }>;
+  }>(payrollPeriod ? `/api/payroll-hour-deductions?period=${payrollPeriod}` : null);
+  // Which "workerId|date|action" write is mid-flight, so its button disables.
+  const [underActionBusy, setUnderActionBusy] = useState<string | null>(null);
+
+  // Resolve an under-recorded short day. "idle" = came but no work, still paid →
+  // log the short hours to PRODUCTION_SHORTFALL so they land in the Idle bucket
+  // and the worker's gap closes (no pay change). "deduct" = came but didn't work
+  // and won't be paid → write a dock + regenerate the month so the worker's
+  // gross drops by exactly the unlogged value. Both refresh the screen.
+  const handleUnderAction = useCallback(
+    async (
+      action: "idle" | "deduct",
+      workerId: string,
+      date: string,
+      shortHours: number,
+    ) => {
+      const hrs = Math.round(shortHours * 100) / 100;
+      if (!workerId || !/^\d{4}-\d{2}-\d{2}$/.test(date) || hrs <= 0) return;
+      setUnderActionBusy(`${workerId}|${date}|${action}`);
+      try {
+        if (action === "idle") {
+          const r = await fetch("/api/working-hour-entries", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workerId,
+              date,
+              departmentCode: "PRODUCTION_SHORTFALL",
+              category: "",
+              hours: hrs,
+              notes: "Idle — marked from Labor Cost review",
+            }),
+          });
+          if (!r.ok) throw new Error(`idle ${r.status}`);
+          invalidateCachePrefix("/api/working-hour-entries");
+          refreshEntries?.();
+        } else {
+          const r = await fetch("/api/payroll-hour-deductions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workerId,
+              date,
+              hours: hrs,
+              note: "Short-hour dock — Labor Cost review",
+            }),
+          });
+          if (!r.ok) throw new Error(`deduct ${r.status}`);
+          await fetch("/api/payslips", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ period: payrollPeriod, regenerate: true }),
+          });
+          invalidateCachePrefix("/api/payslips");
+          invalidateCachePrefix("/api/payroll-hour-deductions");
+          refreshDeductions?.();
+          refreshRecon?.();
+        }
+      } catch (e) {
+        console.error("[under-action]", e);
+      } finally {
+        setUnderActionBusy(null);
+      }
+    },
+    [payrollPeriod, refreshEntries, refreshRecon, refreshDeductions],
+  );
+
+  // Undo a dock → delete it + regenerate so the worker's pay is restored.
+  const handleUndoDeduction = useCallback(
+    async (id: string) => {
+      setUnderActionBusy(`undo|${id}`);
+      try {
+        const r = await fetch(`/api/payroll-hour-deductions/${id}`, {
+          method: "DELETE",
+        });
+        if (!r.ok) throw new Error(`undo ${r.status}`);
+        await fetch("/api/payslips", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ period: payrollPeriod, regenerate: true }),
+        });
+        invalidateCachePrefix("/api/payslips");
+        invalidateCachePrefix("/api/payroll-hour-deductions");
+        refreshDeductions?.();
+        refreshRecon?.();
+      } catch (e) {
+        console.error("[undo-deduction]", e);
+      } finally {
+        setUnderActionBusy(null);
+      }
+    },
+    [payrollPeriod, refreshRecon, refreshDeductions],
   );
 
   // Index departments by code once so the per-row / per-worker reconciliation
@@ -6713,6 +6851,60 @@ function LaborCostTab({
           </div>
         )}
 
+        {/* Docked this month — owner-applied short-hour deductions, with undo.
+            Each dock lowers a worker's gross; deleting one restores their pay on
+            the next regenerate (triggered automatically). Shown only when at
+            least one dock exists for the month. */}
+        {showReconciliation && (deductionsResp?.data?.length ?? 0) > 0 && (
+          <div className="mb-4 rounded-md border border-[#E2B8AE] bg-[#FBF3F1] p-4">
+            <h3 className="text-sm font-semibold text-[#9A3A2D] mb-1">
+              Docked this month — unworked hours removed from pay
+            </h3>
+            <p className="text-xs text-[#6B7280] leading-relaxed mb-2">
+              Hours you marked as not-worked-and-not-paid for {payrollMonthLabel}. Each
+              dock lowers that worker&rsquo;s pay; click Undo to restore it.
+            </p>
+            <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-white">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-[#E7C9C1] text-[#9A3A2D]">
+                    <th className="py-1.5 px-3 text-left font-medium">Employee</th>
+                    <th className="py-1.5 px-3 text-left font-medium">Date</th>
+                    <th className="py-1.5 px-3 text-right font-medium">Hours docked</th>
+                    <th className="py-1.5 px-3 text-right font-medium" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {(deductionsResp?.data ?? [])
+                    .slice()
+                    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+                    .map((d) => (
+                      <tr key={d.id} className="border-b border-[#F1DDD7]">
+                        <td className="py-1.5 px-3 text-[#1F1D1B]">
+                          {workersById.get(d.workerId)?.name ?? d.workerId}
+                        </td>
+                        <td className="py-1.5 px-3 text-[#4B5563]">{d.date}</td>
+                        <td className="py-1.5 px-3 text-right tabular-nums text-[#9A3A2D]">
+                          −{(Number(d.hours) || 0).toFixed(1)} h
+                        </td>
+                        <td className="py-1.5 px-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => handleUndoDeduction(d.id)}
+                            disabled={!!underActionBusy}
+                            className="rounded border border-[#D8D2CC] px-1.5 py-0.5 text-[10px] text-[#4B5563] hover:bg-[#F0EDE9] disabled:opacity-40"
+                          >
+                            {underActionBusy === `undo|${d.id}` ? "…" : "Undo"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* Per-employee itemisation of the Non-production salary residual.
             Splits the residual into (1) genuine non-production staff who log no
             factory hours — expected — and (2) factory workers who were paid more
@@ -6859,6 +7051,9 @@ function LaborCostTab({
                                   idPrefix={`gap-day-${e.id}`}
                                   breakdown={breakdown}
                                   emptyLabel="No absent or under-recorded days in this period"
+                                  workerId={drillWorkerId ?? undefined}
+                                  onAction={handleUnderAction}
+                                  busyKey={underActionBusy}
                                 />
                               </td>
                             </tr>

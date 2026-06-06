@@ -69,9 +69,14 @@ export function generateSharedStickerData(
   poNo: string,
   wipKey: string,
   basePath: string = "/worker/scan",
+  pieceNo?: number,
+  totalPieces?: number,
 ): string {
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  return `${baseUrl}${basePath}?po=${encodeURIComponent(poNo)}&wk=${encodeURIComponent(wipKey)}`;
+  let url = `${baseUrl}${basePath}?po=${encodeURIComponent(poNo)}&wk=${encodeURIComponent(wipKey)}`;
+  if (pieceNo && pieceNo > 0) url += `&p=${encodeURIComponent(String(pieceNo))}`;
+  if (totalPieces && totalPieces > 0) url += `&t=${encodeURIComponent(String(totalPieces))}`;
+  return url;
 }
 
 /**
@@ -98,26 +103,26 @@ export function parseStickerData(
     const u = new URL(url);
     const poNo = u.searchParams.get("po");
     if (!poNo) return null;
-    // Shared Sew/Uph compartment sticker — wipKey + po, dept supplied by scanner.
+    // Piece markers are shared by both sticker shapes (per-piece dept sticker
+    // AND per-piece shared Sew/Uph compartment sticker).
+    const pStr = u.searchParams.get("p");
+    const tStr = u.searchParams.get("t");
+    const rawPiece = pStr ? Number(pStr) : undefined;
+    const rawTotal = tStr ? Number(tStr) : undefined;
+    const pieceNo =
+      rawPiece && Number.isFinite(rawPiece) && rawPiece > 0 ? rawPiece : undefined;
+    const totalPieces =
+      rawTotal && Number.isFinite(rawTotal) && rawTotal > 0 ? rawTotal : undefined;
+    // Shared Sew/Uph compartment sticker — wipKey + po (+ p/t), dept supplied
+    // by the scanner's section at completion time.
     const wk = u.searchParams.get("wk");
     if (wk) {
-      return { poNo, wipKey: wk };
+      return { poNo, wipKey: wk, pieceNo, totalPieces };
     }
     const opId = u.searchParams.get("op");
     const deptCode = u.searchParams.get("dept");
-    const pStr = u.searchParams.get("p");
-    const tStr = u.searchParams.get("t");
     if (opId && deptCode) {
-      const pieceNo = pStr ? Number(pStr) : undefined;
-      const totalPieces = tStr ? Number(tStr) : undefined;
-      return {
-        opId,
-        deptCode,
-        poNo,
-        pieceNo: pieceNo && Number.isFinite(pieceNo) && pieceNo > 0 ? pieceNo : undefined,
-        totalPieces:
-          totalPieces && Number.isFinite(totalPieces) && totalPieces > 0 ? totalPieces : undefined,
-      };
+      return { opId, deptCode, poNo, pieceNo, totalPieces };
     }
     return null;
   } catch {

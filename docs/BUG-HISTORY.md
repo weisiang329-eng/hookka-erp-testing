@@ -49,7 +49,7 @@ Entries themselves stay newest-first.
 
 **Verified live (May 2026):** effective salary == current scalar for all 35 workers (0 mismatches) → Total Payroll Cost RM62,775.52 UNCHANGED (a verified no-op until a raise is recorded). Salary-change round-trip: POST a future-dated change (201) → recorded, current scalar untouched (not yet effective) → DELETE undo restores. typecheck (API+app) + 517 tests + build green.
 
-**Follow-ups DONE (2026-06-06):** reconciliation **"Idle (Shortfall)" → "Shortfall"** everywhere (label only; dept code `PRODUCTION_SHORTFALL` unchanged); **Department Labor** (`employees.tsx:~3698`) now rates off the effective salary too. So **all three views — Payroll / Labor Cost / Department Labor — use the same day-weighted effective salary**, and a mid-month raise reconciles across all of them.
+**Follow-ups DONE (2026-06-06):** reconciliation **"Idle (Shortfall)" → "Shortfall"** everywhere (label only; dept code `PRODUCTION_SHORTFALL` unchanged); **Department Labor** (`employees.tsx:~3698`) now rates off the effective salary too. So **all three views — Payroll / Labor Cost / Department Labor — use the same day-weighted effective salary**, and a mid-month raise reconciles across all of them. **(2026-06-07) Department Labor is now also FULLY-LOADED**: for a full single month it adds each worker's `(gross + employer statutory) − logged value` to their dept, so its column total = the FULL payroll (verified live RM62,775.51 ≈ Payroll RM62,775.52). All three views now tie to the same total, not just the same per-hour rate. KPI card notes "Fully loaded … matches Payroll".
 
 ---
 

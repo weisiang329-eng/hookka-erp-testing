@@ -3660,6 +3660,24 @@ function DepartmentLaborTab({
     [effSalaryResp],
   );
 
+  // Payslips for the period — to FULLY-LOAD each department with its workers'
+  // employer statutory + paid-but-not-logged (under-recorded) + the ÷26-vs-
+  // ÷working-days absent-day gap, so Department Labor totals the FULL payroll
+  // (= Payroll = Labor Cost). The clean trick: each worker's
+  //   extra = (gross + employer statutory) − their logged-hours value
+  // is added to their department; summed it equals total payroll − total logged
+  // labor. Only for a full single month (payslips are monthly) with no category
+  // filter (these extras aren't category- or partial-range-specific).
+  const deptPayslipPeriod = (period || dateFrom || "").slice(0, 7);
+  const { data: deptPayslipResp } = useCachedJson<unknown>(
+    deptPayslipPeriod ? `/api/payslips?period=${deptPayslipPeriod}` : null,
+  );
+  const deptPayslips: PayslipData[] = useMemo(
+    () => asArray(deptPayslipResp) as PayslipData[],
+    [deptPayslipResp],
+  );
+  const deptFullMonth = isFullSingleMonth(dateFrom, dateTo);
+
   // Project onto the canonical departments list so non-production depts
   // (R&D, Warehousing, ...) show up even when they have zero hours, and
   // the row order matches Efficiency Overview (production first, in
@@ -3698,6 +3716,9 @@ function DepartmentLaborTab({
     }
 
     const acc = new Map<string, { totalHours: number; workerIds: Set<string>; costSen: number }>();
+    // Per-worker logged-hours value (across all their depts) — drives each
+    // worker's fully-loaded extra below.
+    const loggedByWorker = new Map<string, number>();
 
     for (const [k, segs] of segsByWorkerDate.entries()) {
       const [workerId] = k.split("|");
@@ -3736,10 +3757,40 @@ function DepartmentLaborTab({
         cell.totalHours += hours;
         cell.workerIds.add(workerId);
         cell.costSen += cost;
+        loggedByWorker.set(workerId, (loggedByWorker.get(workerId) ?? 0) + cost);
       }
     }
 
-    return orderedDepts.map((d) => {
+    // Fully-load each department: add every worker's (gross + employer statutory)
+    // − their logged value to their department, so the column total ties to the
+    // full payroll (= Payroll = Labor Cost's Total Payroll Cost). Σ extras =
+    // total gross + total employer − total logged labor = the non-logged-labor
+    // remainder (under-recorded + ÷-rate gap + statutory). Full month, no filter.
+    if (deptFullMonth && !categoryFilter) {
+      for (const p of deptPayslips) {
+        const wid = p.employeeId;
+        if (!wid) continue;
+        const gross = Number(p.grossPay) || 0;
+        const statutory =
+          (Number(p.epfEmployer) || 0) +
+          (Number(p.socsoEmployer) || 0) +
+          (Number(p.eisEmployer) || 0);
+        const extra = gross + statutory - (loggedByWorker.get(wid) ?? 0);
+        if (extra === 0) continue;
+        const deptCode =
+          p.departmentCode || workerById.get(wid)?.departmentCode || "UNASSIGNED";
+        let cell = acc.get(deptCode);
+        if (!cell) {
+          cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
+          acc.set(deptCode, cell);
+        }
+        cell.costSen += extra;
+        cell.workerIds.add(wid);
+      }
+    }
+
+    const shownCodes = new Set(orderedDepts.map((d) => d.code));
+    const orderedRows = orderedDepts.map((d) => {
       const cell = acc.get(d.code);
       return {
         deptCode: d.code,
@@ -3750,7 +3801,20 @@ function DepartmentLaborTab({
         estCostSen: Math.round(cell?.costSen ?? 0),
       };
     });
-  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf]);
+    // Any cost parked on a dept not in the canonical list (e.g. an unassigned
+    // worker's loaded extra) — append so the total still ties to full payroll.
+    const extraRows = [...acc.entries()]
+      .filter(([code, cell]) => !shownCodes.has(code) && Math.round(cell.costSen) !== 0)
+      .map(([code, cell]) => ({
+        deptCode: code,
+        deptName: code || "Unassigned",
+        isProduction: false,
+        totalHours: cell.totalHours,
+        workerCount: cell.workerIds.size,
+        estCostSen: Math.round(cell.costSen),
+      }));
+    return [...orderedRows, ...extraRows];
+  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -3909,6 +3973,11 @@ function DepartmentLaborTab({
             <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">
               {formatRM(totals.cost)}
             </div>
+            {deptFullMonth && !categoryFilter && (
+              <div className="mt-0.5 text-[10px] text-[#6B7280]">
+                Fully loaded (incl. statutory + unlogged) — matches Payroll
+              </div>
+            )}
           </div>
         </div>
         <DataGrid

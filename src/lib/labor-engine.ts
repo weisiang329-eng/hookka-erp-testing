@@ -190,6 +190,77 @@ export function absenceCutoffDay(
   return cutoff.getDate(); // current/cutoff month — count through the cutoff day
 }
 
+// ── Effective-dated salary ─────────────────────────────────────────────────
+// A worker's salary can change mid-month (a raise). worker_salary_history holds
+// the dated rows; workers.basic_salary_sen is the current snapshot + fallback.
+
+/** One effective-dated salary row (the subset the salary helpers need). */
+export type SalaryHistoryRow = {
+  /** YYYY-MM-DD, inclusive — the first day this salary applies. */
+  effectiveFrom: string;
+  /** Salary in sen effective from effectiveFrom. */
+  basicSalarySen: number;
+};
+
+/**
+ * The salary (sen) effective on `isoDate` = the newest history row whose
+ * effectiveFrom is <= isoDate. Falls back to `fallbackSen` when no row qualifies
+ * (e.g. a date before the worker's first row). Pure.
+ */
+export function salaryAsOfSen(
+  history: readonly SalaryHistoryRow[],
+  fallbackSen: number,
+  isoDate: string,
+): number {
+  let best: SalaryHistoryRow | undefined;
+  for (const row of history) {
+    if (typeof row?.effectiveFrom !== "string") continue;
+    if (row.effectiveFrom <= isoDate) {
+      if (!best || row.effectiveFrom > best.effectiveFrom) best = row;
+    }
+  }
+  return best
+    ? Math.max(0, best.basicSalarySen || 0)
+    : Math.max(0, fallbackSen || 0);
+}
+
+/**
+ * Day-weighted salary (sen) for a worker over `year`/`month`: each working day
+ * (Mon–Sat minus public holidays) is valued at the salary effective that day,
+ * then averaged over the month's working days. For a month with NO salary change
+ * this returns that single salary exactly, so unchanged months are unaffected.
+ * A mid-month raise yields the by-day basic-pay figure exactly (and a very close
+ * OT/absence figure), and lets Payroll AND the Labor Cost reconciliation use ONE
+ * salary per worker per month so the two stay aligned. `month` is 1-indexed.
+ */
+export function effectiveSalarySenForMonth(
+  history: readonly SalaryHistoryRow[],
+  fallbackSen: number,
+  year: number,
+  month: number,
+  publicHolidays: Iterable<string>,
+): number {
+  const holidaySet =
+    publicHolidays instanceof Set
+      ? (publicHolidays as Set<string>)
+      : new Set(publicHolidays);
+  const monthLastDay = new Date(year, month, 0).getDate();
+  const mm = String(month).padStart(2, "0");
+  let totalWorkingDays = 0;
+  let weightedSumSen = 0;
+  for (let d = 1; d <= monthLastDay; d++) {
+    const dow = new Date(year, month - 1, d).getDay();
+    if (!WORKING_DOW.has(dow)) continue; // Sunday — non-working
+    const iso = `${year}-${mm}-${String(d).padStart(2, "0")}`;
+    if (holidaySet.has(iso)) continue; // public holiday
+    totalWorkingDays++;
+    weightedSumSen += salaryAsOfSen(history, fallbackSen, iso);
+  }
+  return totalWorkingDays > 0
+    ? Math.round(weightedSumSen / totalWorkingDays)
+    : Math.max(0, fallbackSen || 0);
+}
+
 /** Inputs for one worker, one month. */
 export type MonthlyLaborInput = {
   worker: LaborWorker;

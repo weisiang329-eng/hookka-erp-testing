@@ -456,6 +456,41 @@ test("productionCostRatePerMinuteSen: zero salary or zero hours → 0", () => {
   );
 });
 
+// ── Effective-dated salary helpers ──────────────────────────────────────────
+
+test("salaryAsOfSen: newest effective row <= date wins; else fallback", () => {
+  const hist = [
+    { effectiveFrom: "2026-01-01", basicSalarySen: 200_000 },
+    { effectiveFrom: "2026-05-15", basicSalarySen: 220_000 },
+  ];
+  assert.equal(labor.salaryAsOfSen(hist, 999, "2026-05-14"), 200_000);
+  assert.equal(labor.salaryAsOfSen(hist, 999, "2026-05-15"), 220_000); // inclusive
+  assert.equal(labor.salaryAsOfSen(hist, 999, "2026-06-01"), 220_000);
+  assert.equal(labor.salaryAsOfSen(hist, 12_345, "2025-12-31"), 12_345); // before first → fallback
+});
+
+test("effectiveSalarySenForMonth: no change → the single salary exactly", () => {
+  const hist = [{ effectiveFrom: "2026-01-01", basicSalarySen: 205_000 }];
+  assert.equal(
+    labor.effectiveSalarySenForMonth(hist, 0, 2026, 5, MAY_HOLIDAYS),
+    205_000,
+  );
+});
+
+test("effectiveSalarySenForMonth: mid-month raise → day-weighted average", () => {
+  // May 2026 has 24 working days (Mon–Sat minus 1 May + 27 May holidays):
+  // 11 working days before 15 May (at 200000) + 13 on/after 15 May (at 240000).
+  // (11×200000 + 13×240000) / 24 = 5,320,000 / 24 = 221,666.67 → 221,667.
+  const hist = [
+    { effectiveFrom: "2026-01-01", basicSalarySen: 200_000 },
+    { effectiveFrom: "2026-05-15", basicSalarySen: 240_000 },
+  ];
+  assert.equal(
+    labor.effectiveSalarySenForMonth(hist, 0, 2026, 5, MAY_HOLIDAYS),
+    221_667,
+  );
+});
+
 // ── costingWorkerOrDefault ──────────────────────────────────────────────────
 
 test("costingWorkerOrDefault: undefined → the system default worker", () => {

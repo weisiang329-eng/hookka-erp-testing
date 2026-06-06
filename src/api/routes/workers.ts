@@ -5,7 +5,7 @@
 // doesn't need any changes. On POST/PUT, `departmentCode` is resolved by
 // joining on the departments table rather than trusting the client payload.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
@@ -532,6 +532,45 @@ app.put("/:id", async (c) => {
       )
       .run();
 
+    // Keep the salary-history in sync with an inline salary edit: correct the
+    // row currently in effect (newest effectiveFrom <= today) so payroll — which
+    // reads the history — reflects the change. A future-dated raise is set via
+    // POST /:id/salary-history instead. Best-effort (skip if table absent).
+    if (
+      body.basicSalarySen !== undefined &&
+      merged.basicSalarySen !== existing.basicSalarySen
+    ) {
+      try {
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const cur = await c.var.DB.prepare(
+          "SELECT id FROM worker_salary_history WHERE workerId = ? AND effectiveFrom <= ? ORDER BY effectiveFrom DESC, createdAt DESC LIMIT 1",
+        )
+          .bind(id, todayIso)
+          .first<{ id: string }>();
+        if (cur) {
+          await c.var.DB.prepare(
+            "UPDATE worker_salary_history SET basicSalarySen = ? WHERE id = ?",
+          )
+            .bind(merged.basicSalarySen, cur.id)
+            .run();
+        } else {
+          await c.var.DB.prepare(
+            "INSERT INTO worker_salary_history (id, workerId, basicSalarySen, effectiveFrom, note) VALUES (?, ?, ?, ?, ?)",
+          )
+            .bind(
+              `wsh-${crypto.randomUUID().slice(0, 8)}`,
+              id,
+              merged.basicSalarySen,
+              todayIso,
+              "Inline salary correction",
+            )
+            .run();
+        }
+      } catch (e) {
+        console.warn("[workers] salary-history inline sync skipped:", e);
+      }
+    }
+
     const updated = await c.var.DB.prepare(
       "SELECT * FROM workers WHERE id = ?",
     )
@@ -838,6 +877,102 @@ app.post("/bulk-generate-pins", async (c) => {
       skipped,
     },
   });
+});
+
+// ---------------------------------------------------------------------------
+// Effective-dated salary (worker_salary_history). A worker's salary on any date
+// = the newest row whose effectiveFrom <= that date; workers.basic_salary_sen is
+// the current snapshot. Payroll day-weights a mid-month raise (labor-engine
+// effectiveSalarySenForMonth). These endpoints manage the dated rows.
+// ---------------------------------------------------------------------------
+
+/** Re-sync workers.basic_salary_sen to the row effective TODAY (newest
+ *  effectiveFrom <= today), so the scalar everything else reads stays current. */
+async function resyncCurrentSalary(c: Context<Env>, workerId: string): Promise<void> {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const cur = await c.var.DB.prepare(
+    "SELECT basicSalarySen FROM worker_salary_history WHERE workerId = ? AND effectiveFrom <= ? ORDER BY effectiveFrom DESC, createdAt DESC LIMIT 1",
+  )
+    .bind(workerId, todayIso)
+    .first<{ basicSalarySen: number }>();
+  if (cur) {
+    await c.var.DB.prepare("UPDATE workers SET basicSalarySen = ? WHERE id = ?")
+      .bind(Number(cur.basicSalarySen) || 0, workerId)
+      .run();
+  }
+}
+
+// GET /:id/salary-history — the worker's dated salary rows, newest first.
+app.get("/:id/salary-history", async (c) => {
+  const denied = await requirePermission(c, "workers", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const res = await c.var.DB.prepare(
+    "SELECT id, basicSalarySen, effectiveFrom, note FROM worker_salary_history WHERE workerId = ? ORDER BY effectiveFrom DESC, createdAt DESC",
+  )
+    .bind(id)
+    .all<{ id: string; basicSalarySen: number; effectiveFrom: string; note: string | null }>();
+  const data = (res.results ?? []).map((r) => ({
+    id: r.id,
+    basicSalarySen: Number(r.basicSalarySen) || 0,
+    effectiveFrom: r.effectiveFrom,
+    note: r.note ?? "",
+  }));
+  return c.json({ success: true, data, total: data.length });
+});
+
+// POST /:id/salary-history — record a salary change effective from a date.
+// Body: { effectiveFrom: YYYY-MM-DD, basicSalarySen: int(sen), note? }.
+// Upserts one row per (worker, effectiveFrom), then re-syncs the current scalar.
+app.post("/:id/salary-history", async (c) => {
+  const denied = await requirePermission(c, "workers", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  let body: { effectiveFrom?: unknown; basicSalarySen?: unknown; note?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+  const effectiveFrom = typeof body.effectiveFrom === "string" ? body.effectiveFrom.trim() : "";
+  const salaryNum = typeof body.basicSalarySen === "number" ? body.basicSalarySen : Number(body.basicSalarySen);
+  const note = typeof body.note === "string" ? body.note : "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+    return c.json({ success: false, error: "effectiveFrom must be YYYY-MM-DD" }, 400);
+  }
+  if (!Number.isFinite(salaryNum) || salaryNum < 0) {
+    return c.json({ success: false, error: "basicSalarySen must be a non-negative number (sen)" }, 400);
+  }
+  const salarySen = Math.round(salaryNum);
+  const worker = await c.var.DB.prepare("SELECT id FROM workers WHERE id = ?").bind(id).first<{ id: string }>();
+  if (!worker) return c.json({ success: false, error: "Worker not found" }, 404);
+
+  const rowId = `wsh-${crypto.randomUUID().slice(0, 8)}`;
+  await c.var.DB.batch([
+    c.var.DB.prepare("DELETE FROM worker_salary_history WHERE workerId = ? AND effectiveFrom = ?").bind(id, effectiveFrom),
+    c.var.DB.prepare(
+      "INSERT INTO worker_salary_history (id, workerId, basicSalarySen, effectiveFrom, note) VALUES (?, ?, ?, ?, ?)",
+    ).bind(rowId, id, salarySen, effectiveFrom, note || null),
+  ]);
+  await resyncCurrentSalary(c, id);
+  return c.json(
+    { success: true, data: { id: rowId, effectiveFrom, basicSalarySen: salarySen, note } },
+    201,
+  );
+});
+
+// DELETE /:id/salary-history/:rowId — remove a dated row (undo a mis-entry),
+// then re-sync the current scalar.
+app.delete("/:id/salary-history/:rowId", async (c) => {
+  const denied = await requirePermission(c, "workers", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const rowId = c.req.param("rowId");
+  await c.var.DB.prepare("DELETE FROM worker_salary_history WHERE id = ? AND workerId = ?")
+    .bind(rowId, id)
+    .run();
+  await resyncCurrentSalary(c, id);
+  return c.json({ success: true, data: { id: rowId } });
 });
 
 export default app;

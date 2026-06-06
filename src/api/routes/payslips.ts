@@ -14,7 +14,11 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
-import { computeMonthlyLabor, absenceCutoffDay } from "../../lib/labor-engine";
+import {
+  computeMonthlyLabor,
+  absenceCutoffDay,
+  effectiveSalarySenForMonth,
+} from "../../lib/labor-engine";
 
 // Data-entry grace before an unrecorded working day is treated as a confirmed
 // absence. Spec (Wei Siang, 2026-06-02): the office keys Working Hours a few
@@ -354,6 +358,28 @@ app.post("/", async (c) => {
       );
     }
 
+    // Effective-dated salary history (worker_salary_history). Resilient: if the
+    // migration (0153) hasn't run yet, fall back to each worker's current scalar.
+    const salaryHistoryByWorker = new Map<
+      string,
+      Array<{ effectiveFrom: string; basicSalarySen: number }>
+    >();
+    try {
+      const wshRes = await c.var.DB.prepare(
+        "SELECT workerId, basicSalarySen, effectiveFrom FROM worker_salary_history",
+      ).all<{ workerId: string; basicSalarySen: number; effectiveFrom: string }>();
+      for (const r of wshRes.results ?? []) {
+        const arr = salaryHistoryByWorker.get(r.workerId) ?? [];
+        arr.push({
+          effectiveFrom: r.effectiveFrom,
+          basicSalarySen: Number(r.basicSalarySen) || 0,
+        });
+        salaryHistoryByWorker.set(r.workerId, arr);
+      }
+    } catch (e) {
+      console.warn("[payslips] worker_salary_history read skipped:", e);
+    }
+
     // Absences are only counted for elapsed working days, minus a data-entry
     // grace: a finished month counts the whole month; the current month stops
     // ABSENCE_GRACE_WORKING_DAYS working days back from today, so the most
@@ -403,12 +429,23 @@ app.post("/", async (c) => {
           ? Number(worker.resignedAt.slice(8, 10))
           : undefined;
 
+      // Salary effective for this month — day-weighted if it changed mid-month
+      // (a raise), else the worker's single salary. Used for pay, statutory, and
+      // the stored snapshot so the payslip is internally consistent.
+      const effectiveSalarySen = effectiveSalarySenForMonth(
+        salaryHistoryByWorker.get(worker.id) ?? [],
+        worker.basicSalarySen,
+        pYear,
+        pMonth,
+        publicHolidays,
+      );
+
       // One engine call per worker — the SAME computeMonthlyLabor that
       // drives production labor cost and the worker phone view, so a
       // payslip and the worker's phone always agree.
       const labor = computeMonthlyLabor({
         worker: {
-          basicSalarySen: worker.basicSalarySen,
+          basicSalarySen: effectiveSalarySen,
           workingDaysPerMonth: worker.workingDaysPerMonth,
           workingHoursPerDay: worker.workingHoursPerDay,
           otMultiplier: worker.otMultiplier,
@@ -427,9 +464,9 @@ app.post("/", async (c) => {
       });
 
       const allowances = 0;
-      // Statutory deductions stay computed on the full monthly salary —
-      // unchanged from before; the engine rework only touches basic + OT.
-      const stat = calcStatutory(worker.basicSalarySen, {
+      // Statutory deductions computed on the month's effective monthly salary
+      // (= the worker's salary, day-weighted if it changed mid-month).
+      const stat = calcStatutory(effectiveSalarySen, {
         epfEnabled: worker.epfEnabled,
         socsoEnabled: worker.socsoEnabled,
         eisEnabled: worker.eisEnabled,
@@ -479,7 +516,7 @@ app.post("/", async (c) => {
           worker.empNo,
           worker.departmentCode ?? "",
           period,
-          worker.basicSalarySen,
+          effectiveSalarySen,
           worker.workingDaysPerMonth,
           labor.payroll.absentDays,
           labor.payroll.absenceDeductionSen,

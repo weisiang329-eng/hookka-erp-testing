@@ -698,18 +698,29 @@ export default function WorkerScanPage() {
     }
     setLoading(true);
     try {
-      // FG-level merged sticker (today: FAB_CUT). The QR's opId is the
-      // sentinel "FG-<DEPT>" so we route to scan-complete-dept, which
-      // flips every matching dept card on the PO in one request. The
-      // per-piece FIFO routing below doesn't apply to a merged sticker
-      // because it spans multiple physical pieces by design.
+      // FG-level merged sticker. The QR's opId is the sentinel "FG-<DEPT>" so
+      // one scan flips every matching dept card on the PO. Two routes:
+      //   - FG-FAB_SEW is the SHARED Sew/Uph sticker: the completing dept is
+      //     resolved from WHO scans (sewing worker → FAB_SEW, upholstery worker
+      //     → UPHOLSTERY), so we DON'T send a deptCode — scan-complete-shared
+      //     reads the section from the worker token.
+      //   - FG-FAB_CUT (and any other FG-<DEPT>) → scan-complete-dept with the
+      //     sticker's own dept.
+      // A real jc id (non-FG, e.g. Packing) is the per-piece FIFO route below.
       const fgMatch = /^FG-([A-Z_]+)$/.exec(ctx.jobCard.id);
-      const endpoint = fgMatch
-        ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
-        : `/api/production-orders/${ctx.order.id}/scan-complete`;
-      const payload = fgMatch
-        ? { deptCode: fgMatch[1], workerId, ...(opts?.force ? { force: true } : {}) }
-        : {
+      const fgDept = fgMatch?.[1];
+      const endpoint =
+        fgDept === "FAB_SEW"
+          ? `/api/production-orders/${ctx.order.id}/scan-complete-shared`
+          : fgDept
+            ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
+            : `/api/production-orders/${ctx.order.id}/scan-complete`;
+      const payload =
+        fgDept === "FAB_SEW"
+          ? { workerId, ...(opts?.force ? { force: true } : {}) }
+          : fgDept
+            ? { deptCode: fgDept, workerId, ...(opts?.force ? { force: true } : {}) }
+            : {
             jobCardId: ctx.jobCard.id,
             workerId,
             // Piece-level routing: the QR carries `p=<pieceNo>&t=<total>` so

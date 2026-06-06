@@ -452,7 +452,14 @@ export default function WorkerScanPage() {
         parsed?.pieceNo && parsed?.totalPieces
           ? { pieceNo: parsed.pieceNo, totalPieces: parsed.totalPieces }
           : undefined;
-      setInput(primaryTerm);
+      // For an FG-sentinel sticker (FG-FAB_CUT / FG-FAB_SEW) show the PO
+      // number in the box, not the raw sentinel — the worker shouldn't see
+      // "FG-FABCUT".
+      setInput(
+        /^FG-[A-Z_]+$/.test(primaryTerm) && parsed?.poNo
+          ? parsed.poNo
+          : primaryTerm,
+      );
       setLoading(true);
       setResult({ kind: "idle" });
       setRackChoice("");
@@ -874,8 +881,12 @@ export default function WorkerScanPage() {
       if (data.success && data.data) {
         setResult({
           kind: "success",
-          slot: data.data.assignedSlot as 1 | 2,
-          jobCard: data.data.jobCard as JobCard,
+          // The dept / shared fan-out endpoints (FAB_CUT scan-complete-dept,
+          // FAB_SEW scan-complete-shared) don't return jobCard/assignedSlot —
+          // fall back to the scanned card so the ✓ card renders a real WIP
+          // name + dept instead of crashing on wipNameFor(undefined).
+          slot: (data.data.assignedSlot as 1 | 2) ?? 1,
+          jobCard: (data.data.jobCard as JobCard) ?? ctx.jobCard,
           order: ctx.order,
           piece: ctx.piece,
           // FIFO diagnostic — server tells us if the scan was routed to a

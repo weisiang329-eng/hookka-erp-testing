@@ -4594,14 +4594,15 @@ export default function ProductionPage({
           return hay.includes(q);
         });
       } else {
-        const soIds = new Set(
-          visibleRows
-            .map((r) => r.salesOrderId || r.consignmentOrderId || "")
-            .filter(Boolean),
+        // Scope to the EXACT visible production lines, by per-line po id —
+        // NOT salesOrderId. The parent SO id is shared by sibling lines
+        // (-01/-02/-03), so scoping by it leaked every sibling's stickers in
+        // even when the grid was filtered to one line (9 stickers instead of
+        // 3). poId matches the grid's per-line filter granularity. 2026-06-06.
+        const poIds = new Set(
+          visibleRows.map((r) => r.poId || "").filter(Boolean),
         );
-        scoped = all.filter((o) =>
-          soIds.has(o.salesOrderId || o.consignmentOrderId || ""),
-        );
+        scoped = all.filter((o) => poIds.has(o.id));
       }
       if (scoped.length === 0) {
         toast.warning(
@@ -4655,14 +4656,25 @@ export default function ProductionPage({
     setFoamPrintRequested(true);
   }, [foamPrintStickers, loadFoamPackingStickers]);
 
-  // Filter scope changed → invalidate any preview/print payload so the
-  // next Show / Print fetches fresh. Cheap (setState of an empty array
-  // is a no-op when already empty).
+  // Filter scope changed → invalidate any preview/print payload so the next
+  // Show / Print fetches fresh. Key on a STABLE signature of the filtered
+  // scope (the sorted set of po ids), NOT the gridFilteredDeptRows array
+  // reference — that reference churns on every 20s poll / serve-stale
+  // revalidate even when the filtered set is unchanged, which used to
+  // auto-close a just-opened preview a beat after it rendered. 2026-06-06.
+  const foamScopeKey = useMemo(
+    () =>
+      ((gridFilteredDeptRows as unknown as DeptRow[] | null) ?? [])
+        .map((r) => r.poId)
+        .sort()
+        .join(","),
+    [gridFilteredDeptRows],
+  );
   /* eslint-disable react-hooks/set-state-in-effect -- intentional cache invalidation on filter change */
   useEffect(() => {
     setFoamPrintStickers([]);
     setShowFoamPackingPreview(false);
-  }, [fltSearch, gridFilteredDeptRows]);
+  }, [fltSearch, foamScopeKey]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Leaving the Fab Cut tab → collapse the Fab Sew strip and DROP the loaded

@@ -49,7 +49,7 @@ Entries themselves stay newest-first.
 
 **Verified live (May 2026):** effective salary == current scalar for all 35 workers (0 mismatches) → Total Payroll Cost RM62,775.52 UNCHANGED (a verified no-op until a raise is recorded). Salary-change round-trip: POST a future-dated change (201) → recorded, current scalar untouched (not yet effective) → DELETE undo restores. typecheck (API+app) + 517 tests + build green.
 
-**NOT done (optional follow-ups):** the reconciliation **"Idle (Shortfall)" bucket** line still reads "Idle" (only the button was renamed); the **Department Labor** view + the early-duplicate rate site (`employees.tsx:~3698`) still rate off the current scalar (only the Labor Cost tab uses the effective salary) — both matter only after a real mid-month salary change.
+**Follow-ups DONE (2026-06-06):** reconciliation **"Idle (Shortfall)" → "Shortfall"** everywhere (label only; dept code `PRODUCTION_SHORTFALL` unchanged); **Department Labor** (`employees.tsx:~3698`) now rates off the effective salary too. So **all three views — Payroll / Labor Cost / Department Labor — use the same day-weighted effective salary**, and a mid-month raise reconciles across all of them.
 
 ---
 

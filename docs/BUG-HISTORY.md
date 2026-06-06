@@ -36,7 +36,7 @@ Entries themselves stay newest-first.
 
 ## BUG-2026-06-06-004 — Payroll absence rated ÷26 again (was ÷24), with a "Non-productive paid (absence)" reconciliation line so Labor Cost still ties out
 
-**Status:** 🟡 Built on branch `feat/payroll-reconcile`; tests 507/0 + typecheck + build green. PENDING merge + May regenerate + live verify. Supersedes the ÷24 decision in BUG-2026-06-06-003.
+**Status:** 🟢 Fixed (2026-06-06) — merged (e9a3a91c) + deployed + May regenerated + verified live. Supersedes the ÷24 decision in BUG-2026-06-06-003.
 **Category:** payroll-reporting
 
 **Why:** ÷24 (BUG-003) made absence reconcile cleanly but docked absent workers MORE than the conventional ÷26 "ordinary rate of pay". Owner wants payroll absence at the standard ÷26 AND Labor Cost to keep recording each worked day at its true ÷working-days value AND the two to still tally. Those three can't all hold by forcing one divisor — the ÷26-vs-÷24 gap on absent days is real money (paid above production value), so it needs its own home, not the under-recorded residual.
@@ -46,7 +46,7 @@ Entries themselves stay newest-first.
 - `src/pages/employees.tsx` (Labor Cost reconciliation) — new line "Non-productive paid (absence)" = Σ absentDays × (÷working-days − ÷26 day rate), carved OUT of the residual; the "Under-recorded hours" residual is now pure (came-but-short only); per-worker under-logged gaps exclude their own absence leniency. Reconciled-sum check updated so the "Reconciled · 0" badge holds.
 - `tests/labor-engine.test.mjs` — absence test back to ÷26 (deduction 20385, basic 244615); new lock test: part-month prorate stays ÷working-days.
 
-**Expected (May 2026, verify after regenerate):** "Non-productive paid (absence)" ≈ RM125; "Under-recorded hours" ≈ RM470 (unchanged, pure); absence column drops ÷24→÷26; reconciliation stays green.
+**Verified (May 2026, live on prod):** absence deduction dropped 1622.93 → RM1,498.09 (÷26); "Non-productive paid (absence)" = RM124.84; "Under-recorded hours" = RM463.24 (pure under-logging); Total Payroll Cost RM62,775.52 = sum of all lines; "Reconciled · 0 difference" green. Part-month proration confirmed live: SAN LIN AUNG = 2 days × (2050÷24) = RM170.83 (join/resign dates honoured).
 
 ---
 

@@ -3535,6 +3535,11 @@ type DepartmentLaborRow = {
   totalHours: number;
   workerCount: number;
   estCostSen: number;
+  // Fully-loaded total (estCostSen) split into the part backed by logged work +
+  // statutory + ÷-rate adjustment, and the under-recorded part (pay issued for
+  // hours not yet logged). laborInclEpfSen + underRecordedSen = estCostSen.
+  laborInclEpfSen: number;
+  underRecordedSen: number;
 };
 
 function DepartmentLaborTab({
@@ -3766,7 +3771,18 @@ function DepartmentLaborTab({
     // full payroll (= Payroll = Labor Cost's Total Payroll Cost). Σ extras =
     // total gross + total employer − total logged labor = the non-logged-labor
     // remainder (under-recorded + ÷-rate gap + statutory). Full month, no filter.
+    //
+    // We also split each department's loaded cost into its UNDER-RECORDED part
+    // (pay issued for hours not yet logged) and the rest, using the SAME
+    // per-worker gap the Labor Cost tab itemises: gap = gross − logged − absent-
+    // day adjustment, counted only for factory-department workers with a
+    // material gap (> RM0.50). This is the figure the owner can close by
+    // recording hours (or deducting) — so it matches Labor Cost's Under-recorded.
+    const underByDept = new Map<string, number>();
     if (deptFullMonth && !categoryFilter) {
+      // "Factory dept" = any known department (office / sales etc. that log no
+      // hours are excluded as a data gap — mirrors the Labor Cost tab).
+      const factoryCodes = new Set(allDepts.map((d) => d.code));
       for (const p of deptPayslips) {
         const wid = p.employeeId;
         if (!wid) continue;
@@ -3776,53 +3792,94 @@ function DepartmentLaborTab({
           (Number(p.socsoEmployer) || 0) +
           (Number(p.eisEmployer) || 0);
         const extra = gross + statutory - (loggedByWorker.get(wid) ?? 0);
-        if (extra === 0) continue;
         const deptCode =
           p.departmentCode || workerById.get(wid)?.departmentCode || "UNASSIGNED";
-        let cell = acc.get(deptCode);
-        if (!cell) {
-          cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
-          acc.set(deptCode, cell);
+        if (extra !== 0) {
+          let cell = acc.get(deptCode);
+          if (!cell) {
+            cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
+            acc.set(deptCode, cell);
+          }
+          cell.costSen += extra;
+          cell.workerIds.add(wid);
         }
-        cell.costSen += extra;
-        cell.workerIds.add(wid);
+        // Under-recorded gap for this worker — factory depts only. Resolve the
+        // department EXACTLY as the Labor Cost tab does (payslip's own code, no
+        // worker fallback) so both tabs' Under-recorded totals tie out: a payslip
+        // with no department is treated as non-production there, so we skip it
+        // here too rather than attributing a gap via the worker's home dept.
+        const reconCode = p.departmentCode || "UNASSIGNED";
+        if (gross > 0 && factoryCodes.has(reconCode)) {
+          const absent = Number(p.absentDays) || 0;
+          const monthDays = p.workingDays > 0 ? p.workingDays : 26;
+          const costingDivisor = Math.max(1, monthDays - holidays);
+          const costEquivalent =
+            absent > 0
+              ? Math.round((absent * (Number(p.basicSalary) || 0)) / costingDivisor)
+              : 0;
+          const leniency = Math.max(
+            0,
+            costEquivalent - (Number(p.absenceDeductionSen) || 0),
+          );
+          const gap = gross - (loggedByWorker.get(wid) ?? 0) - leniency;
+          if (gap > 50) underByDept.set(reconCode, (underByDept.get(reconCode) ?? 0) + gap);
+        }
       }
     }
 
     const shownCodes = new Set(orderedDepts.map((d) => d.code));
     const orderedRows = orderedDepts.map((d) => {
       const cell = acc.get(d.code);
+      const estCostSen = Math.round(cell?.costSen ?? 0);
+      const underRecordedSen = Math.round(underByDept.get(d.code) ?? 0);
       return {
         deptCode: d.code,
         deptName: d.shortName || d.name,
         isProduction: d.isProduction,
         totalHours: cell?.totalHours ?? 0,
         workerCount: cell?.workerIds.size ?? 0,
-        estCostSen: Math.round(cell?.costSen ?? 0),
+        estCostSen,
+        underRecordedSen,
+        laborInclEpfSen: estCostSen - underRecordedSen,
       };
     });
     // Any cost parked on a dept not in the canonical list (e.g. an unassigned
     // worker's loaded extra) — append so the total still ties to full payroll.
     const extraRows = [...acc.entries()]
       .filter(([code, cell]) => !shownCodes.has(code) && Math.round(cell.costSen) !== 0)
-      .map(([code, cell]) => ({
-        deptCode: code,
-        deptName: code || "Unassigned",
-        isProduction: false,
-        totalHours: cell.totalHours,
-        workerCount: cell.workerIds.size,
-        estCostSen: Math.round(cell.costSen),
-      }));
+      .map(([code, cell]) => {
+        const estCostSen = Math.round(cell.costSen);
+        const underRecordedSen = Math.round(underByDept.get(code) ?? 0);
+        return {
+          deptCode: code,
+          deptName: code || "Unassigned",
+          isProduction: false,
+          totalHours: cell.totalHours,
+          workerCount: cell.workerIds.size,
+          estCostSen,
+          underRecordedSen,
+          laborInclEpfSen: estCostSen - underRecordedSen,
+        };
+      });
     return [...orderedRows, ...extraRows];
-  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth]);
+  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth]);
 
   const totals = useMemo(() => {
     return rows.reduce(
-      (a, r) => ({ hours: a.hours + r.totalHours, cost: a.cost + r.estCostSen, depts: a.depts + (r.totalHours > 0 ? 1 : 0) }),
-      { hours: 0, cost: 0, depts: 0 },
+      (a, r) => ({
+        hours: a.hours + r.totalHours,
+        cost: a.cost + r.estCostSen,
+        labor: a.labor + r.laborInclEpfSen,
+        under: a.under + r.underRecordedSen,
+        depts: a.depts + (r.totalHours > 0 ? 1 : 0),
+      }),
+      { hours: 0, cost: 0, labor: 0, under: 0, depts: 0 },
     );
   }, [rows]);
 
+  // The fully-loaded total only splits into Labor / Under-recorded for a full
+  // single month with no category filter (same guard as the loading itself).
+  const splitVisible = deptFullMonth && !categoryFilter;
   const columns: Column<DepartmentLaborRow>[] = [
     {
       key: "deptName",
@@ -3870,8 +3927,41 @@ function DepartmentLaborTab({
         ),
     },
     {
+      key: "laborInclEpfSen",
+      label: "Labor (incl. EPF)",
+      align: "right",
+      sortable: true,
+      hidden: !splitVisible,
+      render: (_v, row) =>
+        row.laborInclEpfSen > 0 ? (
+          <span className="font-medium tabular-nums text-[#1F1D1B]">
+            {formatRM(row.laborInclEpfSen)}
+          </span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "underRecordedSen",
+      label: "Under-recorded",
+      align: "right",
+      sortable: true,
+      hidden: !splitVisible,
+      render: (_v, row) =>
+        row.underRecordedSen > 0 ? (
+          <span
+            className="font-medium tabular-nums text-[#9A3A2D]"
+            title="Pay already issued to this department's workers for hours not yet entered in Working Hours. Record (or deduct) those hours on the Labor Cost tab to clear it."
+          >
+            {formatRM(row.underRecordedSen)}
+          </span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
       key: "estCostSen",
-      label: "Estimated Labor Cost",
+      label: splitVisible ? "Total" : "Estimated Labor Cost",
       align: "right",
       sortable: true,
       render: (_v, row) =>
@@ -3973,9 +4063,17 @@ function DepartmentLaborTab({
             <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">
               {formatRM(totals.cost)}
             </div>
-            {deptFullMonth && !categoryFilter && (
+            {splitVisible && (
               <div className="mt-0.5 text-[10px] text-[#6B7280]">
-                Fully loaded (incl. statutory + unlogged) — matches Payroll
+                Fully loaded (incl. EPF) — matches Payroll
+                {totals.under > 0 && (
+                  <>
+                    {" · "}
+                    <span className="text-[#9A3A2D]">
+                      {formatRM(totals.under)} under-recorded
+                    </span>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -3994,20 +4092,46 @@ function DepartmentLaborTab({
             the operator to scroll back to the top metric tiles. */}
         {rows.length > 0 && (
           <div className="mt-2 grid grid-cols-12 items-center rounded-lg border border-[#6B5C32]/30 bg-[#FAF7F0] px-4 py-3 text-sm font-semibold text-[#1F1D1B]">
-            <div className="col-span-5 flex items-center gap-2">
-              <DollarSign className="h-4 w-4 text-[#6B5C32]" />
-              <span>TOTAL</span>
-              <span className="text-xs font-normal text-[#6B7280]">
-                ({totals.depts} dept{totals.depts === 1 ? "" : "s"} with activity)
-              </span>
-            </div>
-            <div className="col-span-3 text-right tabular-nums">
-              {totals.hours.toFixed(1)}h
-            </div>
-            <div className="col-span-1 text-center text-[#6B7280]">—</div>
-            <div className="col-span-3 text-right tabular-nums text-[#6B5C32]">
-              {formatRM(totals.cost)}
-            </div>
+            {splitVisible ? (
+              <>
+                <div className="col-span-4 flex items-center gap-2">
+                  <DollarSign className="h-4 w-4 text-[#6B5C32]" />
+                  <span>TOTAL</span>
+                  <span className="text-xs font-normal text-[#6B7280]">
+                    ({totals.depts} dept{totals.depts === 1 ? "" : "s"} with activity)
+                  </span>
+                </div>
+                <div className="col-span-2 text-right tabular-nums">
+                  {totals.hours.toFixed(1)}h
+                </div>
+                <div className="col-span-2 text-right tabular-nums text-[#1F1D1B]">
+                  {formatRM(totals.labor)}
+                </div>
+                <div className="col-span-2 text-right tabular-nums text-[#9A3A2D]">
+                  {totals.under > 0 ? formatRM(totals.under) : "—"}
+                </div>
+                <div className="col-span-2 text-right tabular-nums text-[#6B5C32]">
+                  {formatRM(totals.cost)}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="col-span-5 flex items-center gap-2">
+                  <DollarSign className="h-4 w-4 text-[#6B5C32]" />
+                  <span>TOTAL</span>
+                  <span className="text-xs font-normal text-[#6B7280]">
+                    ({totals.depts} dept{totals.depts === 1 ? "" : "s"} with activity)
+                  </span>
+                </div>
+                <div className="col-span-3 text-right tabular-nums">
+                  {totals.hours.toFixed(1)}h
+                </div>
+                <div className="col-span-1 text-center text-[#6B7280]">—</div>
+                <div className="col-span-3 text-right tabular-nums text-[#6B5C32]">
+                  {formatRM(totals.cost)}
+                </div>
+              </>
+            )}
           </div>
         )}
       </CardContent>
@@ -6462,9 +6586,10 @@ function LaborCostTab({
   const totalPayrollCostSen = totalGrossSen + employerContribSen;
   // Absence "non-productive paid": absent days are docked at the nominal ÷26
   // ordinary rate, but production loses the higher ÷working-days rate for the
-  // same unworked day. Carve that difference (paid above production value on
-  // absent days) onto its own reconciliation line so the under-recorded residual
-  // stays pure. Holidays are already absorbed into the ÷working-days rate, so a
+  // same unworked day. This per-payslip difference (paid above production value
+  // on absent days) is folded into each worker's HOME department bucket (see
+  // `reconBurden`), and excluded from the under-recorded gap so that gap stays
+  // pure. Holidays are already absorbed into the ÷working-days rate, so a
   // fully-attended worker contributes 0 here.
   const absenceLeniencyByPayslip = useMemo(() => {
     const m = new Map<string, number>();
@@ -6486,22 +6611,6 @@ function LaborCostTab({
     }
     return m;
   }, [reconPayslips, period, from, holidayList]);
-  const absencePaidAboveCostSen = useMemo(
-    () => [...absenceLeniencyByPayslip.values()].reduce((s, v) => s + v, 0),
-    [absenceLeniencyByPayslip],
-  );
-
-  // Salary of workers with no logged factory hours (office / sales / admin /
-  // drivers / QC), PLUS any under-logged-hours difference. Residual against
-  // gross — by construction the labor buckets + the absence line + this residual
-  // sum to total gross, and adding employer contributions closes to full payroll.
-  const nonProductionSalarySen =
-    totalGrossSen -
-    (productionLaborCostSen +
-      warehousingLaborCostSen +
-      shortfallLaborCostSen +
-      overheadLaborCostSen +
-      absencePaidAboveCostSen);
   // We only have payroll figures once payslips exist for the period. Hide the
   // reconciliation panel (rather than show a misleading negative residual)
   // when there are none or when a category filter is narrowing the buckets.
@@ -6520,16 +6629,11 @@ function LaborCostTab({
   // can check missing Working Hours for any window (e.g. weekly). Independent of
   // payslips; computed purely from logged vs expected hours over the range.
   const showRangeGap = !showReconciliation && !categoryFilter;
-  // Display sum of every bucket — must equal totalPayrollCostSen exactly.
-  const reconciledSumSen =
-    productionLaborCostSen +
-    warehousingLaborCostSen +
-    shortfallLaborCostSen +
-    overheadLaborCostSen +
-    absencePaidAboveCostSen +
-    nonProductionSalarySen +
-    employerContribSen;
-  const reconcileDiffSen = reconciledSumSen - totalPayrollCostSen;
+  // The fully-burdened bucket display (each department's labor carries its own
+  // workers' EPF + ÷-rate adjustment, leaving ONLY the under-recorded gap on its
+  // own line) is computed AFTER the per-employee itemisation below, so it can
+  // reuse the same per-worker under-logged figure. See `loadedBuckets` /
+  // `reconciledSumSen` further down.
 
   // [REMOVED] nonProductionByDept — the old "residual by department" used
   // gross_dept − bucketed_dept and filtered to residual > 50, which surfaced
@@ -6925,15 +7029,6 @@ function LaborCostTab({
     return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
   }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip]);
 
-  // The two subtotals must SUM to the Non-production salary residual bucket so
-  // the whole thing still reconciles to Total Payroll. Any tiny remainder
-  // (rounding, or fully-logged factory workers with a sub-tolerance gap that we
-  // intentionally didn't list) is surfaced as a separate rounding line so the
-  // operator can see the itemisation closes to the residual.
-  const employeeItemisedSumSen =
-    employeeResidual.nonProdSubtotalSen + employeeResidual.underLoggedSubtotalSen;
-  const employeeResidualRemainderSen = nonProductionSalarySen - employeeItemisedSumSen;
-
   // Clean per-department under-logged total — aggregated from the PER-WORKER
   // gaps (each worker's gross − their OWN logged value), so it is NOT polluted
   // by cross-department borrowing the way the old gross-minus-bucketed
@@ -6947,6 +7042,78 @@ function LaborCostTab({
     }
     return [...m.values()].sort((a, b) => b.gapSen - a.gapSen);
   }, [employeeResidual.underLoggedFactory]);
+
+  // ---- Fully-burdened department buckets --------------------------------
+  // The owner wants each department's labor line to carry the FULL cost of its
+  // own people — their EPF / SOCSO / EIS and the ÷26-vs-÷working-days absent-day
+  // adjustment baked in — so the only thing left on its own line is the genuine
+  // under-recorded hours (paid but not yet logged). We therefore drop the two
+  // separate "Employer contributions" and "Working-day rate adjustment" lines
+  // and spread those amounts back onto Production / Warehousing / Shortfall /
+  // Overhead by each worker's HOME department. Office / sales / admin staff (no
+  // known factory department) fold into Overhead with their whole salary.
+  const reconBurden = useMemo(() => {
+    const stat = { production: 0, warehousing: 0, shortfall: 0, overhead: 0 };
+    const adj = { production: 0, warehousing: 0, shortfall: 0, overhead: 0 };
+    let nonProdGrossSen = 0; // office / sales / admin (no factory dept) → Overhead
+    const bucketOf = (
+      code: string,
+    ): "production" | "warehousing" | "shortfall" | "overhead" => {
+      if (code === "PRODUCTION_SHORTFALL") return "shortfall";
+      if (code === "WAREHOUSING") return "warehousing";
+      if (prodCodes.has(code)) return "production";
+      return "overhead";
+    };
+    for (const p of reconPayslips) {
+      const code = p.departmentCode || "UNASSIGNED";
+      const statutorySen =
+        (Number(p.epfEmployer) || 0) +
+        (Number(p.socsoEmployer) || 0) +
+        (Number(p.eisEmployer) || 0);
+      if (!factoryDeptCodes.has(code)) {
+        // Unknown / unassigned department — the whole salary (which already
+        // contains any absent-day adjustment) plus statutory sits in Overhead.
+        stat.overhead += statutorySen;
+        nonProdGrossSen += Number(p.grossPay) || 0;
+        continue;
+      }
+      const b = bucketOf(code);
+      stat[b] += statutorySen;
+      adj[b] += absenceLeniencyByPayslip.get(p.id) ?? 0;
+    }
+    return { stat, adj, nonProdGrossSen };
+  }, [reconPayslips, absenceLeniencyByPayslip, prodCodes, factoryDeptCodes]);
+
+  // Loaded department buckets = logged labor + that department's own statutory
+  // + its absent-day adjustment. Production / Warehousing / Shortfall computed
+  // directly; Overhead is the closing plug so the column ALWAYS totals exactly
+  // to Total Payroll Cost (it absorbs its own overhead labor + statutory + adj +
+  // any office/sales salaries + sub-ringgit rounding).
+  const loadedProductionSen =
+    productionLaborCostSen + reconBurden.stat.production + reconBurden.adj.production;
+  const loadedWarehousingSen =
+    warehousingLaborCostSen + reconBurden.stat.warehousing + reconBurden.adj.warehousing;
+  const loadedShortfallSen =
+    shortfallLaborCostSen + reconBurden.stat.shortfall + reconBurden.adj.shortfall;
+  // Under-recorded hours — the genuine paid-but-not-logged gap. Same per-worker
+  // figure the "who & why" panel itemises, so both lines (and Department Labor's
+  // Under-recorded column) show the identical number.
+  const underRecordedReconSen = employeeResidual.underLoggedSubtotalSen;
+  const loadedOverheadSen =
+    totalPayrollCostSen -
+    underRecordedReconSen -
+    loadedProductionSen -
+    loadedWarehousingSen -
+    loadedShortfallSen;
+  // Display sum — equals totalPayrollCostSen by construction (Overhead is the
+  // plug), so the "Reconciled · 0 difference" badge stays green.
+  const reconciledSumSen =
+    loadedProductionSen +
+    loadedWarehousingSen +
+    loadedShortfallSen +
+    loadedOverheadSen +
+    underRecordedReconSen;
+  const reconcileDiffSen = reconciledSumSen - totalPayrollCostSen;
 
   const loading = entriesLoading || plLoading;
 
@@ -7079,50 +7246,41 @@ function LaborCostTab({
               <table className="w-full text-sm">
                 <tbody>
                   <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">Production Labor</td>
-                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(productionLaborCostSen)}</td>
+                    <td
+                      className="py-1.5 pr-3 text-[#4B5563]"
+                      title="Logged production hours plus these workers' own EPF / SOCSO / EIS and the small ÷26-vs-÷working-days adjustment on their absent days."
+                    >
+                      Production Labor <span className="text-[#9CA3AF]">(incl. EPF)</span>
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(loadedProductionSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">Borrowed (Warehousing)</td>
-                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(warehousingLaborCostSen)}</td>
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Borrowed (Warehousing) <span className="text-[#9CA3AF]">(incl. EPF)</span></td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(loadedWarehousingSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">Shortfall</td>
-                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(shortfallLaborCostSen)}</td>
-                  </tr>
-                  <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">Overhead (Repair / Maintenance / etc.)</td>
-                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(overheadLaborCostSen)}</td>
+                    <td className="py-1.5 pr-3 text-[#4B5563]">Shortfall <span className="text-[#9CA3AF]">(incl. EPF)</span></td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(loadedShortfallSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
                     <td
                       className="py-1.5 pr-3 text-[#4B5563]"
-                      title="Payroll docks an absent day at the standard ÷26 day rate, but production cost values a day at ÷working-days (after public holidays). This line is only that small rate difference — NOT a no-show deduction. Real absences are already deducted in Payroll."
+                      title="Repair / Maintenance / etc. labor, plus EPF and any office / sales / admin salaries (staff who don't clock factory hours)."
                     >
-                      Working-day rate adjustment
+                      Overhead &amp; non-production <span className="text-[#9CA3AF]">(incl. EPF)</span>
                     </td>
-                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(absencePaidAboveCostSen)}</td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(loadedOverheadSen)}</td>
                   </tr>
                   <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">
-                      {employeeResidual.nonProductionStaff.length > 0
-                        ? "Non-production salary (office / sales / admin)"
-                        : "Under-recorded hours (paid, not yet logged)"}
+                    <td
+                      className="py-1.5 pr-3 text-[#4B5563]"
+                      title="Pay already issued for hours not yet entered in Working Hours. Click a worker in the panel below to keep-pay (idle) or deduct each short day."
+                    >
+                      Under-recorded hours <span className="text-[#9CA3AF]">(paid, not yet logged)</span>
                     </td>
-                    <td className={`py-1.5 text-right tabular-nums font-medium ${nonProductionSalarySen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
-                      {formatCurrency(nonProductionSalarySen)}
+                    <td className={`py-1.5 text-right tabular-nums font-medium ${underRecordedReconSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {formatCurrency(underRecordedReconSen)}
                     </td>
-                  </tr>
-                  {/* The per-department residual breakdown was REMOVED here: it
-                      summed only the positive-residual departments and hid the
-                      negative ones (cross-department borrowing / OT), so the rows
-                      never added up to this net line (a confusing mismatch). The
-                      real, clean per-department under-logged figure now lives in
-                      the "who & why" panel below, aggregated from the per-worker
-                      gaps. */}
-                  <tr className="border-b border-[#E2DDD8]">
-                    <td className="py-1.5 pr-3 text-[#4B5563]">Employer contributions (EPF / SOCSO / EIS)</td>
-                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(employerContribSen)}</td>
                   </tr>
                   <tr className="border-t-2 border-[#6B5C32]">
                     <td className="py-2 pr-3 font-semibold text-[#1F1D1B]">Total Payroll Cost</td>
@@ -7133,11 +7291,11 @@ function LaborCostTab({
             </div>
 
             <p className="mt-3 text-xs text-[#6B7280] leading-relaxed">
-              Production-floor labor is costed from logged Working Hours; salaries of staff who don&rsquo;t clock factory hours
-              (office / sales / admin) and the company&rsquo;s EPF / SOCSO / EIS are added here so the breakdown reconciles to the
-              full payroll. &ldquo;Working-day rate adjustment&rdquo; is only the small gap between the ÷26 pay rate and the
-              ÷working-days cost rate on absent days &mdash; NOT a no-show deduction (real absences are already deducted in
-              Payroll). Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
+              Each department&rsquo;s line carries the full cost of its own people &mdash; their logged Working Hours plus their
+              EPF / SOCSO / EIS and the small ÷26-vs-÷working-days adjustment on absent days &mdash; so no separate statutory line is
+              needed. The only amount left on its own line is <span className="font-medium text-[#4B5563]">Under-recorded hours</span>:
+              pay already issued for hours not yet entered. Record those hours (or deduct them) in the panel below and the line drops
+              to zero. Total Payroll Cost matches the Payroll tab for {payrollMonthLabel}.
             </p>
           </div>
         )}
@@ -7204,24 +7362,25 @@ function LaborCostTab({
         {showReconciliation && (
           <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-4">
             <h3 className="text-sm font-semibold text-[#1F1D1B] mb-1">
-              Non-production salary — who &amp; why
+              Under-recorded hours — who &amp; why
             </h3>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
               {employeeResidual.nonProductionStaff.length > 0 ? (
                 <>
-                  The Non-production salary residual ({formatCurrency(nonProductionSalarySen)}) splits into two kinds:
-                  {" "}<span className="font-medium text-[#4B5563]">genuine non-production staff</span> (admin / sales /
-                  management / drivers / QC) who log no factory hours — expected; and
+                  The <span className="font-medium text-[#9A3A2D]">Under-recorded hours</span> line
+                  ({formatCurrency(underRecordedReconSen)}) is the pay issued to
                   {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
-                  {" "}— a data gap to fix by recording the missing hours.
+                  {" "}— a data gap to fix by recording the missing hours. Separately,
+                  {" "}<span className="font-medium text-[#4B5563]">non-production staff</span> (admin / sales /
+                  management / drivers / QC) who log no factory hours are folded into the Overhead line above — expected,
+                  not a gap.
                 </>
               ) : (
                 <>
-                  The Non-production salary residual ({formatCurrency(nonProductionSalarySen)}) is entirely
+                  The <span className="font-medium text-[#9A3A2D]">Under-recorded hours</span> line
+                  ({formatCurrency(underRecordedReconSen)}) is pay issued to
                   {" "}<span className="font-medium text-[#9A3A2D]">factory workers paid more than their logged Working Hours</span>
-                  {" "}— a data gap to fix by recording the missing hours. Everyone on payroll this period is a
-                  production worker, so there is no non-production staff to park. Click a worker to see which days
-                  are short.
+                  {" "}— a data gap to fix by recording the missing hours. Click a worker to see which days are short.
                 </>
               )}
             </p>
@@ -7372,23 +7531,22 @@ function LaborCostTab({
               </div>
             </div>
 
-            {/* Prove the two subtotals add up to the residual bucket. */}
+            {/* Prove the itemised gap equals the Under-recorded reconciliation
+                line above (identical figure by construction). Any genuine
+                non-production staff salary sits in Overhead, noted here. */}
             <div className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-xs">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[#6B7280]">
-                  Non-production staff {formatCurrency(employeeResidual.nonProdSubtotalSen)}
-                  {" + "}Unlogged factory hours {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
-                  {Math.abs(employeeResidualRemainderSen) > 1 && (
-                    <> {" + "}Rounding {formatCurrency(employeeResidualRemainderSen)}</>
+                  Unlogged factory hours {formatCurrency(employeeResidual.underLoggedSubtotalSen)}
+                  {employeeResidual.nonProdSubtotalSen > 0 && (
+                    <> {" "}(non-production staff {formatCurrency(employeeResidual.nonProdSubtotalSen)} sits in Overhead)</>
                   )}
                 </span>
                 <span className="inline-flex items-center gap-1.5 font-semibold text-[#1F1D1B]">
-                  = Non-production salary {formatCurrency(nonProductionSalarySen)}
-                  {Math.abs(employeeResidualRemainderSen) <= 1 && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3E4] px-2 py-0.5 text-[#4F7C3A]">
-                      <Check className="h-3 w-3" /> matches
-                    </span>
-                  )}
+                  = Under-recorded hours {formatCurrency(underRecordedReconSen)}
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#EEF3E4] px-2 py-0.5 text-[#4F7C3A]">
+                    <Check className="h-3 w-3" /> matches
+                  </span>
                 </span>
               </div>
             </div>

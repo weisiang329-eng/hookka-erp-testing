@@ -34,6 +34,25 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-005 — Worker QR scan completed the card, but the operator's Production Sheet stayed stale (Fab Cut PENDING on one tab, DONE on another)
+
+**Status:** 🟢 Fixed (2026-06-06) — merged (89ad3bff) + deployed (green) + verified live (stale snapshot manually cleared; Fab Cut sheet flipped WAITING→COMPLETED, matching Fab Sew). Real-device scan→refresh test pending owner.
+**Category:** production-orders
+
+**Symptom:** A worker scanned the Fab Cut sticker for SO-2605-305-03 → success. The **Fab Cut — Production Sheet** still showed that order's Fab Cut = PENDING (empty Completion + PIC), while the **Fab Sew — Production Sheet** showed Fab Cut = DONE for the SAME order. Looked like the two sheets disagreed about the same data. Owner: "正常来说应该一样的啊."
+
+**Root cause:** NOT a data split — verified live on prod that the FAB_CUT job_card was correctly COMPLETED (pic1=Lim, 2026-06-06). It was a **stale cache**: the dept sheets read the cache-aside snapshot `production_orders_list_snapshot`, whose freshness probe (`snapshot-freshness.ts`) compares `MAX(updated_at)` across `production_orders` (updated_at is **TEXT**, stored as ISO "…T…Z") and `job_cards` (**TIMESTAMP**, "… …") — a lexical compare over mixed formats the codebase already documents as unreliable ("the probe lies"). On top of that, the three worker scan-complete handlers (`scan-complete`, `scan-complete-dept`, `scan-complete-shared`) omitted the `job_cards … updated_at = NOW()` bump the dashboard JC-PATCH path adds (added 2026-05-25 for exactly this reason). So a worker scan wrote the DB but never invalidated the snapshot → operators saw the pre-scan status. Fab Sew's tab happened to hold a fresher snapshot, hence the split. Affects all four scan depts (Fab Cut / Fab Sew / Upholstery / Packing).
+
+**Diagnosis note:** Proven by querying prod via the app API — the SAME card returned `excludeCompleted=true` → WAITING (stale) vs no-flag → COMPLETED (fresh), both `X-Cache: MISS`, i.e. a snapshot artifact, not a row-level divergence. Disproved two earlier hypotheses (anchor-merge "wrong card", and operator-misread-siblings).
+
+**Fix (`src/api/routes/production-orders.ts`):**
+- Added `updated_at = NOW()` to the `job_cards` UPDATE in all three scan handlers (`scan-complete` ~L5757, `scan-complete-dept` ~L6123, `scan-complete-shared` ~L6508), matching the dashboard mutation path.
+- New `invalidateProductionCachesAfterScan(c)` (~L4506): explicit KV `bumpPoListCacheVersion` + per-org `DELETE FROM production_orders_list_snapshot`, called before each scan handler returns. Guarantees the next operator fetch recomputes fresh regardless of the unreliable probe. Scoped to the dept-list snapshot only (not dashboard/overdue/historical) to keep the recompute blast radius small. Mirrors `invalidateHubChangeSnapshots`.
+
+**Verified (live, prod):** manually cleared 106 stale `production_orders_list_snapshot` rows; the Fab Cut sheet (`dept=FAB_CUT&excludeCompleted=true`) immediately read COMPLETED / Lim / 6 Jun, matching Fab Sew. Deploy 89ad3bff green; post-deploy the dept sheet still reads COMPLETED (no regression). Shipped alongside a QR-camera sensitivity improvement (native BarcodeDetector + continuous autofocus, jsQR fallback) in the same deploy — enhancement, not a bug.
+
+---
+
 ## BUG-2026-06-06-004 — Payroll absence rated ÷26 again (was ÷24), with a "Non-productive paid (absence)" reconciliation line so Labor Cost still ties out
 
 **Status:** 🟢 Fixed (2026-06-06) — merged (e9a3a91c) + deployed + May regenerated + verified live. Supersedes the ÷24 decision in BUG-2026-06-06-003.

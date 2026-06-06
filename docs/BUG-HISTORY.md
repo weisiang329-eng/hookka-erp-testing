@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-06-006 — Under-recorded hours made actionable: Idle / Deduct + Undo (Phase 2)
+
+**Status:** 🟢 Shipped + verified live (2026-06-06). Migration 0152 applied to prod via Supabase SQL editor (no-RLS, matching every other table; `_migrations` tracker row added so the runner skips it). Code deployed (df4a30b5).
+**Category:** payroll-reporting
+
+**What:** The Labor Cost "Under-recorded hours" list (worker came but logged < a full day) is now clearable per short day:
+- **Idle** — came but no work, still paid → logs the short hours to `PRODUCTION_SHORTFALL` (existing mechanism); the worker's logged value rises so the gap closes into the "Idle (Shortfall)" bucket. No pay change, no DB change.
+- **Deduct** — came but didn't work and won't be paid → writes a row to the new `payroll_hour_deductions` table + regenerates; the engine values the docked hours at the worker's ÷working-days hourly rate and subtracts from basic earned, so gross drops by exactly the production value Labor Cost never credited and the gap closes.
+- **Undo** — a "Docked this month" list deletes the dock + regenerates, restoring pay.
+- (Enter real hours = the existing Working Hours grid.)
+
+**Files:** migration `0152_payroll_hour_deductions`; `labor-engine.ts` (`shortHourDeductionHours` → `shortHourDeductionSen` off basic, ÷working-days hourly); `payslips.ts` (reads the period's docks, try/catch-resilient if the table is absent); new `payroll-hour-deductions.ts` route (GET / POST-upsert / DELETE, `payslips` perms) + `worker.ts` mount; `employees.tsx` (per-day Idle/Deduct buttons in the drill-in + "Docked this month" undo list).
+
+**Verified live (May 2026):** Deduct 4h on ZAW MOE TUN 2026-05-20 → Paid RM2,155.12 → RM2,117.16 (−RM37.96 = 4 × 2050÷24÷9), Gap RM189.81 → RM151.85, Under-recorded residual RM463.24 → RM425.28, Total Payroll Cost RM62,775.52 → RM62,737.56, "Docked this month" list showed the dock. Undo → all restored exactly. 509 tests, typecheck (API+app), build all green.
+
+---
+
 ## BUG-2026-06-06-005 — Worker QR scan completed the card, but the operator's Production Sheet stayed stale (Fab Cut PENDING on one tab, DONE on another)
 
 **Status:** 🟢 Fixed (2026-06-06) — merged (89ad3bff) + deployed (green) + verified live (stale snapshot manually cleared; Fab Cut sheet flipped WAITING→COMPLETED, matching Fab Sew). Real-device scan→refresh test pending owner.

@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-013 — Nightly prod→staging data clone broken since 06-04 (pg_trgm operator class); fixed + staging re-cloned
+
+**Status:** 🟢 Fixed + verified (2026-06-07, commit d0097c3b on main). One-shot sync re-run green (run 27098699726): **staging now == prod to the row** (job_cards 19705, audit_events 10838, same latest migration 2026-06-06 13:19:52). The nightly cron (`sync-staging.yml`, 02:00 SGT / 18:00 UTC, runs from main) now uses the fixed workflow.
+**Category:** infrastructure
+
+The nightly `Sync prod → staging` workflow (pg_dump prod public schema → DROP/CREATE staging public → pg_restore → verify) silently started FAILING at the restore step on 2026-06-04 (06-01/02/03 were green): `pg_restore: error: operator class "public.gin_trgm_ops" does not exist for access method "gin"`. So staging's data sat 3 nights stale (and the public schema was left empty after the drop, since restore aborted).
+
+Root cause: prod gained a `pg_trgm` GIN index (assistant fuzzy-match / smart_lookup work) whose index DDL references `public.gin_trgm_ops`. The workflow's `DROP SCHEMA public CASCADE` also drops the `pg_trgm` extension (prod keeps it in the `public` schema), and `pg_dump --schema=public` never emits `CREATE EXTENSION`, so `pg_restore` couldn't find the trigram operator class and `--exit-on-error` aborted.
+
+Fix (`.github/workflows/sync-staging.yml`): a new step after the schema reset and before the restore replays prod's full extension list onto staging — `SELECT 'CREATE EXTENSION IF NOT EXISTS '||extname||' WITH SCHEMA '||nspname||' CASCADE' FROM pg_extension` (excluding plpgsql), run against staging. Recreated uuid-ossp, pg_stat_statements, **pg_trgm (public)**, pgcrypto, supabase_vault. Idempotent (IF NOT EXISTS) and robust to any extension prod adds later, so the nightly won't break again. Owner asked to fully mirror staging to prod (code earlier + data now); staging Supabase = Tokyo, prod = Singapore; only `public` schema is cloned (auth/storage/vault left intact on both).
+
+---
+
 ## BUG-2026-06-07-012 — OCR self-learning matched customers by EXACT name → 92% of gold samples wasted; Carress learned nothing
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commits a6916260 + 3a67fc5f onto main 91f88d4f; Cloudflare Pages deploy green run 27089595816). typecheck clean. Weekly distill re-run via workflow_dispatch (run 27089666267, success). Live prod write-then-read verified: `customers.ocrPromptRules` — **Carress 0 → 2,189 chars** (first rules ever; learned its `PO/YYMM-NNN` format), **Houzs Century 1,693 → 3,018 chars** (now distilling all 24 gold, was 3).

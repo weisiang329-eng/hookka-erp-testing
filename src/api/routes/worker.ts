@@ -22,7 +22,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
-import { computeMonthlyLabor, absenceCutoffDay } from "../../lib/labor-engine";
+import { computeMonthlyLabor, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import {
   rowToMinimalPO,
   // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
@@ -1018,14 +1018,15 @@ app.get("/history", async (c) => {
 // ============================================================
 // GET /api/worker/payslips
 //
-// Read-only — does NOT recompute the current-month estimate (admin-side
-// /api/payslips POST already does that on demand).  Returns
-//   { current: <stub-zero-row>, history: [<payslip rows>] }
-// where each history row aliases payslips.* into the camelCase shape the
-// /worker/pay frontend expects (basicSen, grossSen, netSen, ...).
-//
-// `current` is provided as a zeroed shell rather than null because the
-// frontend's runtime parser (asPayData) requires it to be a record.
+// Returns { current, history }:
+//   • current  — a LIVE current-month estimate computed by computeMonthlyLabor
+//     (the SAME engine the admin Payroll screen + /api/payslips/projected use),
+//     on the worker's THIS-MONTH effective salary (day-weighted if it changed
+//     mid-month), their logged Working Hours, OT and absences-through-grace.
+//     Never stored; once the admin generates the period's payslip the stored
+//     row is the source of truth and `history` carries it.
+//   • history  — stored payslips, aliasing payslips.* into the camelCase shape
+//     the /worker/pay frontend expects (basicSen, grossSen, netSen, ...).
 // ============================================================
 type PayslipRow = {
   id: string;
@@ -1112,9 +1113,35 @@ app.get("/payslips", async (c) => {
     } catch { /* malformed payload — treat as no holidays */ }
   }
 
+  // Salary effective for THIS month — day-weighted if it changed mid-month (the
+  // "Effective from" feature). SAME source the admin payroll + projected estimate
+  // use, so the worker's phone matches what they're actually paid even after a
+  // mid-month raise. Resilient: no history table / no rows → current basic salary.
+  let salaryHistory: Array<{ effectiveFrom: string; basicSalarySen: number }> = [];
+  try {
+    const wsh = await c.var.DB.prepare(
+      "SELECT basicSalarySen, effectiveFrom FROM worker_salary_history WHERE workerId = ?",
+    )
+      .bind(workerId)
+      .all<{ basicSalarySen: number; effectiveFrom: string }>();
+    salaryHistory = (wsh.results ?? []).map((r) => ({
+      effectiveFrom: r.effectiveFrom,
+      basicSalarySen: Number(r.basicSalarySen) || 0,
+    }));
+  } catch (e) {
+    console.warn("[worker/pay] worker_salary_history read skipped:", e);
+  }
+  const effectiveSalarySen = effectiveSalarySenForMonth(
+    salaryHistory,
+    auth.worker.basicSalarySen,
+    now.getFullYear(),
+    now.getMonth() + 1,
+    publicHolidays,
+  );
+
   const labor = computeMonthlyLabor({
     worker: {
-      basicSalarySen: auth.worker.basicSalarySen,
+      basicSalarySen: effectiveSalarySen,
       workingDaysPerMonth: auth.worker.workingDaysPerMonth,
       workingHoursPerDay: auth.worker.workingHoursPerDay,
       otMultiplier: auth.worker.otMultiplier,

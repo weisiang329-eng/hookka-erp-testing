@@ -3811,6 +3811,9 @@ async function applyPoUpdate(
       // none of which the operator intended to wipe the date.
     }
 
+    // Capture whether this card was completed BEFORE the operator's edit, so an
+    // explicit "remove completion date" can also wipe the scan stamps below.
+    const jcWasCompleted = !!updated.completedDate;
     if (body.completedDate !== undefined) {
       updated.completedDate = body.completedDate || null;
     }
@@ -3897,6 +3900,30 @@ async function applyPoUpdate(
         updated.id,
       )
       .run();
+
+    // BUG-2026-06-08 (scan ↔ production sync): when the operator REMOVES the
+    // completion on the production page (clears completedDate) on a card that
+    // was completed, ALSO clear the underlying piece_pics scan stamps. The
+    // card's completion % is re-derived from those stamps, so without this the
+    // cleared card "jumps back to complete" on the next refetch (and the PIC,
+    // aggregated from the same stamps, reappears). This makes the production-
+    // page "undo" reach the scan layer the worker filled. Targeted: only fires
+    // on an explicit date-removal of a previously-completed card, so valid
+    // IN_PROGRESS partial scans are untouched.
+    if (
+      body.completedDate !== undefined &&
+      !body.completedDate &&
+      jcWasCompleted
+    ) {
+      await db
+        .prepare(
+          `UPDATE piece_pics SET pic1Id = NULL, pic1Name = NULL, pic2Id = NULL,
+             pic2Name = NULL, completedAt = NULL, lastScanAt = NULL,
+             boundStickerKey = NULL WHERE jobCardId = ?`,
+        )
+        .bind(updated.id)
+        .run();
+    }
 
     // Google Sheets sync — fire-and-forget. Push the freshly-updated JC
     // row to its dept tab so the spreadsheet stays mirror-accurate. Helper

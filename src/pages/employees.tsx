@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "rea
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { countPublicHolidaysInMonth } from "@/lib/labor-engine";
+import { countElapsedWorkingDays } from "@/lib/labor-engine";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -3705,14 +3705,17 @@ function DepartmentLaborTab({
   }, [allDepts]);
 
   const rows: DepartmentLaborRow[] = useMemo(() => {
-    // Public holidays in the reporting month — the production-cost regular
-    // day rate divides the salary by (workingDaysPerMonth − holidays), so a
-    // holiday month costs each productive hour more.
+    // Production-cost divisor = the ACTUAL Mon-Sat working days in this month
+    // minus public holidays (mirrors labor-engine costingDivisor), NOT a fixed
+    // 26. A holiday/short month costs each productive hour proportionally more.
     const [hYear, hMonth] = (period || dateFrom).slice(0, 7).split("-").map(Number);
-    const holidays =
+    const actualWorkingDays =
       hYear && hMonth
-        ? countPublicHolidaysInMonth(hYear, hMonth, holidayList)
-        : 0;
+        ? Math.max(
+            1,
+            countElapsedWorkingDays(hYear, hMonth, new Date(hYear, hMonth, 0).getDate(), holidayList),
+          )
+        : 26;
 
     // Group raw entries by (worker, date) so we can apply OT pro-rata
     // within each workday. Same shape as Labor Cost's segsByWorkerDate.
@@ -3739,7 +3742,7 @@ function DepartmentLaborTab({
       // rate stays on the full ÷26 so OT pay matches payroll.
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
-      const regularDays = Math.max(1, monthDays - holidays);
+      const regularDays = actualWorkingDays;
       const effSalarySen = effSalaryOf(w);
       const regularRateSen = effSalarySen / regularDays / stdHours;
       const otBaseRateSen = effSalarySen / monthDays / stdHours;
@@ -3815,8 +3818,7 @@ function DepartmentLaborTab({
         const reconCode = p.departmentCode || "UNASSIGNED";
         if (gross > 0 && factoryCodes.has(reconCode)) {
           const absent = Number(p.absentDays) || 0;
-          const monthDays = p.workingDays > 0 ? p.workingDays : 26;
-          const costingDivisor = Math.max(1, monthDays - holidays);
+          const costingDivisor = actualWorkingDays;
           const costEquivalent =
             absent > 0
               ? Math.round((absent * (Number(p.basicSalary) || 0)) / costingDivisor)
@@ -6468,15 +6470,17 @@ function LaborCostTab({
     // deployments) so the table still renders with zeroes rather than NaN.
     const byDeptCategory: Record<string, number> = revData.byDeptCategory ?? {};
 
-    // Public holidays in the reporting month — the production-cost regular
-    // day rate divides the salary by (workingDaysPerMonth − holidays), so a
-    // holiday month makes each productive hour cost more. The OT base rate
-    // stays on the full ÷26 so OT pay matches payroll.
+    // Production-cost divisor = the ACTUAL Mon-Sat working days in this month
+    // minus public holidays (mirrors labor-engine costingDivisor), NOT a fixed
+    // 26. The OT base rate stays on the nominal 26 so OT pay matches payroll.
     const [hYear, hMonth] = (period || from).slice(0, 7).split("-").map(Number);
-    const holidays =
+    const actualWorkingDays =
       hYear && hMonth
-        ? countPublicHolidaysInMonth(hYear, hMonth, holidayList)
-        : 0;
+        ? Math.max(
+            1,
+            countElapsedWorkingDays(hYear, hMonth, new Date(hYear, hMonth, 0).getDate(), holidayList),
+          )
+        : 26;
 
     // Group by (departmentCode, category). Hours summed; cost = sum over each
     // entry of regular_hours × regular_rate + ot_hours × ot_base_rate × multiplier.
@@ -6509,7 +6513,7 @@ function LaborCostTab({
       const effSalarySen = effSalaryOf(w);
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
-      const regularDays = Math.max(1, monthDays - holidays);
+      const regularDays = actualWorkingDays;
       const regularRateSen = effSalarySen / regularDays / stdHours;
       const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
@@ -6640,12 +6644,14 @@ function LaborCostTab({
   const absenceLeniencyByPayslip = useMemo(() => {
     const m = new Map<string, number>();
     const [hY, hM] = (period || from).slice(0, 7).split("-").map(Number);
-    const holidays = hY && hM ? countPublicHolidaysInMonth(hY, hM, holidayList) : 0;
+    const actualWorkingDays =
+      hY && hM
+        ? Math.max(1, countElapsedWorkingDays(hY, hM, new Date(hY, hM, 0).getDate(), holidayList))
+        : 26;
     for (const p of reconPayslips) {
       const absent = Number(p.absentDays) || 0;
       if (absent <= 0) continue;
-      const monthDays = p.workingDays > 0 ? p.workingDays : 26;
-      const costingDivisor = Math.max(1, monthDays - holidays);
+      const costingDivisor = actualWorkingDays;
       const costEquivalentSen = Math.round(
         (absent * (Number(p.basicSalary) || 0)) / costingDivisor,
       );
@@ -6715,8 +6721,10 @@ function LaborCostTab({
     const out = new Map<string, number>();
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
     const [hYear, hMonth] = (period || from).slice(0, 7).split("-").map(Number);
-    const holidays =
-      hYear && hMonth ? countPublicHolidaysInMonth(hYear, hMonth, holidayList) : 0;
+    const actualWorkingDays =
+      hYear && hMonth
+        ? Math.max(1, countElapsedWorkingDays(hYear, hMonth, new Date(hYear, hMonth, 0).getDate(), holidayList))
+        : 26;
 
     // Group segments per (worker, date) so the OT threshold + pro-rata OT split
     // are applied against the worker's whole workday — identical to the bucket
@@ -6734,7 +6742,7 @@ function LaborCostTab({
       if (!w || !w.basicSalarySen) continue;
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
-      const regularDays = Math.max(1, monthDays - holidays);
+      const regularDays = actualWorkingDays;
       const effSalarySen = effSalaryOf(w);
       const regularRateSen = effSalarySen / regularDays / stdHours;
       const otBaseRateSen = effSalarySen / monthDays / stdHours;
@@ -6808,16 +6816,17 @@ function LaborCostTab({
       const perDayDeductionSen = w
         ? Math.round(effSalarySen / (w.workingDaysPerMonth || 26))
         : 0;
-      // Hourly rate for valuing under-recorded short hours — ÷working-days basis
-      // (the same rate a Deduct docks): salary ÷ (working days − holidays) ÷ std.
+      // Hourly rate for valuing under-recorded short hours -- div-working-days
+      // basis (the same rate a Deduct docks): salary / actualWorkingDays / std,
+      // where actualWorkingDays = ACTUAL Mon-Sat days this month minus holidays.
       const [hbY, hbM] = (period || from).slice(0, 7).split("-").map(Number);
-      const holidaysInPeriod =
-        hbY && hbM ? countPublicHolidaysInMonth(hbY, hbM, holidayList) : 0;
+      const actualWorkingDays =
+        hbY && hbM
+          ? Math.max(1, countElapsedWorkingDays(hbY, hbM, new Date(hbY, hbM, 0).getDate(), holidayList))
+          : 26;
       const costingHourlyRateSen =
         w && effSalarySen
-          ? effSalarySen /
-            Math.max(1, (w.workingDaysPerMonth || 26) - holidaysInPeriod) /
-            Math.max(1, expected)
+          ? effSalarySen / actualWorkingDays / Math.max(1, expected)
           : 0;
       // Resigned workers: days AFTER their last day (resignedAt, inclusive) are
       // neither worked nor absent — they have left. Such days are skipped so the
@@ -6963,8 +6972,10 @@ function LaborCostTab({
     // as the labor calc does, so the indicative short value matches the bucket
     // rate. Use the same (period || from) month the labor calc uses.
     const [hYear, hMonth] = (period || from).slice(0, 7).split("-").map(Number);
-    const holidays =
-      hYear && hMonth ? countPublicHolidaysInMonth(hYear, hMonth, holidayList) : 0;
+    const actualWorkingDays =
+      hYear && hMonth
+        ? Math.max(1, countElapsedWorkingDays(hYear, hMonth, new Date(hYear, hMonth, 0).getDate(), holidayList))
+        : 26;
     for (const w of workers) {
       if (w.status !== "ACTIVE") continue;
       // Only factory-department workers are expected to log Working Hours; a
@@ -6981,8 +6992,7 @@ function LaborCostTab({
       const shortHours = Math.max(0, expectedHours - loggedHours);
       if (shortHours <= 0.0001) continue;
       // Indicative value of the missing hours at the worker's regular rate.
-      const monthDays = w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
-      const regularDays = Math.max(1, monthDays - holidays);
+      const regularDays = actualWorkingDays;
       const effSalarySen = effSalaryOf(w);
       const regularRateSen = effSalarySen
         ? effSalarySen / regularDays / stdHours

@@ -215,6 +215,65 @@ export function formatRM(sen: number): string {
 }
 
 /**
+ * The single money-rounding primitive: round a fractional-sen amount to whole
+ * sen. Half rounds up (Math.round). Use this everywhere a money value is
+ * displayed/stored so the rounding direction is identical across the app.
+ */
+export function roundSen(amountSen: number): number {
+  return Math.round(amountSen);
+}
+
+/**
+ * Round a list of fractional-sen `parts` to whole sen so that they sum EXACTLY
+ * to `totalSen` — the largest-remainder (Hamilton) method.
+ *
+ * Why: when a single integer total (e.g. Total Payroll Cost) is broken into
+ * parts (per-department labor cost), rounding each part independently can make
+ * the rows sum to a sen more or less than the total. Naively shoving that
+ * residual into one chosen bucket is arbitrary. Largest-remainder instead floors
+ * every part, then hands the leftover sen — one each — to the parts whose
+ * dropped fraction was largest (ties broken by the larger part). Every part ends
+ * up within a sen of its natural rounded value, the allocation is fair, and the
+ * result sums to `totalSen` to the sen. This is THE convention for splitting a
+ * money total into displayed parts across the ERP.
+ *
+ * `totalSen` is rounded to whole sen first. Returns integers in input order.
+ */
+export function distributeRoundSen(parts: number[], totalSen: number): number[] {
+  const n = parts.length;
+  if (n === 0) return [];
+  const floors = parts.map((p) => Math.floor(p));
+  const baseSum = floors.reduce((a, b) => a + b, 0);
+  let remainder = Math.round(totalSen) - baseSum; // whole sen still to allocate
+  // Indices ordered by descending dropped fraction; ties → larger part first.
+  const order = parts
+    .map((p, i) => ({ i, frac: p - floors[i] }))
+    .sort((a, b) => b.frac - a.frac || parts[b.i] - parts[a.i]);
+  const out = floors.slice();
+  // Positive residual → add a sen to the largest-fraction parts.
+  for (let k = 0; k < n && remainder > 0; k++) {
+    out[order[k].i] += 1;
+    remainder -= 1;
+  }
+  // Negative residual (float noise made the floors overshoot) → shave a sen from
+  // the smallest-fraction parts.
+  for (let k = n - 1; k >= 0 && remainder < 0; k--) {
+    out[order[k].i] -= 1;
+    remainder += 1;
+  }
+  // Safety net: in correct use `parts` already sum to ~`totalSen`, so the loops
+  // above consume the whole residual and this is a no-op. If a caller passes a
+  // total far from Σparts, park the leftover on the largest part so the result
+  // ALWAYS sums to totalSen exactly (never a silent mismatch).
+  if (remainder !== 0) {
+    let big = 0;
+    for (let i = 1; i < n; i++) if (out[i] > out[big]) big = i;
+    out[big] += remainder;
+  }
+  return out;
+}
+
+/**
  * Format a minute count as "8h 30m" / "8h" / "-". The canonical
  * hours+minutes display used across the Hookka ERP UI — Employees
  * Working Hours grid, Department Performance KPIs, Planning page

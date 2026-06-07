@@ -274,3 +274,73 @@ test("weightedAvgCostSen: two batches with same qty -> arithmetic mean", () => {
   ];
   assert.equal(costing.weightedAvgCostSen(batches), 150);
 });
+
+// ---------------------------------------------------------------------------
+// roundSen + distributeRoundSen — the single rounding convention (utils.ts).
+// distributeRoundSen (largest-remainder / Hamilton) must make rounded parts sum
+// EXACTLY to the integer total, so the Payroll / Labor Cost / Department Labor
+// screens all tie to the sen WITHOUT an arbitrary "shove the cent into one
+// bucket" plug. If this drifts, the three screens silently disagree again.
+// ---------------------------------------------------------------------------
+test("roundSen: half rounds up (Math.round)", () => {
+  assert.equal(utils.roundSen(100.4), 100);
+  assert.equal(utils.roundSen(100.5), 101);
+  assert.equal(utils.roundSen(100.6), 101);
+});
+
+test("distributeRoundSen: parts sum EXACTLY to the total (+1 sen residual)", () => {
+  // floors [10,20,30]=60, total 61 -> one sen to the largest fraction (30.5).
+  const out = utils.distributeRoundSen([10.4, 20.4, 30.5], 61);
+  assert.equal(out.reduce((a, b) => a + b, 0), 61);
+  assert.deepEqual(out, [10, 20, 31]);
+});
+
+test("distributeRoundSen: two-sen residual -> the two largest fractions", () => {
+  // floors [10,20,30]=60, residual 2 -> 20.7 (.7) and 10.6 (.6) each get +1.
+  const out = utils.distributeRoundSen([10.6, 20.7, 30.1], 62);
+  assert.equal(out.reduce((a, b) => a + b, 0), 62);
+  assert.deepEqual(out, [11, 21, 30]);
+});
+
+test("distributeRoundSen: ties broken by the larger part", () => {
+  // Both fractions .5 -> the larger part wins the single extra sen.
+  const out = utils.distributeRoundSen([10.5, 30.5], 41);
+  assert.equal(out.reduce((a, b) => a + b, 0), 41);
+  assert.deepEqual(out, [10, 31]);
+});
+
+test("distributeRoundSen: already-integer parts that tie out are unchanged", () => {
+  assert.deepEqual(utils.distributeRoundSen([100, 200, 300], 600), [100, 200, 300]);
+});
+
+test("distributeRoundSen: negative residual shaves from the smallest fraction", () => {
+  // floors [10,20,30]=60, total 59 -> remove a sen from the smallest fraction (30.1).
+  const out = utils.distributeRoundSen([10.9, 20.9, 30.1], 59);
+  assert.equal(out.reduce((a, b) => a + b, 0), 59);
+  assert.deepEqual(out, [10, 20, 29]);
+});
+
+test("distributeRoundSen: empty list returns empty", () => {
+  assert.deepEqual(utils.distributeRoundSen([], 0), []);
+});
+
+test("distributeRoundSen: realistic per-department payroll split ties to the sen", () => {
+  // 12 department cost floats (fractional sen). The anchor total is the rounded
+  // sum — exactly how Department Labor calls it (per-dept floats vs the integer
+  // Total Payroll Cost they must add up to).
+  const parts = [
+    625318.4, 1071401.6, 413026.5, 562880.5, 921858.5, 409625.5,
+    1392907.5, 410863.5, 172310.5, 54022.5, 100122.5, 97188.5,
+  ];
+  const total = Math.round(parts.reduce((a, b) => a + b, 0));
+  const out = utils.distributeRoundSen(parts, total);
+  assert.equal(out.reduce((a, b) => a + b, 0), total);
+  // Every department stays within a sen of its independent rounding.
+  out.forEach((v, i) => assert.ok(Math.abs(v - Math.round(parts[i])) <= 1));
+});
+
+test("distributeRoundSen: always sums to total even if parts are far off (safety net)", () => {
+  // Misuse: parts nowhere near the total -> result must STILL sum to the total.
+  const out = utils.distributeRoundSen([10, 20, 30], 1000);
+  assert.equal(out.reduce((a, b) => a + b, 0), 1000);
+});

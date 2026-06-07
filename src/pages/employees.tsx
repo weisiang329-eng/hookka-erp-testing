@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM } from "@/lib/utils";
+import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen } from "@/lib/utils";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -3839,8 +3839,8 @@ function DepartmentLaborTab({
     const shownCodes = new Set(orderedDepts.map((d) => d.code));
     const orderedRows = orderedDepts.map((d) => {
       const cell = acc.get(d.code);
-      const estCostSen = Math.round(cell?.costSen ?? 0);
-      const underRecordedSen = Math.round(underByDept.get(d.code) ?? 0);
+      const estCostSen = roundSen(cell?.costSen ?? 0);
+      const underRecordedSen = roundSen(underByDept.get(d.code) ?? 0);
       return {
         deptCode: d.code,
         deptName: d.shortName || d.name,
@@ -3855,10 +3855,10 @@ function DepartmentLaborTab({
     // Any cost parked on a dept not in the canonical list (e.g. an unassigned
     // worker's loaded extra) — append so the total still ties to full payroll.
     const extraRows = [...acc.entries()]
-      .filter(([code, cell]) => !shownCodes.has(code) && Math.round(cell.costSen) !== 0)
+      .filter(([code, cell]) => !shownCodes.has(code) && roundSen(cell.costSen) !== 0)
       .map(([code, cell]) => {
-        const estCostSen = Math.round(cell.costSen);
-        const underRecordedSen = Math.round(underByDept.get(code) ?? 0);
+        const estCostSen = roundSen(cell.costSen);
+        const underRecordedSen = roundSen(underByDept.get(code) ?? 0);
         return {
           deptCode: code,
           deptName: code || "Unassigned",
@@ -3872,33 +3872,33 @@ function DepartmentLaborTab({
       });
     const allRows = [...orderedRows, ...extraRows];
 
-    // Tie the grand total to Payroll to the sen. Each department's cost is
-    // rounded to the nearest sen, so the sum of the rows can land a sen off the
-    // integer Total Payroll Cost (Σ gross + employer EPF/SOCSO/EIS) that the
-    // Labor Cost + Payroll tabs show. When fully loaded, fold that tiny residual
-    // into the largest-cost department (least visible) so the rows add up EXACTLY
-    // to Payroll. Under-recorded is already tied per-worker and is left untouched.
+    // Make the rows add up EXACTLY to the integer Total Payroll Cost (Σ gross +
+    // employer EPF/SOCSO/EIS) the Payroll + Labor Cost tabs show — using the
+    // shared largest-remainder distributor (distributeRoundSen), the SAME
+    // rounding convention used across the app, NOT an ad-hoc plug. Each dept's
+    // fractional-sen cost is rounded so the leftover sen land on the largest-
+    // fraction departments and the column ties to Payroll to the sen. Only when
+    // fully loaded (full finished month, no category filter); otherwise the
+    // per-dept nearest-sen values stand (no payroll total to tie to).
+    // Under-recorded is already tied per-worker and is left untouched.
     const fullyLoaded = deptFullMonth && !categoryFilter && deptMonthFinished;
     if (fullyLoaded && allRows.length) {
       let payrollTotalSen = 0;
       for (const p of deptPayslips) {
         payrollTotalSen +=
-          Math.round(Number(p.grossPay) || 0) +
-          Math.round(Number(p.epfEmployer) || 0) +
-          Math.round(Number(p.socsoEmployer) || 0) +
-          Math.round(Number(p.eisEmployer) || 0);
+          roundSen(Number(p.grossPay) || 0) +
+          roundSen(Number(p.epfEmployer) || 0) +
+          roundSen(Number(p.socsoEmployer) || 0) +
+          roundSen(Number(p.eisEmployer) || 0);
       }
-      const residualSen =
-        payrollTotalSen - allRows.reduce((s, r) => s + r.estCostSen, 0);
-      if (residualSen !== 0) {
-        let big = 0;
-        for (let i = 1; i < allRows.length; i++) {
-          if (allRows[i].estCostSen > allRows[big].estCostSen) big = i;
-        }
-        allRows[big].estCostSen += residualSen;
-        allRows[big].laborInclEpfSen =
-          allRows[big].estCostSen - allRows[big].underRecordedSen;
-      }
+      const tied = distributeRoundSen(
+        allRows.map((r) => acc.get(r.deptCode)?.costSen ?? 0),
+        payrollTotalSen,
+      );
+      allRows.forEach((r, i) => {
+        r.estCostSen = tied[i];
+        r.laborInclEpfSen = r.estCostSen - r.underRecordedSen;
+      });
     }
     return allRows;
   }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished]);
@@ -6588,7 +6588,7 @@ function LaborCostTab({
         departmentName: dept?.name ?? departmentCode,
         category,
         hours: Math.round(b.hours * 100) / 100,
-        laborCostSen: Math.round(b.laborCostSen),
+        laborCostSen: roundSen(b.laborCostSen),
         revenueSen: isProduction && category
           ? (byDeptCategory[`${departmentCode}|${category}`] ?? 0)
           : 0,

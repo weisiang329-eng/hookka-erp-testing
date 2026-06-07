@@ -461,6 +461,20 @@ test("productionCostRatePerMinuteSen: a public holiday raises the rate", () => {
   assert.ok(Math.abs(noHolidays - 265_000 / 26 / 8 / 60) < 1e-9);
 });
 
+test("productionCostRatePerMinuteSen: divisor = ACTUAL month working days (July 2026 = 27, not nominal 26)", () => {
+  // July 2026 has 27 Mon-Sat working days (4 Sundays), no public holidays.
+  // The rate must divide by 27, NOT the worker's nominal workingDaysPerMonth (26).
+  const july = labor.productionCostRatePerMinuteSen(ANN, 2026, 7, []);
+  assert.ok(
+    Math.abs(july - 265_000 / 27 / 8 / 60) < 1e-9,
+    `July rate ${july} should divide by the real 27 working days, not 26`,
+  );
+  // ÷27 spreads the salary over more days → a lower per-minute rate than a
+  // 26-working-day month with no holidays.
+  const mayNoHol = labor.productionCostRatePerMinuteSen(ANN, 2026, 5, []);
+  assert.ok(july < mayNoHol, `${july} (÷27) should be below ${mayNoHol} (÷26)`);
+});
+
 test("productionCostRatePerMinuteSen: zero salary or zero hours → 0", () => {
   assert.equal(
     labor.productionCostRatePerMinuteSen(

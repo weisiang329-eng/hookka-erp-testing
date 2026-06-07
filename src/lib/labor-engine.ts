@@ -571,13 +571,13 @@ export function costingWorkerOrDefault(worker?: {
  * Production-cost labor rate, in SEN per MINUTE, for one worker in the
  * given month:
  *
- *   rate = basicSalary ÷ (workingDaysPerMonth − public holidays)
- *               ÷ workingHoursPerDay ÷ 60
+ *   rate = basicSalary ÷ (ACTUAL Mon-Sat working days this month − public
+ *               holidays) ÷ workingHoursPerDay ÷ 60
  *
- * The divisor drops the month's public holidays — the same production-cost
- * divisor computeMonthlyLabor uses — so a holiday month costs each
- * produced minute more. Returns 0 only when salary or hours/day is
- * non-positive. `month` is 1-indexed.
+ * The divisor is the real per-month working-day count (countElapsedWorkingDays)
+ * — the same production-cost divisor computeMonthlyLabor uses — so a holiday or
+ * short month costs each produced minute more. Returns 0 only when salary or
+ * hours/day is non-positive. `month` is 1-indexed.
  */
 export function productionCostRatePerMinuteSen(
   worker: LaborWorker,
@@ -588,11 +588,11 @@ export function productionCostRatePerMinuteSen(
   const basicSalarySen = Math.max(0, worker.basicSalarySen || 0);
   const workingHoursPerDay = Math.max(0, worker.workingHoursPerDay || 0);
   if (basicSalarySen <= 0 || workingHoursPerDay <= 0) return 0;
-  const workingDaysPerMonth =
-    worker.workingDaysPerMonth > 0
-      ? worker.workingDaysPerMonth
-      : FALLBACK_WORKING_DAYS_PER_MONTH;
-  const holidays = countPublicHolidaysInMonth(year, month, publicHolidays);
-  const costingDivisor = Math.max(1, workingDaysPerMonth - holidays);
+  // Same costing divisor as computeMonthlyLabor: the ACTUAL Mon-Sat working
+  // days in this calendar month minus public holidays (NOT the nominal 26).
+  const costingDivisor = Math.max(
+    1,
+    countElapsedWorkingDays(year, month, new Date(year, month, 0).getDate(), publicHolidays),
+  );
   return basicSalarySen / costingDivisor / workingHoursPerDay / 60;
 }

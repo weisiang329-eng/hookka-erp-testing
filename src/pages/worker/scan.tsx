@@ -430,19 +430,6 @@ export default function WorkerScanPage() {
     [input, t, findMatches],
   );
 
-  // If the page is opened from a QR deep-link like /worker/scan?op=xxx,
-  // look it up immediately.
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot QR deep-link hydrate on mount */
-  useEffect(() => {
-    const op = params.get("op");
-    if (op) {
-      setInput(op);
-      doLookup(op);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
   // Turn a decoded QR payload into a lookup — factored out so both the
   // live-scan loop and the file-based decoder share one path.
   //
@@ -573,6 +560,21 @@ export default function WorkerScanPage() {
     },
     [findMatches, t],
   );
+
+  // If the page is opened from a sticker URL (the phone's native camera, or a
+  // tapped link) like /worker/scan?op=… or ?wk=…, run the FULL url through the
+  // same decoder the in-app camera uses so EVERY sticker shape is processed on
+  // open — including the shared Sew/Uph compartment sticker (wk=, which has NO
+  // op). Declared AFTER handleDecoded so there's no use-before-declare. Before
+  // this, only `op` was handled, so a Fabric Sewing wk sticker opened by URL did
+  // nothing at all ("完全没有反应").
+  useEffect(() => {
+    if (params.get("op") || params.get("wk")) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot deep-link hydrate on mount; handleDecoded sets state synchronously
+      void handleDecoded(window.location.href);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---------- Live camera scan ----------
 

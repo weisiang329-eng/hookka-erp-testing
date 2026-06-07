@@ -3682,6 +3682,10 @@ function DepartmentLaborTab({
     [deptPayslipResp],
   );
   const deptFullMonth = isFullSingleMonth(dateFrom, dateTo);
+  // Only fully-load (add statutory + under-recorded to tie to full payroll) once
+  // the month is OVER. An in-progress month is still being logged, so it shows
+  // the accumulating logged labor — it must NOT jump to the whole month's payroll.
+  const deptMonthFinished = monthIsFinished(dateFrom.slice(0, 7));
 
   // Project onto the canonical departments list so non-production depts
   // (R&D, Warehousing, ...) show up even when they have zero hours, and
@@ -3779,7 +3783,7 @@ function DepartmentLaborTab({
     // material gap (> RM0.50). This is the figure the owner can close by
     // recording hours (or deducting) — so it matches Labor Cost's Under-recorded.
     const underByDept = new Map<string, number>();
-    if (deptFullMonth && !categoryFilter) {
+    if (deptFullMonth && !categoryFilter && deptMonthFinished) {
       // "Factory dept" = any known department (office / sales etc. that log no
       // hours are excluded as a data gap — mirrors the Labor Cost tab).
       const factoryCodes = new Set(allDepts.map((d) => d.code));
@@ -3865,7 +3869,7 @@ function DepartmentLaborTab({
         };
       });
     return [...orderedRows, ...extraRows];
-  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth]);
+  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -3882,7 +3886,7 @@ function DepartmentLaborTab({
 
   // The fully-loaded total only splits into Labor / Under-recorded for a full
   // single month with no category filter (same guard as the loading itself).
-  const splitVisible = deptFullMonth && !categoryFilter;
+  const splitVisible = deptFullMonth && !categoryFilter && deptMonthFinished;
   const columns: Column<DepartmentLaborRow>[] = [
     {
       key: "deptName",
@@ -5847,6 +5851,19 @@ function isFullSingleMonth(from: string, to: string): boolean {
   return td === lastDay;
 }
 
+// True only once a calendar month is fully OVER (we're in a later month).
+// Payroll is final only at month-end, so the full Payroll-tally views (Labor
+// Cost reconciliation, Department Labor fully-loaded) are gated on this: an
+// in-progress month is still being logged, so those views ACCUMULATE rather
+// than jump to the whole month's payroll. `period` is "YYYY-MM". String compare
+// of YYYY-MM is chronological and handles year boundaries.
+function monthIsFinished(period: string): boolean {
+  if (!/^\d{4}-\d{2}$/.test(period)) return false;
+  const now = new Date();
+  const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  return period < current;
+}
+
 function buildPeriodOptions(): { value: string; label: string }[] {
   // Roll back 12 months from today so users can compare against the prior year.
   const now = new Date();
@@ -6626,7 +6643,13 @@ function LaborCostTab({
   // would be bogus. So we render the payroll reconciliation ONLY for a full
   // month, and fall back to a payslip-independent hours-gap list otherwise.
   const fullSingleMonth = isFullSingleMonth(from, to);
-  const showReconciliation = hasPayroll && !categoryFilter && fullSingleMonth;
+  // Only reconcile/tally a month that is OVER. While the current month is still
+  // being logged, even if draft payslips exist, we DON'T jump to the full-month
+  // payroll — the range-gap (accumulating) view shows instead, so Labor Cost
+  // grows day by day and only ties out to Payroll once the month closes.
+  const periodFinished = monthIsFinished(fullSingleMonth ? from.slice(0, 7) : (period || from).slice(0, 7));
+  const showReconciliation =
+    hasPayroll && !categoryFilter && fullSingleMonth && periodFinished;
   // Range-based unlogged-hours data gap — shown whenever we are NOT showing the
   // payroll reconciliation (custom / partial / multi-month range), so the owner
   // can check missing Working Hours for any window (e.g. weekly). Independent of

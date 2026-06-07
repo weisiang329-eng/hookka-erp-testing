@@ -3870,7 +3870,37 @@ function DepartmentLaborTab({
           laborInclEpfSen: estCostSen - underRecordedSen,
         };
       });
-    return [...orderedRows, ...extraRows];
+    const allRows = [...orderedRows, ...extraRows];
+
+    // Tie the grand total to Payroll to the sen. Each department's cost is
+    // rounded to the nearest sen, so the sum of the rows can land a sen off the
+    // integer Total Payroll Cost (Σ gross + employer EPF/SOCSO/EIS) that the
+    // Labor Cost + Payroll tabs show. When fully loaded, fold that tiny residual
+    // into the largest-cost department (least visible) so the rows add up EXACTLY
+    // to Payroll. Under-recorded is already tied per-worker and is left untouched.
+    const fullyLoaded = deptFullMonth && !categoryFilter && deptMonthFinished;
+    if (fullyLoaded && allRows.length) {
+      let payrollTotalSen = 0;
+      for (const p of deptPayslips) {
+        payrollTotalSen +=
+          Math.round(Number(p.grossPay) || 0) +
+          Math.round(Number(p.epfEmployer) || 0) +
+          Math.round(Number(p.socsoEmployer) || 0) +
+          Math.round(Number(p.eisEmployer) || 0);
+      }
+      const residualSen =
+        payrollTotalSen - allRows.reduce((s, r) => s + r.estCostSen, 0);
+      if (residualSen !== 0) {
+        let big = 0;
+        for (let i = 1; i < allRows.length; i++) {
+          if (allRows[i].estCostSen > allRows[big].estCostSen) big = i;
+        }
+        allRows[big].estCostSen += residualSen;
+        allRows[big].laborInclEpfSen =
+          allRows[big].estCostSen - allRows[big].underRecordedSen;
+      }
+    }
+    return allRows;
   }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished]);
 
   const totals = useMemo(() => {

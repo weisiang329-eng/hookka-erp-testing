@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-008 — Costing divisor now = ACTUAL per-month working days (was fixed 26 − holidays)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, engine commit 2b09b53a + UI-mirror commit 5c17ce65; Cloudflare Pages deploy green run 27087054392). typecheck + 533 tests + build clean. Live prod verified on both tabs: May 2026 Labor Cost **RM62,775.52 "Reconciled · 0 difference" (green)** + under-recorded RM460.30; Dept Labor under-recorded RM460.30 (matches), 3-col split intact; June (in-progress) range-gap short values at the correct ÷25 rate, not blank; no console errors. **Resolves the "known still-open" item flagged in BUG-2026-06-07-006.**
+**Category:** ui-frontend
+
+The production-cost day rate divided the salary by the worker's NOMINAL `workingDaysPerMonth` (26) − public holidays, NOT the ACTUAL Mon–Sat working days in the calendar month. Owner: "工作天未必是 24 天,可能是 25、26、27 天,也可能是 22 天" — working days vary by how many Sundays + public holidays fall in each month (5-day workers Mon–Fri, 6-day Mon–Sat). Coincidentally exact for May & June 2026 (both 26 Mon–Sat days) but would drift in a 27-Mon–Sat month (July 2026: old ÷26, should be ÷27) or a short month (Feb 2026: ÷24). Payroll absence/OT stays ÷26 (the contractual ordinary rate of pay); only the production-cost / part-month-proration divisor floats.
+
+Fix — the single helper `countElapsedWorkingDays(year, month, lastDay, holidays)` (already used for the absence window) is now the costing divisor everywhere:
+1. `src/lib/labor-engine.ts` `computeMonthlyLabor` `costingDivisor` (~L424) → `countElapsedWorkingDays(full month)`; `payrollDailyRateSen` (÷ `workingDaysPerMonth` = 26) unchanged. Drives payslips.ts, the worker phone estimate, and the projected estimate. Tests updated for the per-month model (July ÷27, May ÷26).
+2. `src/pages/employees.tsx` — mirrored across the 6 useMemos that recompute labor rates client-side (Dept Labor rows + its under-recorded leniency; Labor Cost rows; absence-leniency; logged-value-by-worker; the worker day-breakdown short-hour rate; the range-gap indicative rate). Each now derives one month-level `actualWorkingDays` = `countElapsedWorkingDays(...)` and uses it for the regular/costing rate; the OT base rate keeps the nominal ÷26. Frontend + engine now use the IDENTICAL divisor → Labor Cost ties to Payroll in every month, not only 26-day ones.
+
+NOT changed (surfaced to owner as a separate decision): `productionCostRatePerMinuteSen` (labor-engine, used ONLY by the PO cost cascade → `cost_ledger` LABOR_POSTED) still divides by (`workingDaysPerMonth` − holidays). It writes ledger entries (production-lock territory) and is a no-op for May/June (26-day), so it was deliberately kept out of this UI/reconciliation change pending owner sign-off. Pre-existing (unrelated) note: Dept Labor grand total shows RM62,775.51 vs Labor Cost RM62,775.52 — a 1-sen float-accumulation rounding artifact between the two aggregation paths, present BEFORE this change (this change is a provable no-op for May, so it cannot have introduced it).
+
+---
+
 ## BUG-2026-06-07-007 — Worker phone pay estimate now uses effective-dated salary (matched admin)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit 0290c571; Cloudflare Pages deploy green run 27085714356). typecheck (app+worker) + build clean. Safe by construction — empty/missing salary history falls back to the current basic salary, so zero behaviour change until a mid-month raise occurs; correct by construction (uses `effectiveSalarySenForMonth`, the same fn the admin `/api/payslips/projected` uses, which was verified == stored May to the sen).

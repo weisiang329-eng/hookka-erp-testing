@@ -77,6 +77,19 @@ The per-piece / per-compartment Fab-Sew / Upholstery stickers were already PRINT
 
 Keeps the explicit Complete tap (Wei Siang: "没事点 complete 才算 complete").
 
+**Follow-up (2026-06-07, commit 3324a385) — sofa regression caught + fixed:** the
+first ship applied per-compartment scoping to EVERY FAB_SEW sticker, including the
+sofa BASE. But a sofa variant is sewn as ONE unit — Wei Siang: "沙发我是跟着
+compartment 的啊,扫 1A,1A 的 base、扶手和 back cushion 一起完成". So a sofa scan
+completing only the base was wrong. Fix: the backend peeks the scanned card's
+wipType and, for a SOFA_* compartment (base/cushion/armrest), clears wipKey +
+pieceNo so the scan fans out to the WHOLE dept (whole variant); the base sticker
+still carries its wipKey so the phone resolves it to one card (no chooser). The
+sofa BASE row also prints ONE sticker (pieceCount = 1) instead of piecesToCut
+copies. Bedframe DIVAN / HEADBOARD are not SOFA_* → keep per-piece. Lesson: SOFA
+(base+cushion+armrest = one variant) and BEDFRAME (Divan + Headboard = separate
+pieces) are different completion units — confirm the unit before scoping.
+
 ---
 
 ## BUG-2026-06-06-008 — Worker QR scan + production-sticker batch (real-device testing): 5 fixes

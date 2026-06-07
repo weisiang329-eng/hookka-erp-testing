@@ -3563,8 +3563,13 @@ export default function ProductionPage({
       // sentinel is kept (one sticker still serves both Sewing and Upholstery —
       // the completing dept is decided by who scans, and pieceNo flows in the
       // QR p=/t= so the backend completes just the scanned piece).
+      // FAB_SEW per-piece fan-out is ONLY for bedframe pieces (Divan / Headboard),
+      // which are separately scannable. A sofa BASE represents the WHOLE variant
+      // (base + cushion + armrest sewn together — Wei Siang 2026-06-03 / -07), so
+      // it stays ONE sticker. FAB_CUT is one-per-variant too.
       const pieceCount =
-        activeTab === "FAB_CUT"
+        activeTab === "FAB_CUT" ||
+        (activeTab === "FAB_SEW" && row.wipType === "BASE")
           ? 1
           : Math.max(1, row.piecesToCut || 1);
       const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
@@ -3728,7 +3733,10 @@ export default function ProductionPage({
         // out PER PIECE (Wei Siang 2026-06-06), mirroring the FAB_SEW branch of
         // onScreenStickers — a qty-2 Divan = 2 stickers, scan each.
         const opId = "FG-FAB_SEW";
-        const pieceCount = Math.max(1, row.piecesToCut || 1);
+        // Sofa BASE = one sticker for the whole variant; only bedframe pieces
+        // (Divan / Headboard) fan per piece (mirror onScreenStickers).
+        const pieceCount =
+          row.wipType === "BASE" ? 1 : Math.max(1, row.piecesToCut || 1);
         const displayQty = pieceCount > 1 ? 1 : Math.max(1, row.piecesToCut || 1);
         // BASE on FAB_SEW shows the variant-qualified product code as the WIP
         // label (e.g. "5540-1A(LHF)"), not the long fabric-encoded string —

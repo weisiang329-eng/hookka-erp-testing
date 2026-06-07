@@ -6308,12 +6308,15 @@ app.post("/:id/scan-complete-shared", async (c) => {
   //   - pieceNo: bind ONLY this physical piece's slot — a qty=2 Divan prints two
   //     stickers (p=1 / p=2); each completes one piece and the card finishes
   //     once both pieces have been scanned.
-  const wipKey =
+  // NOTE: a SOFA compartment (wipType SOFA_*) is the EXCEPTION — its base/cushion/
+  // armrest are sewn together as one variant, so wipKey/pieceNo are cleared after
+  // the wipType peek below and it fans out to the whole dept (see there).
+  let wipKey =
     typeof body?.wipKey === "string" && body.wipKey.length > 0
       ? body.wipKey
       : undefined;
   const rawPieceNo = Number(body?.pieceNo);
-  const pieceNo =
+  let pieceNo =
     Number.isFinite(rawPieceNo) && rawPieceNo > 0 ? rawPieceNo : undefined;
   if (!workerId) {
     return c.json({ success: false, error: "workerId is required" }, 400);
@@ -6359,6 +6362,29 @@ app.post("/:id/scan-complete-shared", async (c) => {
     }>();
   if (!worker) {
     return c.json({ success: false, error: "Worker not found" }, 400);
+  }
+
+  // SOFA exception: a sofa BASE compartment represents the WHOLE variant — its
+  // base, cushions and armrests are sewn together by one worker (Wei Siang
+  // 2026-06-07: scan 1A → 1A's base + armrest + back-cushion complete together).
+  // The base sticker carries the base's own wipKey so the PHONE resolves it to a
+  // single card (no Divan-vs-HB-style chooser), but COMPLETION must fan out to
+  // every FAB_SEW / UPHOLSTERY card of the variant. Detect a sofa compartment by
+  // its wipType (SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST / SOFA_HEADREST) and drop
+  // the per-compartment + per-piece scoping so the whole-dept fan-out runs.
+  // Bedframe pieces (DIVAN / HEADBOARD) are NOT SOFA_* — they keep per-piece
+  // scoping and stay separately scannable.
+  if (wipKey) {
+    const wkProbe = await db
+      .prepare(
+        "SELECT wipType FROM job_cards WHERE productionOrderId = ? AND wipKey = ? LIMIT 1",
+      )
+      .bind(poId, wipKey)
+      .first<{ wipType: string | null }>();
+    if ((wkProbe?.wipType || "").toUpperCase().startsWith("SOFA_")) {
+      wipKey = undefined;
+      pieceNo = undefined;
+    }
   }
 
   // Resolve the scanning SECTION → target department. Cut+Sew workers (女部)

@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-004 — Perf: customers product Map + dashboard lazy charts (external audit B1 + A5, verified)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit 09949fcc; Cloudflare Pages deploy green run 27081242059). typecheck + 516 tests + build clean. Live prod verified: dashboard renders 2 charts + KPI numbers (Outstanding RM306,438.72 etc.), no stuck placeholder; customers page renders clean.
+**Category:** ui-frontend
+
+Two of an external advisor's perf suggestions, kept after verifying against real code (most of the advisor's other items were stale/wrong/already-handled — see notes below).
+
+- **B1 — customers product lookup** (`customers.tsx`): the customer products panel did `allProducts.find(p => p.id === row.productId)` inside the per-row `.map` — a linear scan of the full catalog for every row, every render (re-ran on each price keystroke). Added a `productById` Map built once per catalog change; rows now `Map.get`. Identical value (product id is a unique key), just O(1). 
+- **A5 — dashboard charts** (`dashboard-b/index.tsx` + new `dashboard-b/charts.tsx`): recharts (~363 KB `charts` chunk) was a static top-level import, so visiting /dashboard had to fetch it before the KPI numbers could paint. Moved both charts (revenue AreaChart + customer PieChart) + their tooltip/label helpers into `charts.tsx`, loaded via `React.lazy` + `Suspense`. Same charts/data/look; the 42 KB page chunk (with the numbers) paints first, recharts streams in behind a "Loading chart…" placeholder. Verified all recharts usage was confined to those two blocks before extracting.
+
+Audit items deliberately NOT done (verified as wrong / already-handled / would regress): search debounce (already `useDeferredValue`; "search visible only" would break find-while-capped); grid row memo (already virtualized + row-capped; high blast radius); per-panel catalog fetch (false — single accordion + cached/deduped fetch); cached-fetch TTL window (the "always refetch" is intentional safety — a cached empty response once stranded the SO list). Pending separately: A4 (dashboard full SO pull → slim price-index), to be done with a before/after "Pending Delivery" amount check.
+
+---
+
 ## BUG-2026-06-07-003 — Under-recorded didn't tie between Labor Cost and Department Labor (1-sen rounding)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit 90594b82; Cloudflare Pages deploy green run 27079997059). Pre-ship: typecheck:app + 516 tests + build clean. Live prod verified (May 2026): both tabs now read RM460.30 (was 460.30 vs 460.29); Labor Cost Total RM62,775.52, "Reconciled · 0 difference" green.

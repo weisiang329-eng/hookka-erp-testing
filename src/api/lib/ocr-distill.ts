@@ -145,10 +145,16 @@ export async function distillCustomerRules(
     return { status: "error", reason: "Customer not found." };
   }
 
-  // Sample selection: gold rows whose customerHint matches the customer's
-  // name (case-insensitive exact) OR whose poIdentifier starts with the
-  // customer's code (cheap heuristic — operator POs typically use the
-  // customer code as a prefix). 50 row cap, newest first.
+  // Sample selection: gold rows for this customer. Three ways to match:
+  //   1. customerHint == customer.name (case-insensitive exact), OR
+  //   2. poIdentifier starts with the customer's code, OR
+  //   3. NORMALIZED prefix — the OCR saves the PO's full legal name as the
+  //      hint ("Houzs Century Sdn Bhd"), but the customer record is the short
+  //      name ("Houzs Century"). Strip non-alphanumerics and treat the short
+  //      name as a prefix of the hint so the two reunite. BUG-2026-06-07: the
+  //      old exact-only match wasted ~92% of gold samples (Carress + the
+  //      "...Sdn Bhd" Houzs pool never matched, so distill ran on near-empty).
+  // 50 row cap, newest first.
   const samplesRes = await dbLike
     .prepare(
       `SELECT id, correctedJson, customerHint, poIdentifier, createdAt
@@ -158,11 +164,13 @@ export async function distillCustomerRules(
            AND (
                  UPPER(customerHint) = UPPER(?)
               OR UPPER(poIdentifier) LIKE UPPER(?)
+              OR regexp_replace(UPPER(COALESCE(customerHint, '')), '[^A-Z0-9]', '', 'g')
+                   LIKE regexp_replace(UPPER(?), '[^A-Z0-9]', '', 'g') || '%'
            )
          ORDER BY createdAt DESC
          LIMIT 50`,
     )
-    .bind(customer.name, `${customer.code}%`)
+    .bind(customer.name, `${customer.code}%`, customer.name)
     .all<{
       id: string;
       correctedJson: string | null;

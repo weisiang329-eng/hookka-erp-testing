@@ -538,6 +538,18 @@ export default function WorkerScanPage() {
           setInput(parsed.poNo);
           matches = await findMatches(parsed.poNo, deptHint);
         }
+        // FG dept sentinels (FG-PACKING) carry pn=<box piece label>. A multi-
+        // compartment PO (bedframe Divan + Headboard) returns >1 dept card;
+        // narrow to the ONE whose wipLabel contains the box label so the worker
+        // isn't prompted to pick. If it can't narrow to exactly one, keep the
+        // list as-is (falls through to the chooser — safe + backward compatible).
+        if (fgMatch && parsed?.pieceLabel && matches.length > 1) {
+          const want = parsed.pieceLabel.trim().toUpperCase();
+          const narrowed = matches.filter((m) =>
+            (m.jobCard.wipLabel ?? "").toUpperCase().includes(want),
+          );
+          if (narrowed.length === 1) matches = narrowed;
+        }
         if (matches.length === 1) {
           // Show the lookup card and STOP — the worker must tap the big
           // "Complete" button to commit. (Wei Siang 2026-06-04: a bare scan

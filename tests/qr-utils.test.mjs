@@ -64,6 +64,24 @@ test('FG-PACKING sticker drops &dept= but parse derives PACKING', () => {
   assert.equal(p.pieceNo, 1);
 });
 
+test('FG-PACKING sticker carries pn= (box piece label) for direct compartment targeting', () => {
+  const p = parseStickerData(
+    'http://localhost:3000/worker/scan?op=FG-PACKING&po=SO-2605-305-02&p=1&t=2&pn=' +
+      encodeURIComponent('Divan'),
+  );
+  assert.equal(p.opId, 'FG-PACKING');
+  assert.equal(p.deptCode, 'PACKING');
+  // pieceLabel lets the scanner pick the Divan packing card directly instead of
+  // prompting "which piece" on a bedframe (Divan + Headboard share one PO).
+  assert.equal(p.pieceLabel, 'Divan');
+});
+
+test('older FG-PACKING sticker WITHOUT pn still parses (backward compat)', () => {
+  const p = parseStickerData('http://localhost:3000/worker/scan?op=FG-PACKING&po=SO-X&p=1&t=2');
+  assert.equal(p.opId, 'FG-PACKING');
+  assert.equal(p.pieceLabel, undefined);
+});
+
 test('per-JC op= sticker (no FG prefix) keeps &dept=', () => {
   const url = generateStickerData('SO-X', 'PACKING', 'jc-abc-123', '/worker/scan');
   assert.ok(url.includes('&dept=PACKING'), 'non-FG op id keeps dept: ' + url);

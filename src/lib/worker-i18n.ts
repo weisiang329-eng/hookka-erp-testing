@@ -292,17 +292,17 @@ const dict: Dict = {
   // scanned job card — stops them from tapping Complete twice on the
   // same piece.
   'scan.alreadyDone': {
-    en: 'You already scanned this piece.',
-    ms: 'Anda sudah imbas keping ini.',
-    zh: '你已扫描过这件。',
+    en: 'You already scanned this — it is already done.',
+    ms: 'Anda sudah imbas ini — ia sudah siap.',
+    zh: '你已经扫过这件 —— 已经完成了。',
     my: 'သင် ဤအပိုင်းကို စကင်န်ပြီးဖြစ်သည်။',
   },
   // Shown when the job card is already fully signed off by two other
   // workers (both PIC slots filled) — the Complete button is disabled.
   'scan.bothSlotsFilled': {
-    en: 'Both PIC slots are already filled on this card.',
-    ms: 'Kedua-dua slot PIC pada kad ini sudah penuh.',
-    zh: '该工单两个 PIC 名额都已占用。',
+    en: 'Limit reached — this piece is already complete (both PICs done).',
+    ms: 'Had dicapai — keping ini sudah siap (kedua-dua PIC selesai).',
+    zh: '已达上限 —— 这件已经完成(两个 PIC 都做了)。',
     my: 'ဤကတ်တွင် PIC နှစ်နေရာလုံး ပြည့်နေပြီ။',
   },
   'scan.start': { en: 'Start', ms: 'Mula', zh: '开始', my: 'စတင်ရန်' },

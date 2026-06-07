@@ -130,6 +130,7 @@ export function parseStickerData(
   totalPieces?: number;
   wipKey?: string;
   compartment?: string;
+  pieceLabel?: string;
 } | null {
   try {
     const u = new URL(url);
@@ -167,7 +168,12 @@ export function parseStickerData(
       if (fg) deptCode = fg[1];
     }
     if (opId && deptCode) {
-      return { opId, deptCode, poNo, pieceNo, totalPieces };
+      // FG dept sentinels (e.g. FG-PACKING) may carry pn=<box piece label> so a
+      // multi-compartment PO (bedframe Divan + Headboard) resolves to the ONE
+      // matching dept card on scan instead of prompting the worker to pick.
+      // Optional + backward compatible — older stickers without pn still parse.
+      const pieceLabel = u.searchParams.get("pn") || undefined;
+      return { opId, deptCode, poNo, pieceNo, totalPieces, pieceLabel };
     }
     return null;
   } catch {

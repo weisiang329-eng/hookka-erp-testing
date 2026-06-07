@@ -6440,23 +6440,14 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const isSewSection =
     workerCoversDept(wk, "FAB_SEW") || workerCoversDept(wk, "FAB_CUT");
   const isUphSection = workerCoversDept(wk, "UPHOLSTERY");
+  // Wei Siang 2026-06-08: the floor splits into a Sewing section (Fabric Cutting
+  // + Fabric Sewing) and "everyone else". A shared compartment sticker completes
+  // FAB_SEW when a Sewing-section worker scans it; ANY OTHER worker (Upholstery,
+  // Framing, Foam, Packing, …) completes UPHOLSTERY. Previously a worker in
+  // neither named section got a 403 — wrong; they should land on UPHOLSTERY.
   let targetDept: "FAB_SEW" | "UPHOLSTERY";
-  if (isUphSection && !isSewSection) {
-    targetDept = "UPHOLSTERY";
-  } else if (isSewSection && !isUphSection) {
-    targetDept = "FAB_SEW";
-  } else if (!isSewSection && !isUphSection) {
-    return c.json(
-      {
-        success: false,
-        code: "SECTION_UNKNOWN",
-        error: "Worker is in neither the Sewing nor the Upholstery section.",
-      },
-      403,
-    );
-  } else {
-    // Covers BOTH (rare — sections don't normally cross). Disambiguate by stage
-    // order: Sewing first, then Upholstery.
+  if (isSewSection && isUphSection) {
+    // Rare dual-section worker — disambiguate by stage: Sewing first, then Uph.
     const sewOpen = await db
       .prepare(
         wipKey
@@ -6466,6 +6457,8 @@ app.post("/:id/scan-complete-shared", async (c) => {
       .bind(...(wipKey ? [poId, wipKey] : [poId]))
       .first();
     targetDept = sewOpen ? "FAB_SEW" : "UPHOLSTERY";
+  } else {
+    targetDept = isSewSection ? "FAB_SEW" : "UPHOLSTERY";
   }
 
   const po = await db

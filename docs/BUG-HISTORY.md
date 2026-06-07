@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-012 — OCR self-learning matched customers by EXACT name → 92% of gold samples wasted; Carress learned nothing
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commits a6916260 + 3a67fc5f onto main 91f88d4f; Cloudflare Pages deploy green run 27089595816). typecheck clean. Weekly distill re-run via workflow_dispatch (run 27089666267, success). Live prod write-then-read verified: `customers.ocrPromptRules` — **Carress 0 → 2,189 chars** (first rules ever; learned its `PO/YYMM-NNN` format), **Houzs Century 1,693 → 3,018 chars** (now distilling all 24 gold, was 3).
+**Category:** infrastructure
+
+Symptom: the "self-improving OCR" (few-shot during scan + a weekly per-customer rule distill from gold samples) ran every Sunday `completed/success`, but accuracy wasn't improving. Of 39 operator-marked gold samples, only 3 were ever used — Carress (15 gold) got ZERO distilled rules; Houzs Century learned from 3 of its 24.
+
+Root cause: customer matching was EXACT-name. The OCR stores the PO's full legal name as `po_scan_samples.customerHint` ("Houzs Century Sdn Bhd", "Carres Sdn. Bhd."), but the customer records are short names ("Houzs Century", "Carress"). Two distinct sites both matched by exact name:
+- `ocr-distill.ts:159` (weekly distill sample-selection) — `UPPER(customerHint) = UPPER(customer.name)`, plus a `poIdentifier LIKE code%` arm that never fired (PO numbers don't start with the customer code) yet risked pulling foreign POs.
+- `scan-po.ts:1258` (few-shot same-customer boost) — `CASE WHEN customerHint = ?` bound to the FILENAME-prefix guess ("Houzs"), which also never equals the stored company name → boost dead, few-shot collapsed to "newest 3, any customer".
+
+Fix: both sites now match on a NORMALIZED prefix — strip non-alphanumerics, treat the short customer name as a prefix of the hint: `regexp_replace(UPPER(customerHint),'[^A-Z0-9]','','g') LIKE regexp_replace(UPPER(?),'[^A-Z0-9]','','g') || '%'`. Dropped the dead/risky `poIdentifier LIKE code%` arm. The distill re-reads all gold each run, so re-triggering recovered every orphaned sample with no data backfill.
+
+Two findings from the parallel OCR audit did NOT survive line-by-line verification and were dropped (Wei Siang challenged the first — "你确定没有?之前的全部有问题?"): (a) "leg-height reparser broken for `Divan10+4`" — the regex does skip that format, but on no-match the code KEEPS Claude's value (`scan-po.ts:735-744`), the prompt drills that exact example, and leg is single-digit (no truncation risk) → no data corruption; (b) "createdBy always null" — `c.get("userId" as never)` reads the user identically to `tenantMiddleware` (`tenant.ts:49`), works for authed operators. Deferred (real but lower priority): org-isolation on `po_scan_samples` (latent — single-tenant today, needs a backfill not just a filter), and server-side Anthropic retry (the scan path is already client-retried).
+
+---
+
 ## BUG-2026-06-07-011 — Unified money rounding: one shared largest-remainder rule across all three labour screens
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit ff962a33; Cloudflare Pages deploy green run 27088463885). typecheck + 73 labor+money tests (9 new) + build clean. Live prod verified: Dept Labour May RM62,775.52 (rows sum exactly; the leftover sen now lands on the largest-FRACTION dept — Fab Sew RM10,714.02 — not an arbitrary "biggest dept"); Labor Cost May "Reconciled · 0 difference" RM62,775.52 unchanged.

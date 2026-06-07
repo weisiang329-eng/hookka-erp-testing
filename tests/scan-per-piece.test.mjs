@@ -1,0 +1,64 @@
+// ---------------------------------------------------------------------------
+// scan-per-piece.test.mjs — structural regression test for the 2026-06-07
+// bedframe per-piece fixes (no D1 runtime; pins the source-level invariants
+// so a refactor can't silently re-introduce the bugs Wei Siang hit on device).
+//
+// Bugs being pinned:
+//   1. Scanning Divan #2 / the Headboard after Divan #1 wrongly said "you
+//      already scanned this piece" — the lookup guard fell back to the
+//      CARD-level pic (the first piece's scanner) for a per-piece scan.
+//   2. The card showed only PIC1 when two people each did a piece — it should
+//      show PIC1 + PIC2 (the distinct piece scanners).
+//   3. Sofa BASE must stay whole-variant (one scan = base+cushion+armrest done,
+//      a real completion date) — NOT per-piece.
+// ---------------------------------------------------------------------------
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const SCAN = readFileSync(resolve(process.cwd(), 'src/pages/worker/scan.tsx'), 'utf8');
+const PO = readFileSync(resolve(process.cwd(), 'src/api/routes/production-orders.ts'), 'utf8');
+
+test('per-piece duplicate guard uses ONLY the piece slot (no card-level fallback)', () => {
+  // For a per-piece scan (result.piece set) the guard must read the piece slot,
+  // never the card-level pic — else scanning a DIFFERENT piece is blocked.
+  assert.ok(SCAN.includes('result.piece'), 'guard must branch on result.piece');
+  assert.ok(
+    SCAN.includes('pieceSlot?.pic1Id ?? null'),
+    'per-piece branch must use the piece slot, falling back to null (not the card pic)',
+  );
+});
+
+test('backend binds ONLY the scanned piece slot (per-piece)', () => {
+  assert.ok(
+    PO.includes('s.pieceNo === pieceNo'),
+    'slot-fill must filter to the scanned pieceNo, not every slot',
+  );
+});
+
+test('card PIC1/PIC2 = distinct piece scanners (old first-slot logic removed)', () => {
+  assert.ok(PO.includes('piecePeople'), 'must aggregate distinct piece scanners');
+  assert.ok(
+    PO.includes('piecePeople[0]?.id') && PO.includes('piecePeople[1]?.id'),
+    'PIC1 = first distinct person, PIC2 = second distinct person',
+  );
+  assert.ok(
+    !PO.includes('const firstWithPic1 = slotList.find'),
+    'the old "first slot only" PIC propagation must be gone',
+  );
+});
+
+test('completion still requires ALL pieces done (date only when both scanned)', () => {
+  assert.ok(
+    PO.includes('slotList.every((s) => !!s.pic1Id)'),
+    'card completes only when EVERY piece slot has a scanner',
+  );
+});
+
+test('sofa BASE fans out to the whole variant (not per-piece)', () => {
+  assert.ok(
+    PO.includes('.startsWith("SOFA_")'),
+    'a SOFA_* compartment clears wipKey/pieceNo so the scan completes the whole variant',
+  );
+});

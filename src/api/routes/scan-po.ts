@@ -1255,7 +1255,14 @@ app.post("/extract", async (c) => {
            FROM po_scan_samples
            WHERE correctedJson IS NOT NULL
            ORDER BY
-             (CASE WHEN customerHint = ? THEN 0 ELSE 1 END),
+             -- Boost same-customer samples. The hint guess is the FILENAME
+             -- prefix ("Houzs"), but samples store the OCR'd company name
+             -- ("Houzs Century Sdn Bhd"), so the old exact "customerHint = ?"
+             -- never matched and the boost was dead. Normalize both sides and
+             -- prefix-match so it actually fires (BUG-2026-06-07).
+             (CASE WHEN regexp_replace(UPPER(COALESCE(customerHint, '')), '[^A-Z0-9]', '', 'g')
+                        LIKE regexp_replace(UPPER(?), '[^A-Z0-9]', '', 'g') || '%'
+                   THEN 0 ELSE 1 END),
              COALESCE(isGold, 0) DESC,
              createdAt DESC
            LIMIT 3`,

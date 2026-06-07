@@ -909,29 +909,48 @@ export default function WorkerScanPage() {
       // FAB_SEW vs UPHOLSTERY from the worker's section. Takes precedence over
       // the legacy FG-FAB_SEW sentinel path below (kept for stickers printed for
       // wipKey-less rows).
-      const sharedWk = ctx.wipKey;
+      const cardDept = (ctx.jobCard.departmentCode || "").toUpperCase();
       const fgMatch = /^FG-([A-Z_]+)$/.exec(ctx.jobCard.id);
       const fgDept = fgMatch?.[1];
-      const isShared = !!sharedWk || fgDept === "FAB_SEW";
+      // Route by the card's DEPARTMENT, not just the sticker shape, so a card
+      // reached by MANUAL ENTRY (or any non-sticker lookup) also hits the
+      // worker-open fan-out endpoints. The per-JC /scan-complete is worker-limited
+      // to PACKING, so a manually-entered Fab Sew / Upholstery / Fab Cut card used
+      // to fail with "only enabled for Packing".
+      // wipKey for the shared endpoint: a wk sticker / sofa supplies ctx.wipKey;
+      // a manual lookup of a Sew/Uph card falls back to the card's own wipKey. An
+      // FG-<DEPT> sentinel deliberately keeps NO wipKey (whole-dept fan-out).
+      const sharedWk =
+        ctx.wipKey ??
+        (!fgDept && (cardDept === "FAB_SEW" || cardDept === "UPHOLSTERY")
+          ? ctx.jobCard.wipKey
+          : undefined);
+      const isShared =
+        !!sharedWk ||
+        fgDept === "FAB_SEW" ||
+        cardDept === "FAB_SEW" ||
+        cardDept === "UPHOLSTERY";
+      const isFabCut = fgDept === "FAB_CUT" || cardDept === "FAB_CUT";
       const endpoint =
         isShared
           ? `/api/production-orders/${ctx.order.id}/scan-complete-shared`
-          : fgDept
+          : isFabCut
             ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
             : `/api/production-orders/${ctx.order.id}/scan-complete`;
       const payload =
         isShared
           ? {
               workerId,
-              // wipKey: complete only THIS compartment (Divan, not Headboard).
-              // Absent for an old FG-FAB_SEW sentinel sticker (whole-dept).
+              // wipKey: complete only THIS compartment (Divan, not Headboard); a
+              // sofa BASE fans out to the whole variant server-side. Absent for an
+              // FG-FAB_SEW sentinel sticker (whole-dept).
               ...(sharedWk ? { wipKey: sharedWk } : {}),
               // per-piece: which physical piece this sticker is (from QR p=)
               pieceNo: ctx.piece?.pieceNo,
               ...(opts?.force ? { force: true } : {}),
             }
-          : fgDept
-            ? { deptCode: fgDept, workerId, ...(opts?.force ? { force: true } : {}) }
+          : isFabCut
+            ? { deptCode: "FAB_CUT", workerId, ...(opts?.force ? { force: true } : {}) }
             : {
             jobCardId: ctx.jobCard.id,
             workerId,

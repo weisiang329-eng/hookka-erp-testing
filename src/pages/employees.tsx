@@ -5211,7 +5211,28 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const period = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}`;
 
   const { data: payslipResp, loading: loadingPayroll, refresh: refreshPayslipsHook } = useCachedJson<unknown>(`/api/payslips?period=${period}`);
-  const payslipData: PayslipData[] = useMemo(() => asArray(payslipResp) as PayslipData[], [payslipResp]);
+  const storedPayslips: PayslipData[] = useMemo(() => asArray(payslipResp) as PayslipData[], [payslipResp]);
+  // In-progress month with nothing generated yet → show the LIVE projected
+  // estimate (same engine as month-end Generate, no DB write) so the month isn't
+  // blank — matches what the worker phone already shows. Fetched only when there
+  // are no stored rows AND the month isn't over. Once Generate runs, stored rows
+  // take over. monthIsFinished is the same gate Labor Cost / Dept Labor use.
+  const monthOver = monthIsFinished(period);
+  const { data: projectedResp, loading: loadingProjected } = useCachedJson<unknown>(
+    storedPayslips.length === 0 && !monthOver
+      ? `/api/payslips/projected?period=${period}`
+      : null,
+  );
+  const projectedPayslips: PayslipData[] = useMemo(
+    () => asArray(projectedResp) as PayslipData[],
+    [projectedResp],
+  );
+  // Showing the live estimate (no stored rows yet). The table + totals use this;
+  // the Approve / Regenerate actions are gated on `storedPayslips` so a preview
+  // can't be approved.
+  const isProjected = storedPayslips.length === 0 && projectedPayslips.length > 0;
+  const payslipData: PayslipData[] =
+    storedPayslips.length > 0 ? storedPayslips : projectedPayslips;
   const fetchPayslips = useCallback(() => {
     invalidateCachePrefix("/api/payslips");
     refreshPayslipsHook();
@@ -5496,19 +5517,19 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                   <option key={y} value={y}>{y}</option>
                 ))}
               </select>
-              {payslipData.length === 0 && (
+              {storedPayslips.length === 0 && (
                 <Button variant="primary" onClick={generatePayslips} disabled={generating}>
                   <DollarSign className="h-4 w-4" />
-                  {generating ? "Generating..." : "Generate Payslips"}
+                  {generating ? "Generating..." : isProjected ? "Generate (finalise)" : "Generate Payslips"}
                 </Button>
               )}
-              {payslipData.length > 0 && payslipData.some((r) => r.status === "DRAFT") && (
+              {storedPayslips.length > 0 && storedPayslips.some((r) => r.status === "DRAFT") && (
                 <Button variant="primary" onClick={approveAll} disabled={approving}>
                   <Check className="h-4 w-4" />
                   {approving ? "Approving..." : "Approve All"}
                 </Button>
               )}
-              {payslipData.length > 0 && payslipData.some((r) => r.status === "DRAFT") && (
+              {storedPayslips.length > 0 && storedPayslips.some((r) => r.status === "DRAFT") && (
                 <Button
                   variant="outline"
                   onClick={regeneratePayslips}
@@ -5529,7 +5550,12 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
           </div>
         </CardHeader>
         <CardContent>
-          {loadingPayroll ? (
+          {isProjected && (
+            <div className="mb-3 rounded-md border border-[#E2D9C3] bg-[#FBF7EC] px-3 py-2 text-xs text-[#6B5C32]">
+              <span className="font-semibold">Estimate · month in progress.</span> Same engine the worker app shows — payslips aren&rsquo;t generated yet. The figures update as Working Hours are entered; click &ldquo;Generate (finalise)&rdquo; at month-end to lock them in (the numbers will match).
+            </div>
+          )}
+          {(loadingPayroll || loadingProjected) ? (
             <div className="flex items-center justify-center h-32 text-[#6B7280]">Loading payroll data...</div>
           ) : payslipData.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-32 text-[#6B7280]">

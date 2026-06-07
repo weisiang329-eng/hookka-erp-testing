@@ -6172,15 +6172,27 @@ app.post("/:id/scan-complete-dept", async (c) => {
     } else if (jc.status === "WAITING") {
       mergedJc.status = "IN_PROGRESS";
     }
-    const firstWithPic1 = slotList.find((s) => s.pic1Id);
-    const firstWithPic2 = slotList.find((s) => s.pic2Id);
-    if (!mergedJc.pic1Id && firstWithPic1) {
-      mergedJc.pic1Id = firstWithPic1.pic1Id;
-      mergedJc.pic1Name = firstWithPic1.pic1Name ?? "";
-    }
-    if (!mergedJc.pic2Id && firstWithPic2) {
-      mergedJc.pic2Id = firstWithPic2.pic2Id;
-      mergedJc.pic2Name = firstWithPic2.pic2Name ?? "";
+    // Card-level PIC1/PIC2 = the DISTINCT people who scanned the pieces (Wei Siang
+    // 2026-06-07: same person across pieces → PIC1 only; two people → PIC1 + PIC2,
+    // each did a piece). Collect distinct workers across every slot's pic1/pic2,
+    // keep the first two in scan order. Recomputed each scan so the card always
+    // shows who actually did the work — never a stale single PIC.
+    if (slotList.length > 0) {
+      const piecePeople: { id: string; name: string }[] = [];
+      for (const s of slotList) {
+        for (const person of [
+          { id: s.pic1Id, name: s.pic1Name },
+          { id: s.pic2Id, name: s.pic2Name },
+        ]) {
+          if (person.id && !piecePeople.some((p) => p.id === person.id)) {
+            piecePeople.push({ id: person.id, name: person.name ?? "" });
+          }
+        }
+      }
+      mergedJc.pic1Id = piecePeople[0]?.id ?? null;
+      mergedJc.pic1Name = piecePeople[0]?.name ?? "";
+      mergedJc.pic2Id = piecePeople[1]?.id ?? null;
+      mergedJc.pic2Name = piecePeople[1]?.name ?? "";
     }
 
     await db
@@ -6621,15 +6633,27 @@ app.post("/:id/scan-complete-shared", async (c) => {
     } else if (card.status === "WAITING" && filled) {
       mergedJc.status = "IN_PROGRESS";
     }
-    const firstWithPic1 = slotList.find((s) => s.pic1Id);
-    const firstWithPic2 = slotList.find((s) => s.pic2Id);
-    if (!mergedJc.pic1Id && firstWithPic1) {
-      mergedJc.pic1Id = firstWithPic1.pic1Id;
-      mergedJc.pic1Name = firstWithPic1.pic1Name ?? "";
-    }
-    if (!mergedJc.pic2Id && firstWithPic2) {
-      mergedJc.pic2Id = firstWithPic2.pic2Id;
-      mergedJc.pic2Name = firstWithPic2.pic2Name ?? "";
+    // Card-level PIC1/PIC2 = the DISTINCT people who scanned the pieces (Wei Siang
+    // 2026-06-07: same person across pieces → PIC1 only; two people → PIC1 + PIC2,
+    // each did a piece). Collect distinct workers across every slot's pic1/pic2,
+    // keep the first two in scan order. Recomputed each scan so the card always
+    // shows who actually did the work — never a stale single PIC.
+    if (slotList.length > 0) {
+      const piecePeople: { id: string; name: string }[] = [];
+      for (const s of slotList) {
+        for (const person of [
+          { id: s.pic1Id, name: s.pic1Name },
+          { id: s.pic2Id, name: s.pic2Name },
+        ]) {
+          if (person.id && !piecePeople.some((p) => p.id === person.id)) {
+            piecePeople.push({ id: person.id, name: person.name ?? "" });
+          }
+        }
+      }
+      mergedJc.pic1Id = piecePeople[0]?.id ?? null;
+      mergedJc.pic1Name = piecePeople[0]?.name ?? "";
+      mergedJc.pic2Id = piecePeople[1]?.id ?? null;
+      mergedJc.pic2Name = piecePeople[1]?.name ?? "";
     }
 
     if (filled || jcJustCompleted) {

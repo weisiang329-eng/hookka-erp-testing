@@ -1235,8 +1235,18 @@ export default function WorkerScanPage() {
                 (s) => s.pieceNo === result.piece!.pieceNo,
               ) || null
             : null;
-        const checkPic1 = pieceSlot?.pic1Id ?? result.jobCard.pic1Id;
-        const checkPic2 = pieceSlot?.pic2Id ?? result.jobCard.pic2Id;
+        // For a PER-PIECE scan (result.piece set), the duplicate check must look
+        // ONLY at THIS piece's slot — never fall back to the card-level pic, which
+        // is the aggregate of OTHER pieces and would wrongly block the same worker
+        // from scanning a DIFFERENT piece ("you already scanned this piece" when
+        // scanning Divan #2 or the Headboard after Divan #1). Card-level fallback
+        // applies only to single (non-per-piece) cards.
+        const checkPic1 = result.piece
+          ? (pieceSlot?.pic1Id ?? null)
+          : result.jobCard.pic1Id;
+        const checkPic2 = result.piece
+          ? (pieceSlot?.pic2Id ?? null)
+          : result.jobCard.pic2Id;
         const selfSlot =
           workerId && checkPic1 === workerId
             ? 1

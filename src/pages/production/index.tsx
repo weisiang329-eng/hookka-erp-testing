@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData, generateSharedStickerData } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -3610,15 +3610,19 @@ export default function ProductionPage({
           specialOrder: row.specialOrder || "",
           pieceNo: p,
           totalPieces: pieceCount,
-          // FAB_SEW = the SHARED Sew/Uph sticker: encode the compartment id
-          // (wk=wipKey) + piece so the scanner completes JUST this piece for
-          // whichever dept the scanning worker belongs to. Falls back to the
-          // FG-FAB_SEW sentinel (whole-dept) only if the row has no wipKey.
+          // Fab Sew uses the SHORT per-JC op=<jobCardId> payload (same format as
+          // every other dept's sticker) so the QR isn't a dense wipKey blob the
+          // phone camera struggles to lock onto. Completion still resolves the
+          // right dept server-side: handleConfirmScan routes a FAB_SEW card to
+          // scan-complete-shared (dept decided by the worker's section; a sofa
+          // BASE fans out to the whole variant). FAB_CUT keeps its FG sentinel;
+          // other depts already use op=<jobCardId>.
           qrPayload:
-            activeTab === "FAB_SEW" && row.wipKey
-              ? generateSharedStickerData(
+            activeTab === "FAB_SEW"
+              ? generateStickerData(
                   order.poNo,
-                  row.wipKey,
+                  "FAB_SEW",
+                  row.jobCardId,
                   "/worker/scan",
                   pieceCount > 1 ? p : undefined,
                   pieceCount > 1 ? pieceCount : undefined,
@@ -3771,25 +3775,17 @@ export default function ProductionPage({
             specialOrder: row.specialOrder || "",
             pieceNo: p,
             totalPieces: pieceCount,
-            // Shared Sew/Uph sticker: encode compartment id (wk) + piece so a
-            // scan completes just this piece for the scanner's dept. Falls back
-            // to the FG-FAB_SEW sentinel (whole-dept) only without a wipKey.
-            qrPayload: row.wipKey
-              ? generateSharedStickerData(
-                  order.poNo,
-                  row.wipKey,
-                  "/worker/scan",
-                  pieceCount > 1 ? p : undefined,
-                  pieceCount > 1 ? pieceCount : undefined,
-                )
-              : generateStickerData(
-                  order.poNo,
-                  "FAB_SEW",
-                  opId,
-                  "/worker/scan",
-                  pieceCount > 1 ? p : undefined,
-                  pieceCount > 1 ? pieceCount : undefined,
-                ),
+            // SHORT per-JC op=<jobCardId> payload (same as onScreenStickers) so the
+            // Fab Sew QR isn't a dense wipKey blob; completion routes to
+            // scan-complete-shared by the card's dept server-side.
+            qrPayload: generateStickerData(
+              order.poNo,
+              "FAB_SEW",
+              row.jobCardId,
+              "/worker/scan",
+              pieceCount > 1 ? p : undefined,
+              pieceCount > 1 ? pieceCount : undefined,
+            ),
           });
         }
       }

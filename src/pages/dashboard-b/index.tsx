@@ -666,8 +666,12 @@ export default function DashboardBPage() {
   const { data: poValRaw, loading: poValL } = useCachedJson<POValuesResp>(
     "/api/delivery-orders/po-values",
   );
+  // Slim price-index variant — returns only {id, items:[{productCode,
+  // unitPriceSen}]} instead of the full 720-SO payload. The price map built
+  // below is byte-identical (same SOs, same items); only the wire payload
+  // shrinks, so the Pending-Delivery tile + KPI value are unchanged.
   const { data: soItemsRaw, loading: soItemsL } =
-    useCachedJson<SOItemsResp>("/api/sales-orders");
+    useCachedJson<SOItemsResp>("/api/sales-orders?fields=price-index");
   const effWin = useMemo(() => last7WorkingDays(), []);
   const { data: jcSumRaw, loading: jcSumL } = useCachedJson<JcSummaryResp>(
     `/api/job-cards/summary?from=${effWin.from}&to=${effWin.to}`,

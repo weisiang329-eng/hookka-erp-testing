@@ -962,6 +962,25 @@ app.get("/", async (c) => {
       "",
       c, // emit cache.hit / cache.miss counters → real cacheHitRatio
     );
+    // The dashboard's Pending-Delivery tile only needs a per-SO
+    // {productCode → unitPriceSen} price map — not the full list (720 SOs ×
+    // every SO field × every 24-field item). When ?fields=price-index is set,
+    // project the SAME cached list down to {id, items:[{productCode,
+    // unitPriceSen}]}: byte-identical prices (same data, same items), a tiny
+    // payload. The full-list path (no param) is untouched.
+    if (c.req.query("fields") === "price-index") {
+      const slim = ((data?.data ?? []) as Array<{
+        id: string;
+        items?: Array<{ productCode?: string; unitPriceSen?: number }>;
+      }>).map((s) => ({
+        id: s.id,
+        items: (s.items ?? []).map((it) => ({
+          productCode: it.productCode,
+          unitPriceSen: it.unitPriceSen,
+        })),
+      }));
+      return c.json({ success: true, data: slim, total: slim.length });
+    }
     return c.json(data);
   }
 

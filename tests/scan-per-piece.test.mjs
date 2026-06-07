@@ -62,3 +62,29 @@ test('sofa BASE fans out to the whole variant (not per-piece)', () => {
     'a SOFA_* compartment clears wipKey/pieceNo so the scan completes the whole variant',
   );
 });
+
+test('worker scans resolve org safely (no "ORGID not resolved" crash)', () => {
+  // Worker-token requests carry no dashboard userId, so the strict getOrgId()
+  // throws "orgId not resolved on request context" (the red error on the Worker
+  // Portal). The scan paths must use the safe resolver that falls back to the
+  // single tenant instead of throwing.
+  assert.ok(
+    PO.includes('tryGetOrgId(c) ?? DEFAULT_ORG_ID'),
+    'scanOrgId must fall back to the default tenant for worker scans (no throw)',
+  );
+  assert.ok(
+    PO.includes('orgId: scanOrgId(c)'),
+    'scan writes must resolve org via scanOrgId, not the throwing getOrgId',
+  );
+});
+
+test('every scan completion refreshes the dashboard (no stale Fab Cut / Fab Sew sheet)', () => {
+  // The stale-dashboard bug (Fab Cut still PENDING while Fab Sew shows DONE)
+  // came from a scan that did not invalidate the production snapshot/cache.
+  // Every scan-complete path must call the invalidator so the sheet updates.
+  const calls = (PO.match(/await invalidateProductionCachesAfterScan\(c\)/g) || []).length;
+  assert.ok(
+    calls >= 3,
+    `expected all 3 scan-complete paths to refresh the dashboard, found ${calls}`,
+  );
+});

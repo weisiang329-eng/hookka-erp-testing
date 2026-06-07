@@ -34,6 +34,15 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-007 — Worker phone pay estimate now uses effective-dated salary (matched admin)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit 0290c571; Cloudflare Pages deploy green run 27085714356). typecheck (app+worker) + build clean. Safe by construction — empty/missing salary history falls back to the current basic salary, so zero behaviour change until a mid-month raise occurs; correct by construction (uses `effectiveSalarySenForMonth`, the same fn the admin `/api/payslips/projected` uses, which was verified == stored May to the sen).
+**Category:** ui-frontend
+
+The worker phone's "This month (estimated)" (`worker.ts` GET /api/worker/payslips) computed `computeMonthlyLabor` on the raw scalar `auth.worker.basicSalarySen`, while the admin payroll generation (POST /api/payslips) AND the new projected estimate (/api/payslips/projected) use `effectiveSalarySenForMonth` (day-weighted when a salary changes mid-month via the "Effective from" feature). They agree today (no one has changed a salary mid-month), but a mid-month raise would make the worker's phone show a different number than what they're actually paid / what admin sees — the "two logics in conflict" the owner suspected. Fix: load the worker's `worker_salary_history` (resilient) and compute the same effective salary before the engine call. Also rewrote the stale handler comment that claimed `current` was a "zeroed stub" (it has been a live estimate for a while).
+
+---
+
 ## BUG-2026-06-07-006 — In-progress month: Payroll/Labor Cost no longer blank — live estimate on the admin side
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit a5242a4a; Cloudflare Pages deploy green run 27084035936). typecheck (app+worker) + build + tests clean. Live prod verified: **projected May == stored May to the sen** (RM62,775.52, 31 payslips, 0 per-worker mismatch — proves the estimate equals what month-end Generate produces); June Payroll tab shows the live estimate (banner + "Generate (finalise)"), was blank; May reconciliation still RM62,775.52 + green (no regression).

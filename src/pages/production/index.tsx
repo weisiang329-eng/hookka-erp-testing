@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -3584,6 +3584,11 @@ export default function ProductionPage({
         activeTab === "FAB_SEW" && row.wipType === "BASE"
           ? row.productCode || row.model || row.wip || ""
           : row.wip;
+      // Fab Sew sticker carries the SHORT compartment subtype (the wipKey's 3rd
+      // ::-segment, e.g. DIVAN / SOFA_BASE) so the QR stays low-density (v5,
+      // scannable like Fab Cut). Empty for a wipKey-less row → op=<jobCardId>.
+      const fsCompartment =
+        activeTab === "FAB_SEW" ? (row.wipKey || "").split("::")[2] || "" : "";
       for (let p = 1; p <= pieceCount; p++) {
         stickers.push({
           key: pieceCount > 1 ? `${row.id}:${p}` : row.id,
@@ -3610,31 +3615,39 @@ export default function ProductionPage({
           specialOrder: row.specialOrder || "",
           pieceNo: p,
           totalPieces: pieceCount,
-          // Fab Sew uses the SHORT per-JC op=<jobCardId> payload (same format as
-          // every other dept's sticker) so the QR isn't a dense wipKey blob the
-          // phone camera struggles to lock onto. Completion still resolves the
+          // Fab Sew sticker = the SHORT compartment form (c=<subtype>) so the QR
+          // is low-density (v5) and scans like Fab Cut; the dense wipKey/UUID blob
+          // (v6+) was what the camera couldn't lock onto. Completion resolves the
           // right dept server-side: handleConfirmScan routes a FAB_SEW card to
-          // scan-complete-shared (dept decided by the worker's section; a sofa
-          // BASE fans out to the whole variant). FAB_CUT keeps its FG sentinel;
-          // other depts already use op=<jobCardId>.
+          // scan-complete-shared (dept by the worker's section; a sofa BASE fans
+          // out to the whole variant). wipKey-less rows fall back to op=jobCardId.
+          // FAB_CUT keeps its FG sentinel; other depts already use op=<jobCardId>.
           qrPayload:
-            activeTab === "FAB_SEW"
+            activeTab !== "FAB_SEW"
               ? generateStickerData(
-                  order.poNo,
-                  "FAB_SEW",
-                  row.jobCardId,
-                  "/worker/scan",
-                  pieceCount > 1 ? p : undefined,
-                  pieceCount > 1 ? pieceCount : undefined,
-                )
-              : generateStickerData(
                   order.poNo,
                   activeTab,
                   opId,
                   "/worker/scan",
                   pieceCount > 1 ? p : undefined,
                   pieceCount > 1 ? pieceCount : undefined,
-                ),
+                )
+              : fsCompartment
+                ? generateCompartmentStickerData(
+                    order.poNo,
+                    fsCompartment,
+                    "/worker/scan",
+                    pieceCount > 1 ? p : undefined,
+                    pieceCount > 1 ? pieceCount : undefined,
+                  )
+                : generateStickerData(
+                    order.poNo,
+                    "FAB_SEW",
+                    row.jobCardId,
+                    "/worker/scan",
+                    pieceCount > 1 ? p : undefined,
+                    pieceCount > 1 ? pieceCount : undefined,
+                  ),
         });
       }
     }
@@ -3749,6 +3762,8 @@ export default function ProductionPage({
           row.wipType === "BASE"
             ? row.productCode || row.model || row.wip || ""
             : row.wip;
+        // Short compartment subtype for the low-density QR (mirror onScreenStickers).
+        const fsCompartment = (row.wipKey || "").split("::")[2] || "";
         for (let p = 1; p <= pieceCount; p++) {
           stickers.push({
             key: pieceCount > 1 ? `fabsew:${row.id}:${p}` : `fabsew:${row.id}`,
@@ -3775,17 +3790,24 @@ export default function ProductionPage({
             specialOrder: row.specialOrder || "",
             pieceNo: p,
             totalPieces: pieceCount,
-            // SHORT per-JC op=<jobCardId> payload (same as onScreenStickers) so the
-            // Fab Sew QR isn't a dense wipKey blob; completion routes to
-            // scan-complete-shared by the card's dept server-side.
-            qrPayload: generateStickerData(
-              order.poNo,
-              "FAB_SEW",
-              row.jobCardId,
-              "/worker/scan",
-              pieceCount > 1 ? p : undefined,
-              pieceCount > 1 ? pieceCount : undefined,
-            ),
+            // SHORT compartment form (c=<subtype>) → low-density v5 QR (mirror
+            // onScreenStickers); wipKey-less rows fall back to op=<jobCardId>.
+            qrPayload: fsCompartment
+              ? generateCompartmentStickerData(
+                  order.poNo,
+                  fsCompartment,
+                  "/worker/scan",
+                  pieceCount > 1 ? p : undefined,
+                  pieceCount > 1 ? pieceCount : undefined,
+                )
+              : generateStickerData(
+                  order.poNo,
+                  "FAB_SEW",
+                  row.jobCardId,
+                  "/worker/scan",
+                  pieceCount > 1 ? p : undefined,
+                  pieceCount > 1 ? pieceCount : undefined,
+                ),
           });
         }
       }

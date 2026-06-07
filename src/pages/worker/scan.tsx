@@ -458,7 +458,10 @@ export default function WorkerScanPage() {
       // number in the box, not the raw sentinel — the worker shouldn't see
       // "FG-FABCUT".
       setInput(
-        (parsed?.wipKey || /^FG-[A-Z_]+$/.test(primaryTerm)) && parsed?.poNo
+        (parsed?.wipKey ||
+          parsed?.compartment ||
+          /^FG-[A-Z_]+$/.test(primaryTerm)) &&
+          parsed?.poNo
           ? parsed.poNo
           : primaryTerm,
       );
@@ -467,18 +470,19 @@ export default function WorkerScanPage() {
       setRackChoice("");
       setRackSaved(false);
       try {
-        // Shared Sew/Uph compartment sticker (carries wk=<wipKey>, no op/dept).
-        // Resolve the ONE compartment card on this PO whose wipKey matches and
-        // show it directly — never the multi-card chooser. ("Scan, then it asks
-        // which thing" was the bug: a Divan sticker must complete the Divan, not
+        // Shared Sew/Uph compartment sticker. The QR carries EITHER the short
+        // compartment code (c=<subtype>, e.g. DIVAN / SOFA_BASE — the low-density
+        // form that scans reliably) OR the legacy full wipKey (wk=). Resolve the
+        // ONE matching compartment card on this PO and show it directly — never
+        // the multi-card chooser. (A Divan sticker must complete the Divan, not
         // prompt Divan-vs-Headboard.) The completing department is decided
         // server-side from the worker's section; for the lookup card we show the
-        // earliest-incomplete dept of this compartment (Sewing if its sewing
-        // isn't done yet, else Upholstery) so the shown dept matches the tap.
-        if (parsed?.wipKey && parsed?.poNo) {
-          const wipKey = parsed.wipKey;
-          const wkCards = (await findMatches(parsed.poNo)).filter(
-            (m) => (m.jobCard.wipKey || "") === wipKey,
+        // earliest-incomplete dept of this compartment so the shown dept matches.
+        if ((parsed?.wipKey || parsed?.compartment) && parsed?.poNo) {
+          const wkCards = (await findMatches(parsed.poNo)).filter((m) =>
+            parsed.wipKey
+              ? (m.jobCard.wipKey || "") === parsed.wipKey
+              : (m.jobCard.wipKey || "").split("::")[2] === parsed.compartment,
           );
           if (wkCards.length > 0) {
             const sew = wkCards.find(
@@ -498,13 +502,15 @@ export default function WorkerScanPage() {
                 order: pick.order,
                 jobCard: pick.jobCard,
                 piece,
-                wipKey,
+                // carry the resolved card's FULL wipKey (a c= sticker only had the
+                // subtype) so handleConfirmScan routes to scan-complete-shared.
+                wipKey: pick.jobCard.wipKey || parsed.wipKey,
               });
               return;
             }
           }
-          // wipKey didn't resolve on this PO — fall through to the normal
-          // lookup / error paths so the worker still gets a meaningful message.
+          // didn't resolve on this PO — fall through to the normal lookup / error
+          // paths so the worker still gets a meaningful message.
         }
         // Merged FG-level sticker — opId is a dept sentinel, not a real jc id,
         // so findMatches by opId would be empty. Jump to the PO lookup filtered

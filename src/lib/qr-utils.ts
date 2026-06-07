@@ -80,6 +80,31 @@ export function generateSharedStickerData(
 }
 
 /**
+ * SHORT compartment sticker for Fab Sew / Upholstery. Encodes the PO + the
+ * compartment subtype (`c` = DIVAN / HEADBOARD / SOFA_BASE — the wipKey's 3rd
+ * `::`-segment) + optional piece markers. It deliberately omits the LONG full
+ * wipKey (and the op id / dept) so the QR stays at version ~5 (37x37) — the same
+ * low density as Fab Cut's sticker, which scans reliably. The long-wipKey form
+ * pushed the QR to version 6+, where phone cameras struggled to lock on ("scan,
+ * no reaction"). The scanner resolves `c` against the PO's cards to recover the
+ * full wipKey and routes to scan-complete-shared (dept by the worker's section).
+ */
+export function generateCompartmentStickerData(
+  poNo: string,
+  compartmentCode: string,
+  basePath: string = "/worker/scan",
+  pieceNo?: number,
+  totalPieces?: number,
+): string {
+  const baseUrl =
+    typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
+  let url = `${baseUrl}${basePath}?po=${encodeURIComponent(poNo)}&c=${encodeURIComponent(compartmentCode)}`;
+  if (pieceNo && pieceNo > 0) url += `&p=${encodeURIComponent(String(pieceNo))}`;
+  if (totalPieces && totalPieces > 0) url += `&t=${encodeURIComponent(String(totalPieces))}`;
+  return url;
+}
+
+/**
  * Parse scanned QR data back into structured fields. Two shapes share one
  * return type (opId/deptCode optional so existing callers compile unchanged):
  *   - Per-piece / dept sticker: `op` + `dept` + `po` (+ optional `p`/`t`).
@@ -98,6 +123,7 @@ export function parseStickerData(
   pieceNo?: number;
   totalPieces?: number;
   wipKey?: string;
+  compartment?: string;
 } | null {
   try {
     const u = new URL(url);
@@ -113,6 +139,12 @@ export function parseStickerData(
       rawPiece && Number.isFinite(rawPiece) && rawPiece > 0 ? rawPiece : undefined;
     const totalPieces =
       rawTotal && Number.isFinite(rawTotal) && rawTotal > 0 ? rawTotal : undefined;
+    // SHORT compartment sticker — `c` = compartment subtype (DIVAN / HEADBOARD /
+    // SOFA_BASE). The scanner resolves it to the full wipKey from the PO's cards.
+    const c = u.searchParams.get("c");
+    if (c) {
+      return { poNo, compartment: c, pieceNo, totalPieces };
+    }
     // Shared Sew/Uph compartment sticker — wipKey + po (+ p/t), dept supplied
     // by the scanner's section at completion time.
     const wk = u.searchParams.get("wk");

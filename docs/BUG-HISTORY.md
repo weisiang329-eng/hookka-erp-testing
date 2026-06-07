@@ -34,6 +34,31 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-006 — In-progress month: Payroll/Labor Cost no longer blank — live estimate on the admin side
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit a5242a4a; Cloudflare Pages deploy green run 27084035936). typecheck (app+worker) + build + tests clean. Live prod verified: **projected May == stored May to the sen** (RM62,775.52, 31 payslips, 0 per-worker mismatch — proves the estimate equals what month-end Generate produces); June Payroll tab shows the live estimate (banner + "Generate (finalise)"), was blank; May reconciliation still RM62,775.52 + green (no regression).
+**Category:** ui-frontend
+
+Owner: an in-progress month (e.g. June while it's June) was BLANK on the admin side — Payroll tab showed only "Generate Payslips", and Labor Cost / Dept Labor reconcile only against generated payslips — while the worker phone already showed a live "This month (estimated)". Two logics in conflict: worker = live estimate (`worker.ts /payslips` → `computeMonthlyLabor`), admin = stored-only. Payroll must read at the whole-month dimension (workers expect "salary 2050 + OT − absence", not a daily-growing number); the daily accumulation belongs only to Labor Cost / Dept Labor (the cost side, which always ties to Payroll).
+
+Three parts (branch `feat/in-progress-month-accrual`):
+1. `employees.tsx` `monthIsFinished(period)` gate — Labor Cost reconciliation + Dept Labor fully-loaded/3-col only for a month that is OVER. An in-progress month ACCUMULATES (logged-so-far) and does not jump to the whole-month payroll even if rows exist; finished months tally as before.
+2. New **`GET /api/payslips/projected?period=`** (`payslips.ts`) — live estimate for ALL active workers using the IDENTICAL engine + statutory + effective-salary + join/resign + grace-cutoff logic as the POST generation, returned WITHOUT storing (status DRAFT, response `projected:true`). POST untouched; reuses the same pure fns + output shape. Verified it reproduces stored May exactly.
+3. `employees.tsx` PayrollTab — when no stored payslips AND month not over, fetches `/projected` and shows it (table + totals) behind an "Estimate · month in progress" banner. Approve/Regenerate gated on STORED rows (a preview can't be approved); Generate stays as "Generate (finalise)".
+
+Note (NOT a bug): 3 recent joiners (CHAU 5/12, Lim 6/5, Violet 6/6) show RM0 estimate because their basic salary isn't set in Employee Master — data, owner handles. Also confirmed working (no change needed): join/resign proration (SAN LIN AUNG 5/29 → 2d×2050÷24 = RM170.83), Sundays/holidays excluded from working days. Known still-open: costing divisor uses the worker's fixed `workingDaysPerMonth` (26) − holidays, not a fresh per-month Mon-Sat count — coincidentally exact for May & June 2026 (both 26 Mon-Sat days), would drift in a 27/24-Mon-Sat month; Labor Cost still ties to Payroll regardless (de-prioritised by owner).
+
+---
+
+## BUG-2026-06-07-005 — Perf: dashboard Pending-Delivery uses slim SO price-index (was full 720-SO pull)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit a5242a4a; deploy run 27084035936). typecheck + build + tests clean. Live prod verified: slim price-index map byte-identical to the full pull (1113 entries, 0 differences across 720 SOs) → Pending Delivery amount unchanged.
+**Category:** ui-frontend
+
+The homepage pulled the entire `/api/sales-orders` list (720 SOs × every SO field × every 24-field line item) ONLY to build a `{soId → {productCode → unitPriceSen}}` price map for the Pending-Delivery KPI (using just 3 fields). Added `?fields=price-index` to `GET /api/sales-orders`: it projects the SAME cached/snapshot list down to `{id, items:[{productCode, unitPriceSen}]}` and returns that tiny shape. The frontend's price-map building is UNCHANGED (the type was already this slim subset) — only the wire payload shrinks — so Pending Delivery is byte-identical by construction. Full-list path (no param) untouched. (External audit A4, verified.)
+
+---
+
 ## BUG-2026-06-07-004 — Perf: customers product Map + dashboard lazy charts (external audit B1 + A5, verified)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit 09949fcc; Cloudflare Pages deploy green run 27081242059). typecheck + 516 tests + build clean. Live prod verified: dashboard renders 2 charts + KPI numbers (Outstanding RM306,438.72 etc.), no stuck placeholder; customers page renders clean.

@@ -3821,7 +3821,10 @@ function DepartmentLaborTab({
             0,
             costEquivalent - (Number(p.absenceDeductionSen) || 0),
           );
-          const gap = gross - (loggedByWorker.get(wid) ?? 0) - leniency;
+          // Round each worker's gap to whole sen BEFORE summing — identical to
+          // the Labor Cost tab — so per-dept rows add up to the same grand total
+          // both tabs show (no per-department rounding drift).
+          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency);
           if (gap > 50) underByDept.set(reconCode, (underByDept.get(reconCode) ?? 0) + gap);
         }
       }
@@ -7002,11 +7005,14 @@ function LaborCostTab({
         continue;
       }
       // Factory-department worker: residual = paid − logged-hours value, less the
-      // absence leniency (which is already shown on its own reconciliation line),
-      // so this gap is PURE under-recorded hours (came but logged < a full day).
+      // absence adjustment (which is folded into the department buckets), so this
+      // gap is PURE under-recorded hours (came but logged < a full day). Round to
+      // whole sen per worker so the Labor Cost total and the Department Labor tab
+      // (which sums the same rounded per-worker gaps) show the identical figure.
       const loggedValueSen = p.employeeId ? loggedValueByWorker.get(p.employeeId) ?? 0 : 0;
-      const gapSen =
-        grossSen - loggedValueSen - (absenceLeniencyByPayslip.get(p.id) ?? 0);
+      const gapSen = Math.round(
+        grossSen - loggedValueSen - (absenceLeniencyByPayslip.get(p.id) ?? 0),
+      );
       // A production worker fully reconciled (gap ≈ 0) is not a data gap. Use a
       // small tolerance so rounding noise doesn't flag a fully-logged worker.
       if (gapSen > 50) {

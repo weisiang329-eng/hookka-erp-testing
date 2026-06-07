@@ -223,6 +223,196 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/payslips/projected?period=YYYY-MM — LIVE, NON-STORED estimate.
+//
+// The admin Payroll screen + Labor Cost / Department Labor reconciliation were
+// blank for an in-progress month (payslips aren't generated until month-end),
+// while the worker phone already shows a live estimate. This computes the SAME
+// estimate for ALL active workers — the IDENTICAL engine (computeMonthlyLabor)
+// + statutory + effective-salary + join/resign + grace-cutoff logic the POST
+// generation uses — but returns it WITHOUT storing. So the in-progress month is
+// no longer empty on the admin side, and these numbers match what the month-end
+// "Generate" will produce. Returns the same camelCase shape as the list, with
+// status "PROJECTED". POST (real generation) is untouched.
+// Registered before GET "/:id" so "projected" isn't parsed as an id.
+// ---------------------------------------------------------------------------
+app.get("/projected", async (c) => {
+  const denied = await requirePermission(c, "payslips", "read");
+  if (denied) return denied;
+  const period = c.req.query("period");
+  if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+    return c.json({ success: false, error: "Period (YYYY-MM) is required" }, 400);
+  }
+
+  // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
+  const wres = await c.var.DB.prepare(
+    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+  )
+    .bind(`${period}-%`)
+    .all<WorkerRow>();
+  const activeWorkers = wres.results ?? [];
+
+  const phRow = await c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string | null }>();
+  const publicHolidays = new Set<string>();
+  if (phRow?.value) {
+    try {
+      const parsed = JSON.parse(phRow.value);
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) {
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) publicHolidays.add(d);
+        }
+      }
+    } catch { /* malformed — no holidays */ }
+  }
+
+  const wheRes = await c.var.DB.prepare(
+    "SELECT workerId, date, hours FROM working_hour_entries WHERE date LIKE ?",
+  )
+    .bind(`${period}-%`)
+    .all<{ workerId: string; date: string; hours: number }>();
+  const daysByWorker = new Map<string, { date: string; hours: number }[]>();
+  for (const r of wheRes.results ?? []) {
+    const arr = daysByWorker.get(r.workerId) ?? [];
+    arr.push({ date: r.date, hours: Number(r.hours) || 0 });
+    daysByWorker.set(r.workerId, arr);
+  }
+
+  const deductionHoursByWorker = new Map<string, number>();
+  try {
+    const dedRes = await c.var.DB.prepare(
+      "SELECT workerId, hours FROM payroll_hour_deductions WHERE date LIKE ?",
+    )
+      .bind(`${period}-%`)
+      .all<{ workerId: string; hours: number }>();
+    for (const r of dedRes.results ?? []) {
+      deductionHoursByWorker.set(r.workerId, (deductionHoursByWorker.get(r.workerId) ?? 0) + (Number(r.hours) || 0));
+    }
+  } catch (e) {
+    console.warn("[payslips/projected] payroll_hour_deductions read skipped:", e);
+  }
+
+  const salaryHistoryByWorker = new Map<string, Array<{ effectiveFrom: string; basicSalarySen: number }>>();
+  try {
+    const wshRes = await c.var.DB.prepare(
+      "SELECT workerId, basicSalarySen, effectiveFrom FROM worker_salary_history",
+    ).all<{ workerId: string; basicSalarySen: number; effectiveFrom: string }>();
+    for (const r of wshRes.results ?? []) {
+      const arr = salaryHistoryByWorker.get(r.workerId) ?? [];
+      arr.push({ effectiveFrom: r.effectiveFrom, basicSalarySen: Number(r.basicSalarySen) || 0 });
+      salaryHistoryByWorker.set(r.workerId, arr);
+    }
+  } catch (e) {
+    console.warn("[payslips/projected] worker_salary_history read skipped:", e);
+  }
+
+  const [pYear, pMonth] = period.split("-").map(Number);
+  const today = new Date();
+  const absenceThroughDay = absenceCutoffDay(pYear, pMonth, today, ABSENCE_GRACE_WORKING_DAYS, publicHolidays);
+  const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
+
+  const data: ReturnType<typeof rowToPayslip>[] = [];
+  for (const worker of activeWorkers) {
+    if (
+      typeof worker.joinDate === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(worker.joinDate) &&
+      worker.joinDate > periodLastIso
+    ) {
+      continue; // joined after this month — no slip
+    }
+    const joinedDay =
+      typeof worker.joinDate === "string" && worker.joinDate.startsWith(`${period}-`)
+        ? Number(worker.joinDate.slice(8, 10))
+        : undefined;
+    const resignedDay =
+      worker.status === "RESIGNED" &&
+      typeof worker.resignedAt === "string" &&
+      worker.resignedAt.startsWith(`${period}-`)
+        ? Number(worker.resignedAt.slice(8, 10))
+        : undefined;
+    const effectiveSalarySen = effectiveSalarySenForMonth(
+      salaryHistoryByWorker.get(worker.id) ?? [],
+      worker.basicSalarySen,
+      pYear,
+      pMonth,
+      publicHolidays,
+    );
+    const labor = computeMonthlyLabor({
+      worker: {
+        basicSalarySen: effectiveSalarySen,
+        workingDaysPerMonth: worker.workingDaysPerMonth,
+        workingHoursPerDay: worker.workingHoursPerDay,
+        otMultiplier: worker.otMultiplier,
+      },
+      year: pYear,
+      month: pMonth,
+      days: daysByWorker.get(worker.id) ?? [],
+      publicHolidays,
+      absenceThroughDay,
+      employmentStartDay: joinedDay,
+      employmentEndDay: resignedDay,
+      prorateToService: joinedDay !== undefined || resignedDay !== undefined,
+      shortHourDeductionHours: deductionHoursByWorker.get(worker.id) ?? 0,
+    });
+    const allowances = 0;
+    const stat = calcStatutory(effectiveSalarySen, {
+      epfEnabled: worker.epfEnabled,
+      socsoEnabled: worker.socsoEnabled,
+      eisEnabled: worker.eisEnabled,
+      pcbEnabled: worker.pcbEnabled,
+    });
+    const grossPay = labor.payroll.grossSen + allowances;
+    const totalDeductions = stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
+    const hourlyRate =
+      worker.workingHoursPerDay > 0
+        ? Math.round(labor.payrollDailyRateSen / worker.workingHoursPerDay)
+        : 0;
+    const otHoursWhole = Math.round(labor.otHours);
+    // Build the SAME camelCase shape rowToPayslip returns — but in-memory.
+    data.push({
+      id: `projected-${period}-${worker.id}`,
+      employeeId: worker.id,
+      employeeName: worker.name,
+      employeeNo: worker.empNo,
+      departmentCode: worker.departmentCode ?? "",
+      period,
+      basicSalary: effectiveSalarySen,
+      workingDays: worker.workingDaysPerMonth,
+      absentDays: labor.payroll.absentDays,
+      absenceDeductionSen: labor.payroll.absenceDeductionSen,
+      otWeekdayHours: otHoursWhole,
+      otSundayHours: 0,
+      otPHHours: 0,
+      hourlyRate,
+      otWeekdayAmount: labor.payroll.otPaySen,
+      otSundayAmount: 0,
+      otPHAmount: 0,
+      totalOT: labor.payroll.otPaySen,
+      allowances,
+      grossPay,
+      epfEmployee: stat.epfEmployee,
+      epfEmployer: stat.epfEmployer,
+      socsoEmployee: stat.socsoEmployee,
+      socsoEmployer: stat.socsoEmployer,
+      eisEmployee: stat.eisEmployee,
+      eisEmployer: stat.eisEmployer,
+      pcb: stat.pcb,
+      totalDeductions,
+      netPay: grossPay - totalDeductions,
+      bankAccount: "",
+      // Reuse the existing DRAFT status (the response's top-level `projected:true`
+      // flag is what the UI keys on to render these as a read-only estimate).
+      status: "DRAFT" as const,
+      createdAt: "",
+      updatedAt: "",
+    });
+  }
+
+  return c.json({ success: true, data, total: data.length, projected: true });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/payslips — generate a run for ACTIVE workers
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {

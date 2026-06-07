@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-002 — Fully-burdened Labor Cost reconciliation + Department Labor under-recorded column
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit b5325f55; Cloudflare Pages deploy green run 27078890346). Pre-ship: typecheck:app clean + 516 tests pass + production build clean. Live prod verified on the rendered Employees page (May 2026): Labor Cost "Reconciled · 0 difference" badge green, Total RM62,775.52; Department Labor 3-column split renders, totals tie to payroll.
+**Category:** ui-frontend
+
+Owner wanted each department's labor line to carry the FULL cost of its own people (so the EPF/SOCSO/EIS and the ÷26-vs-÷working-days absent-day adjustment stop sitting on their own separate lines), leaving ONLY the genuine under-recorded hours visible on its own line — and the same under-recorded figure broken out in Department Labor (which previously only showed one fully-loaded total, so the unlogged-hours hole was invisible there).
+
+**Labor Cost — Payroll Reconciliation (`employees.tsx` LaborCostTab):**
+- New `reconBurden` spreads each payslip's employer statutory + its absent-day adjustment onto the worker's HOME-department bucket (PRODUCTION_SHORTFALL→Shortfall, WAREHOUSING→Warehousing, production dept→Production, else→Overhead; unknown/unassigned dept → whole salary folds into Overhead).
+- Buckets now display loaded: `loadedProduction/Warehousing/Shortfall` = logged + that dept's statutory + adjustment; `loadedOverhead` is the closing **plug** so the column ALWAYS totals exactly to Total Payroll Cost (green badge guaranteed by construction).
+- `underRecordedReconSen = employeeResidual.underLoggedSubtotalSen` — the same per-worker gap (gross − logged − adjustment, factory depts, > RM0.50) the who-&-why panel itemises, so the summary line, the panel subtotal, and Department Labor all show the identical number (RM469.79 live).
+- Removed the separate "Employer contributions (EPF/SOCSO/EIS)" and "Working-day rate adjustment" lines; removed the now-dead `nonProductionSalarySen`, `absencePaidAboveCostSen`, `employeeItemisedSumSen`, `employeeResidualRemainderSen`. Panel retitled "Under-recorded hours — who & why"; proof line now reconciles the itemised gap to the Under-recorded line.
+
+**Department Labor (`employees.tsx` DepartmentLaborTab):**
+- `DepartmentLaborRow` gains `underRecordedSen` + `laborInclEpfSen` (= estCostSen − underRecordedSen). Per-dept under-recorded computed with the SAME formula as Labor Cost (dept resolved as `payslip.departmentCode || "UNASSIGNED"`, no worker fallback, so the two tabs' Under-recorded totals tie out).
+- Grid split into three money columns — **Labor (incl. EPF) │ Under-recorded │ Total** — shown only for a full single month with no category filter (`splitVisible`); a custom range / filter shows the plain Total as before. KPI note + TOTAL strip updated.
+
+Live (May 2026): Labor Cost Total RM62,775.52 (diff 0 sen, green); Department Labor Labor RM62,305.73 │ Under-recorded RM469.78 │ Total RM62,775.51 (the 1-sen total/under deltas are the long-standing per-worker rounding, ≈ Payroll). No office/sales staff this month → nothing lands in Overhead beyond repair/maintenance + EPF.
+
+---
+
 ## BUG-2026-06-07-001 — Shared Sew/Uph sticker now completes ONE compartment + ONE piece; Packing sticker scannable
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit ecebd973; Cloudflare Pages deploy green). Pre-ship: typecheck + 516 tests + production build clean. Live prod data verified (multi-compartment sofas with DISTINCT wip_keys per compartment; qty=2 Divan cards present). Final per-piece WRITE confirmation on the owner's real-device scan (the scan-complete path is worker-auth only — not pokeable via dashboard back-door).

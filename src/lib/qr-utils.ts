@@ -50,7 +50,13 @@ export function generateStickerData(
   totalPieces?: number,
 ): string {
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:3000";
-  let url = `${baseUrl}${basePath}?op=${encodeURIComponent(opId)}&dept=${encodeURIComponent(deptCode)}&po=${encodeURIComponent(poNo)}`;
+  // FG-<DEPT> sentinels (FG-PACKING / FG-FAB_CUT / FG-FAB_SEW) already encode the
+  // dept in the op id, so the &dept= param is redundant — omit it to keep the QR
+  // small (version ~5, reliably scannable). Per-JC op ids (no FG- prefix) keep it.
+  const deptParam = /^FG-/.test(opId)
+    ? ""
+    : `&dept=${encodeURIComponent(deptCode)}`;
+  let url = `${baseUrl}${basePath}?op=${encodeURIComponent(opId)}${deptParam}&po=${encodeURIComponent(poNo)}`;
   if (pieceNo && pieceNo > 0) url += `&p=${encodeURIComponent(String(pieceNo))}`;
   if (totalPieces && totalPieces > 0) url += `&t=${encodeURIComponent(String(totalPieces))}`;
   return url;
@@ -152,7 +158,14 @@ export function parseStickerData(
       return { poNo, wipKey: wk, pieceNo, totalPieces };
     }
     const opId = u.searchParams.get("op");
-    const deptCode = u.searchParams.get("dept");
+    // FG-<DEPT> sentinels encode the dept in the op id, so the &dept= param is
+    // dropped to keep the QR small — derive it back when absent. Older stickers
+    // that still carry &dept= parse unchanged.
+    let deptCode = u.searchParams.get("dept");
+    if (opId && !deptCode) {
+      const fg = /^FG-([A-Z_]+)$/.exec(opId);
+      if (fg) deptCode = fg[1];
+    }
     if (opId && deptCode) {
       return { opId, deptCode, poNo, pieceNo, totalPieces };
     }

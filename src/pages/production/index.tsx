@@ -1610,7 +1610,10 @@ export default function ProductionPage({
   //     editing — would clobber unsaved cells)
   //   * tab not visible (no point computing for an unviewed tab)
   useEffect(() => {
-    const POLL_INTERVAL_MS = 20_000;
+    // 8s (was 20s) — Wei Siang 2026-06-07 wanted scans to show on the operator's
+    // sheet within a few seconds. Each poll is a KV cache HIT (~20-50ms, no DB)
+    // until a scan bumps the version, so 2.5x more polls is cheap at this scale.
+    const POLL_INTERVAL_MS = 8_000;
     const tick = () => {
       if (document.visibilityState !== "visible") return;
       if (pendingJcPatchesRef.current.size > 0) return;
@@ -1645,7 +1648,11 @@ export default function ProductionPage({
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
       if (pendingJcPatchesRef.current.size > 0) return;
-      if (Date.now() - lastFetchAtRef.current < 300_000) return;
+      // 3s gate (was 5 min) — the operator's real workflow is "scan on the phone,
+      // look back at the computer". A 5-minute gate meant that look-back refetch
+      // almost never fired, so the sheet sat stale. 3s still de-bounces rapid tab
+      // flips; in-flight PATCHes are already skipped above, drafts via fetchOrders.
+      if (Date.now() - lastFetchAtRef.current < 3_000) return;
       lastFetchAtRef.current = Date.now();
       fetchOrders();
     };

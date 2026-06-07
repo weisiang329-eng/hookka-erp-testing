@@ -42,7 +42,7 @@ import { workerCoversDept } from "../../lib/worker";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
-import { getOrgId } from "../lib/tenant";
+import { getOrgId, tryGetOrgId, DEFAULT_ORG_ID } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -4520,11 +4520,21 @@ function buildPoListCacheKey(orgId: string, version: string, url: URL): string {
 // 2026-06-06: changed from DELETE to mark-stale (built_from = epoch) so the
 // serve-stale-while-revalidate read path keeps the prior copy to hand back
 // instantly instead of paying a cold recompute on the next operator open.
+// Resolve the org for a SCAN-path write. Worker-token scans carry NO dashboard
+// user, so getOrgId(c) would throw ("orgId not resolved on request context") —
+// which is exactly what crashed worker scan-completion. Fall back to the default
+// org (single-tenant today) so a worker's scan completes AND invalidates the
+// operator's dept-sheet snapshot; a dashboard scan still gets its own resolved
+// org via tryGetOrgId.
+function scanOrgId(c: Context<Env>): string {
+  return tryGetOrgId(c) ?? DEFAULT_ORG_ID;
+}
+
 async function invalidateProductionCachesAfterScan(
   c: Context<Env>,
 ): Promise<void> {
   try {
-    const orgId = getOrgId(c);
+    const orgId = scanOrgId(c);
     await bumpPoListCacheVersion(c, orgId);
     // Mark the dept-sheet snapshots stale WITHOUT deleting them: keep the prior
     // copy so the serve-stale-while-revalidate read path can hand it back
@@ -5842,7 +5852,7 @@ app.post("/:id/scan-complete", async (c) => {
       "COMPLETED",
       siblings.results ?? [],
       target.jc.status,
-      { orgId: getOrgId(c), source: "SCAN" },
+      { orgId: scanOrgId(c), source: "SCAN" },
     );
 
     // F2 — labor cost posting (idempotent per jobCardId).
@@ -6204,7 +6214,7 @@ app.post("/:id/scan-complete-dept", async (c) => {
         "COMPLETED",
         siblings.results ?? [],
         jc.status,
-        { orgId: getOrgId(c), source: "SCAN" },
+        { orgId: scanOrgId(c), source: "SCAN" },
       );
       await postJobCardLabor(db, mergedJc.id, poId);
       completedJcIds.push(mergedJc.id);
@@ -6654,7 +6664,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
         "COMPLETED",
         siblings.results ?? [],
         card.status,
-        { orgId: getOrgId(c), source: "SCAN" },
+        { orgId: scanOrgId(c), source: "SCAN" },
       );
       await postJobCardLabor(db, mergedJc.id, poId);
       completedJcIds.push(mergedJc.id);

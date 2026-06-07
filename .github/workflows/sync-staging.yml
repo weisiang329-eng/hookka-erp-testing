@@ -93,6 +93,29 @@ jobs:
             GRANT ALL ON SCHEMA public TO public;
           SQL
 
+      - name: Re-create prod's extensions on staging
+        # DROP SCHEMA public CASCADE above also drops any extension that was
+        # installed INTO the public schema (e.g. pg_trgm — a GIN index in the
+        # dump needs its operator class public.gin_trgm_ops). pg_dump
+        # --schema=public does NOT emit CREATE EXTENSION, so the restore would
+        # fail ("operator class public.gin_trgm_ops does not exist"). Replay
+        # prod's full extension list, each into the schema prod keeps it in,
+        # BEFORE restoring. Idempotent (IF NOT EXISTS) and covers any extension
+        # prod adds later, so the nightly sync won't break again.
+        env:
+          PROD_URL: ${{ secrets.PROD_DATABASE_URL }}
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          psql "$PROD_URL" -tA -v ON_ERROR_STOP=1 -c \
+            "SELECT 'CREATE EXTENSION IF NOT EXISTS ' || quote_ident(e.extname) || ' WITH SCHEMA ' || quote_ident(n.nspname) || ' CASCADE;' \
+               FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace \
+              WHERE e.extname <> 'plpgsql' \
+              ORDER BY 1;" > extensions.sql
+          echo '--- extensions to recreate on staging ---'
+          cat extensions.sql
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -f extensions.sql
+
       - name: Restore prod dump into staging
         env:
           STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}

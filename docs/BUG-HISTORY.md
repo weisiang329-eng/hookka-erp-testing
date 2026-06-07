@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-003 — Under-recorded didn't tie between Labor Cost and Department Labor (1-sen rounding)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit 90594b82; Cloudflare Pages deploy green run 27079997059). Pre-ship: typecheck:app + 516 tests + build clean. Live prod verified (May 2026): both tabs now read RM460.30 (was 460.30 vs 460.29); Labor Cost Total RM62,775.52, "Reconciled · 0 difference" green.
+**Category:** ui-frontend
+
+Owner spotted the Labor Cost under-recorded line (RM460.30) and the Department Labor Under-recorded column (RM460.29) disagreeing by 1 sen — looked like the data hadn't reconciled. Root cause was purely display rounding at different granularity: **Labor Cost** summed every worker's float gap then rounded the single total once (`employeeResidual.underLoggedSubtotalSen` → `formatCurrency`); **Department Labor** rounded EACH department's gap to whole sen first (`Math.round(underByDept.get(code))`) then summed the rounded per-dept values — so Framing 242.0095 / Upholstery 199.3045 / Fab Cut 18.9812 each lost a fraction and the totals diverged.
+
+Fix: round each worker's gap to whole sen BEFORE summing, in BOTH sites — `employees.tsx` `employeeResidual` (`const gapSen = Math.round(grossSen − loggedValueSen − leniency)`) and `DepartmentLaborTab` rows (`const gap = Math.round(gross − logged − leniency)`). Now both totals = Σ rounded-per-worker gaps (identical), and Department Labor's per-department rows add up exactly to its grand total. Total payroll + green badge unaffected (Labor Cost Overhead plug absorbs the sen; Department Labor Total = Σ estCost unchanged — only the Labor/Under-recorded split shifts by the rounding sen). No data was wrong — the owner's Keep pay had applied correctly; only the two displays rounded differently. (Known separate cosmetic, untouched: Department Labor grand Total shows RM62,775.51 ≈ payroll RM62,775.52 — per-department COST rounding.)
+
+---
+
 ## BUG-2026-06-07-002 — Fully-burdened Labor Cost reconciliation + Department Labor under-recorded column
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit b5325f55; Cloudflare Pages deploy green run 27078890346). Pre-ship: typecheck:app clean + 516 tests pass + production build clean. Live prod verified on the rendered Employees page (May 2026): Labor Cost "Reconciled · 0 difference" badge green, Total RM62,775.52; Department Labor 3-column split renders, totals tie to payroll.

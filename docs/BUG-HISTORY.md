@@ -34,6 +34,28 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-011 — Unified money rounding: one shared largest-remainder rule across all three labour screens
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit ff962a33; Cloudflare Pages deploy green run 27088463885). typecheck + 73 labor+money tests (9 new) + build clean. Live prod verified: Dept Labour May RM62,775.52 (rows sum exactly; the leftover sen now lands on the largest-FRACTION dept — Fab Sew RM10,714.02 — not an arbitrary "biggest dept"); Labor Cost May "Reconciled · 0 difference" RM62,775.52 unchanged.
+**Category:** ui-frontend
+
+Owner: the 1-sen tidy in BUG-2026-06-07-009 fixed the symptom by shoving the residual sen into the largest-cost department — a patch, not a rule ("不是修而已而是进位该怎么进位全部统一"). The three screens reconciled to the same total via DIFFERENT ad-hoc methods (Labor Cost: Overhead closing plug; Department Labor: biggest-dept fold). Unified to ONE convention in `src/lib/utils.ts`:
+- `roundSen(x)` — the single rounding primitive (Math.round).
+- `distributeRoundSen(parts, totalSen)` — largest-remainder (Hamilton): floor every part, hand the leftover sen one-each to the largest dropped fractions (ties → larger part); always sums to the total exactly (safety net parks any caller-misuse leftover on the largest part). 9 unit tests in money.test.mjs.
+
+Department Labor (`employees.tsx` rows useMemo) now rounds its per-dept costs with `distributeRoundSen` against the integer Total Payroll Cost (Σ per-worker gross + employer EPF/SOCSO/EIS) instead of the biggest-dept plug; Labor Cost per-(dept,category) bucket rounding routed through `roundSen`. All three screens anchor to the same per-worker payslip integers and tie to the sen by one rule. No-op on the grand totals (May still RM62,775.52); only WHICH dept absorbs the sub-sen leftover changed (now the fairest one). Labor Cost's Overhead-closing-plug reconciliation is unchanged (Overhead is a real accounting balance line, not a rounding hack).
+
+---
+
+## BUG-2026-06-07-010 — Production-order labour cost (PO cost cascade) also follows actual per-month working days
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit 3d34abfd; Cloudflare Pages deploy green run 27088463885). typecheck + 37 labor-engine tests (1 new) + build clean. Verified by unit test (July 2026 ÷27); no-op for 26-day months (May/June) so no live ledger movement to observe; existing May tests unchanged.
+**Category:** production-orders
+
+Completes the working-days fix from BUG-2026-06-07-008. `productionCostRatePerMinuteSen` (labor-engine) — the per-minute labour rate written into `cost_ledger` LABOR_POSTED when a job card posts — still divided by the worker's nominal `workingDaysPerMonth` (26) − holidays. Now it uses `countElapsedWorkingDays(full month)`, the SAME costing divisor `computeMonthlyLabor` uses, so production-order labour cost follows the real Mon-Sat working days of each month (July ÷27, Feb ÷24). No-op for 26-day months. Owner explicitly authorised this ("讲了很多次了"); it was previously parked because it writes the cost ledger. Only NEW postings use the new rate; existing cost_ledger rows are untouched (history preserved). po-cost-cascade.ts callers unchanged (same signature).
+
+---
+
 ## BUG-2026-06-07-009 — Department Labour grand total ties to Payroll to the sen (1-sen rounding)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, commit 8385894b; Cloudflare Pages deploy green run 27087530408). typecheck + tests + build clean. Live prod verified: Dept Labour "Estimated labor cost" + TOTAL row now **RM62,775.52** (was .51) = Payroll = Labor Cost tab; rows sum exactly to it (the +1 sen landed on Upholstery, the largest dept: RM13,929.08). Under-recorded RM460.30 unchanged.

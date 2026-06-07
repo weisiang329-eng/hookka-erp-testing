@@ -288,13 +288,33 @@ test("computeMonthlyLabor: public holidays make the production day rate higher",
   );
 });
 
-test("computeMonthlyLabor: no holidays — production day rate equals payroll day rate", () => {
-  // A month with no public holidays → both divisors are 26.
+test("computeMonthlyLabor: costing divisor = ACTUAL month working days, not fixed 26 (payroll stays ÷26)", () => {
+  // July 2026 has 27 Mon–Sat working days and NO public holidays. Payroll still
+  // divides by the nominal workingDaysPerMonth (26); production cost divides by
+  // the ACTUAL 27 → the two day rates DIFFER even with no holidays. (2026-06-07
+  // fix: working days are the real per-month count, not a fixed 26.)
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
     month: 7,
     days: [{ date: "2026-07-01", hours: 8 }],
+    publicHolidays: [],
+    absenceThroughDay: 31,
+  });
+  assert.equal(r.holidaysInMonth, 0);
+  assert.equal(r.payrollDailyRateSen, ANN.basicSalarySen / ANN.workingDaysPerMonth); // ÷26 nominal
+  assert.equal(r.costingDailyRateSen, ANN.basicSalarySen / 27); // ÷ actual 27 working days
+  assert.ok(r.costingDailyRateSen < r.payrollDailyRateSen); // 27 > 26 → each day costs less
+});
+
+test("computeMonthlyLabor: costing == payroll rate when the month actually has 26 working days + no holidays", () => {
+  // May 2026 has exactly 26 Mon–Sat days; with no holidays passed, the actual
+  // working-days divisor is 26 = the payroll ÷26, so the two rates converge.
+  const r = labor.computeMonthlyLabor({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: [{ date: "2026-05-04", hours: 8 }],
     publicHolidays: [],
     absenceThroughDay: 31,
   });

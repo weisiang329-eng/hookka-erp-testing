@@ -411,16 +411,20 @@ export function computeMonthlyLabor(
   // Two divisors, on purpose:
   //   • PAYROLL absence + all OT → ÷ nominal workingDaysPerMonth (26): a missed
   //     day is docked the contractual ÷26 "ordinary rate of pay".
-  //   • PRODUCTION COST + part-month proration → ÷ (workingDaysPerMonth −
-  //     public holidays): a logged day of output, or a part-month day served, is
-  //     valued at this higher ÷working-days rate (holidays absorbed into it).
+  //   • PRODUCTION COST + part-month proration → ÷ the ACTUAL working days in
+  //     THIS calendar month = Mon–Sat days minus public holidays. This varies by
+  //     month (24 in a 26-Mon–Sat month with 2 holidays; 27 in a 4-Sunday month;
+  //     ~24 in February) — it is NOT the fixed nominal 26. A logged day of output,
+  //     or a part-month day served, is valued at this ÷working-days rate.
   // They differ only on absent days — payroll docks ÷26, production loses
-  // ÷working-days. That gap (paid above production value on absent days) is shown
-  // as a "non-productive paid (absence)" line in the Labor Cost reconciliation, so
-  // Payroll and Labor Cost still tie out and the under-recorded residual stays
-  // pure. [Owner decision 2026-06-06: absence ÷26, part-month prorate ÷working-days.]
+  // ÷working-days. That gap is folded into the Labor Cost department buckets, so
+  // Payroll and Labor Cost still tie out. [2026-06-06: absence ÷26, prorate
+  // ÷working-days. 2026-06-07: working days = actual per-month count, not fixed 26.]
   // Clamped to ≥1 so it never divides by 0.
-  const costingDivisor = Math.max(1, workingDaysPerMonth - holidaysInMonth);
+  const costingDivisor = Math.max(
+    1,
+    countElapsedWorkingDays(year, month, new Date(year, month, 0).getDate(), publicHolidays),
+  );
 
   const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth;
   const otHourlyRateSen =

@@ -34,6 +34,15 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-07-009 — Department Labour grand total ties to Payroll to the sen (1-sen rounding)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-07, commit 8385894b; Cloudflare Pages deploy green run 27087530408). typecheck + tests + build clean. Live prod verified: Dept Labour "Estimated labor cost" + TOTAL row now **RM62,775.52** (was .51) = Payroll = Labor Cost tab; rows sum exactly to it (the +1 sen landed on Upholstery, the largest dept: RM13,929.08). Under-recorded RM460.30 unchanged.
+**Category:** ui-frontend
+
+The Department Labour grand total summed each department's nearest-sen rounded cost (`Math.round(cell.costSen)` per dept), so the sum could land a sen off the integer Total Payroll Cost (Σ gross + employer EPF/SOCSO/EIS) the Labor Cost + Payroll tabs show — RM62,775.51 vs .52. (Flagged as a known pre-existing cosmetic in BUG-2026-06-07-008.) Fix (`employees.tsx` DeptLaborTab rows useMemo): when fully loaded (full finished month, no category filter), compute the authoritative payroll total from `deptPayslips` and fold the rounding residual into the largest-cost department so the rows add up EXACTLY to Payroll. Under-recorded column untouched (already tied per-worker, round-before-sum). No-op when there is no residual, or when not fully loaded (custom range / category filter / in-progress month → plain per-dept round, no payroll tie claimed).
+
+---
+
 ## BUG-2026-06-07-008 — Costing divisor now = ACTUAL per-month working days (was fixed 26 − holidays)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-07, engine commit 2b09b53a + UI-mirror commit 5c17ce65; Cloudflare Pages deploy green run 27087054392). typecheck + 533 tests + build clean. Live prod verified on both tabs: May 2026 Labor Cost **RM62,775.52 "Reconciled · 0 difference" (green)** + under-recorded RM460.30; Dept Labor under-recorded RM460.30 (matches), 3-col split intact; June (in-progress) range-gap short values at the correct ÷25 rate, not blank; no console errors. **Resolves the "known still-open" item flagged in BUG-2026-06-07-006.**

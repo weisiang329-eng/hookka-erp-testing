@@ -210,6 +210,15 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
     () => (productsResp?.success ? productsResp.data ?? [] : Array.isArray(productsResp) ? (productsResp as ProductOption[]) : []),
     [productsResp]
   );
+  // Lookup by product id — built once per catalog change so the per-row render
+  // below is an O(1) Map.get instead of a linear allProducts.find scan on every
+  // row, every render (which re-ran on each price keystroke). Same value as the
+  // old .find (product id is a unique key), just without the N×rows scan.
+  const productById = useMemo(() => {
+    const m = new Map<string, ProductOption>();
+    for (const p of allProducts) m.set(p.id, p);
+    return m;
+  }, [allProducts]);
 
   const [query, setQuery] = useState("");
   const [categoryTab, setCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA" | "ACCESSORY">("ALL");
@@ -793,7 +802,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                 </thead>
                 <tbody className="divide-y divide-[#E2DDD8]">
                   {filtered.map((row) => {
-                    const productMaster = allProducts.find((p) => p.id === row.productId);
+                    const productMaster = productById.get(row.productId);
                     const description = productMaster?.description ?? "";
                     const baseModel = productMaster?.baseModel ?? "";
                     const sizeLabel = productMaster?.sizeLabel ?? "";

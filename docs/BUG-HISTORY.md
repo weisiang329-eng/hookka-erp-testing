@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-08-009 — Employees Print Reports redesigned to dashboard standard + print follows on-screen filter/sort (WYSIWYG)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-08, commit 007d6579; Cloudflare Pages deploy green run 27149374035). typecheck + build pass; Labor Cost + Payroll print output render-verified locally; live prod verified — Labor Cost RM62,775.52 "Reconciled · 0 difference" (no regression), fresh bundle, no console errors. Owner approved ("merge prod"). Built on staging first (staging branch + DB now mirror prod), reviewed, then shipped.
+**Category:** ui-frontend
+
+Owner feedback: each Employees report tab's "Print Report" (1) didn't follow the on-screen sort — it printed the unsorted source rows, not the DataGrid's current sorted/filtered view (the helper's whole intent is WYSIWYG); and (2) was a bare table, far below the polish of the server-rendered Daily Efficiency Report ("这个才叫排版呢"). Reworked the shared `src/lib/print-report.ts` into a dashboard report engine matching that gold standard: Hookka header + KPI dashboard cards + titled sections (optional `groupBy` + bold `totalRow`) + per-cell colour/bold/badge (`PrintCardObject`/`PrintBadge`) + per-report A4 `orientation`. Backward compatible (`columns`+`rows` still render as one section). Applied to every report:
+- **Labor Cost** (landscape): 5 KPI cards + Payroll Reconciliation (green "Reconciled" badge) + Production Breakdown (cost/revenue % coloured) + Under-recorded Hours detail.
+- **Payroll** (landscape): Total Payroll Cost / EPF / SOCSO / EIS / PCB cards (17-col table verified to fit) + bold Net Pay.
+- **Efficiency Overview** (landscape): Workers / Present / Working Hrs / Avg Efficiency cards + colour-coded efficiency; prints the grid's CURRENT sorted+filtered rows via `onFilteredDataChange` (fixes the original "Sort by Efficiency doesn't follow" complaint).
+- **Employee Performance** (landscape): Days Present / Working / Production / Efficiency / OT cards + green COMPLETED status.
+- **Working Hours** (portrait): Total Hours / Workers / Entries cards.
+- **Department Labor** (landscape): Sofa/Bedframe/Accessory cost columns + WYSIWYG sorted print (from the earlier category-columns work, BUG-2026-06-07 series).
+Every report now prints for exactly the current filter (date range / month / category / employee); the sortable grids (Efficiency Overview, Department Labor, Working Hours) also follow the on-screen sort. NOT changed: **Department Performance** — its Print Report still opens the Daily Efficiency Report (the gold standard itself); owner kept it. Department Labor kept (remain). Known small follow-up (owner offered, not yet done): wire `onFilteredDataChange` so the Employee Performance breakdown print follows its column sort too.
+
+---
+
 ## BUG-2026-06-08-008 — Office completion let the worker phone re-scan + re-complete a finished card (completion didn't reach piece_pics — the SET mirror of -002)
 
 **Status:** 🟢 Fixed in code (on `feat/sticker-scan-per-piece-overhaul`); typecheck + lint + 569 tests (10 new) green. Approved by Wei Siang ("上", Approach A). Deploy + live-verify next.

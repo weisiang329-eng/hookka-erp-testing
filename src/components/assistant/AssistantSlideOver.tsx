@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X, Paperclip, FileText, Image as ImageIcon, FileSpreadsheet } from "lucide-react";
 import { HookkaAILogo } from "@/components/assistant/HookkaAILogo";
+import { humanizeError } from "@/lib/humanize-error";
 
 // File upload limits — these match the server-side guard in
 // src/api/lib/attachment-parser.ts. Defined locally so the UI can refuse
@@ -551,10 +552,14 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       });
 
       if (!res.ok) {
-        let errText = `Request failed (${res.status})`;
+        let errText = humanizeError(
+          { status: res.status },
+          "The assistant couldn't respond. Please try again.",
+        );
         try {
           const j = (await res.json()) as { error?: string };
-          if (j.error) errText = j.error;
+          if (j.error)
+            errText = humanizeError({ status: res.status, message: j.error }, errText);
         } catch {
           // ignore
         }
@@ -683,7 +688,7 @@ export function AssistantSlideOver({ open, onClose }: AssistantSlideOverProps) {
       }
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
+      setError(humanizeError(err, "The assistant couldn't respond. Please try again."));
     } finally {
       setBusy(false);
       abortRef.current = null;

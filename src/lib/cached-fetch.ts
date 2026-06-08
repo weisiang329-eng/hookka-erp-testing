@@ -22,6 +22,7 @@
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buildTraceparent } from "./trace";
+import { humanizeError } from "./humanize-error";
 
 // Per-build cache namespace. `__BUILD_ID__` is injected by Vite (see
 // vite.config.ts `define`) as a unique-per-build string. Every new
@@ -441,7 +442,7 @@ export function useCachedJson<T = unknown>(
           const prior = readCache<T>(joinedUrl);
           if (prior && !isDegradedResponse(prior.data)) {
             setData(prior.data);
-            setError("degraded response — kept last-known-good data");
+            setError("Showing your most recent saved data while we refresh.");
             return;
           }
         }
@@ -458,7 +459,7 @@ export function useCachedJson<T = unknown>(
         // AbortError is the expected outcome of releaseInflight() racing
         // a slow request; not a user-visible failure.
         if (isAbortError(err)) return;
-        setError(err instanceof Error ? err.message : String(err));
+        setError(humanizeError(err));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

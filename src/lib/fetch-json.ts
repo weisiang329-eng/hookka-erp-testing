@@ -20,6 +20,7 @@
 import { z } from "zod";
 import { buildTraceparent } from "./trace";
 import { readCsrfCookie } from "./csrf";
+import { humanizeError } from "./humanize-error";
 
 export class FetchJsonError extends Error {
   public readonly status: number;
@@ -116,9 +117,11 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
     });
   } catch {
     const timedOut = ctrl.signal.aborted && !(upstreamSignal?.aborted);
+    // Plain, operator-safe line. The URL + status(0) stay on the error object
+    // for logs/Sentry; we just never put technical text in `.message`.
     const msg = timedOut
-      ? `Request timeout after ${timeoutMs}ms: ${url}`
-      : `Network error while requesting ${url}`;
+      ? "That took too long. Please try again."
+      : humanizeError({ status: 0 });
     throw new FetchJsonError(msg, 0, url, undefined);
   } finally {
     globalThis.clearTimeout(timeoutId);
@@ -130,7 +133,10 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
     raw = await res.json();
   } catch {
     throw new FetchJsonError(
-      `Invalid JSON from ${url}`,
+      humanizeError(
+        { status: res.status },
+        "The server sent a response we couldn't read. Please try again.",
+      ),
       res.status,
       url,
       undefined,
@@ -138,9 +144,16 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
   }
 
   if (!res.ok) {
-    const msg =
-      (raw as { error?: string })?.error ?? `HTTP ${res.status} from ${url}`;
-    throw new FetchJsonError(msg, res.status, url, raw);
+    // humanizeError keeps a clean backend message ("Order already confirmed")
+    // and replaces a technical one (or the HTTP-code fallback) with a plain
+    // line. The raw body stays in `.body` and the status in `.status` for logs.
+    const backendMsg = (raw as { error?: string })?.error;
+    throw new FetchJsonError(
+      humanizeError({ status: res.status, message: backendMsg }),
+      res.status,
+      url,
+      raw,
+    );
   }
 
   const parsed = schema.safeParse(raw);
@@ -152,7 +165,10 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
       });
     }
     throw new FetchJsonError(
-      `Response shape from ${url} did not match schema`,
+      humanizeError(
+        { status: res.status },
+        "The page got an unexpected response. Please refresh and try again.",
+      ),
       res.status,
       url,
       raw,

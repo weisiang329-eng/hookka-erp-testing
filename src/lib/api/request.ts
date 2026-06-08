@@ -12,6 +12,7 @@ import type { z } from "zod";
 import { fetchJson, FetchJsonError } from "../fetch-json";
 import { cachedFetch, invalidatePrefix } from "./cache";
 import { ApiError } from "./errors";
+import { humanizeError } from "../humanize-error";
 
 export type ListParams = Record<string, string | number | boolean | undefined | null>;
 
@@ -85,7 +86,7 @@ function toApiError(err: unknown, fallbackUrl: string): ApiError {
       cause: err,
     });
   }
-  const message = err instanceof Error ? err.message : String(err);
+  const message = humanizeError(err);
   return new ApiError(message, {
     status: 0,
     code: "UNKNOWN",

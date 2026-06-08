@@ -3780,11 +3780,45 @@ export default function ProductionPage({
         toast.warning("Could not load production orders.");
         return [];
       }
-      // Keep only the production-order LINES visible in the Fab Cut grid
-      // (match by id — each grid row's poId is that line's order id). This is
-      // what makes 2 visible lines yield exactly those 2 lines' Fab Sew
-      // stickers instead of the whole parent SO's lines.
-      const scoped = all.filter((o) => poIds.has(o.id));
+      // The Fab Cut grid MERGES a sofa's per-variant FC job cards into ONE
+      // anchor row (Option C), so a 2-piece sofa (e.g. SO-2605-225 = 1A(LHF) +
+      // 1A(RHF)) shows a single Fab Cut row carrying only the anchor PO's id.
+      // Its sibling POs hold the OTHER pieces' Fab Sew job cards — scoping by
+      // the visible poId alone would print only the anchor's Fab Sew sticker (1)
+      // instead of the full set the Fab Sew page shows (2). Expand each visible
+      // SOFA poId to its merge-group siblings using the SAME recipe as
+      // buildBaseRows' cross-PO scan (groupId = companySOId | salesOrderId |
+      // companyCOId | consignmentOrderId, then SOFA must also match base model +
+      // fabric), so "Print Fab Sew" produces exactly what the Fab Sew page does.
+      // BF/ACC keep their own per-PO FC rows, so this loop is a no-op for them —
+      // it does NOT regress the "don't pull the whole parent SO's lines" rule.
+      const byId = new Map(all.map((o) => [o.id, o] as const));
+      const groupIndex = new Map<string, ProductionOrder[]>();
+      for (const o of all) {
+        const gid =
+          o.companySOId || o.salesOrderId || o.companyCOId || o.consignmentOrderId || "";
+        if (!gid) continue;
+        const arr = groupIndex.get(gid);
+        if (arr) arr.push(o);
+        else groupIndex.set(gid, [o]);
+      }
+      const expandedIds = new Set(poIds);
+      for (const pid of Array.from(poIds)) {
+        const anchor = byId.get(pid);
+        if (!anchor || anchor.itemCategory !== "SOFA") continue;
+        const gid =
+          anchor.companySOId || anchor.salesOrderId || anchor.companyCOId || anchor.consignmentOrderId || "";
+        if (!gid) continue;
+        const myBase = (anchor.productCode || "").split("-")[0];
+        const myFabric = anchor.fabricCode || "";
+        for (const sib of groupIndex.get(gid) || []) {
+          if (sib.id === anchor.id) continue;
+          if ((sib.fabricCode || "") !== myFabric) continue;
+          if ((sib.productCode || "").split("-")[0] !== myBase) continue;
+          expandedIds.add(sib.id);
+        }
+      }
+      const scoped = all.filter((o) => expandedIds.has(o.id));
       if (scoped.length === 0) {
         toast.warning("Could not match the visible Fab Cut rows to any production orders.");
         return [];

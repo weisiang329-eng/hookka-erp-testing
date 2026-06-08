@@ -3827,6 +3827,12 @@ async function applyPoUpdate(
       updated.completedDate = body.completedDate || null;
     }
 
+    // Snapshot the PICs BEFORE the body's change is applied, so a PIC swap can
+    // be propagated to the piece_pics scan stamps below (the worker "completed
+    // products" view credits a worker via piece_pics, not the JC-level pic).
+    const oldPic1Id = updated.pic1Id ?? null;
+    const oldPic2Id = updated.pic2Id ?? null;
+
     if (body.pic1Id !== undefined) {
       updated.pic1Id = body.pic1Id;
       if (body.pic1Id) {
@@ -3998,6 +4004,43 @@ async function applyPoUpdate(
         );
       }
       if (pieceStmts.length > 0) await db.batch(pieceStmts);
+    }
+
+    // BUG (PIC change ↔ scan sync): when the PIC is CHANGED — not the completion
+    // — on a card that STAYS completed, the JC-level pic1Id/pic2Id moved but the
+    // piece_pics scan stamps still carry the OLD pic. The worker "completed
+    // products" view credits a worker via piece_pics, so the old PIC keeps
+    // showing the card (e.g. a PIC removed on the production page still appears
+    // as having completed it). Propagate the swap: for this card's pieces stamped
+    // with the OLD pic, move them to the NEW pic (or clear when the new pic is
+    // null). Pieces a DIFFERENT real scanner filled are left alone (WHERE
+    // picXId = old). The SET branch above handles a fresh complete; the CLEAR
+    // branch wipes everything on un-complete; this covers the change-in-between.
+    if (
+      updated.completedDate &&
+      jcWasCompleted &&
+      (updated.pic1Id !== oldPic1Id || updated.pic2Id !== oldPic2Id)
+    ) {
+      const swapStmts: D1PreparedStatement[] = [];
+      if (oldPic1Id && updated.pic1Id !== oldPic1Id) {
+        swapStmts.push(
+          db
+            .prepare(
+              "UPDATE piece_pics SET pic1Id = ?, pic1Name = ? WHERE jobCardId = ? AND pic1Id = ?",
+            )
+            .bind(updated.pic1Id ?? null, updated.pic1Name ?? "", updated.id, oldPic1Id),
+        );
+      }
+      if (oldPic2Id && updated.pic2Id !== oldPic2Id) {
+        swapStmts.push(
+          db
+            .prepare(
+              "UPDATE piece_pics SET pic2Id = ?, pic2Name = ? WHERE jobCardId = ? AND pic2Id = ?",
+            )
+            .bind(updated.pic2Id ?? null, updated.pic2Name ?? "", updated.id, oldPic2Id),
+        );
+      }
+      if (swapStmts.length > 0) await db.batch(swapStmts);
     }
 
     // Google Sheets sync — fire-and-forget. Push the freshly-updated JC

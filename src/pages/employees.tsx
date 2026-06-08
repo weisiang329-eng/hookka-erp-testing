@@ -658,23 +658,23 @@ function WorkingHoursTab({
   // a saved row on the current date so the operator doesn't end up with
   // duplicate entries per (worker, dept, date) tuple. Falls through with
   // a toast-equivalent error message into copyError state on failure.
-  const copyFromPreviousDate = useCallback(async () => {
+  const copyFromSource = useCallback(async (sourceDate: string) => {
     setCopyError("");
-    if (!copyFromDate) {
+    if (!sourceDate) {
       setCopyError("Pick a source date first");
       return;
     }
-    if (copyFromDate === dateFrom) {
+    if (sourceDate === dateFrom) {
       setCopyError("Source date can't equal target date");
       return;
     }
     setCopying(true);
     try {
-      const res = await fetch(`/api/working-hour-entries?date=${copyFromDate}`);
+      const res = await fetch(`/api/working-hour-entries?date=${sourceDate}`);
       const j = (await res.json()) as { success?: boolean; data?: WorkingHourEntry[] };
       const src = j?.data ?? [];
       if (src.length === 0) {
-        setCopyError(`No entries on ${copyFromDate} to copy`);
+        setCopyError(`No entries on ${sourceDate} to copy`);
         setCopying(false);
         return;
       }
@@ -714,7 +714,17 @@ function WorkingHoursTab({
     } finally {
       setCopying(false);
     }
-  }, [copyFromDate, dateFrom, rows]);
+  }, [dateFrom, rows]);
+
+  // One-click "copy yesterday" — sets the source to the day before the working
+  // date and runs the same copy. Saves the operator from picking a date every
+  // morning (the #1 daily chore: re-entering each worker's dept/category/hours).
+  const copyYesterday = useCallback(() => {
+    const d = new Date(`${dateFrom}T00:00:00`);
+    d.setDate(d.getDate() - 1);
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    void copyFromSource(iso);
+  }, [dateFrom, copyFromSource]);
 
   const duplicateRow = useCallback((idx: number) => {
     setRows((prev) => {
@@ -976,13 +986,21 @@ function WorkingHoursTab({
               />
               <Button
                 variant="outline"
-                onClick={copyFromPreviousDate}
+                onClick={() => void copyFromSource(copyFromDate)}
                 disabled={copying || !copyFromDate}
                 title="Copy every entry from the source date as drafts on the working date"
               >
                 {copying ? "Copying…" : "Copy"}
               </Button>
             </label>
+            <Button
+              variant="outline"
+              onClick={copyYesterday}
+              disabled={copying}
+              title="One click: copy yesterday's department / category / hours for every worker as editable drafts"
+            >
+              {copying ? "Copying…" : "Copy yesterday"}
+            </Button>
             <Button variant="outline" onClick={addRow}>
               <Plus className="h-4 w-4" /> Add Row
             </Button>

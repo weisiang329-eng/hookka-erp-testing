@@ -10,7 +10,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen } from "@/lib/utils";
-import { printReport, type PrintColumn } from "@/lib/print-report";
+import { printReport, type PrintColumn, type PrintCard, type PrintSection } from "@/lib/print-report";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -7584,33 +7584,125 @@ function LaborCostTab({
   // the selected period + category, mirroring its columns (Department,
   // Category, Hours, Labor Cost, Category Revenue, Category Cost / Revenue).
   const handlePrint = useCallback(() => {
-    const prodRows = rows.filter((r) => r.isProduction);
-    const columns: PrintColumn[] = [
-      { header: "Department", value: (r) => (r as LaborCostRow).departmentName },
-      { header: "Category", value: (r) => { const c = (r as LaborCostRow).category; return c ? c[0] + c.slice(1).toLowerCase() : "—"; } },
-      { header: "Hours", align: "right", value: (r) => `${(r as LaborCostRow).hours.toFixed(1)}h` },
-      { header: "Labor Cost", align: "right", value: (r) => formatCurrency((r as LaborCostRow).laborCostSen) },
-      { header: "Category Revenue", align: "right", value: (r) => { const row = r as LaborCostRow; return row.category ? formatCurrency(row.revenueSen) : "n/a"; } },
-      {
-        header: "Category Cost / Revenue",
-        align: "right",
-        value: (r) => {
-          const row = r as LaborCostRow;
-          if (!row.category || row.revenueSen <= 0) return "—";
-          return `${((row.laborCostSen / row.revenueSen) * 100).toFixed(1)}%`;
-        },
-      },
-    ];
     const catLabel = categoryFilter
       ? categoryFilter[0] + categoryFilter.slice(1).toLowerCase()
       : "All categories";
+
+    // ── KPI dashboard cards — mirror the on-screen strip. ──
+    const cards: PrintCard[] = [
+      { label: "Production Labor Cost", value: formatCurrency(productionLaborCostSen) },
+      { label: "Total Revenue", value: formatCurrency(totalRevenueSen) },
+      { label: "Remain", value: formatCurrency(totalRevenueSen - productionLaborCostSen), color: "#15803D" },
+      { label: "Borrowed (Warehousing)", value: formatCurrency(warehousingLaborCostSen), color: "#9C6F1E" },
+      { label: "Shortfall", value: formatCurrency(shortfallLaborCostSen), color: "#9A3A2D" },
+    ];
+
+    const sections: PrintSection[] = [];
+
+    // ── Payroll Reconciliation (full finished month only). ──
+    if (showReconciliation) {
+      const reconRows = [
+        { line: "Production Labor (incl. EPF)", amt: loadedProductionSen },
+        { line: "Borrowed (Warehousing) (incl. EPF)", amt: loadedWarehousingSen },
+        { line: "Shortfall (incl. EPF)", amt: loadedShortfallSen },
+        { line: "Overhead & non-production (incl. EPF)", amt: loadedOverheadSen },
+        { line: "Under-recorded hours (paid, not yet logged)", amt: underRecordedReconSen },
+      ];
+      const reconciled = Math.abs(reconcileDiffSen) <= 1;
+      sections.push({
+        title: "Payroll Reconciliation",
+        columns: [
+          { header: "Line", value: (r) => (r as { line: string }).line },
+          { header: "Amount", align: "right", value: (r) => formatCurrency((r as { amt: number }).amt) },
+        ],
+        rows: reconRows,
+        totalRow: [
+          {
+            text: "Total Payroll Cost",
+            bold: true,
+            badge: reconciled
+              ? { text: "Reconciled · 0 difference", color: "#15803D", bg: "#DCFCE7" }
+              : { text: "Off by " + formatCurrency(Math.abs(reconcileDiffSen)), color: "#9A3A2D", bg: "#FEE2E2" },
+          },
+          { text: formatCurrency(totalPayrollCostSen), bold: true, align: "right" },
+        ],
+      });
+    }
+
+    // ── Production Breakdown (department × category). ──
+    sections.push({
+      title: "Production Breakdown",
+      columns: [
+        { header: "Department", value: (r) => (r as LaborCostRow).departmentName },
+        { header: "Category", value: (r) => { const c = (r as LaborCostRow).category; return c ? c[0] + c.slice(1).toLowerCase() : "—"; } },
+        { header: "Hours", align: "right", value: (r) => `${(r as LaborCostRow).hours.toFixed(1)}h` },
+        { header: "Labor Cost", align: "right", value: (r) => formatCurrency((r as LaborCostRow).laborCostSen) },
+        { header: "Category Revenue", align: "right", value: (r) => { const row = r as LaborCostRow; return row.category ? formatCurrency(row.revenueSen) : "n/a"; } },
+        {
+          header: "Cost / Revenue",
+          align: "right",
+          value: (r) => {
+            const row = r as LaborCostRow;
+            if (!row.category || row.revenueSen <= 0) return "—";
+            const pct = (row.laborCostSen / row.revenueSen) * 100;
+            // Red when labour eats a high share of the category's revenue.
+            return { text: `${pct.toFixed(1)}%`, color: pct >= 35 ? "#9A3A2D" : "#15803D", bold: true };
+          },
+        },
+      ],
+      rows: rows.filter((r) => r.isProduction),
+      emptyText: "No production labour in the selected period.",
+    });
+
+    // ── Under-recorded hours — who & why (full finished month only). ──
+    if (showReconciliation && employeeResidual.underLoggedFactory.length > 0) {
+      sections.push({
+        title: "Under-recorded Hours — Who & Why",
+        note: "Pay issued to factory workers above their logged Working Hours — a data gap to close by recording the missing hours.",
+        columns: [
+          { header: "Employee", value: (r) => (r as { name: string }).name },
+          { header: "Department", value: (r) => (r as { deptName: string }).deptName },
+          { header: "Paid", align: "right", value: (r) => formatCurrency((r as { grossSen: number }).grossSen) },
+          { header: "Logged", align: "right", value: (r) => formatCurrency((r as { loggedValueSen: number }).loggedValueSen) },
+          { header: "Gap", align: "right", value: (r) => ({ text: formatCurrency((r as { gapSen: number }).gapSen), color: "#9A3A2D", bold: true }) },
+        ],
+        rows: employeeResidual.underLoggedFactory,
+        totalRow: [
+          "Subtotal (under-recorded)",
+          "",
+          "",
+          "",
+          { text: formatCurrency(employeeResidual.underLoggedSubtotalSen), color: "#9A3A2D", bold: true, align: "right" },
+        ],
+      });
+    }
+
     printReport({
       title: "Labor Cost vs Revenue",
       filterSummary: `${dateRangeLabel(from, to)} · ${catLabel}`,
-      columns,
-      rows: prodRows,
+      orientation: "landscape",
+      cards,
+      sections,
     });
-  }, [rows, categoryFilter, from, to]);
+  }, [
+    rows,
+    categoryFilter,
+    from,
+    to,
+    productionLaborCostSen,
+    totalRevenueSen,
+    warehousingLaborCostSen,
+    shortfallLaborCostSen,
+    showReconciliation,
+    loadedProductionSen,
+    loadedWarehousingSen,
+    loadedShortfallSen,
+    loadedOverheadSen,
+    underRecordedReconSen,
+    totalPayrollCostSen,
+    reconcileDiffSen,
+    employeeResidual,
+  ]);
 
   return (
     <Card>

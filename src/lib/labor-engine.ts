@@ -190,6 +190,106 @@ export function absenceCutoffDay(
   return cutoff.getDate(); // current/cutoff month — count through the cutoff day
 }
 
+// ── Per-day attendance detail (DISPLAY ONLY — no money) ─────────────────────
+//
+// computeMonthlyLabor returns the COUNT of absent days and the TOTAL overtime
+// hours, but not WHICH days. This helper enumerates the specific dates from the
+// SAME inputs, using the IDENTICAL absence-window + grace-cutoff + per-date OT
+// logic, so the Payroll screen can show "Absent: 03 Jun, 04 Jun" and
+// "OT: 05 Jun — 2h" beneath a row. It computes NO amounts and changes nothing
+// about the pay calculation — it is purely additive and safe to call alongside
+// computeMonthlyLabor with the same arguments.
+
+/** Day-level breakdown of a worker's month: which days were absent, and which
+ *  had overtime (with the OT hours). All money lives in computeMonthlyLabor. */
+export type AttendanceDayDetail = {
+  /** ISO dates (YYYY-MM-DD) the worker was ABSENT — an elapsed working day,
+   *  inside their employment window and within the grace cutoff, with no hours
+   *  logged. The list length equals computeMonthlyLabor's payroll.absentDays for
+   *  the normal case (no logged hours fall outside the absence window). */
+  absentDates: string[];
+  /** Days with overtime: the date plus the OT hours on that date (hours above
+   *  the worker's standard working day). Mirrors how computeMonthlyLabor sums
+   *  otHours, just kept per-date. Empty when the worker has no OT. */
+  otDays: Array<{ date: string; hours: number }>;
+};
+
+/** The subset of MonthlyLaborInput this helper needs. Same field meanings as
+ *  computeMonthlyLabor so the caller passes the identical values. */
+export type AttendanceDayDetailInput = {
+  worker: Pick<LaborWorker, "workingHoursPerDay">;
+  /** 4-digit year. */
+  year: number;
+  /** 1-indexed month (1 = January). */
+  month: number;
+  /** The worker's Working Hours rows for the month (raw, one per date×dept). */
+  days: WorkerDayHours[];
+  /** Declared public-holiday dates (YYYY-MM-DD). */
+  publicHolidays: Iterable<string>;
+  /** Count absences only through this day-of-month (the grace cutoff). */
+  absenceThroughDay: number;
+  /** First employed day-of-month (inclusive). Default 1. */
+  employmentStartDay?: number;
+  /** Last employed day-of-month (inclusive). Default month's last day. */
+  employmentEndDay?: number;
+};
+
+/**
+ * Enumerate the absent dates + overtime days for one worker's month. Pure and
+ * derived from the SAME attendance rows + holidays + grace cutoff that
+ * computeMonthlyLabor uses — surfaces the per-day detail WITHOUT recomputing or
+ * altering any pay amount. `month` is 1-indexed.
+ */
+export function computeAttendanceDayDetail(
+  input: AttendanceDayDetailInput,
+): AttendanceDayDetail {
+  const { worker, year, month, days, publicHolidays, absenceThroughDay } = input;
+  const holidaySet =
+    publicHolidays instanceof Set
+      ? (publicHolidays as Set<string>)
+      : new Set(publicHolidays);
+  const workingHoursPerDay = Math.max(0, worker.workingHoursPerDay || 0);
+
+  // Sum hours per date, dropping rows outside the target month — IDENTICAL to
+  // computeMonthlyLabor's per-date aggregation.
+  const monthPrefix = `${year}-${String(month).padStart(2, "0")}-`;
+  const hoursByDate = new Map<string, number>();
+  for (const row of days) {
+    if (typeof row.date !== "string" || !row.date.startsWith(monthPrefix)) continue;
+    const h = Number(row.hours) || 0;
+    hoursByDate.set(row.date, (hoursByDate.get(row.date) ?? 0) + h);
+  }
+
+  // Overtime days: any date whose summed hours exceed the worker's standard day.
+  // Same threshold rule computeMonthlyLabor applies; just retained per-date.
+  const otDays: Array<{ date: string; hours: number }> = [];
+  if (workingHoursPerDay > 0) {
+    for (const [date, h] of hoursByDate) {
+      if (h > workingHoursPerDay) otDays.push({ date, hours: h - workingHoursPerDay });
+    }
+  }
+  otDays.sort((a, b) => a.date.localeCompare(b.date));
+
+  // Absent dates: working days (Mon–Sat minus public holidays) inside the
+  // employment window [employmentStartDay..min(absenceThroughDay, end)] that
+  // have no logged hours. Same window + cutoff computeMonthlyLabor counts.
+  const monthLastDay = new Date(year, month, 0).getDate();
+  const startDay = Math.max(1, input.employmentStartDay ?? 1);
+  const endDay = input.employmentEndDay ?? monthLastDay;
+  const throughDay = Math.min(absenceThroughDay, endDay, monthLastDay);
+  const mm = String(month).padStart(2, "0");
+  const absentDates: string[] = [];
+  for (let d = startDay; d <= throughDay; d++) {
+    const dow = new Date(year, month - 1, d).getDay();
+    if (!WORKING_DOW.has(dow)) continue; // Sunday — non-working
+    const iso = `${year}-${mm}-${String(d).padStart(2, "0")}`;
+    if (holidaySet.has(iso)) continue; // public holiday — not a workday
+    if ((hoursByDate.get(iso) ?? 0) <= 0) absentDates.push(iso);
+  }
+
+  return { absentDates, otDays };
+}
+
 // ── Effective-dated salary ─────────────────────────────────────────────────
 // A worker's salary can change mid-month (a raise). worker_salary_history holds
 // the dated rows; workers.basic_salary_sen is the current snapshot + fallback.

@@ -135,6 +135,11 @@ type PayslipData = {
   netPay: number;
   bankAccount: string;
   status: "DRAFT" | "APPROVED" | "PAID";
+  // Additive per-day detail surfaced by the payslips API (display only — no
+  // amount math). Lets the expanded Payroll row list WHICH days were absent and
+  // which had overtime. Optional so a stale response shape stays safe.
+  absentDates?: string[];
+  otDays?: Array<{ date: string; hours: number }>;
 };
 
 type LeaveRecord = {
@@ -166,6 +171,16 @@ const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ] as const;
+
+// Compact "DD MMM" date label (e.g. "03 Jun") for the Payroll day-detail list.
+// Parses the ISO date as local — these are calendar dates with no time/zone
+// meaning, so building from the Y/M/D parts avoids any UTC off-by-one.
+function formatDayMonth(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const monthShort = MONTH_NAMES[Number(m[2]) - 1]?.slice(0, 3) ?? m[2];
+  return `${m[3]} ${monthShort}`;
+}
 
 // Each tab on this page has its own from/to date filter. Persisting the
 // operator's last selection in localStorage — keyed per tab — means they can
@@ -6004,6 +6019,49 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                                     <span>{r.bankAccount}</span>
                                   </div>
                                 </div>
+                              </div>
+                            </div>
+                            {/* Day Detail — WHICH days were absent / had OT.
+                                Display-only: the dates come from the same
+                                attendance the amount math reads, surfaced here
+                                so the absence (Nd) + OT hours above are
+                                attributable to specific dates. */}
+                            <div className="mt-4 space-y-2">
+                              <h4 className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">Day Detail</h4>
+                              <div className="text-xs space-y-2 text-[#374151] bg-white rounded-lg p-3 border border-[#E2DDD8]">
+                                <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+                                  <span className="font-semibold text-[#9A3A2D] shrink-0">Absent:</span>
+                                  {r.absentDates && r.absentDates.length > 0 ? (
+                                    <span className="flex flex-wrap gap-1.5">
+                                      {r.absentDates.map((d) => (
+                                        <span key={d} className="inline-flex items-center rounded bg-[#F9E1DA] px-1.5 py-0.5 font-medium text-[#9A3A2D] tabular-nums">
+                                          {formatDayMonth(d)}
+                                        </span>
+                                      ))}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[#9CA3AF]">No absent days</span>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+                                  <span className="font-semibold text-[#6B5C32] shrink-0">OT:</span>
+                                  {r.otDays && r.otDays.length > 0 ? (
+                                    <span className="flex flex-wrap gap-1.5">
+                                      {r.otDays.map((d) => (
+                                        <span key={d.date} className="inline-flex items-center rounded bg-[#FAEFCB] px-1.5 py-0.5 font-medium text-[#9C6F1E] tabular-nums">
+                                          {formatDayMonth(d.date)} — {Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)}h
+                                        </span>
+                                      ))}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[#9CA3AF]">No overtime days</span>
+                                  )}
+                                </div>
+                                {(!r.absentDates && !r.otDays) && (
+                                  <p className="text-[10px] text-[#9CA3AF]">
+                                    Per-day detail isn&rsquo;t available for this row.
+                                  </p>
+                                )}
                               </div>
                             </div>
                           </td>

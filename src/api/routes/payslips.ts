@@ -16,8 +16,10 @@ import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import {
   computeMonthlyLabor,
+  computeAttendanceDayDetail,
   absenceCutoffDay,
   effectiveSalarySenForMonth,
+  type AttendanceDayDetail,
 } from "../../lib/labor-engine";
 
 // Data-entry grace before an unrecorded working day is treated as a confirmed
@@ -131,6 +133,11 @@ function rowToPayslip(r: PayslipRow) {
   };
 }
 
+// A payslip row plus the additive per-day absence/OT detail. The day fields are
+// display-only (no amounts) and are attached by the GET list + projected paths
+// so the Payroll row's expanded layer can show WHICH days were absent / had OT.
+type PayslipWithDayDetail = ReturnType<typeof rowToPayslip> & AttendanceDayDetail;
+
 // ---------------------------------------------------------------------------
 // Malaysian statutory helpers
 // ---------------------------------------------------------------------------
@@ -194,6 +201,103 @@ async function nextPayslipId(
   return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
+// Per-period per-day absence/OT detail for a set of workers, computed from the
+// SAME working_hour_entries + public holidays + grace-cutoff the engine uses.
+// Display-only (no amounts) — lets the stored-payslips list carry the same
+// per-day detail the projected estimate does, so the Payroll row's expanded
+// layer shows WHICH days were absent / had OT regardless of generated state.
+// `period` is YYYY-MM. Returns a map keyed by workerId.
+async function buildDayDetailForPeriod(
+  db: D1Database,
+  period: string,
+  workerIds: string[],
+): Promise<Map<string, AttendanceDayDetail>> {
+  const out = new Map<string, AttendanceDayDetail>();
+  if (!/^\d{4}-\d{2}$/.test(period) || workerIds.length === 0) return out;
+  const [pYear, pMonth] = period.split("-").map(Number);
+
+  // Worker config (hours/day, join/resign) for the workers in the result.
+  const placeholders = workerIds.map(() => "?").join(", ");
+  const wres = await db
+    .prepare(
+      `SELECT id, status, workingHoursPerDay, resignedAt, joinDate FROM workers WHERE id IN (${placeholders})`,
+    )
+    .bind(...workerIds)
+    .all<{
+      id: string;
+      status: string;
+      workingHoursPerDay: number;
+      resignedAt: string | null;
+      joinDate: string | null;
+    }>();
+  const workerById = new Map((wres.results ?? []).map((w) => [w.id, w] as const));
+
+  // Public holidays — same kv_config source the engine reads.
+  const phRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("public_holidays")
+    .first<{ value: string | null }>();
+  const publicHolidays = new Set<string>();
+  if (phRow?.value) {
+    try {
+      const parsed = JSON.parse(phRow.value);
+      if (Array.isArray(parsed)) {
+        for (const d of parsed) {
+          if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) publicHolidays.add(d);
+        }
+      }
+    } catch { /* malformed — no holidays */ }
+  }
+
+  // Working Hours rows for the period, grouped per worker.
+  const wheRes = await db
+    .prepare("SELECT workerId, date, hours FROM working_hour_entries WHERE date LIKE ?")
+    .bind(`${period}-%`)
+    .all<{ workerId: string; date: string; hours: number }>();
+  const daysByWorker = new Map<string, { date: string; hours: number }[]>();
+  for (const r of wheRes.results ?? []) {
+    const arr = daysByWorker.get(r.workerId) ?? [];
+    arr.push({ date: r.date, hours: Number(r.hours) || 0 });
+    daysByWorker.set(r.workerId, arr);
+  }
+
+  const absenceThroughDay = absenceCutoffDay(
+    pYear,
+    pMonth,
+    new Date(),
+    ABSENCE_GRACE_WORKING_DAYS,
+    publicHolidays,
+  );
+
+  for (const workerId of workerIds) {
+    const w = workerById.get(workerId);
+    const joinedDay =
+      typeof w?.joinDate === "string" && w.joinDate.startsWith(`${period}-`)
+        ? Number(w.joinDate.slice(8, 10))
+        : undefined;
+    const resignedDay =
+      w?.status === "RESIGNED" &&
+      typeof w?.resignedAt === "string" &&
+      w.resignedAt.startsWith(`${period}-`)
+        ? Number(w.resignedAt.slice(8, 10))
+        : undefined;
+    out.set(
+      workerId,
+      computeAttendanceDayDetail({
+        worker: { workingHoursPerDay: w?.workingHoursPerDay ?? 0 },
+        year: pYear,
+        month: pMonth,
+        days: daysByWorker.get(workerId) ?? [],
+        publicHolidays,
+        absenceThroughDay,
+        employmentStartDay: joinedDay,
+        employmentEndDay: resignedDay,
+      }),
+    );
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/payslips?period=&employeeId=
 // ---------------------------------------------------------------------------
@@ -218,8 +322,30 @@ app.get("/", async (c) => {
   }
   const sql = `SELECT * FROM payslips WHERE ${clauses.join(" AND ")} ORDER BY period DESC, employeeNo`;
   const res = await c.var.DB.prepare(sql).bind(...binds).all<PayslipRow>();
-  const data = (res.results ?? []).map(rowToPayslip);
-  return c.json({ success: true, data, total: data.length });
+  const rows = (res.results ?? []).map(rowToPayslip);
+
+  // When scoped to a single period (the Payroll screen always is), enrich each
+  // row with the per-day absence/OT dates — additive, display-only, no amounts.
+  // Skipped for unscoped/multi-period lists (the day detail is per-month and the
+  // current callers don't need it there). Best-effort: a read failure leaves the
+  // base rows intact rather than 500-ing the whole list.
+  if (period && rows.length > 0) {
+    try {
+      const detail = await buildDayDetailForPeriod(
+        c.var.DB,
+        period,
+        rows.map((r) => r.employeeId),
+      );
+      const data: PayslipWithDayDetail[] = rows.map((r) => {
+        const d = detail.get(r.employeeId);
+        return { ...r, absentDates: d?.absentDates ?? [], otDays: d?.otDays ?? [] };
+      });
+      return c.json({ success: true, data, total: data.length });
+    } catch (e) {
+      console.warn("[payslips] day-detail enrichment skipped:", e);
+    }
+  }
+  return c.json({ success: true, data: rows, total: rows.length });
 });
 
 // ---------------------------------------------------------------------------
@@ -312,7 +438,9 @@ app.get("/projected", async (c) => {
   const absenceThroughDay = absenceCutoffDay(pYear, pMonth, today, ABSENCE_GRACE_WORKING_DAYS, publicHolidays);
   const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
 
-  const data: ReturnType<typeof rowToPayslip>[] = [];
+  // The estimate rows carry the per-day absence/OT detail (additive display
+  // fields) alongside the standard payslip shape.
+  const data: PayslipWithDayDetail[] = [];
   for (const worker of activeWorkers) {
     if (
       typeof worker.joinDate === "string" &&
@@ -354,6 +482,19 @@ app.get("/projected", async (c) => {
       employmentEndDay: resignedDay,
       prorateToService: joinedDay !== undefined || resignedDay !== undefined,
       shortHourDeductionHours: deductionHoursByWorker.get(worker.id) ?? 0,
+    });
+    // Per-day absence/OT dates from the SAME inputs the engine just used — a
+    // display-only enrichment (no amounts). Lets the Payroll row's expanded
+    // layer show WHICH days were absent / had OT.
+    const dayDetail = computeAttendanceDayDetail({
+      worker: { workingHoursPerDay: worker.workingHoursPerDay },
+      year: pYear,
+      month: pMonth,
+      days: daysByWorker.get(worker.id) ?? [],
+      publicHolidays,
+      absenceThroughDay,
+      employmentStartDay: joinedDay,
+      employmentEndDay: resignedDay,
     });
     const allowances = 0;
     const stat = calcStatutory(effectiveSalarySen, {
@@ -406,6 +547,9 @@ app.get("/projected", async (c) => {
       status: "DRAFT" as const,
       createdAt: "",
       updatedAt: "",
+      // Additive per-day detail for the expanded Payroll row.
+      absentDates: dayDetail.absentDates,
+      otDays: dayDetail.otDays,
     });
   }
 

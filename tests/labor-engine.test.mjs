@@ -559,3 +559,128 @@ test("costingWorkerOrDefault: a no-salary worker falls back to the default rate 
   const rate = labor.productionCostRatePerMinuteSen(w, 2026, 5, MAY_HOLIDAYS);
   assert.ok(rate > 0, "an unconfigured worker should cost at the default rate");
 });
+
+// ── computeAttendanceDayDetail — per-day absent/OT dates (display only) ──────
+// Must stay consistent with computeMonthlyLabor: the absentDates length equals
+// payroll.absentDays, and the OT hours summed across otDays equal otHours.
+
+test("computeAttendanceDayDetail: full attendance — no absences, OT on the last 5 days", () => {
+  const detail = labor.computeAttendanceDayDetail({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: annFullMonth,
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+  });
+  assert.deepEqual(detail.absentDates, []);
+  // 11h days (last 5 working days) each have 3h OT → 5 OT days, 15h total.
+  assert.equal(detail.otDays.length, 5);
+  assert.deepEqual(
+    detail.otDays.map((d) => d.date),
+    ["2026-05-25", "2026-05-26", "2026-05-28", "2026-05-29", "2026-05-30"],
+  );
+  assert.equal(detail.otDays.reduce((s, d) => s + d.hours, 0), 15);
+});
+
+test("computeAttendanceDayDetail: absent 2 days — lists the exact 2 dates, matches the engine count", () => {
+  // Drop the first two working days (2 May, 4 May) — same fixture the engine
+  // 'absent 2 days' test uses, where payroll.absentDays === 2.
+  const days = annFullMonth.slice(2);
+  const detail = labor.computeAttendanceDayDetail({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days,
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+  });
+  assert.deepEqual(detail.absentDates, ["2026-05-02", "2026-05-04"]);
+  const engine = labor.computeMonthlyLabor({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days,
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+  });
+  assert.equal(detail.absentDates.length, engine.payroll.absentDays);
+});
+
+test("computeAttendanceDayDetail: public holidays + Sundays are never absences", () => {
+  // No hours logged at all in May → every elapsed WORKING day is absent, but
+  // the 4 Sundays and the 2 public holidays (1 May, 27 May) are excluded.
+  const detail = labor.computeAttendanceDayDetail({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: [],
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+  });
+  // Exactly the 24 working days of May 2026.
+  assert.deepEqual(detail.absentDates, MAY_WORKDAYS);
+  assert.ok(!detail.absentDates.includes("2026-05-01")); // Friday holiday
+  assert.ok(!detail.absentDates.includes("2026-05-27")); // Wednesday holiday
+  assert.ok(!detail.absentDates.includes("2026-05-03")); // Sunday
+});
+
+test("computeAttendanceDayDetail: grace cutoff stops the absent list early", () => {
+  // No hours, but only count absences through 9 May. The absent dates must be
+  // exactly the working days 2–9 May (7 of them), matching countElapsedWorkingDays.
+  const detail = labor.computeAttendanceDayDetail({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: [],
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 9,
+  });
+  assert.deepEqual(detail.absentDates, [
+    "2026-05-02", "2026-05-04", "2026-05-05", "2026-05-06",
+    "2026-05-07", "2026-05-08", "2026-05-09",
+  ]);
+  assert.equal(
+    detail.absentDates.length,
+    labor.countElapsedWorkingDays(2026, 5, 9, MAY_HOLIDAYS),
+  );
+});
+
+test("computeAttendanceDayDetail: part-month worker — days before joining are not absences", () => {
+  // Joined 18 May, logged the 5 working days served. No absences for the days
+  // before joining; no OT.
+  const detail = labor.computeAttendanceDayDetail({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: [
+      { date: "2026-05-18", hours: 8 },
+      { date: "2026-05-19", hours: 8 },
+      { date: "2026-05-20", hours: 8 },
+      { date: "2026-05-21", hours: 8 },
+      { date: "2026-05-22", hours: 8 },
+    ],
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 31,
+    employmentStartDay: 18,
+    employmentEndDay: 22,
+  });
+  assert.deepEqual(detail.absentDates, []);
+  assert.deepEqual(detail.otDays, []);
+});
+
+test("computeAttendanceDayDetail: several rows on one date aggregate before the OT test", () => {
+  // 5h + 4h on the same date = 9h → 1h OT for an 8h-standard worker.
+  const detail = labor.computeAttendanceDayDetail({
+    worker: ANN,
+    year: 2026,
+    month: 5,
+    days: [
+      { date: "2026-05-04", hours: 5 },
+      { date: "2026-05-04", hours: 4 },
+    ],
+    publicHolidays: MAY_HOLIDAYS,
+    absenceThroughDay: 4,
+  });
+  assert.deepEqual(detail.otDays, [{ date: "2026-05-04", hours: 1 }]);
+});

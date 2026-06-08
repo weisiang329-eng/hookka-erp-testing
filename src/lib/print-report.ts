@@ -39,6 +39,11 @@ export type PrintReportOptions = {
   columns: PrintColumn[];
   /** The on-screen rows to print, in display order. */
   rows: unknown[];
+  /**
+   * Paper orientation. Defaults to "portrait". Use "landscape" for wide
+   * reports (many columns) so they fit on A4 without squashing.
+   */
+  orientation?: "portrait" | "landscape";
 };
 
 /** Escape the five HTML-significant characters so cell text can't break the
@@ -58,6 +63,7 @@ function escapeHtml(value: string | number): string {
  */
 export function buildReportHTML(opts: PrintReportOptions): string {
   const { title, subtitle, filterSummary, columns, rows } = opts;
+  const pageOrientation = opts.orientation === "landscape" ? "landscape" : "portrait";
   const printedAt = new Date().toLocaleDateString("en-MY", {
     day: "2-digit",
     month: "long",
@@ -92,7 +98,7 @@ export function buildReportHTML(opts: PrintReportOptions): string {
   <meta charset="UTF-8">
   <title>${escapeHtml(title)} - Hookka</title>
   <style>
-    @page { size: A4; margin: 14mm; }
+    @page { size: A4 ${pageOrientation}; margin: 14mm; }
     @media print { body { margin: 0; } }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; color: #1F1D1B; padding: 20px; }

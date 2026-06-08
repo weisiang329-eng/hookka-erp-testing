@@ -3532,6 +3532,12 @@ function EfficiencyOverviewTab({
     },
   ];
 
+  // The DataGrid sorts/filters/searches its own internal copy; mirror that
+  // result back here (via <DataGrid onFilteredDataChange>) so "Print Report"
+  // prints EXACTLY what's on screen — the current sort + filter + search — not
+  // the unsorted source rows.
+  const [printRows, setPrintRows] = useState<EffRow[]>([]);
+
   // Print Report — mirrors the on-screen columns (Employee, Total, Production
   // Time, Prod Hrs, Non-Prod Hrs, Efficiency %, then each department's hours)
   // for the selected date range, computing the same derived values the grid
@@ -3577,9 +3583,12 @@ function EfficiencyOverviewTab({
       title: "Efficiency Overview",
       filterSummary: dateRangeLabel(dateFrom, dateTo),
       columns,
-      rows,
+      // Print the grid's CURRENT sorted + filtered rows (WYSIWYG); fall back to
+      // the source rows on the first paint before the grid has echoed them.
+      rows: printRows.length ? printRows : rows,
+      orientation: "landscape",
     });
-  }, [rows, orderedDepts, prodMinsByWorker, productionDeptCodes, dateFrom, dateTo]);
+  }, [rows, printRows, orderedDepts, prodMinsByWorker, productionDeptCodes, dateFrom, dateTo]);
 
   return (
     <Card>
@@ -3619,6 +3628,7 @@ function EfficiencyOverviewTab({
           data={rows}
           keyField="workerId"
           gridId="employees-efficiency"
+          onFilteredDataChange={setPrintRows}
           contextMenuItems={contextMenuItems}
           onDoubleClick={(row) => {
             // Jump straight to the Employee Performance tab with this worker

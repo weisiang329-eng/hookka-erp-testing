@@ -1560,6 +1560,23 @@ export default function ProductionPage({
   // the merger reads the latest value without re-rendering on every PATCH.
   const pendingJcPatchesRef = useRef<Set<string>>(new Set());
 
+  // BUG-2026-06-08 (the "flicker"): even AFTER a PATCH confirms (the JC leaves
+  // pendingJcPatchesRef), the cached orders snapshot can stay STALE for a few
+  // seconds — the row's `updated_at` bump invalidates the snapshot but the
+  // rebuild lags behind. A poll that lands in that window overlays the stale
+  // row, so a cell the operator JUST cleared (Completion Date / PIC) visibly
+  // pops back to "complete", then clears again once the snapshot rebuilds.
+  // This map pins each freshly-patched JC's expected value over the snapshot
+  // until EITHER the server snapshot catches up (the fetched row matches what
+  // we wrote) OR a safety window elapses — so the operator never sees the
+  // bounce. ref (not state): read by the cache merger without a re-render.
+  const recentlyPatchedRef = useRef<
+    Map<string, { expiry: number; expect: Record<string, unknown> }>
+  >(new Map());
+  // Safety ceiling: if the snapshot somehow never catches up, release the pin
+  // after this long so a stuck pin can't hide a genuine later server change.
+  const PATCH_PIN_MS = 30_000;
+
   // Last successful refetch timestamp — gates the visibilitychange auto
   // refresh so quick tab-flips (Sheets / WhatsApp / Alt-Tab to look up an
   // order number) don't keep stomping mid-edit state. 30s is short enough
@@ -1688,7 +1705,38 @@ export default function ProductionPage({
     // sees the cell flicker back). Also splice draftsRef so staged-but-unsent
     // edits stay visible on the matrix until they hit the server.
     const draftedIds = new Set(Array.from(draftsRef.current.keys()));
-    if (pending.size === 0 && draftedIds.size === 0) {
+
+    // BUG-2026-06-08 (flicker): also preserve JCs patched moments ago whose
+    // value the cached snapshot hasn't caught up to. Pin each until the fetched
+    // row matches what we wrote (server caught up) or the safety window lapses.
+    const freshJcMap = new Map<string, JobCard>();
+    for (const po of fresh)
+      for (const jc of po.jobCards) freshJcMap.set(jc.id, jc);
+    const blankVal = (v: unknown) => v === null || v === undefined || v === "";
+    const caughtUp = (jc: JobCard, expect: Record<string, unknown>) => {
+      const row = jc as unknown as Record<string, unknown>;
+      for (const k of Object.keys(expect)) {
+        if (!((blankVal(row[k]) && blankVal(expect[k])) || row[k] === expect[k]))
+          return false;
+      }
+      return true;
+    };
+    const pinnedIds = new Set<string>();
+    const nowMs = Date.now();
+    for (const [jcId, pin] of Array.from(recentlyPatchedRef.current.entries())) {
+      if (nowMs > pin.expiry) {
+        recentlyPatchedRef.current.delete(jcId);
+        continue;
+      }
+      const freshJc = freshJcMap.get(jcId);
+      if (freshJc && caughtUp(freshJc, pin.expect)) {
+        recentlyPatchedRef.current.delete(jcId); // server caught up — release
+        continue;
+      }
+      pinnedIds.add(jcId);
+    }
+
+    if (pending.size === 0 && draftedIds.size === 0 && pinnedIds.size === 0) {
       // Refilling `orders` after a dept switch re-runs the heavy baseRows
       // rebuild. Run it as an interruptible transition so the operator's
       // clicks stay responsive while React reshapes the grid. Behaviour is
@@ -1707,7 +1755,8 @@ export default function ProductionPage({
         const prevJcMap = new Map<string, JobCard>();
         for (const po of prev) {
           for (const jc of po.jobCards) {
-            if (pending.has(jc.id) || draftedIds.has(jc.id)) prevJcMap.set(jc.id, jc);
+            if (pending.has(jc.id) || draftedIds.has(jc.id) || pinnedIds.has(jc.id))
+              prevJcMap.set(jc.id, jc);
           }
         }
         if (prevJcMap.size === 0) return fresh;
@@ -1953,6 +2002,12 @@ export default function ProductionPage({
     // has to re-click the cell to retry. Acceptable for a small-shop workflow.
     for (const { draft, result } of results) {
       if (result.success) {
+        // Pin this just-written value over the (briefly stale) cached snapshot
+        // until the server catches up — kills the "cleared cell pops back" flicker.
+        recentlyPatchedRef.current.set(draft.jcId, {
+          expiry: Date.now() + PATCH_PIN_MS,
+          expect: { ...draft.patch },
+        });
         if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "ok");
         if (draft.feedback?.successMsg) toast.success(draft.feedback.successMsg);
       } else {
@@ -2020,7 +2075,13 @@ export default function ProductionPage({
       if (feedback?.silent) {
         const result = await sendOneDraft({ poId, jcId: jobCardId, patch });
         pendingJcPatchesRef.current.delete(jobCardId);
-        if (result.success) return;
+        if (result.success) {
+          recentlyPatchedRef.current.set(jobCardId, {
+            expiry: Date.now() + PATCH_PIN_MS,
+            expect: { ...patch },
+          });
+          return;
+        }
         // Rollback this specific JC.
         setOrders((prev) =>
           prev.map((o) =>

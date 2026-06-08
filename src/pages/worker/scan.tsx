@@ -59,6 +59,9 @@ const ScanCompleteEnvelope = z
     requiresConfirmation: z.boolean().optional(),
     warning: z.object({ code: z.string(), message: z.string() }).optional(),
     error: z.string().optional(),
+    // Backend error code (ALREADY_PIC1 / ALREADY_PIC2 / PIC_FULL / …). Lets the
+    // page route a PACKING already-done response to the rack picker (BUG-2026-06-08).
+    code: z.string().optional(),
     data: z
       .object({
         assignedSlot: z.number().optional(),
@@ -1027,10 +1030,32 @@ export default function WorkerScanPage() {
           }, 700);
         }
       } else {
-        setResult({
-          kind: "error",
-          message: data.error || t("common.error"),
-        });
+        // C (BUG-2026-06-08): a PACKING "already done / full" response must
+        // STILL let the worker fill / change the rack. Route those codes to the
+        // amber "already complete" card (which renders the rack picker for
+        // PACKING) instead of a dead-end red error screen.
+        const respJc = data.data?.jobCard as JobCard | undefined;
+        const isPackingAlready =
+          (data.code === "ALREADY_PIC1" ||
+            data.code === "ALREADY_PIC2" ||
+            data.code === "PIC_FULL") &&
+          (respJc?.departmentCode || "").toUpperCase() === "PACKING";
+        if (isPackingAlready) {
+          setResult({
+            kind: "success",
+            slot: (data.data?.assignedSlot as 1 | 2) ?? 1,
+            jobCard: respJc ?? ctx.jobCard,
+            order: ctx.order,
+            piece: ctx.piece,
+            alreadyComplete: true,
+          });
+          loadToday();
+        } else {
+          setResult({
+            kind: "error",
+            message: data.error || t("common.error"),
+          });
+        }
       }
     } catch {
       setResult({ kind: "error", message: t("common.error") });

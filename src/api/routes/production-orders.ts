@@ -2036,13 +2036,6 @@ async function ensurePiecePicsForJc(
   return refreshed.results ?? [];
 }
 
-// Derive spec key used to scope FIFO candidates.
-function specKeyFor(jc: JobCardRow, po: ProductionOrderRow): string {
-  const wipLabel = jc.wipLabel;
-  if (wipLabel) return `${jc.departmentCode}::${wipLabel}`;
-  return `${jc.departmentCode}::${po.productCode}`;
-}
-
 // Month-based SOH counter.
 async function nextSOHNumber(db: D1Database): Promise<string> {
   const now = new Date();
@@ -5541,136 +5534,76 @@ app.post("/:id/scan-complete", async (c) => {
   // flag unreliable anyway — it kept firing false warnings on already-completed
   // upstream depts. Workers may now complete any department directly, no check.
 
-  // Ensure scanned JC has piecePics rows.
-  await ensurePiecePicsForJc(db, scannedJc);
-
-  const targetKey = specKeyFor(scannedJc, scannedPo);
+  // ---- WYSIWYG target (Wei Siang 2026-06-08) --------------------------------
+  // Packing completes THE scanned piece — the piece on the scanned JC — NOT a
+  // FIFO-oldest same-spec piece on some other PO. Every made-to-order piece
+  // belongs to its own SO, so scanning SO-X's packing sticker completes SO-X's
+  // piece, full stop. This removes the old cross-PO FIFO redirect, which could
+  // route a scan of an ACTIVE order onto a DIFFERENT — even CANCELLED — order
+  // (the FIFO candidate filter never excluded CANCELLED/BLOCKED, so a scan of
+  // an active sofa once completed a cancelled order's packing). The scanned PO
+  // is already ON_HOLD / CANCELLED-gated at the top of this handler; the
+  // JC-level BLOCKED gate below stops a QC-failed piece from being packed too.
+  if (
+    (scannedJc.status || "").toUpperCase() === "BLOCKED" ||
+    (scannedJc.status || "").toUpperCase() === "CANCELLED"
+  ) {
+    return c.json(
+      {
+        success: false,
+        code: "JC_NOT_PACKABLE",
+        error: `This piece is ${(scannedJc.status || "").toLowerCase()} and can't be packed.`,
+      },
+      409,
+    );
+  }
   const stickerKey = `${scannedPo.id}::${scannedJc.id}::${pieceNo}`;
-
-  // Gather all same-spec candidate JCs across all POs.
-  const allPoRes = await db
-    .prepare("SELECT * FROM production_orders").all<ProductionOrderRow>();
-  const allPos = allPoRes.results ?? [];
-  const allJcRes = await db.prepare("SELECT * FROM job_cards").all<JobCardRow>();
-  const allJcs = allJcRes.results ?? [];
-
-  // Tier B B2 fix 2026-05-21 (Agent C #2) — index allPos by id once so
-  // the spec-candidate filter below stops being O(N×M). At current data
-  // (530 POs × 2,200 JCs) the per-scan cost drops from ~1.16M
-  // comparisons to ~2,730 ops. This endpoint runs on every worker
-  // sticker scan, so the saving is per-action, not per-page-load.
-  const posById = new Map<string, ProductionOrderRow>();
-  for (const p of allPos) posById.set(p.id, p);
-  const jcsById = new Map<string, JobCardRow>();
-  for (const j of allJcs) jcsById.set(j.id, j);
-
-  type Hit = {
-    po: ProductionOrderRow;
-    jc: JobCardRow;
-    slot: PiecePicRow;
-  };
-
-  // Find sticker binding first.
-  let bound: Hit | null = null;
-  const specJcs = allJcs.filter((j) => {
-    const p = posById.get(j.productionOrderId);
-    return p && specKeyFor(j, p) === targetKey;
-  });
-  if (specJcs.length > 0) {
-    const jcIds = specJcs.map((j) => j.id);
-    const placeholders = jcIds.map(() => "?").join(",");
-    const picsRes = await db
-      .prepare(
-        `SELECT * FROM piece_pics WHERE jobCardId IN (${placeholders}) AND boundStickerKey = ?`,
-      )
-      .bind(...jcIds, stickerKey)
-      .all<PiecePicRow>();
-    const hit = picsRes.results?.[0];
-    if (hit) {
-      const jc = jcsById.get(hit.jobCardId);
-      const po = jc ? posById.get(jc.productionOrderId) : undefined;
-      if (jc && po) {
-        bound = { po, jc, slot: hit };
-      }
+  const slots = await ensurePiecePicsForJc(db, scannedJc);
+  // Mirror a legacy JC-level PIC onto slot[0] so the same-worker / share / full
+  // guards below see it (seed + A-flow JCs carry the PIC on the JC, not slots).
+  if (slots[0]) {
+    if (scannedJc.pic1Id && !slots[0].pic1Id) {
+      await db
+        .prepare("UPDATE piece_pics SET pic1Id = ?, pic1Name = ? WHERE id = ?")
+        .bind(scannedJc.pic1Id, scannedJc.pic1Name ?? "", slots[0].id)
+        .run();
+      slots[0] = {
+        ...slots[0],
+        pic1Id: scannedJc.pic1Id,
+        pic1Name: scannedJc.pic1Name ?? "",
+      };
+    }
+    if (scannedJc.pic2Id && !slots[0].pic2Id) {
+      await db
+        .prepare("UPDATE piece_pics SET pic2Id = ?, pic2Name = ? WHERE id = ?")
+        .bind(scannedJc.pic2Id, scannedJc.pic2Name ?? "", slots[0].id)
+        .run();
+      slots[0] = {
+        ...slots[0],
+        pic2Id: scannedJc.pic2Id,
+        pic2Name: scannedJc.pic2Name ?? "",
+      };
     }
   }
-
-  // FIFO: if no binding, pick oldest-due unclaimed piece.
-  let selected: Hit | null = bound;
-  if (!selected) {
-    // Build candidate list — for each eligible JC, ensure piece_pics, then
-    // collect pic1-empty slots.
-    const candidates: Hit[] = [];
-    for (const jc of specJcs) {
-      if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") continue;
-      const po = posById.get(jc.productionOrderId);
-      if (!po) continue;
-      const slots = await ensurePiecePicsForJc(db, jc);
-
-      // Legacy pic1 mirror: if JC has pic1Id but slot[0] doesn't, sync it.
-      const s0 = slots[0];
-      let syncedS0 = s0;
-      if (jc.pic1Id && s0 && !s0.pic1Id) {
-        await db
-          .prepare(
-            "UPDATE piece_pics SET pic1Id = ?, pic1Name = ? WHERE id = ?",
-          )
-          .bind(jc.pic1Id, jc.pic1Name ?? "", s0.id)
-          .run();
-        syncedS0 = { ...s0, pic1Id: jc.pic1Id, pic1Name: jc.pic1Name ?? "" };
-        slots[0] = syncedS0;
-      }
-      if (jc.pic2Id && slots[0] && !slots[0].pic2Id) {
-        await db
-          .prepare(
-            "UPDATE piece_pics SET pic2Id = ?, pic2Name = ? WHERE id = ?",
-          )
-          .bind(jc.pic2Id, jc.pic2Name ?? "", slots[0].id)
-          .run();
-        slots[0] = { ...slots[0], pic2Id: jc.pic2Id, pic2Name: jc.pic2Name ?? "" };
-      }
-
-      for (const s of slots) {
-        if (s.pic1Id) continue;
-        candidates.push({ po, jc, slot: s });
-      }
-    }
-
-    if (candidates.length === 0) {
-      return c.json(
-        {
-          success: false,
-          error: `No pending work for ${targetKey}. All pieces in this spec are already in progress or complete.`,
-          code: "PIC_FULL",
-        },
-        400,
-      );
-    }
-
-    // FIFO sort: jc.dueDate asc, po.targetEndDate asc, po.createdAt asc, pieceNo asc.
-    candidates.sort((a, b) => {
-      const aJD = a.jc.dueDate || "9999-12-31";
-      const bJD = b.jc.dueDate || "9999-12-31";
-      if (aJD !== bJD) return aJD.localeCompare(bJD);
-      const aTD = a.po.targetEndDate || "9999-12-31";
-      const bTD = b.po.targetEndDate || "9999-12-31";
-      if (aTD !== bTD) return aTD.localeCompare(bTD);
-      const aC = a.po.createdAt || "";
-      const bC = b.po.createdAt || "";
-      if (aC !== bC) return aC.localeCompare(bC);
-      return a.slot.pieceNo - b.slot.pieceNo;
-    });
-    selected = candidates[0];
-
-    // Bind sticker.
+  // Target THIS sticker's piece (its pieceNo on the scanned JC).
+  const targetSlot = slots.find((s) => s.pieceNo === pieceNo) ?? slots[0];
+  if (!targetSlot) {
+    return c.json(
+      { success: false, error: "No piece slot found for this sticker." },
+      400,
+    );
+  }
+  // Self-bind the sticker to its own piece so a re-scan (2-worker share) lands
+  // on the same slot.
+  if (targetSlot.boundStickerKey !== stickerKey) {
     await db
       .prepare("UPDATE piece_pics SET boundStickerKey = ? WHERE id = ?")
-      .bind(stickerKey, selected.slot.id)
+      .bind(stickerKey, targetSlot.id)
       .run();
-    selected.slot = { ...selected.slot, boundStickerKey: stickerKey };
+    targetSlot.boundStickerKey = stickerKey;
   }
-
-  const target = selected;
+  const target: { po: ProductionOrderRow; jc: JobCardRow; slot: PiecePicRow } =
+    { po: scannedPo, jc: scannedJc, slot: targetSlot };
 
   // Same-worker guard.
   if (target.slot.pic1Id === worker.id) {
@@ -5955,7 +5888,7 @@ app.post("/:id/scan-complete", async (c) => {
       scannedPoNo: scannedPo.poNo,
       assignedPoId: target.po.id,
       assignedPoNo: target.po.poNo,
-      specKey: targetKey,
+      specKey: `${scannedJc.departmentCode}::${scannedJc.wipLabel || scannedPo.productCode}`,
       fifoDueDate: target.jc.dueDate || target.po.targetEndDate || "",
       stickerKey,
     },

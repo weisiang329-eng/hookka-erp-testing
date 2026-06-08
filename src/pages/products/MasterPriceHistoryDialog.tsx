@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { humanizeError } from "@/lib/humanize-error";
 import { Input } from "@/components/ui/input";
 import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
@@ -207,8 +208,10 @@ export function MasterPriceHistoryDialog({
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         alert(
-          (j as { error?: string }).error ??
-            `Failed to schedule price change (HTTP ${res.status})`,
+          humanizeError(
+            { status: res.status, message: (j as { error?: string }).error },
+            "Couldn't schedule the price change. Please try again.",
+          ),
         );
         return;
       }
@@ -228,8 +231,10 @@ export function MasterPriceHistoryDialog({
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       alert(
-        (j as { error?: string }).error ??
-          `Failed to delete (HTTP ${res.status})`,
+        humanizeError(
+          { status: res.status, message: (j as { error?: string }).error },
+          "Couldn't delete. Please try again.",
+        ),
       );
       return;
     }

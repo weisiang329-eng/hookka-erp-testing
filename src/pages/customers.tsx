@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { useToast } from "@/components/ui/toast";
 import { formatCurrency, formatRM } from "@/lib/utils";
+import { humanizeError } from "@/lib/humanize-error";
 import { parseDebtorCode } from "@/lib/debtor";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
@@ -1416,7 +1417,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
       );
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        setErrorMsg((j as { error?: string })?.error || `Copy failed (HTTP ${res.status})`);
+        setErrorMsg(humanizeError({ status: res.status, message: (j as { error?: string })?.error }, "Copy failed. Please try again."));
         return;
       }
       // Re-fetch the just-seeded blob so the panel re-renders with content.
@@ -1429,7 +1430,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
         setSeeded(true);
       }
     } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Network error");
+      setErrorMsg(humanizeError(e, "Network problem — please try again."));
     } finally {
       setCopying(false);
     }
@@ -2131,7 +2132,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        setErrorMsg((j as { error?: string })?.error || `Copy failed (HTTP ${res.status})`);
+        setErrorMsg(humanizeError({ status: res.status, message: (j as { error?: string })?.error }, "Copy failed. Please try again."));
         return;
       }
       reload();
@@ -2147,7 +2148,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
     const res = await fetch(`/api/sofa-combos/${rule.id}`, { method: "DELETE" });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      setErrorMsg((j as { error?: string })?.error || `Delete failed (HTTP ${res.status})`);
+      setErrorMsg(humanizeError({ status: res.status, message: (j as { error?: string })?.error }, "Delete failed. Please try again."));
       return;
     }
     reload();

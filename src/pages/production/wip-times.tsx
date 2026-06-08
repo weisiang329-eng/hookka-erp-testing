@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { humanizeError } from "@/lib/humanize-error";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Clock, Download, Upload, AlertTriangle, Pencil, X, CheckCircle } from "lucide-react";
@@ -280,7 +281,7 @@ export default function WipTimesPage() {
       // not strictly needed — invalidateCachePrefix already flips the cache
       // entry; the next render's useCachedJson will see the fresh fetch.
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Save failed");
+      setSaveError(humanizeError(err, "Couldn't save. Please try again."));
     } finally {
       setSaving(false);
     }
@@ -589,13 +590,13 @@ export default function WipTimesPage() {
       });
       const json = (await res.json()) as { success: boolean; error?: string } & ImportPreview;
       if (!res.ok || !json.success) {
-        setImportError(json.error || `Preview failed (HTTP ${res.status})`);
+        setImportError(humanizeError({ status: res.status, message: json.error }, "Preview failed. Please check the file and try again."));
         return;
       }
       setImportItems(items);
       setImportPreview(json);
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : String(err));
+      setImportError(humanizeError(err, "Import failed. Please check the file and try again."));
     } finally {
       setImporting(false);
     }
@@ -614,7 +615,7 @@ export default function WipTimesPage() {
       });
       const json = (await res.json()) as { success: boolean; error?: string } & ImportPreview;
       if (!res.ok || !json.success) {
-        setImportError(json.error || `Apply failed (HTTP ${res.status})`);
+        setImportError(humanizeError({ status: res.status, message: json.error }, "Import failed. Please try again."));
         return;
       }
       setImportResult(json);
@@ -624,7 +625,7 @@ export default function WipTimesPage() {
       // numbers without a manual refresh.
       invalidateCachePrefix("/api/wip-times");
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : String(err));
+      setImportError(humanizeError(err, "Import failed. Please check the file and try again."));
     } finally {
       setImporting(false);
     }

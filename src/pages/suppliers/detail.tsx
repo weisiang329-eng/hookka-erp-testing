@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { humanizeError } from "@/lib/humanize-error";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Supplier } from "@/types";
 import {
@@ -210,7 +211,7 @@ export default function SupplierDetailPage() {
     });
     if (!res.ok) {
       const j = (await res.json().catch(() => ({}))) as { error?: string };
-      alert(`Save failed: ${j?.error ?? res.status}`);
+      alert(humanizeError({ status: res.status, message: j?.error }, "Couldn't save. Please try again."));
       return;
     }
     invalidateCachePrefix(`/api/suppliers/${id}`);
@@ -262,7 +263,7 @@ export default function SupplierDetailPage() {
     });
     if (!res.ok) {
       const j = (await res.json().catch(() => ({}))) as { error?: string };
-      alert(`Save failed: ${j?.error ?? res.status}`);
+      alert(humanizeError({ status: res.status, message: j?.error }, "Couldn't save. Please try again."));
       return;
     }
     invalidateCachePrefix("/api/supplier-materials");
@@ -275,7 +276,7 @@ export default function SupplierDetailPage() {
     const res = await fetch(`/api/supplier-materials/${b.id}`, { method: "DELETE" });
     if (!res.ok) {
       const j = (await res.json().catch(() => ({}))) as { error?: string };
-      alert(`Delete failed: ${j?.error ?? res.status}`);
+      alert(humanizeError({ status: res.status, message: j?.error }, "Couldn't delete. Please try again."));
       return;
     }
     invalidateCachePrefix("/api/supplier-materials");

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef, Fragment } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { countElapsedWorkingDays } from "@/lib/labor-engine";
@@ -745,11 +746,11 @@ function WorkingHoursTab({
       try {
         const res = await fetch(`/api/working-hour-entries/${row.id}`, { method: "DELETE" });
         if (!res.ok) {
-          patchRow(idx, { saveError: `Delete failed: HTTP ${res.status}` });
+          patchRow(idx, { saveError: humanizeError({ status: res.status }, "Couldn't delete. Please try again.") });
           return;
         }
       } catch (e) {
-        patchRow(idx, { saveError: e instanceof Error ? e.message : "Delete failed" });
+        patchRow(idx, { saveError: humanizeError(e, "Couldn't delete. Please try again.") });
         return;
       }
     }
@@ -805,7 +806,7 @@ function WorkingHoursTab({
     } catch (e) {
       patchRow(idx, {
         saving: false,
-        saveError: e instanceof Error ? e.message : "Save failed",
+        saveError: humanizeError(e, "Couldn't save. Please try again."),
       });
     }
   }, [rows, patchRow, refreshAttendance, prodCodes]);
@@ -1249,7 +1250,7 @@ function PublicHolidaysCard() {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setDates(next);
     } catch (e) {
-      alert(`Save failed: ${e instanceof Error ? e.message : e}`);
+      alert(humanizeError(e, "Couldn't save. Please try again."));
     } finally {
       setSaving(false);
     }
@@ -1599,7 +1600,7 @@ function EmployeeMasterTab({
         setPinModal({
           ...pinModal,
           submitting: false,
-          error: json?.error || `Failed (HTTP ${res.status})`,
+          error: humanizeError({ status: res.status, message: json?.error }, "That didn't work. Please try again."),
         });
         return;
       }
@@ -1623,7 +1624,7 @@ function EmployeeMasterTab({
       setPinModal({
         ...pinModal,
         submitting: false,
-        error: e instanceof Error ? e.message : "Network error",
+        error: humanizeError(e, "That didn't work. Please try again."),
       });
     }
   };
@@ -1665,7 +1666,7 @@ function EmployeeMasterTab({
         setBulkModal({
           ...bulkModal,
           phase: "preview",
-          error: json?.error || `Failed (HTTP ${res.status})`,
+          error: humanizeError({ status: res.status, message: json?.error }, "That didn't work. Please try again."),
         });
         return;
       }
@@ -1681,7 +1682,7 @@ function EmployeeMasterTab({
       setBulkModal({
         ...bulkModal,
         phase: "preview",
-        error: e instanceof Error ? e.message : "Network error",
+        error: humanizeError(e, "That didn't work. Please try again."),
       });
     }
   };

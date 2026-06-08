@@ -10,6 +10,7 @@ import React, {
 } from "react";
 import { cn } from "@/lib/utils";
 import { useInterval, useTimeout } from "@/lib/scheduler";
+import { humanizeError } from "@/lib/humanize-error";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -253,7 +254,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const toast = {
     success: (message: string) => addToast("success", message),
-    error: (message: string) => addToast("error", message),
+    // Central safety net (owner directive): every error toast is run through
+    // humanizeError, so no page can leak an HTTP code / raw backend string /
+    // DB field name to an operator even if its call site passes one. A clean
+    // message (or a plain caller fallback) passes through unchanged.
+    error: (message: string) => addToast("error", humanizeError(message)),
     warning: (message: string) => addToast("warning", message),
     info: (message: string) => addToast("info", message),
   };

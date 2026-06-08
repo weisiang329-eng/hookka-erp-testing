@@ -18,6 +18,7 @@
 import { useMemo, useState, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { humanizeError } from "@/lib/humanize-error";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -320,14 +321,14 @@ export default function StockAdjustmentsPage() {
           });
           const data = (await res.json()) as { success?: boolean; error?: string };
           if (!res.ok || !data?.success) {
-            return { uid: row.uid, ok: false, msg: data?.error || `HTTP ${res.status}`, code: sel?.code };
+            return { uid: row.uid, ok: false, msg: humanizeError({ status: res.status, message: data?.error }, "Couldn't save. Please try again."), code: sel?.code };
           }
           return { uid: row.uid, ok: true, code: sel?.code };
         } catch (e) {
           return {
             uid: row.uid,
             ok: false,
-            msg: e instanceof Error ? e.message : "Network error",
+            msg: humanizeError(e, "Network problem — please try again."),
             code: sel?.code,
           };
         }

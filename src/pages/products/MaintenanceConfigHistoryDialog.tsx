@@ -21,6 +21,7 @@
 // exact same wording.
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
+import { humanizeError } from "@/lib/humanize-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AlertTriangle, Loader2, Trash2, X } from "lucide-react";
@@ -108,14 +109,16 @@ export function MaintenanceConfigSaveModal({
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         setErrorMsg(
-          (j as { error?: string }).error ??
-            `Save failed (HTTP ${res.status})`,
+          humanizeError(
+            { status: res.status, message: (j as { error?: string }).error },
+            "Couldn't save. Please try again.",
+          ),
         );
         return;
       }
       onSaved(effectiveFrom);
     } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Network error");
+      setErrorMsg(humanizeError(e, "Network problem — please try again."));
     } finally {
       setSaving(false);
     }
@@ -263,7 +266,7 @@ export function EffectiveDateConfirmModal({
     try {
       await onConfirm({ effectiveFrom, notes });
     } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Save failed");
+      setErrorMsg(humanizeError(e, "Couldn't save. Please try again."));
       setSaving(false);
       return;
     }
@@ -393,7 +396,7 @@ export function MaintenanceConfigHistoryDialog({
         setErrorMsg(j.error ?? "Failed to load history");
       }
     } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Network error");
+      setErrorMsg(humanizeError(e, "Network problem — please try again."));
     } finally {
       setLoading(false);
     }
@@ -438,15 +441,17 @@ export function MaintenanceConfigHistoryDialog({
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         alert(
-          (j as { error?: string }).error ??
-            `Delete failed (HTTP ${res.status})`,
+          humanizeError(
+            { status: res.status, message: (j as { error?: string }).error },
+            "Couldn't delete. Please try again.",
+          ),
         );
         return;
       }
       await loadHistory();
       onChanged?.();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Network error");
+      alert(humanizeError(e, "Network problem — please try again."));
     }
   }
 

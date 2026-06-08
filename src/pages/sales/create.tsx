@@ -2,6 +2,7 @@ import { useState, useEffect, Suspense, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
+import { humanizeError } from "@/lib/humanize-error";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2229,7 +2230,7 @@ function CopyFromSourceModal({
         };
       };
       if (!detailRes.ok || !detailJson.success || !detailJson.data) {
-        setError(detailJson.error || `HTTP ${detailRes.status}`);
+        setError(humanizeError({ status: detailRes.status, message: detailJson.error }, "Couldn't load that order. Please try again."));
         setBusy(false);
         return;
       }
@@ -2296,7 +2297,7 @@ function CopyFromSourceModal({
       setQtyById(new Map(lines.map((l) => [l.id, l.quantity])));
       setStep(2);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
+      setError(humanizeError(e, "Network problem — please try again."));
     } finally {
       setBusy(false);
     }
@@ -2333,13 +2334,13 @@ function CopyFromSourceModal({
         data?: CopyDraft;
       };
       if (!res.ok || !json.success || !json.data) {
-        setError(json.error || `HTTP ${res.status}`);
+        setError(humanizeError({ status: res.status, message: json.error }, "Couldn't copy those lines. Please try again."));
         setBusy(false);
         return;
       }
       onCopied(json.data);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
+      setError(humanizeError(e, "Network problem — please try again."));
     } finally {
       setBusy(false);
     }

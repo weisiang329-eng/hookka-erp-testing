@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { useCallback, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import {
   Card,
@@ -211,9 +212,9 @@ export default function UsersPage() {
         const j = JSON.parse(result.body) as { error?: string };
         if (j.error) parsedErr = j.error;
       } catch { /* keep raw body */ }
-      showFlash("err", parsedErr || `Failed to update user (HTTP ${result.status})`);
+      showFlash("err", humanizeError({ status: result.status, message: parsedErr }, "Couldn't update the user. Please try again."));
     } else {
-      showFlash("err", `Save failed: ${result.details}`);
+      showFlash("err", humanizeError(result.details, "Couldn't save. Please try again."));
     }
   };
 
@@ -317,7 +318,7 @@ export default function UsersPage() {
     } catch (err) {
       setInviteResult({
         kind: "err",
-        message: err instanceof Error ? err.message : "Network error",
+        message: humanizeError(err, "Network problem — please try again."),
       });
     } finally {
       setInviteSubmitting(false);

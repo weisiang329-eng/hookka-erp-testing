@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { humanizeError } from "@/lib/humanize-error";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -869,12 +870,12 @@ function JournalsTab({
       if (!res.ok) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const body: any = await res.json().catch(() => ({}));
-        alert(body?.error || `Failed to delete journal entry (HTTP ${res.status})`);
+        alert(humanizeError({ status: res.status, message: body?.error }, "Couldn't delete the journal entry. Please try again."));
         return;
       }
       onRefresh();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Network error — journal not deleted");
+      alert(humanizeError(e, "Couldn't delete the journal entry. Please try again."));
     }
   };
 

@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
+import { humanizeError } from "@/lib/humanize-error";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -255,9 +256,9 @@ export default function MaintenancePage() {
         const j = JSON.parse(result.body) as { error?: string };
         if (j.error) parsedErr = j.error;
       } catch { /* keep raw body */ }
-      alert(parsedErr || `Save failed (HTTP ${result.status})`);
+      alert(humanizeError({ status: result.status, message: parsedErr }, "Couldn't save. Please try again."));
     } else {
-      alert(`Save failed: ${result.details}`);
+      alert(humanizeError(result.details, "Couldn't save. Please try again."));
     }
   }
 

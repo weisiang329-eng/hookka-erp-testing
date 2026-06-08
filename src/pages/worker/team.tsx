@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, BarChart3 } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
+import { humanizeError } from "@/lib/humanize-error";
 import { workerFetch } from "@/layouts/WorkerLayout";
 
 // ---- Response shape (mirrors backend) ----
@@ -153,7 +154,7 @@ export default function WorkerTeamPage() {
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : "Network error");
+        setError(humanizeError(e, "Network problem — please try again."));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

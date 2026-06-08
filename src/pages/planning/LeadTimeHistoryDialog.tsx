@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { humanizeError } from "@/lib/humanize-error";
 import { Input } from "@/components/ui/input";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 
@@ -163,8 +164,10 @@ export function LeadTimeHistoryDialog({
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         alert(
-          (j as { error?: string }).error ??
-            `Failed to schedule change (HTTP ${res.status})`,
+          humanizeError(
+            { status: res.status, message: (j as { error?: string }).error },
+            "Couldn't schedule the change. Please try again.",
+          ),
         );
         return;
       }
@@ -187,8 +190,10 @@ export function LeadTimeHistoryDialog({
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       alert(
-        (j as { error?: string }).error ??
-          `Failed to delete (HTTP ${res.status})`,
+        humanizeError(
+          { status: res.status, message: (j as { error?: string }).error },
+          "Couldn't delete. Please try again.",
+        ),
       );
       return;
     }

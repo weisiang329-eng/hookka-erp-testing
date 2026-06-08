@@ -1,5 +1,6 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import { humanizeError } from "@/lib/humanize-error";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -243,7 +244,7 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
                     Message
                   </p>
                   <pre className="text-xs text-red-700 bg-red-50 rounded p-3 overflow-auto whitespace-pre-wrap break-words">
-                    {error.message}
+                    {humanizeError(error)}
                   </pre>
                 </div>
 

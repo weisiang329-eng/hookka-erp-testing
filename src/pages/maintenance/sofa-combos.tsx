@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { humanizeError } from "@/lib/humanize-error";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { asArray } from "@/lib/safe-json";
 import { formatCurrency, formatDate } from "@/lib/utils";
@@ -1008,7 +1009,7 @@ function CreateComboDialog({
       }
       onSaved();
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : String(ex));
+      setErr(humanizeError(ex, "Couldn't save. Please try again."));
       setSaving(false);
     }
   }

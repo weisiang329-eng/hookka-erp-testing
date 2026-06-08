@@ -26,6 +26,7 @@ import {
 import { Button } from "./button";
 import { Card, CardHeader, CardTitle, CardContent } from "./card";
 import { cn } from "@/lib/utils";
+import { humanizeError } from "@/lib/humanize-error";
 
 export type ImportColumnType = "string" | "number" | "boolean";
 
@@ -311,10 +312,8 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
 
       setParsed(nonEmpty);
       setStep("preview");
-    } catch (e) {
-      setUploadErr(
-        `Failed to parse file: ${e instanceof Error ? e.message : String(e)}`,
-      );
+    } catch {
+      setUploadErr("Couldn't read that file — please check it's a valid CSV.");
     }
   };
 
@@ -327,9 +326,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
       setResult(res);
       setStep("done");
     } catch (e) {
-      setUploadErr(
-        `Import failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      setUploadErr(humanizeError(e, "Import failed. Please try again."));
     } finally {
       setImporting(false);
     }

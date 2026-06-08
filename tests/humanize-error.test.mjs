@@ -101,3 +101,26 @@ test("total junk with no context → safe generic line", () => {
 test("schema-mismatch internal text is never shown", () => {
   noTech(humanizeError({ status: 200, message: "Response shape from /api/x did not match schema" }, "Couldn't load"));
 });
+
+// ── False-positive guards: now that this runs on EVERY error toast, legit
+// human messages (with numbers / ordinary words) must survive untouched. ──
+test("keeps a clean message that merely contains a number", () => {
+  assert.equal(humanizeError("Order #500 not found in this batch"), "Order #500 not found in this batch");
+  assert.equal(humanizeError("Only 3 units left in stock"), "Only 3 units left in stock");
+});
+
+test("keeps a plain 'Failed to load X' fallback (not the bare browser error)", () => {
+  assert.equal(humanizeError("Failed to load orders"), "Failed to load orders");
+  assert.equal(humanizeError("Couldn't delete — this customer has open orders"), "Couldn't delete — this customer has open orders");
+});
+
+test("bare browser network message → connection line", () => {
+  const out = humanizeError("Failed to fetch");
+  noTech(out);
+  assert.match(out, /network|connection/i);
+});
+
+test("'X does not exist' without postgres quoting is kept (only column/relation \"..\" is stripped)", () => {
+  assert.equal(humanizeError("This product no longer exists"), "This product no longer exists");
+  noTech(humanizeError('column "vehicle_id" does not exist'));
+});

@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useTimeout } from "@/lib/scheduler";
+import { humanizeError } from "@/lib/humanize-error";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -162,9 +163,9 @@ export default function InvoiceDetailPage() {
         const j = JSON.parse(result.body) as { error?: string };
         if (j.error) parsedErr = j.error;
       } catch { /* keep raw body */ }
-      setToast(parsedErr || `Could not update prices (HTTP ${result.status})`);
+      setToast(humanizeError({ status: result.status, message: parsedErr }, "Couldn't update prices. Please try again."));
     } else {
-      setToast(`Save failed: ${result.details}`);
+      setToast(humanizeError(result.details, "Couldn't save. Please try again."));
     }
     setSavingPrices(false);
   };
@@ -239,9 +240,9 @@ export default function InvoiceDetailPage() {
         const j = JSON.parse(result.body) as { error?: string };
         if (j.error) parsedErr = j.error;
       } catch { /* keep raw body */ }
-      setToast(parsedErr || `Failed to send invoice (HTTP ${result.status})`);
+      setToast(humanizeError({ status: result.status, message: parsedErr }, "Couldn't send the invoice. Please try again."));
     } else {
-      setToast(`Save failed: ${result.details}`);
+      setToast(humanizeError(result.details, "Couldn't save. Please try again."));
     }
     setUpdating(false);
   };
@@ -295,9 +296,9 @@ export default function InvoiceDetailPage() {
         const j = JSON.parse(result.body) as { error?: string };
         if (j.error) parsedErr = j.error;
       } catch { /* keep raw body */ }
-      setToast(parsedErr || `Failed to record payment (HTTP ${result.status})`);
+      setToast(humanizeError({ status: result.status, message: parsedErr }, "Couldn't record the payment. Please try again."));
     } else {
-      setToast(`Save failed: ${result.details}`);
+      setToast(humanizeError(result.details, "Couldn't save. Please try again."));
     }
     setUpdating(false);
   };
@@ -309,7 +310,7 @@ export default function InvoiceDetailPage() {
       if (!res.ok) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const body: any = await res.json().catch(() => ({}));
-        setToast(body?.error || `Failed to delete invoice (HTTP ${res.status})`);
+        setToast(humanizeError({ status: res.status, message: body?.error }, "Couldn't delete the invoice. Please try again."));
         return;
       }
       // Deletion cascades server-side: DO flips back from INVOICED, SO may
@@ -320,7 +321,7 @@ export default function InvoiceDetailPage() {
       if (id) invalidateCache(`/api/invoices/${id}`);
       navigate("/invoices");
     } catch (e) {
-      setToast(e instanceof Error ? e.message : "Network error — invoice not deleted");
+      setToast(humanizeError(e, "Couldn't delete the invoice. Please try again."));
     }
   };
 

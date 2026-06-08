@@ -14,6 +14,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { setAuth, type AuthUser } from "@/lib/auth";
+import { humanizeError } from "@/lib/humanize-error";
 
 type InviteMeta = {
   email: string;
@@ -112,7 +113,7 @@ export default function InviteAcceptPage() {
       setAuth({ user: json.data.user });
       navigate("/", { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Network error.");
+      setError(humanizeError(err, "Network problem — please try again."));
     } finally {
       setSubmitting(false);
     }

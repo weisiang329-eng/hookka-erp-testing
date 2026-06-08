@@ -12,6 +12,7 @@
 // have to maintain a separate "stockable items" catalog.
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { humanizeError } from "@/lib/humanize-error";
 import type { HistoricalFg, HistoricalWip } from "../types";
 
 export function CreateStockPODialog({
@@ -193,7 +194,7 @@ export function CreateStockPODialog({
       });
       const d = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !d?.success) {
-        setErr(d?.error || `Failed (${res.status}).`);
+        setErr(humanizeError({ status: res.status, message: d?.error }, "Couldn't create the stock PO. Please try again."));
         setSubmitting(false);
         return;
       }
@@ -201,7 +202,7 @@ export function CreateStockPODialog({
       onCreated();
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Network error");
+      setErr(humanizeError(e, "Network problem — please try again."));
       setSubmitting(false);
     }
   }

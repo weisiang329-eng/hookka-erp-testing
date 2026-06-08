@@ -51,9 +51,12 @@ function messageForStatus(status: number): string | null {
 // (so we prefer the status line even when the caller passed a fallback).
 const SPECIFIC_STATUSES = new Set([401, 403, 404, 409, 413, 429]);
 
-// Patterns that mark a string as internal/technical → never show it.
+// Patterns that mark a string as internal/technical → never show it. Kept
+// CONSERVATIVE: this runs on EVERY error toast (incl. legit messages that may
+// contain numbers like "Order #500" or words like "Failed to load orders"), so
+// the patterns are specific enough not to flag a clean human sentence.
 const TECHNICAL =
-  /(\bHTTP\s*\d{3}\b|\b\d{3}\s+from\s+\/|Invalid JSON|did not match schema|Network error while requesting|Request timeout after|NOT NULL|null value|violates|constraint|duplicate key|foreign key|syntax error|does not exist|is not a function|cannot read propert|is not defined|unexpected token|\.[jt]sx?:\d+:\d+|TypeError|ReferenceError|Failed to fetch|fetch failed|ECONN|ETIMEDOUT|\b5\d\d\b)/i;
+  /(\bHTTP\s*\d{3}\b|\b\d{3}\s+from\s+\/|Invalid JSON from|did not match schema|Network error while requesting|Request timeout after|\bNOT NULL\b|null value in column|violates \w+ constraint|violates unique|duplicate key value|foreign key constraint|syntax error at|relation "\w+"|column "\w+"|is not a function|cannot read propert|is not defined|unexpected token|\.[jt]sx?:\d+:\d+|\bTypeError\b|\bReferenceError\b|ECONNREFUSED|ETIMEDOUT)/i;
 
 function looksTechnical(msg: string): boolean {
   const m = msg.trim();
@@ -85,10 +88,23 @@ function extract(err: unknown): { status?: number; candidate: string } {
           : "";
   }
   // Recover a status the error object didn't carry but its text reveals — e.g.
-  // a raw `throw new Error("HTTP 500 ...")` (swr-fetcher) or "503 from /api/x".
+  // a raw `throw new Error("HTTP 500 ...")` (swr-fetcher) or "503 from /api/x",
+  // or the browser's own network-failure message ("Failed to fetch").
   if (status === undefined && candidate) {
     const m = candidate.match(/\bHTTP\s*(\d{3})\b|\b(\d{3})\s+from\s+\//i);
-    if (m) status = Number(m[1] ?? m[2]);
+    if (m) {
+      status = Number(m[1] ?? m[2]);
+    } else if (
+      // EXACT browser network-failure messages (anchored, so a legit
+      // "Failed to fetch the report" is NOT swallowed). Blank the candidate so
+      // it routes to the friendly network line instead of being shown as-is.
+      /^(TypeError:\s*)?(Failed to fetch|Load failed|NetworkError when attempting to fetch resource\.?)$/i.test(
+        candidate.trim(),
+      )
+    ) {
+      status = 0;
+      candidate = "";
+    }
   }
   return { status, candidate };
 }

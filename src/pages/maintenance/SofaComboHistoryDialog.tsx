@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { humanizeError } from "@/lib/humanize-error";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 
@@ -167,7 +168,7 @@ export function SofaComboHistoryDialog({
         error?: string;
       };
       if (!res.ok || !j.success) {
-        setErrorMsg(j.error ?? `Failed to schedule (HTTP ${res.status})`);
+        setErrorMsg(humanizeError({ status: res.status, message: j.error }, "Couldn't schedule the change. Please try again."));
         return;
       }
       // Reset note + date so a follow-up edit doesn't accidentally re-post
@@ -187,7 +188,10 @@ export function SofaComboHistoryDialog({
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       setErrorMsg(
-        (j as { error?: string }).error ?? `Failed to delete (HTTP ${res.status})`,
+        humanizeError(
+          { status: res.status, message: (j as { error?: string }).error },
+          "Couldn't delete. Please try again.",
+        ),
       );
       return;
     }

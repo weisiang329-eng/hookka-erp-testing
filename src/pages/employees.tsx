@@ -3581,13 +3581,9 @@ function EfficiencyOverviewTab({
         },
       },
     ];
-    for (const d of orderedDepts) {
-      columns.push({
-        header: d.shortName || d.name,
-        align: "right",
-        value: (r) => { const h = (r as EffRow).byDept[d.code] ?? 0; return h > 0 ? `${h.toFixed(1)}h` : "—"; },
-      });
-    }
+    // Per-department hour columns are intentionally NOT printed — they make the
+    // report extremely wide and are mostly blank. The on-screen grid still shows
+    // them; the printed report keeps just the core efficiency columns + Days.
     columns.push({ header: "Days", align: "center", value: (r) => (r as EffRow).daysWithEntries });
     // Print the grid's CURRENT sorted + filtered rows (WYSIWYG); fall back to the
     // source rows on the first paint before the grid has echoed them.
@@ -3613,11 +3609,11 @@ function EfficiencyOverviewTab({
     printReport({
       title: "Efficiency Overview",
       filterSummary: dateRangeLabel(dateFrom, dateTo),
-      orientation: "landscape",
+      orientation: "portrait",
       cards,
       sections: [{ columns, rows: printableRows }],
     });
-  }, [rows, printRows, orderedDepts, prodMinsByWorker, productionDeptCodes, dateFrom, dateTo]);
+  }, [rows, printRows, prodMinsByWorker, productionDeptCodes, dateFrom, dateTo]);
 
   return (
     <Card>

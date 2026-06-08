@@ -88,6 +88,32 @@ async function resolveFreshnessColumns(
   return resolved;
 }
 
+/**
+ * Chronologically-latest timestamp from a list of per-table MAX strings.
+ *
+ * Each input is one source table's MAX(freshness col)::text — which arrives in
+ * TWO formats in the SAME list: ISO "2026-06-08T13:45:30.123Z" (TEXT columns)
+ * and postgres "2026-06-08 13:45:30.123+00" (TIMESTAMP columns). We MUST compare
+ * by parsed time (new Date), NOT lexically — a string MAX puts 'T' (0x54) above
+ * the space (0x20), so a TEXT table's OLDER string would beat a TIMESTAMP
+ * table's NEWER one (the snapshot-staleness bug). Unparseable / empty values are
+ * skipped; returns null when nothing parses (caller treats null as "trivially
+ * fresh"). Pure + exported so the cross-format ordering is unit-tested.
+ */
+export function latestTimestamp(
+  values: ReadonlyArray<string | null | undefined>,
+): string | null {
+  let maxMs = Number.NEGATIVE_INFINITY;
+  for (const v of values) {
+    if (!v) continue;
+    const ms = new Date(v).getTime();
+    if (!Number.isNaN(ms) && ms > maxMs) maxMs = ms;
+  }
+  return maxMs === Number.NEGATIVE_INFINITY
+    ? null
+    : new Date(maxMs).toISOString();
+}
+
 // ---------------------------------------------------------------------------
 // Cross-table MAX of each source table's freshness column. One extra
 // round-trip the first time a source set is seen (schema probe, cached
@@ -113,20 +139,25 @@ export async function getMaxSourceUpdatedAt(
   // /api/dashboard/overview and /api/production-orders at deploy time.
   // 2026-05-26 hotfix.
   //
-  // For TIMESTAMP columns Postgres serialises MAX(updated_at)::text as
-  // "2026-05-26 13:45:30.123+00" (postgres native format). For TEXT
-  // columns it's whatever was inserted — every route writes
-  // toISOString() → "2026-05-26T13:45:30.123Z". new Date(x) parses
-  // both, so the downstream comparison still works.
+  // For TIMESTAMP columns Postgres serialises MAX(updated_at)::text with a
+  // SPACE separator ("2026-06-08 13:45:30.123+00"); for TEXT columns it's the
+  // ISO string every route wrote via toISOString() ("2026-06-08T13:45:30.123Z").
+  //
+  // BUG FIX 2026-06-08 — do NOT take the cross-table MAX in SQL. `SELECT MAX(t)`
+  // over those two formats is a LEXICAL string max: 'T' (0x54) sorts ABOVE the
+  // space (0x20), so for the same day a TEXT table's string always beats a
+  // TIMESTAMP table's — a fresh job_cards[TIMESTAMP] bump LOST to an older
+  // production_orders[TEXT] string, the probe missed the edit, and the stale
+  // snapshot was served as "fresh" for hours ("completion saved then gone"; also
+  // hit Dashboard / Dept-Performance / Fabric-Tracking — every probe that mixes
+  // job_cards with a TEXT table). We fetch each table's per-table MAX and take
+  // the latest CHRONOLOGICALLY in JS via new Date(), which parses both forms.
   const parts: string[] = [];
   for (const [table, col] of cols) {
     parts.push(`SELECT MAX(${col})::text AS t FROM ${table}`);
   }
-  const sql = `SELECT MAX(t) AS "maxUpdatedAt" FROM (${parts.join(
-    " UNION ALL ",
-  )}) sub`;
-  const row = await db
-    .prepare(sql)
-    .first<{ maxUpdatedAt: string | null }>();
-  return row?.maxUpdatedAt ?? null;
+  const res = await db
+    .prepare(parts.join(" UNION ALL "))
+    .all<{ t: string | null }>();
+  return latestTimestamp((res.results ?? []).map((r) => r.t));
 }

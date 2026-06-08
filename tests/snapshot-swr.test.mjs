@@ -59,6 +59,13 @@ function makeDb({ snapshotRow = null, currentMax = "2030-01-01T00:00:00.000Z" } 
               ],
             };
           }
+          // Cross-table freshness probe — UNION of per-table MAX(col)::text AS t.
+          // 2026-06-08: the probe now takes the chronological MAX in JS via
+          // .all() (was a lexical SQL MAX(t)::first()) — see snapshot-freshness.ts.
+          // Hand it the watermark as one per-table row.
+          if (sql.includes("AS t")) {
+            return { results: [{ t: currentMax }] };
+          }
           return { results: [] };
         },
         async run() {

@@ -34,6 +34,62 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-08-006 — 8-department scan/sticker audit: Packing rescan, QC-fail orphan, Foam ticked-print, rescan message, dead code
+
+**Status:** 🟡 Fixed in code (commits `2ee4b747` backend + `9b356de6` frontend, on `feat/sticker-scan-per-piece-overhaul`); typecheck + 545 tests + lint green. Pending merge→deploy + live verify.
+**Category:** production-orders
+
+Wei Siang asked to stop fixing one department at a time and audit ALL 8 (FAB_CUT, FAB_SEW, WOOD_CUT, FOAM, FRAMING, WEBBING, UPHOLSTERY, PACKING) for the bug classes we'd been hitting. Three parallel audits (sticker count / rescan-after-complete / scan↔production sync), each finding verified at file:line. Fixes:
+
+1. **Packing rescan-after-complete** (the reported one): the worker scan-lookup (`worker.ts` GET /scan-lookup) omitted `piecePics`, so the scan page's per-piece "already done" pre-check (`scan.tsx` ~1244) was blind — a rescan of a complete PACKING piece left Complete enabled and the worker only saw a red 409 AFTER tapping. Fix: scan-lookup now attaches each card's piece_pics (new opt-in `picsByJcId` param on `rowToMinimalPO` + `piecePics?` on `MinimalJobCardOut`; the Production page's minimal payload is unchanged). The phone now shows "already done / limit reached" + the rack picker and disables Complete before the tap.
+2. **Foam "Print Packing Stickers" ticked-rows override = 0 stickers** (sofas AND bedframes): `loadFoamPackingStickers` built the scope set from the rows' human `soId` but the filter compared it against `o.salesOrderId` (internal id) → never matched. Fix: compare `soId` against `poNo`/`companySOId`/`companyCOId` (matching companySOId pulls all of a sofa's compartments). The default filter + Show/Print path (poId-scoped) was already correct.
+3. **QC-fail orphaned scan stamps**: a QC FAIL on a WIP job card (`qc-pending.ts` ~638) reset it to BLOCKED + cleared completedDate but left `piece_pics` stamped; since a scan re-derives "all pieces done" from those stamps and BLOCKED isn't scan-excluded, a re-scan could silently un-do the block (same vector as -002). Fix: the QC reset now also clears that card's piece_pics, so a rework re-scan starts fresh (safer than hard-blocking scans on BLOCKED cards, which would break the rework re-scan).
+4. **Rescan shows a false green ✓** on the fan-out endpoints (FAB_CUT/FAB_SEW/UPHOLSTERY return 200 `{alreadyComplete:true}`): the page rendered a success ✓ as if the worker just did the work. Fix: amber "already complete" header (no PIC-slot line), rack picker kept. Data was already safe (no double-stamp).
+5. **Dead code**: removed the HTTP-202 `requiresConfirmation` confirm flow from `scan.tsx` (the `kind:"confirm"` result, its dialog, the handler branch) — no endpoint has returned 202 since the prerequisite check was deleted earlier today (-003).
+
+**Audit also CONFIRMED a negative**: the sofa sticker-undercount (-005) does NOT recur in any other generator — the row-merge that collapses a sofa into one anchor row is FAB_CUT-ONLY (`baserows-core.ts` ~301); every other dept keeps per-piece rows that per-poId scopes capture in full. So Foam Bonding's normal filter+Show/Print path is correct.
+
+---
+
+## BUG-2026-06-08-005 — Fab Cut "Print Fab Sew Stickers" printed 1 sticker for a 2-piece sofa
+
+**Status:** 🟡 Fixed in code (commit `68411b1f`); typecheck + 545 tests green. Pending merge→deploy + live verify.
+**Category:** production-orders
+
+Symptom: a 2-piece sofa (SO-2605-225 = 1A(LHF) + 1A(RHF)) shows 2 Fab Sew stickers on the Fab Sew page, but Fab Cut's "Print Fab Sew Stickers" produced only 1.
+
+Root cause: the Fab Cut grid merges a sofa's per-variant FAB_CUT job cards into ONE anchor row (Option C merge), so only the anchor PO's id is visible; the sibling POs carry the other pieces' Fab Sew job cards. `loadFabSewStickers` scoped by the visible poId alone → rebuilt only the anchor's Fab Sew row.
+
+Fix (`production/index.tsx` loadFabSewStickers): expand each visible SOFA poId to its merge-group siblings (groupId = companySOId|salesOrderId|companyCOId|consignmentOrderId, SOFA also matching base model + fabric — same recipe as buildBaseRows' cross-PO scan) before rebuilding. Produces exactly the Fab Sew page's set. BF/ACC keep per-PO FC rows so the loop is a no-op for them.
+
+---
+
+## BUG-2026-06-08-004 — Production cell "flicker": cleared PIC / Completion Date popped back, then cleared again
+
+**Status:** 🟡 Fixed in code (commit `d6110483`); typecheck + 545 tests green. Pending merge→deploy + live verify.
+**Category:** production-orders
+
+Symptom: after deleting a job card's PIC + Completion Date, the cell cleared, popped back to "complete" a few seconds later, then cleared again.
+
+Root cause: after the PATCH confirms (the JC leaves pendingJcPatchesRef), the cached orders snapshot stays stale for a few seconds — the row's updated_at bump invalidates it but the rebuild lags. An 8s poll landing in that window overlaid the stale (still-complete) row.
+
+Fix (`production/index.tsx`): `recentlyPatchedRef` pins each just-written JC's expected value over the snapshot until the fetched row matches what we wrote (server caught up) or a 30s safety window lapses. The cache merger preserves pinned JCs the same way it already preserves in-flight (pending) + staged (draft) edits; pins self-prune on catch-up/expiry. The splice only ever restores the operator's own just-saved value, never a server value — so it can only delay showing server data, never write a wrong one.
+
+---
+
+## BUG-2026-06-08-003 — Worker scan falsely warned "earlier department hasn't completed"
+
+**Status:** 🟡 Fixed in code (commit `83747f52`); typecheck + 545 tests green. Pending merge→deploy + live verify.
+**Category:** production-orders
+
+Symptom: scanning to complete a department popped "Earlier dept hasn't completed. Continue anyway?" even when the upstream dept (or the whole SO) was already complete.
+
+Root cause: the `prerequisiteMet` flag (planner stamps =1 on the first dept, =0 downstream; rollup flips downstream to 1 when the earlier dept completes) was unreliable because ~18k job cards across ~1,310 orders carry unresolved BOM-template placeholders (`{PRODUCT_CODE}`/`{SEAT_SIZE}`/`{FABRIC}`/`{MODEL}`) in wip_key/branch_key, which break the rollup's matching. Wei Siang chose to remove the check entirely rather than fix the placeholder data (the floor doesn't enforce strict dept order).
+
+Fix (`production-orders.ts`): removed the prerequisiteMet soft-warn (HTTP 202 PREREQUISITE_NOT_MET) from all 3 scan-complete handlers (per-JC, dept fan-out, shared Sew/Uph) + the now-unused force flag. Workers complete any department directly. The `prerequisiteMet` column + planner stamping are left intact (gate just no longer enforced). UPSTREAM_LOCKED was NOT touched. The ~18k placeholder-key data issue remains as a separate, deferred item.
+
+---
+
 ## BUG-2026-06-08-002 — Removing a completion on the production page "jumped back to complete" (scan stamps not cleared)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-08, commit 9d191bd9 onto main ab3e2fdb; Cloudflare Pages deploy green). typecheck + 545 tests green. Also cleaned 3 test SOs (`SO-2605-225*`, `SO-2605-305-02`/`-03`) back to WAITING via prod SQL (piece_pics + job_cards + production_orders reset; re-verified 0 dirty cards).

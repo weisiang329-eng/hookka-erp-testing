@@ -5441,7 +5441,7 @@ app.post("/:id/scan-complete", async (c) => {
   // (PREREQUISITE_NOT_MET / UPSTREAM_LOCKED) on the previous scan-complete
   // round-trip and is re-posting to bypass it. Each forced scan gets an
   // audit row in `scan_override_audit`.
-  const forced = body?.force === true;
+  // (force flag removed 2026-06-08 — prerequisite warning gone, no force path)
   if (!jobCardId || !workerId) {
     return c.json(
       { success: false, error: "jobCardId and workerId are required" },
@@ -5519,48 +5519,12 @@ app.post("/:id/scan-complete", async (c) => {
   // completed, which is wrong. Re-enable once the lock chain is derived
   // from the BOM template at runtime.
 
-  // ---- prerequisiteMet check -----------------------------------------------
-  // The sales-orders planner stamps prerequisiteMet=1 on the first dept of
-  // each wip chain and 0 on every downstream dept. As each earlier dept
-  // completes, the rollup flips downstream prerequisiteMet=1. If it's still
-  // 0 here, the operator is trying to scan a piece whose upstream dept
-  // hasn't finished yet.
-  if (scannedJc.prerequisiteMet !== 1) {
-    if (!forced) {
-      return c.json(
-        {
-          success: false,
-          requiresConfirmation: true,
-          warning: {
-            code: "PREREQUISITE_NOT_MET",
-            message: "Earlier dept hasn't completed. Continue anyway?",
-          },
-          data: {
-            jobCardId: scannedJc.id,
-            blockedBy: "UPSTREAM_NOT_COMPLETED",
-          },
-        },
-        202,
-      );
-    }
-    // Forced — record the override.
-    await db
-      .prepare(
-        `INSERT INTO scan_override_audit
-           (id, workerId, workerName, jobCardId, productionOrderId,
-            overrideCode, reason, created_at)
-         VALUES (?, ?, ?, ?, ?, 'PREREQUISITE_NOT_MET', 'force scan', ?)`,
-      )
-      .bind(
-        `soa-${crypto.randomUUID().slice(0, 8)}`,
-        workerId,
-        worker.name,
-        scannedJc.id,
-        scannedJc.productionOrderId,
-        new Date().toISOString(),
-      )
-      .run();
-  }
+  // ---- prerequisiteMet check REMOVED (Wei Siang 2026-06-08) -----------------
+  // The "Earlier dept hasn't completed. Continue anyway?" soft warning is gone.
+  // The shop floor doesn't enforce strict department order, and the BOM-template
+  // placeholder data (~18k JCs with unresolved keys) left the prerequisiteMet
+  // flag unreliable anyway — it kept firing false warnings on already-completed
+  // upstream depts. Workers may now complete any department directly, no check.
 
   // Ensure scanned JC has piecePics rows.
   await ensurePiecePicsForJc(db, scannedJc);
@@ -6061,7 +6025,7 @@ app.post("/:id/scan-complete-dept", async (c) => {
     deptCode?: string;
     workerId?: string;
   };
-  const forced = body?.force === true;
+  // (force flag removed 2026-06-08 — prerequisite warning gone, no force path)
   if (!deptCode || !workerId) {
     return c.json(
       { success: false, error: "deptCode and workerId are required" },
@@ -6134,46 +6098,14 @@ app.post("/:id/scan-complete-dept", async (c) => {
   // Prerequisite gate — soft-warn (202) if ANY compartment's upstream dept
   // hasn't completed, unless the worker already acknowledged and re-posted
   // with force:true. Mirrors /scan-complete's single-card gate.
-  const anyPrereqUnmet = cards.some((jc) => jc.prerequisiteMet !== 1);
-  if (anyPrereqUnmet && !forced) {
-    return c.json(
-      {
-        success: false,
-        requiresConfirmation: true,
-        warning: {
-          code: "PREREQUISITE_NOT_MET",
-          message: "Earlier dept hasn't completed. Continue anyway?",
-        },
-        data: { deptCode, blockedBy: "UPSTREAM_NOT_COMPLETED" },
-      },
-      202,
-    );
-  }
+  // prerequisiteMet warning REMOVED (Wei Siang 2026-06-08) — workers may
+  // complete any dept directly; no "earlier dept hasn't completed" gate.
 
   const nowIso = new Date().toISOString();
   const today = nowIso.split("T")[0];
   const completedJcIds: string[] = [];
 
   for (const jc of cards) {
-    if (jc.prerequisiteMet !== 1 && forced) {
-      await db
-        .prepare(
-          `INSERT INTO scan_override_audit
-             (id, workerId, workerName, jobCardId, productionOrderId,
-              overrideCode, reason, created_at)
-           VALUES (?, ?, ?, ?, ?, 'PREREQUISITE_NOT_MET', 'force scan-dept', ?)`,
-        )
-        .bind(
-          `soa-${crypto.randomUUID().slice(0, 8)}`,
-          workerId,
-          worker.name,
-          jc.id,
-          jc.productionOrderId,
-          nowIso,
-        )
-        .run();
-    }
-
     await ensurePiecePicsForJc(db, jc);
     // Fill every still-empty pic1 slot with the scanning worker so the whole
     // card (all pieces) completes in this one scan. Slots already claimed by
@@ -6356,7 +6288,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const poId = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
   const { workerId } = (body || {}) as { workerId?: string };
-  const forced = body?.force === true;
+  // (force flag removed 2026-06-08 — prerequisite warning gone, no force path)
   // Per-compartment + per-piece refinement (the new shared "wk" sticker). Both
   // optional and ADDITIVE — an older shared sticker that carries neither keeps
   // the whole-dept, all-pieces fan-out below exactly as before, so stickers
@@ -6572,21 +6504,8 @@ app.post("/:id/scan-complete-shared", async (c) => {
     }
   }
 
-  // Prerequisite soft-warn (mirror scan-complete-dept) — unless forced.
-  if (cards.some((jc) => jc.prerequisiteMet !== 1) && !forced) {
-    return c.json(
-      {
-        success: false,
-        requiresConfirmation: true,
-        warning: {
-          code: "PREREQUISITE_NOT_MET",
-          message: "Earlier dept hasn't completed. Continue anyway?",
-        },
-        data: { deptCode: targetDept, blockedBy: "UPSTREAM_NOT_COMPLETED" },
-      },
-      202,
-    );
-  }
+  // prerequisiteMet warning REMOVED (Wei Siang 2026-06-08) — workers may
+  // complete any dept directly; no "earlier dept hasn't completed" gate.
 
   const nowIso = new Date().toISOString();
   const today = nowIso.split("T")[0];

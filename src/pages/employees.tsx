@@ -4872,7 +4872,7 @@ function EmployeeDetailTab({
       title: "Employee Performance",
       subtitle: empLabel,
       filterSummary: dateRangeLabel(dateFrom, dateTo),
-      orientation: "landscape",
+      orientation: "portrait",
       cards,
       sections: [{ columns, rows: itemRows }],
     });

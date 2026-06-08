@@ -34,6 +34,31 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-08-002 — Removing a completion on the production page "jumped back to complete" (scan stamps not cleared)
+
+**Status:** 🟢 Shipped + deployed live (2026-06-08, commit 9d191bd9 onto main ab3e2fdb; Cloudflare Pages deploy green). typecheck + 545 tests green. Also cleaned 3 test SOs (`SO-2605-225*`, `SO-2605-305-02`/`-03`) back to WAITING via prod SQL (piece_pics + job_cards + production_orders reset; re-verified 0 dirty cards).
+**Category:** production-orders
+
+Symptom: clearing a card's PIC / Completion Date on the production page didn't stick — it "jumped back to complete", forcing the operator to remove it 2–3 times. Live proof: `SO-2605-305-02` had `job_cards.status=WAITING` (no PIC, no completedDate) yet its `piece_pics` still carried scanner stamps — the two layers had diverged.
+
+Root cause: worker-scan completion is TWO-LAYER — `piece_pics` holds one "scanner stamp" per physical piece, and the card's completion-%/PIC are re-derived from those stamps. The production-page clear (`PUT /api/production-orders/:id`) only updated the `job_cards` row; it never touched `piece_pics`. So the next refetch re-derived "all pieces done" and re-marked the card complete (and the PIC, aggregated from the same stamps, reappeared).
+
+Fix: in the PUT handler, when the operator explicitly removes the `completedDate` of a previously-completed card (`body.completedDate` falsy + the card had a date), also NULL that card's `piece_pics` stamps. Targeted — only fires on date-removal of a completed card, so valid IN_PROGRESS partial scans are untouched. The cache half ("scan shows complete but production lags") was already handled by the existing `updated_at` bump + 8s poll; no code change needed.
+
+---
+
+## BUG-2026-06-08-001 — Shared-sticker dept grouping + Packing direct-target + "limit reached" re-scan messages
+
+**Status:** 🟢 Shipped + deployed live (2026-06-08, commit 8d47d160 onto main 7f348e55; Cloudflare Pages deploy green). typecheck + 545 tests green (2 new pn-parse tests).
+**Category:** production-orders
+
+Three worker-scan-flow fixes (Wei Siang spec, 2026-06-08):
+- **Dept grouping** (`production-orders.ts` scan-complete-shared): the floor splits into a Sewing section (Fab Cut + Fab Sew) and everyone else. A shared compartment sticker completes FAB_SEW when a Sewing-section worker scans it; ANY other dept (Framing/Webbing/Upholstery/…) completes UPHOLSTERY. Previously a worker in neither named section got a 403 "Worker is in neither the Sewing nor the Upholstery section" — hit when scanning as Upholstery. Now they land on UPHOLSTERY, no error.
+- **Packing direct-target** (`qr-utils.ts` + `production/index.tsx` + `scan.tsx`): a bedframe's Divan + Headboard packing cards share one PO (differ only by wipKey `::DIVAN::`/`::HEADBOARD::`), so FG-PACKING matched both and prompted "which piece". The sticker now carries `pn=<box piece label>`; the scanner narrows the PACKING matches by `wipLabel` to the one card — no prompt. Backward compatible (old stickers without `pn` still parse).
+- **"Limit reached" messages** (`worker-i18n.ts`): re-scan guard text → "you already scanned this — it is already done" (self) / "Limit reached — this piece is already complete (both PICs done)" (2 PICs). Data was already protected (backend no-ops re-scans); this is wording + the disabled Complete button.
+
+---
+
 ## BUG-2026-06-07-013 — Nightly prod→staging data clone broken since 06-04 (pg_trgm operator class); fixed + staging re-cloned
 
 **Status:** 🟢 Fixed + verified (2026-06-07, commit d0097c3b on main). One-shot sync re-run green (run 27098699726): **staging now == prod to the row** (job_cards 19705, audit_events 10838, same latest migration 2026-06-06 13:19:52). The nightly cron (`sync-staging.yml`, 02:00 SGT / 18:00 UTC, runs from main) now uses the fixed workflow.

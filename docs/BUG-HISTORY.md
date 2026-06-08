@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-08-007 — Production completion/PIC "saved then gone hours later": snapshot freshness probe compared mixed timestamp formats lexically, not chronologically
+
+**Status:** 🟢 Fixed — shipped to `main` (commit `9e4d31d7`, on `feat/sticker-scan-per-piece-overhaul`) + deployed to prod; 559 tests (7 new regression) + typecheck + lint green; live-verified `/api/production-orders` on prod (200, 1324 rows, freshly recomputed) and the Production page Load-all renders 1233 real orders. Live WRITE→READ demo on a real order is pending Wei Siang's go (won't mutate real production data unprompted).
+**Category:** infrastructure
+
+Symptom (Wei Siang): enter a completion date + PIC on the Production dashboard, system shows it saved, then "3–4 hours later" it's gone. The data was never lost — it was always in the DB; the page kept serving a stale cached copy.
+
+Root cause: the shared snapshot **freshness probe** (`getMaxSourceUpdatedAt`, `src/api/lib/snapshot-freshness.ts`) decided "is the cached page still fresh?" by taking the cross-table MAX of each source table's freshness column **in SQL** (`SELECT MAX(t)` over per-table `MAX(col)::text`). Those per-table strings arrive in TWO formats in the same list: TEXT columns (sales_orders, production_orders, working_hour_entries) serialise as ISO `"2026-06-08T13:45:30Z"`; TIMESTAMP columns (**job_cards**) serialise as postgres `"2026-06-08 13:45:30+00"`. A string MAX is **lexical**: at character 11 it compares `'T'` (0x54) vs `' '` (0x20), so for the same day **any** TEXT table's string outranks job_cards. A completion/PIC edit only bumps **job_cards**; if no TEXT source table changed in that window, the lexical MAX stayed pinned to the older TEXT value, the probe judged the stale snapshot "fresh", and the edit stayed invisible until something else happened to bump a TEXT table (often hours later). The same probe backs 4 modules — Production, Dashboard, Department Performance, Fabric Tracking — so all four could serve stale job_cards data.
+
+Fix (`src/api/lib/snapshot-freshness.ts`): stop taking the cross-table MAX in SQL. Fetch each table's per-table `MAX(col)::text` (UNION ALL) and take the latest **chronologically in JS** via `new Date()` (parses both the ISO-`Z` and postgres-`+00` forms — verified). Extracted as a pure exported helper `latestTimestamp()` so the cross-format ordering is unit-tested. `resolveFreshnessColumns` (the information_schema column probe) is unchanged, so all-TEXT probes behave identically; `isSnapshotFresh` was already chronological (`new Date`), so no change there.
+
+Verified: new `tests/snapshot-freshness-latestts.test.mjs` (7 tests) pins the exact bug — e.g. a NEWER postgres-TIMESTAMP `13:45` must beat an OLDER TEXT-ISO `13:40` (a lexical MAX wrongly picks 13:40). Updated `tests/snapshot-swr.test.mjs` mock for the new `.all()` probe shape. Full suite 559 (558 pass / 1 skip / 0 fail), typecheck + lint clean. Deployed; prod `/api/production-orders` = 200 / 1324 rows / `x-cache: MISS` (freshly recomputed); Production page renders 1233 real orders. Prod Workers run in UTC, so a hypothetical no-offset postgres string still parses as UTC.
+
+Prior-art note: this file already carried two related fixes — 2026-05-21 (probe hard-coded `updated_at` → 500s on tables without it) and 2026-05-26 (probe skipped TEXT columns → snapshots never refreshed). This is the third and root freshness bug in the same probe; the 2026-05-26 comment even *assumed* "MAX over a TEXT column = chronological max", which holds **within** one format but breaks **across** the TEXT/TIMESTAMP mix.
+
+---
+
 ## BUG-2026-06-08-006 — 8-department scan/sticker audit: Packing rescan, QC-fail orphan, Foam ticked-print, rescan message, dead code
 
 **Status:** 🟡 Fixed in code (commits `2ee4b747` backend + `9b356de6` frontend, on `feat/sticker-scan-per-piece-overhaul`); typecheck + 545 tests + lint green. Pending merge→deploy + live verify.

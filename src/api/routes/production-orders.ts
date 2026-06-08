@@ -323,7 +323,7 @@ export type JobCardRow = {
   distributedAt: string | null;
 };
 
-type PiecePicRow = {
+export type PiecePicRow = {
   id: number;
   jobCardId: string;
   pieceNo: number;
@@ -482,6 +482,11 @@ type MinimalJobCardOut = {
   // node.quantity × po.quantity × (1 + waste%). The Fabric Cutting dept
   // page's "Fabric Usage" column reads this directly.
   fabricUsageMeters?: number;
+  // Per-piece PIC slots — populated ONLY when the caller passes piece_pics
+  // (the worker scan-lookup, so the phone can pre-check "already done /
+  // limit reached" on a per-piece sticker BEFORE the worker taps Complete).
+  // Omitted (undefined) on the Production page's minimal payload. BUG-2026-06-08.
+  piecePics?: PiecePicOut[];
 };
 type MinimalPOOut = {
   id: string;
@@ -697,6 +702,10 @@ export function rowToMinimalPO(
   // Passed through to rowToMinimalJobCard so non-active-dept JCs render
   // as slim shape (renderDeptSchedCell only reads ~9 fields out of ~25).
   activeDeptCode: string | null = null,
+  // Opt-in per-piece slots, keyed by jobCardId. Only the worker scan-lookup
+  // passes this (so the phone can pre-check "already done" on a per-piece
+  // sticker); every other caller omits it and the payload is unchanged.
+  picsByJcId: Map<string, PiecePicRow[]> | null = null,
 ): MinimalPOOut {
   const parentTargetEndDate = row.targetEndDate ?? null;
   const parentItemCategory = row.itemCategory ?? null;
@@ -744,8 +753,8 @@ export function rowToMinimalPO(
   const myJCs = jobCards
     .filter((j) => j.productionOrderId === row.id)
     .sort((a, b) => a.sequence - b.sequence)
-    .map((j) =>
-      rowToMinimalJobCard(
+    .map((j) => {
+      const jc = rowToMinimalJobCard(
         j,
         piecesDoneByJc,
         parentTargetEndDate,
@@ -756,8 +765,14 @@ export function rowToMinimalPO(
         bomByProductCode,
         siblings,
         activeDeptCode,
-      ),
-    );
+      );
+      // Attach per-piece slots only when the caller supplied them (worker
+      // scan-lookup). BUG-2026-06-08: without this the phone's per-piece
+      // "already done" pre-check is blind and the worker can re-tap Complete.
+      const pics = picsByJcId?.get(j.id);
+      if (pics && pics.length > 0) jc.piecePics = pics.map(rowToPiecePic);
+      return jc;
+    });
   return {
     id: row.id,
     poNo: row.poNo,

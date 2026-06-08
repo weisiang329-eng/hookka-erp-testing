@@ -30,6 +30,9 @@ import {
   // rowToMinimalPO consumes — a SELECT * returns them at runtime.
   type ProductionOrderRow as PoRowFull,
   type JobCardRow as JcRowFull,
+  // Per-piece slot row shape — reused so scan-lookup can hand piece_pics to
+  // rowToMinimalPO for the phone's "already done" pre-check (BUG-2026-06-08).
+  type PiecePicRow as ProdPiecePicRow,
 } from "./production-orders";
 
 const app = new Hono<Env>();
@@ -398,7 +401,33 @@ app.get("/scan-lookup", async (c) => {
     (await c.var.DB.prepare(jcSql).bind(...binds).all<JcRowFull>()).results ??
     [];
 
-  const data = poRows.map((po) => rowToMinimalPO(po, jcRows));
+  // Per-piece slots for these JCs so the scan page can pre-check "already
+  // done / limit reached" on a per-piece (PACKING) sticker BEFORE the worker
+  // taps Complete. BUG-2026-06-08: without this the phone's pre-check is blind
+  // (rowToMinimalPO omitted piecePics), so a rescan of a completed piece left
+  // Complete enabled and the worker only hit a 409 AFTER tapping.
+  const jcIds = jcRows.map((j) => j.id);
+  const picsByJcId = new Map<string, ProdPiecePicRow[]>();
+  if (jcIds.length > 0) {
+    const ph = jcIds.map(() => "?").join(", ");
+    const picRows =
+      (
+        await c.var.DB.prepare(
+          `SELECT * FROM piece_pics WHERE jobCardId IN (${ph})`,
+        )
+          .bind(...jcIds)
+          .all<ProdPiecePicRow>()
+      ).results ?? [];
+    for (const p of picRows) {
+      const arr = picsByJcId.get(p.jobCardId);
+      if (arr) arr.push(p);
+      else picsByJcId.set(p.jobCardId, [p]);
+    }
+  }
+
+  const data = poRows.map((po) =>
+    rowToMinimalPO(po, jcRows, new Map(), null, null, null, null, null, picsByJcId),
+  );
   return c.json({ success: true, data });
 });
 

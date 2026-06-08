@@ -645,6 +645,23 @@ app.post("/:id/complete", async (c) => {
           )
           .bind(subjectId),
       );
+      // BUG-2026-06-08: clearing the JC's completion alone leaves the per-piece
+      // scan stamps (piece_pics) in place. A later scan re-derives "all pieces
+      // done" from those stamps and re-completes the card (the same vector as
+      // the production-page remove fix, BUG-2026-06-08-002), silently un-doing
+      // the QC block. Clear this JC's piece_pics so a re-scan after rework
+      // starts fresh instead of resurrecting the old completion.
+      stmts.push(
+        c.var.DB
+          .prepare(
+            `UPDATE piece_pics SET
+               pic1Id = NULL, pic1Name = NULL,
+               pic2Id = NULL, pic2Name = NULL,
+               completedAt = NULL, lastScanAt = NULL, boundStickerKey = NULL
+             WHERE jobCardId = ?`,
+          )
+          .bind(subjectId),
+      );
       // Stash the parent PO id so we can recompute its status/progress
       // after the batch commits — flipping a JC to BLOCKED can drop the
       // parent PO from COMPLETED (extremely rare but possible) or simply

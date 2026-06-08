@@ -1575,7 +1575,17 @@ export default function ProductionPage({
   >(new Map());
   // Safety ceiling: if the snapshot somehow never catches up, release the pin
   // after this long so a stuck pin can't hide a genuine later server change.
-  const PATCH_PIN_MS = 30_000;
+  //
+  // BUG-2026-06-09: this was 30s, but it's a *ceiling*, not the normal release
+  // path — the pin releases EARLY the moment the refetched row matches what we
+  // wrote (caughtUp). The problem: after the snapshot-freshness fix (BUG-...-007)
+  // the cache self-heals on read but takes ~1-3 MIN (serve-stale-then-revalidate,
+  // measured live), while 30s expired the pin first — so a SUCCESSFUL save's cell
+  // silently reverted to the stale value with no error in that window. Raised to
+  // 5 min so the ceiling outlasts the cache lag; normal saves still release on
+  // catch-up well before this. Trade-off (small-shop-acceptable): a *concurrent*
+  // edit to the same cell by another user is hidden until catch-up or this cap.
+  const PATCH_PIN_MS = 300_000;
 
   // Last successful refetch timestamp — gates the visibilitychange auto
   // refresh so quick tab-flips (Sheets / WhatsApp / Alt-Tab to look up an

@@ -34,6 +34,32 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-003 — Delivery "Generate Invoice" failed silently: empty catch closed the dialog with no error
+
+**Status:** 🟢 Fixed in code (`delivery/index.tsx`, `feat/sticker-scan-per-piece-overhaul`); typecheck + lint + 586 tests green. Pending merge→deploy + live verify.
+**Category:** delivery-orders
+
+Symptom: on the Delivery list, "Generate Invoice" → if the POST failed, the handler's `catch { /* ignore */ }` swallowed the error and the dialog closed with NO message — the operator believed the invoice was created when it wasn't (a money document). Surfaced by a system-wide sweep of optimistic-save / silent-failure paths: most modules already route through `verifiedSave`; this handler was the odd one bypassing it.
+
+Root cause: `confirmGenerateInvoice` used a raw `fetchJson` POST + empty catch instead of the canonical `verifiedSave` its sibling handlers (POD attach, driver/vehicle, status advance) already use.
+
+Fix: migrated `confirmGenerateInvoice` to `verifiedSave` (the existing helper — Wei Siang's 2026-05-25 "tell me success only when it actually saved" ask). Invoice creation flips the DO to INVOICED on the backend (invoices route), so the readback fetches the DO with a cache-bust and confirms `status === "INVOICED"`. mismatch → `formatMismatchError`; http → the backend's error (humanised by the central toast net); network → a plain connection line. On any failure the dialog stays OPEN to retry; the optimistic INVOICED flip applies only AFTER confirmed persistence. Reuse of an existing feature, no new machinery.
+
+---
+
+## BUG-2026-06-09-002 — Production cell "saved then silently reverted": the just-saved-value pin (30s) expired before the cache caught up (~1–3 min)
+
+**Status:** 🟢 Fixed in code (`production/index.tsx`); typecheck + lint + 586 tests green. Pending merge→deploy + live verify.
+**Category:** production-orders
+
+Symptom (Wei Siang): fill a completion date / PIC on a production cell, it saves (no error), then a minute or two later the cell silently reverts to the old value — with NO error toast. (Distinct from a save FAILURE, which DOES toast "save failed … Cell reverted".)
+
+Root cause: the production page pins an operator's just-saved cell value over a still-stale cached refetch (`recentlyPatchedRef`, BUG-2026-06-08-004). The pin releases EARLY the moment the refetched row matches what was written (`caughtUp`), with a fixed safety ceiling `PATCH_PIN_MS`. That ceiling was 30s — set when the cache was assumed to lag "a few seconds". After the snapshot-freshness fix (BUG-2026-06-08-007) the cache self-heals on read but via serve-stale-then-revalidate takes ~1–3 MIN (measured live: a marker write showed the operator's `?fields=minimal` view still stale at 64s, fresh at 134s). So 30s expired the pin while the cache was still serving the old value → the next 20s poll overwrote the cell with the stale value, silently — the save itself succeeded (the bulk-patch verify-readback confirms it server-side); this was purely the display pin being too short.
+
+Fix: raised `PATCH_PIN_MS` 30s → 5 min so the safety ceiling outlasts the measured cache lag. The pin still releases EARLY on catch-up (the normal path), so 5 min only matters in the pathological never-catch-up case. Design guarantee unchanged — the pin only ever restores the operator's OWN just-saved value, never a server value, so it can only DELAY server data, never show a wrong one. Trade-off (small-shop-acceptable): a concurrent same-cell edit by another user is hidden until catch-up or the ceiling. Extends BUG-2026-06-08-004 — no new machinery.
+
+---
+
 ## BUG-2026-06-09-001 — Removing a PIC on a completed card left the old PIC still credited in the worker portal "Completed Products"
 
 **Status:** 🟢 Fixed + deployed live (2026-06-09, fix commit 62156472 + test 8df4567e on main; Cloudflare Pages deploy green run 27153463595). typecheck + build + structural test pass. Static-verified placement: the fix lives in the shared `applyPoUpdate`, which BOTH `PUT`/`PATCH /:id` (individual PIC change) AND `POST /bulk-patch` (batch "Apply PIC" — it loopback-PATCHes `/:id` per card) flow through, so all production-page PIC-change paths are covered. Owner does the one-off stale-data cleanup himself by re-clicking the PIC (now propagates).

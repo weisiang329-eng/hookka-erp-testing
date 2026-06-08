@@ -38,7 +38,6 @@ import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { mutationWithData, MutationResultSchema } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
 import { SalesOrderSchema } from "@/lib/schemas/sales-order";
-import { InvoiceSchema } from "@/lib/schemas/invoice";
 import {
   pickRelevantUphCards,
   poInPlanning,
@@ -48,7 +47,6 @@ import {
 
 const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
-const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2102,28 +2100,65 @@ export default function DeliveryPage() {
   const confirmGenerateInvoice = async () => {
     if (!invoiceDialog) return;
     setInvoiceLoading(true);
-    try {
-      await fetchJson("/api/invoices", InvoiceMutationSchema, {
-        method: "POST",
-        body: {
-          salesOrderId: invoiceDialog.salesOrderId,
-          doNo: invoiceDialog.doNo,
-          customerId: invoiceDialog.customerId,
-          customerName: invoiceDialog.customerName,
-        },
-      });
-      setDeliveryOrders((prev) =>
-        prev.map((d) =>
-          d.id === invoiceDialog.id && d.status === "DELIVERED"
-            ? { ...d, status: "INVOICED" as DOStatus }
-            : d
-        )
-      );
-      if (detailDO?.id === invoiceDialog.id) {
-        setDetailDO({ ...invoiceDialog, status: "INVOICED" });
-      }
-    } catch { /* ignore */ }
+    // verifiedSave (2026-06-09): the old handler did `catch { /* ignore */ }`,
+    // so a failed invoice creation closed the dialog with NO error — the
+    // operator thought the invoice was generated when it wasn't. Invoice
+    // creation flips the DO to INVOICED on the backend (invoices route), so we
+    // read the DO back with a cache-bust and confirm; a 200 that didn't persist
+    // (stale snapshot / half-write) or any failure now tells the operator
+    // honestly instead of silently. Mirrors the POD / driver handlers above.
+    const result = await verifiedSave<{ status?: string | null }>({
+      endpoint: "/api/invoices",
+      method: "POST",
+      body: {
+        salesOrderId: invoiceDialog.salesOrderId,
+        doNo: invoiceDialog.doNo,
+        customerId: invoiceDialog.customerId,
+        customerName: invoiceDialog.customerName,
+      },
+      readback: async () => {
+        const r = await fetch(
+          `/api/delivery-orders/${invoiceDialog.id}?_v=${Date.now()}`,
+          { credentials: "include", cache: "no-store" },
+        );
+        if (!r.ok) return null;
+        const j = (await r.json()) as
+          | { data?: { status?: string | null } }
+          | { status?: string | null };
+        return (j as { data?: { status?: string | null } }).data ?? (j as { status?: string | null });
+      },
+      expect: { status: "INVOICED" },
+    });
     setInvoiceLoading(false);
+    if (!result.ok) {
+      if (result.reason === "mismatch") {
+        toast.error(formatMismatchError(result.diffs));
+      } else if (result.reason === "http") {
+        let msg = result.body;
+        try {
+          const j = JSON.parse(result.body) as { error?: string };
+          if (j?.error) msg = j.error;
+        } catch {
+          /* non-json body — central toast net humanises it */
+        }
+        toast.error(msg || "Couldn't generate the invoice. Please try again.");
+      } else {
+        toast.error("Couldn't generate the invoice — please check your connection and try again.");
+      }
+      return; // keep the dialog open so the operator can retry
+    }
+    // Confirmed persisted → apply the optimistic INVOICED flip + close.
+    setDeliveryOrders((prev) =>
+      prev.map((d) =>
+        d.id === invoiceDialog.id && d.status === "DELIVERED"
+          ? { ...d, status: "INVOICED" as DOStatus }
+          : d
+      )
+    );
+    if (detailDO?.id === invoiceDialog.id) {
+      setDetailDO({ ...invoiceDialog, status: "INVOICED" });
+    }
+    toast.success("Invoice generated");
     setInvoiceDialog(null);
   };
 

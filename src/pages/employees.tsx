@@ -3198,7 +3198,12 @@ function EfficiencyOverviewTab({
         empNo: w?.empNo ?? "",
       });
     }
-    return Array.from(byWorker.values()).sort((a, b) => b.totalHours - a.totalHours);
+    // Default order = employee number ascending (EMP-001, EMP-002, …) so the
+    // report opens in roster order; empNo is zero-padded so string sort is
+    // numeric, blanks last. (Wei Siang 2026-06-08; was totalHours desc.)
+    return Array.from(byWorker.values()).sort((a, b) =>
+      (a.empNo || "~").localeCompare(b.empNo || "~"),
+    );
   }, [summary, workerById, prodMinsByWorker]);
 
   const columns: Column<EffRow>[] = useMemo(() => {
@@ -3207,6 +3212,10 @@ function EfficiencyOverviewTab({
         key: "employeeName",
         label: "Employee",
         sortable: true,
+        // Sort by employee NUMBER (EMP-001, EMP-002, …), not the display name —
+        // Wei Siang 2026-06-08. empNo is zero-padded so a plain string sort is
+        // already numeric order; blanks sort last. Cell still shows "EMP-NNN — Name".
+        sortAccessor: (row) => row.empNo || "~",
         render: (_value, row) => (
           <span className="font-medium text-[#1F1D1B]">
             {row.empNo ? `${row.empNo} — ` : ""}

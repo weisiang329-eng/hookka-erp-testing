@@ -62,6 +62,10 @@ const ScanCompleteEnvelope = z
     data: z
       .object({
         assignedSlot: z.number().optional(),
+        // Fan-out endpoints (scan-complete-dept / -shared) return this true on
+        // a rescan of an already-finished variant (no slot filled) so the page
+        // can show "already complete" instead of a misleading green ✓.
+        alreadyComplete: z.boolean().optional(),
         // Shared / dept fan-out endpoints (scan-complete-shared / -dept) return
         // the department they actually completed; used to label the ✓ card.
         deptCode: z.string().optional(),
@@ -179,24 +183,17 @@ type Result =
   // and Headboard), surface them all so the worker disambiguates. Never
   // silently auto-pick — that's how a Divan scan ended up marking HB done.
   | { kind: "choices"; options: WipOption[]; piece?: PieceInfo }
-  // Soft warning — server returned HTTP 202 with `requiresConfirmation`.
-  // The worker acknowledges and re-posts with `force: true` on Continue.
-  | {
-      kind: "confirm";
-      order: Order;
-      jobCard: JobCard;
-      piece?: PieceInfo;
-      // Carried through so the "Continue" re-post (force:true) routes back to
-      // scan-complete-shared for a shared compartment sticker.
-      wipKey?: string;
-      warning: { code: string; message: string };
-    }
   | {
       kind: "success";
       slot: 1 | 2;
       jobCard: JobCard;
       order: Order;
       piece?: PieceInfo;
+      // True when the server reported the variant was ALREADY complete (a
+      // rescan that filled no slot). Renders an amber "already complete"
+      // header instead of the green ✓ so the worker isn't told they just did
+      // work they didn't. BUG-2026-06-08.
+      alreadyComplete?: boolean;
       // Sticker-binding FIFO — when the scanned sticker's own JC wasn't
       // the oldest same-spec candidate, the server routed the completion
       // to an earlier PO. Surfaces so the worker knows "you scanned X but
@@ -896,14 +893,7 @@ export default function WorkerScanPage() {
             piece: result.piece,
             wipKey: result.wipKey,
           }
-        : result.kind === "confirm"
-          ? {
-              order: result.order,
-              jobCard: result.jobCard,
-              piece: result.piece,
-              wipKey: result.wipKey,
-            }
-          : null);
+        : null);
     if (!ctx) return;
     if (!workerId) {
       setResult({ kind: "error", message: t("common.error") });
@@ -990,23 +980,9 @@ export default function WorkerScanPage() {
       });
       const raw = await res.json();
       const data = ScanCompleteEnvelope.parse(raw);
-      // Soft-warning path — server returned HTTP 202 with
-      // `requiresConfirmation`. Surface the confirm dialog instead of
-      // treating it as an error.
-      if (res.status === 202 && data.requiresConfirmation) {
-        setResult({
-          kind: "confirm",
-          order: ctx.order,
-          jobCard: ctx.jobCard,
-          piece: ctx.piece,
-          wipKey: ctx.wipKey,
-          warning: data.warning || {
-            code: "UNKNOWN",
-            message: t("common.error"),
-          },
-        });
-        return;
-      }
+      // (Removed 2026-06-08) The HTTP 202 `requiresConfirmation` soft-warning
+      // path is gone — no scan endpoint returns it since the prerequisite
+      // check was deleted. Responses are now success | error only.
       if (data.success && data.data) {
         setResult({
           kind: "success",
@@ -1026,6 +1002,7 @@ export default function WorkerScanPage() {
           })(),
           order: ctx.order,
           piece: ctx.piece,
+          alreadyComplete: !!data.data.alreadyComplete,
           // FIFO diagnostic — server tells us if the scan was routed to a
           // DIFFERENT PO (older due date). Surfaces on the success card so
           // the worker isn't confused when the Production Sheet row they
@@ -1399,52 +1376,18 @@ export default function WorkerScanPage() {
         );
       })()}
 
-      {/* Soft-warning confirm dialog — shown when the server returned
-          HTTP 202 with requiresConfirmation (PREREQUISITE_NOT_MET or
-          UPSTREAM_LOCKED). The worker either acknowledges and continues
-          (re-posts with force:true, which records an audit row) or
-          cancels back to the scanner. Same colour palette as the main
-          lookup card so the jump feels contained, not alarming. */}
-      {result.kind === "confirm" && (
-        <div className="bg-[#FFF8E1] border border-[#F6D672] rounded-xl p-4 space-y-3">
-          <div className="flex items-start gap-2 text-[#7A5B1A]">
-            <AlertTriangle className="h-5 w-5 mt-0.5 shrink-0" />
-            <div className="min-w-0">
-              <p className="font-semibold text-base">
-                {t("common.confirm")}
-              </p>
-              <p className="text-sm mt-0.5 break-words">
-                {result.warning.message}
-              </p>
-              <p className="text-xs mt-1 text-[#9C6F1E]">
-                {result.order.poNo} · {wipNameFor(result.jobCard, result.order)}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => handleConfirmScan({ force: true })}
-            disabled={loading}
-            className="w-full h-12 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white font-semibold disabled:opacity-60"
-          >
-            {loading ? t("common.loading") : t("common.continue")}
-          </button>
-          <button
-            type="button"
-            onClick={reset}
-            className="w-full h-10 rounded-lg border border-[#D8D2CC] bg-white text-[#5A5550] font-semibold"
-          >
-            {t("common.cancel")}
-          </button>
-        </div>
-      )}
-
       {/* Success — show the WIP name + piece badge too, so the worker sees
           exactly which piece they just completed. */}
       {result.kind === "success" && (
-        <div className="bg-[#3E6570] text-white rounded-xl p-6 text-center">
+        <div
+          className={`${result.alreadyComplete ? "bg-[#7A5B1A]" : "bg-[#3E6570]"} text-white rounded-xl p-6 text-center`}
+        >
           <CheckCircle2 className="h-12 w-12 mx-auto mb-3" />
-          <p className="text-xl font-bold mb-1">{t("scan.complete")} ✓</p>
+          <p className="text-xl font-bold mb-1">
+            {result.alreadyComplete
+              ? t("scan.alreadyDone")
+              : `${t("scan.complete")} ✓`}
+          </p>
           <p className="text-base font-semibold opacity-95">
             {wipNameFor(result.jobCard, result.order)}
           </p>
@@ -1458,7 +1401,9 @@ export default function WorkerScanPage() {
                 .replace("{n}", String(result.piece.totalPieces))}
             </p>
           )}
-          <p className="text-xs opacity-75 mt-1">PIC slot {result.slot}</p>
+          {!result.alreadyComplete && (
+            <p className="text-xs opacity-75 mt-1">PIC slot {result.slot}</p>
+          )}
 
           {/* Packing rack picker — Wei Siang: after Complete, pick the rack
               below. Options from the warehouse catalog; saved independently of

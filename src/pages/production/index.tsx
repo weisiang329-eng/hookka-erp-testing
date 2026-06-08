@@ -4710,6 +4710,15 @@ export default function ProductionPage({
     // Scope source 0 (optional override): ticked job-card rows. If the
     // operator has ticked specific rows, pack exactly those SOs instead of
     // the whole visible set.
+    // BUG-2026-06-08: the ticked-rows scope matched the WRONG id. The ticked
+    // rows carry `soId` = the human number (SOFA → companySOId "SO-2605-225";
+    // BF → poNo "…-01"), but the filter below compared it against o.salesOrderId
+    // (an internal DB id) → never matched → ticking rows then printing produced
+    // 0 stickers for sofas AND bedframes. Fix: keep soId here and compare it
+    // against the matching human fields (poNo / companySOId / companyCOId) in
+    // the scope filter. Matching companySOId pulls all of a sofa's sibling lines
+    // (every compartment) — exactly what packing the whole sofa needs. The
+    // default filter + Show/Print path (scoped by poId) was unaffected.
     const selSoIds = new Set(
       selectedDeptRows.map((r) => r.soId).filter(Boolean),
     );
@@ -4735,8 +4744,11 @@ export default function ProductionPage({
       }
       let scoped: ProductionOrder[];
       if (hasSelectionScope) {
-        scoped = all.filter((o) =>
-          selSoIds.has(o.salesOrderId || o.consignmentOrderId || ""),
+        scoped = all.filter(
+          (o) =>
+            selSoIds.has(o.poNo) ||
+            selSoIds.has(o.companySOId || "") ||
+            selSoIds.has(o.companyCOId || ""),
         );
       } else if (q) {
         scoped = all.filter((o) => {

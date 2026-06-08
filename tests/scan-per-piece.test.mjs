@@ -88,3 +88,30 @@ test('every scan completion refreshes the dashboard (no stale Fab Cut / Fab Sew 
     `expected all 3 scan-complete paths to refresh the dashboard, found ${calls}`,
   );
 });
+
+test('changing a stays-completed card PIC propagates the swap to piece_pics (old PIC no longer credited)', () => {
+  // BUG: the operator removes/changes a completed card's PIC on the production
+  // page; job_cards.pic1Id/pic2Id moves, but the piece_pics scan stamps keep the
+  // OLD pic. The worker "Completed Products" view credits via piece_pics, so the
+  // removed PIC still shows as having completed the products. The fix must
+  // propagate a PIC swap on a card that STAYS completed (the SET branch handles a
+  // fresh complete; the CLEAR branch wipes everything on un-complete).
+  assert.ok(
+    PO.includes('const oldPic1Id = updated.pic1Id') &&
+      PO.includes('const oldPic2Id = updated.pic2Id'),
+    'must snapshot the old PICs BEFORE the body change is applied',
+  );
+  assert.ok(
+    /jcWasCompleted &&[\s\S]{0,80}updated\.pic1Id !== oldPic1Id/.test(PO),
+    'must branch on a card that stays completed whose PIC changed',
+  );
+  assert.ok(
+    PO.includes(
+      'UPDATE piece_pics SET pic1Id = ?, pic1Name = ? WHERE jobCardId = ? AND pic1Id = ?',
+    ) &&
+      PO.includes(
+        'UPDATE piece_pics SET pic2Id = ?, pic2Name = ? WHERE jobCardId = ? AND pic2Id = ?',
+      ),
+    'must swap OLD pic -> NEW pic in piece_pics, scoped to the old pic so other scanners are untouched',
+  );
+});

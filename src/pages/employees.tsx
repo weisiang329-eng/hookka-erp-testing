@@ -909,11 +909,20 @@ function WorkingHoursTab({
       { header: "Hours", align: "right", value: (r) => `${(Number((r as EntryDraft).hours) || 0).toFixed(1)}h` },
       { header: "Notes", value: (r) => (r as EntryDraft).notes || "" },
     );
+    const printableRows = displayRows.filter((d) => d.row.workerId).map((d) => d.row);
+    const totalHrs = printableRows.reduce((s, row) => s + (Number(row.hours) || 0), 0);
+    const distinctWorkers = new Set(printableRows.map((row) => row.workerId)).size;
+    const cards: PrintCard[] = [
+      { label: "Total Hours", value: `${totalHrs.toFixed(1)}h` },
+      { label: "Workers", value: String(distinctWorkers) },
+      { label: "Entries", value: String(printableRows.length) },
+    ];
     printReport({
       title: "Working Hours",
       filterSummary: dateRangeLabel(dateFrom, dateTo),
-      columns,
-      rows: displayRows.filter((d) => d.row.workerId).map((d) => d.row),
+      orientation: "portrait",
+      cards,
+      sections: [{ columns, rows: printableRows }],
     });
   }, [allDepts, isMultiDay, workerNameById, dateFrom, dateTo, displayRows]);
 
@@ -3567,7 +3576,8 @@ function EfficiencyOverviewTab({
           const prodHours = prodHoursOf(row);
           if (prodHours <= 0 || row.daysWithEntries === 0) return "—";
           const prodMins = prodMinsByWorker.get(row.workerId) ?? 0;
-          return `${((prodMins / (prodHours * 60)) * 100).toFixed(1)}%`;
+          const pct = (prodMins / (prodHours * 60)) * 100;
+          return { text: `${pct.toFixed(1)}%`, bold: true, color: pct >= 100 ? "#15803D" : pct >= 60 ? "#9C6F1E" : "#9A3A2D" };
         },
       },
     ];
@@ -3579,14 +3589,33 @@ function EfficiencyOverviewTab({
       });
     }
     columns.push({ header: "Days", align: "center", value: (r) => (r as EffRow).daysWithEntries });
+    // Print the grid's CURRENT sorted + filtered rows (WYSIWYG); fall back to the
+    // source rows on the first paint before the grid has echoed them.
+    const printableRows = printRows.length ? printRows : rows;
+    // KPI dashboard cards — computed over the visible rows.
+    const present = printableRows.filter((r) => r.totalHours > 0).length;
+    const totalHrs = printableRows.reduce((s, r) => s + r.totalHours, 0);
+    const effVals = printableRows
+      .map((r) => {
+        const ph = prodHoursOf(r);
+        if (ph <= 0 || r.daysWithEntries === 0) return null;
+        const pm = prodMinsByWorker.get(r.workerId) ?? 0;
+        return (pm / (ph * 60)) * 100;
+      })
+      .filter((v): v is number => v != null);
+    const avgEff = effVals.length ? effVals.reduce((s, v) => s + v, 0) / effVals.length : 0;
+    const cards: PrintCard[] = [
+      { label: "Workers", value: String(printableRows.length) },
+      { label: "Present", value: `${present} / ${printableRows.length}` },
+      { label: "Total Working Hours", value: `${totalHrs.toFixed(1)}h` },
+      { label: "Avg Efficiency", value: `${avgEff.toFixed(1)}%`, color: avgEff >= 100 ? "#15803D" : avgEff >= 60 ? "#9C6F1E" : "#9A3A2D" },
+    ];
     printReport({
       title: "Efficiency Overview",
       filterSummary: dateRangeLabel(dateFrom, dateTo),
-      columns,
-      // Print the grid's CURRENT sorted + filtered rows (WYSIWYG); fall back to
-      // the source rows on the first paint before the grid has echoed them.
-      rows: printRows.length ? printRows : rows,
       orientation: "landscape",
+      cards,
+      sections: [{ columns, rows: printableRows }],
     });
   }, [rows, printRows, orderedDepts, prodMinsByWorker, productionDeptCodes, dateFrom, dateTo]);
 
@@ -4827,13 +4856,13 @@ function EmployeeDetailTab({
     const empLabel = selectedWorker
       ? `${selectedWorker.empNo} — ${selectedWorker.name}`
       : "Employee";
-    const kpis = [
-      `Days Present ${daysPresent}`,
-      `Working Hrs ${totalWorkMins > 0 ? formatHours(totalWorkMins) : "-"}`,
-      `Production Hrs ${totalProdMins > 0 ? formatHours(totalProdMins) : "-"}`,
-      `Avg Efficiency ${avgEff !== null ? `${avgEff}%` : "—"}`,
-      `Total OT ${totalOT > 0 ? formatHours(totalOT) : "-"}`,
-    ].join(" · ");
+    const cards: PrintCard[] = [
+      { label: "Days Present", value: String(daysPresent) },
+      { label: "Working Hrs", value: totalWorkMins > 0 ? formatHours(totalWorkMins) : "—" },
+      { label: "Production Hrs", value: totalProdMins > 0 ? formatHours(totalProdMins) : "—" },
+      { label: "Avg Efficiency", value: avgEff !== null ? `${avgEff}%` : "—", color: avgEff !== null ? (Number(avgEff) >= 100 ? "#15803D" : Number(avgEff) >= 60 ? "#9C6F1E" : "#9A3A2D") : undefined },
+      { label: "Total OT", value: totalOT > 0 ? formatHours(totalOT) : "—" },
+    ];
     const columns: PrintColumn[] = [
       { header: "Date", value: (r) => formatDateDMY((r as ItemRow).date) },
       { header: "Product / Item", value: (r) => { const row = r as ItemRow; return row.wipLabel || row.productCode; } },
@@ -4841,14 +4870,15 @@ function EmployeeDetailTab({
       { header: "Department", value: (r) => (r as ItemRow).deptCode },
       { header: "Qty", align: "center", value: (r) => { const q = (r as ItemRow).qty; return q && q > 0 ? q : "—"; } },
       { header: "Total JC Time", align: "right", value: (r) => formatHours((r as ItemRow).minutes) },
-      { header: "Status", value: (r) => (r as ItemRow).status },
+      { header: "Status", value: (r) => { const s = (r as ItemRow).status; return s === "COMPLETED" ? { text: s, color: "#15803D", bold: true } : s; } },
     ];
     printReport({
       title: "Employee Performance",
       subtitle: empLabel,
-      filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${kpis}`,
-      columns,
-      rows: itemRows,
+      filterSummary: dateRangeLabel(dateFrom, dateTo),
+      orientation: "landscape",
+      cards,
+      sections: [{ columns, rows: itemRows }],
     });
   }, [selectedWorker, daysPresent, totalWorkMins, totalProdMins, avgEff, totalOT, dateFrom, dateTo, itemRows]);
 
@@ -5789,16 +5819,24 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       { header: "SOCSO", align: "right", value: (r) => formatCurrency((r as PayslipData).socsoEmployee) },
       { header: "EIS", align: "right", value: (r) => formatCurrency((r as PayslipData).eisEmployee) },
       { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return p.pcb > 0 ? formatCurrency(p.pcb) : "-"; } },
-      { header: "Net Pay", align: "right", value: (r) => formatCurrency((r as PayslipData).netPay) },
+      { header: "Net Pay", align: "right", value: (r) => ({ text: formatCurrency((r as PayslipData).netPay), bold: true }) },
       { header: "Status", value: (r) => (r as PayslipData).status },
+    ];
+    const cards: PrintCard[] = [
+      { label: "Total Payroll Cost", value: formatCurrency(totalPayrollCost) },
+      { label: "Total EPF (EE+ER)", value: formatCurrency(totals.epfEmployee + totals.epfEmployer) },
+      { label: "Total SOCSO", value: formatCurrency(totals.socsoEmployee + totals.socsoEmployer) },
+      { label: "Total EIS", value: formatCurrency(totals.eisEmployee + totals.eisEmployer) },
+      { label: "Total PCB", value: formatCurrency(totals.pcb) },
     ];
     printReport({
       title: "Payroll",
       filterSummary: `${months[selectedMonth - 1]} ${selectedYear}${isProjected ? " · Estimate (month in progress)" : ""}`,
-      columns,
-      rows: payslipData,
+      orientation: "landscape",
+      cards,
+      sections: [{ columns, rows: payslipData }],
     });
-  }, [payslipData, isProjected, selectedMonth, selectedYear, months, prorationSenOf]);
+  }, [payslipData, isProjected, selectedMonth, selectedYear, months, prorationSenOf, totalPayrollCost, totals]);
 
   return (
     <div className="space-y-4">

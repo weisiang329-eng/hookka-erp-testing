@@ -34,6 +34,15 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-001 — Removing a PIC on a completed card left the old PIC still credited in the worker portal "Completed Products"
+
+**Status:** 🟢 Fixed + deployed live (2026-06-09, fix commit 62156472 + test 8df4567e on main; Cloudflare Pages deploy green run 27153463595). typecheck + build + structural test pass. Static-verified placement: the fix lives in the shared `applyPoUpdate`, which BOTH `PUT`/`PATCH /:id` (individual PIC change) AND `POST /bulk-patch` (batch "Apply PIC" — it loopback-PATCHes `/:id` per card) flow through, so all production-page PIC-change paths are covered. Owner does the one-off stale-data cleanup himself by re-clicking the PIC (now propagates).
+**Category:** production-orders
+
+Owner removed a worker (LIM) as the PIC on a completed card via the production page, but LIM still showed those 6 products under "Completed Products" in the worker portal — even though LIM completed nothing. Root cause: the worker portal credits "completed products" via `piece_pics` (per-piece scan stamps), and completing a card auto-stamps the card's PIC onto its pieces (the BUG-2026-06-08-008 SET-completion logic). But CHANGING/clearing the PIC on a card that STAYS completed updated `job_cards.pic1Id/pic2Id` only — the `piece_pics` stamps kept the OLD pic. (Only un-completing a card cleared piece_pics; a plain PIC swap didn't reach the scan layer.) Fix (`applyPoUpdate`, production-orders.ts): snapshot the PICs before the body change is applied; when the card stays completed and a PIC changed, `UPDATE piece_pics SET picN = <new>, picNName = <new> WHERE jobCardId = <card> AND picN = <old>` — scoped to the OLD pic so a DIFFERENT real scanner's pieces are untouched. Mirrors the existing complete/un-complete piece_pics sync. Stale data: owner re-clicks the PIC on the affected cards (the fix now propagates) to clear LIM's existing stamps.
+
+---
+
 ## BUG-2026-06-08-009 — Employees Print Reports redesigned to dashboard standard + print follows on-screen filter/sort (WYSIWYG)
 
 **Status:** 🟢 Shipped + deployed live (2026-06-08, commit 007d6579; Cloudflare Pages deploy green run 27149374035). typecheck + build pass; Labor Cost + Payroll print output render-verified locally; live prod verified — Labor Cost RM62,775.52 "Reconciled · 0 difference" (no regression), fresh bundle, no console errors. Owner approved ("merge prod"). Built on staging first (staging branch + DB now mirror prod), reviewed, then shipped.

@@ -10,6 +10,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency, formatDate, formatDateDMY, formatHours, formatRM, roundSen, distributeRoundSen } from "@/lib/utils";
+import { printReport, type PrintColumn } from "@/lib/print-report";
 import { asArray } from "@/lib/safe-json";
 import {
   Users,
@@ -159,6 +160,13 @@ function todayStr(): string {
   return new Date().toISOString().split("T")[0];
 }
 
+// Full month names, module-scope so references stay stable across renders
+// (used by the Payroll month label + its Print Report filter line).
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+] as const;
+
 // Each tab on this page has its own from/to date filter. Persisting the
 // operator's last selection in localStorage — keyed per tab — means they can
 // flip between tabs without re-picking the same range, AND when they reopen
@@ -188,6 +196,15 @@ function writePersistedDateRange(key: string, from: string, to: string): void {
   } catch {
     /* localStorage full / blocked — non-fatal, just lose persistence */
   }
+}
+
+// Human date-range label for the "Print Report" filter line. Single-day ranges
+// collapse to one date; otherwise "DD/MM/YYYY – DD/MM/YYYY". Reuses the canonical
+// DD/MM/YYYY formatter so the printed report matches the on-screen date pickers.
+function dateRangeLabel(from: string, to: string): string {
+  if (!from && !to) return "All dates";
+  if (from === to) return formatDateDMY(from);
+  return `${formatDateDMY(from)} – ${formatDateDMY(to)}`;
 }
 
 // Quote a CSV cell when it contains a comma, double-quote or newline. Empty /
@@ -861,6 +878,30 @@ function WorkingHoursTab({
     return [...indexed].sort(cmp);
   }, [rows, sortColumn, sortDir, workerNameById]);
 
+  // Print Report — prints exactly the on-screen rows (in current sort order)
+  // for the selected working-date range. Mirrors the grid's columns; the Date
+  // column is included only in multi-day mode, matching the table.
+  const handlePrint = useCallback(() => {
+    const deptNameById = new Map(allDepts.map((d) => [d.code, d.name] as const));
+    const columns: PrintColumn[] = [];
+    if (isMultiDay) {
+      columns.push({ header: "Date", value: (r) => formatDateDMY((r as EntryDraft).date) });
+    }
+    columns.push(
+      { header: "Employee", value: (r) => workerNameById.get((r as EntryDraft).workerId) ?? "—" },
+      { header: "Department", value: (r) => deptNameById.get((r as EntryDraft).departmentCode) ?? (r as EntryDraft).departmentCode ?? "—" },
+      { header: "Category", value: (r) => (r as EntryDraft).category || "—" },
+      { header: "Hours", align: "right", value: (r) => `${(Number((r as EntryDraft).hours) || 0).toFixed(1)}h` },
+      { header: "Notes", value: (r) => (r as EntryDraft).notes || "" },
+    );
+    printReport({
+      title: "Working Hours",
+      filterSummary: dateRangeLabel(dateFrom, dateTo),
+      columns,
+      rows: displayRows.filter((d) => d.row.workerId).map((d) => d.row),
+    });
+  }, [allDepts, isMultiDay, workerNameById, dateFrom, dateTo, displayRows]);
+
   return (
     <div className="space-y-4">
       <PublicHolidaysCard />
@@ -923,6 +964,9 @@ function WorkingHoursTab({
             <Button variant="primary" onClick={saveAll} disabled={bulkSaving || dirtyCount === 0}>
               <Save className="h-4 w-4" />
               {bulkSaving ? "Saving…" : dirtyCount > 0 ? `Save All (${dirtyCount})` : "Saved"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={handlePrint} title="Print the on-screen working hours for the selected date range">
+              <Printer className="h-4 w-4 mr-1" /> Print Report
             </Button>
           </div>
         </div>
@@ -3473,6 +3517,55 @@ function EfficiencyOverviewTab({
     },
   ];
 
+  // Print Report — mirrors the on-screen columns (Employee, Total, Production
+  // Time, Prod Hrs, Non-Prod Hrs, Efficiency %, then each department's hours)
+  // for the selected date range, computing the same derived values the grid
+  // renders.
+  const handlePrint = useCallback(() => {
+    const prodHoursOf = (row: EffRow) =>
+      Object.entries(row.byDept).reduce(
+        (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
+        0,
+      );
+    const nonProdHoursOf = (row: EffRow) =>
+      Object.entries(row.byDept).reduce(
+        (s, [code, h]) => (productionDeptCodes.has(code) ? s : s + h),
+        0,
+      );
+    const columns: PrintColumn[] = [
+      { header: "Employee", value: (r) => { const row = r as EffRow; return `${row.empNo ? `${row.empNo} — ` : ""}${row.employeeName}`; } },
+      { header: "Total", align: "right", value: (r) => { const row = r as EffRow; return row.totalHours > 0 ? `${row.totalHours.toFixed(1)}h (${row.daysWithEntries}d)` : "—"; } },
+      { header: "Production Time", align: "right", value: (r) => { const m = prodMinsByWorker.get((r as EffRow).workerId) ?? 0; return m > 0 ? formatHours(m) : "—"; } },
+      { header: "Prod Hrs", align: "right", value: (r) => { const h = prodHoursOf(r as EffRow); return h > 0 ? formatHours(Math.round(h * 60)) : "—"; } },
+      { header: "Non-Prod Hrs", align: "right", value: (r) => { const h = nonProdHoursOf(r as EffRow); return h > 0 ? formatHours(Math.round(h * 60)) : "—"; } },
+      {
+        header: "Efficiency %",
+        align: "right",
+        value: (r) => {
+          const row = r as EffRow;
+          const prodHours = prodHoursOf(row);
+          if (prodHours <= 0 || row.daysWithEntries === 0) return "—";
+          const prodMins = prodMinsByWorker.get(row.workerId) ?? 0;
+          return `${((prodMins / (prodHours * 60)) * 100).toFixed(1)}%`;
+        },
+      },
+    ];
+    for (const d of orderedDepts) {
+      columns.push({
+        header: d.shortName || d.name,
+        align: "right",
+        value: (r) => { const h = (r as EffRow).byDept[d.code] ?? 0; return h > 0 ? `${h.toFixed(1)}h` : "—"; },
+      });
+    }
+    columns.push({ header: "Days", align: "center", value: (r) => (r as EffRow).daysWithEntries });
+    printReport({
+      title: "Efficiency Overview",
+      filterSummary: dateRangeLabel(dateFrom, dateTo),
+      columns,
+      rows,
+    });
+  }, [rows, orderedDepts, prodMinsByWorker, productionDeptCodes, dateFrom, dateTo]);
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -3499,6 +3592,9 @@ function EfficiencyOverviewTab({
                 className="w-36 h-8 text-xs"
               />
             </div>
+            <Button variant="outline" size="sm" onClick={handlePrint} title="Print the efficiency overview for the selected date range">
+              <Printer className="h-4 w-4 mr-1" /> Print Report
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -4023,6 +4119,34 @@ function DepartmentLaborTab({
     },
   ];
 
+  // Print Report — mirrors the on-screen department-labor columns for the
+  // selected period + category. The split Labor / Under-recorded columns print
+  // only when they're visible on screen (a full finished month, no category
+  // filter), exactly as the grid shows them.
+  const handlePrint = useCallback(() => {
+    const columns: PrintColumn[] = [
+      { header: "Department", value: (r) => { const row = r as DepartmentLaborRow; return `${row.deptName} (${row.isProduction ? "Prod" : "Non-prod"})`; } },
+      { header: "Total Hours", align: "right", value: (r) => { const h = (r as DepartmentLaborRow).totalHours; return h > 0 ? `${h.toFixed(1)}h` : "—"; } },
+      { header: "Workers", align: "center", value: (r) => { const n = (r as DepartmentLaborRow).workerCount; return n > 0 ? n : "—"; } },
+    ];
+    if (splitVisible) {
+      columns.push(
+        { header: "Labor (incl. EPF)", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).laborInclEpfSen; return v > 0 ? formatRM(v) : "—"; } },
+        { header: "Under-recorded", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).underRecordedSen; return v > 0 ? formatRM(v) : "—"; } },
+      );
+    }
+    columns.push({ header: splitVisible ? "Total" : "Estimated Labor Cost", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).estCostSen; return v > 0 ? formatRM(v) : "—"; } });
+    const catLabel = categoryFilter
+      ? categoryFilter[0] + categoryFilter.slice(1).toLowerCase()
+      : "All categories";
+    printReport({
+      title: "Department Labor",
+      filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${catLabel}`,
+      columns,
+      rows,
+    });
+  }, [rows, splitVisible, categoryFilter, dateFrom, dateTo]);
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -4085,6 +4209,9 @@ function DepartmentLaborTab({
                 <option value="ACCESSORY">Accessory</option>
               </select>
             </div>
+            <Button variant="outline" size="sm" onClick={handlePrint} title="Print the department labor breakdown for the selected period">
+              <Printer className="h-4 w-4 mr-1" /> Print Report
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -4576,6 +4703,39 @@ function EmployeeDetailTab({
     },
   ];
 
+  // Print Report — single-employee drill-down. The KPI summary goes on the
+  // filter line (Days Present / Working Hrs / Production Hrs / Avg Efficiency /
+  // OT), and the Daily Breakdown rows (the same job-card rows the grid shows)
+  // form the table, mirroring its columns.
+  const handlePrint = useCallback(() => {
+    const empLabel = selectedWorker
+      ? `${selectedWorker.empNo} — ${selectedWorker.name}`
+      : "Employee";
+    const kpis = [
+      `Days Present ${daysPresent}`,
+      `Working Hrs ${totalWorkMins > 0 ? formatHours(totalWorkMins) : "-"}`,
+      `Production Hrs ${totalProdMins > 0 ? formatHours(totalProdMins) : "-"}`,
+      `Avg Efficiency ${avgEff !== null ? `${avgEff}%` : "—"}`,
+      `Total OT ${totalOT > 0 ? formatHours(totalOT) : "-"}`,
+    ].join(" · ");
+    const columns: PrintColumn[] = [
+      { header: "Date", value: (r) => formatDateDMY((r as ItemRow).date) },
+      { header: "Product / Item", value: (r) => { const row = r as ItemRow; return row.wipLabel || row.productCode; } },
+      { header: "Completion Date", value: (r) => { const d = (r as ItemRow).completedDate; return d ? formatDateDMY(d) : "—"; } },
+      { header: "Department", value: (r) => (r as ItemRow).deptCode },
+      { header: "Qty", align: "center", value: (r) => { const q = (r as ItemRow).qty; return q && q > 0 ? q : "—"; } },
+      { header: "Total JC Time", align: "right", value: (r) => formatHours((r as ItemRow).minutes) },
+      { header: "Status", value: (r) => (r as ItemRow).status },
+    ];
+    printReport({
+      title: "Employee Performance",
+      subtitle: empLabel,
+      filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${kpis}`,
+      columns,
+      rows: itemRows,
+    });
+  }, [selectedWorker, daysPresent, totalWorkMins, totalProdMins, avgEff, totalOT, dateFrom, dateTo, itemRows]);
+
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -4616,6 +4776,9 @@ function EmployeeDetailTab({
                 className="w-36 h-8 text-xs"
               />
             </div>
+            <Button variant="outline" size="sm" onClick={handlePrint} className="ml-auto" title="Print this employee's KPI summary and daily breakdown for the selected date range">
+              <Printer className="h-4 w-4 mr-1" /> Print Report
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -5399,11 +5562,14 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   // absence: proration = Basic − Absence − (Gross − OT − allowances). Zero for a
   // full-month worker. With it, every row reads Basic − Absence − Part-month +
   // OT = Gross, and the totals tie out exactly (display only — no pay math here).
-  const prorationSenOf = (r: PayslipData) =>
-    Math.max(
-      0,
-      r.basicSalary - (r.absenceDeductionSen || 0) - (r.grossPay - r.totalOT - (r.allowances || 0)),
-    );
+  const prorationSenOf = useCallback(
+    (r: PayslipData) =>
+      Math.max(
+        0,
+        r.basicSalary - (r.absenceDeductionSen || 0) - (r.grossPay - r.totalOT - (r.allowances || 0)),
+      ),
+    [],
+  );
   const totalProrationSen = useMemo(
     () =>
       payslipData.reduce(
@@ -5418,10 +5584,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     [payslipData],
   );
 
-  const months = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-  ];
+  const months = MONTH_NAMES;
 
   const getStatusStyle = (status: string) => {
     switch (status) {
@@ -5488,6 +5651,38 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   };
 
   const fmtSen = (sen: number) => `RM ${(sen / 100).toFixed(2)}`;
+
+  // Print Report — mirrors the on-screen payroll columns (Employee, Basic,
+  // Days, Absence, Part-month, OT hours, OT Amt, Gross, statutory, Net Pay,
+  // Status) for the selected period. Estimate vs finalised is noted on the
+  // filter line so a printed estimate is never mistaken for an approved run.
+  const handlePrint = useCallback(() => {
+    const columns: PrintColumn[] = [
+      { header: "Employee", value: (r) => { const p = r as PayslipData; return `${p.employeeNo} — ${p.employeeName} (${p.departmentCode.replace(/_/g, " ")})`; } },
+      { header: "Basic (RM)", align: "right", value: (r) => formatCurrency((r as PayslipData).basicSalary) },
+      { header: "Days", align: "center", value: (r) => (r as PayslipData).workingDays },
+      { header: "Absence", align: "right", value: (r) => { const p = r as PayslipData; return p.absenceDeductionSen > 0 ? `−${formatCurrency(p.absenceDeductionSen)} (${p.absentDays}d)` : "-"; } },
+      { header: "Part-month", align: "right", value: (r) => { const v = prorationSenOf(r as PayslipData); return v > 1 ? `−${formatCurrency(v)}` : "-"; } },
+      { header: "OT Wk", align: "right", value: (r) => `${(r as PayslipData).otWeekdayHours}h` },
+      { header: "OT Sun", align: "right", value: (r) => { const h = (r as PayslipData).otSundayHours; return h > 0 ? `${h}h` : "-"; } },
+      { header: "OT PH", align: "right", value: (r) => { const h = (r as PayslipData).otPHHours; return h > 0 ? `${h}h` : "-"; } },
+      { header: "OT Amt", align: "right", value: (r) => formatCurrency((r as PayslipData).totalOT) },
+      { header: "Gross", align: "right", value: (r) => formatCurrency((r as PayslipData).grossPay) },
+      { header: "EPF EE", align: "right", value: (r) => formatCurrency((r as PayslipData).epfEmployee) },
+      { header: "EPF ER", align: "right", value: (r) => formatCurrency((r as PayslipData).epfEmployer) },
+      { header: "SOCSO", align: "right", value: (r) => formatCurrency((r as PayslipData).socsoEmployee) },
+      { header: "EIS", align: "right", value: (r) => formatCurrency((r as PayslipData).eisEmployee) },
+      { header: "PCB", align: "right", value: (r) => { const p = r as PayslipData; return p.pcb > 0 ? formatCurrency(p.pcb) : "-"; } },
+      { header: "Net Pay", align: "right", value: (r) => formatCurrency((r as PayslipData).netPay) },
+      { header: "Status", value: (r) => (r as PayslipData).status },
+    ];
+    printReport({
+      title: "Payroll",
+      filterSummary: `${months[selectedMonth - 1]} ${selectedYear}${isProjected ? " · Estimate (month in progress)" : ""}`,
+      columns,
+      rows: payslipData,
+    });
+  }, [payslipData, isProjected, selectedMonth, selectedYear, months, prorationSenOf]);
 
   return (
     <div className="space-y-4">
@@ -5585,6 +5780,11 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                 <Button variant="outline" onClick={exportCSV}>
                   <Download className="h-4 w-4" />
                   Export CSV
+                </Button>
+              )}
+              {payslipData.length > 0 && (
+                <Button variant="outline" size="sm" onClick={handlePrint} title="Print the payroll table for the selected period">
+                  <Printer className="h-4 w-4 mr-1" /> Print Report
                 </Button>
               )}
             </div>
@@ -7221,6 +7421,38 @@ function LaborCostTab({
 
   const loading = entriesLoading || plLoading;
 
+  // Print Report — prints the Production Breakdown rows (the headline view) for
+  // the selected period + category, mirroring its columns (Department,
+  // Category, Hours, Labor Cost, Category Revenue, Category Cost / Revenue).
+  const handlePrint = useCallback(() => {
+    const prodRows = rows.filter((r) => r.isProduction);
+    const columns: PrintColumn[] = [
+      { header: "Department", value: (r) => (r as LaborCostRow).departmentName },
+      { header: "Category", value: (r) => { const c = (r as LaborCostRow).category; return c ? c[0] + c.slice(1).toLowerCase() : "—"; } },
+      { header: "Hours", align: "right", value: (r) => `${(r as LaborCostRow).hours.toFixed(1)}h` },
+      { header: "Labor Cost", align: "right", value: (r) => formatCurrency((r as LaborCostRow).laborCostSen) },
+      { header: "Category Revenue", align: "right", value: (r) => { const row = r as LaborCostRow; return row.category ? formatCurrency(row.revenueSen) : "n/a"; } },
+      {
+        header: "Category Cost / Revenue",
+        align: "right",
+        value: (r) => {
+          const row = r as LaborCostRow;
+          if (!row.category || row.revenueSen <= 0) return "—";
+          return `${((row.laborCostSen / row.revenueSen) * 100).toFixed(1)}%`;
+        },
+      },
+    ];
+    const catLabel = categoryFilter
+      ? categoryFilter[0] + categoryFilter.slice(1).toLowerCase()
+      : "All categories";
+    printReport({
+      title: "Labor Cost vs Revenue",
+      filterSummary: `${dateRangeLabel(from, to)} · ${catLabel}`,
+      columns,
+      rows: prodRows,
+    });
+  }, [rows, categoryFilter, from, to]);
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -7267,6 +7499,9 @@ function LaborCostTab({
               <option value="BEDFRAME">Bedframe</option>
               <option value="ACCESSORY">Accessory</option>
             </select>
+            <Button variant="outline" size="sm" onClick={handlePrint} title="Print the production labor breakdown for the selected period">
+              <Printer className="h-4 w-4 mr-1" /> Print Report
+            </Button>
           </div>
         </div>
       </CardHeader>

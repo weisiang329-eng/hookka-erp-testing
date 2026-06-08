@@ -3670,6 +3670,14 @@ type DepartmentLaborRow = {
   // hours not yet logged). laborInclEpfSen + underRecordedSen = estCostSen.
   laborInclEpfSen: number;
   underRecordedSen: number;
+  // Logged production labour cost split by product category (Sofa / Bedframe /
+  // Accessory). These are the same per-(dept,category) figure the Labor Cost
+  // tab's Production Breakdown shows; they sum to a bit LESS than laborInclEpfSen
+  // because EPF/SOCSO/EIS isn't tied to a category. catTotalSen = the three summed.
+  sofaSen: number;
+  bedframeSen: number;
+  accessorySen: number;
+  catTotalSen: number;
 };
 
 function DepartmentLaborTab({
@@ -3857,7 +3865,7 @@ function DepartmentLaborTab({
       segsByWorkerDate.set(k, arr);
     }
 
-    const acc = new Map<string, { totalHours: number; workerIds: Set<string>; costSen: number }>();
+    const acc = new Map<string, { totalHours: number; workerIds: Set<string>; costSen: number; catSen: { SOFA: number; BEDFRAME: number; ACCESSORY: number } }>();
     // Per-worker logged-hours value (across all their depts) — drives each
     // worker's fully-loaded extra below.
     const loggedByWorker = new Map<string, number>();
@@ -3893,12 +3901,18 @@ function DepartmentLaborTab({
         if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
         let cell = acc.get(e.departmentCode);
         if (!cell) {
-          cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
+          cell = { totalHours: 0, workerIds: new Set(), costSen: 0, catSen: { SOFA: 0, BEDFRAME: 0, ACCESSORY: 0 } };
           acc.set(e.departmentCode, cell);
         }
         cell.totalHours += hours;
         cell.workerIds.add(workerId);
         cell.costSen += cost;
+        // Split the same logged production cost by product category so the
+        // table can show Sofa / Bedframe / Accessory columns (entries with no
+        // category — non-production depts — aren't attributed to any of them).
+        if (cat === "SOFA" || cat === "BEDFRAME" || cat === "ACCESSORY") {
+          cell.catSen[cat] += cost;
+        }
         loggedByWorker.set(workerId, (loggedByWorker.get(workerId) ?? 0) + cost);
       }
     }
@@ -3934,9 +3948,11 @@ function DepartmentLaborTab({
         if (extra !== 0) {
           let cell = acc.get(deptCode);
           if (!cell) {
-            cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
+            cell = { totalHours: 0, workerIds: new Set(), costSen: 0, catSen: { SOFA: 0, BEDFRAME: 0, ACCESSORY: 0 } };
             acc.set(deptCode, cell);
           }
+          // The fully-loaded extra (gross + employer statutory − logged) is NOT
+          // category-specific, so it lifts costSen only — never catSen.
           cell.costSen += extra;
           cell.workerIds.add(wid);
         }
@@ -3971,6 +3987,9 @@ function DepartmentLaborTab({
       const cell = acc.get(d.code);
       const estCostSen = roundSen(cell?.costSen ?? 0);
       const underRecordedSen = roundSen(underByDept.get(d.code) ?? 0);
+      const sofaSen = roundSen(cell?.catSen.SOFA ?? 0);
+      const bedframeSen = roundSen(cell?.catSen.BEDFRAME ?? 0);
+      const accessorySen = roundSen(cell?.catSen.ACCESSORY ?? 0);
       return {
         deptCode: d.code,
         deptName: d.shortName || d.name,
@@ -3980,6 +3999,10 @@ function DepartmentLaborTab({
         estCostSen,
         underRecordedSen,
         laborInclEpfSen: estCostSen - underRecordedSen,
+        sofaSen,
+        bedframeSen,
+        accessorySen,
+        catTotalSen: sofaSen + bedframeSen + accessorySen,
       };
     });
     // Any cost parked on a dept not in the canonical list (e.g. an unassigned
@@ -3989,6 +4012,9 @@ function DepartmentLaborTab({
       .map(([code, cell]) => {
         const estCostSen = roundSen(cell.costSen);
         const underRecordedSen = roundSen(underByDept.get(code) ?? 0);
+        const sofaSen = roundSen(cell.catSen.SOFA);
+        const bedframeSen = roundSen(cell.catSen.BEDFRAME);
+        const accessorySen = roundSen(cell.catSen.ACCESSORY);
         return {
           deptCode: code,
           deptName: code || "Unassigned",
@@ -3998,6 +4024,10 @@ function DepartmentLaborTab({
           estCostSen,
           underRecordedSen,
           laborInclEpfSen: estCostSen - underRecordedSen,
+          sofaSen,
+          bedframeSen,
+          accessorySen,
+          catTotalSen: sofaSen + bedframeSen + accessorySen,
         };
       });
     const allRows = [...orderedRows, ...extraRows];
@@ -4096,6 +4126,54 @@ function DepartmentLaborTab({
         ),
     },
     {
+      key: "sofaSen",
+      label: "Sofa",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.sofaSen > 0 ? (
+          <span className="tabular-nums text-[#4B5563]">{formatRM(row.sofaSen)}</span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "bedframeSen",
+      label: "Bedframe",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.bedframeSen > 0 ? (
+          <span className="tabular-nums text-[#4B5563]">{formatRM(row.bedframeSen)}</span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "accessorySen",
+      label: "Accessory",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.accessorySen > 0 ? (
+          <span className="tabular-nums text-[#4B5563]">{formatRM(row.accessorySen)}</span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "catTotalSen",
+      label: "Category Total",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.catTotalSen > 0 ? (
+          <span className="font-medium tabular-nums text-[#1F1D1B]">{formatRM(row.catTotalSen)}</span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
       key: "laborInclEpfSen",
       label: "Labor (incl. EPF)",
       align: "right",
@@ -4144,15 +4222,24 @@ function DepartmentLaborTab({
     },
   ];
 
+  // The DataGrid sorts/filters/searches its own copy; mirror that result back
+  // here (via <DataGrid onFilteredDataChange>) so "Print Report" prints EXACTLY
+  // what's on screen — the current sort + filter — not the unsorted source rows.
+  const [printRows, setPrintRows] = useState<DepartmentLaborRow[]>([]);
+
   // Print Report — mirrors the on-screen department-labor columns for the
-  // selected period + category. The split Labor / Under-recorded columns print
-  // only when they're visible on screen (a full finished month, no category
-  // filter), exactly as the grid shows them.
+  // selected period + category, including the Sofa / Bedframe / Accessory split.
+  // The Labor (incl. EPF) / Under-recorded columns print only when they're
+  // visible on screen (a full finished month, no category filter).
   const handlePrint = useCallback(() => {
     const columns: PrintColumn[] = [
       { header: "Department", value: (r) => { const row = r as DepartmentLaborRow; return `${row.deptName} (${row.isProduction ? "Prod" : "Non-prod"})`; } },
       { header: "Total Hours", align: "right", value: (r) => { const h = (r as DepartmentLaborRow).totalHours; return h > 0 ? `${h.toFixed(1)}h` : "—"; } },
       { header: "Workers", align: "center", value: (r) => { const n = (r as DepartmentLaborRow).workerCount; return n > 0 ? n : "—"; } },
+      { header: "Sofa", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).sofaSen; return v > 0 ? formatRM(v) : "—"; } },
+      { header: "Bedframe", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).bedframeSen; return v > 0 ? formatRM(v) : "—"; } },
+      { header: "Accessory", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).accessorySen; return v > 0 ? formatRM(v) : "—"; } },
+      { header: "Category Total", align: "right", value: (r) => { const v = (r as DepartmentLaborRow).catTotalSen; return v > 0 ? formatRM(v) : "—"; } },
     ];
     if (splitVisible) {
       columns.push(
@@ -4168,9 +4255,12 @@ function DepartmentLaborTab({
       title: "Department Labor",
       filterSummary: `${dateRangeLabel(dateFrom, dateTo)} · ${catLabel}`,
       columns,
-      rows,
+      // Print the grid's CURRENT sorted + filtered rows (WYSIWYG); fall back to
+      // the source rows before the grid has echoed them.
+      rows: printRows.length ? printRows : rows,
+      orientation: "landscape",
     });
-  }, [rows, splitVisible, categoryFilter, dateFrom, dateTo]);
+  }, [rows, printRows, splitVisible, categoryFilter, dateFrom, dateTo]);
 
   return (
     <Card>
@@ -4283,6 +4373,7 @@ function DepartmentLaborTab({
           data={rows}
           keyField="deptCode"
           gridId="department-labor"
+          onFilteredDataChange={setPrintRows}
           emptyMessage={loading ? "Loading..." : "No working hours in the selected date range."}
         />
         {/* TOTAL row mirrors the top metric cards — added 2026-05-06 per

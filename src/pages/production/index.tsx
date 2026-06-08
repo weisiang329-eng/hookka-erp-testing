@@ -1874,11 +1874,15 @@ export default function ProductionPage({
   const sendOneDraft = useCallback(
     async (
       d: Pick<DraftEntry, "poId" | "jcId" | "patch">,
-    ): Promise<{ success: boolean; error?: string; attemptsUsed: number }> => {
+    ): Promise<{ success: boolean; error?: string; attemptsUsed: number; permanent: boolean }> => {
       const MAX_ATTEMPTS = 3;
       const RETRY_DELAYS_MS = [500, 1500];
       let lastError = "";
       let attemptsUsed = 0;
+      // `permanent` = the server DEFINITIVELY rejected it (a 4xx that isn't
+      // 408/429). false = transient (network down / 5xx / timeout) — the caller
+      // KEEPS the value and re-queues instead of erasing it (BUG-2026-06-09).
+      let permanent = false;
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         attemptsUsed = attempt;
         let retryable = true;
@@ -1888,7 +1892,7 @@ export default function ProductionPage({
             headers: csrfHeaders(),
             body: JSON.stringify({ jobCardId: d.jcId, ...d.patch }),
           });
-          if (res.ok) return { success: true, attemptsUsed };
+          if (res.ok) return { success: true, attemptsUsed, permanent: false };
           let msg = `HTTP ${res.status}`;
           try {
             const body = (await res.json()) as { error?: string } | null;
@@ -1903,15 +1907,22 @@ export default function ProductionPage({
         } catch (err) {
           lastError = err instanceof Error ? err.message : "network error";
         }
-        if (!retryable) break;
+        if (!retryable) {
+          permanent = true;
+          break;
+        }
         if (attempt < MAX_ATTEMPTS) {
           await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
         }
       }
-      return { success: false, error: lastError, attemptsUsed };
+      return { success: false, error: lastError, attemptsUsed, permanent };
     },
     [],
   );
+
+  // Latest flushDrafts — lets the transient-failure retry timer re-flush
+  // without making flushDrafts depend on itself. Assigned after the callback.
+  const flushDraftsRef = useRef<(() => Promise<void>) | null>(null);
 
   // flushDrafts — Phase 2.5-B: try the bulk endpoint first (1 HTTP for all
   // drafts in the buffer); fall back to per-draft sendOneDraft on bulk
@@ -1938,7 +1949,7 @@ export default function ProductionPage({
     // (3 attempts) that Phase 2.5-A introduced.
     type DraftResult = {
       draft: (typeof drafts)[number];
-      result: { success: boolean; error?: string; attemptsUsed: number };
+      result: { success: boolean; error?: string; attemptsUsed: number; permanent?: boolean };
     };
     let results: DraftResult[] = [];
     let bulkOK = false;
@@ -1981,35 +1992,58 @@ export default function ProductionPage({
     }
     for (const d of drafts) pendingJcPatchesRef.current.delete(d.jcId);
 
-    // Apply per-draft outcomes. Successful drafts: optimistic state already
-    // reflects the desired value, just flash green. Failed drafts: roll the
-    // affected JC's fields back to prevState AND push to the failure modal.
-    setOrders((prev) => {
-      let next = prev;
-      for (const { draft, result } of results) {
-        if (result.success) continue;
-        next = next.map((o) =>
-          o.id !== draft.poId
-            ? o
-            : {
-                ...o,
-                jobCards: o.jobCards.map((j) =>
-                  j.id !== draft.jcId ? j : { ...j, ...draft.prevState },
-                ),
-              },
-        );
-      }
-      return next;
-    });
+    // Split failures (BUG-2026-06-09 "laggy network erased my entry"):
+    //   • permanent — the server DEFINITIVELY rejected it (4xx, not 408/429):
+    //     roll the cell back, the value is genuinely invalid/unauthorised.
+    //   • transient — network down / 5xx / timeout (`permanent === false`):
+    //     KEEP the operator's value on screen and re-queue it, so a slow line
+    //     never silently throws away a typed completion/PIC. The old code rolled
+    //     back EVERY failure. Bulk per-row failures carry no `permanent` flag →
+    //     they are server-side verify-readback rejects → treated as permanent.
+    const transientFails = results.filter(
+      (r) => !r.result.success && r.result.permanent === false,
+    );
+    const permanentFails = results.filter(
+      (r) => !r.result.success && r.result.permanent !== false,
+    );
 
-    // Per-draft outcome: success → flash green + optional success toast;
-    // failure → flash red + toast.error with the JC dept and error message.
-    // Optimistic state was already rolled back in the setOrders splice above,
-    // so the operator sees the cell revert + the toast at the same time.
-    // BUG-2026-05-12 simplification: PatchFailureModal replaced with toast —
-    // less state, less code, same operator signal (cell reverts visibly +
-    // toast appears). Trade-off: lost the persistent "Retry" button; operator
-    // has to re-click the cell to retry. Acceptable for a small-shop workflow.
+    // Roll back ONLY the permanent failures.
+    if (permanentFails.length > 0) {
+      setOrders((prev) => {
+        let next = prev;
+        for (const { draft } of permanentFails) {
+          next = next.map((o) =>
+            o.id !== draft.poId
+              ? o
+              : {
+                  ...o,
+                  jobCards: o.jobCards.map((j) =>
+                    j.id !== draft.jcId ? j : { ...j, ...draft.prevState },
+                  ),
+                },
+          );
+        }
+        return next;
+      });
+    }
+
+    // Transient failures: put the draft back in the buffer (value stays on
+    // screen) and re-arm a retry so it saves itself when the line recovers.
+    if (transientFails.length > 0) {
+      for (const { draft } of transientFails) {
+        if (!draftsRef.current.has(draft.jcId)) {
+          draftsRef.current.set(draft.jcId, draft);
+        }
+      }
+      setUnsavedCount(draftsRef.current.size);
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = setTimeout(() => {
+        void flushDraftsRef.current?.();
+      }, 5000);
+    }
+
+    // Outcomes: success → pin + green; transient → amber pulse (kept, retrying,
+    // no per-draft toast — one shared notice below); permanent → red + revert.
     for (const { draft, result } of results) {
       if (result.success) {
         // Pin this just-written value over the (briefly stale) cached snapshot
@@ -2020,6 +2054,9 @@ export default function ProductionPage({
         });
         if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "ok");
         if (draft.feedback?.successMsg) toast.success(draft.feedback.successMsg);
+      } else if (result.permanent === false) {
+        // Transient — value kept + re-queued. Amber pulse, no per-draft toast.
+        if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "err");
       } else {
         if (draft.feedback?.flashKey) flashCell(draft.feedback.flashKey, "err");
         const label = draft.deptCode ? `${draft.deptCode} JC` : "Job card";
@@ -2031,8 +2068,20 @@ export default function ProductionPage({
         });
       }
     }
+
+    // One shared "kept + retrying" notice for transient failures (no spam when
+    // several cells are in flight).
+    if (transientFails.length > 0) {
+      const n = transientFails.length;
+      toast.warning(
+        `Network slow — your ${n} change${n > 1 ? "s are" : " is"} kept and will save automatically when the connection comes back.`,
+      );
+    }
     setSavingNow(false);
   }, [sendOneDraft, flashCell, toast]);
+
+  // Keep the retry-timer's reference to flushDrafts current (see flushDraftsRef).
+  flushDraftsRef.current = flushDrafts;
 
   // saveAllNow — manual "Save All" button. Cancels the debounce and flushes
   // immediately. Also used by the failure modal's retry helpers to push

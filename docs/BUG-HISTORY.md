@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-004 — Laggy network erased a typed completion/PIC instead of keeping it (production save rolled back on transient failure)
+
+**Status:** 🟢 Fixed in code (`production/index.tsx`); typecheck + lint + 586 tests green. Pending merge→deploy + live verify (network-failure path is code+test-verified; a live offline simulation needs driving the matrix — offered to owner).
+**Category:** production-orders
+
+Symptom (Wei Siang's "网线卡的时候 completion+PIC 还是会不见"): on a slow / dropping connection, a typed completion date / PIC showed briefly, then the cell reverted (with a "save failed … cell reverted" toast) — the operator had to re-type. Not silently lost (a toast showed), but the VALUE was erased on a transient hiccup.
+
+Root cause: `flushDrafts` retried a failed save 3× over ~2s, then on ANY remaining failure rolled the cell back to its pre-edit value — without distinguishing a DEFINITIVE server rejection (4xx) from a TRANSIENT one (network down / 5xx / timeout). A 2-second blip erased the entry.
+
+Fix: `sendOneDraft` now reports `permanent` (a 4xx that isn't 408/429) vs transient. `flushDrafts` splits them: permanent → roll back + toast (unchanged); transient → KEEP the value on screen, re-queue the draft, show one shared "Network slow — your change is kept and will save automatically when the connection comes back" notice, and re-arm a 5s retry (via a `flushDraftsRef` so the callback doesn't depend on itself). The retry loops until success or a permanent reject. Success / 4xx behaviour is unchanged; only the transient path changed (worst case is now keep-and-retry, not erase). Bulk per-row failures (no `permanent` flag) are server-side verify-readback rejects → still roll back.
+
+---
+
 ## BUG-2026-06-09-003 — Delivery "Generate Invoice" failed silently: empty catch closed the dialog with no error
 
 **Status:** 🟢 Fixed in code (`delivery/index.tsx`, `feat/sticker-scan-per-piece-overhaul`); typecheck + lint + 586 tests green. Pending merge→deploy + live verify.

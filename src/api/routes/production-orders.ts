@@ -54,6 +54,7 @@ import {
 // Google Sheets sync (fire-and-forget). Helper silently no-ops when
 // GOOGLE_SHEETS_SA_KEY is missing — see docs/SHEETS-SYNC.md.
 import { syncJobCardToSheet } from "../lib/sheets-sync";
+import { planCompletionPieceStamps } from "../lib/completion-piece-stamp";
 // Per-request leadtime map → expectedDueDate computation. The Production
 // overview cell flips its text colour to teal when a JC's persisted
 // dueDate doesn't match what the *current* leadtime config says it
@@ -3931,6 +3932,72 @@ async function applyPoUpdate(
         )
         .bind(updated.id)
         .run();
+    }
+
+    // BUG-2026-06-08-008 (scan ↔ production sync, the SET mirror of the CLEAR
+    // branch above): when the operator SETS a completion on the production page
+    // — the card transitions from not-completed to completed and a PIC is
+    // recorded — ALSO stamp the underlying piece_pics so the worker phone sees
+    // the card as done. The phone's "already done" pre-check AND the backend
+    // scan-complete no-op both key off piece_pics (pic1Id IS NOT NULL), NOT the
+    // card status, so without this a dashboard-completed card still lets a
+    // worker re-scan + re-Mark-Complete (re-dating it / splitting the credit).
+    // We fill ONLY un-scanned pieces with the card's PIC and leave real worker
+    // stamps intact, so efficiency attribution is unchanged (it already unions
+    // the JC-level PIC). Uses `updated.completedDate` (not body.completedDate)
+    // so a status→COMPLETED that auto-set the date above also triggers it.
+    if (updated.completedDate && !jcWasCompleted && updated.pic1Id) {
+      const existingSlots = await db
+        .prepare("SELECT pieceNo, pic1Id FROM piece_pics WHERE jobCardId = ?")
+        .bind(updated.id)
+        .all<{ pieceNo: number; pic1Id: string | null }>();
+      const plan = planCompletionPieceStamps(
+        updated.wipQty,
+        existingSlots.results ?? [],
+      );
+      const pieceStmts: D1PreparedStatement[] = [];
+      for (const pieceNo of plan.insert) {
+        pieceStmts.push(
+          db
+            .prepare(
+              `INSERT INTO piece_pics
+                 (jobCardId, pieceNo, pic1Id, pic1Name, pic2Id, pic2Name,
+                  completedAt, lastScanAt, boundStickerKey)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+            )
+            .bind(
+              updated.id,
+              pieceNo,
+              updated.pic1Id ?? null,
+              updated.pic1Name ?? "",
+              updated.pic2Id ?? null,
+              updated.pic2Name ?? "",
+              updated.completedDate,
+              updated.completedDate,
+            ),
+        );
+      }
+      for (const pieceNo of plan.fill) {
+        pieceStmts.push(
+          db
+            .prepare(
+              `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, pic2Id = ?,
+                 pic2Name = ?, completedAt = ?, lastScanAt = ?
+               WHERE jobCardId = ? AND pieceNo = ? AND pic1Id IS NULL`,
+            )
+            .bind(
+              updated.pic1Id ?? null,
+              updated.pic1Name ?? "",
+              updated.pic2Id ?? null,
+              updated.pic2Name ?? "",
+              updated.completedDate,
+              updated.completedDate,
+              updated.id,
+              pieceNo,
+            ),
+        );
+      }
+      if (pieceStmts.length > 0) await db.batch(pieceStmts);
     }
 
     // Google Sheets sync — fire-and-forget. Push the freshly-updated JC

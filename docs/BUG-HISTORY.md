@@ -34,9 +34,26 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-08-008 — Office completion let the worker phone re-scan + re-complete a finished card (completion didn't reach piece_pics — the SET mirror of -002)
+
+**Status:** 🟢 Fixed in code (on `feat/sticker-scan-per-piece-overhaul`); typecheck + lint + 569 tests (10 new) green. Approved by Wei Siang ("上", Approach A). Deploy + live-verify next.
+**Category:** production-orders
+
+Symptom (Wei Siang): after the office sets a completion date + PIC on the production dashboard, the worker phone STILL treats the card as scannable — "扫描了显示已 Complete,可是还能扫描并 Mark as Complete" — and a re-scan re-dates the card / splits the credit.
+
+Root cause: worker-scan completion is TWO-LAYER — `piece_pics` holds one scan stamp per physical piece, and BOTH the phone's "already done" pre-check (`worker.ts` scan-lookup → `scan.tsx`) AND the backend scan-complete no-op key off those stamps (`pic1Id IS NOT NULL`), NOT the card's `status`/`completedDate`. A dashboard completion (`applyPoUpdate`) writes `job_cards` but left `piece_pics` empty, so both gates stayed blind → the phone enabled Complete and the backend stamped a fresh scan on an already-finished card. This is the exact SET-direction twin of BUG-2026-06-08-002 (which made the dashboard CLEAR wipe piece_pics).
+
+Fix (Approach A, owner-approved): in `applyPoUpdate`, on the complete TRANSITION (`updated.completedDate && !jcWasCompleted && updated.pic1Id` — uses `updated.completedDate` so a `status→COMPLETED` that auto-sets the date also fires), stamp the card's PIC onto `piece_pics`. A new pure helper `planCompletionPieceStamps` (`src/api/lib/completion-piece-stamp.ts`) decides per physical piece: INSERT a fresh stamped slot (no row yet), FILL an existing un-scanned slot (pic1Id empty), or SKIP a slot a worker already scanned (preserve real attribution). This also covers the partial-scan case `ensurePiecePicsForJc` can't (it skips creation when ANY slot already exists). Worker scans are untouched (separate scan-complete handlers).
+
+Why attribution/pay don't move: efficiency-report.ts + department-performance.ts credit the UNION of the JC-level PIC and the piece_pics PICs; we stamp the SAME PIC already on the JC, so the worker set is identical → no efficiency/dept number changes. Pay is the full-monthly model (no piece bonus) and never reads piece_pics. Only visible side-effect: a worker's phone "pieces done today" tally counts actual pieces (N) instead of 1 for a multi-piece office-completed card — display only, not money.
+
+Verified: 10 new tests (`tests/completion-piece-stamp.test.mjs`) pin the planner branches (empty / partial / fully-scanned / mixed / clamp). Full suite 569 (568 pass / 1 skip / 0 fail), typecheck + lint clean.
+
+---
+
 ## BUG-2026-06-08-007 — Production completion/PIC "saved then gone hours later": snapshot freshness probe compared mixed timestamp formats lexically, not chronologically
 
-**Status:** 🟢 Fixed — shipped to `main` (commit `9e4d31d7`, on `feat/sticker-scan-per-piece-overhaul`) + deployed to prod; 559 tests (7 new regression) + typecheck + lint green; live-verified `/api/production-orders` on prod (200, 1324 rows, freshly recomputed) and the Production page Load-all renders 1233 real orders. Live WRITE→READ demo on a real order is pending Wei Siang's go (won't mutate real production data unprompted).
+**Status:** 🟢 Fixed — shipped to `main` (commit `9e4d31d7`, on `feat/sticker-scan-per-piece-overhaul`) + deployed to prod; 559 tests (7 new regression) + typecheck + lint green; live-verified `/api/production-orders` on prod (200, 1324 rows, freshly recomputed) and the Production page Load-all renders 1233 real orders. **Live WRITE→READ verified on prod 2026-06-08**: a temp marker written to an empty field on `SO-2606-079-01` propagated to BOTH the full and the operator-facing slim (`?fields=minimal`) list views within one revalidate cycle (≈1–3 min, NOT hours), then reverted — confirmed at source. The transient single stale read is serve-stale-then-revalidate (SWR) by design; this fix is what makes that revalidation actually fire (the probe previously never flagged the snapshot stale, so it served stale for hours).
 **Category:** infrastructure
 
 Symptom (Wei Siang): enter a completion date + PIC on the Production dashboard, system shows it saved, then "3–4 hours later" it's gone. The data was never lost — it was always in the DB; the page kept serving a stale cached copy.

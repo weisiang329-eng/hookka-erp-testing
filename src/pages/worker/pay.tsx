@@ -1,15 +1,15 @@
 // ============================================================
-// /worker/pay — Salary view + attendance audit trail (mobile)
+// /worker/pay — Salary view (mobile)
 //
-// This page answers two money-related questions for the worker:
-//   1. How much am I earning this month? (estimate card)
-//   2. How did I earn it? (clock-in/out + OT records for any date
-//      range, so they can cross-check against the estimate or any
-//      past payslip)
+// Answers ONE question for the worker: how much am I earning this month, and
+// how is that number built up? Pick a MONTH (the in-progress month shows a live
+// estimate; past months show the finalised payslip) and every line is itemised
+// — full salary, absence (which days), overtime (which days), allowances,
+// statutory deductions — so the worker can check exactly how the figure is
+// reached.
 //
-// Performance-oriented data (Production time, Efficiency, completed
-// products) stays on /worker — this page is money + raw attendance
-// only.
+// No date-range picker here: salary is viewed one whole month at a time.
+// Attendance / efficiency by date range lives on /worker (Home).
 // ============================================================
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
@@ -24,50 +24,23 @@ function rm(sen: number | undefined): string {
     maximumFractionDigits: 2,
   })}`;
 }
-function mins2hrs(mins: number): string {
-  return (mins / 60).toFixed(1);
-}
-function ymd(d: Date): string {
-  // Local-tz YYYY-MM-DD. toISOString() would convert to UTC, which for
-  // Malaysia (UTC+8) shifts midnight-local back to the previous day —
-  // "this month" preset would land on 30 Apr instead of 1 May.
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-function addDays(base: Date, days: number): Date {
-  const d = new Date(base);
-  d.setDate(d.getDate() + days);
-  return d;
-}
 function fmtDay(iso: string): string {
   if (!iso) return "-";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short" });
 }
+const MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+function monthLabel(period: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  if (!m) return period;
+  return `${MONTH_NAMES[Number(m[2]) - 1] ?? m[2]} ${m[1]}`;
+}
 
 // ---------- types ----------
-type AttendanceRow = {
-  date: string;
-  clockIn: string | null;
-  clockOut: string | null;
-  workingMinutes: number;
-  productionTimeMinutes: number;
-  efficiencyPct: number;
-  overtimeMinutes: number;
-  status: string;
-};
-type HistoryData = {
-  range: { from: string; to: string };
-  attendance: AttendanceRow[];
-  totals: {
-    days: number;
-    workedMinutes: number;
-    overtimeMinutes: number;
-  };
-};
 type PayData = {
   current: {
     period: string;
@@ -99,59 +72,24 @@ type PayData = {
     taxSen?: number;
   }>;
 };
+type PayslipRow = PayData["history"][number];
+type Translate = (key: string) => string;
 
-type WorkerPayResponse = { success: true; data: PayData } | { success: false; error?: string };
-type WorkerHistoryResponse = { success: true; data: HistoryData } | { success: false; error?: string };
+type WorkerPayResponse =
+  | { success: true; data: PayData }
+  | { success: false; error?: string };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object";
 }
-
 function asString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
-
 function asNumber(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-function asAttendanceRow(v: unknown): AttendanceRow | null {
-  if (!isRecord(v)) return null;
-  const date = asString(v.date);
-  const workingMinutes = asNumber(v.workingMinutes);
-  const productionTimeMinutes = asNumber(v.productionTimeMinutes);
-  const efficiencyPct = asNumber(v.efficiencyPct);
-  const overtimeMinutes = asNumber(v.overtimeMinutes);
-  const status = asString(v.status);
-  if (!date || workingMinutes === null || productionTimeMinutes === null || efficiencyPct === null || overtimeMinutes === null || !status) return null;
-  return {
-    date,
-    clockIn: asString(v.clockIn),
-    clockOut: asString(v.clockOut),
-    workingMinutes,
-    productionTimeMinutes,
-    efficiencyPct,
-    overtimeMinutes,
-    status,
-  };
-}
-
-function asHistoryData(v: unknown): HistoryData | null {
-  if (!isRecord(v) || !isRecord(v.range) || !Array.isArray(v.attendance) || !isRecord(v.totals)) return null;
-  const from = asString(v.range.from);
-  const to = asString(v.range.to);
-  const days = asNumber(v.totals.days);
-  const workedMinutes = asNumber(v.totals.workedMinutes);
-  const overtimeMinutes = asNumber(v.totals.overtimeMinutes);
-  if (!from || !to || days === null || workedMinutes === null || overtimeMinutes === null) return null;
-  return {
-    range: { from, to },
-    attendance: v.attendance.map(asAttendanceRow).filter((x): x is AttendanceRow => !!x),
-    totals: { days, workedMinutes, overtimeMinutes },
-  };
-}
-
-function asPayslipRow(v: unknown): PayData["history"][number] | null {
+function asPayslipRow(v: unknown): PayslipRow | null {
   if (!isRecord(v)) return null;
   const id = asString(v.id);
   const period = asString(v.period);
@@ -177,15 +115,14 @@ function asPayData(v: unknown): PayData | null {
   const workedDays = asNumber(v.current.workedDays);
   const absentDays = asNumber(v.current.absentDays) ?? 0;
   const otMinutes = asNumber(v.current.otMinutes);
-  // fullSalarySen / absenceDeductionSen — newer fields; tolerate an older
-  // backend response that predates them by falling back to 0.
+  // fullSalarySen / absenceDeductionSen — tolerate an older backend that
+  // predates them by falling back to 0.
   const fullSalarySen = asNumber(v.current.fullSalarySen) ?? 0;
   const absenceDeductionSen = asNumber(v.current.absenceDeductionSen) ?? 0;
   const basicEarnedSen = asNumber(v.current.basicEarnedSen);
   const otSen = asNumber(v.current.otSen);
   const efficiencyAllowanceSen = asNumber(v.current.efficiencyAllowanceSen) ?? 0;
   const estimatedGrossSen = asNumber(v.current.estimatedGrossSen);
-  // Additive per-day detail — tolerate an older backend that omits them.
   const absentDates = Array.isArray(v.current.absentDates)
     ? v.current.absentDates.filter((x): x is string => typeof x === "string")
     : [];
@@ -198,7 +135,15 @@ function asPayData(v: unknown): PayData | null {
         )
         .filter((x): x is { date: string; hours: number } => !!x)
     : [];
-  if (!period || workedDays === null || otMinutes === null || basicEarnedSen === null || otSen === null || estimatedGrossSen === null) return null;
+  if (
+    !period ||
+    workedDays === null ||
+    otMinutes === null ||
+    basicEarnedSen === null ||
+    otSen === null ||
+    estimatedGrossSen === null
+  )
+    return null;
   return {
     current: {
       period,
@@ -216,7 +161,7 @@ function asPayData(v: unknown): PayData | null {
     },
     history: v.history
       .map(asPayslipRow)
-      .filter((x): x is PayData["history"][number] => !!x),
+      .filter((x): x is PayslipRow => !!x),
   };
 }
 
@@ -230,80 +175,32 @@ function asWorkerPayResponse(v: unknown): WorkerPayResponse | null {
   return null;
 }
 
-function asWorkerHistoryResponse(v: unknown): WorkerHistoryResponse | null {
-  if (!isRecord(v)) return null;
-  if (v.success === true) {
-    const data = asHistoryData(v.data);
-    return data ? { success: true, data } : null;
-  }
-  if (v.success === false) return { success: false, error: asString(v.error) ?? undefined };
-  return null;
-}
-
 // ============================================================
 export default function WorkerPayPage() {
   const t = useT();
   const [pay, setPay] = useState<PayData | null>(null);
-  const [hist, setHist] = useState<HistoryData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [period, setPeriod] = useState<string | null>(null);
 
-  // Attendance range — default to current month (1st → today)
-  const [from, setFrom] = useState<string>(() => {
-    const n = new Date();
-    return ymd(new Date(n.getFullYear(), n.getMonth(), 1));
-  });
-  const [to, setTo] = useState<string>(() => ymd(new Date()));
-
-  // Individual loaders swallow their own errors — a failed /history
-  // must NOT take down the page or block the /payslips response.
   const loadPay = useCallback(async () => {
     try {
       const res = await workerFetch("/api/worker/payslips");
       const j = asWorkerPayResponse(await res.json());
       if (j?.success) setPay(j.data);
     } catch {
-      /* network error — leave pay null, UI will show error card */
-    }
-  }, []);
-
-  const loadHist = useCallback(async (f: string, tto: string) => {
-    try {
-      const res = await workerFetch(
-        `/api/worker/history?from=${encodeURIComponent(f)}&to=${encodeURIComponent(tto)}`,
-      );
-      const j = asWorkerHistoryResponse(await res.json());
-      if (j?.success) setHist(j.data);
-    } catch {
-      /* leave hist null — attendance section just won't render */
+      /* network error — leave pay null, the UI shows the error card */
     }
   }, []);
 
   useEffect(() => {
-    // Wrap in try/finally so a thrown fetch NEVER strands us on the
-    // loading screen — we always release the loading flag.
     (async () => {
       try {
-        await Promise.all([loadPay(), loadHist(from, to)]);
+        await loadPay();
       } finally {
         setLoading(false);
       }
     })();
-  }, [loadPay, loadHist, from, to]);
-
-  function setPreset(kind: "month" | "lastMonth" | "30d") {
-    const now = new Date();
-    if (kind === "month") {
-      setFrom(ymd(new Date(now.getFullYear(), now.getMonth(), 1)));
-      setTo(ymd(now));
-    } else if (kind === "lastMonth") {
-      setFrom(ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1)));
-      setTo(ymd(new Date(now.getFullYear(), now.getMonth(), 0)));
-    } else {
-      setFrom(ymd(addDays(now, -29)));
-      setTo(ymd(now));
-    }
-  }
+  }, [loadPay]);
 
   if (loading) {
     return (
@@ -316,249 +213,143 @@ export default function WorkerPayPage() {
     );
   }
 
-  const otHours = (pay.current.otMinutes / 60).toFixed(1);
-  // Tap-to-reveal detail behind the Absent / OT figures: which days, how many
-  // OT hours. Built from the additive fields the my-pay endpoint now returns.
-  const absentChips = (pay.current.absentDates ?? []).map((d) => ({
+  // Salary is viewed one whole MONTH at a time (no date range — that lives on
+  // Home, which is for efficiency). Options = the in-progress current month
+  // (live estimate) + every finalised payslip, newest first. (Wei Siang
+  // 2026-06-09: "Pay 只能选月份".)
+  const months = Array.from(
+    new Set([pay.current.period, ...pay.history.map((p) => p.period)]),
+  ).sort((a, b) => (a < b ? 1 : -1));
+  const selected = period ?? pay.current.period;
+  const isCurrent = selected === pay.current.period;
+  const slip = pay.history.find((p) => p.period === selected) ?? null;
+
+  return (
+    <div className="space-y-4 pt-2">
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-xl font-bold">{t("pay.title")}</h1>
+        <select
+          aria-label="Month"
+          value={selected}
+          onChange={(e) => setPeriod(e.target.value)}
+          className="h-9 shrink-0 rounded-lg border border-[#D8D2CC] bg-white px-3 text-sm font-semibold tabular-nums text-[#1F1D1B]"
+        >
+          {months.map((p) => (
+            <option key={p} value={p}>
+              {monthLabel(p)}
+              {p === pay.current.period ? " · now" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {isCurrent ? (
+        <CurrentMonthBreakdown current={pay.current} t={t} />
+      ) : slip ? (
+        <FinalisedBreakdown slip={slip} t={t} />
+      ) : (
+        <div className="bg-white rounded-xl p-6 text-center text-sm text-[#8A8680] border border-[#D8D2CC]">
+          —
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Current (in-progress) month — a LIVE estimate. Every line is itemised so the
+// worker can see how the gross is built; Absent / OT rows tap open to the dates.
+function CurrentMonthBreakdown({
+  current: c,
+  t,
+}: {
+  current: PayData["current"];
+  t: Translate;
+}) {
+  const otHours = (c.otMinutes / 60).toFixed(1);
+  const absentChips = (c.absentDates ?? []).map((d) => ({
     key: d,
     text: fmtDay(d),
   }));
-  const otChips = (pay.current.otDays ?? []).map((d) => ({
+  const otChips = (c.otDays ?? []).map((d) => ({
     key: d.date,
     text: `${fmtDay(d.date)} · ${
       Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)
     }h`,
   }));
-
   return (
-    <div className="space-y-4 pt-2">
-      <h1 className="text-xl font-bold">{t("pay.title")}</h1>
+    <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
+      <p className="text-[11px] text-[#B0AAA3]">{t("pay.estimate")}</p>
+      <p className="text-4xl font-bold tracking-tight mt-1">
+        {rm(c.estimatedGrossSen)}
+      </p>
 
-      {/* ========== Current month pay estimate ========== */}
-      <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-xs text-[#B0AAA3]">{t("pay.thisMonth")}</p>
-          <p className="text-xs tabular-nums">{pay.current.period}</p>
-        </div>
-        <p className="text-4xl font-bold tracking-tight">
-          {rm(pay.current.estimatedGrossSen)}
-        </p>
-        <p className="text-[11px] text-[#B0AAA3] mt-1">{t("pay.estimate")}</p>
-
-        <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
-          {/* Full salary → minus absence → basic earned. The full figure
-              is always shown so the worker sees their baseline; the
-              deduction row only appears when they were actually absent. */}
-          <Row
-            label={t("pay.fullSalary")}
-            value={rm(pay.current.fullSalarySen)}
-          />
-          {pay.current.absentDays > 0 && (
-            <DetailRow
-              label={t("pay.absentDeduction").replace(
-                "{n}",
-                String(pay.current.absentDays),
-              )}
-              value={`− ${rm(pay.current.absenceDeductionSen)}`}
-              muted
-              chips={absentChips}
-              tone="red"
-            />
-          )}
-          <Row
-            label={t("pay.basicEarned")}
-            value={rm(pay.current.basicEarnedSen)}
-          />
+      <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
+        <Row label={t("pay.fullSalary")} value={rm(c.fullSalarySen)} />
+        {c.absentDays > 0 && (
           <DetailRow
-            label={`${t("pay.ot")} · ${otHours}h`}
-            value={rm(pay.current.otSen)}
-            chips={otChips}
-            tone="amber"
+            label={t("pay.absentDeduction").replace("{n}", String(c.absentDays))}
+            value={`− ${rm(c.absenceDeductionSen)}`}
+            muted
+            chips={absentChips}
+            tone="red"
           />
-          {pay.current.efficiencyAllowanceSen > 0 && (
-            <Row
-              label={t("pay.efficiencyAllowance")}
-              value={rm(pay.current.efficiencyAllowanceSen)}
-            />
-          )}
-          <div className="pt-2 mt-2 border-t border-white/10">
-            <Row
-              label={t("pay.gross")}
-              value={rm(pay.current.estimatedGrossSen)}
-              bold
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* ========== Attendance (clock-in/out + OT) ========== */}
-      {/* Shows raw clock records for any range the worker picks, so they
-          can reconcile their RM estimate with actual days/OT. */}
-      <div className="bg-[#1B2B44] text-white rounded-xl p-4">
-        <p className="text-[11px] font-bold uppercase tracking-[0.15em] text-white/70">
-          {t("pay.attendanceOt")}
-        </p>
-
-        <div className="grid grid-cols-2 gap-2 mt-3">
-          <label className="block">
-            <span className="text-[11px] text-white/60">{t("pay.from")}</span>
-            <input
-              type="date"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              className="w-full h-11 px-3 pr-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32] appearance-none"
-              style={{ colorScheme: "dark" }}
-            />
-          </label>
-          <label className="block">
-            <span className="text-[11px] text-white/60">{t("pay.to")}</span>
-            <input
-              type="date"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              className="w-full h-11 px-3 pr-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32] appearance-none"
-              style={{ colorScheme: "dark" }}
-            />
-          </label>
-        </div>
-
-        <div className="flex gap-1.5 mt-2 overflow-x-auto -mx-1 px-1">
-          <Chip onClick={() => setPreset("month")}>{t("pay.thisMonthChip")}</Chip>
-          <Chip onClick={() => setPreset("lastMonth")}>{t("pay.lastMonth")}</Chip>
-          <Chip onClick={() => setPreset("30d")}>{t("pay.last30d")}</Chip>
-        </div>
-      </div>
-
-      {/* Mini KPIs for the picked range */}
-      {hist && (
-        <div className="grid grid-cols-3 gap-2">
-          <Mini label={t("pay.days")} value={String(hist.totals.days)} />
-          <Mini label={t("pay.hours")} value={mins2hrs(hist.totals.workedMinutes)} />
-          <Mini
-            label={t("pay.otHrs")}
-            value={mins2hrs(hist.totals.overtimeMinutes)}
-            accent
-          />
-        </div>
-      )}
-
-      {/* Daily attendance — Hours pulled from working_hour_entries via /history.
-          Clock-in/out column dropped (flow not yet live). */}
-      {hist && (
-        <TableSection title={t("pay.dailyAttendance")}>
-          <TableHeader
-            cols={[t("pay.colDate"), t("pay.colWorkHrs"), t("pay.colOvertimeHrs")]}
-            align={["left", "right", "right"]}
-          />
-          {hist.attendance.length === 0 ? (
-            <EmptyRow />
-          ) : (
-            hist.attendance.map((a) => (
-              <div
-                key={a.date}
-                className="grid grid-cols-[auto_1fr_1fr] gap-3 py-2.5 text-sm border-t border-[#F0ECE9] items-center"
-              >
-                <span className="text-[#1F1D1B] font-medium">
-                  {fmtDay(a.date)}
-                </span>
-                <span className="tabular-nums text-right font-semibold">
-                  {mins2hrs(a.workingMinutes)}
-                </span>
-                <span
-                  className={`tabular-nums text-right font-semibold ${
-                    a.overtimeMinutes > 0 ? "text-[#9C6F1E]" : "text-[#8A8680]"
-                  }`}
-                >
-                  {a.overtimeMinutes > 0 ? mins2hrs(a.overtimeMinutes) : "—"}
-                </span>
-              </div>
-            ))
-          )}
-        </TableSection>
-      )}
-
-      {/* ========== Payslip history ========== */}
-      <div>
-        <p className="text-sm font-semibold text-[#5A5550] mb-2">
-          {t("pay.history")}
-        </p>
-        {pay.history.length === 0 ? (
-          <div className="bg-white rounded-xl p-6 text-center text-sm text-[#8A8680] border border-[#D8D2CC]">
-            —
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {pay.history.map((p) => {
-              const open = expanded === p.id;
-              return (
-                <div
-                  key={p.id}
-                  className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setExpanded(open ? null : p.id)}
-                    className="w-full px-4 py-3 flex items-center justify-between hover:bg-[#FAF9F7]"
-                  >
-                    <div className="text-left">
-                      <p className="text-sm tabular-nums text-[#5A5550]">
-                        {p.period}
-                      </p>
-                      <p className="text-lg font-bold mt-0.5">
-                        {rm(p.netSen ?? p.grossSen)}
-                      </p>
-                    </div>
-                    {open ? (
-                      <ChevronUp className="h-4 w-4 text-[#8A8680]" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4 text-[#8A8680]" />
-                    )}
-                  </button>
-                  {open && (
-                    <div className="px-4 pb-4 pt-1 space-y-1.5 text-sm border-t border-[#F0ECE9]">
-                      <Row
-                        label={t("pay.basicEarned")}
-                        value={rm(p.basicSen)}
-                      />
-                      {p.allowancesSen ? (
-                        <Row label="Allowances" value={rm(p.allowancesSen)} />
-                      ) : null}
-                      {p.overtimeSen ? (
-                        <Row label={t("pay.ot")} value={rm(p.overtimeSen)} />
-                      ) : null}
-                      <div className="pt-1.5 border-t border-[#F0ECE9]">
-                        <Row
-                          label={t("pay.gross")}
-                          value={rm(p.grossSen)}
-                          bold
-                        />
-                      </div>
-                      {p.epfEeSen ? (
-                        <Row label="EPF" value={`- ${rm(p.epfEeSen)}`} muted />
-                      ) : null}
-                      {p.socsoEeSen ? (
-                        <Row
-                          label="SOCSO"
-                          value={`- ${rm(p.socsoEeSen)}`}
-                          muted
-                        />
-                      ) : null}
-                      {p.eisEeSen ? (
-                        <Row label="EIS" value={`- ${rm(p.eisEeSen)}`} muted />
-                      ) : null}
-                      {p.taxSen ? (
-                        <Row label="Tax" value={`- ${rm(p.taxSen)}`} muted />
-                      ) : null}
-                      <div className="pt-1.5 border-t border-[#F0ECE9]">
-                        <Row label="Net" value={rm(p.netSen)} bold />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
         )}
+        <Row label={t("pay.basicEarned")} value={rm(c.basicEarnedSen)} />
+        <DetailRow
+          label={`${t("pay.ot")} · ${otHours}h`}
+          value={rm(c.otSen)}
+          chips={otChips}
+          tone="amber"
+        />
+        {/* Efficiency allowance is ALWAYS listed (even RM 0.00) so the breakdown
+            is complete — RM150 when the worker hits their monthly target. */}
+        <Row
+          label={t("pay.efficiencyAllowance")}
+          value={rm(c.efficiencyAllowanceSen)}
+        />
+        <div className="pt-2 mt-2 border-t border-white/10">
+          <Row label={t("pay.gross")} value={rm(c.estimatedGrossSen)} bold />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// A finalised (generated) payslip for a past month — the locked-in figures.
+function FinalisedBreakdown({ slip, t }: { slip: PayslipRow; t: Translate }) {
+  return (
+    <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
+      <p className="text-[11px] text-[#B0AAA3]">Net pay</p>
+      <p className="text-4xl font-bold tracking-tight mt-1">
+        {rm(slip.netSen ?? slip.grossSen)}
+      </p>
+
+      <div className="mt-4 pt-4 border-t border-white/10 space-y-2 text-sm">
+        <Row label={t("pay.basicEarned")} value={rm(slip.basicSen)} />
+        {slip.allowancesSen ? (
+          <Row label={t("pay.efficiencyAllowance")} value={rm(slip.allowancesSen)} />
+        ) : null}
+        {slip.overtimeSen ? (
+          <Row label={t("pay.ot")} value={rm(slip.overtimeSen)} />
+        ) : null}
+        <div className="pt-2 mt-2 border-t border-white/10">
+          <Row label={t("pay.gross")} value={rm(slip.grossSen)} bold />
+        </div>
+        {slip.epfEeSen ? (
+          <Row label="EPF" value={`− ${rm(slip.epfEeSen)}`} muted />
+        ) : null}
+        {slip.socsoEeSen ? (
+          <Row label="SOCSO" value={`− ${rm(slip.socsoEeSen)}`} muted />
+        ) : null}
+        {slip.eisEeSen ? (
+          <Row label="EIS" value={`− ${rm(slip.eisEeSen)}`} muted />
+        ) : null}
+        {slip.taxSen ? (
+          <Row label="Tax" value={`− ${rm(slip.taxSen)}`} muted />
+        ) : null}
+        <div className="pt-2 mt-2 border-t border-white/10">
+          <Row label="Net" value={rm(slip.netSen)} bold />
+        </div>
       </div>
     </div>
   );
@@ -645,99 +436,4 @@ function DetailRow({
       )}
     </div>
   );
-}
-
-function Chip({
-  children,
-  onClick,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="shrink-0 text-xs px-2.5 py-1 rounded-full bg-white/10 border border-white/20 hover:bg-white/20 font-medium"
-    >
-      {children}
-    </button>
-  );
-}
-
-function Mini({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: boolean;
-}) {
-  return (
-    <div className="bg-white rounded-xl p-3 border border-[#D8D2CC] text-center">
-      <p className="text-[10px] uppercase tracking-wide text-[#8A8680] font-semibold">
-        {label}
-      </p>
-      <p
-        className={`text-2xl font-bold mt-1 ${
-          accent ? "text-[#9C6F1E]" : "text-[#1F1D1B]"
-        }`}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function TableSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="bg-white rounded-xl border border-[#D8D2CC] overflow-hidden">
-      <div className="px-3 py-2 bg-[#1B2B44] text-white">
-        <p className="text-xs font-bold uppercase tracking-wide">{title}</p>
-      </div>
-      <div className="px-3 pb-2">{children}</div>
-    </div>
-  );
-}
-
-function TableHeader({
-  cols,
-  align,
-}: {
-  cols: string[];
-  align?: Array<"left" | "right">;
-}) {
-  // Match the row templates exactly so headers sit above their columns.
-  // Daily Attendance rows on this page use [auto_1fr_1fr] (3 cols).
-  const gridCols =
-    cols.length === 3
-      ? "grid-cols-[auto_1fr_1fr]"
-      : cols.length === 4
-        ? "grid-cols-[auto_1fr_1fr_1fr]"
-        : `grid-cols-${cols.length}`;
-  return (
-    <div
-      className={`grid ${gridCols} gap-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#8A8680] bg-[#EAF3E5] -mx-3 px-3`}
-    >
-      {cols.map((c, i) => (
-        <span
-          key={c}
-          className={align?.[i] === "right" ? "text-right" : "text-left"}
-        >
-          {c}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function EmptyRow() {
-  return <div className="py-4 text-center text-xs text-[#8A8680]">—</div>;
 }

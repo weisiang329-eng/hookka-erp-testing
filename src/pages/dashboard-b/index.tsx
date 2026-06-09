@@ -180,9 +180,9 @@ type Overview = {
   // historical snapshot, the current live value, or a live value shown for
   // a past month with NO stored history (→ show a muted "live" tag).
   stateSnapshot?: {
-    source: "live" | "snapshot";
-    isHistorical: boolean; // true → live value for a past month, no history
-    asOf: string | null; // snap_date when source === "snapshot"
+    source: "live" | "snapshot" | "reconstructed";
+    isHistorical: boolean; // true → past-month value (snapshot-less): live or reconstructed
+    asOf: string | null; // snap_date (snapshot) or month-end (reconstructed)
   };
 };
 type PODeliveryShape = PipelinePO & {
@@ -810,14 +810,26 @@ export default function DashboardBPage() {
   const util = Math.min(1, backlogDays / 14);
   const gaugeAccent = backlogDays > 12 ? C_RED : backlogDays > 7 ? C_PROD : C_GREEN;
   // Month-awareness: the state widgets (Backlog / Active Jobs / Workforce)
-  // are point-in-time counts. For a past month with no captured history the
-  // backend serves the live value flagged isHistorical — show a muted tag so
-  // the figure is never mistaken for that month's true state. When the
-  // backend served a true historical snapshot (source === "snapshot"), no
-  // tag. asOf carries the snapshot's date for the "as of" note.
-  const stateLiveTag = ov.stateSnapshot?.isHistorical === true;
+  // are point-in-time counts. Three cases for a selected period:
+  //   • source === "snapshot"      → a true captured daily snapshot for that
+  //                                   past month. Show "as of <date>", no
+  //                                   warning tag (it's real history).
+  //   • source === "reconstructed" → no snapshot existed, so the backend
+  //                                   rebuilt Backlog + Workforce as of the
+  //                                   month's last day (best-effort estimate).
+  //                                   Show a muted "≈ reconstructed" tag plus
+  //                                   "as of <month-end>".
+  //   • source === "live" + isHistorical → couldn't reconstruct; current live
+  //                                   value shown for a past month. Muted
+  //                                   "live (no history)" warning.
+  //   • source === "live" (current/all) → no tag.
+  const stateReconstructed = ov.stateSnapshot?.source === "reconstructed";
+  const stateLiveTag =
+    ov.stateSnapshot?.isHistorical === true && !stateReconstructed;
   const stateAsOf =
-    ov.stateSnapshot?.source === "snapshot" ? ov.stateSnapshot?.asOf : null;
+    ov.stateSnapshot?.source === "snapshot" || stateReconstructed
+      ? ov.stateSnapshot?.asOf
+      : null;
 
   const aovAll = ov.aovByCustomer ?? [];
   const topBed = ov.topSellers?.BEDFRAME ?? [];
@@ -1126,6 +1138,15 @@ export default function DashboardBPage() {
               >
                 <Info className="h-3 w-3" />
                 live (no history before today)
+              </span>
+            )}
+            {stateReconstructed && (
+              <span
+                title="No daily snapshot was stored for this past month. Backlog and Workforce are reconstructed as of the month's last day from job-card and worker records — a best-effort estimate, not a captured figure. (Active Jobs stays on the current live value.)"
+                className="mt-1 inline-flex items-center gap-1 rounded-full bg-[#EEF1F4] px-2 py-0.5 text-[10px] font-medium text-[#5B6675]"
+              >
+                <Info className="h-3 w-3" />
+                ≈ reconstructed (month-end est.)
               </span>
             )}
             {stateAsOf && (
@@ -2068,6 +2089,15 @@ export default function DashboardBPage() {
               >
                 <Info className="h-3 w-3" />
                 live (no history before today)
+              </span>
+            )}
+            {stateReconstructed && (
+              <span
+                title="No daily snapshot was stored for this past month. This backlog is reconstructed as of the month's last day from job-card records — a best-effort estimate, not a captured figure."
+                className="mb-2 inline-flex items-center gap-1 rounded-full bg-[#EEF1F4] px-2 py-0.5 text-[10px] font-medium text-[#5B6675]"
+              >
+                <Info className="h-3 w-3" />
+                ≈ reconstructed (month-end est.)
               </span>
             )}
             {stateAsOf && (

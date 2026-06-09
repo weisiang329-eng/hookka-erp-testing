@@ -1662,7 +1662,7 @@ app.get("/", async (c) => {
       byDept: headByDept.sort((a, b) => b.count - a.count),
     };
     let stateSnapshot: {
-      source: "live" | "snapshot";
+      source: "live" | "snapshot" | "reconstructed";
       isHistorical: boolean;
       asOf: string | null;
     } = { source: "live", isHistorical: false, asOf: null };
@@ -1699,8 +1699,193 @@ app.get("/", async (c) => {
           asOf: snapRow.snapDate,
         };
       } else {
-        // No snapshot for this past month → live value, clearly tagged.
-        stateSnapshot = { source: "live", isHistorical: true, asOf: null };
+        // No stored snapshot for this past month. Rather than serve TODAY's
+        // live state mislabelled as history, reconstruct the STATE widgets
+        // (Backlog + Workforce) as of the month's LAST day (M) from the
+        // event-bearing tables, and tag them as a best-effort ESTIMATE.
+        //
+        // This is an APPROXIMATION, not a captured truth:
+        //   • job_cards has NO creation timestamp (only completed_date,
+        //     due_date, and updated_at — and updated_at moves on every write
+        //     so it can't establish "existed by M"). We therefore proxy a
+        //     job card's birth by its PRODUCTION ORDER's create date,
+        //     substr(COALESCE(po.created_at, po.start_date),1,10) — created_at
+        //     is a full ISO timestamp and start_date is date-only, so we take
+        //     the date prefix to compare cleanly against M's YYYY-MM-DD. A job
+        //     card cannot predate its own PO, so "PO created on/before M" is a
+        //     sound lower bound for "the job existed by M". If BOTH PO dates are
+        //     NULL (legacy rows with no recorded birth) we INCLUDE the card —
+        //     an open, still-uncompleted card almost certainly predates a
+        //     past month-end, and dropping it would understate the backlog.
+        //   • Re-deriving each PO's exact in-progress state as of M is not
+        //     attempted (Active Jobs stays on the live value — see below).
+        const M = monthScope ? monthScope.lastDay : null;
+        if (M) {
+          // ---- Backlog as of M ----------------------------------------------
+          // Pending-as-of-M job cards: existed by M (PO born on/before M, or
+          // unknown birth), NOT completed by M (completedDate NULL or after M),
+          // and neither the card nor its PO cancelled. We pull the per-card
+          // category + the PO create/start dates so the reconstruction mirrors
+          // the live backlogByDept shape (sofa/bedframe split per department).
+          // We also pull cards COMPLETED *within the month* to rebuild each
+          // department's daily capacity for that month (mirrors the live
+          // per-dept `windowTotal/7`, but scoped to the month's own throughput
+          // ÷ the month's working-day count).
+          const reconRows =
+            (
+              await db
+                .prepare(
+                  `SELECT jc.departmentCode AS "dept", jc.status AS "jcStatus",
+                          jc.estMinutes AS "estMinutes",
+                          jc.actualMinutes AS "actualMinutes",
+                          jc.wipQty AS "wipQty",
+                          jc.completedDate AS "completedDate",
+                          po.itemCategory AS "cat", po.status AS "poStatus",
+                          substr(COALESCE(po.createdAt, po.startDate)::text, 1, 10) AS "poBirth"
+                     FROM job_cards jc
+                     JOIN production_orders po ON po.id = jc.productionOrderId
+                    WHERE jc.orgId = ?`,
+                )
+                .bind(orgId)
+                .all<{
+                  dept: string | null;
+                  jcStatus: string;
+                  estMinutes: number | null;
+                  actualMinutes: number | null;
+                  wipQty: number | null;
+                  completedDate: string | null;
+                  cat: string | null;
+                  poStatus: string;
+                  poBirth: string | null;
+                }>()
+            ).results ?? [];
+
+          // Month working-day count (already excludes Sundays + holidays via
+          // windowDays for a selected month) — the per-dept capacity divisor.
+          const reconMonthWorkingDays = windowDays.length || 1;
+          // "Completed within the month" = completion date inside the month
+          // window the rolling widgets already use (windowSet for a month).
+          const reconBacklogByDept = DEPARTMENTS.map(({ code, name }) => {
+            let sofaMin = 0;
+            let bedframeMin = 0;
+            let monthCompletedMin = 0;
+            for (const r of reconRows) {
+              if (r.dept !== code) continue;
+              const wip = Math.max(1, r.wipQty ?? 1);
+              // Month throughput for this dept → reconstructed daily capacity.
+              if (
+                (r.jcStatus === "COMPLETED" || r.jcStatus === "TRANSFERRED") &&
+                r.completedDate &&
+                windowSet.has(r.completedDate)
+              ) {
+                monthCompletedMin += (r.actualMinutes ?? r.estMinutes ?? 0) * wip;
+              }
+              // Pending as of M: existed by M (PO born on/before M, or unknown
+              // birth), not completed by M, neither card nor PO cancelled.
+              const existedByM = r.poBirth == null || r.poBirth <= M;
+              const completedByM =
+                r.completedDate != null && r.completedDate <= M;
+              const pendingAsOfM =
+                existedByM &&
+                !completedByM &&
+                r.jcStatus !== "CANCELLED" &&
+                r.poStatus !== "CANCELLED";
+              if (pendingAsOfM) {
+                const m = (r.estMinutes ?? 0) * wip;
+                if ((r.cat ?? "").toUpperCase() === "SOFA") sofaMin += m;
+                else if ((r.cat ?? "").toUpperCase() === "BEDFRAME")
+                  bedframeMin += m;
+              }
+            }
+            const dailyCapMin = Math.round(
+              monthCompletedMin / reconMonthWorkingDays,
+            );
+            const totalMin = sofaMin + bedframeMin;
+            const denom = dailyCapMin > 0 ? dailyCapMin : 1;
+            return {
+              dept: name,
+              sofaMin,
+              bedframeMin,
+              totalMin,
+              dailyCapMin,
+              backlogDays: Math.round((totalMin / denom) * 10) / 10,
+            };
+          })
+            .filter((d) => d.totalMin > 0 || d.dailyCapMin > 0)
+            .sort((a, b) => b.backlogDays - a.backlogDays);
+          const reconBacklogGrandMin = reconBacklogByDept.reduce(
+            (s, d) => s + d.totalMin,
+            0,
+          );
+          // Headline backlog days uses the MONTH's daily capacity (its actual
+          // average throughput, already computed as `dailyCapacityMin`). Guard
+          // the divide-by-zero (a month with no completed work).
+          const reconBacklogDays =
+            dailyCapacityMin > 0
+              ? Math.round((reconBacklogGrandMin / dailyCapacityMin) * 10) / 10
+              : 0;
+
+          // ---- Workforce as of M --------------------------------------------
+          // Headcount employed on M = hired on/before M AND still employed on
+          // M. workers.join_date is the hire date (TEXT YYYY-MM-DD, since
+          // 0001); workers.resigned_at is the LAST DAY of employment (TEXT,
+          // since 0143_workers_resignation — "records the last day of
+          // employment"), so a worker is still employed up to AND INCLUDING
+          // resigned_at → keep them when resigned_at >= M. We count across ALL
+          // statuses (ACTIVE / INACTIVE / RESIGNED) — current status is "now",
+          // not M. NULL join_date = legacy worker with no recorded hire date →
+          // treated as employed since forever (included), so headcount is never
+          // understated by missing data. workers is NOT org-scoped (no org_id
+          // column — see the live headcount query above), so no orgId filter.
+          const reconHeadRows =
+            (
+              await db
+                .prepare(
+                  `SELECT departmentCode AS "dept", COUNT(*) AS "n"
+                     FROM workers
+                    WHERE (joinDate IS NULL OR joinDate <= ?)
+                      AND (resignedAt IS NULL OR resignedAt >= ?)
+                    GROUP BY departmentCode`,
+                )
+                .bind(M, M)
+                .all<{ dept: string | null; n: number }>()
+            ).results ?? [];
+          const reconHeadByDept = reconHeadRows.map((r) => ({
+            dept: r.dept || "—",
+            count: Number(r.n) || 0,
+          }));
+          const reconActiveHeadcount = reconHeadByDept.reduce(
+            (s, d) => s + d.count,
+            0,
+          );
+
+          // Override ONLY the reconstructed widgets. Active Jobs stays on the
+          // LIVE value: re-deriving each PO's in-progress state as of M would
+          // need a full job-card-history replay and is materially riskier than
+          // Backlog/Workforce, so it is intentionally left as-is and the
+          // estimate tag (below) covers the whole state group.
+          stateProduction = {
+            ...stateProduction,
+            backlogMin: reconBacklogGrandMin,
+            backlogDays: reconBacklogDays,
+            backlogByDept: reconBacklogByDept,
+            backlogGrandMin: reconBacklogGrandMin,
+          };
+          stateEmployee = {
+            ...stateEmployee,
+            activeHeadcount: reconActiveHeadcount,
+            byDept: reconHeadByDept.sort((a, b) => b.count - a.count),
+          };
+          stateSnapshot = {
+            source: "reconstructed",
+            isHistorical: true,
+            asOf: M,
+          };
+        } else {
+          // Should be unreachable (isPastMonth ⇒ monthScope is set), but keep
+          // the old honest fallback if month bounds are somehow unavailable.
+          stateSnapshot = { source: "live", isHistorical: true, asOf: null };
+        }
       }
     }
 

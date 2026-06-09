@@ -533,6 +533,17 @@ app.put("/:id", async (c) => {
       )
       .run();
 
+    // Resigning / deactivating a worker locks them OUT of the worker app
+    // immediately: purge their login tokens so a phone already signed in is
+    // kicked. (Login already blocks non-ACTIVE, and getWorker now rejects a
+    // non-ACTIVE worker on every request — this clears the lingering session
+    // so the lock takes effect the moment you set the status, not on next login.)
+    if (merged.status !== "ACTIVE") {
+      await c.var.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?")
+        .bind(id)
+        .run();
+    }
+
     // Keep the salary-history in sync with an inline salary edit: correct the
     // row currently in effect (newest effectiveFrom <= today) so payroll — which
     // reads the history — reflects the change. A future-dated raise is set via

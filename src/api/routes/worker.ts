@@ -129,6 +129,19 @@ async function getWorker(
       response: c.json({ success: false, error: "Worker not found" }, 404),
     };
   }
+  // A worker who is no longer ACTIVE (RESIGNED / INACTIVE) is locked out of the
+  // ENTIRE worker app — every request is rejected, not just fresh logins. This
+  // catches a phone that was already signed in before the worker was resigned
+  // (the login gate alone wouldn't kick an existing session).
+  if (w.status !== "ACTIVE") {
+    return {
+      ok: false,
+      response: c.json(
+        { success: false, error: "Employee account inactive" },
+        403,
+      ),
+    };
+  }
   return { ok: true, workerId, worker: w };
 }
 

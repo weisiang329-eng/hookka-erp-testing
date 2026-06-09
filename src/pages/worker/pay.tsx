@@ -49,6 +49,7 @@ type PayData = {
     otMinutes: number;
     fullSalarySen: number;
     absenceDeductionSen: number;
+    shortHourDeductionSen: number;
     basicEarnedSen: number;
     otSen: number;
     efficiencyAllowanceSen: number;
@@ -119,6 +120,7 @@ function asPayData(v: unknown): PayData | null {
   // predates them by falling back to 0.
   const fullSalarySen = asNumber(v.current.fullSalarySen) ?? 0;
   const absenceDeductionSen = asNumber(v.current.absenceDeductionSen) ?? 0;
+  const shortHourDeductionSen = asNumber(v.current.shortHourDeductionSen) ?? 0;
   const basicEarnedSen = asNumber(v.current.basicEarnedSen);
   const otSen = asNumber(v.current.otSen);
   const efficiencyAllowanceSen = asNumber(v.current.efficiencyAllowanceSen) ?? 0;
@@ -152,6 +154,7 @@ function asPayData(v: unknown): PayData | null {
       otMinutes,
       fullSalarySen,
       absenceDeductionSen,
+      shortHourDeductionSen,
       basicEarnedSen,
       otSen,
       efficiencyAllowanceSen,
@@ -292,6 +295,16 @@ function CurrentMonthBreakdown({
             muted
             chips={absentChips}
             tone="red"
+          />
+        )}
+        {/* Late clock-in / short-hour dock — only when one applies. Sits between
+            the absence line and Basic so the running total reads correctly:
+            Full salary − Absent − Late/short = Basic. */}
+        {c.shortHourDeductionSen > 0 && (
+          <Row
+            label={t("pay.lateShortDeduction")}
+            value={`− ${rm(c.shortHourDeductionSen)}`}
+            muted
           />
         )}
         <Row label={t("pay.basicEarned")} value={rm(c.basicEarnedSen)} />

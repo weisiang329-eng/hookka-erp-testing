@@ -1256,6 +1256,24 @@ app.get("/payslips", async (c) => {
     publicHolidays,
   );
 
+  // Owner-flagged unworked-hour docks for the month (the under-recorded review /
+  // late-short deductions). The worker's estimate must reflect them too, else the
+  // phone shows MORE than they're actually paid. Resilient: if the table isn't
+  // there yet → no docks. Same source the admin payroll uses.
+  let shortHourDeductionHours = 0;
+  try {
+    const dedRes = await c.var.DB.prepare(
+      "SELECT hours FROM payroll_hour_deductions WHERE workerId = ? AND date LIKE ?",
+    )
+      .bind(workerId, `${monthPrefix}%`)
+      .all<{ hours: number }>();
+    for (const r of dedRes.results ?? []) {
+      shortHourDeductionHours += Number(r.hours) || 0;
+    }
+  } catch (e) {
+    console.warn("[worker/pay] payroll_hour_deductions read skipped:", e);
+  }
+
   const labor = computeMonthlyLabor({
     worker: {
       basicSalarySen: effectiveSalarySen,
@@ -1268,6 +1286,7 @@ app.get("/payslips", async (c) => {
     days: dayRows,
     publicHolidays,
     absenceThroughDay,
+    shortHourDeductionHours,
   });
 
   // WHICH days were absent / had OT — derived from the SAME inputs the engine
@@ -1317,6 +1336,7 @@ app.get("/payslips", async (c) => {
         otMinutes: Math.round(labor.otHours * 60),
         fullSalarySen: labor.payroll.fullSalarySen,
         absenceDeductionSen: labor.payroll.absenceDeductionSen,
+        shortHourDeductionSen: labor.payroll.shortHourDeductionSen,
         basicEarnedSen: labor.payroll.basicEarnedSen,
         otSen: labor.payroll.otPaySen,
         efficiencyAllowanceSen,

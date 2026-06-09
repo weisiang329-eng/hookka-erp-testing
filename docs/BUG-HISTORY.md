@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-007 — Worker My Pay estimate ignored late / short-hour docks → the phone showed MORE than the worker is actually paid
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-09, on main this session, deploy green + worker-bundle live-verified). typecheck:app + vite build green.
+**Category:** payroll
+
+Symptom: the worker-portal My Pay screen built the in-progress month's estimated gross from full salary − absence + OT + efficiency allowance, but it did NOT subtract the owner-flagged late-clock-in / under-recorded ("short hour") docks stored in `payroll_hour_deductions`. The admin Payroll screen and the generated payslip already net those docks (via `computeMonthlyLabor`'s `shortHourDeductionHours`), so a worker who'd been docked saw a HIGHER figure on their phone than the admin figure — and higher than what they'll actually be paid. Surfaced while finishing the My Pay itemisation Wei Siang asked for ("最重要的是扣钱…list out 出来 … 5. 迟到").
+
+Root cause: the worker my-pay route (`worker.ts`, GET `/api/worker/payslips`) called `computeMonthlyLabor` WITHOUT loading the month's `payroll_hour_deductions`, so `shortHourDeductionHours` defaulted to 0 → `basicEarnedSen` on the phone was un-docked. The engine, admin payroll, and payslip generation were all correct; only the worker estimate omitted the input.
+
+Fix: (1) `worker.ts` now sums the month's `payroll_hour_deductions` hours (resilient try/catch — no table yet → 0 docks; same source the admin payroll reads) and passes `shortHourDeductionHours` into `computeMonthlyLabor`, then surfaces `shortHourDeductionSen` in the response `current`. (2) `pay.tsx` adds a "Late / short hours" deduction line between the Absent line and Basic so the running total reads correctly (Full salary − Absent − Late/short = Basic), shown only when a dock applies. (3) new i18n key `pay.lateShortDeduction` (en/ms/zh/my). Purely additive — no engine/cost/payslip change — this aligns the worker's phone estimate with the admin payroll it should always have matched.
+
+---
+
 ## BUG-2026-06-09-006 — Marking a worker RESIGNED didn't lock out a phone already signed in (only blocked fresh logins)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-09, commit e5b11bc8 on main, deploy run 27206372067 green; built/tested earlier as 1c323f3e, also on staging). typecheck + resign-lockout + worker-auth tests green.

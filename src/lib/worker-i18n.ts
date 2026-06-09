@@ -426,6 +426,14 @@ const dict: Dict = {
     zh: '效率津贴',
     my: 'ထိရောက်မှုကြေး',
   },
+  // Late clock-in (>10 min) + owner-flagged short/under-recorded hours docked
+  // this month. Shown as a deduction line so the worker sees why Basic dropped.
+  'pay.lateShortDeduction': {
+    en: 'Late / short hours',
+    ms: 'Lewat / kurang jam',
+    zh: '迟到 / 工时不足',
+    my: 'နောက်ကျ / နာရီမပြည့်',
+  },
   'pay.attendanceOt': {
     en: 'Attendance & OT',
     ms: 'Kehadiran & OT',

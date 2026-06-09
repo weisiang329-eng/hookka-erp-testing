@@ -206,6 +206,18 @@ function readPersistedDateRange(key: string): { from?: string; to?: string } {
   }
 }
 
+// Per-tab persisted date-range localStorage keys. The top summary follows the
+// ACTIVE tab's range by reading its key on tab switch — keep in sync with each
+// tab's writePersistedDateRange(...) key.
+const SUMMARY_TAB_DATE_KEYS: Record<string, string> = {
+  "working-hours": "employees:working-hours:dateRange",
+  efficiency: "employees:efficiency-overview:dateRange",
+  "department-labor": "employees:department-labor:dateRange",
+  detail: "employees:employee-detail:dateRange",
+  "department-performance": "employees:dept-perf:dateRange",
+  "labor-cost": "employees:labor-cost:dateRange",
+};
+
 function writePersistedDateRange(key: string, from: string, to: string): void {
   if (typeof window === "undefined") return;
   try {
@@ -9101,6 +9113,23 @@ export default function EmployeesPage() {
     },
     [],
   );
+  // Switching tabs makes the top summary follow THAT tab's own date range (each
+  // date-bearing tab persists its range under its key; on mount that === what
+  // the tab shows). Working Hours also live-updates via the callback above. Tabs
+  // with no range (Payroll month / Employee Master / Leave) keep the last range.
+  useEffect(() => {
+    const key = SUMMARY_TAB_DATE_KEYS[activeTab];
+    if (!key) return;
+    const r = readPersistedDateRange(key);
+    if (r.from && r.to) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSummaryRange((prev) =>
+        prev.from === r.from && prev.to === r.to
+          ? prev
+          : { from: r.from as string, to: r.to as string },
+      );
+    }
+  }, [activeTab]);
   // The summary cards read real working_hour_entries + job-card figures for
   // the selected day via /api/department-performance — Present, Working
   // Hours, Avg Efficiency — instead of the near-empty attendance table.

@@ -4,6 +4,7 @@ import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { countElapsedWorkingDays } from "@/lib/labor-engine";
+import { computeAttendanceDay, hhmmToMinutes } from "@/lib/attendance-rules";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -519,7 +520,25 @@ type EntryDraft = {
   saving: boolean;
   saved: boolean;
   saveError?: string;
+  // Optional punch times (HH:MM). When BOTH are set, the day's payable hours
+  // (regular + OT) auto-fill `hours` via the confirmed attendance rules — so the
+  // operator can key clock-in/out instead of computing hours by hand. Client-only
+  // (not persisted): they recompute `hours`, which is what gets saved.
+  clockIn?: string;
+  clockOut?: string;
 };
+
+// Payable hours (regular + OT) from a clock-in/out pair, rounded to 2 dp; null
+// when a time is missing / invalid / out-of-order (so we never clobber a
+// hand-typed Hours value). Late/short is NOT docked here — it surfaces in the
+// existing under-recorded review (operator decides), so nothing is auto-deducted.
+function hoursFromPunch(clockIn?: string, clockOut?: string): number | null {
+  const inM = hhmmToMinutes(clockIn ?? null);
+  const outM = hhmmToMinutes(clockOut ?? null);
+  if (inM === null || outM === null || outM <= inM) return null;
+  const d = computeAttendanceDay(inM, outM);
+  return Math.round(((d.regularWorkMin + d.otMin) / 60) * 100) / 100;
+}
 
 // Sortable columns. We keep the column key list small and tied to actual
 // table columns — no kitchen-sink sort menu.
@@ -1077,6 +1096,12 @@ function WorkingHoursTab({
                   sortDir={sortDir}
                   onClick={cycleSort}
                 />
+                <th
+                  className="h-10 px-3 text-left font-medium text-[#374151] w-44"
+                  title="Optional: key clock-in / clock-out and Hours auto-fills (regular + OT, Malaysia rules). Late / short shows in the under-recorded review — not auto-deducted."
+                >
+                  Punch (in / out)
+                </th>
                 <SortableHeader
                   label="Hours"
                   column="hours"
@@ -1091,11 +1116,11 @@ function WorkingHoursTab({
             </thead>
             <tbody>
               {loading && rows.length === 0 && (
-                <tr><td colSpan={isMultiDay ? 7 : 6} className="h-20 text-center text-[#9CA3AF]">Loading…</td></tr>
+                <tr><td colSpan={isMultiDay ? 8 : 7} className="h-20 text-center text-[#9CA3AF]">Loading…</td></tr>
               )}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={isMultiDay ? 7 : 6} className="h-20 text-center text-[#9CA3AF]">
+                  <td colSpan={isMultiDay ? 8 : 7} className="h-20 text-center text-[#9CA3AF]">
                     No entries for {isMultiDay ? `${dateFrom} → ${dateTo}` : dateFrom}. Click <span className="font-medium">+ Add Row</span> to start.
                   </td>
                 </tr>
@@ -1153,6 +1178,39 @@ function WorkingHoursTab({
                           <option key={cat} value={cat}>{cat[0] + cat.slice(1).toLowerCase()}</option>
                         ))}
                       </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <div className="flex items-center gap-1">
+                        <Input
+                          type="time"
+                          value={row.clockIn ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            const h = hoursFromPunch(v, row.clockOut);
+                            updateField(
+                              originalIdx,
+                              h !== null ? { clockIn: v, hours: h } : { clockIn: v },
+                            );
+                          }}
+                          className="h-8 w-[4.75rem] text-xs"
+                          title="Clock in (HH:MM)"
+                        />
+                        <span className="text-[#9CA3AF]">→</span>
+                        <Input
+                          type="time"
+                          value={row.clockOut ?? ""}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            const h = hoursFromPunch(row.clockIn, v);
+                            updateField(
+                              originalIdx,
+                              h !== null ? { clockOut: v, hours: h } : { clockOut: v },
+                            );
+                          }}
+                          className="h-8 w-[4.75rem] text-xs"
+                          title="Clock out — Hours auto-fills (regular + OT) when both set"
+                        />
+                      </div>
                     </td>
                     <td className="px-3 py-1.5">
                       <Input

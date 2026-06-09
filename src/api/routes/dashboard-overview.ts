@@ -1741,7 +1741,7 @@ app.get("/", async (c) => {
                           jc.wipQty AS "wipQty",
                           jc.completedDate AS "completedDate",
                           po.itemCategory AS "cat", po.status AS "poStatus",
-                          substr(COALESCE(po.createdAt, po.startDate)::text, 1, 10) AS "poBirth"
+                          substr(COALESCE(po.created_at, po.startDate)::text, 1, 10) AS "poBirth"
                      FROM job_cards jc
                      JOIN production_orders po ON po.id = jc.productionOrderId
                     WHERE jc.orgId = ?`,

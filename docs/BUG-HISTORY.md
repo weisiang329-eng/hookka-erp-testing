@@ -34,6 +34,27 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-008 — Command Center month view: weekly (not daily) revenue, all-time Order Pipeline, and a stale delta chip ("RM 0.00 ↗423%")
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-09, on main this session, deploy green + April/May/June live-verified on the deployed bundle after cache-bust). typecheck:app + 621 tests + eslint green.
+**Category:** ui-frontend
+
+Symptom: after the Command Center month selector shipped, picking a month left three widgets wrong. (1) The Revenue chart still bucketed by week (e.g. June showed only 06-01 / 06-08 ticks) instead of one point per day to month-end. (2) The Order Pipeline kept showing all-time confirmed/outstanding/delivered regardless of the selected month. (3) The Sales/Delivered KPI tiles carried a period-over-period delta chip computed from the all-time series, so in month view it was a stale constant — most visibly "DELIVERED · 2026-04 RM 0.00 ↗423%", which reads as broken.
+
+Root cause:
+- (1) the revenue SQL bucketed on `date_trunc('week', …)` unconditionally; a month must bucket per calendar day.
+- (2) the Order Pipeline widget read `so.*` (all-time) values; the period-aware month figures (`salesThisMonthSen` / `deliveredThisMonthSen`) were already in the overview payload but went unused.
+- (3) the delta chips always passed `salesDelta` / `prodDelta` (last-two-bucket change of the all-time series), with no period guard.
+
+Fix:
+- `src/api/routes/dashboard-overview.ts` — `bucketExpr(col)` returns daily `to_char(col::date,'YYYY-MM-DD')` for a month, weekly (byte-identical to before) for all-time; applied to the 3 revenue SELECTs (companySODate, invoiceDate, per_po.unit_completed_at); the x-axis day list emits every calendar day of the month. (commit e2bfa2f7)
+- `src/pages/dashboard-b/index.tsx` — `isMonthScoped` drives `pipeConfirmed/pipeDelivered/pipeOutstanding` + rate + title ("Order Pipeline — YYYY-MM") + footer from the month figures; all-time path unchanged; the live Outstanding KPI tile stays on `so.*`. (commit e2bfa2f7)
+- `src/pages/dashboard-b/index.tsx` — Sales/Delivered tiles pass `delta={isMonthScoped ? null : …}`; the period-over-period chip now shows only for all-time. (commit b74007ea)
+
+Verification: on the deployed bundle (`index-FpSfefwJ.js`, cache-busted), April/May/June each show daily revenue points (past months full month, current month to yesterday) and "Order Pipeline — <month>" with that month's figures; the delta chip is gone in month view, present for all-time. Worker Efficiency confirmed month-isolated (April top EI PHOO WEI 3878% ≠ June top KYAW OO 288%, no cross-month blend). NOTE (expected, not a bug): per-month Delivered can exceed Confirmed (May 141%, June 107%, April 0%) because monthly Confirmed = that month's *new* SO value while monthly Delivered = that month's *dispatched* value, and the factory ships prior-month orders; the same-cohort funnel is the all-time view (66.9%).
+
+---
+
 ## BUG-2026-06-09-007 — Worker My Pay estimate ignored late / short-hour docks → the phone showed MORE than the worker is actually paid
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-09, on main this session, deploy green + worker-bundle live-verified). typecheck:app + vite build green.

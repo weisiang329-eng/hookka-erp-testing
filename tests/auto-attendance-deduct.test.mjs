@@ -1,0 +1,238 @@
+// ---------------------------------------------------------------------------
+// auto-attendance-deduct.test.mjs — the punch → auto short-hour dock helper
+// (src/api/lib/attendance-deduct.ts).
+//
+// This moves REAL MONEY, so the tests pin BOTH halves:
+//   1. computePunchShortfallHours — the shift maths (08:00–18:00, 1h lunch = 9h,
+//      10-min late grace folds into shortfall, OT is separate). Pure.
+//   2. maybeApplyAutoPunchDock — every guard, because each one is a "don't
+//      wrongly dock a worker" promise: no clock-out → skip, finalised month →
+//      skip, a manual dock is never overridden, tiny/zero shortfall → no dock
+//      (and a stale AUTO dock is cleared), and the happy path writes source=AUTO.
+// ---------------------------------------------------------------------------
+import test from "node:test";
+import assert from "node:assert/strict";
+import { register } from "node:module";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+
+try {
+  register("tsx/esm", pathToFileURL("./"));
+} catch {
+  // Native type-stripping handles it on Node 22+.
+}
+
+const dock = await import(
+  pathToFileURL(resolve(process.cwd(), "src/api/lib/attendance-deduct.ts")).href
+);
+
+// A stateful mock DB: one optional existing dock for the (worker, date) lookup,
+// a payslip-lock count, and recorders for what got written. Routes by SQL
+// fingerprint — the helper runs: ALTER (ensure), SELECT existing dock, SELECT
+// payslip lock count, then either a DELETE (clear stale) or a batch(DELETE,INSERT).
+function mockDb({ existingDock = null, lockedCount = 0 } = {}) {
+  const calls = { alters: 0, deletes: [], inserts: [], batches: 0 };
+  function stmt(sql) {
+    let bound = [];
+    const api = {
+      __sql: sql,
+      bound: () => bound,
+      bind(...args) {
+        bound = args;
+        return api;
+      },
+      async first() {
+        if (
+          sql.includes("FROM payroll_hour_deductions") &&
+          sql.includes("WHERE workerId")
+        ) {
+          return existingDock; // { id, source } | null
+        }
+        if (sql.includes("FROM payslips")) return { c: lockedCount };
+        return null;
+      },
+      async all() {
+        return { results: [] };
+      },
+      async run() {
+        if (sql.startsWith("ALTER TABLE")) calls.alters++;
+        else if (sql.startsWith("DELETE")) calls.deletes.push({ sql, bound });
+        return {};
+      },
+    };
+    return api;
+  }
+  return {
+    __calls: calls,
+    prepare(sql) {
+      return stmt(sql);
+    },
+    async batch(stmts) {
+      calls.batches++;
+      for (const s of stmts) {
+        if (s.__sql.startsWith("INSERT"))
+          calls.inserts.push({ sql: s.__sql, bound: s.bound() });
+        else if (s.__sql.startsWith("DELETE"))
+          calls.deletes.push({ sql: s.__sql, bound: s.bound() });
+      }
+      return [];
+    },
+  };
+}
+
+// Reset the module-level "source column" migration cache before each case so the
+// ensure step is exercised against the fresh mock.
+test.beforeEach(() => dock._resetDeductionSourceMigForTests());
+
+// ── computePunchShortfallHours (pure shift maths) ───────────────────────────
+
+test("on-time full day 08:00–18:00 → zero shortfall", () => {
+  const r = dock.computePunchShortfallHours("08:00", "18:00");
+  assert.equal(r.valid, true);
+  assert.equal(r.hasClockOut, true);
+  assert.equal(r.shortfallHours, 0);
+  assert.equal(r.lateMin, 0);
+  assert.equal(r.otMin, 0);
+});
+
+test("leaving an hour early 08:00–17:00 → 1.0h shortfall", () => {
+  const r = dock.computePunchShortfallHours("08:00", "17:00");
+  assert.equal(r.shortfallHours, 1);
+});
+
+test("late 12 min (past grace) 08:12–18:00 → 0.2h shortfall, lateMin 12", () => {
+  const r = dock.computePunchShortfallHours("08:12", "18:00");
+  assert.equal(r.lateMin, 12);
+  assert.equal(r.shortfallHours, 0.2);
+});
+
+test("late within the 10-min grace 08:08–18:00 → no shortfall, no late", () => {
+  const r = dock.computePunchShortfallHours("08:08", "18:00");
+  assert.equal(r.lateMin, 0);
+  assert.equal(r.shortfallHours, 0);
+});
+
+test("overtime 08:00–19:10 → no shortfall, OT 60m (clock-out floored to 19:00)", () => {
+  const r = dock.computePunchShortfallHours("08:00", "19:10");
+  assert.equal(r.shortfallHours, 0);
+  assert.equal(r.otMin, 60);
+});
+
+test("missing clock-out → not valid, hasClockOut false", () => {
+  const r = dock.computePunchShortfallHours("08:00", null);
+  assert.equal(r.hasClockOut, false);
+  assert.equal(r.valid, false);
+  assert.equal(r.shortfallHours, 0);
+});
+
+test("garbage / reversed times → not valid", () => {
+  assert.equal(dock.computePunchShortfallHours("xx", "18:00").valid, false);
+  assert.equal(dock.computePunchShortfallHours("18:00", "08:00").valid, false);
+});
+
+// ── maybeApplyAutoPunchDock (guards) ────────────────────────────────────────
+
+test("no clock-out → skip, never writes (forgot-to-punch-out guard)", async () => {
+  const db = mockDb();
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-06-03",
+    clockIn: "08:00",
+    clockOut: null,
+  });
+  assert.equal(res.applied, false);
+  assert.equal(res.reason, "no-clockout");
+  assert.equal(db.__calls.batches, 0);
+  assert.equal(db.__calls.inserts.length, 0);
+});
+
+test("clean late/short day → applies an AUTO dock with the shortfall hours", async () => {
+  const db = mockDb({ existingDock: null, lockedCount: 0 });
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-06-03",
+    clockIn: "08:12",
+    clockOut: "18:00",
+  });
+  assert.equal(res.applied, true);
+  assert.equal(res.reason, "applied");
+  assert.equal(res.hours, 0.2);
+  assert.equal(db.__calls.inserts.length, 1);
+  const ins = db.__calls.inserts[0];
+  // INSERT (id, workerId, date, hours, note, source)
+  assert.equal(ins.bound[1], "W1");
+  assert.equal(ins.bound[2], "2026-06-03");
+  assert.equal(ins.bound[3], 0.2);
+  assert.equal(ins.bound[5], dock.AUTO_DOCK_SOURCE);
+});
+
+test("a MANUAL dock on that day is NEVER overridden", async () => {
+  const db = mockDb({ existingDock: { id: "phd-x", source: "MANUAL" } });
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-06-03",
+    clockIn: "08:30",
+    clockOut: "17:00",
+  });
+  assert.equal(res.applied, false);
+  assert.equal(res.reason, "manual-exists");
+  assert.equal(db.__calls.batches, 0);
+  assert.equal(db.__calls.deletes.length, 0);
+});
+
+test("an existing AUTO dock IS overwritten (re-punch recompute)", async () => {
+  const db = mockDb({ existingDock: { id: "phd-old", source: "AUTO" } });
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-06-03",
+    clockIn: "08:00",
+    clockOut: "17:00",
+  });
+  assert.equal(res.applied, true);
+  assert.equal(res.hours, 1);
+  assert.equal(db.__calls.inserts.length, 1);
+  assert.equal(db.__calls.inserts[0].bound[5], dock.AUTO_DOCK_SOURCE);
+});
+
+test("finalised month (a payslip not DRAFT) → never touched", async () => {
+  const db = mockDb({ lockedCount: 1 });
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-05-03",
+    clockIn: "08:30",
+    clockOut: "17:00",
+  });
+  assert.equal(res.applied, false);
+  assert.equal(res.reason, "period-locked");
+  assert.equal(db.__calls.inserts.length, 0);
+});
+
+test("full day → no dock; a stale AUTO dock is cleared", async () => {
+  const db = mockDb({ existingDock: { id: "phd-stale", source: "AUTO" } });
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-06-03",
+    clockIn: "08:00",
+    clockOut: "18:00",
+  });
+  assert.equal(res.applied, false);
+  assert.equal(res.reason, "no-shortfall");
+  // the stale AUTO row was deleted, nothing inserted
+  assert.equal(db.__calls.inserts.length, 0);
+  assert.equal(db.__calls.deletes.length, 1);
+  assert.equal(db.__calls.deletes[0].bound[0], "phd-stale");
+});
+
+test("full day with NO existing dock → no write at all", async () => {
+  const db = mockDb({ existingDock: null });
+  const res = await dock.maybeApplyAutoPunchDock(db, {
+    workerId: "W1",
+    date: "2026-06-03",
+    clockIn: "08:00",
+    clockOut: "18:00",
+  });
+  assert.equal(res.applied, false);
+  assert.equal(res.reason, "no-shortfall");
+  assert.equal(db.__calls.deletes.length, 0);
+  assert.equal(db.__calls.inserts.length, 0);
+});

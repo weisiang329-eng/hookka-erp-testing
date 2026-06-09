@@ -542,8 +542,9 @@ type EntryDraft = {
 
 // Payable hours (regular + OT) from a clock-in/out pair, rounded to 2 dp; null
 // when a time is missing / invalid / out-of-order (so we never clobber a
-// hand-typed Hours value). Late/short is NOT docked here — it surfaces in the
-// existing under-recorded review (operator decides), so nothing is auto-deducted.
+// hand-typed Hours value). The late/short SHORTFALL from these same punch times
+// is auto-docked on save (saveRow → /auto-from-punch), guarded server-side; the
+// owner can still Undo any AUTO dock in the under-recorded review.
 function hoursFromPunch(clockIn?: string, clockOut?: string): number | null {
   const inM = hhmmToMinutes(clockIn ?? null);
   const outM = hhmmToMinutes(clockOut ?? null);
@@ -844,6 +845,30 @@ function WorkingHoursTab({
       // Auto-create on POST may have created an attendance row; refresh
       // the parent attendance list so any clock-in/out summary stays in sync.
       if (!row.id) refreshAttendance(row.date);
+      // Office-keyed punch → auto short-hour dock (the SAME guarded rule the
+      // worker phone punch uses). Only when BOTH clock times were keyed.
+      // Fire-and-forget: docking is a separate concern from saving the hours,
+      // and the server guards it (no clock-out → skip, finalised month → skip,
+      // never overrides a manual dock). It must never block the hours save.
+      if (row.clockIn && row.clockOut) {
+        void fetch("/api/payroll-hour-deductions/auto-from-punch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workerId: row.workerId,
+            date: row.date,
+            clockIn: row.clockIn,
+            clockOut: row.clockOut,
+          }),
+        })
+          .then(() => {
+            invalidateCachePrefix("/api/payroll-hour-deductions");
+            invalidateCachePrefix("/api/payslips");
+          })
+          .catch(() => {
+            /* best-effort — the hours are saved; a dock hiccup is non-fatal */
+          });
+      }
     } catch (e) {
       patchRow(idx, {
         saving: false,
@@ -1208,7 +1233,7 @@ function WorkingHoursTab({
                 />
                 <th
                   className="h-10 px-3 text-left font-medium text-[#374151] w-44"
-                  title="Optional: key clock-in / clock-out and Hours auto-fills (regular + OT, Malaysia rules). Late / short shows in the under-recorded review — not auto-deducted."
+                  title="Optional: key clock-in / clock-out and Hours auto-fills (regular + OT, Malaysia rules). Late past the 10-min grace / short of 9h is auto-deducted on save; you can Undo it in the under-recorded review."
                 >
                   Punch (in / out)
                 </th>

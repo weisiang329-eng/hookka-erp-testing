@@ -24,6 +24,7 @@ import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
 import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
+import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import {
   rowToMinimalPO,
   // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
@@ -734,6 +735,26 @@ app.post("/clock", async (c) => {
     )
     .run();
   await stampPunchGeo(c.var.DB, existing.id, "CLOCK_OUT", lat, lng);
+
+  // Auto short-hour dock (real money). Now that we have BOTH a clock-in and a
+  // clock-out, apply the shift rules (late past grace / short of 9h) and, if
+  // warranted, dock the shortfall — so the owner doesn't have to do it by hand.
+  // Heavily guarded inside the helper (no clock-out → skip, finalised month →
+  // skip, never overrides a manual dock). Best-effort: a dock hiccup must NEVER
+  // fail the punch, and "no dock" is always the safe fallback.
+  if (existing.clockIn) {
+    try {
+      await maybeApplyAutoPunchDock(c.var.DB, {
+        workerId: worker.id,
+        date,
+        clockIn: existing.clockIn,
+        clockOut: time,
+      });
+    } catch (e) {
+      console.warn("[worker/clock] auto short-hour dock skipped:", e);
+    }
+  }
+
   const row = await c.var.DB.prepare(
     "SELECT * FROM attendance_records WHERE id = ?",
   )

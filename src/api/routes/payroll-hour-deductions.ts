@@ -18,6 +18,11 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import {
+  ensureDeductionSourceColumn,
+  maybeApplyAutoPunchDock,
+  MANUAL_DOCK_SOURCE,
+} from "../lib/attendance-deduct";
 
 const app = new Hono<Env>();
 
@@ -27,6 +32,7 @@ type DeductionRow = {
   date: string;
   hours: number | string;
   note: string | null;
+  source: string | null;
 };
 
 function rowToDeduction(r: DeductionRow) {
@@ -36,6 +42,9 @@ function rowToDeduction(r: DeductionRow) {
     date: r.date,
     hours: typeof r.hours === "number" ? r.hours : Number(r.hours) || 0,
     note: r.note ?? "",
+    // 'MANUAL' (owner, from the under-recorded review) vs 'AUTO' (from a punch).
+    // Older rows predate the column → treated as MANUAL.
+    source: r.source ?? MANUAL_DOCK_SOURCE,
   };
 }
 
@@ -49,13 +58,14 @@ function genId(): string {
 app.get("/", async (c) => {
   const denied = await requirePermission(c, "payslips", "read");
   if (denied) return denied;
+  await ensureDeductionSourceColumn(c.var.DB);
   const period = c.req.query("period");
   const stmt = period
     ? c.var.DB.prepare(
-        "SELECT id, workerId, date, hours, note FROM payroll_hour_deductions WHERE date LIKE ? ORDER BY date, workerId",
+        "SELECT id, workerId, date, hours, note, source FROM payroll_hour_deductions WHERE date LIKE ? ORDER BY date, workerId",
       ).bind(`${period}-%`)
     : c.var.DB.prepare(
-        "SELECT id, workerId, date, hours, note FROM payroll_hour_deductions ORDER BY date DESC, workerId",
+        "SELECT id, workerId, date, hours, note, source FROM payroll_hour_deductions ORDER BY date DESC, workerId",
       );
   const res = await stmt.all<DeductionRow>();
   const data = (res.results ?? []).map(rowToDeduction);
@@ -94,8 +104,12 @@ app.post("/", async (c) => {
     .first<{ id: string }>();
   if (!worker) return c.json({ success: false, error: "Worker not found" }, 400);
 
+  await ensureDeductionSourceColumn(c.var.DB);
+
   // Upsert: delete any existing dock for this (worker, date) then insert, so a
-  // re-dock overwrites rather than stacking. One transactional batch.
+  // re-dock overwrites rather than stacking. One transactional batch. Tagged
+  // MANUAL — this is the owner deciding; the punch auto-dock will then never
+  // override it (see attendance-deduct.ts guard 2).
   const id = genId();
   await c.var.DB.batch([
     c.var.DB
@@ -103,16 +117,60 @@ app.post("/", async (c) => {
       .bind(workerId, date),
     c.var.DB
       .prepare(
-        "INSERT INTO payroll_hour_deductions (id, workerId, date, hours, note) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO payroll_hour_deductions (id, workerId, date, hours, note, source) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .bind(id, workerId, date, hoursNum, note || null),
+      .bind(id, workerId, date, hoursNum, note || null, MANUAL_DOCK_SOURCE),
   ]);
   const row = await c.var.DB.prepare(
-    "SELECT id, workerId, date, hours, note FROM payroll_hour_deductions WHERE id = ?",
+    "SELECT id, workerId, date, hours, note, source FROM payroll_hour_deductions WHERE id = ?",
   )
     .bind(id)
     .first<DeductionRow>();
   return c.json({ success: true, data: rowToDeduction(row!) }, 201);
+});
+
+// ---------------------------------------------------------------------------
+// POST /auto-from-punch  — office-keyed punch → auto short-hour dock.
+// Body: { workerId, date, clockIn, clockOut }  (clock times "HH:MM")
+//
+// When the office keys a worker's clock in/out in the Working Hours grid, this
+// applies the SAME guarded rule the worker phone punch uses: late past the
+// 10-min grace and/or short of a 9-hour day → dock the shortfall, tagged AUTO.
+// Heavily guarded inside the helper (no clock-out → skip, finalised month →
+// skip, never overrides a manual dock). Idempotent per (worker, date) and
+// always safe to re-call — returns what it did + why.
+// ---------------------------------------------------------------------------
+app.post("/auto-from-punch", async (c) => {
+  const denied = await requirePermission(c, "payslips", "update");
+  if (denied) return denied;
+  let body: {
+    workerId?: unknown;
+    date?: unknown;
+    clockIn?: unknown;
+    clockOut?: unknown;
+  };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+  const workerId = typeof body.workerId === "string" ? body.workerId.trim() : "";
+  const date = typeof body.date === "string" ? body.date.trim() : "";
+  const clockIn = typeof body.clockIn === "string" ? body.clockIn : null;
+  const clockOut = typeof body.clockOut === "string" ? body.clockOut : null;
+  if (!workerId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return c.json(
+      { success: false, error: "workerId and date (YYYY-MM-DD) are required" },
+      400,
+    );
+  }
+  const result = await maybeApplyAutoPunchDock(c.var.DB, {
+    workerId,
+    date,
+    clockIn,
+    clockOut,
+  });
+  return c.json({ success: true, data: result });
 });
 
 // ---------------------------------------------------------------------------

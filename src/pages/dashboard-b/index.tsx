@@ -60,6 +60,7 @@ type Overview = {
   salesMonths?: string[];
   salesThisMonthSen?: number;
   deliveredThisMonthSen?: number;
+  deliveredOfMonthOrdersSen?: number;
   production?: {
     dailyCapacityMin: number;
     backlogMin: number;
@@ -811,19 +812,22 @@ export default function DashboardBPage() {
   const confirmed = so.csRevenueSen ?? delivered + outstanding;
   // Order Pipeline values. The /api/sales-orders/stats endpoint is NOT
   // period-aware (it only aggregates the whole table), so for a selected month
-  // we instead use the month-scoped figures the dashboard-overview payload
-  // already computes: salesThisMonthSen (= that month's confirmed-SO value) and
-  // deliveredThisMonthSen (= that month's shipped DO value, by dispatch date).
-  // Outstanding is then derived as confirmed − delivered (floored at 0).
+  // we use the month-scoped figures the dashboard-overview payload computes.
   //   • period === 'all' → original all-time so.* values (UNCHANGED).
-  //   • a month          → this-month confirmed vs how much of it shipped.
-  // Caveat: month "Outstanding" = confirmed-minus-delivered for the month, a
-  // flow figure — it is NOT the live "orders still open" state count that the
-  // separate all-time Outstanding KPI tile shows (that tile stays on so.*).
+  //   • a month          → SAME-COHORT funnel of the orders confirmed that
+  //     month: confirmed = salesThisMonthSen, delivered = how much of THAT
+  //     cohort has shipped (deliveredOfMonthOrdersSen), outstanding = the rest.
+  // Note: the all-time "Outstanding" KPI tile above stays on so.* (the live
+  // "orders still open" count) — a different lens from this funnel.
   const isMonthScoped = period !== "all";
   const pipeConfirmed = isMonthScoped ? (ov.salesThisMonthSen ?? 0) : confirmed;
+  // Month pipeline is a SAME-COHORT funnel: of the orders CONFIRMED this month
+  // (salesThisMonthSen), how much has shipped (deliveredOfMonthOrdersSen — the
+  // SO's confirm-month, not the ship date). So delivered ≤ confirmed and
+  // Outstanding = the rest is meaningful (≠ the dispatch-month "delivered this
+  // month" KPI tile, which folds in prior-month backlog and can exceed 100%).
   const pipeDelivered = isMonthScoped
-    ? (ov.deliveredThisMonthSen ?? 0)
+    ? (ov.deliveredOfMonthOrdersSen ?? 0)
     : delivered;
   const pipeOutstanding = isMonthScoped
     ? Math.max(0, pipeConfirmed - pipeDelivered)
@@ -943,11 +947,27 @@ export default function DashboardBPage() {
   const completedDrillTitle = isAllTime
     ? "Completed — last 7 days"
     : `Completed — ${period}`;
-  // Completed headline tracks the backend: yesterday's figure for all-time /
-  // current; a PAST month shows that month's LAST day instead.
-  const completedHeadlineLabel =
-    isAllTime || isCurrentMonth ? "Completed yest." : "Completed (last day)";
-  const completedHintLabel = isAllTime ? "· view 7d" : "· view month";
+  // Completed headline: all-time shows yesterday's live pulse; a selected month
+  // (current or past) shows that month's RUNNING TOTAL, summed from the per-day
+  // series the backend already returns for the whole month range.
+  const completedMonthBf = (prod?.completedLast7 ?? []).reduce(
+    (s, d) => s + (d.bedframeUnits || 0),
+    0,
+  );
+  const completedMonthSofa = (prod?.completedLast7 ?? []).reduce(
+    (s, d) => s + (d.sofaSets || 0),
+    0,
+  );
+  const completedHeadBf = isAllTime
+    ? (prod?.completedYesterday?.bedframeUnits ?? 0)
+    : completedMonthBf;
+  const completedHeadSofa = isAllTime
+    ? (prod?.completedYesterday?.sofaSets ?? 0)
+    : completedMonthSofa;
+  const completedHeadlineLabel = isAllTime
+    ? "Completed yest."
+    : `Completed · ${period}`;
+  const completedHintLabel = isAllTime ? "· view 7d" : "· view days";
   const effSub = isAllTime
     ? "production mins ÷ clocked hours · last 7 working days"
     : `production mins ÷ clocked hours · ${period}`;
@@ -1377,9 +1397,8 @@ export default function DashboardBPage() {
                   </span>
                 </span>
                 <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
-                  {(prod?.completedYesterday?.bedframeUnits ?? 0).toLocaleString()}{" "}
-                  /{" "}
-                  {(prod?.completedYesterday?.sofaSets ?? 0).toLocaleString()}
+                  {completedHeadBf.toLocaleString()} /{" "}
+                  {completedHeadSofa.toLocaleString()}
                 </span>
               </button>
             </div>
@@ -1393,7 +1412,11 @@ export default function DashboardBPage() {
           <CardContent className="p-5">
             <SectionTitle
               title={isMonthScoped ? `Order Pipeline — ${period}` : "Order Pipeline"}
-              sub="confirmed → outstanding → delivered"
+              sub={
+                isMonthScoped
+                  ? `${period} orders — shipped vs still to ship`
+                  : "confirmed → outstanding → delivered"
+              }
               right={
                 <div className="text-right">
                   <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF]">

@@ -1009,18 +1009,34 @@ app.get("/", async (c) => {
         ym: String(eff).slice(0, 7),
       });
     }
+    // SO confirm-month lookup (soId -> 'YYYY-MM' of companySODate) for the
+    // month-cohort Order Pipeline: "of the orders CONFIRMED this month, how
+    // much has shipped" — a same-cohort funnel that cannot exceed 100% (unlike
+    // dispatch-month "delivered this month", which folds in prior-month backlog
+    // and so overshoots confirmed). Built from the per-SO aggregate.
+    const soConfirmYm = new Map<string, string>();
+    for (const r of soAggRes.results ?? []) {
+      if (r.soId && r.ym) soConfirmYm.set(String(r.soId), String(r.ym));
+    }
     let thisMonthDeliveredSen = 0;
+    let deliveredOfMonthOrdersSen = 0;
     for (const di of delivItemsRes.results ?? []) {
       const info = doInfo.get(di.deliveryOrderId);
       if (!info || !info.shipped) continue;
-      if (!kpiAllTime && info.ym !== period) continue;
-      thisMonthDeliveredSen +=
+      const val =
         priceForItem(
           soPriceIdx,
           di.productionOrderId,
           info.soId,
           di.productCode,
         ) * (di.quantity || 0);
+      // "Delivered this month" = shipped BY dispatch month (the KPI tile).
+      if (kpiAllTime || info.ym === period) thisMonthDeliveredSen += val;
+      // "Delivered of this month's orders" = the cohort funnel: shipped value
+      // whose SO was CONFIRMED in the selected month, regardless of ship date.
+      if (!kpiAllTime && soConfirmYm.get(info.soId) === period) {
+        deliveredOfMonthOrdersSen += val;
+      }
     }
 
     // ---- Fabric cost per meter (consumption basis) ----
@@ -1899,6 +1915,7 @@ app.get("/", async (c) => {
     return {
       salesThisMonthSen: thisMonthSalesSen,
       deliveredThisMonthSen: thisMonthDeliveredSen,
+      deliveredOfMonthOrdersSen,
       production: stateProduction,
       stateSnapshot,
       purchasing: {

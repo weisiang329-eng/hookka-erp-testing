@@ -7065,7 +7065,9 @@ function LaborCostTab({
   // Owner-applied short-hour docks for the month (the same table payslip
   // generation reads). Drives the "Docked this month" undo list below.
   const { data: deductionsResp, refresh: refreshDeductions } = useCachedJson<{
-    data?: Array<{ id: string; workerId: string; date: string; hours: number }>;
+    // source: 'MANUAL' (owner, from this review) vs 'AUTO' (from a late/short
+    // punch). Older rows omit it → treated as MANUAL.
+    data?: Array<{ id: string; workerId: string; date: string; hours: number; source?: string }>;
   }>(payrollPeriod ? `/api/payroll-hour-deductions?period=${payrollPeriod}` : null);
   // Which "workerId|date|action" write is mid-flight, so its button disables.
   const [underActionBusy, setUnderActionBusy] = useState<string | null>(null);
@@ -8209,8 +8211,10 @@ function LaborCostTab({
               Docked this month — unworked hours removed from pay
             </h3>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-2">
-              Hours you marked as not-worked-and-not-paid for {payrollMonthLabel}. Each
-              dock lowers that worker&rsquo;s pay; click Undo to restore it.
+              Short-hour docks for {payrollMonthLabel} — hours removed from pay.
+              An <span className="font-semibold text-[#8A6D2F]">Auto</span> tag means it came
+              from a late / short punch; the rest you set here. Each lowers that
+              worker&rsquo;s pay; click Undo to restore it.
             </p>
             <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-white">
               <table className="w-full text-xs">
@@ -8230,6 +8234,14 @@ function LaborCostTab({
                       <tr key={d.id} className="border-b border-[#F1DDD7]">
                         <td className="py-1.5 px-3 text-[#1F1D1B]">
                           {workersById.get(d.workerId)?.name ?? d.workerId}
+                          {d.source === "AUTO" && (
+                            <span
+                              title="Created automatically from a late / short punch. Click Undo to keep the pay."
+                              className="ml-1.5 inline-block rounded bg-[#EADFC9] px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#8A6D2F]"
+                            >
+                              Auto
+                            </span>
+                          )}
                         </td>
                         <td className="py-1.5 px-3 text-[#4B5563]">{d.date}</td>
                         <td className="py-1.5 px-3 text-right tabular-nums text-[#9A3A2D]">

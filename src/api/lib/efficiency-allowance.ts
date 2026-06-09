@@ -1,0 +1,223 @@
+// ---------------------------------------------------------------------------
+// Efficiency allowance — month-cumulative efficiency per worker + the gate that
+// turns that efficiency into the flat bonus.
+//
+// The efficiency number here is THE SAME one the operator reads on the
+// Employees → Efficiency Overview tab (their monthly reference for "did this
+// worker hit the target"), so the bonus that auto-pays always agrees with what
+// they see on screen:
+//
+//   efficiency% = production minutes / (production-dept working hours × 60) × 100
+//
+//   • production minutes — job_cards.productionTimeMinutes × wipQty, for cards
+//     that are COMPLETED/TRANSFERRED with a completedDate inside the month.
+//     Split in half when BOTH PIC slots are filled, full when solo. (Exact
+//     mirror of GET /api/job-cards/summary.)
+//   • production-dept working hours — SUM(working_hour_entries.hours) for the
+//     month, counting ONLY departments flagged isProduction. Hours logged to
+//     Warehousing / Repair / Maintenance / Shortfall are NOT available
+//     production time and are excluded from the denominator. (Exact mirror of
+//     the Efficiency Overview denominator + GET /api/working-hour-entries/summary.)
+//
+// When a worker has no production-dept hours (or no working-hour rows at all)
+// in the month, efficiency is null — the Overview shows "—" and NO allowance is
+// paid.
+//
+// The bonus itself is configured per worker (efficiencyAllowanceSen +
+// efficiencyThresholdPct, migration 0151). It is a PURE non-statutory bonus:
+// every caller adds it to gross pay AFTER calcStatutory, so it never moves
+// EPF / SOCSO / EIS / PCB — it is extra money on top, exactly as Wei Siang
+// specified ("不算法定纯额外奖金").
+//
+// For an in-progress month the queries only ever see elapsed job cards + keyed
+// hours, so the same call naturally returns the cumulative-to-date efficiency
+// (a live estimate); at month-end it is the final figure.
+// ---------------------------------------------------------------------------
+
+// D1-compat shape exposed by the SupabaseAdapter installed in worker.ts —
+// matches the DbLike used across src/api/lib.
+interface DbLike {
+  prepare(sql: string): {
+    bind(...args: unknown[]): {
+      all<T = unknown>(): Promise<{ results?: T[] }>;
+    };
+  };
+}
+
+export type WorkerMonthlyEfficiency = {
+  /** job_cards production minutes credited to the worker in the month. */
+  prodMinutes: number;
+  /** Production-dept working hours — the Efficiency % denominator. */
+  prodHours: number;
+  /** Distinct dates the worker logged ANY working_hour_entries in the month. */
+  daysWithEntries: number;
+  /**
+   * prodMinutes / (prodHours × 60) × 100, or null when it can't be computed
+   * (no production-dept hours / no entries at all). null ⇒ no allowance.
+   */
+  pct: number | null;
+};
+
+// Per-worker production minutes for the window — mirrors GET /api/job-cards/
+// summary byte-for-byte (PIC halving when both slots filled, × wipQty, only
+// COMPLETED/TRANSFERRED cards with a completedDate in range). Output aliases
+// are snake_case so Postgres preserves them through the unquoted-identifier
+// lowercase fold; the driver's transform.column.from restores worker_id →
+// workerId and production_minutes → productionMinutes on the way back.
+const JC_PROD_MINUTES_SQL = `
+  SELECT wid AS worker_id, SUM(contrib_min) AS production_minutes
+    FROM (
+      SELECT pic1Id AS wid,
+             CASE WHEN pic2Id IS NOT NULL AND pic2Id != ''
+                  THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
+                  ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
+             END AS contrib_min
+        FROM job_cards
+       WHERE pic1Id IS NOT NULL AND pic1Id != ''
+         AND status IN ('COMPLETED','TRANSFERRED')
+         AND completedDate IS NOT NULL
+         AND completedDate >= ? AND completedDate <= ?
+
+      UNION ALL
+
+      SELECT pic2Id AS wid,
+             CASE WHEN pic1Id IS NOT NULL AND pic1Id != ''
+                  THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
+                  ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
+             END AS contrib_min
+        FROM job_cards
+       WHERE pic2Id IS NOT NULL AND pic2Id != ''
+         AND status IN ('COMPLETED','TRANSFERRED')
+         AND completedDate IS NOT NULL
+         AND completedDate >= ? AND completedDate <= ?
+    ) sub
+   WHERE wid IS NOT NULL AND wid != ''
+   GROUP BY wid
+`;
+
+/**
+ * Month-cumulative efficiency per worker for [periodStart, periodEnd]
+ * (inclusive YYYY-MM-DD). Returns one entry per worker seen in either the
+ * job-card or working-hour data for the window.
+ */
+export async function computeMonthlyEfficiencyByWorker(
+  db: DbLike,
+  periodStart: string,
+  periodEnd: string,
+): Promise<Map<string, WorkerMonthlyEfficiency>> {
+  // 1. Which departments count toward the efficiency denominator. Truthy
+  //    isProduction (1 / true) only — same test the Overview uses.
+  const deptRes = await db
+    .prepare("SELECT code, isProduction FROM departments")
+    .bind()
+    .all<{ code: string; isProduction: number | boolean | null }>();
+  const productionDeptCodes = new Set<string>();
+  for (const d of deptRes.results ?? []) {
+    if (d.isProduction) productionDeptCodes.add(d.code);
+  }
+
+  // 2. Production minutes per worker (numerator).
+  const jcRes = await db
+    .prepare(JC_PROD_MINUTES_SQL)
+    .bind(periodStart, periodEnd, periodStart, periodEnd)
+    .all<{ workerId: string; productionMinutes: number | string | null }>();
+  const prodMinByWorker = new Map<string, number>();
+  for (const r of jcRes.results ?? []) {
+    prodMinByWorker.set(
+      r.workerId,
+      Math.round(Number(r.productionMinutes) || 0),
+    );
+  }
+
+  // 3. Working-hour rows for the window — sum production-dept hours (the
+  //    denominator) and count distinct entry-days per worker. Raw rows are
+  //    aggregated in JS so the distinct-date count is exact across depts.
+  const wheRes = await db
+    .prepare(
+      `SELECT workerId, departmentCode, date, hours
+         FROM working_hour_entries
+        WHERE date >= ? AND date <= ?`,
+    )
+    .bind(periodStart, periodEnd)
+    .all<{
+      workerId: string;
+      departmentCode: string;
+      date: string;
+      hours: number | string | null;
+    }>();
+  const prodHoursByWorker = new Map<string, number>();
+  const entryDaysByWorker = new Map<string, Set<string>>();
+  for (const r of wheRes.results ?? []) {
+    let days = entryDaysByWorker.get(r.workerId);
+    if (!days) {
+      days = new Set<string>();
+      entryDaysByWorker.set(r.workerId, days);
+    }
+    days.add(r.date);
+    if (productionDeptCodes.has(r.departmentCode)) {
+      const h = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+      prodHoursByWorker.set(
+        r.workerId,
+        (prodHoursByWorker.get(r.workerId) ?? 0) + h,
+      );
+    }
+  }
+
+  // 4. Assemble per-worker efficiency over the UNION of both sources.
+  const out = new Map<string, WorkerMonthlyEfficiency>();
+  const allWorkerIds = new Set<string>([
+    ...prodMinByWorker.keys(),
+    ...entryDaysByWorker.keys(),
+  ]);
+  for (const wid of allWorkerIds) {
+    const prodMinutes = prodMinByWorker.get(wid) ?? 0;
+    const prodHours = prodHoursByWorker.get(wid) ?? 0;
+    const daysWithEntries = entryDaysByWorker.get(wid)?.size ?? 0;
+    // Same "—" rule as the Efficiency Overview: a zero denominator (no
+    // production-dept hours) OR no working-hour rows at all ⇒ efficiency is
+    // not defined for this worker this month.
+    const pct =
+      prodHours > 0 && daysWithEntries > 0
+        ? (prodMinutes / (prodHours * 60)) * 100
+        : null;
+    out.set(wid, { prodMinutes, prodHours, daysWithEntries, pct });
+  }
+  return out;
+}
+
+/**
+ * The gate: how much efficiency allowance (in sen) a worker earns for the
+ * month, given their monthly efficiency and their per-worker config.
+ *
+ * Pays the flat efficiencyAllowanceSen iff the worker's monthly efficiency
+ * reaches their efficiencyThresholdPct; otherwise 0. A worker with no bonus
+ * configured (the default 0/0) or no computable efficiency earns nothing.
+ */
+export function resolveEfficiencyAllowanceSen(
+  eff: WorkerMonthlyEfficiency | undefined,
+  allowanceSen: number | null | undefined,
+  thresholdPct: number | null | undefined,
+): number {
+  const allow = Math.round(Number(allowanceSen) || 0);
+  const threshold = Number(thresholdPct) || 0;
+  // Not configured. A threshold of 0 is treated as "off" on purpose — the
+  // efficiency allowance is a reach-the-target bonus, not an unconditional add.
+  if (allow <= 0 || threshold <= 0) return 0;
+  // No computable efficiency (em-dash on the Overview) ⇒ no bonus.
+  if (!eff || eff.pct === null) return 0;
+  // Compare on the SAME one-decimal figure the operator reads on the Efficiency
+  // Overview, so "screen shows 100.0% → bonus paid" always holds (avoids a
+  // 99.96%-rounds-to-100.0%-but-no-pay surprise).
+  const shown = Math.round(eff.pct * 10) / 10;
+  return shown >= threshold ? allow : 0;
+}
+
+/** period "YYYY-MM" → inclusive first + last calendar day as "YYYY-MM-DD". */
+export function monthBounds(period: string): { start: string; end: string } {
+  const [y, m] = period.split("-").map(Number);
+  const lastDay = new Date(y, m, 0).getDate(); // day 0 of next month = last of this
+  return {
+    start: `${period}-01`,
+    end: `${period}-${String(lastDay).padStart(2, "0")}`,
+  };
+}

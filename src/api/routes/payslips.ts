@@ -21,6 +21,11 @@ import {
   effectiveSalarySenForMonth,
   type AttendanceDayDetail,
 } from "../../lib/labor-engine";
+import {
+  computeMonthlyEfficiencyByWorker,
+  resolveEfficiencyAllowanceSen,
+  monthBounds,
+} from "../lib/efficiency-allowance";
 
 // Data-entry grace before an unrecorded working day is treated as a confirmed
 // absence. Spec (Wei Siang, 2026-06-02): the office keys Working Hours a few
@@ -53,6 +58,11 @@ type WorkerRow = {
   // YYYY-MM-DD join date, or null. Days before it aren't worked/absent, and a
   // worker who joined in a later month is excluded from this period entirely.
   joinDate: string | null;
+  // Per-worker efficiency bonus config (migration 0151). Flat bonus (sen) paid
+  // when month-cumulative efficiency reaches the threshold %. Default 0 / 0 on
+  // legacy rows ⇒ no bonus.
+  efficiencyAllowanceSen?: number | null;
+  efficiencyThresholdPct?: number | null;
 };
 
 type PayslipRow = {
@@ -372,7 +382,7 @@ app.get("/projected", async (c) => {
 
   // Same worker scope as POST: ACTIVE, plus RESIGNED in their final month.
   const wres = await c.var.DB.prepare(
-    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+    "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
   )
     .bind(`${period}-%`)
     .all<WorkerRow>();
@@ -438,6 +448,17 @@ app.get("/projected", async (c) => {
   const absenceThroughDay = absenceCutoffDay(pYear, pMonth, today, ABSENCE_GRACE_WORKING_DAYS, publicHolidays);
   const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
 
+  // Month-cumulative efficiency per worker (job_cards production minutes ÷
+  // production-dept working hours) — drives the efficiency allowance below.
+  // One pass for the whole period; an in-progress month yields the to-date
+  // figure (only elapsed cards + keyed hours exist yet).
+  const effBounds = monthBounds(period);
+  const effByWorker = await computeMonthlyEfficiencyByWorker(
+    c.var.DB,
+    effBounds.start,
+    effBounds.end,
+  );
+
   // The estimate rows carry the per-day absence/OT detail (additive display
   // fields) alongside the standard payslip shape.
   const data: PayslipWithDayDetail[] = [];
@@ -496,7 +517,11 @@ app.get("/projected", async (c) => {
       employmentStartDay: joinedDay,
       employmentEndDay: resignedDay,
     });
-    const allowances = 0;
+    const allowances = resolveEfficiencyAllowanceSen(
+      effByWorker.get(worker.id),
+      worker.efficiencyAllowanceSen,
+      worker.efficiencyThresholdPct,
+    );
     const stat = calcStatutory(effectiveSalarySen, {
       epfEnabled: worker.epfEnabled,
       socsoEnabled: worker.socsoEnabled,
@@ -624,7 +649,7 @@ app.post("/", async (c) => {
       // partial, month) — the existing absence math prorates the days after
       // they left. Later months exclude them because resignedAt no longer
       // matches the period. Earlier months were generated while still ACTIVE.
-      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
+      "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth, workingHoursPerDay, otMultiplier, epfEnabled, socsoEnabled, eisEnabled, pcbEnabled, resignedAt, joinDate, efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE status = 'ACTIVE' OR (status = 'RESIGNED' AND resignedAt LIKE ?)",
     )
       .bind(`${period}-%`)
       .all<WorkerRow>();
@@ -732,6 +757,15 @@ app.post("/", async (c) => {
     // Last calendar day of the period, as YYYY-MM-DD, for join-date comparison.
     const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
 
+    // Month-cumulative efficiency per worker — the basis for the efficiency
+    // allowance written into each generated payslip's allowancesSen.
+    const effBounds = monthBounds(period);
+    const effByWorker = await computeMonthlyEfficiencyByWorker(
+      c.var.DB,
+      effBounds.start,
+      effBounds.end,
+    );
+
     for (const worker of activeWorkers) {
       // Join date. A worker who joined AFTER this period had not started yet —
       // skip them entirely (no payslip for a month before they were hired).
@@ -797,7 +831,11 @@ app.post("/", async (c) => {
         shortHourDeductionHours: deductionHoursByWorker.get(worker.id) ?? 0,
       });
 
-      const allowances = 0;
+      const allowances = resolveEfficiencyAllowanceSen(
+        effByWorker.get(worker.id),
+        worker.efficiencyAllowanceSen,
+        worker.efficiencyThresholdPct,
+      );
       // Statutory deductions computed on the month's effective monthly salary
       // (= the worker's salary, day-weighted if it changed mid-month).
       const stat = calcStatutory(effectiveSalarySen, {

@@ -34,6 +34,15 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-006 — Marking a worker RESIGNED didn't lock out a phone already signed in (only blocked fresh logins)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-09, commit e5b11bc8 on main, deploy run 27206372067 green; built/tested earlier as 1c323f3e, also on staging). typecheck + resign-lockout + worker-auth tests green.
+**Category:** auth-rbac
+
+Setting a worker to RESIGNED only blocked NEW logins (worker-auth login already 403s a non-ACTIVE worker). But the worker-token resolver never re-checked status and worker tokens have no expiry, so a phone already signed in BEFORE the worker was resigned kept full access (My Pay, history, clock, scan) indefinitely — until someone manually reset the PIN or deleted the worker. Fix: (1) `getWorker()` (worker.ts) now rejects any non-ACTIVE worker (403 "Employee account inactive") on EVERY worker-app request, not just login — catches an already-open session; (2) the worker `PUT /api/workers/:id` (workers.ts) purges that worker's `worker_tokens` whenever the new status is non-ACTIVE, kicking any open phone session the instant the operator resigns them (mirrors what the soft-DELETE handler already did). Net: marking RESIGNED disables app access immediately. Test: `tests/resign-lockout.test.mjs` (pins both guards). No data cleanup needed.
+
+---
+
 ## BUG-2026-06-09-005 — Dashboard edit didn't invalidate the production list snapshot → removed/filled value flickers back for ~1–3 min
 
 **Status:** 🟢 Fixed (`production-orders.ts`, `feat/sticker-scan-per-piece-overhaul`); typecheck + lint + 585/586 tests green. Merged → main + deployed; live-verified by Wei Siang's exact repro (remove completion date + PIC, navigate away + back).

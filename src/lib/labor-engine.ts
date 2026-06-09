@@ -46,6 +46,17 @@ const WORKING_DOW: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 6]);
 const FALLBACK_WORKING_DAYS_PER_MONTH = 26;
 
 /**
+ * Hourly-rate divisor from the owner's salary spec (HOOKKA MANUFACTURING
+ * CALCULATION SALARY): the shift is 08:00–18:00 = 10 hours, and the hourly rate
+ * = daily rate ÷ 10. DISTINCT from `workingHoursPerDay` (the 9 PAYABLE hours,
+ * which stays the OT THRESHOLD only). Used for OT pay rate and the unpaid-hours
+ * (lateness / short-of-a-day) deduction rate:
+ *   OT/hr            = (salary ÷ 26 work days) ÷ 10 × multiplier   (RM7.88 ×mult)
+ *   unpaid-hour/late = (salary ÷ calendar days) ÷ 10               (RM6.83)
+ */
+const RATE_HOURS_PER_DAY = 10;
+
+/**
  * A worker's maintained Employee Master figures. Everything the engine
  * needs about the person; no DB types leak in here so this module stays
  * pure and unit-testable.
@@ -526,11 +537,18 @@ export function computeMonthlyLabor(
     countElapsedWorkingDays(year, month, new Date(year, month, 0).getDate(), publicHolidays),
   );
 
-  const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth;
-  const otHourlyRateSen =
-    workingHoursPerDay > 0
-      ? (payrollDailyRateSen / workingHoursPerDay) * otMultiplier
-      : 0;
+  // Rates per the owner's salary spec (HOOKKA MANUFACTURING CALCULATION SALARY):
+  //   • Absence (unpaid day)  → salary ÷ CALENDAR days this month (30/31/28/29).
+  //   • OT pay /hour          → (salary ÷ 26 work days) ÷ 10 × multiplier = 7.88×mult.
+  //   • Unpaid hours (lateness / short of a full day) → (salary ÷ calendar days) ÷ 10 = 6.83.
+  // The ÷10 is the 08:00–18:00 shift span; the 9 PAYABLE hours (workingHoursPerDay)
+  // stays the OT THRESHOLD only. costingDailyRate (÷ working-days) is UNCHANGED —
+  // it remains the production-cost rate + the part-month proration base.
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const calendarDailyRateSen = basicSalarySen / daysInMonth; // absence /day (÷30/31)
+  const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — the OT daily base
+  const otHourlyRateSen = (payrollDailyRateSen / RATE_HOURS_PER_DAY) * otMultiplier; // ÷26÷10×mult
+  const lateHourlyRateSen = calendarDailyRateSen / RATE_HOURS_PER_DAY; // unpaid hour / lateness (÷calendar÷10)
   const costingDailyRateSen = basicSalarySen / costingDivisor;
 
   // ── Payroll side (÷26).
@@ -554,20 +572,19 @@ export function computeMonthlyLabor(
   // can't make absences negative or inflate prorated pay.
   const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
   const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
-  // Absence docks the nominal ÷26 day rate (the contractual ordinary rate of pay),
-  // which is LESS than the ÷working-days rate production loses for that unworked
-  // day; the difference is reconciled as "non-productive paid (absence)" on the
-  // Labor Cost screen, not left in the under-recorded residual.
-  const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
-  // Owner-flagged unworked hours (under-recorded review) are valued at the
-  // worker's ÷working-days hourly rate and docked from basic earned, so the
-  // worker's pay drops by exactly the production value Labor Cost never credited
-  // → their under-recorded gap closes.
+  // Absence docks the CALENDAR-day rate (salary ÷ days-in-month = RM68.33 on a
+  // 30-day month), per the owner's spec. This is LESS than the ÷working-days rate
+  // production loses for that unworked day; the difference is reconciled as
+  // "non-productive paid (absence)" on the Labor Cost screen (the absence-leniency
+  // line), not left in the under-recorded residual.
+  const absenceDeductionSen = Math.round(absentDays * calendarDailyRateSen);
+  // Owner-flagged / punch-derived unworked hours (lateness or short of a full day,
+  // from the under-recorded review or an auto punch dock) are docked at the spec's
+  // unpaid-hour rate = (salary ÷ calendar days) ÷ 10 = RM6.83, subtracted from
+  // basic earned. Same hours figure as before (payroll_hour_deductions); only the
+  // per-hour VALUE changed to match the salary spec.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
-  const shortHourDeductionSen =
-    workingHoursPerDay > 0
-      ? Math.round(shortHourDeductionHours * (costingDailyRateSen / workingHoursPerDay))
-      : 0;
+  const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
   // Full-month worker → entitled to the FULL monthly salary, minus absences.
   // Partial-month worker (joined and/or resigned mid-month) → entitled only to
   // the days actually served (days worked × daily rate); days outside their

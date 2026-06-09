@@ -133,14 +133,15 @@ test("computeMonthlyLabor: ANN full attendance — rates", () => {
     Math.abs(r.costingDailyRateSen - 265_000 / 24) < 1e-6,
     `production day rate ${r.costingDailyRateSen}`,
   );
-  // OT hourly = 265000/26/8 × 1.5 ≈ 1911.06 sen.
+  // OT hourly per the owner spec = (salary ÷ 26 work days) ÷ 10 × 1.5 ≈ 1528.85 sen.
+  // (÷10 = the 08:00–18:00 shift span, NOT the 8h OT threshold.)
   assert.ok(
-    Math.abs(r.otHourlyRateSen - (265_000 / 26 / 8) * 1.5) < 1e-6,
+    Math.abs(r.otHourlyRateSen - (265_000 / 26 / 10) * 1.5) < 1e-6,
     `OT hourly ${r.otHourlyRateSen}`,
   );
 });
 
-test("computeMonthlyLabor: ANN full attendance — payroll = RM2,936.66", () => {
+test("computeMonthlyLabor: ANN full attendance — payroll = RM2,879.33 (OT ÷26÷10)", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -153,11 +154,11 @@ test("computeMonthlyLabor: ANN full attendance — payroll = RM2,936.66", () => 
   assert.equal(r.payroll.absentDays, 0);
   assert.equal(r.payroll.absenceDeductionSen, 0);
   assert.equal(r.payroll.basicEarnedSen, 265_000);
-  assert.equal(r.payroll.otPaySen, 28_666); // 15h × 1911.057… → 28665.87 → 28666
-  assert.equal(r.payroll.grossSen, 293_666); // RM2,936.66
+  assert.equal(r.payroll.otPaySen, 22_933); // 15h × (265000/26/10)×1.5 = 1528.85 → 22933
+  assert.equal(r.payroll.grossSen, 287_933); // 265000 + 22933 → RM2,879.33
 });
 
-test("computeMonthlyLabor: ANN full attendance — production cost = RM2,936.66", () => {
+test("computeMonthlyLabor: ANN full attendance — production cost = RM2,879.33 (OT cost = OT pay)", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -168,8 +169,8 @@ test("computeMonthlyLabor: ANN full attendance — production cost = RM2,936.66"
   });
   // 24 days × (265000/24) = 265000 sen exactly.
   assert.equal(r.cost.regularCostSen, 265_000);
-  assert.equal(r.cost.otCostSen, 28_666); // identical to payroll OT
-  assert.equal(r.cost.totalCostSen, 293_666); // RM2,936.66
+  assert.equal(r.cost.otCostSen, 22_933); // identical to payroll OT (now ÷26÷10)
+  assert.equal(r.cost.totalCostSen, 287_933); // RM2,879.33
 });
 
 test("computeMonthlyLabor: full attendance — payroll gross equals production cost", () => {
@@ -186,7 +187,7 @@ test("computeMonthlyLabor: full attendance — payroll gross equals production c
 
 // ── computeMonthlyLabor: ANN, absent 2 days ─────────────────────────────────
 
-test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷26; gap vs cost = non-productive paid", () => {
+test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷calendar-days; gap vs cost = non-productive paid", () => {
   // Drop the first two 8 h days → 22 days present, still 15 h OT.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
@@ -198,17 +199,17 @@ test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷26; gap vs cost
   });
   assert.equal(r.daysWorked, 22);
   assert.equal(r.payroll.absentDays, 2);
-  // Absence is docked at the nominal ÷26 day rate (ordinary rate of pay):
-  // 2 × 265000/26 = 20384.6 → 20385 sen.
-  assert.equal(r.payroll.absenceDeductionSen, 20_385);
-  assert.equal(r.payroll.basicEarnedSen, 244_615); // 265000 − 20385 → RM2,446.15
-  assert.equal(r.payroll.grossSen, 273_281); // 244615 + 28666 (OT, ÷26) → RM2,732.81
+  // Absence is docked at the CALENDAR-day rate (salary ÷ days-in-month), per the
+  // owner spec: 2 × 265000/31 = 17096.8 → 17097 sen (May has 31 days).
+  assert.equal(r.payroll.absenceDeductionSen, 17_097);
+  assert.equal(r.payroll.basicEarnedSen, 247_903); // 265000 − 17097 → RM2,479.03
+  assert.equal(r.payroll.grossSen, 270_836); // 247903 + 22933 (OT ÷26÷10) → RM2,708.36
   // Cost removes the 2 unworked days at the higher ÷working-days rate, so basic
   // earned is HIGHER than production-cost regular. That gap (paid above
   // production value on absent days) is the "non-productive paid (absence)"
-  // reconciliation line — here 244615 − 242917 = 1698 sen (RM16.98).
+  // reconciliation line — wider now that absence docks ÷31: 247903 − 242917 = 4986 sen.
   assert.equal(r.cost.regularCostSen, 242_917);
-  assert.equal(r.payroll.basicEarnedSen - r.cost.regularCostSen, 1_698);
+  assert.equal(r.payroll.basicEarnedSen - r.cost.regularCostSen, 4_986);
 });
 
 test("computeMonthlyLabor: part-month prorate uses ÷working-days (matches cost), not ÷26", () => {
@@ -239,7 +240,7 @@ test("computeMonthlyLabor: part-month prorate uses ÷working-days (matches cost)
 
 test("computeMonthlyLabor: short-hour deduction docks ÷working-days hourly from earned", () => {
   // ANN full attendance, but the owner docks 5 unworked hours (under-recorded
-  // review). ÷working-days hourly = 265000/24/8 = 1380.21 sen; 5h → 6901 sen.
+  // review). Spec unpaid-hour rate = (265000/31)/10 = 854.84 sen; 5h → 4274 sen.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -249,9 +250,9 @@ test("computeMonthlyLabor: short-hour deduction docks ÷working-days hourly from
     absenceThroughDay: 31,
     shortHourDeductionHours: 5,
   });
-  assert.equal(r.payroll.shortHourDeductionSen, 6_901); // 5 × 265000/24/8
-  assert.equal(r.payroll.basicEarnedSen, 265_000 - 6_901); // full salary − dock
-  assert.equal(r.payroll.grossSen, 265_000 - 6_901 + 28_666); // OT unchanged
+  assert.equal(r.payroll.shortHourDeductionSen, 4_274); // 5 × (265000/31)/10
+  assert.equal(r.payroll.basicEarnedSen, 265_000 - 4_274); // full salary − dock
+  assert.equal(r.payroll.grossSen, 265_000 - 4_274 + 22_933); // OT now ÷26÷10
   // The dock does not touch production cost — that stays hours/day based.
   assert.equal(r.cost.regularCostSen, 265_000);
 });
@@ -267,7 +268,7 @@ test("computeMonthlyLabor: ANN absent 2 days — production cost is days-worked 
   });
   // 22 days × (265000/24) = 242916.67 → 242917 sen.
   assert.equal(r.cost.regularCostSen, 242_917);
-  assert.equal(r.cost.totalCostSen, 271_583); // 242917 + 28666
+  assert.equal(r.cost.totalCostSen, 265_850); // 242917 + 22933 (OT ÷26÷10)
 });
 
 // ── Holiday effect ──────────────────────────────────────────────────────────

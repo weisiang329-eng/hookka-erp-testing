@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { z } from "zod";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
@@ -346,12 +346,81 @@ export default function DepartmentProductionPage() {
     [workersResp]
   );
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  // Sync cached orders into local state so optimistic mutations keep working.
-  const [lastSeenOrders, setLastSeenOrders] = useState<ProductionOrder[] | null>(null);
-  if (fetchedOrders !== lastSeenOrders) {
-    setLastSeenOrders(fetchedOrders);
-    setOrders(fetchedOrders);
-  }
+  // Pin just-saved job cards so a background cached-fetch revalidation — which
+  // serves a STALE snapshot for ~1-3 min after a write (serve-stale-while-
+  // revalidate) — can't clobber the operator's value before the server catches
+  // up. This is the SAME protection the Master Tracker (index.tsx,
+  // recentlyPatchedRef) already has; this per-dept "Production Sheet" page
+  // never got it, which is why edits HERE (incl. Upholstery) flickered: the
+  // removed value disappears, the stale snapshot pops it back, then it
+  // disappears again. (Wei Siang 2026-06-10.)
+  const recentlyPatchedRef = useRef<
+    Map<string, { expect: Record<string, unknown> }>
+  >(new Map());
+  const PATCH_PIN_MS = 300_000; // 5-min ceiling; releases EARLY on catch-up.
+  // Record what we just wrote for a job card so the merge below can hold it
+  // until the refetched row matches (server caught up) or the ceiling lapses.
+  const pinJc = (jcId: string, fields: Record<string, unknown>) => {
+    const expect: Record<string, unknown> = {};
+    for (const k of Object.keys(fields)) if (k !== "jobCardId") expect[k] = fields[k];
+    recentlyPatchedRef.current.set(jcId, { expect });
+    // Safety ceiling: drop the pin after this long even if the server never
+    // catches up, so a stuck pin can't hide a genuine later change. (Normal
+    // release is EARLIER, via caughtUp in the merge below.)
+    // eslint-disable-next-line no-restricted-syntax -- fired from a save event
+    // handler (pinJc), not a render-time timer; plain setTimeout is correct here.
+    setTimeout(() => recentlyPatchedRef.current.delete(jcId), PATCH_PIN_MS);
+  };
+  // Sync cached orders into local state, PRESERVING pinned (just-saved) job
+  // cards until the refetched row matches what we wrote or the ceiling lapses,
+  // so a stale background refetch never resurrects a value the operator just
+  // changed or removed. (Design invariant: a pin can only DELAY server data,
+  // never show a wrong value — it releases the instant the server agrees.)
+  /* eslint-disable react-hooks/set-state-in-effect -- cache-merge sync: hold
+     the operator's just-saved value over a stale background refetch until the
+     server catches up; mirrors the Master Tracker (index.tsx) pattern. */
+  useEffect(() => {
+    if (!fetchedOrders) return;
+    const freshJcMap = new Map<string, JobCard>();
+    for (const po of fetchedOrders)
+      for (const jc of po.jobCards) freshJcMap.set(jc.id, jc);
+    const blankVal = (v: unknown) => v === null || v === undefined || v === "";
+    const caughtUp = (jc: JobCard, expect: Record<string, unknown>) => {
+      const row = jc as unknown as Record<string, unknown>;
+      for (const k of Object.keys(expect)) {
+        if (!((blankVal(row[k]) && blankVal(expect[k])) || row[k] === expect[k]))
+          return false;
+      }
+      return true;
+    };
+    const pinnedIds = new Set<string>();
+    for (const [jcId, pin] of Array.from(recentlyPatchedRef.current.entries())) {
+      const freshJc = freshJcMap.get(jcId);
+      if (freshJc && caughtUp(freshJc, pin.expect)) {
+        recentlyPatchedRef.current.delete(jcId); // server caught up — release
+        continue;
+      }
+      pinnedIds.add(jcId);
+    }
+    if (pinnedIds.size === 0) {
+      setOrders(fetchedOrders);
+      return;
+    }
+    setOrders((prev) => {
+      const prevJcMap = new Map<string, JobCard>();
+      for (const po of prev)
+        for (const jc of po.jobCards)
+          if (pinnedIds.has(jc.id)) prevJcMap.set(jc.id, jc);
+      if (prevJcMap.size === 0) return fetchedOrders;
+      return fetchedOrders.map((po) => ({
+        ...po,
+        jobCards: po.jobCards.map((jc) =>
+          prevJcMap.has(jc.id) ? (prevJcMap.get(jc.id) as JobCard) : jc,
+        ),
+      }));
+    });
+  }, [fetchedOrders]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   const [saving, setSaving] = useState<string | null>(null);
   // Smart PIC filter (operator request 2026-05-12). Default: only workers
   // who cover this dept are listed in the PIC dropdowns; toggle expands
@@ -398,6 +467,7 @@ export default function DepartmentProductionPage() {
       if (!data.success) throw new Error(data.error || "save failed");
       // Refresh cached PO list so peers see the tick on their next refetch.
       invalidateCachePrefix("/api/production-orders");
+      pinJc(jc.id, { distributedAt: nextValue }); // hold over stale refetch
     } catch (err) {
       // Revert local change + alert.
       setOrders((prev) => prev.map((o) => o.id !== order.id ? o : {
@@ -523,6 +593,7 @@ export default function DepartmentProductionPage() {
       setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/sales-orders");
+      pinJc(jc.id, { status: "IN_PROGRESS" });
     } catch (err) {
       const detail = err instanceof Error ? err.message : "try again";
       toast.error(`Failed to start: ${detail}`);
@@ -560,6 +631,7 @@ export default function DepartmentProductionPage() {
       setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/sales-orders");
+      pinJc(jc.id, { status: "COMPLETED", pic1Id, pic2Id: pic2Id || null });
       setDoneDialog(null);
     } catch (err) {
       const detail = err instanceof Error ? err.message : "try again";
@@ -580,9 +652,14 @@ export default function DepartmentProductionPage() {
     if (edit.pic1Id !== undefined) body.pic1Id = edit.pic1Id;
     if (edit.pic2Id !== undefined) body.pic2Id = edit.pic2Id;
     if (edit.dueDate !== undefined) body.dueDate = edit.dueDate;
-    if (edit.completedDate) {
-      body.status = "COMPLETED";
-      body.completedDate = edit.completedDate;
+    // Send the CLEARED value too. Previously `if (edit.completedDate)` skipped a
+    // removal (empty string), so clearing the date never reached the server —
+    // the cell blanked locally then the next refetch popped the old date back.
+    // Clearing also reverts COMPLETED → WAITING (matches the batch "Clear
+    // completion date" action).
+    if (edit.completedDate !== undefined) {
+      body.completedDate = edit.completedDate || null;
+      body.status = edit.completedDate ? "COMPLETED" : "WAITING";
     }
 
     try {
@@ -594,6 +671,7 @@ export default function DepartmentProductionPage() {
       setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/sales-orders");
+      pinJc(jc.id, body); // hold this value over stale background refetches
       // Clear edit for this job card
       setEdits(prev => {
         const next = { ...prev };

@@ -1376,39 +1376,57 @@ function WorkingHoursTab({
                         ))}
                       </select>
                     </td>
-                    <td className="px-3 py-1.5">
-                      <div className="flex items-center gap-1">
-                        <Input
-                          type="time"
-                          value={row.clockIn ?? ""}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            const h = hoursFromPunch(v, row.clockOut);
-                            updateField(
-                              originalIdx,
-                              h !== null ? { clockIn: v, hours: h } : { clockIn: v },
-                            );
-                          }}
-                          className="h-8 w-[4.75rem] text-xs"
-                          title="Clock in (HH:MM)"
-                        />
-                        <span className="text-[#9CA3AF]">→</span>
-                        <Input
-                          type="time"
-                          value={row.clockOut ?? ""}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            const h = hoursFromPunch(row.clockIn, v);
-                            updateField(
-                              originalIdx,
-                              h !== null ? { clockOut: v, hours: h } : { clockOut: v },
-                            );
-                          }}
-                          className="h-8 w-[4.75rem] text-xs"
-                          title="Clock out — Hours auto-fills (regular + OT) when both set"
-                        />
-                      </div>
-                    </td>
+                    {/* Punch ONCE per worker/day — a person punches in/out once,
+                        no matter how many departments their day splits across, so it
+                        spans the group like Employee/Date (NOT repeated per dept row).
+                        Drives the auto short-hour dock on save; auto-fills Hours only
+                        for a single-department day (multi-dept → split hours yourself). */}
+                    {firstSeg && (
+                      <td rowSpan={span} className="px-3 py-1.5 align-top">
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            type="time"
+                            value={first.row.clockIn ?? ""}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              const single = group.items.length === 1;
+                              const h = single ? hoursFromPunch(v, first.row.clockOut) : null;
+                              group.items.forEach((it) =>
+                                updateField(
+                                  it.originalIdx,
+                                  h !== null ? { clockIn: v, hours: h } : { clockIn: v },
+                                ),
+                              );
+                            }}
+                            className="h-8 w-[5rem] text-xs"
+                            title="Clock in (HH:MM) — one punch per worker per day"
+                          />
+                          <span className="text-[#9CA3AF]">→</span>
+                          <Input
+                            type="time"
+                            value={first.row.clockOut ?? ""}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              const single = group.items.length === 1;
+                              const h = single ? hoursFromPunch(first.row.clockIn, v) : null;
+                              group.items.forEach((it) =>
+                                updateField(
+                                  it.originalIdx,
+                                  h !== null ? { clockOut: v, hours: h } : { clockOut: v },
+                                ),
+                              );
+                            }}
+                            className="h-8 w-[5rem] text-xs"
+                            title="Clock out — Hours auto-fills for a single-department day; for multiple depts, split the hours yourself"
+                          />
+                        </div>
+                        {group.items.length > 1 && (
+                          <p className="mt-1 text-[10px] leading-tight text-[#9CA3AF]">
+                            Split the day&rsquo;s hours across the departments
+                          </p>
+                        )}
+                      </td>
+                    )}
                     <td className="px-3 py-1.5">
                       <Input
                         type="number" onFocus={(e) => e.currentTarget.select()}

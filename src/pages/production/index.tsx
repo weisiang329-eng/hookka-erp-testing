@@ -1866,6 +1866,9 @@ export default function ProductionPage({
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [unsavedCount, setUnsavedCount] = useState(0);
   const [savingNow, setSavingNow] = useState(false);
+  // True while network/5xx failures are kept + auto-retrying (BUG-2026-06-09).
+  // Drives the red "retrying" banner so the operator sees it's working, not stuck.
+  const [retryPending, setRetryPending] = useState(false);
   const DEBOUNCE_MS = 2000;
 
   // sendOneDraft — the actual HTTP write with retry. Extracted from the
@@ -2077,6 +2080,7 @@ export default function ProductionPage({
         `Network slow — your ${n} change${n > 1 ? "s are" : " is"} kept and will save automatically when the connection comes back.`,
       );
     }
+    setRetryPending(transientFails.length > 0);
     setSavingNow(false);
   }, [sendOneDraft, flashCell, toast]);
 
@@ -6002,13 +6006,21 @@ export default function ProductionPage({
           debounce timer is still counting down. Operators see a live
           unsaved-count + can force an immediate flush via "Save All Now".
           Bar is sticky so it's visible while scrolling the matrix. */}
-      {(unsavedCount > 0 || savingNow) && (
-        <div className="sticky top-0 z-40 -mx-4 px-4 py-2 bg-amber-100 border-y border-amber-300 flex items-center justify-between gap-3 shadow-sm">
+      {(unsavedCount > 0 || savingNow || retryPending) && (
+        <div className={`sticky top-0 z-40 -mx-4 px-4 py-2 border-y flex items-center justify-between gap-3 shadow-sm ${retryPending && !savingNow ? "bg-red-100 border-red-300" : "bg-amber-100 border-amber-300"}`}>
           <div className="flex items-center gap-2 text-sm">
             {savingNow ? (
               <>
                 <div className="h-3 w-3 animate-spin rounded-full border-2 border-amber-700 border-t-transparent" />
                 <span className="font-medium text-amber-900">Saving {unsavedCount > 0 ? unsavedCount : ""}…</span>
+              </>
+            ) : retryPending ? (
+              <>
+                <span className="text-red-700">⚠</span>
+                <span className="font-medium text-red-900">
+                  Network slow — retrying {unsavedCount} change{unsavedCount === 1 ? "" : "s"} automatically…
+                </span>
+                <span className="text-red-700 text-xs">· your edits are kept</span>
               </>
             ) : (
               <>
@@ -6021,8 +6033,8 @@ export default function ProductionPage({
             )}
           </div>
           {!savingNow && unsavedCount > 0 && (
-            <Button size="sm" onClick={saveAllNow} className="bg-amber-700 hover:bg-amber-800 text-white">
-              Save All Now
+            <Button size="sm" onClick={saveAllNow} className={retryPending ? "bg-red-700 hover:bg-red-800 text-white" : "bg-amber-700 hover:bg-amber-800 text-white"}>
+              {retryPending ? "Retry now" : "Save All Now"}
             </Button>
           )}
         </div>

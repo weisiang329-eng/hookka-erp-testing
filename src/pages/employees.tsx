@@ -626,17 +626,72 @@ function WorkingHoursTab({
       const hi = dateFrom <= dateTo ? dateTo : dateFrom;
       const res = await fetch(`/api/working-hour-entries?from=${lo}&to=${hi}`);
       const j = (await res.json()) as { success?: boolean; data?: WorkingHourEntry[] };
-      const drafts: EntryDraft[] = (j?.data ?? []).map((e) => ({
-        id: e.id,
-        workerId: e.workerId,
-        date: e.date,
-        departmentCode: e.departmentCode,
-        category: e.category,
-        hours: e.hours,
-        notes: e.notes,
-        saving: false,
-        saved: true,
-      }));
+      const entries = j?.data ?? [];
+
+      // Pull the same range's WORKER PHONE PUNCHES (attendance_records) so a
+      // punch flows into this grid: it pre-fills the Punch (in/out) cell + lets
+      // Hours auto-compute, and anyone who punched but has no Working Hours entry
+      // yet is auto-added below. Best-effort — the grid still loads if this fails.
+      const punchByKey = new Map<string, { clockIn?: string; clockOut?: string }>();
+      try {
+        const aRes = await fetch(`/api/attendance?from=${lo}&to=${hi}`);
+        const aj = (await aRes.json()) as {
+          data?: Array<{ employeeId?: string; date?: string; clockIn?: string | null; clockOut?: string | null }>;
+        };
+        for (const a of aj?.data ?? []) {
+          if (!a.employeeId || !a.date) continue;
+          if (a.clockIn || a.clockOut) {
+            punchByKey.set(`${a.employeeId}|${a.date}`, {
+              clockIn: a.clockIn ?? undefined,
+              clockOut: a.clockOut ?? undefined,
+            });
+          }
+        }
+      } catch {
+        /* attendance unavailable — grid works without the punch pre-fill */
+      }
+
+      const drafts: EntryDraft[] = entries.map((e) => {
+        const punch = punchByKey.get(`${e.workerId}|${e.date}`);
+        return {
+          id: e.id,
+          workerId: e.workerId,
+          date: e.date,
+          departmentCode: e.departmentCode,
+          category: e.category,
+          hours: e.hours, // keep the saved hours — do NOT overwrite a split from a punch
+          notes: e.notes,
+          saving: false,
+          saved: true,
+          clockIn: punch?.clockIn,
+          clockOut: punch?.clockOut,
+        };
+      });
+
+      // Auto-add a draft for each worker who PUNCHED but has no Working Hours
+      // entry that day, so the punch shows up here with its in/out + computed
+      // hours; the office just picks the department/category and saves.
+      const haveEntry = new Set(entries.map((e) => `${e.workerId}|${e.date}`));
+      for (const [key, punch] of punchByKey) {
+        if (haveEntry.has(key)) continue;
+        const sep = key.lastIndexOf("|");
+        const wid = key.slice(0, sep);
+        const date = key.slice(sep + 1);
+        const h = hoursFromPunch(punch.clockIn, punch.clockOut);
+        drafts.push({
+          workerId: wid,
+          date,
+          departmentCode: "",
+          category: "",
+          hours: h ?? 0,
+          notes: "",
+          saving: false,
+          saved: false,
+          clockIn: punch.clockIn,
+          clockOut: punch.clockOut,
+        });
+      }
+
       setRows(drafts);
     } finally {
       setLoading(false);

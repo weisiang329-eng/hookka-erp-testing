@@ -786,13 +786,17 @@ export default function DashboardBPage() {
   const months = ov.salesMonths ?? [];
 
   const rev = useMemo(() => ov.monthlyRevenue ?? [], [ov.monthlyRevenue]);
-  // The Revenue trend chart is now weekly (last 12 weeks). KPI sparklines /
-  // deltas below stay month-over-month off `rev`. — Wei Siang 2026-05-29.
+  // The Revenue trend chart is weekly (last 12 weeks) for All-time, and DAILY
+  // (one point per day of the month) when a month is selected — the backend
+  // switches the bucket granularity and sends the matching `week` keys, so the
+  // frontend just plots whatever points it gets. KPI sparklines / deltas below
+  // stay month-over-month off `rev`. — Wei Siang 2026-05-29 / 2026-06-09.
   const weekRev = useMemo(() => ov.weeklyRevenue ?? [], [ov.weeklyRevenue]);
   const revChart = useMemo(
     () =>
       weekRev.map((r) => ({
-        m: r.week.slice(5), // "MM-DD" of the week start
+        // All-time → "MM-DD" of the week-start; month → "MM-DD" of the day.
+        m: r.week.slice(5),
         "Sales Orders": Math.round(r.salesOrderSen / 100),
         Invoices: Math.round(r.invoiceSen / 100),
         Production: Math.round(r.productionSen / 100),
@@ -805,7 +809,26 @@ export default function DashboardBPage() {
   const delivered = so.deliveredItemsSen ?? 0;
   const outstanding = so.outstandingItemsSen ?? 0;
   const confirmed = so.csRevenueSen ?? delivered + outstanding;
-  const pipeMax = Math.max(1, confirmed, delivered, outstanding);
+  // Order Pipeline values. The /api/sales-orders/stats endpoint is NOT
+  // period-aware (it only aggregates the whole table), so for a selected month
+  // we instead use the month-scoped figures the dashboard-overview payload
+  // already computes: salesThisMonthSen (= that month's confirmed-SO value) and
+  // deliveredThisMonthSen (= that month's shipped DO value, by dispatch date).
+  // Outstanding is then derived as confirmed − delivered (floored at 0).
+  //   • period === 'all' → original all-time so.* values (UNCHANGED).
+  //   • a month          → this-month confirmed vs how much of it shipped.
+  // Caveat: month "Outstanding" = confirmed-minus-delivered for the month, a
+  // flow figure — it is NOT the live "orders still open" state count that the
+  // separate all-time Outstanding KPI tile shows (that tile stays on so.*).
+  const isMonthScoped = period !== "all";
+  const pipeConfirmed = isMonthScoped ? (ov.salesThisMonthSen ?? 0) : confirmed;
+  const pipeDelivered = isMonthScoped
+    ? (ov.deliveredThisMonthSen ?? 0)
+    : delivered;
+  const pipeOutstanding = isMonthScoped
+    ? Math.max(0, pipeConfirmed - pipeDelivered)
+    : outstanding;
+  const pipeMax = Math.max(1, pipeConfirmed, pipeDelivered, pipeOutstanding);
   const backlogDays = prod?.backlogDays ?? 0;
   const util = Math.min(1, backlogDays / 14);
   const gaugeAccent = backlogDays > 12 ? C_RED : backlogDays > 7 ? C_PROD : C_GREEN;
@@ -862,9 +885,10 @@ export default function DashboardBPage() {
       ? [...pieTop, { name: "Others", value: othersRev }]
       : pieTop;
 
-  // Pipeline conversion rates.
+  // Pipeline conversion rate — follows the same period-scoped values as the
+  // Order Pipeline widget (month figures for a month, all-time otherwise).
   const deliveredRate =
-    confirmed > 0 ? (delivered / confirmed) * 100 : 0;
+    pipeConfirmed > 0 ? (pipeDelivered / pipeConfirmed) * 100 : 0;
 
   // Per-customer monthly AOV (drill-through for Customer Value rows).
   const aovMonthly = ov.aovMonthlyByCustomer ?? {};
@@ -1368,7 +1392,7 @@ export default function DashboardBPage() {
         <Card className="bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">
             <SectionTitle
-              title="Order Pipeline"
+              title={isMonthScoped ? `Order Pipeline — ${period}` : "Order Pipeline"}
               sub="confirmed → outstanding → delivered"
               right={
                 <div className="text-right">
@@ -1390,16 +1414,19 @@ export default function DashboardBPage() {
             ) : (
               <>
                 {[
-                  { k: "Confirmed", v: confirmed, c: C_SO, pct: 100 },
+                  { k: "Confirmed", v: pipeConfirmed, c: C_SO, pct: 100 },
                   {
                     k: "Outstanding",
-                    v: outstanding,
+                    v: pipeOutstanding,
                     c: C_PROD,
-                    pct: confirmed > 0 ? (outstanding / confirmed) * 100 : 0,
+                    pct:
+                      pipeConfirmed > 0
+                        ? (pipeOutstanding / pipeConfirmed) * 100
+                        : 0,
                   },
                   {
                     k: "Delivered",
-                    v: delivered,
+                    v: pipeDelivered,
                     c: C_GREEN,
                     pct: deliveredRate,
                   },
@@ -1424,7 +1451,8 @@ export default function DashboardBPage() {
                   </div>
                 ))}
                 <p className="mt-2 text-[11px] text-[#9CA3AF]">
-                  {rm(outstanding)} still to ship of {rm(confirmed)} confirmed.
+                  {rm(pipeOutstanding)} still to ship of {rm(pipeConfirmed)}{" "}
+                  confirmed{isMonthScoped ? ` · ${period}` : ""}.
                 </p>
               </>
             )}

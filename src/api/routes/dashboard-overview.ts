@@ -1221,10 +1221,22 @@ app.get("/", async (c) => {
     const weekDateBinds: string[] = monthScope
       ? [monthScope.start, monthScope.end]
       : [];
+    // Bucket granularity for the Revenue chart:
+    //   - A month selected → ONE bucket per calendar DAY (06-01, 06-02, …),
+    //     so the chart plots every day of the month instead of ~2-5 coarse
+    //     week points (the old weekly view made the partial last week look
+    //     like a crash). — Wei Siang 2026-06-09.
+    //   - All-time → UNCHANGED: bucket by ISO week-Monday.
+    // Only the GROUP-BY date key changes here; the SUM/monetary expressions
+    // and the (already month-scoped) `weekDateClause` WHERE filter are kept.
+    const bucketExpr = (col: string) =>
+      monthScope
+        ? `to_char(${col}::date, 'YYYY-MM-DD')`
+        : `to_char(date_trunc('week', ${col}::date), 'YYYY-MM-DD')`;
     const [soWeekRes, invWeekRes, prodWeekRes] = await Promise.all([
       db
         .prepare(
-          `SELECT to_char(date_trunc('week', companySODate::date), 'YYYY-MM-DD') AS "yw",
+          `SELECT ${bucketExpr("companySODate")} AS "yw",
                   COALESCE(SUM(totalSen),0) AS "revenueSen"
              FROM sales_orders
             WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')
@@ -1236,7 +1248,7 @@ app.get("/", async (c) => {
         .all<{ yw: string | null; revenueSen: number }>(),
       db
         .prepare(
-          `SELECT to_char(date_trunc('week', invoiceDate::date), 'YYYY-MM-DD') AS "yw",
+          `SELECT ${bucketExpr("invoiceDate")} AS "yw",
                   COALESCE(SUM(totalSen),0) AS "revenueSen"
              FROM invoices
             WHERE orgId = ? AND status != 'CANCELLED' AND invoiceDate IS NOT NULL
@@ -1260,7 +1272,7 @@ app.get("/", async (c) => {
                                   AND completedDate IS NOT NULL
                              THEN 1 ELSE 0 END) = COUNT(*)
            )
-           SELECT to_char(date_trunc('week', per_po.unit_completed_at::date), 'YYYY-MM-DD') AS "yw",
+           SELECT ${bucketExpr("per_po.unit_completed_at")} AS "yw",
                   COALESCE(SUM(
                     COALESCE(
                       soi.unitPriceSen,
@@ -1293,31 +1305,26 @@ app.get("/", async (c) => {
     for (const r of invWeekRes.results ?? []) if (r.yw) invRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
     const prodRevWeekMap = new Map<string, number>();
     for (const r of prodWeekRes.results ?? []) if (r.yw) prodRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
-    // Monday-anchored week starts to display (UTC; matches Postgres
-    // date_trunc('week', …) which is Monday-based).
-    //   - All-time → the 12 weeks ending the current week.
-    //   - A month   → the distinct week-Mondays of every day in
-    //     [monthScope.start .. monthScope.end], so the displayed buckets line
-    //     up exactly with what the SQL can produce (a week that straddles the
-    //     1st is keyed to its Monday, which may fall just before the 1st).
-    const weekMonday = (iso: string): string => {
-      const d = new Date(`${iso}T00:00:00Z`);
-      const dow = d.getUTCDay(); // 0=Sun..6=Sat
-      d.setUTCDate(d.getUTCDate() + (dow === 0 ? -6 : 1 - dow));
-      return d.toISOString().slice(0, 10);
-    };
+    // Buckets to display on the x-axis (UTC). These must line up exactly with
+    // the SQL GROUP-BY key chosen by `bucketExpr` above.
+    //   - All-time → Monday-anchored week starts: the 12 weeks ending the
+    //     current week (matches Postgres date_trunc('week', …), Monday-based).
+    //   - A month   → EVERY calendar day in [monthScope.start .. monthScope.end]
+    //     (the SQL now buckets per day), so each day of the month is a point.
     const weekStarts: string[] = (() => {
       if (monthScope) {
-        const set = new Set<string>();
+        // One entry per day from start..end inclusive. `guard` (>31) caps the
+        // walk so a malformed bound can never spin.
+        const days: string[] = [];
         const cur = new Date(`${monthScope.start}T00:00:00Z`);
         const endUTC = new Date(`${monthScope.end}T00:00:00Z`);
         let guard = 0;
         while (cur <= endUTC && guard < 40) {
           guard++;
-          set.add(weekMonday(cur.toISOString().slice(0, 10)));
+          days.push(cur.toISOString().slice(0, 10));
           cur.setUTCDate(cur.getUTCDate() + 1);
         }
-        return [...set].sort((a, b) => a.localeCompare(b));
+        return days;
       }
       const out: string[] = [];
       const mon = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));

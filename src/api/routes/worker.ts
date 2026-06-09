@@ -149,8 +149,16 @@ function genId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// Malaysia local clock (UTC+8, no DST). The Workers runtime is UTC, so a raw
+// `new Date()` is 8h behind Malaysia: a pre-8am "today" rolls back to yesterday,
+// and a 9am punch would stamp "01:00". Shift to UTC+8 first, then read the UTC
+// fields off the shifted instant. The punch clock and /today share this so they
+// always agree on which calendar day "today" is.
+function malaysiaNow(): Date {
+  return new Date(Date.now() + 8 * 60 * 60 * 1000);
+}
 function todayYmd(): string {
-  return new Date().toISOString().slice(0, 10);
+  return malaysiaNow().toISOString().slice(0, 10);
 }
 
 // ----- types for joined queries -----
@@ -559,11 +567,11 @@ app.post("/clock", async (c) => {
     return c.json({ success: false, error: "Invalid action" }, 400);
   }
 
-  const date = todayYmd();
-  const now = new Date();
-  const time = `${String(now.getHours()).padStart(2, "0")}:${String(
-    now.getMinutes(),
-  ).padStart(2, "0")}`;
+  // Malaysia local date + HH:MM from ONE instant (so date and time can't split
+  // across midnight). UTC fields of the +8h-shifted time = Malaysia wall clock.
+  const my = malaysiaNow();
+  const date = my.toISOString().slice(0, 10);
+  const time = my.toISOString().slice(11, 16);
 
   const existing = await c.var.DB.prepare(
     "SELECT * FROM attendance_records WHERE employeeId = ? AND date = ?",

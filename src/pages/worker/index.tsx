@@ -250,8 +250,13 @@ export default function WorkerHomePage() {
   const displayName = cachedName || data.worker.name;
   const clockedIn = !!data.attendance?.clockIn;
   const clockedOut = !!data.attendance?.clockOut;
-  // Wei Siang 2026-05-10: Clock-in + Scan Job Card not yet live for workers.
-  // Hide the two action cards on the home page until rollout.
+  // Wei Siang 2026-06-09: self-punch is now LIVE — the clock card (Punch In /
+  // Punch Out) shows for every worker. Punch records attendance only; it does
+  // NOT yet drive payroll hours (that wiring comes with the owner's pay spec).
+  const SHOW_CLOCK = true;
+  // The stat grid (Pending / In Progress / Pieces done) + report-issue card are
+  // still hidden — they read the JC/scan counters that aren't surfaced yet
+  // (always 0). Keep them gated until their own rollout.
   const SHOW_CLOCK_AND_SCAN = false;
   // Wei Siang 2026-06-05: the shop-floor scan is NOT locked to a worker's own
   // department — anyone can scan the Fab Cut / Fab Sew (and soon Packing)
@@ -273,7 +278,7 @@ export default function WorkerHomePage() {
       </div>
 
       {/* Clock card */}
-      {SHOW_CLOCK_AND_SCAN && (
+      {SHOW_CLOCK && (
       <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] shadow-sm">
         {!clockedIn ? (
           <button

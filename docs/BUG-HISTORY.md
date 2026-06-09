@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-09-005 — Dashboard edit didn't invalidate the production list snapshot → removed/filled value flickers back for ~1–3 min
+
+**Status:** 🟢 Fixed (`production-orders.ts`, `feat/sticker-scan-per-piece-overhaul`); typecheck + lint + 585/586 tests green. Merged → main + deployed; live-verified by Wei Siang's exact repro (remove completion date + PIC, navigate away + back).
+**Category:** production-orders
+
+Symptom (Wei Siang, with screenshots): on the production dashboard he REMOVED a completion date + PIC; the value saved, then a few seconds later "jumped back" to the old completed state, then disappeared again — a flicker. "正常系统,如果我 remove 它就是 remove,我填入它就是填入的啊" — he expected remove = removed, deterministically. Distinct from BUG-2026-06-09-002 (pin ceiling too short) and -004 (network erase): here the SAVE succeeded and the just-saved-value pin masked it for an in-place edit, but navigating away and back (the pin is per-component, lost on unmount) re-exposed the stale snapshot.
+
+Root cause: `applyPoUpdate` (the dashboard PUT handler) bumped the per-org KV cache version (`bumpPoListCacheVersion`) but did NOT mark the Layer-2 `production_orders_list_snapshot` stale. Only the 3 worker-scan handlers did both, via `invalidateProductionCachesAfterScan` (KV bump + `built_from = epoch`). So after a dashboard edit the KV layer was fresh but the snapshot kept serving the pre-edit row under serve-stale-while-revalidate, relying on the (historically mis-firing, mixed TEXT/TIMESTAMP) freshness probe to notice the source-table bump — which left the old value visible for ~1–3 min. Navigating away + back (pin lost) showed that stale snapshot = the "jumps back then disappears" flicker.
+
+Fix: extracted `invalidateProductionListCaches(c, orgId)` = KV version bump + snapshot mark-stale (`built_from = '1970-01-01T00:00:00.000Z'`, which forces `isSnapshotFresh()` false on the next read regardless of the probe, while KEEPING the row so SWR still serves instantly + revalidates in the background — no cold ~2–3s recompute). Both the scan wrapper AND `applyPoUpdate` now call it; the `applyPoUpdate` call is wrapped best-effort (the PO row is already committed, so a cache hiccup must never 500 the save). Mark-stale (not delete) matches the scan path and keeps the dept sheet snappy. The three `piece_pics` CLEAR/SET/SWAP branches (the actual delete/fill logic) are untouched — only the post-write cache invalidation changed, so "remove = removed" now reflects on the next read instead of fighting a stale snapshot.
+
+---
+
 ## BUG-2026-06-09-004 — Laggy network erased a typed completion/PIC instead of keeping it (production save rolled back on transient failure)
 
 **Status:** 🟢 Fixed in code (`production/index.tsx`); typecheck + lint + 586 tests green. Pending merge→deploy + live verify (network-failure path is code+test-verified; a live offline simulation needs driving the matrix — offered to owner).

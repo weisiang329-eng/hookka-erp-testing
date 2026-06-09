@@ -1282,14 +1282,21 @@ app.get("/payslips", async (c) => {
   // phone shows MORE than they're actually paid. Resilient: if the table isn't
   // there yet → no docks. Same source the admin payroll uses.
   let shortHourDeductionHours = 0;
+  // Per-day breakdown of the docks so My Pay can drill the late/short figure down
+  // to the specific days (date + hours docked), mirroring the Absent / OT chips.
+  const lateDays: Array<{ date: string; hours: number; note: string }> = [];
   try {
     const dedRes = await c.var.DB.prepare(
-      "SELECT hours FROM payroll_hour_deductions WHERE workerId = ? AND date LIKE ?",
+      "SELECT date, hours, note FROM payroll_hour_deductions WHERE workerId = ? AND date LIKE ? ORDER BY date",
     )
       .bind(workerId, `${monthPrefix}%`)
-      .all<{ hours: number }>();
+      .all<{ date: string; hours: number; note: string | null }>();
     for (const r of dedRes.results ?? []) {
-      shortHourDeductionHours += Number(r.hours) || 0;
+      const h = Number(r.hours) || 0;
+      shortHourDeductionHours += h;
+      if (h > 0) {
+        lateDays.push({ date: r.date, hours: Math.round(h * 100) / 100, note: r.note ?? "" });
+      }
     }
   } catch (e) {
     console.warn("[worker/pay] payroll_hour_deductions read skipped:", e);
@@ -1362,9 +1369,11 @@ app.get("/payslips", async (c) => {
         otSen: labor.payroll.otPaySen,
         efficiencyAllowanceSen,
         estimatedGrossSen: labor.payroll.grossSen + efficiencyAllowanceSen,
-        // Per-day detail so My Pay can show WHICH days were absent / had OT.
+        // Per-day detail so My Pay can show WHICH days were absent / had OT /
+        // were late-or-short (each docked day + the hours docked).
         absentDates: dayDetail.absentDates,
         otDays: dayDetail.otDays,
+        lateDays,
       },
       history,
     },

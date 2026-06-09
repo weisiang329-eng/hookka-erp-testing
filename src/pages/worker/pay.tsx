@@ -58,6 +58,7 @@ type PayData = {
     // responses omit them; the UI then falls back to a plain, non-tappable row).
     absentDates?: string[];
     otDays?: Array<{ date: string; hours: number }>;
+    lateDays?: Array<{ date: string; hours: number }>;
   };
   history: Array<{
     id: string;
@@ -137,6 +138,15 @@ function asPayData(v: unknown): PayData | null {
         )
         .filter((x): x is { date: string; hours: number } => !!x)
     : [];
+  const lateDays = Array.isArray(v.current.lateDays)
+    ? v.current.lateDays
+        .map((o) =>
+          isRecord(o) && typeof o.date === "string" && typeof o.hours === "number"
+            ? { date: o.date, hours: o.hours }
+            : null,
+        )
+        .filter((x): x is { date: string; hours: number } => !!x)
+    : [];
   if (
     !period ||
     workedDays === null ||
@@ -161,6 +171,7 @@ function asPayData(v: unknown): PayData | null {
       estimatedGrossSen,
       absentDates,
       otDays,
+      lateDays,
     },
     history: v.history
       .map(asPayslipRow)
@@ -279,6 +290,14 @@ function CurrentMonthBreakdown({
       Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)
     }h`,
   }));
+  // Days behind the Late / short-hours deduction (each docked day + hours), so
+  // that figure taps open to "which days" just like Absent / OT.
+  const lateChips = (c.lateDays ?? []).map((d) => ({
+    key: d.date,
+    text: `${fmtDay(d.date)} · ${
+      Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)
+    }h`,
+  }));
   return (
     <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
       <p className="text-[11px] text-[#B0AAA3]">{t("pay.estimate")}</p>
@@ -301,10 +320,12 @@ function CurrentMonthBreakdown({
             the absence line and Basic so the running total reads correctly:
             Full salary − Absent − Late/short = Basic. */}
         {c.shortHourDeductionSen > 0 && (
-          <Row
+          <DetailRow
             label={t("pay.lateShortDeduction")}
             value={`− ${rm(c.shortHourDeductionSen)}`}
             muted
+            chips={lateChips}
+            tone="red"
           />
         )}
         <Row label={t("pay.basicEarned")} value={rm(c.basicEarnedSen)} />

@@ -22,7 +22,8 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { resolveWorkerToken } from "./worker-auth";
-import { computeMonthlyLabor, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
+import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effectiveSalarySenForMonth } from "../../lib/labor-engine";
+import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import {
   rowToMinimalPO,
   // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
@@ -1168,6 +1169,21 @@ app.get("/payslips", async (c) => {
     publicHolidays,
   );
 
+  const dayRows = (wheRes.results ?? []).map((r) => ({
+    date: r.date,
+    hours: Number(r.hours) || 0,
+  }));
+  // Current month — count absences only through the data-entry grace cutoff
+  // (2 working days back), so days that haven't happened yet AND the most
+  // recent not-yet-keyed days aren't charged as absences. Matches payroll.
+  const absenceThroughDay = absenceCutoffDay(
+    now.getFullYear(),
+    now.getMonth() + 1,
+    now,
+    2,
+    publicHolidays,
+  );
+
   const labor = computeMonthlyLabor({
     worker: {
       basicSalarySen: effectiveSalarySen,
@@ -1177,26 +1193,47 @@ app.get("/payslips", async (c) => {
     },
     year: now.getFullYear(),
     month: now.getMonth() + 1,
-    days: (wheRes.results ?? []).map((r) => ({
-      date: r.date,
-      hours: Number(r.hours) || 0,
-    })),
+    days: dayRows,
     publicHolidays,
-    // Current month — count absences only through the data-entry grace cutoff
-    // (2 working days back), so days that haven't happened yet AND the most
-    // recent not-yet-keyed days aren't charged as absences. Matches payroll.
-    absenceThroughDay: absenceCutoffDay(
-      now.getFullYear(),
-      now.getMonth() + 1,
-      now,
-      2,
-      publicHolidays,
-    ),
+    absenceThroughDay,
   });
 
-  // Efficiency allowance — placeholder until Wei Siang specifies the
-  // formula (likely: efficiency % thresholds → flat allowance).
-  const efficiencyAllowanceSen = 0;
+  // WHICH days were absent / had OT — derived from the SAME inputs the engine
+  // just used, so the dates line up with the counts. Display-only (no amounts);
+  // lets My Pay drill the Absent / OT figures down to the specific dates.
+  const dayDetail = computeAttendanceDayDetail({
+    worker: { workingHoursPerDay: auth.worker.workingHoursPerDay },
+    year: now.getFullYear(),
+    month: now.getMonth() + 1,
+    days: dayRows,
+    publicHolidays,
+    absenceThroughDay,
+  });
+
+  // Efficiency allowance — a flat bonus when the worker's MONTH-CUMULATIVE
+  // efficiency (the same figure the admin Efficiency Overview shows) reaches
+  // their configured threshold. Pure non-statutory bonus: added to gross only,
+  // never touches EPF / SOCSO / EIS / PCB. For the in-progress month this is
+  // the to-date estimate (only elapsed cards + keyed hours exist yet).
+  const { start: effStart, end: effEnd } = monthBounds(period);
+  const effByWorker = await computeMonthlyEfficiencyByWorker(
+    c.var.DB,
+    effStart,
+    effEnd,
+  );
+  const effCfg = await c.var.DB.prepare(
+    "SELECT efficiencyAllowanceSen, efficiencyThresholdPct FROM workers WHERE id = ?",
+  )
+    .bind(workerId)
+    .first<{
+      efficiencyAllowanceSen: number | null;
+      efficiencyThresholdPct: number | null;
+    }>();
+  const efficiencyAllowanceSen = resolveEfficiencyAllowanceSen(
+    effByWorker.get(workerId),
+    effCfg?.efficiencyAllowanceSen,
+    effCfg?.efficiencyThresholdPct,
+  );
 
   return c.json({
     success: true,
@@ -1212,6 +1249,9 @@ app.get("/payslips", async (c) => {
         otSen: labor.payroll.otPaySen,
         efficiencyAllowanceSen,
         estimatedGrossSen: labor.payroll.grossSen + efficiencyAllowanceSen,
+        // Per-day detail so My Pay can show WHICH days were absent / had OT.
+        absentDates: dayDetail.absentDates,
+        otDays: dayDetail.otDays,
       },
       history,
     },

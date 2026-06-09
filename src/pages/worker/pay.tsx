@@ -80,6 +80,10 @@ type PayData = {
     otSen: number;
     efficiencyAllowanceSen: number;
     estimatedGrossSen: number;
+    // Per-day detail behind the Absent / OT figures (optional — older backend
+    // responses omit them; the UI then falls back to a plain, non-tappable row).
+    absentDates?: string[];
+    otDays?: Array<{ date: string; hours: number }>;
   };
   history: Array<{
     id: string;
@@ -181,6 +185,19 @@ function asPayData(v: unknown): PayData | null {
   const otSen = asNumber(v.current.otSen);
   const efficiencyAllowanceSen = asNumber(v.current.efficiencyAllowanceSen) ?? 0;
   const estimatedGrossSen = asNumber(v.current.estimatedGrossSen);
+  // Additive per-day detail — tolerate an older backend that omits them.
+  const absentDates = Array.isArray(v.current.absentDates)
+    ? v.current.absentDates.filter((x): x is string => typeof x === "string")
+    : [];
+  const otDays = Array.isArray(v.current.otDays)
+    ? v.current.otDays
+        .map((o) =>
+          isRecord(o) && typeof o.date === "string" && typeof o.hours === "number"
+            ? { date: o.date, hours: o.hours }
+            : null,
+        )
+        .filter((x): x is { date: string; hours: number } => !!x)
+    : [];
   if (!period || workedDays === null || otMinutes === null || basicEarnedSen === null || otSen === null || estimatedGrossSen === null) return null;
   return {
     current: {
@@ -194,6 +211,8 @@ function asPayData(v: unknown): PayData | null {
       otSen,
       efficiencyAllowanceSen,
       estimatedGrossSen,
+      absentDates,
+      otDays,
     },
     history: v.history
       .map(asPayslipRow)
@@ -298,6 +317,18 @@ export default function WorkerPayPage() {
   }
 
   const otHours = (pay.current.otMinutes / 60).toFixed(1);
+  // Tap-to-reveal detail behind the Absent / OT figures: which days, how many
+  // OT hours. Built from the additive fields the my-pay endpoint now returns.
+  const absentChips = (pay.current.absentDates ?? []).map((d) => ({
+    key: d,
+    text: fmtDay(d),
+  }));
+  const otChips = (pay.current.otDays ?? []).map((d) => ({
+    key: d.date,
+    text: `${fmtDay(d.date)} · ${
+      Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)
+    }h`,
+  }));
 
   return (
     <div className="space-y-4 pt-2">
@@ -323,24 +354,33 @@ export default function WorkerPayPage() {
             value={rm(pay.current.fullSalarySen)}
           />
           {pay.current.absentDays > 0 && (
-            <Row
+            <DetailRow
               label={t("pay.absentDeduction").replace(
                 "{n}",
                 String(pay.current.absentDays),
               )}
               value={`− ${rm(pay.current.absenceDeductionSen)}`}
               muted
+              chips={absentChips}
+              tone="red"
             />
           )}
           <Row
             label={t("pay.basicEarned")}
             value={rm(pay.current.basicEarnedSen)}
           />
-          <Row label={`${t("pay.ot")} · ${otHours}h`} value={rm(pay.current.otSen)} />
-          <Row
-            label={t("pay.efficiencyAllowance")}
-            value={rm(pay.current.efficiencyAllowanceSen)}
+          <DetailRow
+            label={`${t("pay.ot")} · ${otHours}h`}
+            value={rm(pay.current.otSen)}
+            chips={otChips}
+            tone="amber"
           />
+          {pay.current.efficiencyAllowanceSen > 0 && (
+            <Row
+              label={t("pay.efficiencyAllowance")}
+              value={rm(pay.current.efficiencyAllowanceSen)}
+            />
+          )}
           <div className="pt-2 mt-2 border-t border-white/10">
             <Row
               label={t("pay.gross")}
@@ -544,6 +584,65 @@ function Row({
     >
       <span>{label}</span>
       <span className={bold ? "font-bold" : ""}>{value}</span>
+    </div>
+  );
+}
+
+// A pay row whose figure can be tapped to reveal the specific dates behind it
+// (which days were absent / had OT, with hours). Falls back to a plain,
+// non-tappable row when there is no detail (e.g. an older backend response).
+function DetailRow({
+  label,
+  value,
+  muted,
+  chips,
+  tone,
+}: {
+  label: string;
+  value: string;
+  muted?: boolean;
+  chips: Array<{ key: string; text: string }>;
+  tone: "red" | "amber";
+}) {
+  const [open, setOpen] = useState(false);
+  const has = chips.length > 0;
+  const palette =
+    tone === "red"
+      ? "bg-[#4A2520] text-[#F0A99C]"
+      : "bg-[#41331A] text-[#E5BE80]";
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={!has}
+        onClick={() => setOpen((o) => !o)}
+        className={`w-full flex items-center justify-between text-left ${
+          muted ? "text-[#8A8680]" : ""
+        }`}
+      >
+        <span className="flex items-center gap-1">
+          {label}
+          {has &&
+            (open ? (
+              <ChevronUp className="h-3 w-3 opacity-60" />
+            ) : (
+              <ChevronDown className="h-3 w-3 opacity-60" />
+            ))}
+        </span>
+        <span>{value}</span>
+      </button>
+      {open && has && (
+        <div className="flex flex-wrap gap-1.5 mt-2 mb-1">
+          {chips.map((c) => (
+            <span
+              key={c.key}
+              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${palette}`}
+            >
+              {c.text}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

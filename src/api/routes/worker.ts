@@ -557,6 +557,49 @@ app.post("/packing-rack", async (c) => {
 // ============================================================
 type DepartmentRow = { id: string; shortName: string };
 
+// Soft punch-geofence. Geo columns are added at runtime (the ensurePendingMigrations
+// pattern used elsewhere) so a punch can stamp the worker's location without a
+// deploy-time migration step. Additive + nullable + IF NOT EXISTS → a re-run is a
+// no-op, and a phone that denies/can't-get location just leaves them null. SOFT:
+// location is recorded for review, never blocks the punch.
+let _attendanceGeoMig: Promise<void> | null = null;
+function ensureAttendanceGeo(db: D1Database): Promise<void> {
+  if (_attendanceGeoMig) return _attendanceGeoMig;
+  _attendanceGeoMig = (async () => {
+    const stmts = [
+      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLat DOUBLE PRECISION",
+      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLng DOUBLE PRECISION",
+      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLat DOUBLE PRECISION",
+      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLng DOUBLE PRECISION",
+    ];
+    for (const s of stmts) await db.prepare(s).run();
+  })();
+  return _attendanceGeoMig;
+}
+// Valid WGS84 coordinate or null (a denied/garbage reading must not be stored).
+function parseCoord(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= 180
+    ? v
+    : null;
+}
+async function stampPunchGeo(
+  db: D1Database,
+  recId: string,
+  action: "CLOCK_IN" | "CLOCK_OUT",
+  lat: number | null,
+  lng: number | null,
+): Promise<void> {
+  if (lat === null || lng === null) return;
+  const cols =
+    action === "CLOCK_IN"
+      ? "clockInLat = ?, clockInLng = ?"
+      : "clockOutLat = ?, clockOutLng = ?";
+  await db
+    .prepare(`UPDATE attendance_records SET ${cols} WHERE id = ?`)
+    .bind(lat, lng, recId)
+    .run();
+}
+
 app.post("/clock", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
@@ -566,6 +609,11 @@ app.post("/clock", async (c) => {
   if (action !== "CLOCK_IN" && action !== "CLOCK_OUT") {
     return c.json({ success: false, error: "Invalid action" }, 400);
   }
+
+  // Optional punch location (soft geofence). Absent / denied → null → not stored.
+  const lat = parseCoord((body as { lat?: unknown }).lat);
+  const lng = parseCoord((body as { lng?: unknown }).lng);
+  await ensureAttendanceGeo(c.var.DB);
 
   // Malaysia local date + HH:MM from ONE instant (so date and time can't split
   // across midnight). UTC fields of the +8h-shifted time = Malaysia wall clock.
@@ -596,6 +644,7 @@ app.post("/clock", async (c) => {
           .bind(existing.id)
           .run();
       }
+      await stampPunchGeo(c.var.DB, existing.id, "CLOCK_IN", lat, lng);
       const row = await c.var.DB.prepare(
         "SELECT * FROM attendance_records WHERE id = ?",
       )
@@ -637,6 +686,7 @@ app.post("/clock", async (c) => {
         deptBreakdown,
       )
       .run();
+    await stampPunchGeo(c.var.DB, id, "CLOCK_IN", lat, lng);
     const row = await c.var.DB.prepare(
       "SELECT * FROM attendance_records WHERE id = ?",
     )
@@ -683,6 +733,7 @@ app.post("/clock", async (c) => {
       existing.id,
     )
     .run();
+  await stampPunchGeo(c.var.DB, existing.id, "CLOCK_OUT", lat, lng);
   const row = await c.var.DB.prepare(
     "SELECT * FROM attendance_records WHERE id = ?",
   )

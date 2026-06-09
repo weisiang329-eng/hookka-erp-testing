@@ -137,6 +137,22 @@ function fmtDay(iso: string): string {
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short" });
 }
+// Best-effort punch location for the soft geofence. Resolves to null when the
+// device has no geolocation, the worker denies permission, or it times out — the
+// punch still goes through (soft: location only flags out-of-area, never blocks).
+function getPunchLocation(): Promise<{ lat: number; lng: number } | null> {
+  return new Promise((resolve) => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+    );
+  });
+}
 
 // ============================================================
 export default function WorkerHomePage() {
@@ -193,9 +209,14 @@ export default function WorkerHomePage() {
   async function handleClock(action: "CLOCK_IN" | "CLOCK_OUT") {
     setClocking(true);
     try {
+      // Soft geofence: attach the worker's location if we can get it. Denied /
+      // unavailable / timeout → null → the punch still goes through unstamped.
+      const loc = await getPunchLocation();
       await workerFetch("/api/worker/clock", {
         method: "POST",
-        body: JSON.stringify({ action }),
+        body: JSON.stringify(
+          loc ? { action, lat: loc.lat, lng: loc.lng } : { action },
+        ),
       });
       // Re-fetch both — a fresh clock event shifts daily/attendance too
       await Promise.all([refreshToday(), refreshHistory(from, to)]);

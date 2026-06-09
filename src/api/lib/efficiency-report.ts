@@ -16,6 +16,7 @@
 // (actualMinutes ?? estMinutes) × wipQty is credited once per its
 // completedDate; per-worker share = total / |distinct workers credited|.
 // ---------------------------------------------------------------------------
+import { DEFAULT_FACTORY_GEOFENCE, evalPunchLocation } from "./geofence";
 
 export interface EfficiencyEnv {
   RESEND_API_KEY?: string;
@@ -46,6 +47,8 @@ export interface WorkerSummary {
   productionMinutes: number;
   efficiencyPct: number;
   jobsCompleted: number;
+  // Soft geofence: a clock in or out was recorded OUTSIDE the factory radius.
+  punchOutOfArea: boolean;
 }
 
 export interface DepartmentSummary {
@@ -120,6 +123,10 @@ type AttendanceRow = {
   clockIn: string | null;
   clockOut: string | null;
   status: string;
+  clockInLat?: number | null;
+  clockInLng?: number | null;
+  clockOutLat?: number | null;
+  clockOutLng?: number | null;
 };
 
 export async function collectEfficiencyData(
@@ -150,15 +157,32 @@ export async function collectEfficiencyData(
   const allWorkers = wRes.results ?? [];
 
   // 3. Attendance for the date — pulls clock in/out + present/absent status.
-  const attRes = await db
-    .prepare(
-      `SELECT employeeId, clockIn, clockOut, status
-         FROM attendance_records WHERE date = ?`,
-    )
-    .bind(dateYmd)
-    .all<AttendanceRow>();
+  // Pull the geo columns too (soft geofence). They're added at runtime by the
+  // punch route, so on an env where nobody has punched yet they may not exist —
+  // fall back to the geo-less query so this report never breaks.
+  let attRows: AttendanceRow[] = [];
+  try {
+    const attRes = await db
+      .prepare(
+        `SELECT employeeId, clockIn, clockOut, status,
+                clockInLat, clockInLng, clockOutLat, clockOutLng
+           FROM attendance_records WHERE date = ?`,
+      )
+      .bind(dateYmd)
+      .all<AttendanceRow>();
+    attRows = attRes.results ?? [];
+  } catch {
+    const attRes = await db
+      .prepare(
+        `SELECT employeeId, clockIn, clockOut, status
+           FROM attendance_records WHERE date = ?`,
+      )
+      .bind(dateYmd)
+      .all<AttendanceRow>();
+    attRows = attRes.results ?? [];
+  }
   const attByWorker = new Map<string, AttendanceRow>();
-  for (const a of attRes.results ?? []) attByWorker.set(a.employeeId, a);
+  for (const a of attRows) attByWorker.set(a.employeeId, a);
 
   // 4. Working hour entries — sum minutes per worker.
   const wheRes = await db
@@ -266,6 +290,17 @@ export async function collectEfficiencyData(
       productionMinutes,
       efficiencyPct,
       jobsCompleted: jcsCompletedByWorker.get(w.id) ?? 0,
+      punchOutOfArea:
+        evalPunchLocation(
+          att?.clockInLat,
+          att?.clockInLng,
+          DEFAULT_FACTORY_GEOFENCE,
+        ) === "out" ||
+        evalPunchLocation(
+          att?.clockOutLat,
+          att?.clockOutLng,
+          DEFAULT_FACTORY_GEOFENCE,
+        ) === "out",
     });
   }
   workerRows.sort((a, b) => {
@@ -435,7 +470,11 @@ export function renderEfficiencyHtml(data: EfficiencyData): string {
       <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;">${escapeHtml(w.empNo)}</td>
       <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;">${escapeHtml(w.name)}</td>
       <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;color:${statusColor};">${escapeHtml(w.status)}</td>
-      <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;text-align:center;">${escapeHtml(clockStr)}</td>
+      <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;text-align:center;">${escapeHtml(clockStr)}${
+        w.punchOutOfArea
+          ? `<span style="display:inline-block;margin-left:6px;padding:1px 5px;font-size:8pt;font-weight:700;color:#B91C1C;background:#FEE2E2;border-radius:3px;">OFF-SITE</span>`
+          : ""
+      }</td>
       <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;text-align:right;">${formatHours(w.workingMinutes)}</td>
       <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;text-align:right;">${formatHours(w.productionMinutes)}</td>
       <td style="padding:5px 8px;border-bottom:1px solid #F0ECE9;font-size:9.5pt;text-align:right;font-weight:700;color:${effC};">${present ? w.efficiencyPct + "%" : "—"}</td>

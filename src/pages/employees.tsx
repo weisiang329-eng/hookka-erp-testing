@@ -1216,7 +1216,7 @@ function WorkingHoursTab({
                       <Input
                         type="number" onFocus={(e) => e.currentTarget.select()}
                         min={0}
-                        step={0.5}
+                        step="any"
                         value={row.hours}
                         onChange={(e) => updateField(originalIdx, { hours: Number(e.target.value) })}
                         className="h-8 w-20 text-xs"
@@ -2212,7 +2212,7 @@ function EmployeeMasterTab({
         render: (_value, row) =>
           editingId === row.id ? (
             <Input
-              type="number" step="0.5" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
+              type="number" step="any" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
               value={editForm.workingHoursPerDay}
               onChange={(e) =>
                 setEditForm((f) => ({
@@ -2737,7 +2737,7 @@ function EmployeeMasterTab({
               <div>
                 <label className="text-xs text-[#6B7280]">Hrs/Day</label>
                 <Input
-                  type="number" step="0.5" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
+                  type="number" step="any" min="0" max="24" onFocus={(e) => e.currentTarget.select()}
                   value={form.workingHoursPerDay}
                   onChange={(e) =>
                     setForm((f) => ({

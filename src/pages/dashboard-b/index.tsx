@@ -987,7 +987,7 @@ export default function DashboardBPage() {
           icon={DollarSign}
           accent={C_SO}
           spark={soSpark}
-          delta={salesDelta}
+          delta={isMonthScoped ? null : salesDelta}
         />
         <KTile
           label={deliveredLabel}
@@ -996,7 +996,7 @@ export default function DashboardBPage() {
           icon={Truck}
           accent={C_PROD}
           spark={delSpark}
-          delta={prodDelta}
+          delta={isMonthScoped ? null : prodDelta}
         />
         <KTile
           label="Outstanding"

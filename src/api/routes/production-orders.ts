@@ -4352,10 +4352,23 @@ async function applyPoUpdate(
 
   const fresh = await fetchPO(db, id);
 
-  // Bump the per-org version key — invalidates every cached GET /
-  // response for this org so the operator's own mutation is reflected
-  // immediately on the next list fetch. See poListCacheVersion above.
-  await bumpPoListCacheVersion(c, getOrgId(c));
+  // Invalidate every cached GET / read for this org so the operator's own
+  // edit is reflected on the very next list fetch. Mirror the scan path: bump
+  // the KV version key AND mark the dept-sheet snapshot stale. Bumping the KV
+  // version alone left the Layer-2 snapshot serving the pre-edit row for up to
+  // ~1-3 min, which the operator saw as their just-removed completion date /
+  // PIC flickering back in, then vanishing again once the snapshot finally
+  // caught up (BUG-2026-06-09-005). Best-effort: the row is already committed,
+  // so a cache hiccup must never 500 the save.
+  const orgId = getOrgId(c);
+  try {
+    await invalidateProductionListCaches(c, orgId);
+  } catch (err) {
+    console.warn(
+      "[applyPoUpdate] cache invalidation failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   return c.json({ success: true, data: fresh });
 }
@@ -4675,25 +4688,38 @@ function scanOrgId(c: Context<Env>): string {
   return tryGetOrgId(c) ?? DEFAULT_ORG_ID;
 }
 
+// Invalidate every cached read of GET /api/production-orders for one org:
+//   (1) bump the KV version key so the 60s Layer-1 cache is skipped, AND
+//   (2) mark the Layer-2 dept-sheet snapshot stale WITHOUT deleting it — keep
+//       the prior copy so the serve-stale-while-revalidate read path can hand
+//       it back instantly (no cold ~2-3s recompute) and refresh in the
+//       background. built_from = epoch forces isSnapshotFresh() false on the
+//       next read, regardless of the (mixed TEXT/TIMESTAMP) updated_at probe.
+//
+// EVERY production-order write path — scan completion AND dashboard edit — must
+// do BOTH steps; doing only the KV bump leaves the snapshot stale for ~1-3 min
+// (the operator-visible flicker, BUG-2026-06-09-005). Callers pass their own
+// resolved orgId (dashboard: getOrgId; scan: scanOrgId) and own the try/catch.
+async function invalidateProductionListCaches(
+  c: Context<Env>,
+  orgId: string,
+): Promise<void> {
+  await bumpPoListCacheVersion(c, orgId);
+  await c.var.DB
+    .prepare(
+      `UPDATE production_orders_list_snapshot
+          SET built_from = '1970-01-01T00:00:00.000Z'
+        WHERE org_id = ?`,
+    )
+    .bind(orgId)
+    .run();
+}
+
 async function invalidateProductionCachesAfterScan(
   c: Context<Env>,
 ): Promise<void> {
   try {
-    const orgId = scanOrgId(c);
-    await bumpPoListCacheVersion(c, orgId);
-    // Mark the dept-sheet snapshots stale WITHOUT deleting them: keep the prior
-    // copy so the serve-stale-while-revalidate read path can hand it back
-    // instantly (no cold ~2-3s recompute) and refresh in the background.
-    // built_from = epoch forces isSnapshotFresh() false on the next read,
-    // regardless of the (mixed TEXT/TIMESTAMP) updated_at probe.
-    await c.var.DB
-      .prepare(
-        `UPDATE production_orders_list_snapshot
-            SET built_from = '1970-01-01T00:00:00.000Z'
-          WHERE org_id = ?`,
-      )
-      .bind(orgId)
-      .run();
+    await invalidateProductionListCaches(c, scanOrgId(c));
   } catch (err) {
     console.warn(
       "[invalidateProductionCachesAfterScan] failed:",

@@ -2061,6 +2061,118 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/delivery-orders/backfill-normalize-invoiced-to-delivered
+//
+// One-shot status normaliser (Wei Siang 2026-06-09). The invoice-creation
+// path flips a DO to status='INVOICED' (see the createInvoiceForDO statement
+// that sets status='INVOICED', overdue='INVOICED'), but the system
+// DELIBERATELY keeps auto-invoiced DOs at 'DELIVERED' so they stay in the
+// searchable Delivered list — that's why the live self-heal in
+// /backfill-void-reissue-underbilled normalises stragglers back, and why
+// that backfill's re-issue path deliberately does NOT flip the DO to
+// INVOICED. Between manual runs, recently-invoiced DOs sit at INVOICED and
+// fall OUT of the Delivered list. This endpoint flips ONLY those back.
+//
+// STATUS ONLY. Selects DOs at status='INVOICED' that genuinely have a
+// non-cancelled invoice (the safe equivalent of "has an invoice number" —
+// the invoice number lives on the invoices table, joined by
+// deliveryOrderId, not as a column on delivery_orders), and sets each to
+// 'DELIVERED'. Invoice / ledger / A-R / overdue / fg_units correctness is
+// independent of DO.status (per the comments on the sibling backfills), so
+// nothing else is touched and no cascade is triggered. Idempotent: a re-run
+// finds nothing at INVOICED → no-op.
+//
+//   ?dry=1 → preview only, no writes; returns the matching rows
+//            (doNo, invoiceNo, status). This IS the audit artifact.
+// Temporary migration endpoint; delete once the book is corrected.
+// Registered BEFORE /:id (Hono static-before-wildcard ordering).
+// ---------------------------------------------------------------------------
+app.post("/backfill-normalize-invoiced-to-delivered", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const dry = c.req.query("dry") === "1" || c.req.query("dry") === "true";
+  const now = new Date().toISOString();
+
+  // Column names copied verbatim from the sibling backfills above:
+  // delivery_orders uses camelCase (status, doNo) but snake_case timestamps
+  // (created_at / updated_at) — see /backfill-fix-underbilled-invoices.
+  const dosRes = await c.var.DB.prepare(
+    "SELECT * FROM delivery_orders WHERE orgId = ? AND status = 'INVOICED' ORDER BY created_at ASC",
+  )
+    .bind(orgId)
+    .all<DeliveryOrderRow>();
+  const dos = dosRes.results ?? [];
+
+  let scanned = 0;
+  let normalisedN = 0;
+  let noInvN = 0; // INVOICED status but no live invoice — left untouched
+  const rows: Array<{ doNo: string; invoiceNo: string; status: string }> = [];
+  const errors: { doId: string; doNo: string; error: string }[] = [];
+
+  for (const doRow of dos) {
+    scanned++;
+    try {
+      // The invoice number lives on the invoices table (joined by
+      // deliveryOrderId) — there is NO invoiceNo column on delivery_orders.
+      // Query shape copied verbatim from /backfill-void-reissue-underbilled.
+      const invs =
+        (
+          await c.var.DB.prepare(
+            "SELECT invoiceNo FROM invoices WHERE deliveryOrderId = ? AND status != 'CANCELLED'",
+          )
+            .bind(doRow.id)
+            .all<{ invoiceNo: string }>()
+        ).results ?? [];
+
+      // Safe gate: only flip a DO that genuinely has a live invoice. An
+      // INVOICED-status DO with zero non-cancelled invoices is an anomaly
+      // this status-only normaliser deliberately does NOT touch.
+      if (invs.length === 0) {
+        noInvN++;
+        continue;
+      }
+
+      rows.push({
+        doNo: doRow.doNo,
+        invoiceNo: invs.map((v) => v.invoiceNo).join(", "),
+        status: doRow.status,
+      });
+      if (dry) continue;
+
+      // STATUS ONLY — no cascade, no invoice/ledger/A-R/overdue/fg_units.
+      // UPDATE copied verbatim from the sibling backfills' self-heal.
+      await c.var.DB.prepare(
+        "UPDATE delivery_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+      )
+        .bind(now, doRow.id)
+        .run();
+      normalisedN++;
+    } catch (e) {
+      errors.push({
+        doId: doRow.id,
+        doNo: doRow.doNo,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    mode: dry ? "dry-run" : "executed",
+    dry,
+    scanned,
+    deliveredDosScanned: scanned,
+    normalisedToDelivered: { n: dry ? 0 : normalisedN, wouldNormalise: rows.length },
+    skippedNoLiveInvoice: { n: noInvN },
+    rows,
+    list: rows,
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/delivery-orders/backfill-dedupe-delivered
 //
 // One-shot cleanup (Wei Siang 2026-05-16): a production order can only be

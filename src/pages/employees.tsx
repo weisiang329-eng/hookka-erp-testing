@@ -1110,71 +1110,78 @@ function WorkingHoursTab({
           <CardTitle className="flex items-center gap-2">
             <Clock className="h-5 w-5 text-[#6B5C32]" /> Daily Working Hours
           </CardTitle>
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Working date range — leave both equal for single-day editing
-                (the historical default). Set From earlier than To to pull a
-                multi-day view; the table grows a Date column and rows can
-                live on different days. New rows always start on the From
-                date but each row's date is editable per-row. */}
-            <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
-              <span>From</span>
-              <Input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="w-40"
-                title="Start of working-date range — new rows default to this date"
-              />
-            </label>
-            <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
-              <span>To</span>
-              <Input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="w-40"
-                title="End of working-date range (inclusive). Set equal to From for single-day mode."
-              />
-            </label>
-            {/* Copy-from date workflow — typical use: payroll operator
-                pulls yesterday's full table, micro-adjusts the rows that
-                differ today, hits Save All. */}
-            <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
-              <span>Copy from</span>
-              <Input
-                type="date"
-                value={copyFromDate}
-                onChange={(e) => setCopyFromDate(e.target.value)}
-                className="w-40"
-                title="Copy from — pick a source date whose entries will be cloned as drafts on the working date"
-              />
+          {/* Toolbar grouped into clusters (date range │ copy │ row actions)
+              with subtle dividers, so the controls read at a glance instead of
+              one long crowded row. */}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Date range */}
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+                <span>From</span>
+                <Input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  className="w-36"
+                  title="Start of working-date range — new rows default to this date"
+                />
+              </label>
+              <span className="text-[#C9C2BA]">–</span>
+              <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+                <span>To</span>
+                <Input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  className="w-36"
+                  title="End of working-date range (inclusive). Set equal to From for single-day mode."
+                />
+              </label>
+            </div>
+            {/* Copy workflow — pull a source date's rows as editable drafts. */}
+            <div className="flex items-center gap-2 border-l border-[#E2DDD8] pl-3">
+              <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+                <span>Copy from</span>
+                <Input
+                  type="date"
+                  value={copyFromDate}
+                  onChange={(e) => setCopyFromDate(e.target.value)}
+                  className="w-36"
+                  title="Copy from — pick a source date whose entries will be cloned as drafts on the working date"
+                />
+              </label>
               <Button
                 variant="outline"
+                size="sm"
                 onClick={() => void copyFromSource(copyFromDate)}
                 disabled={copying || !copyFromDate}
                 title="Copy every entry from the source date as drafts on the working date"
               >
                 {copying ? "Copying…" : "Copy"}
               </Button>
-            </label>
-            <Button
-              variant="outline"
-              onClick={copyYesterday}
-              disabled={copying}
-              title="One click: copy yesterday's department / category / hours for every worker as editable drafts"
-            >
-              {copying ? "Copying…" : "Copy yesterday"}
-            </Button>
-            <Button variant="outline" onClick={addRow}>
-              <Plus className="h-4 w-4" /> Add Row
-            </Button>
-            <Button variant="primary" onClick={saveAll} disabled={bulkSaving || dirtyCount === 0}>
-              <Save className="h-4 w-4" />
-              {bulkSaving ? "Saving…" : dirtyCount > 0 ? `Save All (${dirtyCount})` : "Saved"}
-            </Button>
-            <Button variant="outline" size="sm" onClick={handlePrint} title="Print the on-screen working hours for the selected date range">
-              <Printer className="h-4 w-4 mr-1" /> Print Report
-            </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={copyYesterday}
+                disabled={copying}
+                title="One click: copy yesterday's department / category / hours for every worker as editable drafts"
+              >
+                {copying ? "Copying…" : "Copy yesterday"}
+              </Button>
+            </div>
+            {/* Row actions */}
+            <div className="flex items-center gap-2 border-l border-[#E2DDD8] pl-3">
+              <Button variant="outline" size="sm" onClick={addRow}>
+                <Plus className="h-4 w-4" /> Add Row
+              </Button>
+              <Button variant="primary" size="sm" onClick={saveAll} disabled={bulkSaving || dirtyCount === 0}>
+                <Save className="h-4 w-4" />
+                {bulkSaving ? "Saving…" : dirtyCount > 0 ? `Save All (${dirtyCount})` : "Saved"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={handlePrint} title="Print the on-screen working hours for the selected date range">
+                <Printer className="h-4 w-4 mr-1" /> Print
+              </Button>
+            </div>
           </div>
         </div>
         {copyError && (
@@ -9493,8 +9500,8 @@ export default function EmployeesPage() {
                 <Users className="h-5 w-5 text-[#3E6570]" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{totalWorkers}</p>
-                <p className="text-xs text-[#6B7280]">Total Workers</p>
+                <p className="text-2xl font-bold leading-none">{totalWorkers}</p>
+                <p className="mt-1 text-[11px] font-medium uppercase tracking-wide text-[#8A8680]">Total Workers</p>
               </div>
             </CardContent>
           </Card>
@@ -9504,10 +9511,10 @@ export default function EmployeesPage() {
                 <UserCheck className="h-5 w-5 text-[#4F7C3A]" />
               </div>
               <div>
-                <p className="text-2xl font-bold text-[#4F7C3A]">
+                <p className="text-2xl font-bold leading-none text-[#4F7C3A]">
                   {presentCount}/{totalWorkers}
                 </p>
-                <p className="text-xs text-[#6B7280]">Present</p>
+                <p className="mt-1 text-[11px] font-medium uppercase tracking-wide text-[#8A8680]">Present</p>
               </div>
             </CardContent>
           </Card>
@@ -9517,10 +9524,10 @@ export default function EmployeesPage() {
                 <Clock className="h-5 w-5 text-[#9C6F1E]" />
               </div>
               <div>
-                <p className="text-2xl font-bold">
+                <p className="text-2xl font-bold leading-none">
                   {(summaryWorkingMinutes / 60).toFixed(1)}h
                 </p>
-                <p className="text-xs text-[#6B7280]">Working Hours</p>
+                <p className="mt-1 text-[11px] font-medium uppercase tracking-wide text-[#8A8680]">Working Hours</p>
               </div>
             </CardContent>
           </Card>
@@ -9535,7 +9542,7 @@ export default function EmployeesPage() {
                 >
                   {avgEfficiency}%
                 </p>
-                <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
+                <p className="mt-1 text-[11px] font-medium uppercase tracking-wide text-[#8A8680]">Avg Efficiency</p>
               </div>
             </CardContent>
           </Card>

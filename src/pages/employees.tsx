@@ -935,6 +935,59 @@ function WorkingHoursTab({
     return [...indexed].sort(cmp);
   }, [rows, sortColumn, sortDir, workerNameById]);
 
+  // ── Column filters (Date / Employee / Department) ─────────────────────────
+  // A busy daily grid is hard to fill when you can't find the row you want.
+  // These filters narrow the VIEW only — they never change what's saved. An
+  // empty, unsaved draft always stays visible so a freshly added row isn't
+  // hidden while you're typing into it.
+  const [fltEmployee, setFltEmployee] = useState("");
+  const [fltDept, setFltDept] = useState("");
+  const [fltDate, setFltDate] = useState("");
+  const filtersActive = !!(fltEmployee.trim() || fltDept || fltDate);
+  const clearFilters = useCallback(() => {
+    setFltEmployee("");
+    setFltDept("");
+    setFltDate("");
+  }, []);
+
+  const filteredRows = useMemo(() => {
+    if (!filtersActive) return displayRows;
+    const fe = fltEmployee.trim().toLowerCase();
+    return displayRows.filter(({ row }) => {
+      if (!row.workerId && !row.id) return true; // keep blank drafts visible
+      if (fe) {
+        const name = (workerNameById.get(row.workerId) ?? "").toLowerCase();
+        if (!name.includes(fe)) return false;
+      }
+      if (fltDept && row.departmentCode !== fltDept) return false;
+      if (fltDate && row.date !== fltDate) return false;
+      return true;
+    });
+  }, [displayRows, filtersActive, fltEmployee, fltDept, fltDate, workerNameById]);
+
+  // Group the (filtered, sorted) rows by worker+date so a worker's several
+  // department / category segments render under ONE employee cell — the name
+  // shows once; dept / category / hours are the sub-rows beneath it. Empty
+  // drafts each stand alone. Render-only: the flat `rows` array and every edit
+  // handler (addressed by originalIdx) are unchanged, so pay math is untouched.
+  const groupedRows = useMemo(() => {
+    const order: string[] = [];
+    const map = new Map<string, { row: EntryDraft; originalIdx: number }[]>();
+    for (const item of filteredRows) {
+      const key = item.row.workerId
+        ? `${item.row.workerId}||${item.row.date}`
+        : `__new-${item.originalIdx}`;
+      let g = map.get(key);
+      if (!g) {
+        g = [];
+        map.set(key, g);
+        order.push(key);
+      }
+      g.push(item);
+    }
+    return order.map((k) => ({ key: k, items: map.get(k)! }));
+  }, [filteredRows]);
+
   // Print Report — prints exactly the on-screen rows (in current sort order)
   // for the selected working-date range. Mirrors the grid's columns; the Date
   // column is included only in multi-day mode, matching the table.
@@ -951,7 +1004,7 @@ function WorkingHoursTab({
       { header: "Hours", align: "right", value: (r) => `${(Number((r as EntryDraft).hours) || 0).toFixed(1)}h` },
       { header: "Notes", value: (r) => (r as EntryDraft).notes || "" },
     );
-    const printableRows = displayRows.filter((d) => d.row.workerId).map((d) => d.row);
+    const printableRows = filteredRows.filter((d) => d.row.workerId).map((d) => d.row);
     const totalHrs = printableRows.reduce((s, row) => s + (Number(row.hours) || 0), 0);
     const distinctWorkers = new Set(printableRows.map((row) => row.workerId)).size;
     const cards: PrintCard[] = [
@@ -966,7 +1019,7 @@ function WorkingHoursTab({
       cards,
       sections: [{ columns, rows: printableRows }],
     });
-  }, [allDepts, isMultiDay, workerNameById, dateFrom, dateTo, displayRows]);
+  }, [allDepts, isMultiDay, workerNameById, dateFrom, dateTo, filteredRows]);
 
   return (
     <div className="space-y-4">
@@ -1071,6 +1124,51 @@ function WorkingHoursTab({
             })}
           </div>
         )}
+        {/* Column filters — narrow the grid to the rows you're filling. View
+            only; nothing saved changes. */}
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-[#6B7280]">Filter</span>
+          {isMultiDay && (
+            <Input
+              type="date"
+              value={fltDate}
+              onChange={(e) => setFltDate(e.target.value)}
+              className="h-8 w-36"
+              title="Show only this working date"
+            />
+          )}
+          <Input
+            value={fltEmployee}
+            onChange={(e) => setFltEmployee(e.target.value)}
+            placeholder="Employee name…"
+            className="h-8 w-44"
+          />
+          <select
+            value={fltDept}
+            onChange={(e) => setFltDept(e.target.value)}
+            className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+            title="Show only this department"
+          >
+            <option value="">All departments</option>
+            {allDepts.map((d) => (
+              <option key={d.code} value={d.code}>{d.name}</option>
+            ))}
+          </select>
+          {filtersActive && (
+            <>
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="rounded border border-[#D8D2CC] px-2 py-1 text-[#9A3A2D] hover:bg-[#F9E1DA]"
+              >
+                Clear
+              </button>
+              <span className="text-[#6B7280]">
+                {groupedRows.length} {groupedRows.length === 1 ? "worker" : "workers"} shown
+              </span>
+            </>
+          )}
+        </div>
         <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -1137,34 +1235,96 @@ function WorkingHoursTab({
                   </td>
                 </tr>
               )}
-              {displayRows.map(({ row, originalIdx }) => {
-                const isProd = prodCodes.has(row.departmentCode);
-                return (
-                  <tr key={row.id ?? `new-${originalIdx}`} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
-                    {isMultiDay && (
-                      <td className="px-3 py-1.5">
+              {rows.length > 0 && groupedRows.length === 0 && (
+                <tr>
+                  <td colSpan={isMultiDay ? 8 : 7} className="h-16 text-center text-[#9CA3AF]">
+                    No rows match the filter.{" "}
+                    <button type="button" onClick={clearFilters} className="text-[#9A3A2D] underline">
+                      Clear filter
+                    </button>
+                  </td>
+                </tr>
+              )}
+              {groupedRows.flatMap((group) => {
+                const first = group.items[0];
+                const gWorkerId = first.row.workerId;
+                const gWorker = gWorkerId ? workers.find((w) => w.id === gWorkerId) : undefined;
+                // Standard payable day (this worker's, else 9h) — the yardstick
+                // the daily total is flagged against.
+                const std = gWorker && gWorker.workingHoursPerDay > 0 ? gWorker.workingHoursPerDay : 9;
+                const gTotal = group.items.reduce((s, it) => s + (Number(it.row.hours) || 0), 0);
+                const over = gTotal > std + 0.01;
+                const short = !!gWorkerId && gTotal > 0.01 && gTotal < std - 0.01;
+                const totalCls = over
+                  ? "bg-[#FAEFCB] text-[#9C6F1E]"
+                  : short
+                    ? "bg-[#F6E0D3] text-[#9A5B2D]"
+                    : "bg-[#EEF3E4] text-[#4F7C3A]";
+                const span = group.items.length;
+                return group.items.map((item, segIdx) => {
+                  const { row, originalIdx } = item;
+                  const isProd = prodCodes.has(row.departmentCode);
+                  const firstSeg = segIdx === 0;
+                  return (
+                  <tr
+                    key={row.id ?? `new-${originalIdx}`}
+                    className={`hover:bg-[#FAF9F7] transition-colors ${
+                      firstSeg ? "border-t-2 border-[#E2DDD8]" : "border-t border-[#F0ECE9]"
+                    }`}
+                  >
+                    {/* Date + Employee render ONCE per worker-day group, spanning
+                        the group's department/category sub-rows (the name shows
+                        once; segments nest beneath it). */}
+                    {isMultiDay && firstSeg && (
+                      <td rowSpan={span} className="px-3 py-1.5 align-top border-r border-[#E2DDD8]">
                         <Input
                           type="date"
                           value={row.date}
-                          onChange={(e) => updateField(originalIdx, { date: e.target.value })}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            group.items.forEach((it) => updateField(it.originalIdx, { date: v }));
+                          }}
                           className="h-8 w-32 text-xs"
                         />
                       </td>
                     )}
-                    <td className="px-3 py-1.5">
-                      <select
-                        value={row.workerId}
-                        onChange={(e) => updateField(originalIdx, { workerId: e.target.value })}
-                        className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-                      >
-                        <option value="">— select worker —</option>
-                        {workers
-                          .filter((w) => w.status === "ACTIVE")
-                          .map((w) => (
-                            <option key={w.id} value={w.id}>{w.name}</option>
-                          ))}
-                      </select>
-                    </td>
+                    {firstSeg && (
+                      <td rowSpan={span} className="px-3 py-1.5 align-top border-r border-[#E2DDD8] min-w-[10rem]">
+                        <select
+                          value={row.workerId}
+                          onChange={(e) => {
+                            // Re-assign the WHOLE group (all of this worker's
+                            // segments that day) to the picked worker.
+                            const v = e.target.value;
+                            group.items.forEach((it) => updateField(it.originalIdx, { workerId: v }));
+                          }}
+                          className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                        >
+                          <option value="">— select worker —</option>
+                          {workers
+                            .filter((w) => w.status === "ACTIVE")
+                            .map((w) => (
+                              <option key={w.id} value={w.id}>{w.name}</option>
+                            ))}
+                        </select>
+                        {gWorkerId && (
+                          <div className="mt-1">
+                            <span
+                              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] tabular-nums ${totalCls}`}
+                              title={
+                                over
+                                  ? `${gTotal.toFixed(1)}h total — over the ${std}h day (overtime)`
+                                  : short
+                                    ? `${gTotal.toFixed(1)}h total — UNDER the ${std}h day. Check this is right (e.g. after Copy yesterday onto a different day).`
+                                    : `${gTotal.toFixed(1)}h total`
+                              }
+                            >
+                              {gTotal.toFixed(1)}h{over ? " · OT" : short ? " · short" : ""}
+                            </span>
+                          </div>
+                        )}
+                      </td>
+                    )}
                     <td className="px-3 py-1.5">
                       <select
                         value={row.departmentCode}
@@ -1277,7 +1437,8 @@ function WorkingHoursTab({
                       )}
                     </td>
                   </tr>
-                );
+                  );
+                });
               })}
             </tbody>
           </table>

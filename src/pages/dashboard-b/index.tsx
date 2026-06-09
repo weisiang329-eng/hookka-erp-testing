@@ -271,6 +271,20 @@ function last7WorkingDays(): { from: string; to: string } {
   days.sort((a, b) => a.localeCompare(b));
   return { from: days[0], to: days[days.length - 1] };
 }
+// Date range for a selected "YYYY-MM": [1st .. month end]. The current
+// month is capped at today; a past month runs to its last calendar day.
+function monthWindow(ym: string): { from: string; to: string } {
+  const iso = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const yr = Number(ym.slice(0, 4));
+  const mo = Number(ym.slice(5, 7)); // 1-12
+  const from = iso(new Date(yr, mo - 1, 1));
+  const lastDay = new Date(yr, mo, 0); // day 0 of next month
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const to = ym === CUR_YM && today < lastDay ? iso(today) : iso(lastDay);
+  return { from, to };
+}
 
 // ---------- helpers (same tokens as /dashboard) ----------
 const rm = (sen: number | undefined) => formatCurrency(sen ?? 0);
@@ -672,7 +686,13 @@ export default function DashboardBPage() {
   // shrinks, so the Pending-Delivery tile + KPI value are unchanged.
   const { data: soItemsRaw, loading: soItemsL } =
     useCachedJson<SOItemsResp>("/api/sales-orders?fields=price-index");
-  const effWin = useMemo(() => last7WorkingDays(), []);
+  // Worker-Efficiency window follows the selected month: a specific month →
+  // [1st .. month end] (capped at today for the current month); All-time →
+  // the rolling last 7 working days (unchanged).
+  const effWin = useMemo(() => {
+    if (period === "all") return last7WorkingDays();
+    return monthWindow(period);
+  }, [period]);
   const { data: jcSumRaw, loading: jcSumL } = useCachedJson<JcSummaryResp>(
     `/api/job-cards/summary?from=${effWin.from}&to=${effWin.to}`,
   );
@@ -876,6 +896,26 @@ export default function DashboardBPage() {
       ? "shipped value · current month"
       : `${period} · shipped (by dispatch)`;
 
+  // Labels for the month-aware ROLLING widgets (Revenue, Daily Capacity,
+  // Completed, Worker Efficiency). All-time keeps each widget's original
+  // rolling phrase; a selected month shows the month string.
+  const revTitle = isAllTime ? "Revenue — last 12 weeks" : `Revenue — ${period}`;
+  const capacityWindowLabel = isAllTime ? "7-day avg" : `${period} avg`;
+  const capacityDrillTitle = isAllTime
+    ? "Daily Capacity — Past 7 Working Days"
+    : `Daily Capacity — ${period}`;
+  const completedDrillTitle = isAllTime
+    ? "Completed — last 7 days"
+    : `Completed — ${period}`;
+  // Completed headline tracks the backend: yesterday's figure for all-time /
+  // current; a PAST month shows that month's LAST day instead.
+  const completedHeadlineLabel =
+    isAllTime || isCurrentMonth ? "Completed yest." : "Completed (last day)";
+  const completedHintLabel = isAllTime ? "· view 7d" : "· view month";
+  const effSub = isAllTime
+    ? "production mins ÷ clocked hours · last 7 working days"
+    : `production mins ÷ clocked hours · ${period}`;
+
   return (
     <div className="space-y-5">
       {/* Header */}
@@ -1019,7 +1059,7 @@ export default function DashboardBPage() {
         <Card className="lg:col-span-2 bg-white rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.08)]">
           <CardContent className="p-5">
             <SectionTitle
-              title="Revenue — last 12 weeks"
+              title={revTitle}
               sub="Sales Orders · Invoices · Production · click a legend to toggle"
               right={
                 <div className="flex gap-3 text-xs">
@@ -1141,7 +1181,7 @@ export default function DashboardBPage() {
                       ? hm(Math.round(prod.dailyCapacityMin / avgWorkers))
                       : "—";
                   setDrill({
-                    title: "Daily Capacity — Past 7 Working Days",
+                    title: capacityDrillTitle,
                     subtitle: `Average ${hm(prod.dailyCapacityMin)}/day · ${perWorkerAvg}/worker across all production depts`,
                     node: (
                       <MiniTable
@@ -1175,7 +1215,7 @@ export default function DashboardBPage() {
                   <Factory className="h-4 w-4 text-[#6B5C32]" />
                   <span className="text-xs text-[#5A5550]">
                     Daily Capacity{" "}
-                    <span className="text-[#C2BBAE]">· 7-day avg</span>
+                    <span className="text-[#C2BBAE]">· {capacityWindowLabel}</span>
                   </span>
                 </span>
                 <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
@@ -1267,7 +1307,7 @@ export default function DashboardBPage() {
                 onClick={() =>
                   prod?.completedLast7 &&
                   setDrill({
-                    title: "Completed — last 7 days",
+                    title: completedDrillTitle,
                     subtitle:
                       "Production finished per day (last upholstery completed)",
                     node: (
@@ -1287,8 +1327,8 @@ export default function DashboardBPage() {
                 <span className="flex items-center gap-2">
                   <CheckCircle2 className="h-4 w-4 text-[#15803D]" />
                   <span className="text-xs text-[#5A5550]">
-                    Completed yest.{" "}
-                    <span className="text-[#C2BBAE]">· view 7d</span>
+                    {completedHeadlineLabel}{" "}
+                    <span className="text-[#C2BBAE]">{completedHintLabel}</span>
                   </span>
                 </span>
                 <span className="text-sm font-bold text-[#1F1D1B] tabular-nums">
@@ -1374,7 +1414,7 @@ export default function DashboardBPage() {
           <CardContent className="p-5">
             <SectionTitle
               title="Worker Efficiency"
-              sub="production mins ÷ clocked hours · last 7 working days"
+              sub={effSub}
             />
             {effL ? (
               <SectionRowsSkeleton rows={5} />

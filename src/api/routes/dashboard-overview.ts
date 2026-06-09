@@ -170,6 +170,43 @@ app.get("/", async (c) => {
       return fmtISO(d);
     })();
 
+    // Month-window bounds for the rolling widgets that DO honour the
+    // selected month (Revenue chart, Completed list, Daily Capacity).
+    // `period` is already validated as "YYYY-MM" or "all" (line ~56).
+    //   - All-time            → bounds unused (each widget keeps its own
+    //                           rolling window: last 12 weeks / 7 days /
+    //                           7 working days).
+    //   - Current month       → [1st .. yesterday], matching the existing
+    //                           "ending yesterday" convention. If today is
+    //                           the 1st there is no complete day yet, so the
+    //                           end clamps below the start and the window is
+    //                           empty (correct: nothing finished this month).
+    //   - Past month          → [1st .. last calendar day of that month].
+    const monthScope = (() => {
+      if (period === "all") return null;
+      const yr = Number(period.slice(0, 4));
+      const mo = Number(period.slice(5, 7)); // 1-12
+      const first = fmtISO(new Date(yr, mo - 1, 1));
+      const lastDay = fmtISO(new Date(yr, mo, 0)); // day 0 of next month
+      const end = isPastMonth
+        ? lastDay
+        : yesterdayISO < lastDay
+          ? yesterdayISO
+          : lastDay;
+      return { start: first, end, lastDay };
+    })();
+
+    // Completed-widget date bounds (per widget 2 of the month-aware plan):
+    //   - "Completed" headline keeps the live "yesterday" figure for
+    //     all-time / current month; for a PAST month it shows that month's
+    //     LAST day's completions (there is no "yesterday" inside history).
+    //   - The per-day drill-down list spans last-7-days for all-time /
+    //     current, or the whole selected month otherwise.
+    const completedHeadlineDate =
+      isPastMonth && monthScope ? monthScope.lastDay : yesterdayISO;
+    const completedRangeStart = monthScope ? monthScope.start : last7StartISO;
+    const completedRangeEnd = monthScope ? monthScope.end : yesterdayISO;
+
     // Public holidays (kv_config['public_holidays'], maintained on the
     // Employees → Public Holidays panel). Excluded from the working-day
     // window below so a 0-production holiday doesn't deflate the daily-
@@ -194,21 +231,46 @@ app.get("/", async (c) => {
       }
     }
 
-    // 7 most-recent COMPLETE working days (Mon-Sat, EXCLUDING Sundays AND
-    // public holidays), ending YESTERDAY — same window the Planning page
-    // uses for Daily Capacity. `guard` caps the walk-back so a malformed
-    // holiday list can never spin.
-    const windowDays: string[] = [];
+    // Rolling 7 most-recent COMPLETE working days (Mon-Sat, EXCLUDING
+    // Sundays AND public holidays), ending YESTERDAY — same window the
+    // Planning page uses. This ALWAYS drives the Backlog "days of queue"
+    // figure (`backlogDays`), which is a point-in-time state metric and is
+    // therefore NOT re-scoped by the selected month. `guard` caps the
+    // walk-back so a malformed holiday list can never spin.
+    const rolling7Days: string[] = [];
     {
       const cur = new Date(today);
       cur.setDate(cur.getDate() - 1);
       let guard = 0;
-      while (windowDays.length < 7 && guard < 130) {
+      while (rolling7Days.length < 7 && guard < 130) {
+        guard++;
+        const iso = fmtISO(cur);
+        if (cur.getDay() !== 0 && !holidaySet.has(iso)) rolling7Days.push(iso);
+        cur.setDate(cur.getDate() - 1);
+      }
+    }
+    const rolling7Set = new Set(rolling7Days);
+
+    // Daily-Capacity widget window (Mon-Sat, EXCLUDING Sundays AND public
+    // holidays). The widget's average divisor is `windowDays.length`.
+    //   - All-time / current behaviour → identical to the rolling 7 above.
+    //   - A selected month → every working day in that month within
+    //     [monthScope.start .. monthScope.end] (end already clamped to
+    //     yesterday for the current month). Divisor becomes that month's
+    //     working-day COUNT, not a hardcoded 7.
+    let windowDays: string[];
+    if (monthScope) {
+      windowDays = [];
+      const cur = new Date(`${monthScope.start}T00:00:00`);
+      let guard = 0;
+      while (fmtISO(cur) <= monthScope.end && guard < 40) {
         guard++;
         const iso = fmtISO(cur);
         if (cur.getDay() !== 0 && !holidaySet.has(iso)) windowDays.push(iso);
-        cur.setDate(cur.getDate() - 1);
+        cur.setDate(cur.getDate() + 1);
       }
+    } else {
+      windowDays = rolling7Days;
     }
     const windowSet = new Set(windowDays);
 
@@ -601,15 +663,16 @@ app.get("/", async (c) => {
               AND substr(per_po.unit_completed_at::text, 1, 10) = ?
             GROUP BY po.itemCategory, po.customerName`,
         )
-        .bind(orgId, yesterdayISO)
+        .bind(orgId, completedHeadlineDate)
         .all<{
           cat: string | null;
           customerName: string | null;
           units: number;
           sos: number;
         }>(),
-      // Completed in the LAST 7 DAYS — per completion date, Bedframe
-      // units + Sofa sets (no customer split). Same per_po gate.
+      // Completed in the LAST 7 DAYS (or the selected month) — per
+      // completion date, Bedframe units + Sofa sets (no customer split).
+      // Same per_po gate.
       db
         .prepare(
           `WITH per_po AS (
@@ -638,7 +701,7 @@ app.get("/", async (c) => {
             GROUP BY substr(per_po.unit_completed_at::text, 1, 10)
             ORDER BY substr(per_po.unit_completed_at::text, 1, 10)`,
         )
-        .bind(orgId, last7StartISO, yesterdayISO)
+        .bind(orgId, completedRangeStart, completedRangeEnd)
         .all<{ d: string | null; bfUnits: number; sofaSets: number }>(),
       // Fabric PURCHASE price per SKU — from RM_RECEIPT ledger rows.
       // weighted avg = Σ cost ÷ Σ qty; plus min/max per-meter unit cost.
@@ -716,7 +779,8 @@ app.get("/", async (c) => {
     ]);
 
     // ---- Production ----
-    let capacityMin = 0;
+    let capacityMin = 0; // capacity over the Daily-Capacity widget window
+    let capacityMin7 = 0; // capacity over the rolling 7 working days (Backlog)
     let backlogMin = 0;
     const capByDay = new Map<string, number>();
     // Distinct workers (PIC1/PIC2 ids) credited on the job cards COMPLETED
@@ -728,8 +792,11 @@ app.get("/", async (c) => {
       const wip = Math.max(1, jc.wipQty ?? 1);
       const done = jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
       if (done && jc.completedDate) {
+        const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wip;
+        // Backlog "days of queue" always uses the rolling 7-working-day
+        // capacity — it is a point-in-time state metric, never re-scoped.
+        if (rolling7Set.has(jc.completedDate)) capacityMin7 += mins;
         if (windowSet.has(jc.completedDate)) {
-          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wip;
           capacityMin += mins;
           capByDay.set(
             jc.completedDate,
@@ -752,12 +819,21 @@ app.get("/", async (c) => {
         backlogMin += (jc.estMinutes ?? 0) * wip;
       }
     }
-    const dailyCapacityMin = Math.round(capacityMin / 7);
+    // Widget divisor = the window's working-day count (7 for all-time /
+    // current; the month's working days for a selected month). Guard the
+    // empty-window case (e.g. the 1st of the current month, no complete day
+    // yet) so we never divide by zero.
+    const capacityDivisor = windowDays.length || 1;
+    const dailyCapacityMin = Math.round(capacityMin / capacityDivisor);
+    // Backlog days uses the rolling-7 capacity (state metric — unchanged by
+    // the month selector). Divisor stays a fixed 7.
+    const backlogDailyCapacityMin = Math.round(capacityMin7 / 7);
     const backlogDays =
-      dailyCapacityMin > 0
-        ? Math.round((backlogMin / dailyCapacityMin) * 10) / 10
+      backlogDailyCapacityMin > 0
+        ? Math.round((backlogMin / backlogDailyCapacityMin) * 10) / 10
         : 0;
-    // Daily Capacity drill-down: last 7 working days, oldest first.
+    // Daily Capacity drill-down: the widget window's working days, oldest
+    // first (rolling 7 for all-time / current; the month for a selection).
     const capacityDays = [...windowDays]
       .sort((a, b) => a.localeCompare(b))
       .map((date) => ({
@@ -788,7 +864,7 @@ app.get("/", async (c) => {
         if (
           (r.jcStatus === "COMPLETED" || r.jcStatus === "TRANSFERRED") &&
           r.completedDate &&
-          windowSet.has(r.completedDate)
+          rolling7Set.has(r.completedDate)
         ) {
           windowTotal += (r.actualMinutes ?? r.estMinutes ?? 0) * wip;
         }
@@ -867,8 +943,9 @@ app.get("/", async (c) => {
     };
     const activeJobs = rollUp(activeJobsRes.results ?? []);
     const completedYesterday = rollUp(compYestRes.results ?? []);
-    // Completed in the last 7 days, per day (no customer split). Fill
-    // every day so the list is continuous (0 on idle days).
+    // Completed per day (no customer split). Fill every day so the list is
+    // continuous (0 on idle days). Window = last 7 days for all-time /
+    // current; the whole selected month otherwise.
     const compByDay = new Map<string, { bf: number; sofa: number }>();
     for (const r of compLast7Res.results ?? []) {
       if (!r.d) continue;
@@ -882,16 +959,32 @@ app.get("/", async (c) => {
       bedframeUnits: number;
       sofaSets: number;
     }[] = [];
-    for (let i = 7; i >= 1; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const iso = fmtISO(d);
-      const v = compByDay.get(iso) ?? { bf: 0, sofa: 0 };
-      completedLast7.push({
-        date: iso,
-        bedframeUnits: v.bf,
-        sofaSets: v.sofa,
-      });
+    if (monthScope) {
+      const cur = new Date(`${monthScope.start}T00:00:00`);
+      let guard = 0;
+      while (fmtISO(cur) <= monthScope.end && guard < 40) {
+        guard++;
+        const iso = fmtISO(cur);
+        const v = compByDay.get(iso) ?? { bf: 0, sofa: 0 };
+        completedLast7.push({
+          date: iso,
+          bedframeUnits: v.bf,
+          sofaSets: v.sofa,
+        });
+        cur.setDate(cur.getDate() + 1);
+      }
+    } else {
+      for (let i = 7; i >= 1; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        const iso = fmtISO(d);
+        const v = compByDay.get(iso) ?? { bf: 0, sofa: 0 };
+        completedLast7.push({
+          date: iso,
+          bedframeUnits: v.bf,
+          sofaSets: v.sofa,
+        });
+      }
     }
 
     // ---- This-Month Delivered (item-level, shipped DOs, this month) ----
@@ -1107,11 +1200,27 @@ app.get("/", async (c) => {
       productionSen: prodRevMap.get(month) ?? 0,
     }));
 
-    // ── Weekly Revenue (last 12 weeks) — same three lenses as
-    // monthlyRevenue but bucketed by ISO week (Monday start). Additive
-    // queries so the monthly cards above stay untouched. The three SO /
-    // Invoice / Production revenue definitions mirror the monthly ones
-    // exactly so the two views reconcile. — Wei Siang 2026-05-29.
+    // ── Weekly Revenue — same three lenses as monthlyRevenue but bucketed
+    // by ISO week (Monday start). Additive queries so the monthly cards
+    // above stay untouched. The three SO / Invoice / Production revenue
+    // definitions mirror the monthly ones exactly so the two views
+    // reconcile. — Wei Siang 2026-05-29.
+    //
+    // Date filtering only (the monetary logic is never touched):
+    //   - All-time     → last 12 weeks: date >= date_trunc('week', today) - 11 weeks.
+    //   - A month       → still weekly granularity, but ONLY rows whose date
+    //     falls inside [monthScope.start .. monthScope.end]. Rows are still
+    //     bucketed by their week-Monday, so a week that straddles the month
+    //     boundary is keyed to its Monday (may sit a few days before the 1st).
+    // `weekDateClause` returns the WHERE fragment for a given date column; the
+    // matching bind values are appended per query.
+    const weekDateClause = (col: string) =>
+      monthScope
+        ? `${col}::date >= ? AND ${col}::date <= ?`
+        : `${col}::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')`;
+    const weekDateBinds: string[] = monthScope
+      ? [monthScope.start, monthScope.end]
+      : [];
     const [soWeekRes, invWeekRes, prodWeekRes] = await Promise.all([
       db
         .prepare(
@@ -1120,10 +1229,10 @@ app.get("/", async (c) => {
              FROM sales_orders
             WHERE orgId = ? AND status NOT IN ('DRAFT','CANCELLED')
               AND companySODate IS NOT NULL
-              AND companySODate::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')
+              AND ${weekDateClause("companySODate")}
             GROUP BY 1`,
         )
-        .bind(orgId)
+        .bind(orgId, ...weekDateBinds)
         .all<{ yw: string | null; revenueSen: number }>(),
       db
         .prepare(
@@ -1131,10 +1240,10 @@ app.get("/", async (c) => {
                   COALESCE(SUM(totalSen),0) AS "revenueSen"
              FROM invoices
             WHERE orgId = ? AND status != 'CANCELLED' AND invoiceDate IS NOT NULL
-              AND invoiceDate::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')
+              AND ${weekDateClause("invoiceDate")}
             GROUP BY 1`,
         )
-        .bind(orgId)
+        .bind(orgId, ...weekDateBinds)
         .all<{ yw: string | null; revenueSen: number }>(),
       db
         .prepare(
@@ -1172,9 +1281,10 @@ app.get("/", async (c) => {
                     ON coi.consignmentOrderId = po.consignmentOrderId AND coi.lineNo = po.lineNo
             WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
               AND per_po.unit_completed_at IS NOT NULL
-              AND per_po.unit_completed_at::date >= (date_trunc('week', CURRENT_DATE) - INTERVAL '11 weeks')
+              AND ${weekDateClause("per_po.unit_completed_at")}
             GROUP BY 1`,
         )
+        .bind(...weekDateBinds)
         .all<{ yw: string | null; revenueSen: number }>(),
     ]);
     const soRevWeekMap = new Map<string, number>();
@@ -1183,9 +1293,32 @@ app.get("/", async (c) => {
     for (const r of invWeekRes.results ?? []) if (r.yw) invRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
     const prodRevWeekMap = new Map<string, number>();
     for (const r of prodWeekRes.results ?? []) if (r.yw) prodRevWeekMap.set(r.yw, Number(r.revenueSen) || 0);
-    // 12 Monday-anchored week starts ending the current week (UTC; matches
-    // Postgres date_trunc('week', …) which is Monday-based).
+    // Monday-anchored week starts to display (UTC; matches Postgres
+    // date_trunc('week', …) which is Monday-based).
+    //   - All-time → the 12 weeks ending the current week.
+    //   - A month   → the distinct week-Mondays of every day in
+    //     [monthScope.start .. monthScope.end], so the displayed buckets line
+    //     up exactly with what the SQL can produce (a week that straddles the
+    //     1st is keyed to its Monday, which may fall just before the 1st).
+    const weekMonday = (iso: string): string => {
+      const d = new Date(`${iso}T00:00:00Z`);
+      const dow = d.getUTCDay(); // 0=Sun..6=Sat
+      d.setUTCDate(d.getUTCDate() + (dow === 0 ? -6 : 1 - dow));
+      return d.toISOString().slice(0, 10);
+    };
     const weekStarts: string[] = (() => {
+      if (monthScope) {
+        const set = new Set<string>();
+        const cur = new Date(`${monthScope.start}T00:00:00Z`);
+        const endUTC = new Date(`${monthScope.end}T00:00:00Z`);
+        let guard = 0;
+        while (cur <= endUTC && guard < 40) {
+          guard++;
+          set.add(weekMonday(cur.toISOString().slice(0, 10)));
+          cur.setUTCDate(cur.getUTCDate() + 1);
+        }
+        return [...set].sort((a, b) => a.localeCompare(b));
+      }
       const out: string[] = [];
       const mon = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
       const dow = mon.getUTCDay(); // 0=Sun..6=Sat

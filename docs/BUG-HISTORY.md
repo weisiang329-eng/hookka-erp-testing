@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-10-007 — Packing List Cost showed RM 0.00: a vehicle with unset 3PL rates masked the company's real rates
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). Live-verified: the six RM 0.00 packing lists all resolved to their real one-trip cost (RM 300 / RM 350); only PL-2606-005 stays "—" (its DO genuinely has no rated 3PL — data gap for the operator).
+**Category:** delivery-orders
+
+Symptom: minutes after the new Packing List Revenue/Cost columns shipped, six of the ten live PLs showed **Cost RM 0.00** — implying free transport.
+
+Root cause: `computePackingListMoney` (src/api/routes/packing-lists.ts) mirrors the DO write-path's vehicle-over-provider rate precedence. Those PLs' DOs had a `vehicleId` assigned whose `three_pl_vehicles` rates were never keyed (0/0), so the vehicle "win" produced `0 + drops×0 = RM 0.00` and masked the provider's real RM300/RM50 from 3PL Maintenance. (The DO write path has the same latent behavior for `deliveryCostSen` — pre-existing, untouched here.)
+
+Fix: treat a 0/0 rate pair as UNSET, not free — `hasRate()` guard in `rateForDo`: a rate-less vehicle falls through to its provider's rates; when neither side has rates the PL resolves null and renders "—" (never RM 0.00).
+
+Verification: typecheck + eslint green; redeployed and re-read `/api/packing-lists` on prod — RM 0.00 count went 6 → 0; same-address multi-DO PLs still cost one trip (PL-2606-008: 4 DOs, one address → RM 300); two-address PLs RM 350.
+
+---
+
 ## BUG-2026-06-10-006 — Efficiency allowance hidden in the Overhead plug + inflating "Under-recorded hours" (no reconciliation line of its own)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). typecheck:app + build green; impact verified on live data (May allowance RM0 → recon unchanged RM62,775.52; June 15×RM150 = RM2,250).

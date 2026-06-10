@@ -167,6 +167,8 @@ type PayslipData = {
   // which had overtime. Optional so a stale response shape stays safe.
   absentDates?: string[];
   otDays?: Array<{ date: string; hours: number }>;
+  shortHourDeductionSen?: number;
+  lateDays?: Array<{ date: string; hours: number }>;
 };
 
 type LeaveRecord = {
@@ -6545,6 +6547,12 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                                       <span className="font-semibold">({fmtSen(r.absenceDeductionSen)})</span>
                                     </div>
                                   )}
+                                  {(r.shortHourDeductionSen ?? 0) > 0 && (
+                                    <div className="flex justify-between text-[#9A3A2D]">
+                                      <span>Less: Late / short hours</span>
+                                      <span className="font-semibold">({fmtSen(r.shortHourDeductionSen ?? 0)})</span>
+                                    </div>
+                                  )}
                                   {prorationSenOf(r) > 1 && (
                                     <div className="flex justify-between text-[#9A3A2D]">
                                       <span>Less: Part-month (joined / resigned mid-month)</span>
@@ -6619,6 +6627,18 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                                     <span className="text-[#9CA3AF]">No overtime days</span>
                                   )}
                                 </div>
+                                {r.lateDays && r.lateDays.length > 0 && (
+                                  <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+                                    <span className="font-semibold text-[#9A3A2D] shrink-0">Late / short:</span>
+                                    <span className="flex flex-wrap gap-1.5">
+                                      {r.lateDays.map((d) => (
+                                        <span key={d.date} className="inline-flex items-center rounded bg-[#F9E1DA] px-1.5 py-0.5 font-medium text-[#9A3A2D] tabular-nums">
+                                          {formatDayMonth(d.date)} — {Number.isInteger(d.hours) ? d.hours : d.hours.toFixed(1)}h
+                                        </span>
+                                      ))}
+                                    </span>
+                                  </div>
+                                )}
                                 {(!r.absentDates && !r.otDays) && (
                                   <p className="text-[10px] text-[#9CA3AF]">
                                     Per-day detail isn&rsquo;t available for this row.

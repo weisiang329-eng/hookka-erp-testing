@@ -146,7 +146,13 @@ function rowToPayslip(r: PayslipRow) {
 // A payslip row plus the additive per-day absence/OT detail. The day fields are
 // display-only (no amounts) and are attached by the GET list + projected paths
 // so the Payroll row's expanded layer can show WHICH days were absent / had OT.
-type PayslipWithDayDetail = ReturnType<typeof rowToPayslip> & AttendanceDayDetail;
+type PayslipWithDayDetail = ReturnType<typeof rowToPayslip> &
+  AttendanceDayDetail & {
+    // Late / short-hours dock — amount + the specific days. Projected path only
+    // (mirrors worker My Pay); the office Payroll row itemises it when present.
+    shortHourDeductionSen?: number;
+    lateDays?: Array<{ date: string; hours: number }>;
+  };
 
 // ---------------------------------------------------------------------------
 // Malaysian statutory helpers
@@ -416,14 +422,23 @@ app.get("/projected", async (c) => {
   }
 
   const deductionHoursByWorker = new Map<string, number>();
+  // Per-day docks so the Payroll row can itemise the late/short deduction down to
+  // the specific days — mirrors the worker My Pay drill-down (worker.ts).
+  const deductionDaysByWorker = new Map<string, Array<{ date: string; hours: number }>>();
   try {
     const dedRes = await c.var.DB.prepare(
-      "SELECT workerId, hours FROM payroll_hour_deductions WHERE date LIKE ?",
+      "SELECT workerId, date, hours FROM payroll_hour_deductions WHERE date LIKE ? ORDER BY date",
     )
       .bind(`${period}-%`)
-      .all<{ workerId: string; hours: number }>();
+      .all<{ workerId: string; date: string; hours: number }>();
     for (const r of dedRes.results ?? []) {
-      deductionHoursByWorker.set(r.workerId, (deductionHoursByWorker.get(r.workerId) ?? 0) + (Number(r.hours) || 0));
+      const h = Number(r.hours) || 0;
+      deductionHoursByWorker.set(r.workerId, (deductionHoursByWorker.get(r.workerId) ?? 0) + h);
+      if (h > 0) {
+        const arr = deductionDaysByWorker.get(r.workerId) ?? [];
+        arr.push({ date: r.date, hours: Math.round(h * 100) / 100 });
+        deductionDaysByWorker.set(r.workerId, arr);
+      }
     }
   } catch (e) {
     console.warn("[payslips/projected] payroll_hour_deductions read skipped:", e);
@@ -577,6 +592,11 @@ app.get("/projected", async (c) => {
       // Additive per-day detail for the expanded Payroll row.
       absentDates: dayDetail.absentDates,
       otDays: dayDetail.otDays,
+      // Late / short-hours dock — the amount (from the engine) + the specific
+      // days, so the office Payroll row itemises it like the worker My Pay does
+      // (the deduction is already folded into gross/net; this just shows it).
+      shortHourDeductionSen: labor.payroll.shortHourDeductionSen,
+      lateDays: deductionDaysByWorker.get(worker.id) ?? [],
     });
   }
 

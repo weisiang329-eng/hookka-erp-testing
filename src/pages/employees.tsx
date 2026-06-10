@@ -4425,7 +4425,10 @@ function DepartmentLaborTab({
           // Round each worker's gap to whole sen BEFORE summing — identical to
           // the Labor Cost tab — so per-dept rows add up to the same grand total
           // both tabs show (no per-department rounding drift).
-          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency - otAdj);
+          // Exclude the efficiency allowance (a flat bonus, not logged hours) so
+          // it doesn't show as a spurious "under-recorded" gap — same as the
+          // Labor Cost tab. The dept's `extra` above still carries the bonus cost.
+          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency - otAdj - (Number(p.allowances) || 0));
           if (gap > 50) underByDept.set(reconCode, (underByDept.get(reconCode) ?? 0) + gap);
         }
       }
@@ -7994,7 +7997,11 @@ function LaborCostTab({
         grossSen -
           loggedValueSen -
           (absenceLeniencyByPayslip.get(p.id) ?? 0) -
-          (otAdjustmentByPayslip.get(p.id) ?? 0),
+          (otAdjustmentByPayslip.get(p.id) ?? 0) -
+          // Efficiency allowance is a flat bonus, not logged hours — it has its
+          // OWN reconciliation line, so exclude it here or a fully-logged earner
+          // shows a spurious ~RM150 "under-recorded" gap.
+          (Number(p.allowances) || 0),
       );
       // A production worker fully reconciled (gap ≈ 0) is not a data gap. Use a
       // small tolerance so rounding noise doesn't flag a fully-logged worker.
@@ -8090,9 +8097,19 @@ function LaborCostTab({
   // figure the "who & why" panel itemises, so both lines (and Department Labor's
   // Under-recorded column) show the identical number.
   const underRecordedReconSen = employeeResidual.underLoggedSubtotalSen;
+  // Efficiency allowance — the flat monthly bonus (RM150 if the worker hit their
+  // efficiency target, else RM0). It's in Payroll's gross but NOT in the
+  // logged-hours labor cost, so it gets its OWN line instead of hiding in the
+  // Overhead plug or inflating Under-recorded (subtracted from both). Already
+  // resolved per worker on the payslip; a flat monthly amount, not daily.
+  const efficiencyAllowanceReconSen = reconPayslips.reduce(
+    (s, p) => s + (Number(p.allowances) || 0),
+    0,
+  );
   const loadedOverheadSen =
     totalPayrollCostSen -
     underRecordedReconSen -
+    efficiencyAllowanceReconSen -
     loadedProductionSen -
     loadedWarehousingSen -
     loadedShortfallSen;
@@ -8103,7 +8120,8 @@ function LaborCostTab({
     loadedWarehousingSen +
     loadedShortfallSen +
     loadedOverheadSen +
-    underRecordedReconSen;
+    underRecordedReconSen +
+    efficiencyAllowanceReconSen;
   const reconcileDiffSen = reconciledSumSen - totalPayrollCostSen;
 
   const loading = entriesLoading || plLoading;
@@ -8131,6 +8149,9 @@ function LaborCostTab({
     if (showReconciliation) {
       const reconRows = [
         { line: "Production Labor (incl. EPF)", amt: loadedProductionSen },
+        ...(efficiencyAllowanceReconSen > 0
+          ? [{ line: "Efficiency allowance (bonus)", amt: efficiencyAllowanceReconSen }]
+          : []),
         { line: "Borrowed (Warehousing) (incl. EPF)", amt: loadedWarehousingSen },
         { line: "Shortfall (incl. EPF)", amt: loadedShortfallSen },
         { line: "Overhead & non-production (incl. EPF)", amt: loadedOverheadSen },
@@ -8372,6 +8393,17 @@ function LaborCostTab({
                     </td>
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(loadedProductionSen)}</td>
                   </tr>
+                  {efficiencyAllowanceReconSen > 0 && (
+                  <tr className="border-b border-[#E2DDD8]">
+                    <td
+                      className="py-1.5 pr-3 text-[#4B5563]"
+                      title="Efficiency bonus paid to workers who hit their monthly efficiency target (a flat amount per worker). It's in payroll but not in logged hours, so it shows on its own line instead of hiding in Overhead. Real-time estimate mid-month; locks when you Generate (finalise)."
+                    >
+                      Efficiency allowance <span className="text-[#9CA3AF]">(bonus)</span>
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(efficiencyAllowanceReconSen)}</td>
+                  </tr>
+                  )}
                   <tr className="border-b border-[#E2DDD8]">
                     <td className="py-1.5 pr-3 text-[#4B5563]">Borrowed (Warehousing) <span className="text-[#9CA3AF]">(incl. EPF)</span></td>
                     <td className="py-1.5 text-right tabular-nums font-medium text-[#1F1D1B]">{formatCurrency(loadedWarehousingSen)}</td>

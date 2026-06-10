@@ -129,11 +129,14 @@ export function cellFor(
 // Whole-PO overdue predicate. Two modes (dept = null vs string):
 //
 //   Overview mode (dept = null): "will we ship on time?". A PO is overdue
-//   when its customer-promised PO.targetEndDate has passed AND the PO's
-//   UPHOLSTERY JC isn't done (COMPLETED / TRANSFERRED). UPH is the
-//   ship-readiness gate — once UPH is done the PO is effectively ready.
-//   POs without any UPH JC (legacy / non-upholstered items) are skipped
-//   so the count never accuses something that has no UPH stage.
+//   when its SO "Our Expected DD" (hookkaExpectedDD — the date the operator
+//   reads in the Overview cell) has passed AND the PO's UPHOLSTERY JC isn't
+//   done (COMPLETED / TRANSFERRED). UPH is the ship-readiness gate — once UPH
+//   is done the PO is effectively ready. POs without any UPH JC (legacy /
+//   non-upholstered items) are skipped so the count never accuses something
+//   that has no UPH stage. A PO with no hookkaExpectedDD (empty, or CO-origin
+//   which never gets one) can't be late against a date it doesn't have, so it
+//   is never overdue here (2026-06-10 — was keyed off targetEndDate).
 //
 //   Per-dept mode (dept = "FAB_CUT" | "FAB_SEW" | …): "is this dept
 //   missing its own deadline?". A PO is overdue at this dept when one of
@@ -151,8 +154,8 @@ export function isOverduePO(
   if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
 
   if (dept === null) {
-    // Overview rule: customer Expected DD passed AND UPHOLSTERY not done.
-    if (!po.targetEndDate || po.targetEndDate >= today) return false;
+    // Overview rule: SO "Our Expected DD" passed AND UPHOLSTERY not done.
+    if (!po.hookkaExpectedDD || po.hookkaExpectedDD >= today) return false;
     const uph = (po.jobCards ?? []).filter((j) => j.departmentCode === "UPHOLSTERY");
     if (uph.length === 0) return false;
     return uph.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
@@ -175,10 +178,10 @@ export function isOverduePO(
 // "earliest first" so the operator can prioritize. Returns "" if the PO
 // is not overdue under the given rule.
 //
-//   Overview (dept = null): if PO.targetEndDate < today AND UPH is open,
-//   return PO.targetEndDate (the customer's promised date is the anchor
-//   the operator cares about — UPH dueDate isn't what slipped against
-//   the customer). Returns "" otherwise.
+//   Overview (dept = null): if hookkaExpectedDD < today AND UPH is open,
+//   return hookkaExpectedDD (the SO "Our Expected DD" is the anchor the
+//   operator reads — UPH dueDate isn't what slipped against the promise).
+//   Returns "" otherwise (incl. empty / CO-origin DD — 2026-06-10).
 //
 //   Per-dept (dept = string): earliest dueDate across that dept's open
 //   JCs that have already passed today. Returns "" if no such JC.
@@ -190,13 +193,13 @@ export function earliestOverdueDateOnPO(
   if (po.status === "COMPLETED" || po.status === "CANCELLED") return "";
 
   if (dept === null) {
-    if (!po.targetEndDate || po.targetEndDate >= today) return "";
+    if (!po.hookkaExpectedDD || po.hookkaExpectedDD >= today) return "";
     const uph = (po.jobCards ?? []).filter((j) => j.departmentCode === "UPHOLSTERY");
     if (uph.length === 0) return "";
     const stillOpen = uph.some(
       (j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED",
     );
-    return stillOpen ? po.targetEndDate : "";
+    return stillOpen ? po.hookkaExpectedDD : "";
   }
 
   let earliest = "";

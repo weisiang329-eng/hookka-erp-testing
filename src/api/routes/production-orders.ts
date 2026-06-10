@@ -1326,11 +1326,18 @@ async function fetchFilteredPOs(
   // Sprint 4: orgId is always the leading WHERE predicate. Status filter
   // becomes an AND clause when present.
   // dueFrom / dueTo: date window applied differently depending on context:
-  //   overview (no deptFilter)  → PO.targetEndDate window (whole-order PACKING anchor)
+  //   overview (no deptFilter)  → the PO's SO "Our Expected DD"
+  //                               (sales_orders.hookkaExpectedDD) window — this
+  //                               is the column the operator actually reads in
+  //                               the Overview "Our Expected DD" cell, so the
+  //                               top Due-Date range filter must key off it, NOT
+  //                               the internal targetEndDate (2026-06-10).
   //   dept page (deptFilter set) → that dept's JC.dueDate window (correct semantic
   //                                for /production/<dept> filtering)
-  // NULL targetEndDate / dueDate is preserved on both sides — undated POs
-  // / JCs survive so the daily view still shows them.
+  // Undated rows are preserved on both sides — a PO with no salesOrderId
+  // (CO-origin) or a NULL/'' hookkaExpectedDD still passes the overview window
+  // (never silently dropped), and a JC with NULL dueDate still passes the dept
+  // window — so the daily view keeps showing them.
   const dueClauses: string[] = [];
   const dueBindings: string[] = [];
   if (dueFrom || dueTo) {
@@ -1356,12 +1363,27 @@ async function fetchFilteredPOs(
       dueClauses.push(sub.join(""));
       dueBindings.push(...subBindings);
     } else {
+      // Overview mode: window the PO's SO "Our Expected DD". Correlated
+      // subquery looks up sales_orders.hookkaExpectedDD for this PO's
+      // salesOrderId. NULLIF(...,'') folds an empty stored value into NULL so
+      // the "undated → always shown" guard covers both NULL and ''. The outer
+      // `salesOrderId` is referenced unqualified so the clause works whether
+      // the FROM is `production_orders` or the (unaliased) hot+archive UNION;
+      // sales_orders has no salesOrderId column, so there is no ambiguity.
+      // A PO with NULL salesOrderId (CO-origin) short-circuits the OR and is
+      // always kept.
+      const ddExpr =
+        "NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so WHERE so.id = salesOrderId), '')";
       if (dueFrom) {
-        dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+        dueClauses.push(
+          `(salesOrderId IS NULL OR ${ddExpr} IS NULL OR ${ddExpr} >= ?)`,
+        );
         dueBindings.push(dueFrom);
       }
       if (dueTo) {
-        dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+        dueClauses.push(
+          `(salesOrderId IS NULL OR ${ddExpr} IS NULL OR ${ddExpr} <= ?)`,
+        );
         dueBindings.push(dueTo);
       }
     }
@@ -1771,8 +1793,11 @@ async function fetchPaginatedPOs(
     : "job_cards";
 
   // dueFrom / dueTo: dept-aware date window — same logic as
-  // fetchFilteredPOs. Overview filters PO.targetEndDate; dept page
-  // filters that dept's JC.dueDate via EXISTS subquery.
+  // fetchFilteredPOs. Overview filters the PO's SO "Our Expected DD"
+  // (sales_orders.hookkaExpectedDD — the column shown in the Overview cell);
+  // dept page filters that dept's JC.dueDate via EXISTS subquery. Undated rows
+  // (no salesOrderId / NULL or '' hookkaExpectedDD; or NULL JC dueDate) are
+  // always kept.
   const dueClauses: string[] = [];
   const dueBindings: string[] = [];
   if (dueFrom || dueTo) {
@@ -1795,12 +1820,24 @@ async function fetchPaginatedPOs(
       dueClauses.push(sub.join(""));
       dueBindings.push(...subBindings);
     } else {
+      // Overview mode: window the PO's SO "Our Expected DD". See the matching
+      // block in fetchFilteredPOs for the full rationale — correlated lookup of
+      // sales_orders.hookkaExpectedDD, NULLIF('') folds empty into NULL, and the
+      // unqualified outer `salesOrderId` keeps the clause valid against both
+      // `production_orders` and the unaliased hot+archive UNION. CO-origin POs
+      // (NULL salesOrderId) and undated SOs are always kept.
+      const ddExpr =
+        "NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so WHERE so.id = salesOrderId), '')";
       if (dueFrom) {
-        dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+        dueClauses.push(
+          `(salesOrderId IS NULL OR ${ddExpr} IS NULL OR ${ddExpr} >= ?)`,
+        );
         dueBindings.push(dueFrom);
       }
       if (dueTo) {
-        dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+        dueClauses.push(
+          `(salesOrderId IS NULL OR ${ddExpr} IS NULL OR ${ddExpr} <= ?)`,
+        );
         dueBindings.push(dueTo);
       }
     }
@@ -4514,8 +4551,11 @@ async function applyPoUpdate(
 // drill-down panel. Mirrors `isOverduePO` + `earliestOverdueDateOnPO` in
 // src/pages/production/utils.ts:
 //
-//   ?dept missing  → Overview rule: PO.targetEndDate < today AND any
-//                    UPHOLSTERY JC still open.  earliest = PO.targetEndDate.
+//   ?dept missing  → Overview rule: the PO's SO "Our Expected DD"
+//                    (sales_orders.hookkaExpectedDD) < today AND any
+//                    UPHOLSTERY JC still open.  earliest = that DD. A PO with
+//                    no DD (empty / CO-origin) is never overdue (2026-06-10 —
+//                    was keyed off PO.targetEndDate).
 //   ?dept=<code>   → Per-dept rule: that dept's JC dueDate passed AND open.
 //                    earliest = MIN(such JC.dueDate).
 //
@@ -4574,17 +4614,31 @@ app.get("/overdue-counts", async (c) => {
     c.var.DB,
     {
       tableName: "production_overdue_snapshot",
-      sourceTables: ["production_orders", "job_cards"],
+      // sales_orders added 2026-06-10: the Overview overdue branch now reads
+      // sales_orders.hookkaExpectedDD, so an operator editing the SO "Our
+      // Expected DD" must roll this snapshot forward (the freshness probe
+      // compares MAX(updated_at) across these tables; the SO PUT bumps
+      // sales_orders.updated_at).
+      sourceTables: ["production_orders", "job_cards", "sales_orders"],
     },
     orgId,
     async () => {
   // One SQL per request; the slim row list (~800 max) is aggregated in JS.
   // Per-PO `earliestOverdue` is computed via the same predicate the FE used
-  // to apply locally — overview branch is anchored on PO.targetEndDate and
-  // gated on UPHOLSTERY-JC openness; dept branch is the MIN(jc.dueDate)
-  // across that dept's still-open JCs that have already passed today.
+  // to apply locally — overview branch is anchored on the SO "Our Expected DD"
+  // (sales_orders.hookkaExpectedDD) and gated on UPHOLSTERY-JC openness; dept
+  // branch is the MIN(jc.dueDate) across that dept's still-open JCs that have
+  // already passed today.
   let rows: OverduePoRow[];
   if (dept === null) {
+    // Overview overdue now keys off the PO's SO "Our Expected DD"
+    // (sales_orders.hookkaExpectedDD) — the date the operator reads in the
+    // Overview cell — NOT the internal targetEndDate (2026-06-10). A PO is
+    // overdue when that DD has passed AND its UPHOLSTERY JC is still open.
+    // NULLIF(...,'') folds an empty stored DD into NULL; a NULL/'' DD or a
+    // CO-origin PO (NULL salesOrderId → subquery yields NULL) can't be late
+    // against a date it doesn't have, so earliest_overdue stays NULL. The
+    // surfaced earliest date is the SO DD itself (what the operator sees).
     const stmt = c.var.DB.prepare(
       `SELECT po.id,
               po.companySOId,
@@ -4596,15 +4650,18 @@ app.get("/overdue-counts", async (c) => {
               po.status AS po_status,
               CASE
                 WHEN po.status NOT IN ('COMPLETED','CANCELLED')
-                  AND po.targetEndDate IS NOT NULL
-                  AND po.targetEndDate < ?
+                  AND NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so
+                              WHERE so.id = po.salesOrderId), '') IS NOT NULL
+                  AND NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so
+                              WHERE so.id = po.salesOrderId), '') < ?
                   AND EXISTS (
                     SELECT 1 FROM job_cards jc
                     WHERE jc.productionOrderId = po.id
                       AND jc.departmentCode = 'UPHOLSTERY'
                       AND jc.status NOT IN ('COMPLETED','TRANSFERRED')
                   )
-                THEN po.targetEndDate
+                THEN NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so
+                              WHERE so.id = po.salesOrderId), '')
                 ELSE NULL
               END AS earliest_overdue
          FROM production_orders po

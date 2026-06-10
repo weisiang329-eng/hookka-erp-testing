@@ -160,6 +160,9 @@ type PackingListRecord = {
   // null when not computed; fall back to the stored stopCount (legacy DO count).
   doCount: number | null;
   stops: number | null;
+  // Distinct delivery states across the PL's DOs (e.g. ["KL"] or
+  // ["KL","PG"]); null when not computed.
+  states: string[] | null;
 };
 
 // One row of the Packing-List-first grouping preview — mirrors the `groups`
@@ -3989,6 +3992,7 @@ export default function DeliveryPage() {
                       <th className="py-2 px-3 font-medium">Packing No</th>
                       <th className="py-2 px-3 font-medium text-center">DOs</th>
                       <th className="py-2 px-3 font-medium text-center">Stops</th>
+                      <th className="py-2 px-3 font-medium text-center">State</th>
                       <th className="py-2 px-3 font-medium text-center">Units</th>
                       <th className="py-2 px-3 font-medium text-right">Total M³</th>
                       <th className="py-2 px-3 font-medium text-right">Revenue</th>
@@ -4012,6 +4016,11 @@ export default function DeliveryPage() {
                         </td>
                         <td className="py-2.5 px-3 text-center tabular-nums">
                           {pl.stops ?? "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-center">
+                          {pl.states && pl.states.length > 0
+                            ? pl.states.join(", ")
+                            : "—"}
                         </td>
                         <td className="py-2.5 px-3 text-center tabular-nums">
                           {pl.totalUnits}

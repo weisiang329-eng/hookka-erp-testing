@@ -63,6 +63,7 @@ function rowToPackingList(
     costSen: number | null;
     doCount: number;
     stops: number;
+    states: string[];
   },
 ) {
   return {
@@ -82,6 +83,9 @@ function rowToPackingList(
     // (single-record GET) — the FE falls back to the stored snapshot.
     doCount: money?.doCount ?? null,
     stops: money?.stops ?? null,
+    // Distinct delivery states across the PL's DOs (customerState, hub
+    // fallback). null when not computed.
+    states: money?.states ?? null,
   };
 }
 
@@ -137,6 +141,8 @@ type PlDoRow = {
   deliveryAddress: string | null;
   driverId: string | null; // = providerId (drivers.id) per the 3PL refactor
   vehicleId: string | null;
+  customerState: string | null;
+  hubId: string | null;
 };
 type RatePair = { ratePerTripSen: number; ratePerExtraDropSen: number };
 
@@ -149,6 +155,10 @@ type PlLiveFields = {
   costSen: number | null;
   doCount: number;
   stops: number;
+  // Distinct delivery states across the PL's DOs, first-seen DO order —
+  // raw stored codes (KL / PG / SBH …), customerState falling back to the
+  // DO's hub state. Multiple states on one truck run all show.
+  states: string[];
 };
 
 async function computePackingListMoney(
@@ -159,7 +169,13 @@ async function computePackingListMoney(
   const out = new Map<string, PlLiveFields>();
   // Pre-seed every PL so the caller always gets an entry.
   for (const l of lists)
-    out.set(l.id, { revenueSen: 0, costSen: null, doCount: 0, stops: 0 });
+    out.set(l.id, {
+      revenueSen: 0,
+      costSen: null,
+      doCount: 0,
+      stops: 0,
+      states: [],
+    });
 
   const allDoIds = [...new Set(lists.flatMap((l) => l.doIds))];
   // Always load the value map (org-scoped, used for revenue even if a PL has
@@ -173,13 +189,42 @@ async function computePackingListMoney(
   const ph = allDoIds.map(() => "?").join(",");
   const doRes = await db
     .prepare(
-      `SELECT id, deliveryAddress, driverId, vehicleId
+      `SELECT id, deliveryAddress, driverId, vehicleId, customerState, hubId
          FROM delivery_orders WHERE orgId = ? AND id IN (${ph})`,
     )
     .bind(orgId, ...allDoIds)
     .all<PlDoRow>();
   const doById = new Map<string, PlDoRow>();
   for (const d of doRes.results ?? []) doById.set(d.id, d);
+
+  // Hub state fallback — delivery_orders.customerState is often NULL on
+  // older rows (the DO list has the same fallback); resolve via the DO's
+  // delivery hub in one bulk read.
+  const hubStates = new Map<string, string>();
+  {
+    const hubIds = [
+      ...new Set(
+        (doRes.results ?? [])
+          .filter((d) => !(d.customerState || "").trim())
+          .map((d) => (d.hubId || "").trim())
+          .filter((x) => x.length > 0),
+      ),
+    ];
+    if (hubIds.length > 0) {
+      try {
+        const hph = hubIds.map(() => "?").join(",");
+        const hRes = await db
+          .prepare(`SELECT id, state FROM delivery_hubs WHERE id IN (${hph})`)
+          .bind(...hubIds)
+          .all<{ id: string; state: string | null }>();
+        for (const h of hRes.results ?? []) {
+          if ((h.state || "").trim()) hubStates.set(h.id, h.state!.trim());
+        }
+      } catch {
+        /* degrade: states fall back to customerState only */
+      }
+    }
+  }
 
   // Bulk-resolve rates for every distinct vehicle + provider in one read each.
   const vehicleIds = [
@@ -259,6 +304,7 @@ async function computePackingListMoney(
     const keyCount = new Map<string, number>();
     const keyOrder: string[] = []; // first-seen order for deterministic ties
     let foundDos = 0;
+    const states: string[] = [];
 
     for (const did of l.doIds) {
       const d = doById.get(did);
@@ -266,6 +312,12 @@ async function computePackingListMoney(
       foundDos += 1;
       revenueSen += valueMap.get(did) ?? 0;
       addrSet.add(normAddr(d.deliveryAddress));
+      const st = (
+        (d.customerState || "").trim() ||
+        hubStates.get((d.hubId || "").trim()) ||
+        ""
+      ).toUpperCase();
+      if (st && !states.includes(st)) states.push(st);
       const resolved = rateForDo(d);
       if (resolved) {
         if (!keyCount.has(resolved.key)) {
@@ -302,6 +354,7 @@ async function computePackingListMoney(
       costSen,
       doCount: foundDos,
       stops: addrSet.size,
+      states,
     });
   }
   return out;
@@ -331,6 +384,7 @@ app.get("/", async (c) => {
           costSen: null,
           doCount: 0,
           stops: 0,
+          states: [],
         },
       ),
     );

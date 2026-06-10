@@ -83,11 +83,44 @@ test("worker app captures location but a denial still punches (soft)", () => {
     WORKER_HOME.includes("navigator.geolocation.getCurrentPosition"),
     "the worker app must request the punch location",
   );
+  // The punch payload always carries `action` (so a null location still posts);
+  // lat/lng are attached only when a location was actually captured.
   assert.ok(
-    /loc \? \{ action, lat: loc\.lat, lng: loc\.lng \} : \{ action \}/.test(
-      WORKER_HOME,
-    ),
-    "a null location must still post the punch (no lat/lng) — soft, never blocks",
+    /const payload[^=]*= \{ action, photo \}/.test(WORKER_HOME) &&
+      /if \(loc\) \{\s*payload\.lat = loc\.lat;\s*payload\.lng = loc\.lng;/.test(
+        WORKER_HOME,
+      ),
+    "a null location must still post the punch (lat/lng only when captured) — soft, never blocks",
+  );
+});
+
+const ATT_API = readFileSync(
+  resolve(process.cwd(), "src/api/routes/attendance.ts"),
+  "utf8",
+);
+
+test("punch selfie: worker app requires a photo, route stores it, view serves it", () => {
+  // Worker app: opens the camera, compresses the shot, and REQUIRES it to punch
+  // (anti-buddy-punching — a cancelled camera aborts with a clear message).
+  assert.ok(
+    WORKER_HOME.includes("capturePunchPhoto") &&
+      WORKER_HOME.includes("compressImage(") &&
+      /if \(!photo\) \{[\s\S]{0,120}home\.photoRequired/.test(WORKER_HOME),
+    "the worker app must capture + require a punch selfie",
+  );
+  // Punch route: self-applies the photo columns + stamps the selfie.
+  assert.ok(
+    WORKER_API.includes("ADD COLUMN IF NOT EXISTS clockInPhoto") &&
+      WORKER_API.includes("ADD COLUMN IF NOT EXISTS clockOutPhoto") &&
+      WORKER_API.includes("stampPunchPhoto("),
+    "the punch route must self-apply photo columns + stamp the selfie",
+  );
+  // Attendance view: an on-demand endpoint serves the photo as a real image.
+  assert.ok(
+    /app\.get\("\/:id\/photo"/.test(ATT_API) &&
+      ATT_API.includes('"Content-Type": "image/jpeg"') &&
+      ATT_API.includes("hasClockInPhoto"),
+    "attendance must expose the selfie via an on-demand image endpoint",
   );
 });
 

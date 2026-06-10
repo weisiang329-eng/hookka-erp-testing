@@ -577,6 +577,9 @@ function ensureAttendanceGeo(db: D1Database): Promise<void> {
       "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInLng DOUBLE PRECISION",
       "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLat DOUBLE PRECISION",
       "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutLng DOUBLE PRECISION",
+      // Punch selfie (compressed JPEG data URL) — anti-buddy-punching evidence.
+      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockInPhoto TEXT",
+      "ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockOutPhoto TEXT",
     ];
     for (const s of stmts) await db.prepare(s).run();
   })();
@@ -605,6 +608,23 @@ async function stampPunchGeo(
     .bind(lat, lng, recId)
     .run();
 }
+// Store the punch SELFIE (a client-compressed JPEG data URL) for anti-buddy-
+// punching review. Optional — a worker who cancels/denies the camera leaves it
+// null and the punch still goes through. Guarded so a junk / oversized payload
+// can't bloat the row (≈640px JPEG ⇒ tens of KB; cap well above that).
+async function stampPunchPhoto(
+  db: D1Database,
+  recId: string,
+  action: "CLOCK_IN" | "CLOCK_OUT",
+  photo: string | null,
+): Promise<void> {
+  if (!photo || !photo.startsWith("data:image/") || photo.length > 600_000) return;
+  const col = action === "CLOCK_IN" ? "clockInPhoto" : "clockOutPhoto";
+  await db
+    .prepare(`UPDATE attendance_records SET ${col} = ? WHERE id = ?`)
+    .bind(photo, recId)
+    .run();
+}
 
 app.post("/clock", async (c) => {
   const auth = await getWorker(c);
@@ -619,6 +639,11 @@ app.post("/clock", async (c) => {
   // Optional punch location (soft geofence). Absent / denied → null → not stored.
   const lat = parseCoord((body as { lat?: unknown }).lat);
   const lng = parseCoord((body as { lng?: unknown }).lng);
+  // Optional punch selfie (anti-buddy-punching). Absent / cancelled → null.
+  const photo =
+    typeof (body as { photo?: unknown }).photo === "string"
+      ? (body as { photo: string }).photo
+      : null;
   await ensureAttendanceGeo(c.var.DB);
 
   // Malaysia local date + HH:MM from ONE instant (so date and time can't split
@@ -651,6 +676,7 @@ app.post("/clock", async (c) => {
           .run();
       }
       await stampPunchGeo(c.var.DB, existing.id, "CLOCK_IN", lat, lng);
+      await stampPunchPhoto(c.var.DB, existing.id, "CLOCK_IN", photo);
       const row = await c.var.DB.prepare(
         "SELECT * FROM attendance_records WHERE id = ?",
       )
@@ -693,6 +719,7 @@ app.post("/clock", async (c) => {
       )
       .run();
     await stampPunchGeo(c.var.DB, id, "CLOCK_IN", lat, lng);
+    await stampPunchPhoto(c.var.DB, id, "CLOCK_IN", photo);
     const row = await c.var.DB.prepare(
       "SELECT * FROM attendance_records WHERE id = ?",
     )
@@ -740,6 +767,7 @@ app.post("/clock", async (c) => {
     )
     .run();
   await stampPunchGeo(c.var.DB, existing.id, "CLOCK_OUT", lat, lng);
+  await stampPunchPhoto(c.var.DB, existing.id, "CLOCK_OUT", photo);
 
   // Auto short-hour dock (real money). Now that we have BOTH a clock-in and a
   // clock-out, apply the shift rules (late past grace / short of 9h) and, if

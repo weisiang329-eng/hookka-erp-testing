@@ -16,10 +16,11 @@
 // ============================================================
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ScanLine, AlertTriangle, Clock, CheckCircle2 } from "lucide-react";
+import { ScanLine, AlertTriangle, Clock, CheckCircle2, Camera } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { deriveWipName } from "@/lib/wip-name";
+import { compressImage } from "@/lib/image-compress";
 import { z } from "zod";
 
 // workerFetch handles auth + 401 redirect, but we still want runtime-typed
@@ -146,11 +147,75 @@ function getPunchLocation(): Promise<{ lat: number; lng: number } | null> {
       resolve(null);
       return;
     }
+    // enableHighAccuracy:false → uses wifi/cell, not just GPS satellites, so a
+    // fix arrives INDOORS (high-accuracy GPS often times out on a factory floor
+    // and left every punch with null location). ±50-100m is plenty for a 200m
+    // factory fence. Longer timeout so a slow first fix still lands.
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       () => resolve(null),
-      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 },
     );
+  });
+}
+
+// Snap a punch selfie (anti-buddy-punching). Opens the front camera, compresses
+// the shot to a small JPEG data URL, and resolves it. Resolves null if the
+// worker cancels / no file / the camera isn't available — three independent
+// cancel signals (the native 'cancel' event, a focus-return check, and a hard
+// safety timeout) guarantee the punch flow never hangs waiting on the camera.
+function capturePunchPhoto(): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (typeof document === "undefined") {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const done = (v: string | null) => {
+      if (settled) return;
+      settled = true;
+      try {
+        input.remove();
+      } catch {
+        /* ignore */
+      }
+      resolve(v);
+    };
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    // capture="user" → front (selfie) camera on phones; ignored on desktop.
+    input.setAttribute("capture", "user");
+    input.style.display = "none";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) {
+        done(null);
+        return;
+      }
+      try {
+        done(await compressImage(file, { maxDim: 640, quality: 0.6 }));
+      } catch {
+        done(null);
+      }
+    };
+    // Modern browsers fire 'cancel' when the picker is dismissed with no file.
+    input.addEventListener("cancel", () => done(null));
+    // Fallback for browsers without 'cancel': when the window regains focus
+    // after the camera closes, give onchange a beat; if still no file, cancel.
+    window.addEventListener(
+      "focus",
+      () => {
+        setTimeout(() => {
+          if (!input.files || input.files.length === 0) done(null);
+        }, 1000);
+      },
+      { once: true },
+    );
+    // Hard safety net: never leave the punch hanging on a stuck camera.
+    setTimeout(() => done(null), 90000);
+    document.body.appendChild(input);
+    input.click();
   });
 }
 
@@ -160,6 +225,8 @@ export default function WorkerHomePage() {
   const [data, setData] = useState<TodayData | null>(null);
   const [loading, setLoading] = useState(true);
   const [clocking, setClocking] = useState(false);
+  // Inline punch feedback (e.g. "take a photo first"). Cleared on next attempt.
+  const [clockErr, setClockErr] = useState<string | null>(null);
 
   // Dashboard date range — default to last 7 days
   const [from, setFrom] = useState<string>(() => ymd(addDays(new Date(), -6)));
@@ -208,15 +275,27 @@ export default function WorkerHomePage() {
 
   async function handleClock(action: "CLOCK_IN" | "CLOCK_OUT") {
     setClocking(true);
+    setClockErr(null);
     try {
+      // Anti-buddy-punching: a selfie is REQUIRED to punch. The camera opens
+      // first; if the worker cancels it, we abort with a clear message (they
+      // just tap again). This is what stops one phone punching for someone else.
+      const photo = await capturePunchPhoto();
+      if (!photo) {
+        setClockErr(t("home.photoRequired"));
+        return;
+      }
       // Soft geofence: attach the worker's location if we can get it. Denied /
       // unavailable / timeout → null → the punch still goes through unstamped.
       const loc = await getPunchLocation();
+      const payload: Record<string, unknown> = { action, photo };
+      if (loc) {
+        payload.lat = loc.lat;
+        payload.lng = loc.lng;
+      }
       await workerFetch("/api/worker/clock", {
         method: "POST",
-        body: JSON.stringify(
-          loc ? { action, lat: loc.lat, lng: loc.lng } : { action },
-        ),
+        body: JSON.stringify(payload),
       });
       // Re-fetch both — a fresh clock event shifts daily/attendance too
       await Promise.all([refreshToday(), refreshHistory(from, to)]);
@@ -308,8 +387,17 @@ export default function WorkerHomePage() {
             disabled={clocking}
             className="w-full h-14 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white text-lg font-semibold disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
           >
-            <Clock className="h-5 w-5" />
-            {t("home.clockIn")}
+            {clocking ? (
+              <>
+                <Camera className="h-5 w-5" />
+                {t("home.openingCamera")}
+              </>
+            ) : (
+              <>
+                <Clock className="h-5 w-5" />
+                {t("home.clockIn")}
+              </>
+            )}
           </button>
         ) : (
           <div>
@@ -338,12 +426,24 @@ export default function WorkerHomePage() {
                 type="button"
                 onClick={() => handleClock("CLOCK_OUT")}
                 disabled={clocking}
-                className="w-full h-11 rounded-lg bg-[#F0ECE9] hover:bg-[#E5E0DB] text-[#1F1D1B] text-sm font-semibold disabled:opacity-60 transition-colors"
+                className="w-full h-11 rounded-lg bg-[#F0ECE9] hover:bg-[#E5E0DB] text-[#1F1D1B] text-sm font-semibold disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
               >
-                {t("home.clockOut")}
+                {clocking ? (
+                  <>
+                    <Camera className="h-4 w-4" />
+                    {t("home.openingCamera")}
+                  </>
+                ) : (
+                  t("home.clockOut")
+                )}
               </button>
             )}
           </div>
+        )}
+        {clockErr && (
+          <p className="mt-2 text-center text-sm font-medium text-[#9A3A2D]">
+            {clockErr}
+          </p>
         )}
       </div>
       )}

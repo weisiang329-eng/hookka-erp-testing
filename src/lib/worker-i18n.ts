@@ -168,6 +168,18 @@ const dict: Dict = {
     zh: '今日工时',
     my: 'ယနေ့ အလုပ်နာရီ',
   },
+  'home.photoRequired': {
+    en: 'Please take a photo to punch',
+    ms: 'Sila ambil foto untuk daftar',
+    zh: '请拍照后才能打卡',
+    my: 'ဓာတ်ပုံ ဦးစွာရိုက်ပါ',
+  },
+  'home.openingCamera': {
+    en: 'Opening camera…',
+    ms: 'Membuka kamera…',
+    zh: '正在打开相机…',
+    my: 'ကင်မရာ ဖွင့်နေသည်…',
+  },
   'home.piecesDone': {
     en: 'Pieces done today',
     ms: 'Siap hari ini',

@@ -30,6 +30,8 @@ type AttendanceRow = {
   clockInLng: number | null;
   clockOutLat: number | null;
   clockOutLng: number | null;
+  clockInPhoto: string | null;
+  clockOutPhoto: string | null;
   status: string;
   workingMinutes: number;
   productionTimeMinutes: number;
@@ -84,6 +86,10 @@ function rowToAttendance(r: AttendanceRow) {
     clockInLng: r.clockInLng ?? null,
     clockOutLat: r.clockOutLat ?? null,
     clockOutLng: r.clockOutLng ?? null,
+    // Punch selfies: the list returns only a HAS-flag (the base64 image is heavy,
+    // fetched on demand via GET /:id/photo when the operator clicks to view).
+    hasClockInPhoto: !!r.clockInPhoto,
+    hasClockOutPhoto: !!r.clockOutPhoto,
     status: r.status,
     workingMinutes: r.workingMinutes,
     productionTimeMinutes: r.productionTimeMinutes,
@@ -125,6 +131,44 @@ app.get("/", async (c) => {
   const res = await stmt.all<AttendanceRow>();
   const data = (res.results ?? []).map(rowToAttendance);
   return c.json({ success: true, data, total: data.length });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/attendance/:id/photo?which=in|out → the punch selfie as a real JPEG
+// response (Content-Type image/jpeg), so the Attendance view can render it with
+// a plain <img src> (browser lazy-loads + caches; the list itself stays lean).
+// Fetched on demand. Scoped by org — no cross-tenant read.
+// ---------------------------------------------------------------------------
+app.get("/:id/photo", async (c) => {
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  const which = c.req.query("which") === "out" ? "out" : "in";
+  const row = await c.var.DB.prepare(
+    "SELECT clockInPhoto, clockOutPhoto FROM attendance_records WHERE id = ? AND orgId = ?",
+  )
+    .bind(id, orgId)
+    .first<{ clockInPhoto: string | null; clockOutPhoto: string | null }>();
+  const dataUrl = which === "out" ? row?.clockOutPhoto : row?.clockInPhoto;
+  if (!dataUrl) return c.json({ success: false, error: "No photo" }, 404);
+  // Stored as a data URL (data:image/jpeg;base64,...). Decode to raw bytes so an
+  // <img> can render it directly and the browser can cache it.
+  const comma = dataUrl.indexOf(",");
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  let buf: ArrayBuffer;
+  try {
+    const bin = atob(b64);
+    buf = new ArrayBuffer(bin.length);
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch {
+    return c.json({ success: false, error: "Bad photo data" }, 500);
+  }
+  return new Response(buf, {
+    headers: {
+      "Content-Type": "image/jpeg",
+      "Cache-Control": "private, max-age=86400",
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------

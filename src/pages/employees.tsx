@@ -9424,13 +9424,51 @@ type AttPunchRow = {
   clockInLng: number | null;
   clockOutLat: number | null;
   clockOutLng: number | null;
+  hasClockInPhoto?: boolean;
+  hasClockOutPhoto?: boolean;
 };
+// A small punch-selfie thumbnail. The image streams from the on-demand photo
+// endpoint (browser lazy-loads + caches it) so the attendance list stays light.
+// Click to open the full-size view.
+function PunchThumb({
+  show,
+  src,
+  label,
+  onOpen,
+}: {
+  show: boolean;
+  src: string;
+  label: string;
+  onOpen: (src: string) => void;
+}) {
+  if (!show) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(src)}
+      className="group relative shrink-0"
+      title={`View ${label} photo`}
+    >
+      <img
+        src={src}
+        alt={`${label} punch`}
+        loading="lazy"
+        className="h-10 w-10 rounded object-cover border border-[#E2DDD8] group-hover:ring-2 group-hover:ring-[#3E6570]"
+      />
+      <span className="absolute -bottom-1 -right-1 rounded bg-[#1F1D1B]/70 px-1 text-[9px] leading-none py-px text-white">
+        {label}
+      </span>
+    </button>
+  );
+}
 function AttendanceTab() {
   const [date, setDate] = useState<string>(() => {
     // Malaysia (UTC+8) "today" so the default matches the worker's punch date.
     const d = new Date(Date.now() + 8 * 60 * 60 * 1000);
     return d.toISOString().slice(0, 10);
   });
+  // Full-size punch selfie shown in an overlay when a thumbnail is clicked.
+  const [photoView, setPhotoView] = useState<{ src: string; title: string } | null>(null);
   const { data } = useCachedJson<{ data?: AttPunchRow[] }>(
     `/api/attendance?date=${date}`,
   );
@@ -9441,6 +9479,7 @@ function AttendanceTab() {
       attPunchLoc(r.clockOutLat, r.clockOutLng) === "out",
   ).length;
   return (
+    <>
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -9470,12 +9509,13 @@ function AttendanceTab() {
                 <th className="h-10 px-3 text-left font-medium">Clock In</th>
                 <th className="h-10 px-3 text-left font-medium">Clock Out</th>
                 <th className="h-10 px-3 text-left font-medium">Location</th>
+                <th className="h-10 px-3 text-left font-medium">Photo</th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="h-20 text-center text-[#9CA3AF]">
+                  <td colSpan={5} className="h-20 text-center text-[#9CA3AF]">
                     No phone punches on {date}.
                   </td>
                 </tr>
@@ -9490,6 +9530,29 @@ function AttendanceTab() {
                     <td className="px-3 py-2 tabular-nums text-[#4B5563]">{r.clockIn ?? "—"}</td>
                     <td className="px-3 py-2 tabular-nums text-[#4B5563]">{r.clockOut ?? "—"}</td>
                     <td className="px-3 py-2"><AttLocBadge status={loc} /></td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <PunchThumb
+                          show={!!r.hasClockInPhoto}
+                          src={`/api/attendance/${r.id}/photo?which=in`}
+                          label="In"
+                          onOpen={(src) =>
+                            setPhotoView({ src, title: `${r.employeeName} · Clock In ${r.clockIn ?? ""}` })
+                          }
+                        />
+                        <PunchThumb
+                          show={!!r.hasClockOutPhoto}
+                          src={`/api/attendance/${r.id}/photo?which=out`}
+                          label="Out"
+                          onOpen={(src) =>
+                            setPhotoView({ src, title: `${r.employeeName} · Clock Out ${r.clockOut ?? ""}` })
+                          }
+                        />
+                        {!r.hasClockInPhoto && !r.hasClockOutPhoto && (
+                          <span className="text-xs text-[#9CA3AF]">No photo</span>
+                        )}
+                      </div>
+                    </td>
                   </tr>
                 );
               })}
@@ -9498,6 +9561,29 @@ function AttendanceTab() {
         </div>
       </CardContent>
     </Card>
+    {photoView && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+        onClick={() => setPhotoView(null)}
+      >
+        <div className="max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+          <img
+            src={photoView.src}
+            alt="Punch selfie"
+            className="w-full rounded-lg shadow-2xl"
+          />
+          <p className="mt-2 text-center text-sm text-white">{photoView.title}</p>
+          <button
+            type="button"
+            onClick={() => setPhotoView(null)}
+            className="mt-2 mx-auto block rounded bg-white/90 px-4 py-1.5 text-sm font-medium text-[#1F1D1B] hover:bg-white"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 

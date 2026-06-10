@@ -26,6 +26,10 @@ type AttendanceRow = {
   date: string;
   clockIn: string | null;
   clockOut: string | null;
+  clockInLat: number | null;
+  clockInLng: number | null;
+  clockOutLat: number | null;
+  clockOutLng: number | null;
   status: string;
   workingMinutes: number;
   productionTimeMinutes: number;
@@ -74,6 +78,12 @@ function rowToAttendance(r: AttendanceRow) {
     date: r.date,
     clockIn: r.clockIn,
     clockOut: r.clockOut,
+    // Soft-geofence punch coordinates (null when the phone gave no GPS). The
+    // Attendance view flags out-of-fence punches from these.
+    clockInLat: r.clockInLat ?? null,
+    clockInLng: r.clockInLng ?? null,
+    clockOutLat: r.clockOutLat ?? null,
+    clockOutLng: r.clockOutLng ?? null,
     status: r.status,
     workingMinutes: r.workingMinutes,
     productionTimeMinutes: r.productionTimeMinutes,

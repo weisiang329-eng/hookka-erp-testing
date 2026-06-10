@@ -9323,7 +9323,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
 
 // ========== MAIN PAGE ==========
 
-type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "department-performance" | "payroll" | "leave";
+type TabKey = "working-hours" | "attendance" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "department-performance" | "payroll" | "leave";
 
 // Labor Cost tab is wedged between Working Hours and Payroll per spec — the
 // flow goes "what hours did people work" → "what did those hours cost vs the
@@ -9333,6 +9333,11 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     key: "working-hours",
     label: "Working Hours",
     icon: <Clock className="h-4 w-4" />,
+  },
+  {
+    key: "attendance",
+    label: "Attendance",
+    icon: <UserCheck className="h-4 w-4" />,
   },
   {
     key: "labor-cost",
@@ -9376,6 +9381,125 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     icon: <Users className="h-4 w-4" />,
   },
 ];
+
+// ============================================================
+// Attendance tab — worker PHONE punches (clock in/out) for a day, with a soft
+// geofence badge (At factory ✓ / Off-site ⚠ / No GPS —) against the 200 m
+// factory fence, so the owner can spot home- / proxy-punching. Photos land here
+// next. Location is judged client-side from the punch's stored GPS — soft only,
+// never blocks a punch (matches the worker-side behaviour).
+// ============================================================
+const ATT_FENCE = { lat: 3.187681, lng: 101.570928, radiusM: 200 };
+function attMetersFromFactory(lat: number, lng: number): number {
+  const R = 6_371_000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(ATT_FENCE.lat - lat);
+  const dLng = toRad(ATT_FENCE.lng - lng);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat)) * Math.cos(toRad(ATT_FENCE.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function attPunchLoc(lat: unknown, lng: unknown): "in" | "out" | "none" {
+  if (typeof lat !== "number" || typeof lng !== "number" || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return "none";
+  }
+  return attMetersFromFactory(lat, lng) <= ATT_FENCE.radiusM ? "in" : "out";
+}
+function AttLocBadge({ status }: { status: "in" | "out" | "none" }) {
+  if (status === "in")
+    return <span className="inline-flex items-center rounded-full bg-[#EEF3E4] px-2 py-0.5 text-xs font-medium text-[#4F7C3A]">✓ At factory</span>;
+  if (status === "out")
+    return <span className="inline-flex items-center rounded-full bg-[#F9E1DA] px-2 py-0.5 text-xs font-medium text-[#9A3A2D]">⚠ Off-site</span>;
+  return <span className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-xs text-[#8A8680]">— No GPS</span>;
+}
+type AttPunchRow = {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  date: string;
+  clockIn: string | null;
+  clockOut: string | null;
+  clockInLat: number | null;
+  clockInLng: number | null;
+  clockOutLat: number | null;
+  clockOutLng: number | null;
+};
+function AttendanceTab() {
+  const [date, setDate] = useState<string>(() => {
+    // Malaysia (UTC+8) "today" so the default matches the worker's punch date.
+    const d = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    return d.toISOString().slice(0, 10);
+  });
+  const { data } = useCachedJson<{ data?: AttPunchRow[] }>(
+    `/api/attendance?date=${date}`,
+  );
+  const rows = (data?.data ?? []).filter((r) => r.clockIn || r.clockOut);
+  const offSiteCount = rows.filter(
+    (r) =>
+      attPunchLoc(r.clockInLat, r.clockInLng) === "out" ||
+      attPunchLoc(r.clockOutLat, r.clockOutLng) === "out",
+  ).length;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <CardTitle className="flex items-center gap-2">
+            <UserCheck className="h-5 w-5 text-[#6B5C32]" /> Attendance — Phone Punches
+          </CardTitle>
+          <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+            <span>Date</span>
+            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-40" />
+          </label>
+        </div>
+        <p className="mt-1 text-xs text-[#6B7280]">
+          When a worker punches in / out on their phone it lands here, with their location vs the 200&nbsp;m factory fence.{" "}
+          <span className="font-medium text-[#9A3A2D]">Off-site</span> = punched away from the factory;{" "}
+          <span className="text-[#8A8680]">No GPS</span> = the phone gave no location.
+          {offSiteCount > 0 && (
+            <span className="ml-1 font-medium text-[#9A3A2D]">{offSiteCount} off-site today.</span>
+          )}
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9] text-[#374151]">
+                <th className="h-10 px-3 text-left font-medium">Employee</th>
+                <th className="h-10 px-3 text-left font-medium">Clock In</th>
+                <th className="h-10 px-3 text-left font-medium">Clock Out</th>
+                <th className="h-10 px-3 text-left font-medium">Location</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="h-20 text-center text-[#9CA3AF]">
+                    No phone punches on {date}.
+                  </td>
+                </tr>
+              )}
+              {rows.map((r) => {
+                const inLoc = attPunchLoc(r.clockInLat, r.clockInLng);
+                const outLoc = attPunchLoc(r.clockOutLat, r.clockOutLng);
+                const loc = inLoc !== "none" ? inLoc : outLoc;
+                return (
+                  <tr key={r.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
+                    <td className="px-3 py-2 text-[#1F1D1B]">{r.employeeName}</td>
+                    <td className="px-3 py-2 tabular-nums text-[#4B5563]">{r.clockIn ?? "—"}</td>
+                    <td className="px-3 py-2 tabular-nums text-[#4B5563]">{r.clockOut ?? "—"}</td>
+                    <td className="px-3 py-2"><AttLocBadge status={loc} /></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function EmployeesPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("working-hours");
@@ -9631,6 +9755,8 @@ export default function EmployeesPage() {
           onDateChange={handleWorkingHoursDateChange}
         />
       )}
+
+      {activeTab === "attendance" && <AttendanceTab />}
 
       {activeTab === "employee-master" && (
         <EmployeeMasterTab workers={workers} refreshWorkers={fetchWorkers} departments={departments} />

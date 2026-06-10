@@ -7024,6 +7024,8 @@ function LaborCostTab({
   const [showProduction, setShowProduction] = useState(true);
   const [showOverhead, setShowOverhead] = useState(false);
   const [showRevenueRaw, setShowRevenueRaw] = useState(false);
+  // The "unlogged hours data gap" table — collapsible so the owner can hide it.
+  const [showRangeGapTbl, setShowRangeGapTbl] = useState(true);
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   // `period` keeps the existing month dropdown working as a quick-jump preset.
   // When the user picks a month, we re-derive from/to. When they tweak the
@@ -7875,6 +7877,25 @@ function LaborCostTab({
       hYear && hMonth
         ? Math.max(1, countElapsedWorkingDays(hYear, hMonth, new Date(hYear, hMonth, 0).getDate(), holidayList))
         : 26;
+    // Only count days that have ELAPSED and cleared the 2-working-day grace — the
+    // SAME cutoff the per-worker drill-down uses. Future days (not yet worked) and
+    // the last couple of working days (maybe just not keyed yet) are NOT counted
+    // as short, so a not-yet-finished month doesn't show everyone hugely short.
+    const cutoffIso = (() => {
+      const iso = (t: Date) =>
+        `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+      const holidaySet = new Set(holidayList);
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      let remaining = 2;
+      while (remaining > 0) {
+        d.setDate(d.getDate() - 1);
+        if (d.getDay() === 0) continue; // Sunday — non-working
+        if (holidaySet.has(iso(d))) continue; // public holiday
+        remaining -= 1;
+      }
+      return iso(d);
+    })();
     for (const w of workers) {
       if (w.status !== "ACTIVE") continue;
       // Only factory-department workers are expected to log Working Hours; a
@@ -7885,6 +7906,7 @@ function LaborCostTab({
       let expectedHours = 0;
       let loggedHours = 0;
       for (const date of periodWorkingDays) {
+        if (date > cutoffIso) continue; // future / within-grace → not yet "short"
         expectedHours += stdHours;
         loggedHours += loggedHoursByWorkerDate.get(`${w.id}|${date}`) ?? 0;
       }
@@ -8669,14 +8691,22 @@ function LaborCostTab({
         {showRangeGap && (
           <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-4">
             <div className="mb-1 flex items-center justify-between flex-wrap gap-2">
-              <h3 className="text-sm font-semibold text-[#9A3A2D] flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowRangeGapTbl((v) => !v)}
+                className="text-sm font-semibold text-[#9A3A2D] flex items-center gap-2 hover:opacity-80"
+                title={showRangeGapTbl ? "Hide this section" : "Show this section"}
+              >
+                {showRangeGapTbl ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                 <AlertTriangle className="h-4 w-4" />
                 Factory workers with unlogged hours (data gap — record their Working Hours)
-              </h3>
+              </button>
               <span className="text-xs font-normal text-[#6B7280]">
                 {from} → {to}
               </span>
             </div>
+            {showRangeGapTbl && (
+            <>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
               For this custom range, this is the unlogged-hours data gap for the selected dates —
               each active factory worker&rsquo;s expected hours (standard daily hours × working days
@@ -8762,6 +8792,8 @@ function LaborCostTab({
                 </tfoot>
               </table>
             </div>
+            </>
+            )}
           </div>
         )}
 

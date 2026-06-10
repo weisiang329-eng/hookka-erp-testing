@@ -527,7 +527,9 @@ type EntryDraft = {
   date: string;                // ISO YYYY-MM-DD; defaults to dateFrom for new rows
   departmentCode: string;
   category: Category;
-  hours: number;
+  // number while editing; "" lets the operator CLEAR the cell so it stays blank
+  // instead of snapping back to 0. Coerced to 0 on save and when summed.
+  hours: number | "";
   notes: string;
   saving: boolean;
   saved: boolean;
@@ -872,7 +874,7 @@ function WorkingHoursTab({
         : "/api/working-hour-entries";
       const method = row.id ? "PUT" : "POST";
       const body = row.id
-        ? { departmentCode: row.departmentCode, category: row.category, hours: row.hours, notes: row.notes }
+        ? { departmentCode: row.departmentCode, category: row.category, hours: Number(row.hours) || 0, notes: row.notes }
         : {
             workerId: row.workerId,
             // Each row carries its own date — multi-day mode lets the
@@ -880,7 +882,7 @@ function WorkingHoursTab({
             date: row.date,
             departmentCode: row.departmentCode,
             category: row.category,
-            hours: row.hours,
+            hours: Number(row.hours) || 0,
             notes: row.notes,
           };
       const res = await fetch(url, {
@@ -1495,7 +1497,11 @@ function WorkingHoursTab({
                         min={0}
                         step="any"
                         value={row.hours}
-                        onChange={(e) => updateField(originalIdx, { hours: Number(e.target.value) })}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          // Empty stays empty (no snap-to-0); otherwise parse it.
+                          updateField(originalIdx, { hours: v === "" ? "" : Number(v) });
+                        }}
                         className="h-8 w-20 text-xs"
                       />
                     </td>
@@ -1716,6 +1722,18 @@ type WorkerFormData = {
   efficiencyAllowanceSen: number;
   efficiencyThresholdPct: number;
 };
+
+// Next Emp No = the highest existing EMP-### + 1, same prefix + zero-padding.
+// "max of existing" means it adapts to changes — remove the last worker and it
+// drops back, add one and it climbs. Non-conforming codes are ignored so a stray
+// hand-typed value can't poison the sequence. The operator can still overtype it.
+function nextEmpNo(workers: { empNo?: string | null }[]): string {
+  const max = workers.reduce((m, w) => {
+    const match = /^EMP-(\d+)$/.exec((w.empNo ?? "").trim());
+    return match ? Math.max(m, parseInt(match[1], 10)) : m;
+  }, 0);
+  return `EMP-${String(max + 1).padStart(3, "0")}`;
+}
 
 const emptyForm: WorkerFormData = {
   empNo: "",
@@ -2866,7 +2884,12 @@ function EmployeeMasterTab({
             </Button>
             <Button
               variant="primary"
-              onClick={() => setShowAddForm(!showAddForm)}
+              onClick={() => {
+                // Opening a fresh form → pre-fill the next Emp No (editable).
+                if (!showAddForm)
+                  setForm((f) => ({ ...f, empNo: f.empNo || nextEmpNo(workers) }));
+                setShowAddForm(!showAddForm);
+              }}
             >
               <Plus className="h-4 w-4" />
               {showAddForm ? "Cancel" : "Add Employee"}

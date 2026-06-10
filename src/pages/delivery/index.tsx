@@ -45,6 +45,7 @@ import {
   poReadyForDelivery,
   buildLinkedPOIds,
 } from "@/lib/delivery-pipeline";
+import { MALAYSIA_STATES } from "@/lib/malaysia-states";
 
 const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
@@ -589,6 +590,24 @@ export default function DeliveryPage() {
     name: "", phone: "", status: "ACTIVE" as "ACTIVE" | "INACTIVE", remarks: "",
   });
 
+  // ----- 3PL State Rate Card (per-provider, per-state pricing) -----
+  // Fixed 16-row grid keyed by canonical state code; values are RM strings
+  // ("" = unset, mirrors the 0/0-in-sen house rule). Loaded from
+  // GET /api/three-pl-state-rates?providerId=..., saved wholesale via
+  // PUT /api/three-pl-state-rates/bulk. ratesDirty powers the same
+  // "unsaved sub-form" guard the Vehicles / Drivers inline editors get
+  // in saveProvider.
+  type ProviderDialogTab = "info" | "rates" | "fleet" | "drivers";
+  const [providerDialogTab, setProviderDialogTab] = useState<ProviderDialogTab>("info");
+  const emptyRateGrid = () =>
+    Object.fromEntries(
+      MALAYSIA_STATES.map((s) => [s.code, { trip: "", drop: "" }]),
+    ) as Record<string, { trip: string; drop: string }>;
+  const [stateRates, setStateRates] = useState<Record<string, { trip: string; drop: string }>>(emptyRateGrid);
+  const [ratesLoading, setRatesLoading] = useState(false);
+  const [ratesSaving, setRatesSaving] = useState(false);
+  const [ratesDirty, setRatesDirty] = useState(false);
+
   // ----- Vehicle + Driver pickers (DO Create / Edit dialogs) -----
   // Two separate caches scoped per-provider — one feeds the Create DO
   // dialog (key by createDOForm.driverId), the other the Edit dialog
@@ -1054,6 +1073,11 @@ export default function DeliveryPage() {
         remarks: p.remarks || "",
       });
     }
+    // Every open starts on the Info section with a clean rate grid; the
+    // currentProviderId effect below loads the live card for existing rows.
+    setProviderDialogTab("info");
+    setStateRates(emptyRateGrid());
+    setRatesDirty(false);
     setProviderDialog(p);
   };
 
@@ -1074,6 +1098,15 @@ export default function DeliveryPage() {
     if (driverEditing !== null && driverForm.name.trim()) {
       toast.error(
         "You have an unsaved Driver form. Click 'Save Driver' inside the Drivers section first, or Cancel that form before saving.",
+      );
+      return;
+    }
+    // Same guard for the State Rate Card: edited cells only persist via the
+    // card's own "Save Rates" button (PUT /bulk). Saving the provider here
+    // closes the dialog, which would silently drop those edits.
+    if (ratesDirty) {
+      toast.error(
+        "You have unsaved State Rates. Click 'Save Rates' inside the State Rate Card section first, or reopen the dialog to discard them.",
       );
       return;
     }
@@ -1163,6 +1196,79 @@ export default function DeliveryPage() {
     }
   }, []);
 
+  // Server returns one entry per canonical state (16 rows, lazily seeded).
+  // sen → RM strings for the inputs; 0 renders as "" (blank = not served).
+  type StateRateEntry = {
+    state: string;
+    ratePerTripSen: number;
+    ratePerExtraDropSen: number;
+  };
+  const rateEntriesToGrid = useCallback((entries: StateRateEntry[]) => {
+    const next = Object.fromEntries(
+      MALAYSIA_STATES.map((s) => [s.code, { trip: "", drop: "" }]),
+    ) as Record<string, { trip: string; drop: string }>;
+    for (const r of entries) {
+      if (next[r.state]) {
+        next[r.state] = {
+          trip: r.ratePerTripSen ? String(r.ratePerTripSen / 100) : "",
+          drop: r.ratePerExtraDropSen ? String(r.ratePerExtraDropSen / 100) : "",
+        };
+      }
+    }
+    return next;
+  }, []);
+
+  const fetchProviderStateRates = useCallback(async (providerId: string) => {
+    setRatesLoading(true);
+    try {
+      const res = await fetch(`/api/three-pl-state-rates?providerId=${providerId}`);
+      const body = (await res.json()) as { success?: boolean; data?: StateRateEntry[] };
+      if (body?.success && Array.isArray(body.data)) {
+        setStateRates(rateEntriesToGrid(body.data));
+        setRatesDirty(false);
+      }
+    } catch {
+      /* swallow — grid stays blank, retry on next dialog open */
+    }
+    setRatesLoading(false);
+  }, [rateEntriesToGrid]);
+
+  const saveStateRates = async () => {
+    if (!currentProviderId) return;
+    setRatesSaving(true);
+    // Blank / invalid input → 0 sen (unset). Backend re-validates: canonical
+    // state codes only, non-negative integers (reject-don't-normalize).
+    const rates = MALAYSIA_STATES.map((s) => ({
+      state: s.code,
+      ratePerTripSen: Math.round((Number(stateRates[s.code]?.trip) || 0) * 100),
+      ratePerExtraDropSen: Math.round((Number(stateRates[s.code]?.drop) || 0) * 100),
+    }));
+    try {
+      const res = await fetch("/api/three-pl-state-rates/bulk", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: currentProviderId, rates }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        data?: StateRateEntry[];
+      };
+      if (!res.ok || !body?.success) {
+        toast.error(body?.error || `Failed to save rates (HTTP ${res.status})`);
+      } else {
+        if (Array.isArray(body.data)) setStateRates(rateEntriesToGrid(body.data));
+        setRatesDirty(false);
+        toast.success("State rates saved");
+        // Refresh the provider list so the "States covered" badges update.
+        fetchProviders();
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — rates not saved");
+    }
+    setRatesSaving(false);
+  };
+
   // Refetch sub-tables whenever the dialog target changes. fetchProvider*
   // call setState internally — that's intentional (they're async fetches
   // synchronizing with an external source), so the lint rule about
@@ -1172,15 +1278,17 @@ export default function DeliveryPage() {
     if (currentProviderId) {
       fetchProviderVehicles(currentProviderId);
       fetchProviderDrivers(currentProviderId);
+      fetchProviderStateRates(currentProviderId);
     } else {
       setProviderVehicles([]);
       setProviderDrivers([]);
     }
     // Also reset any in-progress vehicle/driver inline editor when the
-    // host provider dialog opens/closes/changes.
+    // host provider dialog opens/closes/changes. (The state-rate grid is
+    // reset by openProviderDialog and re-filled by the fetch above.)
     setVehicleEditing(null);
     setDriverEditing(null);
-  }, [currentProviderId, fetchProviderVehicles, fetchProviderDrivers]);
+  }, [currentProviderId, fetchProviderVehicles, fetchProviderDrivers, fetchProviderStateRates]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Fetch vehicle + driver lists for the Create / Edit DO dialogs whenever
@@ -5098,20 +5206,18 @@ export default function DeliveryPage() {
                       <th className="text-left px-4 py-2 font-medium">Name</th>
                       <th className="text-left px-4 py-2 font-medium">Contact Person</th>
                       <th className="text-left px-4 py-2 font-medium">Phone</th>
-                      <th className="text-left px-4 py-2 font-medium">Vehicle No</th>
-                      <th className="text-left px-4 py-2 font-medium">Vehicle Type</th>
-                      <th className="text-right px-4 py-2 font-medium">Capacity (M&sup3;)</th>
-                      <th className="text-right px-4 py-2 font-medium">Rate/Trip (RM)</th>
-                      <th className="text-right px-4 py-2 font-medium">Rate/Extra Drop (RM)</th>
+                      <th className="text-left px-4 py-2 font-medium">States Covered</th>
+                      <th className="text-right px-4 py-2 font-medium">Vehicles</th>
+                      <th className="text-right px-4 py-2 font-medium">Drivers</th>
                       <th className="text-center px-4 py-2 font-medium">Status</th>
                       <th className="text-right px-4 py-2 font-medium">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {providersLoading ? (
-                      <tr><td colSpan={10} className="text-center py-8 text-[#6B7280]">Loading...</td></tr>
+                      <tr><td colSpan={8} className="text-center py-8 text-[#6B7280]">Loading...</td></tr>
                     ) : filteredProviders.length === 0 ? (
-                      <tr><td colSpan={10} className="text-center py-8 text-[#6B7280]">No providers found.</td></tr>
+                      <tr><td colSpan={8} className="text-center py-8 text-[#6B7280]">No providers found.</td></tr>
                     ) : (
                       filteredProviders.map((p) => (
                         <tr
@@ -5122,11 +5228,24 @@ export default function DeliveryPage() {
                           <td className="px-4 py-2 font-medium text-[#1F1D1B]">{p.name}</td>
                           <td className="px-4 py-2 text-[#6B7280]">{p.contactPerson || "-"}</td>
                           <td className="px-4 py-2 text-[#6B7280]">{p.phone}</td>
-                          <td className="px-4 py-2 font-mono text-xs">{p.vehicleNo || "-"}</td>
-                          <td className="px-4 py-2 text-[#6B7280]">{p.vehicleType || "-"}</td>
-                          <td className="px-4 py-2 text-right tabular-nums">{p.capacityM3 ?? "-"}</td>
-                          <td className="px-4 py-2 text-right tabular-nums">{(p.ratePerTripSen / 100).toFixed(2)}</td>
-                          <td className="px-4 py-2 text-right tabular-nums">{(p.ratePerExtraDropSen / 100).toFixed(2)}</td>
+                          <td className="px-4 py-2">
+                            {(p.ratedStates ?? []).length === 0 ? (
+                              <span className="text-[#9CA3AF]">&mdash;</span>
+                            ) : (
+                              <div className="flex flex-wrap gap-1 max-w-[260px]">
+                                {(p.ratedStates ?? []).map((code) => (
+                                  <span
+                                    key={code}
+                                    className="inline-block px-1.5 py-0.5 rounded border border-[#E2DDD8] bg-[#F9F7F5] text-[#6B5C32] text-[10px] font-mono font-medium"
+                                  >
+                                    {code}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-right tabular-nums">{p.vehicleCount ?? 0}</td>
+                          <td className="px-4 py-2 text-right tabular-nums">{p.driverCount ?? 0}</td>
                           <td className="px-4 py-2 text-center">
                             <Badge
                               variant="status"
@@ -5166,17 +5285,57 @@ export default function DeliveryPage() {
           {providerDialog !== null && (
             <div className="fixed inset-0 z-50 flex items-center justify-center">
               <div className="absolute inset-0 bg-black/40" onClick={() => !providerSaving && setProviderDialog(null)} />
-              <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 border border-[#E2DDD8]">
-                <div className="px-6 py-4 border-b border-[#E2DDD8] flex items-center justify-between">
-                  <h2 className="text-lg font-bold text-[#1F1D1B]">
-                    {providerDialog === "new" ? "New 3PL Provider" : "Edit 3PL Provider"}
-                  </h2>
-                  <button onClick={() => setProviderDialog(null)} className="p-1.5 rounded hover:bg-[#F0ECE9] text-[#6B7280]">
-                    <X className="h-5 w-5" />
-                  </button>
+              <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-5xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
+                {/* Sticky header + section pills (house big-dialog style) */}
+                <div className="sticky top-0 bg-white border-b border-[#E2DDD8] rounded-t-xl z-10">
+                  <div className="px-6 py-4 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-lg font-bold text-[#1F1D1B]">
+                        {providerDialog === "new" ? "New 3PL Provider" : "Edit 3PL Provider"}
+                      </h2>
+                      <p className="text-xs text-[#6B7280]">
+                        {providerDialog === "new"
+                          ? "Create the company first, then add state rates, vehicles and drivers"
+                          : (providerDialog as ThreePLProvider).name}
+                      </p>
+                    </div>
+                    <button onClick={() => setProviderDialog(null)} className="p-1.5 rounded hover:bg-[#F0ECE9] text-[#6B7280]">
+                      <X className="h-5 w-5" />
+                    </button>
+                  </div>
+                  <div className="px-6 pb-3 flex items-center gap-2 flex-wrap">
+                    {(
+                      [
+                        { key: "info", label: "Info" },
+                        {
+                          key: "rates",
+                          label: `State Rate Card (${
+                            Object.values(stateRates).filter(
+                              (r) => (Number(r.trip) || 0) > 0 || (Number(r.drop) || 0) > 0,
+                            ).length
+                          })`,
+                        },
+                        { key: "fleet", label: `Fleet (${providerVehicles.length})` },
+                        { key: "drivers", label: `Drivers & Contacts (${providerDrivers.length})` },
+                      ] as { key: ProviderDialogTab; label: string }[]
+                    ).map((t) => (
+                      <button
+                        key={t.key}
+                        onClick={() => setProviderDialogTab(t.key)}
+                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                          providerDialogTab === t.key
+                            ? "bg-[#111827] text-white"
+                            : "bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="px-6 py-5 space-y-5 max-h-[75vh] overflow-y-auto">
-                  {/* --- Company-level fields (top section) --- */}
+                <div className="px-6 py-5 space-y-5">
+                  {/* --- Section 1: Info — company-level fields --- */}
+                  {providerDialogTab === "info" && (
                   <div className="grid grid-cols-2 gap-4">
                     <div className="col-span-2">
                       <label className="text-xs text-[#6B7280] font-medium">Name *</label>
@@ -5227,9 +5386,115 @@ export default function DeliveryPage() {
                       />
                     </div>
                   </div>
+                  )}
 
-                  {/* --- Vehicles sub-table --- */}
-                  <div className="pt-4 border-t border-[#E2DDD8]">
+                  {/* --- Section 2: State Rate Card --- */}
+                  {/* Fixed 16-row grid, one row per canonical Malaysia state.
+                      Inputs are RM; saved to the backend in sen via the one
+                      "Save Rates" button (PUT /api/three-pl-state-rates/bulk).
+                      Blank / 0 = provider does not serve that state (0/0 =
+                      unset house rule) — the list's "States Covered" badges
+                      skip those. */}
+                  {providerDialogTab === "rates" && (
+                  <div>
+                    <div className="flex items-start justify-between mb-2 gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-[#1F1D1B]">State Rate Card</h3>
+                        <p className="text-xs text-[#6B7280]">
+                          Per-state pricing for this provider. Leave a row blank for states it does not serve.
+                        </p>
+                      </div>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={saveStateRates}
+                        disabled={!currentProviderId || ratesSaving || ratesLoading}
+                      >
+                        {ratesSaving ? (
+                          <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Saving...</>
+                        ) : (
+                          <><Save className="h-3.5 w-3.5 mr-1" /> Save Rates</>
+                        )}
+                      </Button>
+                    </div>
+                    {!currentProviderId ? (
+                      <div className="text-xs text-[#6B7280] py-3 px-2 bg-[#F9F7F5] rounded-md border border-[#E2DDD8]">
+                        Save the provider first to set state rates.
+                      </div>
+                    ) : (
+                      <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead className="bg-[#F9F7F5] text-[#6B7280]">
+                            <tr>
+                              <th className="text-left px-3 py-1.5 font-medium">State</th>
+                              <th className="text-right px-3 py-1.5 font-medium w-44">Base / Trip (RM)</th>
+                              <th className="text-right px-3 py-1.5 font-medium w-44">Per Extra Drop (RM)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {MALAYSIA_STATES.map((s) => {
+                              const row = stateRates[s.code] ?? { trip: "", drop: "" };
+                              return (
+                                <tr key={s.code} className="border-t border-[#E2DDD8]">
+                                  <td className="px-3 py-1.5">
+                                    <span className="inline-block w-9 font-mono text-[10px] text-[#6B7280]">{s.code}</span>
+                                    <span className="font-medium text-[#1F1D1B]">{s.label}</span>
+                                  </td>
+                                  <td className="px-3 py-1.5 text-right">
+                                    <input
+                                      type="number" min="0" step="0.01"
+                                      onFocus={(e) => e.currentTarget.select()}
+                                      value={row.trip}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setStateRates((prev) => ({
+                                          ...prev,
+                                          [s.code]: { ...(prev[s.code] ?? { trip: "", drop: "" }), trip: v },
+                                        }));
+                                        setRatesDirty(true);
+                                      }}
+                                      disabled={ratesLoading || ratesSaving}
+                                      className="w-36 h-8 px-2 rounded border border-[#E2DDD8] text-xs text-right focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5]"
+                                    />
+                                  </td>
+                                  <td className="px-3 py-1.5 text-right">
+                                    <input
+                                      type="number" min="0" step="0.01"
+                                      onFocus={(e) => e.currentTarget.select()}
+                                      value={row.drop}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setStateRates((prev) => ({
+                                          ...prev,
+                                          [s.code]: { ...(prev[s.code] ?? { trip: "", drop: "" }), drop: v },
+                                        }));
+                                        setRatesDirty(true);
+                                      }}
+                                      disabled={ratesLoading || ratesSaving}
+                                      className="w-36 h-8 px-2 rounded border border-[#E2DDD8] text-xs text-right focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5]"
+                                    />
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {currentProviderId && ratesLoading && (
+                      <div className="text-xs text-[#6B7280] mt-2">Loading rates...</div>
+                    )}
+                    {currentProviderId && ratesDirty && !ratesSaving && (
+                      <div className="text-xs text-[#B45309] mt-2">
+                        Unsaved changes — click "Save Rates" to apply.
+                      </div>
+                    )}
+                  </div>
+                  )}
+
+                  {/* --- Section 3: Fleet — Vehicles sub-table --- */}
+                  {providerDialogTab === "fleet" && (
+                  <div>
                     <div className="flex items-center justify-between mb-2">
                       <h3 className="text-sm font-semibold text-[#1F1D1B]">Vehicles</h3>
                       <Button
@@ -5253,8 +5518,11 @@ export default function DeliveryPage() {
                               <th className="text-left px-2 py-1.5 font-medium">Plate</th>
                               <th className="text-left px-2 py-1.5 font-medium">Type</th>
                               <th className="text-right px-2 py-1.5 font-medium">Cap (m³)</th>
-                              <th className="text-right px-2 py-1.5 font-medium">Rate/Trip</th>
-                              <th className="text-right px-2 py-1.5 font-medium">+Drop</th>
+                              {/* Per-truck rates are legacy overrides now —
+                                  per-state pricing lives on the State Rate
+                                  Card. Kept (Phase 1 changes no cost math). */}
+                              <th className="text-right px-2 py-1.5 font-medium">Override Rate/Trip (legacy)</th>
+                              <th className="text-right px-2 py-1.5 font-medium">Override +Drop (legacy)</th>
                               <th className="text-left px-2 py-1.5 font-medium">Status</th>
                               <th className="text-right px-2 py-1.5 font-medium w-20">Actions</th>
                             </tr>
@@ -5335,7 +5603,7 @@ export default function DeliveryPage() {
                             />
                           </div>
                           <div>
-                            <label className="text-[10px] text-[#6B7280] font-medium">Rate/Trip (RM)</label>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Override Rate/Trip (RM, legacy)</label>
                             <input
                               type="number" onFocus={(e) => e.currentTarget.select()}
                               step="0.01"
@@ -5345,7 +5613,7 @@ export default function DeliveryPage() {
                             />
                           </div>
                           <div>
-                            <label className="text-[10px] text-[#6B7280] font-medium">+Drop (RM)</label>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Override +Drop (RM, legacy)</label>
                             <input
                               type="number" onFocus={(e) => e.currentTarget.select()}
                               step="0.01"
@@ -5377,9 +5645,11 @@ export default function DeliveryPage() {
                       </div>
                     )}
                   </div>
+                  )}
 
-                  {/* --- Drivers sub-table --- */}
-                  <div className="pt-4 border-t border-[#E2DDD8]">
+                  {/* --- Section 4: Drivers & Contacts — Drivers sub-table --- */}
+                  {providerDialogTab === "drivers" && (
+                  <div>
                     <div className="flex items-center justify-between mb-2">
                       <h3 className="text-sm font-semibold text-[#1F1D1B]">Drivers</h3>
                       <Button
@@ -5492,6 +5762,7 @@ export default function DeliveryPage() {
                       </div>
                     )}
                   </div>
+                  )}
                 </div>
                 <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
                   <Button variant="outline" onClick={() => setProviderDialog(null)} disabled={providerSaving}>Cancel</Button>

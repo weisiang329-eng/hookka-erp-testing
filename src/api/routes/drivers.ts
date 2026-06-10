@@ -8,6 +8,8 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+import { MALAYSIA_STATE_ORDER } from "../../lib/malaysia-states";
+import { ensureThreePlStateRatesSchema } from "./three-pl-state-rates";
 
 const app = new Hono<Env>();
 
@@ -58,6 +60,15 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 }
 
 // GET /api/drivers
+// List response is additive-extended (2026-06 3PL state-rate card) with
+// per-provider aggregates the 3PL tab renders directly:
+//   vehicleCount  — three_pl_vehicles rows for the provider
+//   driverCount   — three_pl_drivers rows for the provider
+//   ratedStates[] — canonical state codes whose rate pair is non-0/0
+//                   (0/0 = unset, house rule), in display order
+// Back-compatible: existing consumers keep reading the original fields.
+// Each aggregate is individually guarded — a hiccup degrades that field
+// to 0 / [] instead of failing the whole list.
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
@@ -65,7 +76,66 @@ app.get("/", async (c) => {
   )
     .bind(orgId)
     .all<DriverRow>();
-  const data = (res.results ?? []).map(rowToDriver);
+
+  const vehicleCounts = new Map<string, number>();
+  const driverCounts = new Map<string, number>();
+  const ratedStates = new Map<string, string[]>();
+  try {
+    const v = await c.var.DB.prepare(
+      "SELECT providerId, COUNT(*) AS cnt FROM three_pl_vehicles WHERE orgId = ? GROUP BY providerId",
+    )
+      .bind(orgId)
+      .all<{ providerId: string; cnt: number }>();
+    for (const r of v.results ?? []) {
+      vehicleCounts.set(r.providerId, Number(r.cnt) || 0);
+    }
+  } catch {
+    /* degrade to 0 counts */
+  }
+  try {
+    const d = await c.var.DB.prepare(
+      "SELECT providerId, COUNT(*) AS cnt FROM three_pl_drivers WHERE orgId = ? GROUP BY providerId",
+    )
+      .bind(orgId)
+      .all<{ providerId: string; cnt: number }>();
+    for (const r of d.results ?? []) {
+      driverCounts.set(r.providerId, Number(r.cnt) || 0);
+    }
+  } catch {
+    /* degrade to 0 counts */
+  }
+  try {
+    // Self-applies the table (CREATE TABLE IF NOT EXISTS) so badges work
+    // on prod before migration 0157 runs via the migration script.
+    await ensureThreePlStateRatesSchema(c.var.DB);
+    const s = await c.var.DB.prepare(
+      `SELECT providerId, state FROM three_pl_state_rates
+       WHERE orgId = ? AND (ratePerTripSen <> 0 OR ratePerExtraDropSen <> 0)`,
+    )
+      .bind(orgId)
+      .all<{ providerId: string; state: string }>();
+    for (const r of s.results ?? []) {
+      const list = ratedStates.get(r.providerId) ?? [];
+      list.push(r.state);
+      ratedStates.set(r.providerId, list);
+    }
+    for (const list of ratedStates.values()) {
+      list.sort(
+        (a, b) =>
+          (MALAYSIA_STATE_ORDER.get(a) ?? 99) -
+          (MALAYSIA_STATE_ORDER.get(b) ?? 99),
+      );
+    }
+  } catch {
+    /* degrade to empty badge lists */
+  }
+
+  const data = (res.results ?? []).map((row) => ({
+    ...rowToDriver(row),
+    vehicleCount: vehicleCounts.get(row.id) ?? 0,
+    driverCount: driverCounts.get(row.id) ?? 0,
+    ratedStates: ratedStates.get(row.id) ?? [],
+  }));
   return c.json({ success: true, data, total: data.length });
 });
 
@@ -100,8 +170,13 @@ app.post("/", async (c) => {
         typeof body.vehicleNo === "string" ? body.vehicleNo.trim() : "",
         typeof body.vehicleType === "string" ? body.vehicleType.trim() : "",
         Number(body.capacityM3) || 0,
-        Number(body.ratePerTripSen) || 30000,
-        Number(body.ratePerExtraDropSen) || 5000,
+        // 0/0 = unset (house rule). New providers start with NO company-level
+        // rate — pricing now lives on the per-state rate card
+        // (three_pl_state_rates); the old 30000/5000 defaults made every new
+        // provider look priced when nobody ever quoted it. Existing rows
+        // keep whatever legacy values they have.
+        Number(body.ratePerTripSen) || 0,
+        Number(body.ratePerExtraDropSen) || 0,
         status,
         typeof body.remarks === "string" ? body.remarks : "",
         now,

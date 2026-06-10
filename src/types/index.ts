@@ -1361,6 +1361,12 @@ export type ThreePLProvider = {
   remarks: string;
   createdAt: string;
   updatedAt: string;
+  // Additive list aggregates (GET /api/drivers, 2026-06 state-rate card).
+  // Optional — single-row reads (GET /api/drivers/:id) don't include them.
+  vehicleCount?: number;
+  driverCount?: number;
+  /** Canonical state codes with a non-0/0 rate pair, in display order. */
+  ratedStates?: string[];
 };
 
 // --- Proof of Delivery ---

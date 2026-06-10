@@ -771,3 +771,22 @@ test("computeAttendanceDayDetail: several rows on one date aggregate before the 
   });
   assert.deepEqual(detail.otDays, [{ date: "2026-05-04", hours: 1 }]);
 });
+
+// -- mid-month estimate parity for part-month workers ------------------------
+test("prorateToService mid-month: future window days count as will-be-worked (estimate parity); month-end unchanged", () => {
+  const base = {
+    worker: ANN, year: 2026, month: 5,
+    days: [{ date: "2026-05-04", hours: 8 }, { date: "2026-05-05", hours: 8 }],
+    publicHolidays: MAY_HOLIDAYS,
+    employmentStartDay: 4,
+    prorateToService: true,
+  };
+  // Mid-month (cutoff day 9): worked 2 + future working days 10..31 in window.
+  const mid = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 9 });
+  // May 2026 working days 10..31 = 24 total - 7 elapsed through day 9 = 17.
+  const rate = 265000 / 24;
+  assert.equal(mid.payroll.basicEarnedSen, Math.round((2 + 17) * rate));
+  // Month-end (cutoff = last day): future term is 0 -> days-served only.
+  const fin = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 31 });
+  assert.equal(fin.payroll.basicEarnedSen, Math.round(2 * rate));
+});

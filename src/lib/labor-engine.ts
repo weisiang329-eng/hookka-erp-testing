@@ -642,10 +642,24 @@ export function computeMonthlyLabor(
   // employment window are simply unpaid, NOT charged as absence.
   // prorateToService selects between the two; either way the owner's explicit
   // short-hour dock is then subtracted.
+  //
+  // Mid-month ESTIMATE parity: a full-month worker's estimate assumes future
+  // days will be worked (full salary − confirmed absences). Give part-month
+  // workers the same optimism — working days in their window AFTER the grace
+  // cutoff count as "will be worked", so a new joiner's mid-month estimate
+  // isn't a scary near-zero. At month-end (cutoff = last day) this term is 0,
+  // so FINAL pay is unchanged: still exactly days-served × daily rate.
+  const futureWorkingDaysInWindow = Math.max(
+    0,
+    countElapsedWorkingDays(year, month, employmentEndDay, publicHolidays) -
+      countElapsedWorkingDays(year, month, throughDay, publicHolidays),
+  );
   const basicEarnedSen = Math.max(
     0,
     (input.prorateToService
-      ? Math.round(workedWithinWindow * costingDailyRateSen)
+      ? Math.round(
+          (workedWithinWindow + futureWorkingDaysInWindow) * costingDailyRateSen,
+        )
       : Math.max(0, basicSalarySen - absenceDeductionSen)) - shortHourDeductionSen,
   );
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a

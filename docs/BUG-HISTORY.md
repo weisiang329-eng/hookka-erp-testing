@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-001 — Sofa combo discount never applied on scan-PO/OCR-created SOs and was lost on edit (combo logic lived only in the create page)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, branch fix/so-combo-on-edit → main, deploy green, e2e-verified live). typecheck + build + 8 new unit tests + full suite green.
+**Category:** sales-orders
+
+Symptom: the sofa combo renegotiation (a matched set priced at the rule's combo total instead of the per-piece sum) existed ONLY in the SO create page's client-side logic. The factory's main flow is customer PO → OCR scan → SO (`scan-po-modal` POSTs to /api/sales-orders), which never ran the combo — live scan of the 62 most recent SOs found ZERO create-page sofa SOs. Editing a combo SO also re-priced sofa lines at full catalog price. Real case: SO-2605-224 (Houzs Century, 5530 2A+L 28", created 2026-05-20) stored RM2,350 full price while the customer's combo rule (created 2026-05-05, effective 2026-04-01) says RM2,200 — invoiced RM150 over on INV-2606-103.
+
+Root cause: combo detection + discount distribution lived in `src/pages/sales/create.tsx` only (comboMatches + submit-time baking into basePriceSen). The backend POST/PUT had no combo pass, so any non-create-page path stored full per-piece prices.
+
+Fix: `src/api/lib/sofa-combo.ts` — `applySofaCombos()`, a VERBATIM port (grouping, uniform tier/height, customer>company rule priority, OR-group subset match, floor→round→residual-to-highest distribution; tier = sofaPriceTier ?? priceTier ?? null with null disqualifying). `src/api/routes/sales-orders.ts` — `runSofaComboPass()` wired into POST + PUT before the subtotal: resolves baseModel from products, tier from fabric_trackings, rules from sofa_combo_rules (customer + company, effective today), derives the PIECE code from productCode (scan-PO/stored rows carry the seat size in sizeCode). Idempotent (discount ≤ 0 → no-op) so create-page-baked carts pass through unchanged — frontend untouched. Best-effort try/catch: a combo failure never blocks the save.
+
+Verification: golden sim with prod inputs — Houzs 5530 125000+110000 → 117022+102978 = 220000 exactly; Carress 5531 (per-piece prices already = combo) → strict no-op. Live e2e on prod post-deploy: POSTed a DRAFT test SO (0 prices in) → backend resolved customer prices AND stored the combo split 117022/102978 (= RM2,200.00); test SO deleted (read-back 404). Behaviour note: previously-full-priced combo SOs re-price DOWN to the combo total on their next edit (owner informed pre-merge).
+
+---
+
 ## BUG-2026-06-10-007 — Packing List Cost showed RM 0.00: a vehicle with unset 3PL rates masked the company's real rates
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). Live-verified: the six RM 0.00 packing lists all resolved to their real one-trip cost (RM 300 / RM 350); only PL-2606-005 stays "—" (its DO genuinely has no rated 3PL — data gap for the operator).

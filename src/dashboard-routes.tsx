@@ -42,7 +42,6 @@ const ServiceOrderEdit = lazy(() => import('./pages/service-order/edit'))
 const ProductionOverview = lazy(() => import('./pages/production/overview'))
 const ProductionDeptPage = lazy(() => import('./pages/production/dept'))
 const WipTimesPage = lazy(() => import('./pages/production/wip-times'))
-const DepartmentDetail = lazy(() => import('./pages/production/department'))
 const ProductionFolders = lazy(() => import('./pages/production/folders'))
 const ProductionFolderDetail = lazy(() => import('./pages/production/folder-detail'))
 const ProductionScan = lazy(() => import('./pages/production/scan'))
@@ -221,7 +220,10 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/production/scan', element: <S><ProductionScan /></S> },
   { path: '/production/fg-scan', element: <S><FGScan /></S> },
   { path: '/production/tracker', element: <Navigate to="/planning" replace /> },
-  { path: '/production/department/:code', element: <S><DepartmentDetail /></S> },
+  // Legacy per-dept route — superseded by /production/<dept> (the shared
+  // ProductionPage). Redirect so old links/bookmarks land on the live page
+  // instead of the orphaned department.tsx (2026-06-10).
+  { path: '/production/department/:code', element: <Navigate to="/production" replace /> },
   // Production Folders — archive paper schedules. Both routes are LITERAL
   // prefixes so React Router's route matcher distinguishes them from the
   // dept routes below. `/folders` lists, `/folders/:id` opens one.

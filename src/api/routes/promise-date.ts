@@ -89,9 +89,16 @@ async function loadCoreState(db: D1Database) {
     // as 10 min of queue load instead of 80 — promise dates ran way short.
     // COALESCE protects against NULL wipQty in legacy rows; GREATEST(1,...)
     // ensures a zero/missing qty still credits at least the per-unit minute.
+    // FAB_CUT exception (mirrors jcMinutesTotal + the cost cascade): merged
+    // FABRIC CUTTING cards store estMinutes as the per-SET TOTAL already
+    // (wipQty = piece count), so the ×wipQty would triple-count there — the
+    // CASE uses the stored total as-is for FAB_CUT and ×wipQty everywhere else.
     db.prepare(
       `SELECT po.productId AS "productId",
-              SUM(jc.estMinutes * GREATEST(1, COALESCE(jc.wipQty, 1))) AS "totalMinutes"
+              SUM(CASE WHEN jc.departmentCode = 'FAB_CUT'
+                       THEN COALESCE(jc.estMinutes, 0)
+                       ELSE jc.estMinutes * GREATEST(1, COALESCE(jc.wipQty, 1))
+                  END) AS "totalMinutes"
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
         WHERE jc.status IN ('WAITING','IN_PROGRESS','PAUSED','BLOCKED')

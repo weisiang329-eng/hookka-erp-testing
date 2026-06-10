@@ -13,6 +13,7 @@
 //
 // Rendered as A4 LANDSCAPE HTML so the wide column set fits comfortably.
 // ---------------------------------------------------------------------------
+import { jcMinutesTotal } from "../../lib/job-card-minutes";
 
 interface DbLike {
   prepare(sql: string): {
@@ -86,7 +87,6 @@ type ScheduleRawRow = {
 };
 
 function mapScheduleRow(r: ScheduleRawRow): ScheduleRow {
-  const wipQty = Math.max(1, r.wipQty ?? 1);
   const perUnit = r.actualMinutes ?? r.estMinutes ?? 0;
   return {
     jobCardId: r.jobCardId,
@@ -102,7 +102,9 @@ function mapScheduleRow(r: ScheduleRawRow): ScheduleRow {
     sizeLabel: r.sizeLabel,
     wipLabel: r.wipLabel,
     quantity: r.quantity ?? 0,
-    prodMinutes: Math.round(perUnit * wipQty),
+    // jcMinutesTotal skips the ×wipQty for FAB_CUT (perUnit is already the
+    // per-SET total there) and applies it for every other dept.
+    prodMinutes: Math.round(jcMinutesTotal(perUnit, r)),
     pic1Name: r.pic1Name ?? "",
     pic2Name: r.pic2Name ?? "",
   };

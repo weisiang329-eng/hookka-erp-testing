@@ -17,6 +17,7 @@
 // completedDate; per-worker share = total / |distinct workers credited|.
 // ---------------------------------------------------------------------------
 import { DEFAULT_FACTORY_GEOFENCE, evalPunchLocation } from "./geofence";
+import { jcMinutesTotal } from "../../lib/job-card-minutes";
 
 export interface EfficiencyEnv {
   RESEND_API_KEY?: string;
@@ -237,8 +238,10 @@ export async function collectEfficiencyData(
   const productionMinsByWorker = new Map<string, number>();
   const jcsCompletedByWorker = new Map<string, number>();
   for (const jc of jcs) {
-    const wipQty = Math.max(1, jc.wipQty ?? 1);
-    const totalMins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+    // jcMinutesTotal applies ×wipQty for normal depts and skips it for FAB_CUT
+    // (estMinutes/actualMinutes is already the per-SET total there), so this
+    // per-worker efficiency credit isn't 3× inflated for FAB_CUT.
+    const totalMins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
     if (totalMins <= 0) continue;
 
     const workerIds = new Set<string>();

@@ -28,6 +28,7 @@ import { LeadTimeHistoryDialog } from "./LeadTimeHistoryDialog";
 import { EffectiveDateConfirmModal } from "../products/MaintenanceConfigHistoryDialog";
 import { useToast } from "@/components/ui/toast";
 import { csrfHeaders } from "@/lib/csrf";
+import { jcMinutesTotal } from "@/lib/job-card-minutes";
 import { BatchActionToolbar, ApplyBatchDueDateDialog } from "../production/components/BatchActionToolbar";
 
 // ── Types matching mock-data ──
@@ -316,8 +317,9 @@ function getDeptEfficiency(
             if (dateFrom && jc.completedDate < dateFrom) continue;
             if (dateTo && jc.completedDate > dateTo) continue;
             completed++;
-            const wipQty = Math.max(1, jc.wipQty ?? 1);
-            totalProductionMinutes += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+            // FAB_CUT stores the per-SET total (wipQty = piece count); the
+            // helper skips the ×wipQty there so Production Hours isn't 3× high.
+            totalProductionMinutes += jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
           }
         }
       }
@@ -895,11 +897,12 @@ export default function PlanningPage() {
     // jc.estMinutes / jc.actualMinutes are stored per-piece (see
     // import-completion.ts:538 + job-cards.ts:219 comments). Total
     // production time for the JC = per-unit × wipQty. Missing this
-    // factor under-counts every multi-piece JC.
+    // factor under-counts every multi-piece JC. EXCEPTION: merged FAB_CUT
+    // JCs store the per-SET total already (wipQty = piece count), so
+    // jcMinutesTotal skips the ×wipQty there — see helper.
     const jcMinutes = (jc: JobCard, useActual: boolean): number => {
       const perUnit = useActual ? jc.actualMinutes ?? jc.estMinutes ?? 0 : jc.estMinutes ?? 0;
-      const wipQty = Math.max(1, jc.wipQty ?? 1);
-      return perUnit * wipQty;
+      return jcMinutesTotal(perUnit, jc);
     };
 
     return DEPARTMENTS.map((dept) => {
@@ -1075,7 +1078,6 @@ export default function PlanningPage() {
         loadingCategoryFilter === "ALL" ||
         order.itemCategory === loadingCategoryFilter;
       for (const jc of order.jobCards) {
-        const wipQty = Math.max(1, jc.wipQty ?? 1);
         // Future = active JC, dueDate in future window. Filter applies
         // here so the planned-load bar only sums the visible category.
         if (
@@ -1087,7 +1089,7 @@ export default function PlanningPage() {
           jc.status !== "CANCELLED" &&
           jc.status !== "TRANSFERRED"
         ) {
-          const mins = (jc.estMinutes || 0) * wipQty;
+          const mins = jcMinutesTotal(jc.estMinutes || 0, jc);
           if (!futureBucket.has(jc.departmentCode)) futureBucket.set(jc.departmentCode, new Map());
           const deptMap = futureBucket.get(jc.departmentCode) as Map<string, number>;
           deptMap.set(jc.dueDate, (deptMap.get(jc.dueDate) ?? 0) + mins);
@@ -1098,7 +1100,7 @@ export default function PlanningPage() {
           jc.completedDate &&
           pastDayIndex.has(jc.completedDate)
         ) {
-          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+          const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
           // (a) Bucket for the visible filter — drives the chart bar.
           if (passesFilter) {
             if (!pastBucket.has(jc.departmentCode)) pastBucket.set(jc.departmentCode, new Map());
@@ -1443,8 +1445,7 @@ export default function PlanningPage() {
         if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
         if (!jc.completedDate) continue;
         if (!m.has(jc.completedDate)) continue;
-        const wipQty = Math.max(1, jc.wipQty ?? 1);
-        const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+        const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
         m.set(jc.completedDate, (m.get(jc.completedDate) ?? 0) + mins);
       }
     }
@@ -1459,8 +1460,7 @@ export default function PlanningPage() {
         for (const jc of order.jobCards) {
           if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
           if (jc.completedDate !== date) continue;
-          const wipQty = Math.max(1, jc.wipQty ?? 1);
-          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+          const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
           const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, other: 0, total: 0 };
           if (order.itemCategory === "SOFA") existing.sofa += mins;
           else if (order.itemCategory === "BEDFRAME") existing.bf += mins;
@@ -1490,8 +1490,7 @@ export default function PlanningPage() {
         if (!jc.dueDate) continue;
         if (jc.dueDate > scopeRange.to) continue;
         const existing = byDept.get(jc.departmentCode) ?? { sofa: 0, bf: 0, total: 0 };
-        const wipQty = Math.max(1, jc.wipQty ?? 1);
-        const mins = (jc.estMinutes ?? 0) * wipQty;
+        const mins = jcMinutesTotal(jc.estMinutes ?? 0, jc);
         if (order.itemCategory === "SOFA") existing.sofa += mins;
         else if (order.itemCategory === "BEDFRAME") existing.bf += mins;
         existing.total += mins;
@@ -1526,7 +1525,6 @@ export default function PlanningPage() {
           if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
           if (!jc.dueDate) continue;
           if (jc.dueDate > scopeRange.to) continue;
-          const wipQty = Math.max(1, jc.wipQty ?? 1);
           rows.push({
             jcId: jc.id,
             dueDate: jc.dueDate,
@@ -1538,7 +1536,7 @@ export default function PlanningPage() {
             poNo: order.poNo,
             category: order.itemCategory,
             customerName: order.customerName,
-            minutes: (jc.estMinutes ?? 0) * wipQty,
+            minutes: jcMinutesTotal(jc.estMinutes ?? 0, jc),
             status: jc.status,
           });
         }
@@ -1583,8 +1581,7 @@ export default function PlanningPage() {
           if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
           if (jc.completedDate !== date) continue;
           if (jc.departmentCode !== deptCode) continue;
-          const wipQty = Math.max(1, jc.wipQty ?? 1);
-          const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+          const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
           const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
           if (picCount === 0) {
             credit("", "", mins);
@@ -1640,7 +1637,7 @@ export default function PlanningPage() {
             poNo: order.poNo,
             category: order.itemCategory,
             customerName: order.customerName,
-            minutes: (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty,
+            minutes: jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc),
           });
         }
       }
@@ -1671,8 +1668,7 @@ export default function PlanningPage() {
           if (jc.status === "COMPLETED" || jc.status === "CANCELLED" || jc.status === "TRANSFERRED") continue;
           if (!jc.dueDate) continue;
           if (jc.dueDate > scopeRange.to) continue;
-          const wipQty = Math.max(1, jc.wipQty ?? 1);
-          const mins = (jc.estMinutes ?? 0) * wipQty;
+          const mins = jcMinutesTotal(jc.estMinutes ?? 0, jc);
           const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
           if (picCount === 0) {
             credit("", "", mins);
@@ -1724,8 +1720,7 @@ export default function PlanningPage() {
         if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
         if (!jc.completedDate) continue;
         if (jc.completedDate < scopeRange.from || jc.completedDate > scopeRange.to) continue;
-        const wipQty = Math.max(1, jc.wipQty ?? 1);
-        total += (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+        total += jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
       }
     }
     return total;

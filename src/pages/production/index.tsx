@@ -20,6 +20,7 @@ import { readCsrfCookie, CSRF_HEADER_NAME } from "@/lib/csrf";
 import { workerCoversDept } from "@/lib/worker";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { legPacksSeparately, type LegHeightOption } from "@/lib/leg-packing";
+import { jcMinutesTotal } from "@/lib/job-card-minutes";
 
 // Build headers for mutating fetches. The default Hookka fetcher (fetchJson)
 // auto-injects X-CSRF-Token, but Phase 2.5's sendOneDraft / flushDrafts go
@@ -2578,8 +2579,9 @@ export default function ProductionPage({
         const perUnit =
           Number((jc as JobCard & { productionTimeMinutes?: number }).productionTimeMinutes) ||
           Number((jc as JobCard & { estMinutes?: number }).estMinutes) || 0;
-        const wipQty = (jc as JobCard & { wipQty?: number }).wipQty ?? 1;
-        sum += perUnit * (wipQty || 1);
+        // FAB_CUT stores the per-SET total (wipQty = piece count); jcMinutesTotal
+        // skips the ×wipQty there so the workload preview isn't 3× inflated.
+        sum += jcMinutesTotal(perUnit, jc);
       }
     }
     return sum;
@@ -5167,8 +5169,8 @@ export default function ProductionPage({
       for (const o of visibleOrders) {
         for (const jc of o.jobCards || []) {
           const perUnit = Number(jc.productionTimeMinutes) || Number(jc.estMinutes) || 0;
-          const wipQty = (jc as JobCard & { wipQty?: number }).wipQty ?? 1;
-          totalProdMinutes += perUnit * (wipQty || 1);
+          // FAB_CUT total is already per-SET (wipQty = piece count) — don't re-×.
+          totalProdMinutes += jcMinutesTotal(perUnit, jc);
         }
       }
       const rowsHtml = visibleOrders.map((o) => {
@@ -5688,8 +5690,8 @@ export default function ProductionPage({
       for (const o of visibleOrders) {
         for (const jc of o.jobCards || []) {
           const perUnit = Number(jc.productionTimeMinutes) || Number(jc.estMinutes) || 0;
-          const wipQty = (jc as JobCard & { wipQty?: number }).wipQty ?? 1;
-          totalProdMinutes += perUnit * (wipQty || 1);
+          // FAB_CUT total is already per-SET (wipQty = piece count) — don't re-×.
+          totalProdMinutes += jcMinutesTotal(perUnit, jc);
         }
       }
       const list = Array.from(buckets.values()).sort((a, b) => {

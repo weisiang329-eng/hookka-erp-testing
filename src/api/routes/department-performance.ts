@@ -35,6 +35,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import {
   writeEmployeeStateSnapshot,
   type EmployeeStateMetrics,
@@ -302,8 +303,10 @@ app.get("/", async (c) => {
       // B3 fix (2026-05-11): jc.estMinutes + jc.actualMinutes are both
       // per-UNIT (import-completion.ts:538 sets actual ← per-unit value).
       // Multiply by wipQty for the JC total — mirrors worker.ts:1475.
-      const wipQty = Math.max(1, jc.wipQty ?? 1);
-      const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wipQty;
+      // FAB_CUT exception (jcMinutesTotal): merged FABRIC CUTTING cards store
+      // the per-SET total already (wipQty = piece count), so the helper skips
+      // the ×wipQty there to avoid a 3× over-count in dept Production Minutes.
+      const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
       const day = ensure(date);
       day.productionMinutes += mins;
 
@@ -348,9 +351,19 @@ app.get("/", async (c) => {
       const pieces = picsByJc.get(jc.id) ?? [];
       const perWorkerMins = new Map<string, number>();
       if (pieces.length > 0) {
+        // Per-piece minute base. Non-FAB_CUT: jcMins is per-piece, so each
+        // piece row credits jcMins (summed over pieces.length ≈ wipQty → JC
+        // total). FAB_CUT stores the per-SET total on the JC (not per-piece),
+        // so the per-piece base is total ÷ piece count — keeps the per-piece
+        // sum equal to jcMinutesTotal instead of total × piece count (the 3×
+        // over-count this fix removes). Mirrors the FAB_CUT branch in worker.ts.
+        const perPieceMins =
+          (jc.departmentCode ?? "") === "FAB_CUT"
+            ? jcMinutesTotal(jcMins, jc) / Math.max(1, pieces.length)
+            : jcMins;
         for (const s of pieces) {
           const picCount = (s.pic1Id ? 1 : 0) + (s.pic2Id ? 1 : 0);
-          const share = jcMins / Math.max(1, picCount);
+          const share = perPieceMins / Math.max(1, picCount);
           if (s.pic1Id) {
             perWorkerMins.set(
               s.pic1Id,
@@ -368,8 +381,10 @@ app.get("/", async (c) => {
         // B3 fix: legacy path = no pieces, so jcMins (per-unit) needs
         // explicit × wipQty for total. Pieces path above is fine because
         // it iterates pieces.length × jcMins per worker = wipQty × jcMins.
+        // jcMinutesTotal applies the ×wipQty for normal depts and skips it for
+        // FAB_CUT (jcMins is already the per-SET total there).
         const picCount = (jc.pic1Id ? 1 : 0) + (jc.pic2Id ? 1 : 0);
-        const share = (jcMins * wipQty) / Math.max(1, picCount);
+        const share = jcMinutesTotal(jcMins, jc) / Math.max(1, picCount);
         if (jc.pic1Id) perWorkerMins.set(jc.pic1Id, share);
         if (jc.pic2Id) perWorkerMins.set(jc.pic2Id, share);
       }

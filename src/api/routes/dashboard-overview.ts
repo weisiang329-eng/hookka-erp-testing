@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
+import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { loadSoLinePriceIndex, priceForItem } from "../lib/do-value";
 import { computeFabricNext30ByCategory } from "../lib/fabric-usage";
 import {
@@ -304,11 +305,12 @@ app.get("/", async (c) => {
     ] = await Promise.all([
       db
         .prepare(
-          "SELECT status, estMinutes, actualMinutes, wipQty, completedDate, dueDate, pic1Id, pic2Id FROM job_cards WHERE orgId = ?",
+          "SELECT status, departmentCode, estMinutes, actualMinutes, wipQty, completedDate, dueDate, pic1Id, pic2Id FROM job_cards WHERE orgId = ?",
         )
         .bind(orgId)
         .all<{
           status: string;
+          departmentCode: string | null;
           estMinutes: number | null;
           actualMinutes: number | null;
           wipQty: number | null;
@@ -789,10 +791,12 @@ app.get("/", async (c) => {
     // capacity ÷ workers is internally consistent.
     const workersByDay = new Map<string, Set<string>>();
     for (const jc of jcRes.results ?? []) {
-      const wip = Math.max(1, jc.wipQty ?? 1);
+      // jcMinutesTotal applies ×wipQty for normal depts and skips it for
+      // FAB_CUT (estMinutes/actualMinutes is already the per-SET total there),
+      // so the capacity + backlog minutes aren't 3× inflated for FAB_CUT.
       const done = jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
       if (done && jc.completedDate) {
-        const mins = (jc.actualMinutes ?? jc.estMinutes ?? 0) * wip;
+        const mins = jcMinutesTotal(jc.actualMinutes ?? jc.estMinutes ?? 0, jc);
         // Backlog "days of queue" always uses the rolling 7-working-day
         // capacity — it is a point-in-time state metric, never re-scoped.
         if (rolling7Set.has(jc.completedDate)) capacityMin7 += mins;
@@ -816,7 +820,7 @@ app.get("/", async (c) => {
         jc.status !== "TRANSFERRED" &&
         jc.status !== "CANCELLED"
       ) {
-        backlogMin += (jc.estMinutes ?? 0) * wip;
+        backlogMin += jcMinutesTotal(jc.estMinutes ?? 0, jc);
       }
     }
     // Widget divisor = the window's working-day count (7 for all-time /
@@ -860,13 +864,16 @@ app.get("/", async (c) => {
       let bedframeMin = 0;
       for (const r of backlogRows) {
         if (r.dept !== code) continue;
-        const wip = Math.max(1, r.wipQty ?? 1);
+        // r.dept is the JC's departmentCode; jcMinutesTotal skips the ×wipQty
+        // for FAB_CUT (already a per-SET total) and applies it for every other
+        // dept — keeps this per-dept backlog consistent with the cost cascade.
+        const jc = { departmentCode: r.dept, wipQty: r.wipQty };
         if (
           (r.jcStatus === "COMPLETED" || r.jcStatus === "TRANSFERRED") &&
           r.completedDate &&
           rolling7Set.has(r.completedDate)
         ) {
-          windowTotal += (r.actualMinutes ?? r.estMinutes ?? 0) * wip;
+          windowTotal += jcMinutesTotal(r.actualMinutes ?? r.estMinutes ?? 0, jc);
         }
         if (
           (r.poStatus === "IN_PROGRESS" || r.poStatus === "PENDING") &&
@@ -874,7 +881,7 @@ app.get("/", async (c) => {
           r.jcStatus !== "CANCELLED" &&
           r.jcStatus !== "TRANSFERRED"
         ) {
-          const m = (r.estMinutes ?? 0) * wip;
+          const m = jcMinutesTotal(r.estMinutes ?? 0, jc);
           if ((r.cat ?? "").toUpperCase() === "SOFA") sofaMin += m;
           else if ((r.cat ?? "").toUpperCase() === "BEDFRAME")
             bedframeMin += m;
@@ -1794,14 +1801,17 @@ app.get("/", async (c) => {
             let monthCompletedMin = 0;
             for (const r of reconRows) {
               if (r.dept !== code) continue;
-              const wip = Math.max(1, r.wipQty ?? 1);
+              // r.dept is the JC's departmentCode; jcMinutesTotal skips the
+              // ×wipQty for FAB_CUT (already a per-SET total) and applies it
+              // elsewhere, so the reconstructed month figures aren't inflated.
+              const jc = { departmentCode: r.dept, wipQty: r.wipQty };
               // Month throughput for this dept → reconstructed daily capacity.
               if (
                 (r.jcStatus === "COMPLETED" || r.jcStatus === "TRANSFERRED") &&
                 r.completedDate &&
                 windowSet.has(r.completedDate)
               ) {
-                monthCompletedMin += (r.actualMinutes ?? r.estMinutes ?? 0) * wip;
+                monthCompletedMin += jcMinutesTotal(r.actualMinutes ?? r.estMinutes ?? 0, jc);
               }
               // Pending as of M: existed by M (PO born on/before M, or unknown
               // birth), not completed by M, neither card nor PO cancelled.
@@ -1814,7 +1824,7 @@ app.get("/", async (c) => {
                 r.jcStatus !== "CANCELLED" &&
                 r.poStatus !== "CANCELLED";
               if (pendingAsOfM) {
-                const m = (r.estMinutes ?? 0) * wip;
+                const m = jcMinutesTotal(r.estMinutes ?? 0, jc);
                 if ((r.cat ?? "").toUpperCase() === "SOFA") sofaMin += m;
                 else if ((r.cat ?? "").toUpperCase() === "BEDFRAME")
                   bedframeMin += m;

@@ -10,6 +10,7 @@
 // from index.tsx's useMemos with ZERO behavior change.
 
 import type { JobCard, ProductionOrder, DeptRow, DeptSched, PrevState } from "./types";
+import { jcMinutesTotal } from "../../lib/job-card-minutes";
 
 // Per (poId, deptCode, wipKey) -> JobCard index. The outer Map keys on
 // deptCode; the inner Map keys on wipKey ("" when none) plus a "*" entry
@@ -486,10 +487,12 @@ export const buildBaseRows = (
         // sheet column shows hours of work, not per-piece. Populated on every
         // dept sheet — the FAB_CUT merge step below aggregates this across
         // merged children so the collapsed row reports a sum, matching what
-        // the sticker prints.
-        prodTime:
-          ((jc.productionTimeMinutes || jc.estMinutes || 0) as number) *
-          (((jc as JobCard & { wipQty?: number }).wipQty ?? 1) || 1),
+        // the sticker prints. FAB_CUT stores the per-SET total already (wipQty =
+        // piece count), so jcMinutesTotal does NOT re-multiply it — see helper.
+        prodTime: jcMinutesTotal(
+          (jc.productionTimeMinutes || jc.estMinutes || 0) as number,
+          jc,
+        ),
         rack: (jc as JobCard & { rackingNumber?: string }).rackingNumber || "",
         dueDate: jc.dueDate || "",
         // Planning aids (2026-05-28) — from the parent SO via attachCustomerSO.

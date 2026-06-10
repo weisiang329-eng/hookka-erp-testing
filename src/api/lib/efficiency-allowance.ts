@@ -64,13 +64,22 @@ export type WorkerMonthlyEfficiency = {
 // are snake_case so Postgres preserves them through the unquoted-identifier
 // lowercase fold; the driver's transform.column.from restores worker_id →
 // workerId and production_minutes → productionMinutes on the way back.
+// FAB_CUT exception (mirrors jcMinutesTotal + the cost cascade + /summary):
+// merged FABRIC CUTTING cards store productionTimeMinutes as the per-SET TOTAL
+// already (wipQty = piece count), so the ×wipQty would triple-count there —
+// JC_TOTAL_MIN uses the stored total as-is for FAB_CUT and ×wipQty everywhere
+// else. This feeds the (money-adjacent) efficiency-allowance gate, so the
+// over-count must not leak in.
+const JC_TOTAL_MIN =
+  "CASE WHEN departmentCode = 'FAB_CUT' THEN COALESCE(productionTimeMinutes, 0) " +
+  "ELSE COALESCE(productionTimeMinutes, 0) * GREATEST(1, COALESCE(wipQty, 1)) END";
 const JC_PROD_MINUTES_SQL = `
   SELECT wid AS worker_id, SUM(contrib_min) AS production_minutes
     FROM (
       SELECT pic1Id AS wid,
              CASE WHEN pic2Id IS NOT NULL AND pic2Id != ''
-                  THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
-                  ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
+                  THEN (${JC_TOTAL_MIN}) / 2.0
+                  ELSE (${JC_TOTAL_MIN})
              END AS contrib_min
         FROM job_cards
        WHERE pic1Id IS NOT NULL AND pic1Id != ''
@@ -82,8 +91,8 @@ const JC_PROD_MINUTES_SQL = `
 
       SELECT pic2Id AS wid,
              CASE WHEN pic1Id IS NOT NULL AND pic1Id != ''
-                  THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
-                  ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
+                  THEN (${JC_TOTAL_MIN}) / 2.0
+                  ELSE (${JC_TOTAL_MIN})
              END AS contrib_min
         FROM job_cards
        WHERE pic2Id IS NOT NULL AND pic2Id != ''

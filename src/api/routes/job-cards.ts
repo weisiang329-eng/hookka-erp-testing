@@ -33,6 +33,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { requirePermission } from "../lib/rbac";
+import { jcMinutesTotal } from "../../lib/job-card-minutes";
 
 const app = new Hono<Env>();
 
@@ -148,7 +149,10 @@ app.get("/", async (c) => {
     // worker actually spent and what should appear in Daily Breakdown +
     // be summed for Total Production Hrs. Bug fix 2026-04-28: was
     // returning per-unit, so a 15-min/unit JC with qty=2 looked like 15
-    // min instead of 30.
+    // min instead of 30. FAB_CUT exception (jcMinutesTotal): merged FABRIC
+    // CUTTING cards store productionTimeMinutes as the per-SET TOTAL already
+    // (wipQty = piece count), so the helper skips the ×wipQty there to avoid
+    // a 3× over-count in the worker's Production Hrs.
     const wipQty = Math.max(1, Number(r.wipQty) || 1);
     const perUnitMin = r.productionTimeMinutes ?? 0;
     return {
@@ -161,7 +165,7 @@ app.get("/", async (c) => {
       wipLabel: r.wipLabel ?? "",
       wipQty,
       completedDate: r.completedDate,
-      productionTimeMinutes: perUnitMin * wipQty,
+      productionTimeMinutes: jcMinutesTotal(perUnitMin, r),
       perUnitMinutes: perUnitMin,
       status: r.status,
       picSlot: r.pic1Id === picId ? "PIC1" : r.pic2Id === picId ? "PIC2" : "",
@@ -250,6 +254,14 @@ app.get("/summary", async (c) => {
   // get the actual time the worker spent. A 15-min/unit JC with qty=2
   // = 30 min real time; previously we summed per-unit values so PIC's
   // production minutes were under-counted whenever wipQty > 1.
+  // FAB_CUT exception (mirrors jcMinutesTotal + the cost cascade): merged
+  // FABRIC CUTTING cards store productionTimeMinutes as the per-SET TOTAL
+  // (wipQty = piece count), so multiplying by wipQty there triple-counts
+  // (190-min/3-piece set would read 570). Guard with a CASE so FAB_CUT uses
+  // the stored total as-is while every other dept keeps the ×wipQty.
+  const jcTotalMin =
+    "CASE WHEN departmentCode = 'FAB_CUT' THEN COALESCE(productionTimeMinutes, 0) " +
+    "ELSE COALESCE(productionTimeMinutes, 0) * GREATEST(1, COALESCE(wipQty, 1)) END";
   const sql = `
     SELECT wid AS worker_id,
            SUM(contrib_min) AS production_minutes,
@@ -257,8 +269,8 @@ app.get("/summary", async (c) => {
       FROM (
         SELECT pic1Id AS wid,
                CASE WHEN pic2Id IS NOT NULL AND pic2Id != ''
-                    THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
-                    ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
+                    THEN (${jcTotalMin}) / 2.0
+                    ELSE (${jcTotalMin})
                END AS contrib_min
           FROM job_cards
          WHERE pic1Id IS NOT NULL AND pic1Id != ''
@@ -270,8 +282,8 @@ app.get("/summary", async (c) => {
 
         SELECT pic2Id AS wid,
                CASE WHEN pic1Id IS NOT NULL AND pic1Id != ''
-                    THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
-                    ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
+                    THEN (${jcTotalMin}) / 2.0
+                    ELSE (${jcTotalMin})
                END AS contrib_min
           FROM job_cards
          WHERE pic2Id IS NOT NULL AND pic2Id != ''

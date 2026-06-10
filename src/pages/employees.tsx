@@ -7690,20 +7690,10 @@ function LaborCostTab({
     const start = new Date(`${from}T00:00:00`);
     const end = new Date(`${to}T00:00:00`);
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return days;
-    // Cap the range at TODAY. Expected / logged / short hours must only count
-    // working days that have actually ELAPSED, and grow day by day — NOT jump
-    // straight to the full selected range. Without this, selecting a whole
-    // month mid-month counts the not-yet-happened days (e.g. 06-11..06-30 on
-    // the 10th) into Expected, so every worker looks massively "short". At or
-    // after the range end this is a no-op (today >= end), so a finished month
-    // still shows its full reconciliation. View code — reading the real current
-    // date here is intentional, exactly like the per-day drill-in below.
-    const today = todayStr();
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
       const dow = d.getDay();
       if (dow === 0) continue; // Sunday — non-working
       const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      if (iso > today) break; // not yet elapsed — only count up to today
       if (holidaySet.has(iso)) continue; // declared public holiday
       days.push(iso);
     }
@@ -8718,10 +8708,9 @@ function LaborCostTab({
             {showRangeGapTbl && (
             <>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
-              For this custom range, this is the unlogged-hours data gap so far — each active
-              factory worker&rsquo;s expected hours (standard daily hours × working days elapsed up
-              to today) versus the hours actually logged. It grows as the days pass, so it never
-              counts days that haven&rsquo;t happened yet. Payroll reconciliation is monthly and is
+              For this custom range, this is the unlogged-hours data gap for the selected dates —
+              each active factory worker&rsquo;s expected hours (standard daily hours × working days
+              in range) versus the hours actually logged. Payroll reconciliation is monthly and is
               shown only when a full calendar month is selected. Click a worker to see which days are
               short. Working days are Mon–Sat, excluding Sundays and declared public holidays.
             </p>

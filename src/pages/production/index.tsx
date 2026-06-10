@@ -1872,6 +1872,131 @@ export default function ProductionPage({
   const [retryPending, setRetryPending] = useState(false);
   const DEBOUNCE_MS = 2000;
 
+  // True when a written patch touched PIC1 / PIC2 / Completion — the three
+  // fields whose post-write display must come from a direct-to-DB read (see
+  // mergeFreshPOs). Due-date / racking / distributedAt edits don't suffer the
+  // same stale-snapshot pop, so they keep the existing pin-only path.
+  const PIC_COMPLETION_KEYS = [
+    "pic1Id",
+    "pic1Name",
+    "pic2Id",
+    "pic2Name",
+    "completedDate",
+  ] as const;
+  const touchesPicOrCompletion = (patch: Record<string, unknown>): boolean =>
+    PIC_COMPLETION_KEYS.some((k) => k in patch);
+
+  // mergeFreshPOs — direct-to-DB read-back for PIC / Completion edits.
+  //
+  // After a PIC1 / PIC2 / Completion write lands, the cached LIST refetch
+  // serves the STALE backend snapshot (production_orders_list_snapshot, served
+  // serve-stale-while-revalidate) for the ~1-3 min rebuild window, popping the
+  // old value back — the "flicker" that the recentlyPatchedRef pin alone never
+  // reliably killed (patched 8×). Instead of trusting the list, fetch the ONE
+  // PO we just edited straight from the DB (?fresh=1 bypasses KV + the snapshot)
+  // and MERGE that authoritative row into the grid. We also (re)set the pin from
+  // the FRESH JC values so the slow background LIST refetch can't clobber the
+  // merged row until it catches up to the same values.
+  //
+  // Concurrency: JCs of the same PO that still have an in-flight write
+  // (pendingJcPatchesRef) or a staged draft (draftsRef) are NOT overwritten by
+  // the fresh row — their local value is preserved, mirroring the cache merger.
+  // Fresh-read failures are swallowed: the optimistic value + the value-pin are
+  // already on screen, and the next poll self-heals — a read blip must never
+  // erase a write the server already accepted.
+  const mergeFreshPOs = useCallback(
+    async (targets: Array<{ poId: string; jcIds: string[] }>) => {
+      // Collapse to one fetch per PO; union the JC ids to pin per PO.
+      const byPo = new Map<string, Set<string>>();
+      for (const t of targets) {
+        if (!t.poId) continue;
+        const set = byPo.get(t.poId) ?? new Set<string>();
+        for (const jcId of t.jcIds) if (jcId) set.add(jcId);
+        byPo.set(t.poId, set);
+      }
+      if (byPo.size === 0) return;
+      const deptFrag =
+        mode === "dept" && deptCode
+          ? `&dept=${encodeURIComponent(deptCode)}`
+          : "";
+      await Promise.all(
+        Array.from(byPo.entries()).map(async ([poId, jcIdSet]) => {
+          let fresh: ProductionOrder | null = null;
+          try {
+            const res = await fetch(
+              `/api/production-orders/${encodeURIComponent(poId)}?fresh=1${deptFrag}`,
+              { credentials: "include" },
+            );
+            if (!res.ok) return;
+            const j = (await res.json()) as {
+              success?: boolean;
+              data?: ProductionOrder;
+            };
+            if (!j.success || !j.data) return;
+            fresh = j.data;
+          } catch {
+            // Network blip on the read-back — leave the optimistic value + pin
+            // in place; the poll will reconcile. Never erase the write.
+            return;
+          }
+          const freshPo = fresh;
+          // Pin each just-written JC to the FRESH DB value so the next LIST
+          // refetch (still stale for 1-3 min) can't pop the old value back.
+          // Releases early the moment the list catches up to this value
+          // (caughtUp in the cache merger), else after PATCH_PIN_MS.
+          const freshJcById = new Map<string, JobCard>();
+          for (const jc of freshPo.jobCards) freshJcById.set(jc.id, jc);
+          for (const jcId of jcIdSet) {
+            const fjc = freshJcById.get(jcId);
+            if (!fjc) continue;
+            recentlyPatchedRef.current.set(jcId, {
+              expiry: Date.now() + PATCH_PIN_MS,
+              expect: {
+                pic1Id: fjc.pic1Id,
+                pic1Name: fjc.pic1Name,
+                pic2Id: fjc.pic2Id,
+                pic2Name: fjc.pic2Name,
+                completedDate: fjc.completedDate,
+                status: fjc.status,
+              },
+            });
+          }
+          // Replace the one PO with the fresh row, but keep any JC that still
+          // has an unsent draft / in-flight write (a concurrent edit on a
+          // DIFFERENT cell of the same PO) so the read-back can't stomp it.
+          setOrders((prev) => {
+            const prevPo = prev.find((o) => o.id === poId);
+            const merged: ProductionOrder = prevPo
+              ? {
+                  ...freshPo,
+                  jobCards: freshPo.jobCards.map((jc) => {
+                    const stillLocal =
+                      (pendingJcPatchesRef.current.has(jc.id) ||
+                        draftsRef.current.has(jc.id)) &&
+                      !jcIdSet.has(jc.id);
+                    if (!stillLocal) return jc;
+                    const prevJc = prevPo.jobCards.find((p) => p.id === jc.id);
+                    return prevJc ?? jc;
+                  }),
+                }
+              : freshPo;
+            let replaced = false;
+            const next = prev.map((o) => {
+              if (o.id !== poId) return o;
+              replaced = true;
+              return merged;
+            });
+            // PO wasn't in the current slice (e.g. filtered out) — don't inject
+            // it; the merged row would violate the active filter. The pin still
+            // protects it if it later reappears.
+            return replaced ? next : prev;
+          });
+        }),
+      );
+    },
+    [mode, deptCode],
+  );
+
   // sendOneDraft — the actual HTTP write with retry. Extracted from the
   // pre-batching patchJobCard so flushDrafts and retryFailure can share it.
   // Returns success / error data; never throws (caller decides UI handling).
@@ -2083,7 +2208,21 @@ export default function ProductionPage({
     }
     setRetryPending(transientFails.length > 0);
     setSavingNow(false);
-  }, [sendOneDraft, flashCell, toast]);
+
+    // Direct-to-DB read-back for the PIC / Completion writes that just
+    // succeeded — fetch each touched PO fresh (?fresh=1, bypassing the
+    // serve-stale list snapshot) and merge the authoritative row in. This is
+    // what makes a cleared/changed PIC or completion STICK instead of popping
+    // back to the snapshot's pre-write value. Fire-and-forget: it owns its own
+    // merge + pin and swallows read failures (the optimistic value + pin set
+    // above already hold the cell). Only PIC/Completion drafts qualify; due
+    // date / racking keep the pin-only path.
+    const freshTargets = results
+      .filter((r) => r.result.success && touchesPicOrCompletion(r.draft.patch))
+      .map((r) => ({ poId: r.draft.poId, jcIds: [r.draft.jcId] }));
+    if (freshTargets.length > 0) void mergeFreshPOs(freshTargets);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- touchesPicOrCompletion is a pure module-stable helper (no closure deps); listing it would force a useless re-memo each render.
+  }, [sendOneDraft, flashCell, toast, mergeFreshPOs]);
 
   // Keep the retry-timer's reference to flushDrafts current (see flushDraftsRef).
   flushDraftsRef.current = flushDrafts;
@@ -2144,6 +2283,11 @@ export default function ProductionPage({
             expiry: Date.now() + PATCH_PIN_MS,
             expect: { ...patch },
           });
+          // PIC / Completion edits read back the fresh PO so the value sticks
+          // over the serve-stale list snapshot (see mergeFreshPOs).
+          if (touchesPicOrCompletion(patch as Record<string, unknown>)) {
+            void mergeFreshPOs([{ poId, jcIds: [jobCardId] }]);
+          }
           return;
         }
         // Rollback this specific JC.
@@ -2187,7 +2331,8 @@ export default function ProductionPage({
         void flushDrafts();
       }, DEBOUNCE_MS);
     },
-    [sendOneDraft, flushDrafts],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- touchesPicOrCompletion is a pure module-stable helper (no closure deps); listing it would force a useless re-memo each render.
+    [sendOneDraft, flushDrafts, mergeFreshPOs],
   );
 
   // 2026-05-12 simplification: retryFailure / discardFailure /
@@ -6707,6 +6852,11 @@ export default function ProductionPage({
               }),
             );
             invalidateCachePrefix("/api/production-orders");
+            // Read each touched PO fresh (?fresh=1) so the stamped/cleared
+            // completion sticks over the serve-stale list snapshot + pins it.
+            void mergeFreshPOs(
+              patches.map((p) => ({ poId: p.poId, jcIds: [p.jobCardId] })),
+            );
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -6846,6 +6996,17 @@ export default function ProductionPage({
               }),
             );
             invalidateCachePrefix("/api/production-orders");
+            // Read each touched PO fresh (?fresh=1) so the applied/cleared PIC
+            // sticks over the serve-stale list snapshot + pins it. `patches`
+            // here is Record<string, unknown> (PIC slots are conditionally
+            // added), so coerce the id fields — they originate from
+            // selectedDeptRows (always strings).
+            void mergeFreshPOs(
+              patches.map((p) => ({
+                poId: String(p.poId),
+                jcIds: [String(p.jobCardId)],
+              })),
+            );
           } catch (err) {
             toast.error(`Batch save failed: ${err instanceof Error ? err.message : String(err)}`);
           }

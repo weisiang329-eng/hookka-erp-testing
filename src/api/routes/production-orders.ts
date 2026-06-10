@@ -2000,6 +2000,65 @@ async function fetchPO(
   return rowToPO(po, jcs.results ?? [], pics, leadTimeMap);
 }
 
+// Cache-bypassing single-PO read in the SAME minimal shape the list endpoint
+// returns (rowToMinimalPO). Reads the ONE production order + its job_cards
+// DIRECTLY from the DB — no KV, no production_orders_list_snapshot, no
+// serve-stale path — so a freshly-written PIC / completion can be shown
+// deterministically right after the write (the list's serve-stale snapshot can
+// hand back the pre-write row for the ~1-3 min rebuild window, which is the
+// 8-times-patched "flicker"). Mirrors the minimal branch of fetchFilteredPOs
+// (leadTime + BOM + sofa-sibling preloads → rowToMinimalPO + fetchPiecesDoneByJc),
+// scoped to this single PO. deptFilter is threaded through so non-active-dept
+// JCs render in the SAME slim shape the dept tab's list payload uses.
+async function fetchFreshMinimalPO(
+  db: D1Database,
+  orgId: string,
+  id: string,
+  deptFilter: string | null,
+): Promise<MinimalPOOut | null> {
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE orgId = ? AND id = ?")
+    .bind(orgId, id)
+    .first<ProductionOrderRow>();
+  if (!po) return null;
+  // All JCs for this one PO. A single PO has at most a few dozen JCs, so the
+  // list's dept-narrow EXISTS gymnastics (a payload-size optimization for the
+  // ~9k-row whole-list scan) is unnecessary here — load them all and let
+  // rowToMinimalPO + the deptFilter slim-shape handle presentation. This keeps
+  // the prev/next-dept date columns populated exactly like the list path.
+  const jcs = await db
+    .prepare("SELECT * FROM job_cards WHERE orgId = ? AND productionOrderId = ?")
+    .bind(orgId, id)
+    .all<JobCardRow>();
+  const jcRows = jcs.results ?? [];
+  // Same three preloads the minimal list path runs, fired in parallel. BOM +
+  // sofa-siblings drive FAB_CUT fabricUsageMeters / cross-PO sums; leadTime
+  // drives expectedDueDate. Fail-soft to null (→ rowToMinimalPO treats as
+  // "no signal"), identical to the list's .catch(() => null) on leadTime.
+  const [leadTimeMap, bomByProductCode, siblingsIdx] = await Promise.all([
+    loadLeadTimes(db).catch(() => null),
+    fetchBomWipComponentsByCode(db).catch(() => null),
+    fetchSofaSiblingsByGroupKey(db, orgId).catch(() => null),
+  ]);
+  const siblingsByGroupKey = siblingsIdx?.byGroupKey ?? null;
+  const baseModelByProductCode = siblingsIdx?.baseModelByProductCode ?? null;
+  const piecesDoneByJc = await fetchPiecesDoneByJc(
+    db,
+    orgId,
+    jcRows.map((j) => j.id),
+  );
+  return rowToMinimalPO(
+    po,
+    jcRows,
+    piecesDoneByJc,
+    leadTimeMap,
+    bomByProductCode,
+    siblingsByGroupKey,
+    baseModelByProductCode,
+    deptFilter,
+  );
+}
+
 // Ensure piece_pics rows exist for a job card. Creates wipQty (or 1) slots on
 // demand and returns the ordered array. Mirrors the in-memory ensurePiecePics
 // semantics, but persists to D1 so subsequent scans find the same slots.
@@ -3834,27 +3893,34 @@ async function applyPoUpdate(
     const oldPic2Id = updated.pic2Id ?? null;
 
     if (body.pic1Id !== undefined) {
-      updated.pic1Id = body.pic1Id;
       if (body.pic1Id) {
+        updated.pic1Id = body.pic1Id;
         const w = await db
           .prepare("SELECT name FROM workers WHERE id = ?")
           .bind(body.pic1Id)
           .first<{ name: string }>();
         updated.pic1Name = w?.name ?? "";
       } else {
-        updated.pic1Name = "";
+        // CLEAR: coerce to null, NOT "". Empty string is not nullish, so the
+        // `updated.pic1Id ?? null` bind below kept "" — and piecesDone counts
+        // `piece_pics WHERE pic1Id IS NOT NULL`, so a "" stamp still read as
+        // "present" and the cleared PIC popped back. Store a real NULL.
+        updated.pic1Id = null;
+        updated.pic1Name = null;
       }
     }
     if (body.pic2Id !== undefined) {
-      updated.pic2Id = body.pic2Id;
       if (body.pic2Id) {
+        updated.pic2Id = body.pic2Id;
         const w = await db
           .prepare("SELECT name FROM workers WHERE id = ?")
           .bind(body.pic2Id)
           .first<{ name: string }>();
         updated.pic2Name = w?.name ?? "";
       } else {
-        updated.pic2Name = "";
+        // CLEAR → real NULL (see the pic1 note above).
+        updated.pic2Id = null;
+        updated.pic2Name = null;
       }
     }
 
@@ -4041,6 +4107,41 @@ async function applyPoUpdate(
         );
       }
       if (swapStmts.length > 0) await db.batch(swapStmts);
+    }
+
+    // BUG (PIC-only clear ↔ scan sync): when a PIC is REMOVED (oldPicId set →
+    // new is null) on a card that is NOT completed, the swap branch above does
+    // NOT fire (it is gated on `updated.completedDate && jcWasCompleted`), so
+    // the matching piece_pics stamp survives. piecesDone counts `piece_pics
+    // WHERE pic1Id IS NOT NULL`, so the cleared PIC kept counting as present
+    // and popped back on the next refetch. Clear the matching stamp
+    // UNCONDITIONALLY on removal — this is the complement of the swap branch
+    // (which already clears removed PICs while completed, now that the clear
+    // coerces to real NULL). Only fires when the swap branch didn't, so the
+    // two never double-run on the same removal. Pieces a DIFFERENT real scanner
+    // filled are untouched (WHERE picXId = old).
+    const swapHandledRemoval = !!updated.completedDate && jcWasCompleted;
+    if (!swapHandledRemoval) {
+      const clearStmts: D1PreparedStatement[] = [];
+      if (oldPic1Id && !updated.pic1Id) {
+        clearStmts.push(
+          db
+            .prepare(
+              "UPDATE piece_pics SET pic1Id = NULL, pic1Name = NULL WHERE jobCardId = ? AND pic1Id = ?",
+            )
+            .bind(updated.id, oldPic1Id),
+        );
+      }
+      if (oldPic2Id && !updated.pic2Id) {
+        clearStmts.push(
+          db
+            .prepare(
+              "UPDATE piece_pics SET pic2Id = NULL, pic2Name = NULL WHERE jobCardId = ? AND pic2Id = ?",
+            )
+            .bind(updated.id, oldPic2Id),
+        );
+      }
+      if (clearStmts.length > 0) await db.batch(clearStmts);
     }
 
     // Google Sheets sync — fire-and-forget. Push the freshly-updated JC
@@ -6813,8 +6914,61 @@ app.post("/:id/scan-complete-shared", async (c) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/production-orders/:id
+//
+// ?fresh=1 branch: cache-bypassing single-PO read in the SAME minimal shape the
+// list returns. Reads the one PO + its job_cards straight from the DB (no KV,
+// no withSnapshot / serve-stale) so a freshly-written PIC / completion can be
+// shown deterministically right after the write — the list's serve-stale
+// snapshot keeps handing back the pre-write row for the ~1-3 min rebuild window
+// (the "flicker" patched 8× via the cache pin). The Production page calls this
+// for the one PO it just edited and merges the fresh row over the grid.
+// Gated on the same read permission as the job-cards GET (the nearest sibling
+// that reads this exact data) — production-orders:read, satisfied by *:read.
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
+  if (c.req.query("fresh") === "1") {
+    const denied = await requirePermission(c, "production-orders", "read");
+    if (denied) return denied;
+    const orgId = getOrgId(c);
+    const deptParamRaw = c.req.query("dept");
+    const deptFilter =
+      deptParamRaw && deptParamRaw.trim().length > 0
+        ? deptParamRaw.trim().toUpperCase()
+        : null;
+    const fresh = await fetchFreshMinimalPO(
+      c.var.DB,
+      orgId,
+      c.req.param("id"),
+      deptFilter,
+    );
+    if (!fresh) {
+      return c.json(
+        { success: false, error: "Production order not found" },
+        404,
+      );
+    }
+    // Same Customer SO / PO / Ref / DD enrichment the list + plain GET run, so
+    // the merged row carries identical joined fields (no blank Customer SO on
+    // the freshly-merged row).
+    await attachCustomerSO(
+      c.var.DB,
+      [fresh] as unknown as Array<{
+        salesOrderId: string;
+        consignmentOrderId: string;
+        customerSO: string;
+      }>,
+    );
+    return new Response(JSON.stringify({ success: true, data: fresh }), {
+      status: 200,
+      // Belt-and-braces: tell every intermediary this single-PO read is the
+      // fresh source of truth and must not be cached.
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "X-Cache": "BYPASS",
+      },
+    });
+  }
   const po = await fetchPO(c.var.DB, c.req.param("id"));
   if (!po) {
     return c.json({ success: false, error: "Production order not found" }, 404);

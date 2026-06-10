@@ -39,6 +39,7 @@ import { mutationWithData, MutationResultSchema } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
 import { SalesOrderSchema } from "@/lib/schemas/sales-order";
 import {
+  isHbOnlySpecial,
   pickRelevantUphCards,
   poInPlanning,
   poReadyForDelivery,
@@ -149,6 +150,10 @@ type PackingListRecord = {
   remarks: string;
   createdAt: string | null;
   createdBy: string | null;
+  // Computed live by GET /api/packing-lists: revenueSen = Σ goods value of the
+  // PL's DOs; costSen = the one-trip 3PL transport cost (null when no rate).
+  revenueSen: number;
+  costSen: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -350,6 +355,10 @@ type ReadyPORow = {
   unitM3: number;                // per-unit volume from /api/products (Products page · Unit M³)
   completedDate: string | null;
   uphCompletedDate: string | null;
+  // Latest PACKING job-card completion — only set when EVERY packing card on
+  // the PO is done. Date present = fully packed; blank = not packed yet (the
+  // Ready-for-DO gate stays on UPHOLSTERY, this column just surfaces packing).
+  packingCompletedDate: string | null;
   rackingNumber: string;
   hookkaExpectedDD: string;
   currentDepartment: string;
@@ -932,6 +941,29 @@ export default function DeliveryPage() {
                 if (uphCards.length === 0) return null;
                 // Find the latest completion date among upholstery cards
                 const dates = uphCards.map(j => j.completedDate).filter((d): d is string => !!d);
+                return dates.length > 0 ? dates.sort().reverse()[0] : null;
+              })(),
+              packingCompletedDate: (() => {
+                // Packed = EVERY PACKING card done; show the latest packing
+                // date. Any packing card still open ⇒ blank (not packed yet).
+                // HB-only BEDFRAME specials: ignore stranded DIVAN packing
+                // cards, same rule pickRelevantUphCards applies to UPH.
+                const hbOnly =
+                  (po.itemCategory || "").toUpperCase() === "BEDFRAME" &&
+                  isHbOnlySpecial(po.specialOrder);
+                const pk = (po.jobCards ?? []).filter(
+                  (j) =>
+                    j.departmentCode === "PACKING" &&
+                    (!hbOnly || (j.wipType || "").toUpperCase() !== "DIVAN"),
+                );
+                if (pk.length === 0) return null;
+                const allDone = pk.every(
+                  (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+                );
+                if (!allDone) return null;
+                const dates = pk
+                  .map((j) => j.completedDate)
+                  .filter((d): d is string => !!d);
                 return dates.length > 0 ? dates.sort().reverse()[0] : null;
               })(),
               rackingNumber: po.rackingNumber || "",
@@ -2805,6 +2837,20 @@ export default function DeliveryPage() {
         render: (_v, row) => <span className="tabular-nums">{row.uphCompletedDate ? formatDate(row.uphCompletedDate) : "-"}</span>,
       },
       {
+        key: "packingCompletedDate",
+        label: "Packed",
+        type: "date",
+        width: "110px",
+        sortable: true,
+        // Date = every packing card on the PO is completed (fully packed).
+        // Blank = upholstery may be done but packing hasn't finished.
+        render: (_v, row) => (
+          <span className="tabular-nums">
+            {row.packingCompletedDate ? formatDate(row.packingCompletedDate) : "-"}
+          </span>
+        ),
+      },
+      {
         key: "hookkaExpectedDD",
         label: "Expected DD",
         type: "date",
@@ -3694,6 +3740,8 @@ export default function DeliveryPage() {
                       <th className="py-2 px-3 font-medium text-center">Stops</th>
                       <th className="py-2 px-3 font-medium text-center">Units</th>
                       <th className="py-2 px-3 font-medium text-right">Total M³</th>
+                      <th className="py-2 px-3 font-medium text-right">Revenue</th>
+                      <th className="py-2 px-3 font-medium text-right">Cost</th>
                       <th className="py-2 px-3 font-medium">Created</th>
                       <th className="py-2 px-3 font-medium">Remarks</th>
                       <th className="py-2 px-3 font-medium text-right">Actions</th>
@@ -3716,6 +3764,12 @@ export default function DeliveryPage() {
                         </td>
                         <td className="py-2.5 px-3 text-right tabular-nums">
                           {pl.totalM3.toFixed(2)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">
+                          {formatRM(pl.revenueSen ?? 0)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">
+                          {pl.costSen == null ? "—" : formatRM(pl.costSen)}
                         </td>
                         <td className="py-2.5 px-3 text-[#6B7280]">
                           {pl.createdAt ? formatDate(pl.createdAt) : "-"}

@@ -16,6 +16,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
+import { loadDoValueMap } from "../lib/do-value";
 
 const app = new Hono<Env>();
 
@@ -47,7 +48,14 @@ function parseIds(raw: string | null): string[] {
   }
 }
 
-function rowToPackingList(r: PackingListRow) {
+function rowToPackingList(
+  r: PackingListRow,
+  // Money fields are computed live by the list endpoint (see computePackingListMoney).
+  // revenueSen = Σ goods value of the PL's DOs; costSen = the ONE-trip transport
+  // cost (null when no 3PL rate is resolvable). Omitted (undefined) by the
+  // single-record GET /:id, which doesn't surface money.
+  money?: { revenueSen: number; costSen: number | null },
+) {
   return {
     id: r.id,
     packingNo: r.packingNo,
@@ -59,6 +67,8 @@ function rowToPackingList(r: PackingListRow) {
     remarks: r.remarks ?? "",
     createdAt: r.createdAt,
     createdBy: r.createdBy,
+    revenueSen: money?.revenueSen ?? 0,
+    costSen: money === undefined ? null : money.costSen,
   };
 }
 
@@ -86,6 +96,186 @@ async function genNextPackingNo(db: D1Database, orgId: string): Promise<string> 
 const SELECT_COLS =
   "id, packing_no, status, do_ids, stop_count, total_units, total_m3, remarks, created_at, created_by, org_id";
 
+// ---------------------------------------------------------------------------
+// Live Revenue + Cost for the Packing List list view.
+//
+// REVENUE per PL = Σ over the PL's DOs of the DO's goods value (the SAME
+// per-DO resolver — loadDoValueMap — that feeds the Delivery per-row Amount
+// and the DO /stats tab totals, so the PL figure reconciles to the cent).
+//
+// COST per PL = the ONE TRIP transport cost, mirroring delivery-orders.ts:
+//     ratePerTrip + max(0, distinctDrops − 1) × ratePerExtraDrop
+//   - distinctDrops = number of DISTINCT delivery addresses across the PL's
+//     DOs (trimmed + whitespace-collapsed + lowercased for comparison only).
+//     4 DOs to the SAME address = 1 drop ⇒ cost = just ratePerTrip.
+//   - Rates come from each DO's 3PL with the SAME precedence delivery-orders.ts
+//     uses on write: the assigned VEHICLE (three_pl_vehicles) takes precedence;
+//     else the PROVIDER/company (drivers, keyed by the DO's driverId column,
+//     which stores the providerId). A PL's DOs normally share one 3PL; if they
+//     differ, the 3PL the most DOs share wins (tie → first seen). costSen is
+//     null when no rate is resolvable. This is ONE trip per PL — we do NOT sum
+//     the per-DO deliveryCostSen (that multiplies the trip rate).
+//
+// All bulk: one DO read, one loadDoValueMap, one vehicles read, one drivers
+// read — no N+1 across packing lists.
+// ---------------------------------------------------------------------------
+type PlDoRow = {
+  id: string;
+  deliveryAddress: string | null;
+  driverId: string | null; // = providerId (drivers.id) per the 3PL refactor
+  vehicleId: string | null;
+};
+type RatePair = { ratePerTripSen: number; ratePerExtraDropSen: number };
+
+function normAddr(raw: string | null | undefined): string {
+  return (raw ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+async function computePackingListMoney(
+  db: D1Database,
+  orgId: string,
+  lists: { id: string; doIds: string[] }[],
+): Promise<Map<string, { revenueSen: number; costSen: number | null }>> {
+  const out = new Map<string, { revenueSen: number; costSen: number | null }>();
+  // Pre-seed every PL so the caller always gets an entry (revenue 0, cost null).
+  for (const l of lists) out.set(l.id, { revenueSen: 0, costSen: null });
+
+  const allDoIds = [...new Set(lists.flatMap((l) => l.doIds))];
+  // Always load the value map (org-scoped, used for revenue even if a PL has
+  // no resolvable cost). If there are no DOs at all, revenue stays 0 / cost null.
+  const valueMap = await loadDoValueMap(db, orgId);
+  if (allDoIds.length === 0) {
+    for (const l of lists) out.set(l.id, { revenueSen: 0, costSen: null });
+    return out;
+  }
+
+  // One bulk read of every DO referenced by any PL.
+  const ph = allDoIds.map(() => "?").join(",");
+  const doRes = await db
+    .prepare(
+      `SELECT id, deliveryAddress, driverId, vehicleId
+         FROM delivery_orders WHERE orgId = ? AND id IN (${ph})`,
+    )
+    .bind(orgId, ...allDoIds)
+    .all<PlDoRow>();
+  const doById = new Map<string, PlDoRow>();
+  for (const d of doRes.results ?? []) doById.set(d.id, d);
+
+  // Bulk-resolve rates for every distinct vehicle + provider in one read each.
+  const vehicleIds = [
+    ...new Set(
+      (doRes.results ?? [])
+        .map((d) => (d.vehicleId || "").trim())
+        .filter((x) => x.length > 0),
+    ),
+  ];
+  const providerIds = [
+    ...new Set(
+      (doRes.results ?? [])
+        .map((d) => (d.driverId || "").trim())
+        .filter((x) => x.length > 0),
+    ),
+  ];
+  const vehicleRates = new Map<string, RatePair>();
+  if (vehicleIds.length > 0) {
+    const vph = vehicleIds.map(() => "?").join(",");
+    const vRes = await db
+      .prepare(
+        `SELECT id, ratePerTripSen, ratePerExtraDropSen
+           FROM three_pl_vehicles WHERE id IN (${vph})`,
+      )
+      .bind(...vehicleIds)
+      .all<{ id: string; ratePerTripSen: number; ratePerExtraDropSen: number }>();
+    for (const v of vRes.results ?? [])
+      vehicleRates.set(v.id, {
+        ratePerTripSen: Number(v.ratePerTripSen) || 0,
+        ratePerExtraDropSen: Number(v.ratePerExtraDropSen) || 0,
+      });
+  }
+  const providerRates = new Map<string, RatePair>();
+  if (providerIds.length > 0) {
+    const pph = providerIds.map(() => "?").join(",");
+    const pRes = await db
+      .prepare(
+        `SELECT id, ratePerTripSen, ratePerExtraDropSen
+           FROM drivers WHERE id IN (${pph})`,
+      )
+      .bind(...providerIds)
+      .all<{ id: string; ratePerTripSen: number; ratePerExtraDropSen: number }>();
+    for (const p of pRes.results ?? [])
+      providerRates.set(p.id, {
+        ratePerTripSen: Number(p.ratePerTripSen) || 0,
+        ratePerExtraDropSen: Number(p.ratePerExtraDropSen) || 0,
+      });
+  }
+
+  // Resolve ONE DO's rate with the write-path precedence: vehicle over provider.
+  // Returns a stable key (so we can pick the 3PL the most DOs share) + the rate.
+  const rateForDo = (d: PlDoRow): { key: string; rate: RatePair } | null => {
+    const vid = (d.vehicleId || "").trim();
+    if (vid) {
+      const r = vehicleRates.get(vid);
+      if (r) return { key: `v:${vid}`, rate: r };
+    }
+    const pid = (d.driverId || "").trim();
+    if (pid) {
+      const r = providerRates.get(pid);
+      if (r) return { key: `p:${pid}`, rate: r };
+    }
+    return null;
+  };
+
+  for (const l of lists) {
+    let revenueSen = 0;
+    const addrSet = new Set<string>();
+    // Tally which 3PL the PL's DOs resolve to; the most common one wins.
+    const rateByKey = new Map<string, RatePair>();
+    const keyCount = new Map<string, number>();
+    const keyOrder: string[] = []; // first-seen order for deterministic ties
+    let sawAnyDo = false;
+
+    for (const did of l.doIds) {
+      const d = doById.get(did);
+      if (!d) continue; // do_id missing — skip gracefully
+      sawAnyDo = true;
+      revenueSen += valueMap.get(did) ?? 0;
+      addrSet.add(normAddr(d.deliveryAddress));
+      const resolved = rateForDo(d);
+      if (resolved) {
+        if (!keyCount.has(resolved.key)) {
+          keyOrder.push(resolved.key);
+          rateByKey.set(resolved.key, resolved.rate);
+        }
+        keyCount.set(resolved.key, (keyCount.get(resolved.key) ?? 0) + 1);
+      }
+    }
+
+    let costSen: number | null = null;
+    if (sawAnyDo && keyOrder.length > 0) {
+      // Pick the 3PL the most DOs share; tie → first seen.
+      let bestKey = keyOrder[0];
+      let bestCount = keyCount.get(bestKey) ?? 0;
+      for (const k of keyOrder) {
+        const cnt = keyCount.get(k) ?? 0;
+        if (cnt > bestCount) {
+          bestKey = k;
+          bestCount = cnt;
+        }
+      }
+      const rate = rateByKey.get(bestKey);
+      if (rate) {
+        const distinctDrops = addrSet.size; // distinct delivery addresses
+        costSen =
+          rate.ratePerTripSen +
+          Math.max(0, distinctDrops - 1) * rate.ratePerExtraDropSen;
+      }
+    }
+
+    out.set(l.id, { revenueSen, costSen });
+  }
+  return out;
+}
+
 // GET / — list all packing lists for the org (newest first).
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
@@ -95,7 +285,16 @@ app.get("/", async (c) => {
     )
       .bind(orgId)
       .all<PackingListRow>();
-    const data = (res.results ?? []).map(rowToPackingList);
+    const rows = res.results ?? [];
+    // Compute Revenue + Cost LIVE so the existing PLs also show values.
+    const money = await computePackingListMoney(
+      c.var.DB,
+      orgId,
+      rows.map((r) => ({ id: r.id, doIds: parseIds(r.doIds) })),
+    );
+    const data = rows.map((r) =>
+      rowToPackingList(r, money.get(r.id) ?? { revenueSen: 0, costSen: null }),
+    );
     return c.json({ success: true, data, total: data.length });
   } catch (e) {
     // Table not migrated yet — don't break the delivery page; return empty.

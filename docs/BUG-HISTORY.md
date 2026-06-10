@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-10-006 — Efficiency allowance hidden in the Overhead plug + inflating "Under-recorded hours" (no reconciliation line of its own)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). typecheck:app + build green; impact verified on live data (May allowance RM0 → recon unchanged RM62,775.52; June 15×RM150 = RM2,250).
+**Category:** ui-frontend
+
+Symptom: the flat monthly **efficiency allowance** (RM150 when a worker hits their efficiency target) is in Payroll's gross but NOT in the logged-hours labor cost. In the Payroll Reconciliation (Labor Cost tab) it had **no line of its own**, so it was silently absorbed by the **Overhead** closing plug AND it **inflated "Under-recorded hours (paid, not yet logged)"** — a fully-logged bonus earner showed a spurious ~RM150 "data gap." Department Labor had the same gap-inflation. The recon still showed "0 difference" (Overhead is a plug) but the RM150 was mis-attributed. Owner: "在 labor cost 那边添加一个 efficiency allowance 吧… 这样它就可以跟 payroll tally 了".
+
+Root cause: `src/pages/employees.tsx` — the recon line list (Production / Borrowed / Shortfall / Overhead-plug / Under-recorded) had no allowance line; the per-worker Under-recorded gap (`gapSen` in LaborCostTab `employeeResidual`; and the DeptLaborTab `gap`) was `gross − logged − leniency − otAdj`, and `gross` includes the allowance → the allowance leaked into the gap (→ Under-recorded) or the Overhead plug.
+
+Fix: `src/pages/employees.tsx` — (1) new `efficiencyAllowanceReconSen = Σ p.allowances` + a visible **"Efficiency allowance (bonus)"** recon line (shown when > 0) + Print row; (2) subtracted it from the Overhead plug so Overhead no longer absorbs it; (3) subtracted `p.allowances` from BOTH Under-recorded gaps (LaborCostTab `gapSen` + DeptLaborTab `gap`) so a bonus earner no longer shows a spurious gap. Ties by construction (Overhead stays the closing plug). Flat MONTHLY amount (not daily); real-time mid-month, locks at Generate (finalise).
+
+Verification: typecheck:app + build green. Live data — May (finalised, allowance RM0) → line hidden, recon byte-identical (RM62,775.52 / 0 difference, no regression); June (live, 15 × RM150 = RM2,250) → the line shows RM2,250 once finalised. (Live render double-check deferred — the heavy Employees page froze the browser; May is mathematically unchanged since allowance = 0.)
+
+---
+
 ## BUG-2026-06-10-005 — Production "Due Date" filter + Overdue keyed off the wrong date (production target, not the Our Expected DD the operator reads)
 
 **Status:** 🟢 Fixed + shipped to prod (2026-06-10, on main this session, deploy green). typecheck + eslint + 654 tests green; backend SQL reviewed line-by-line. **Live overdue-count / filter-matches-column verification PENDING owner's browser** (will confirm the count drops only for empty-DD / CO-origin POs).

@@ -643,7 +643,9 @@ function Gauge({
 
 // ---------- page ----------
 export default function DashboardBPage() {
-  const [period, setPeriod] = useState("all");
+  // Open the Command Center on the CURRENT month by default (owner request) —
+  // not all-time. CUR_YM (module-scope) is the current "YYYY-MM".
+  const [period, setPeriod] = useState(CUR_YM);
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
   const toggleSeries = (k: string) =>
     setHiddenSeries((prev) => {
@@ -990,7 +992,7 @@ export default function DashboardBPage() {
           className="text-xs rounded-md border border-[#E2DDD8] bg-[#F5F2ED] px-2.5 py-1.5 font-medium text-[#5A5550] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
         >
           <option value="all">All-time</option>
-          {months.map((m) => (
+          {(months.includes(CUR_YM) ? months : [CUR_YM, ...months]).map((m) => (
             <option key={m} value={m}>
               {m === CUR_YM ? `This month (${m})` : m}
             </option>

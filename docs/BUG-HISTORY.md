@@ -73,6 +73,8 @@ Fix: `src/api/lib/sofa-combo.ts` — `applySofaCombos()`, a VERBATIM port (group
 
 Verification: golden sim with prod inputs — Houzs 5530 125000+110000 → 117022+102978 = 220000 exactly; Carress 5531 (per-piece prices already = combo) → strict no-op. Live e2e on prod post-deploy: POSTed a DRAFT test SO (0 prices in) → backend resolved customer prices AND stored the combo split 117022/102978 (= RM2,200.00); test SO deleted (read-back 404). Behaviour note: previously-full-priced combo SOs re-price DOWN to the combo total on their next edit (owner informed pre-merge).
 
+**REMEDIATION (2026-06-11, owner-approved backfill):** audited all Apr–Jun SOs (122 sofa SOs) → 44 stored above the applicable combo price (RM6,377.66 total over). Fixed via sanctioned paths only: **13 SOs re-priced** through PUT (the backend combo pass; −RM2,180.40; per-line price_overrides reason "Sofa combo re-price backfill"), 2 CANCELLED skipped, **29 SOs production-locked** (Rule 2 — completed job cards; deliberately NOT overridden). The money documents were corrected instead: **all 19 affected SENT-unpaid invoices re-priced** via the invoice priceEdits endpoint (−RM2,755.82; read-back verified each). **Zero PAID invoices affected** (no credit notes needed). Outstanding: ~11 production-locked SOs not yet invoiced still carry full price — their future invoices need the combo price applied at invoicing (the invoice price editor, or ask the assistant to re-run the per-invoice fix).
+
 ---
 
 ## BUG-2026-06-10-007 — Packing List Cost showed RM 0.00: a vehicle with unset 3PL rates masked the company's real rates

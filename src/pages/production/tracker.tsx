@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -120,10 +120,73 @@ export default function MasterTrackerPage() {
   const { toast } = useToast();
   // ?fields=minimal&include=jobCards — slim PO fields; keep JCs (per-dept JC lookup uses them).
   const { data: ordersResp, loading, refresh } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?fields=minimal&include=jobCards");
-  const orders: ProductionOrder[] = useMemo(
+  const fetchedOrders: ProductionOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
     [ordersResp]
   );
+  // Local copy so an optimistic batch-due-date edit survives the background
+  // cached-fetch revalidation (which serves a STALE snapshot for ~1-3 min after
+  // a write). Pin each just-patched job card until the refetched row matches
+  // what we wrote (caught up) or a 5-min ceiling lapses — the same protection
+  // department.tsx and index.tsx already have, extended here so the WHOLE
+  // production module is flicker-proof. (Wei Siang 2026-06-10.)
+  const [orders, setOrders] = useState<ProductionOrder[]>([]);
+  const recentlyPatchedRef = useRef<
+    Map<string, { expect: Record<string, unknown> }>
+  >(new Map());
+  const PATCH_PIN_MS = 300_000; // 5-min ceiling; releases EARLY on catch-up.
+  const pinJc = (jcId: string, fields: Record<string, unknown>) => {
+    recentlyPatchedRef.current.set(jcId, { expect: fields });
+    // Pin-expiry ceiling fired from a save event handler (applyBatchDueDate),
+    // not a render-time timer — plain setTimeout is correct here.
+    // eslint-disable-next-line no-restricted-syntax
+    setTimeout(() => recentlyPatchedRef.current.delete(jcId), PATCH_PIN_MS);
+  };
+  /* eslint-disable react-hooks/set-state-in-effect -- cache-merge sync: hold the
+     operator's just-saved due date over a stale background refetch until the
+     server catches up; mirrors department.tsx / index.tsx. */
+  useEffect(() => {
+    if (!fetchedOrders) return;
+    const freshJcMap = new Map<string, JobCard>();
+    for (const po of fetchedOrders)
+      for (const jc of po.jobCards) freshJcMap.set(jc.id, jc);
+    const blankVal = (v: unknown) => v === null || v === undefined || v === "";
+    const caughtUp = (jc: JobCard, expect: Record<string, unknown>) => {
+      const row = jc as unknown as Record<string, unknown>;
+      for (const k of Object.keys(expect)) {
+        if (!((blankVal(row[k]) && blankVal(expect[k])) || row[k] === expect[k]))
+          return false;
+      }
+      return true;
+    };
+    const pinnedIds = new Set<string>();
+    for (const [jcId, pin] of Array.from(recentlyPatchedRef.current.entries())) {
+      const freshJc = freshJcMap.get(jcId);
+      if (freshJc && caughtUp(freshJc, pin.expect)) {
+        recentlyPatchedRef.current.delete(jcId);
+        continue;
+      }
+      pinnedIds.add(jcId);
+    }
+    if (pinnedIds.size === 0) {
+      setOrders(fetchedOrders);
+      return;
+    }
+    setOrders((prev) => {
+      const prevJcMap = new Map<string, JobCard>();
+      for (const po of prev)
+        for (const jc of po.jobCards)
+          if (pinnedIds.has(jc.id)) prevJcMap.set(jc.id, jc);
+      if (prevJcMap.size === 0) return fetchedOrders;
+      return fetchedOrders.map((po) => ({
+        ...po,
+        jobCards: po.jobCards.map((jc) =>
+          prevJcMap.has(jc.id) ? (prevJcMap.get(jc.id) as JobCard) : jc,
+        ),
+      }));
+    });
+  }, [fetchedOrders]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Filters
   const [categoryTab, setCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -289,6 +352,19 @@ export default function MasterTrackerPage() {
         const scope = batchDept === "ALL" ? "all departments" : (DEPARTMENTS.find((d) => d.code === batchDept)?.name ?? batchDept);
         const verb = date ? "Set due date" : "Cleared due date";
         toast.success(`${verb} (${scope}) on ${selectedOrders.length} order${selectedOrders.length === 1 ? "" : "s"}.`);
+        // All patched OK — optimistically apply the new date locally + pin each
+        // job card so the background refetch (stale ~1-3 min) can't pop the old
+        // date back (the flicker). The pin releases the instant the server agrees.
+        const patchedJcIds = new Set(patches.map((p) => p.jobCardId));
+        setOrders((prev) =>
+          prev.map((o) => ({
+            ...o,
+            jobCards: o.jobCards.map((jc) =>
+              patchedJcIds.has(jc.id) ? { ...jc, dueDate: date } : jc,
+            ),
+          })),
+        );
+        for (const p of patches) pinJc(p.jobCardId, { dueDate: date });
       }
       // Drop the cached matrix + force this page's hook to refetch so the new
       // dates show. Same invalidate prefix the production page uses.

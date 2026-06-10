@@ -330,7 +330,16 @@ export default function WorkerScanPage() {
         success?: boolean;
         data?: { rack: string; occupied: boolean }[];
       };
-      if (j.success && Array.isArray(j.data)) setRacks(j.data);
+      if (j.success && Array.isArray(j.data)) {
+        // Natural sort so the picker reads Rack 1, 2, 3 … 10, 11 … 20 in order.
+        // (The API's `ORDER BY rack` is lexical, so "Rack 10" sorts before
+        // "Rack 2" and the list looks jumbled — Wei Siang 2026-06-10.)
+        setRacks(
+          [...j.data].sort((a, b) =>
+            a.rack.localeCompare(b.rack, undefined, { numeric: true }),
+          ),
+        );
+      }
     } catch {
       /* leave empty — the picker just won't populate */
     }

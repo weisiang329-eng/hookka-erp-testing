@@ -3705,7 +3705,7 @@ export default function DeliveryPage() {
                         key={pl.id}
                         className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]"
                       >
-                        <td className="py-2.5 px-3 font-mono font-medium text-[#1F1D1B]">
+                        <td className="py-2.5 px-3 font-medium text-[#1F1D1B]">
                           {pl.packingNo}
                         </td>
                         <td className="py-2.5 px-3 text-center tabular-nums">
@@ -4708,7 +4708,7 @@ export default function DeliveryPage() {
                             onClick={() => addReadyPOToEdit(po)}
                           >
                             <div className="flex items-center gap-3 flex-wrap">
-                              <span className="font-mono text-[#3E6570]">{po.poNo}</span>
+                              <span className="text-[#3E6570]">{po.poNo}</span>
                               <span className="text-[#6B7280]">{po.salesOrderNo}</span>
                               {/* Customer-side refs so the packer can match the
                                   customer's own paperwork while picking, not just

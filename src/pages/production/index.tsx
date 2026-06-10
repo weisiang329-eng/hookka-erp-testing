@@ -6529,7 +6529,7 @@ export default function ProductionPage({
                           : "No linked SO detail page"
                       }
                     >
-                      <td className="px-3 py-1.5 font-mono text-[11px] text-[#1F1D1B]">
+                      <td className="px-3 py-1.5 text-[11px] text-[#1F1D1B]">
                         {row.displaySoId}
                         {clickable && (
                           <ExternalLink className="inline-block ml-1 h-3 w-3 text-[#9CA3AF]" />

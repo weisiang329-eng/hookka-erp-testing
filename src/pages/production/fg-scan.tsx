@@ -346,7 +346,7 @@ export default function FGScanPage() {
             </div>
             <div>
               <p className="text-[10px] uppercase text-[#9CA3AF]">SO / PO</p>
-              <p className="font-mono text-[11px] text-[#1F1D1B]">{result.unit.soNo} · {result.unit.poNo}</p>
+              <p className="text-[11px] text-[#1F1D1B]">{result.unit.soNo} · {result.unit.poNo}</p>
             </div>
           </div>
         </div>

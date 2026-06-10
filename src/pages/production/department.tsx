@@ -1532,7 +1532,7 @@ export default function DepartmentProductionPage() {
             <div className="space-y-1 text-xs text-[#6B7280]">
               <div>
                 <span className="text-[#9CA3AF]">PO:</span>{" "}
-                <span className="font-mono text-[#6B5C32]">{doneDialog.order.poNo}</span>
+                <span className="text-[#6B5C32]">{doneDialog.order.poNo}</span>
                 {"  "}
                 <span className="text-[#9CA3AF]">Customer:</span>{" "}
                 <span className="text-[#1F1D1B]">{doneDialog.order.customerName}</span>

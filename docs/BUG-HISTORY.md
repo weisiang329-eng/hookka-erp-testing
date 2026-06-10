@@ -26,11 +26,28 @@ Entries themselves stay newest-first.
 - `delivery-orders` (11) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
-- `data-migration` (5) — [BUG-2026-04-25-014](#bug-2026-04-25-014-fixd1-compat-ifnullcoalesce-bom-search-likeilike)
+- `data-migration` (6) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter)
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-06-10-001 — Punch-selfie photo endpoint 500'd: an explicit camelCase SELECT projection isn't translated by the d1-compat adapter
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green + endpoint live-verified 500→404). typecheck:app + 644 tests + eslint green.
+**Category:** data-migration
+
+Symptom: right after the new punch-selfie feature deployed to prod, the on-demand photo endpoint `GET /api/attendance/:id/photo?which=in` returned `500 {"error":"column \"clockinphoto\" does not exist"}`. Caught by a verify-live API probe on prod immediately after the feature deploy — before any worker hit it (the thumbnail UI only calls this endpoint once a photo exists, so it was not yet user-visible).
+
+Root cause: the endpoint used an explicit projection `SELECT clockInPhoto, clockOutPhoto FROM attendance_records`. The d1-compat SupabaseAdapter only rewrites camelCase identifiers in the clause shapes the rest of the code exercises (`SELECT *`, `WHERE x = ?`, `SET x = ?`, INSERT column lists) — an explicit SELECT projection is passed through verbatim, so Postgres folds the unquoted `clockInPhoto` to lowercase `clockinphoto`, which is not the real column name (`clock_in_photo`). The geo columns (clock_in_lat etc.) never hit this because every geo read is `SELECT *` + `r.clockInLat`.
+
+Fix: `src/api/routes/attendance.ts` — the photo endpoint now does `SELECT *` + reads `row.clockInPhoto` / `row.clockOutPhoto`, exactly like `rowToAttendance` reads `r.clockInLat`. Bonus: a row missing the column yields `undefined` → a clean 404 "No photo" instead of a 500, so it also survives the window before the first punch self-applies the photo columns. (commit a7ca1ae2)
+
+Verification: re-probed the live endpoint after the fix deploy — `404 {"success":false,"error":"No photo"}` (was 500). The list read path (`GET /api/attendance?date=`) returns the new `hasClockInPhoto` / `hasClockOutPhoto` flags (200, base64 kept out of the list). Store→serve round-trip (camera → save → thumbnail) awaits the owner's first real phone punch, which self-applies the `clock_in_photo` / `clock_out_photo` columns via `ensureAttendanceGeo`.
+
+Lesson: in this codebase NEVER use an explicit camelCase column projection in a SELECT — always `SELECT *` and read the camelCase key off the row, or the adapter silently won't translate it. (Same class as BUG-2026-04-25-014, the d1-compat ifnull/coalesce gap.)
 
 ---
 

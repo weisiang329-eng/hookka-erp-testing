@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-003 — Mid-month joiner's projected payslip showed a scary near-zero (counted only days already served)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green, live-verified: KINM MG HLA June estimate RM396 → RM1,954). 49/49 engine tests green (new test locks both halves).
+**Category:** ui-frontend
+
+Symptom: a worker who joined mid-month (e.g. KINM MG HLA, joined 2026-06-02) showed a June ESTIMATE of RM396 with a "Part-month −RM1,599" line, while full-month colleagues showed their optimistic full salary minus confirmed absences. Owner: "past month 是什么意思?为什么会扣那么多钱呢?" — the RM1,599 was just the not-yet-elapsed days, not a real deduction.
+
+Root cause: `src/lib/labor-engine.ts` `prorateToService` paid only `workedWithinWindow × costingDailyRateSen` — days already served — so mid-month the estimate excluded all future days; full-month workers' estimate implicitly assumes future days are worked.
+
+Fix: estimate parity — `futureWorkingDaysInWindow` (working days in the employment window AFTER the grace cutoff) now counts as "will be worked" in the prorated basicEarned. At month-end the cutoff = last day → the future term is 0 → **final pay byte-identical** (still exactly days-served × daily rate). New engine test asserts mid-month = (served+future)×rate AND month-end = served×rate.
+
+---
+
 ## BUG-2026-06-11-002 — Unpriced SO lines saved silently at RM0; editing could zero a price (PUT had no catalog fallback)
 
 **Status:** 🟢 Fixed + shipped to prod (2026-06-11, same branch as -001, deploy green). typecheck + build + full suite green.

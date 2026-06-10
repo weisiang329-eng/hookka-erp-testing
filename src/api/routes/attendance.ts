@@ -143,11 +143,16 @@ app.get("/:id/photo", async (c) => {
   const orgId = getOrgId(c);
   const id = c.req.param("id");
   const which = c.req.query("which") === "out" ? "out" : "in";
+  // SELECT * (not an explicit camelCase projection): the d1-compat adapter
+  // translates snake_case columns back to camelCase on a `SELECT *` row (same
+  // path the geo columns use), and a row missing the column simply yields
+  // undefined instead of a 500 — so this also survives before the first punch
+  // has self-applied the photo columns.
   const row = await c.var.DB.prepare(
-    "SELECT clockInPhoto, clockOutPhoto FROM attendance_records WHERE id = ? AND orgId = ?",
+    "SELECT * FROM attendance_records WHERE id = ? AND orgId = ?",
   )
     .bind(id, orgId)
-    .first<{ clockInPhoto: string | null; clockOutPhoto: string | null }>();
+    .first<{ clockInPhoto?: string | null; clockOutPhoto?: string | null }>();
   const dataUrl = which === "out" ? row?.clockOutPhoto : row?.clockInPhoto;
   if (!dataUrl) return c.json({ success: false, error: "No photo" }, 404);
   // Stored as a data URL (data:image/jpeg;base64,...). Decode to raw bytes so an

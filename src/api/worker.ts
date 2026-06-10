@@ -192,11 +192,13 @@ app.use("/api/*", async (c, next) => {
   // Don't leak full URLs (which carry record IDs) when the user clicks
   // a link to an external site.
   c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  // Disable powerful APIs by default. Camera kept on `self` for the QR
-  // scan flow; the rest are off.
+  // Disable powerful APIs by default. Camera (QR scan + punch photo) and
+  // geolocation (punch soft-geofence) are kept on `self` — WITHOUT geolocation=(self)
+  // the browser blocks navigator.geolocation and every punch records NO GPS, so the
+  // off-site geofence can never fire. The rest stay off.
   c.res.headers.set(
     "Permissions-Policy",
-    "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
+    "camera=(self), microphone=(), geolocation=(self), payment=(), usb=()",
   );
 });
 
@@ -215,7 +217,7 @@ app.use("*", async (c, next) => {
     c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
     c.res.headers.set(
       "Permissions-Policy",
-      "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
+      "camera=(self), microphone=(), geolocation=(self), payment=(), usb=()",
     );
     // CSP report-only for now — flips to enforcing once we've seen a
     // week of reports with no false positives. Allowlist:

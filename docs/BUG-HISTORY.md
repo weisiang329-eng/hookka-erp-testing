@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-10-004 — Production Sheet PIC / Completion edits flickered back (cleared PIC popped to its old value)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). Live-verified on prod: a cleared PIC reads back real `null` via the new fresh endpoint while the list snapshot still served the old name — exactly the pop-back, now sidestepped. typecheck + eslint + 650 tests (incl. 6 new) green.
+**Category:** production-orders
+
+Symptom: on the per-dept Production Sheet (`/production/:dept`, e.g. Fab Sew), clearing a worker from the PIC dropdown (or editing the Completion date) flickered — the value blanked, then ~1-3 min later popped BACK to the OLD value; some cleared PICs needed removing twice. Patched 8× via the `recentlyPatchedRef` pin without ever sticking. Owner: "我已经 remove 了,可是它又跳回来…甚至有一些需要我 remove 第二次才行".
+
+Root cause: THREE layers. (1) After a write, the cached LIST refetch served the `production_orders_list_snapshot` (withSnapshot, staleWhileRevalidate) which kept handing back the PRE-write row for the rebuild window — the pin alone didn't reliably outlast it. (2) Clearing a PIC stored `""` not NULL (`updated.pic1Id ?? null` doesn't catch `""`), and `piecesDone` counts `piece_pics WHERE pic1Id IS NOT NULL`, so an empty-string stamp still read as "present". (3) A PIC-only removal never cleared the matching `piece_pics` scan stamp (that propagation was gated on `completedDate`), so completion re-derived the old PIC.
+
+Fix: `src/api/routes/production-orders.ts` + `src/pages/production/index.tsx`. (a) New cache-bypassing single-PO read `GET /api/production-orders/:id?fresh=1` (`fetchFreshMinimalPO`) — reads the one PO + its job_cards straight from the DB (no KV, no snapshot, no serve-stale), in the same minimal shape the list returns. (b) PIC clear now stores real NULL (pic1Id/pic1Name = null), and a PIC removal UNCONDITIONALLY clears the matching `piece_pics` stamp (scoped `WHERE picXId = <old>`, gated `!swapHandledRemoval` so it never double-runs with the completed-card swap branch). (c) Frontend: after a PIC/Completion write, `mergeFreshPOs` fetches `?fresh=1` for that PO, merges the authoritative row in, and pins from the FRESH values so the stale list refetch can't clobber it. Drafts buffer + May-12 transient-retry untouched; due-date / racking keep the pin-only path.
+
+Verification: live on prod — cleared SO-2605-304's Fab Sew PIC via the same `applyPoUpdate` path: `?fresh=1` returned `pic1Id: null` (cleared, real NULL) while the list snapshot STILL returned "PHYU SIN MOE" (the stale value that used to pop back); then restored cleanly. Endpoint live-checked: 200, 14 job cards, `X-Cache: BYPASS`, Customer SO enrichment intact. typecheck + eslint + 650 tests green. NOTE: a same-session duplicate of BUG-2026-06-10-003 (a `periodWorkingDays` today-cap in employees.tsx) was committed then reverted on realising that fix had already shipped — single source of truth kept.
+
+---
+
 ## BUG-2026-06-10-003 — Labor Cost "unlogged hours" data gap counted FUTURE days as short (false short)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). typecheck:app + build green; effect verified live (June total short 6,138h → 387h).

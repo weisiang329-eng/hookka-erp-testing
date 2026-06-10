@@ -34,6 +34,14 @@ export type DOPrintExtras = {
       divanHeightInches: number | null;
       legHeightInches: number | null;
       totalHeightInches: number | null;
+      // Packing completion date — set only when EVERY PACKING job card of
+      // the line's PO is done (matches the on-screen Packed column);
+      // null/absent = not fully packed yet.
+      packedDate?: string | null;
+      // Warehouse rack per component type, racks pre-sorted numerically,
+      // e.g. [{ label: "HB", racks: ["Rack 3"] },
+      //       { label: "DIVAN", racks: ["Rack 3", "Rack 20"] }].
+      componentRacks?: { label: string; racks: string[] }[];
     }
   >;
 };
@@ -83,6 +91,29 @@ function fmtPieces(pieces?: string | null): { text: string; total: number } {
       .join("  +  "),
     total,
   };
+}
+
+// componentRacks -> "HB: Rack 3 · DIVAN: Rack 3, 20" for the packing-list
+// manifest. The stored rackingNumber values carry the "Rack " prefix
+// themselves (rack_locations catalog: "Rack 1"…"Rack 20"), so strip it per
+// value and print it once per group — "Rack 3, 20", never "Rack Rack 3".
+// Legacy bare numbers ("3") group the same way; anything else prints raw.
+function fmtComponentRacks(
+  componentRacks?: { label: string; racks: string[] }[] | null,
+): string {
+  if (!componentRacks || componentRacks.length === 0) return "";
+  const parts: string[] = [];
+  for (const cr of componentRacks) {
+    const racks = (cr.racks || []).map((r) => String(r).trim()).filter(Boolean);
+    if (racks.length === 0) continue;
+    const stripped = racks.map((r) => r.replace(/^rack\s*/i, "").trim() || r);
+    const groupable =
+      racks.some((r) => /^rack\b/i.test(r)) ||
+      stripped.every((s) => /^\d+$/.test(s));
+    const txt = groupable ? `Rack ${stripped.join(", ")}` : racks.join(", ");
+    parts.push(`${cr.label}: ${txt}`);
+  }
+  return parts.join(" · ");
 }
 
 // Tally a set of items into a component map (HB / DIVAN / SOFA / ITEM) from
@@ -708,27 +739,39 @@ function renderPackingSummary(
   // Group DOs into drops by delivery LOCATION: same customer + same hub = one
   // drop (two/three DOs to the same place are still one stop). A new drop only
   // when the customer differs, or the same customer ships to a different hub.
+  // 2026-06-11 owner rule: a DROP = one REAL delivery address. Several DOs
+  // (even different customers / hubs — "hub" is just the customer's label)
+  // going to the SAME address are ONE physical stop, matching the Packing
+  // List table's Stops + the one-trip Cost. DOs with no address fall back to
+  // customer+hub grouping so unrelated blank-address DOs don't merge.
+  const normDropAddr = (raw: string | null | undefined): string =>
+    (raw ?? "").trim().replace(/\s+/g, " ").toLowerCase();
   const dropGroups: {
-    customer: string;
-    hub: string;
-    state: string;
+    customers: string[];
+    hubs: string[];
+    states: string[];
     dos: typeof list;
   }[] = [];
   const dropIndex = new Map<string, number>();
   for (const o of list) {
-    const key = `${(o.customerName || "").trim().toLowerCase()}::${(o.hubName || "").trim().toLowerCase()}`;
+    const addrKey = normDropAddr(o.deliveryAddress);
+    const key = addrKey
+      ? `addr::${addrKey}`
+      : `ch::${(o.customerName || "").trim().toLowerCase()}::${(o.hubName || "").trim().toLowerCase()}`;
     let idx = dropIndex.get(key);
     if (idx === undefined) {
       idx = dropGroups.length;
       dropIndex.set(key, idx);
-      dropGroups.push({
-        customer: o.customerName || "-",
-        hub: o.hubName || "-",
-        state: o.customerState || "",
-        dos: [],
-      });
+      dropGroups.push({ customers: [], hubs: [], states: [], dos: [] });
     }
-    dropGroups[idx].dos.push(o);
+    const g = dropGroups[idx];
+    const cust = o.customerName || "-";
+    if (!g.customers.includes(cust)) g.customers.push(cust);
+    const hub = o.hubName || "-";
+    if (!g.hubs.includes(hub)) g.hubs.push(hub);
+    const st = o.customerState || "";
+    if (st && !g.states.includes(st)) g.states.push(st);
+    g.dos.push(o);
   }
 
   let y = 38;
@@ -812,7 +855,7 @@ function renderPackingSummary(
     doc.setFont("helvetica", "bold");
     doc.setFontSize(9.5);
     doc.text(
-      `DROP ${gi + 1}  ·  ${g.customer}  —  ${g.hub}${g.state ? ` (${g.state})` : ""}`,
+      `DROP ${gi + 1}  ·  ${g.customers.join(" + ")}  —  ${g.hubs.join(", ")}${g.states.length ? ` (${g.states.join("/")})` : ""}`,
       m + 2.5,
       y + 5.4,
     );
@@ -861,6 +904,31 @@ function renderPackingSummary(
       doc.text(addr, m, y);
       y += addr.length * 3.6 + 1.5;
 
+      // Per-row rack sub-line for the Quantity cell ("HB: Rack 3 · DIVAN:
+      // Rack 3, 20"). autotable cells are single-font, so the small grey
+      // line is drawn by hand: didParseCell reserves the extra height,
+      // didDrawCell draws it bottom-anchored under the pieces text.
+      const QTY_WRAP_W = 34 - 3.6; // Quantity col width minus L/R padding
+      const LH_MAIN = 3.05; // 7.5pt × 1.15 line height, in mm
+      const LH_RACK = 2.55; // 6.2pt × 1.15 line height, in mm
+      const rowExtras = items.map((it) => {
+        const ex = exDo?.items?.[it.id];
+        const rackTxt = fmtComponentRacks(ex?.componentRacks);
+        if (!rackTxt) return null;
+        const rackLines = doc.splitTextToSize(rackTxt, QTY_WRAP_W, {
+          fontSize: 6.2,
+        }) as string[];
+        const fp = fmtPieces(ex?.pieces);
+        const qtyTxt = fp.text || String(it.quantity ?? 0);
+        const piecesLines = (
+          doc.splitTextToSize(qtyTxt, QTY_WRAP_W, { fontSize: 7.5 }) as string[]
+        ).length;
+        return {
+          rackLines,
+          minH: 2.4 + piecesLines * LH_MAIN + rackLines.length * LH_RACK + 0.8,
+        };
+      });
+
       autoTable(doc, {
         startY: y,
         margin: { left: m, right: m },
@@ -870,6 +938,7 @@ function renderPackingSummary(
             "Order (PO / SO / Ref)",
             "Description",
             "Quantity",
+            { content: "Packed", styles: { halign: "center" } },
             { content: "Total", styles: { halign: "right" } },
           ],
         ],
@@ -896,6 +965,9 @@ function renderPackingSummary(
             `PO: ${po || "-"}\nSO: ${so || "-"}\nREF: ${ref || "-"}`,
             desc,
             fp.text || String(it.quantity ?? 0),
+            // Packed = the date the PO's LAST packing card completed;
+            // "—" = at least one component not packed yet.
+            ex?.packedDate ? fmtDate(ex.packedDate) : "—",
             String(fp.total || it.quantity || 0),
           ];
         }) as RowInput[],
@@ -918,9 +990,37 @@ function renderPackingSummary(
           1: { cellWidth: 30, fontSize: 6.5 },
           2: { cellWidth: "auto" },
           3: { cellWidth: 34 },
-          4: { cellWidth: 14, halign: "right" },
+          4: { cellWidth: 18, fontSize: 6.5, halign: "center" },
+          5: { cellWidth: 14, halign: "right" },
         },
         rowPageBreak: "avoid",
+        didParseCell: (data) => {
+          // Reserve room under the pieces text for the small rack line.
+          if (data.section !== "body" || data.column.index !== 3) return;
+          const rx = rowExtras[data.row.index];
+          if (rx) {
+            data.cell.styles.minCellHeight = Math.max(
+              data.cell.styles.minCellHeight || 0,
+              rx.minH,
+            );
+          }
+        },
+        didDrawCell: (data) => {
+          // Rack location line, small + grey, bottom-anchored in the
+          // Quantity cell so it never collides with the pieces text above.
+          if (data.section !== "body" || data.column.index !== 3) return;
+          const rx = rowExtras[data.row.index];
+          if (!rx || rx.rackLines.length === 0) return;
+          const x = data.cell.x + 1.8;
+          const yLast = data.cell.y + data.cell.height - 1.8;
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(6.2);
+          doc.setTextColor(...FAINT);
+          rx.rackLines.forEach((ln, i) =>
+            doc.text(ln, x, yLast - (rx.rackLines.length - 1 - i) * LH_RACK),
+          );
+          doc.setTextColor(...INK);
+        },
       });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       y = ((doc as any).lastAutoTable?.finalY ?? y) + 4;

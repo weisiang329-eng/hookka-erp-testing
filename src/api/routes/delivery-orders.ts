@@ -3302,14 +3302,26 @@ app.get("/:id/print-extras", async (c) => {
   // Postgres compat layer, so customerSO came back blank even when it
   // exists. Resolve from a clean sales_orders query keyed by SO no. / id.
   const diSoById = new Map<string, string>();
+  // di.id -> production order id. Fetched via this clean single-table query
+  // (NOT an alias on the big multi-join above — renamed aliases there don't
+  // round-trip the Postgres compat layer, see the soRef comment below).
+  // Join key for the per-component PACKING job-card read further down.
+  const diPoById = new Map<string, string>();
   {
     const diRes = await c.var.DB.prepare(
-      "SELECT id, salesOrderNo FROM delivery_order_items WHERE deliveryOrderId = ?",
+      "SELECT id, salesOrderNo, productionOrderId FROM delivery_order_items WHERE deliveryOrderId = ?",
     )
       .bind(id)
-      .all<{ id: string; salesOrderNo: string | null }>();
-    for (const dr of diRes.results ?? [])
-      if (dr.id) diSoById.set(dr.id, dr.salesOrderNo || "");
+      .all<{
+        id: string;
+        salesOrderNo: string | null;
+        productionOrderId: string | null;
+      }>();
+    for (const dr of diRes.results ?? []) {
+      if (!dr.id) continue;
+      diSoById.set(dr.id, dr.salesOrderNo || "");
+      if (dr.productionOrderId) diPoById.set(dr.id, dr.productionOrderId);
+    }
   }
   const soKeys = Array.from(
     new Set(
@@ -3353,6 +3365,42 @@ app.get("/:id/print-extras", async (c) => {
       };
       for (const k of [s.companySOId, s.companySO, s.id])
         if (k) soRef.set(k, v);
+    }
+  }
+
+  // Per-component PACKING job cards for the DO's production orders — the
+  // ONLY place the per-component rack + packing completion live (one PACKING
+  // JC per top-level component, each with its own rackingNumber +
+  // completedDate; production_orders.rackingNumber is a lossy last-writer
+  // mirror, so it is deliberately NOT used here). One bulk read for all POs.
+  type PackingJcRow = {
+    productionOrderId: string | null;
+    wipType: string | null;
+    wipLabel: string | null;
+    rackingNumber: string | null;
+    completedDate: string | null;
+    status: string | null;
+  };
+  const packingJcsByPo = new Map<string, PackingJcRow[]>();
+  {
+    const poIds = Array.from(new Set(diPoById.values()));
+    if (poIds.length > 0) {
+      const ph = poIds.map(() => "?").join(",");
+      const jcRes = await c.var.DB.prepare(
+        `SELECT productionOrderId, wipType, wipLabel, rackingNumber,
+                completedDate, status
+           FROM job_cards
+          WHERE departmentCode = 'PACKING' AND productionOrderId IN (${ph})`,
+      )
+        .bind(...poIds)
+        .all<PackingJcRow>();
+      for (const jc of jcRes.results ?? []) {
+        const pid = jc.productionOrderId || "";
+        if (!pid) continue;
+        const list = packingJcsByPo.get(pid);
+        if (list) list.push(jc);
+        else packingJcsByPo.set(pid, [jc]);
+      }
     }
   }
 
@@ -3454,6 +3502,14 @@ app.get("/:id/print-extras", async (c) => {
       divanHeightInches: number | null;
       legHeightInches: number | null;
       totalHeightInches: number | null;
+      // Packing completion date — set ONLY when every PACKING JC of the
+      // line's PO is COMPLETED/TRANSFERRED (latest completedDate); null =
+      // not fully packed. Matches the on-screen Packed column (mapPO).
+      packedDate: string | null;
+      // Warehouse rack per component type, e.g.
+      // [{ label: "HB", racks: ["Rack 3"] },
+      //  { label: "DIVAN", racks: ["Rack 3", "Rack 20"] }].
+      componentRacks: { label: string; racks: string[] }[];
     }
   > = {};
   for (const r of itRes.results ?? []) {
@@ -3500,6 +3556,68 @@ app.get("/:id/print-extras", async (c) => {
           Number(r.quantity) || 1,
         )
       : null;
+    // Packed date + per-component racks from the PO's PACKING job cards.
+    // Same rule as the on-screen Packed column (delivery/index.tsx mapPO):
+    // every PACKING card done ⇒ latest completedDate; any open card ⇒ null.
+    // HB-only BEDFRAME specials ignore stranded DIVAN packing cards (and
+    // their racks — a component that isn't shipping has no load location).
+    let packedDate: string | null = null;
+    const componentRacks: { label: string; racks: string[] }[] = [];
+    const packJcs = packingJcsByPo.get(diPoById.get(r.id) || "") ?? [];
+    if (packJcs.length > 0) {
+      const hbOnly =
+        (itemCategory || "").toUpperCase() === "BEDFRAME" &&
+        isHeadboardOnlySpecial(specialOrder);
+      const pk = packJcs.filter(
+        (j) => !hbOnly || (j.wipType || "").toUpperCase() !== "DIVAN",
+      );
+      if (
+        pk.length > 0 &&
+        pk.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")
+      ) {
+        const dates = pk
+          .map((j) => j.completedDate)
+          .filter((dd): dd is string => !!dd);
+        packedDate = dates.length > 0 ? dates.sort().reverse()[0] : null;
+      }
+      // Group distinct racks by component label — the same label mapping
+      // piecesFor uses (HEADBOARD→HB, DIVAN→DIVAN, else wipLabel/wipType).
+      const racksByLabel = new Map<string, string[]>();
+      const labelOrder: string[] = [];
+      for (const j of pk) {
+        const rack = (j.rackingNumber || "").trim();
+        if (!rack) continue;
+        const t = (j.wipType || "").toUpperCase();
+        const label =
+          t === "HEADBOARD"
+            ? "HB"
+            : t === "DIVAN"
+              ? "DIVAN"
+              : (j.wipLabel || j.wipType || "PC").trim();
+        let bucket = racksByLabel.get(label);
+        if (!bucket) {
+          bucket = [];
+          racksByLabel.set(label, bucket);
+          labelOrder.push(label);
+        }
+        if (!bucket.includes(rack)) bucket.push(rack);
+      }
+      // HB first, DIVAN second, the rest in first-seen order — matches the
+      // pieces-string ordering fmtPieces prints. Racks sort numerically so
+      // "Rack 3" lands before "Rack 20".
+      const labRank = (lab: string) =>
+        lab === "HB" ? 0 : lab === "DIVAN" ? 1 : 2;
+      labelOrder.sort((a, b) => labRank(a) - labRank(b));
+      const rackNum = (s: string) => {
+        const mm = s.match(/\d+/);
+        return mm ? Number(mm[0]) : Number.POSITIVE_INFINITY;
+      };
+      for (const label of labelOrder) {
+        const racks = racksByLabel.get(label)!;
+        racks.sort((a, b) => rackNum(a) - rackNum(b) || a.localeCompare(b));
+        componentRacks.push({ label, racks });
+      }
+    }
     items[r.id] = {
       itemCategory,
       customerPOId,
@@ -3512,6 +3630,8 @@ app.get("/:id/print-extras", async (c) => {
       divanHeightInches: d,
       legHeightInches: l,
       totalHeightInches: total,
+      packedDate,
+      componentRacks,
     };
   }
   return c.json({

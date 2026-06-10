@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-10-003 — Labor Cost "unlogged hours" data gap counted FUTURE days as short (false short)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). typecheck:app + build green; effect verified live (June total short 6,138h → 387h).
+**Category:** ui-frontend
+
+Symptom: on the Labor Cost tab, the "Factory workers with unlogged hours (data gap)" section computed Expected hours over the ENTIRE selected range. Selecting a not-yet-finished month (e.g. June 1–30 on the 10th) counted every working day INCLUDING future / not-yet-worked days (25 working days → 225h expected per worker), so everyone showed a huge "Short hrs" that was false. Owner: "后面都没开工…那就不要做成 short 了" / "我怎么知道是真的 short 还是假的 short".
+
+Root cause: `src/pages/employees.tsx` `rangeHoursGap` useMemo summed `expectedHours += stdHours` for every date in `periodWorkingDays` (the raw from→to range, no today/grace cap). The per-worker drill-down already applied a 2-working-day grace cutoff (mirroring the engine's `absenceCutoffDay`), but the headline Expected/Short ignored it.
+
+Fix: cap the headline at the same cutoff — compute `cutoffIso` = the date 2 working days before today (holiday-aware) and `if (date > cutoffIso) continue;` in the rangeHoursGap loop, so Expected/Short only count days that have ELAPSED and cleared the grace. Future + too-recent days no longer inflate short hours. Also made the section collapsible (chevron toggle on the heading). DISPLAY-ONLY — feeds no payslip / payroll_hour_deductions / labor-cost bucket, so reconciliation totals are unchanged.
+
+Verification: live replication on June prod data — total short dropped from **6,138h** (all 25 working days) to **387h** (the 6 elapsed+confirmed days, June 2–8). typecheck:app + build green. Shipped to prod with the day-typed OT + Emp No + Hours-clear batch.
+
+---
+
 ## BUG-2026-06-10-002 — Working Hours grid: the Hours cell snapped back to 0 (couldn't be cleared)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). typecheck:app + build + 649 tests green.

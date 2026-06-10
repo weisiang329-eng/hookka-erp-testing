@@ -211,16 +211,22 @@ async function computePackingListMoney(
 
   // Resolve ONE DO's rate with the write-path precedence: vehicle over provider.
   // Returns a stable key (so we can pick the 3PL the most DOs share) + the rate.
+  // A rate pair of 0/0 means "never set in 3PL Maintenance", NOT "free" — a
+  // vehicle without rates must fall through to its company's rates instead of
+  // masking them (live PLs were showing RM 0.00), and when neither side has
+  // rates we return null so the column shows "—" rather than a free trip.
+  const hasRate = (r: RatePair): boolean =>
+    r.ratePerTripSen > 0 || r.ratePerExtraDropSen > 0;
   const rateForDo = (d: PlDoRow): { key: string; rate: RatePair } | null => {
     const vid = (d.vehicleId || "").trim();
     if (vid) {
       const r = vehicleRates.get(vid);
-      if (r) return { key: `v:${vid}`, rate: r };
+      if (r && hasRate(r)) return { key: `v:${vid}`, rate: r };
     }
     const pid = (d.driverId || "").trim();
     if (pid) {
       const r = providerRates.get(pid);
-      if (r) return { key: `p:${pid}`, rate: r };
+      if (r && hasRate(r)) return { key: `p:${pid}`, rate: r };
     }
     return null;
   };

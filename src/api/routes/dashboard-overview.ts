@@ -177,11 +177,11 @@ app.get("/", async (c) => {
     //   - All-time            → bounds unused (each widget keeps its own
     //                           rolling window: last 12 weeks / 7 days /
     //                           7 working days).
-    //   - Current month       → [1st .. yesterday], matching the existing
-    //                           "ending yesterday" convention. If today is
-    //                           the 1st there is no complete day yet, so the
-    //                           end clamps below the start and the window is
-    //                           empty (correct: nothing finished this month).
+    //   - Current month       → [1st .. TODAY]. Owner request 2026-06-10
+    //                           ("今天明明已经是 10 号了,为什么还没有呈现 10 号
+    //                           的数据") — the chart/list must include the
+    //                           in-progress day, not stop at yesterday.
+    //                           Today's point simply grows as the day fills.
     //   - Past month          → [1st .. last calendar day of that month].
     const monthScope = (() => {
       if (period === "all") return null;
@@ -189,10 +189,11 @@ app.get("/", async (c) => {
       const mo = Number(period.slice(5, 7)); // 1-12
       const first = fmtISO(new Date(yr, mo - 1, 1));
       const lastDay = fmtISO(new Date(yr, mo, 0)); // day 0 of next month
+      const todayISO = fmtISO(new Date(today));
       const end = isPastMonth
         ? lastDay
-        : yesterdayISO < lastDay
-          ? yesterdayISO
+        : todayISO < lastDay
+          ? todayISO
           : lastDay;
       return { start: first, end, lastDay };
     })();

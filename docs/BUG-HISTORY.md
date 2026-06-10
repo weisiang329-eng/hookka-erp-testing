@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-10-005 — Production "Due Date" filter + Overdue keyed off the wrong date (production target, not the Our Expected DD the operator reads)
+
+**Status:** 🟢 Fixed + shipped to prod (2026-06-10, on main this session, deploy green). typecheck + eslint + 654 tests green; backend SQL reviewed line-by-line. **Live overdue-count / filter-matches-column verification PENDING owner's browser** (will confirm the count drops only for empty-DD / CO-origin POs).
+**Category:** production-orders
+
+Symptom: on Production Tracking, the top "Due Date" range filter never lined up with the "OUR EXPECTED DD" column the operator reads — filtering to a date returned a set that didn't match that column, and the Overdue badges used yet another basis. Owner: "Date filter 是 filter 什么东西呢?本来它应该是 filter our expected delivery date 才对啊".
+
+Root cause: the "OUR EXPECTED DD" column displays `sales_orders.hookkaExpectedDD` (the SO's expected delivery date, enriched at read time), but the top Due-Date range filter (`fetchFilteredPOs` / `fetchPaginatedPOs` overview window) and the Overview overdue rule (`/overdue-counts` + `utils.ts` `isOverduePO` / `earliestOverdueDateOnPO`) keyed off the PO's internal `targetEndDate` (production target). The SO date-cascade sets `targetEndDate = hookkaExpectedDD` ONLY when a DD is set; for empty-DD POs `targetEndDate = customerDD − buffer` (earlier), and CO-origin POs have no hookkaExpectedDD — so those rows were filtered / flagged-overdue against a date the operator never sees.
+
+Fix: `src/api/routes/production-orders.ts` + `src/pages/production/utils.ts`. Both overview Due-Date windows + the `/overdue-counts` Overview branch now key off hookkaExpectedDD via a correlated subquery `NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so WHERE so.id = <po>.salesOrderId), '')`. CO-origin (NULL salesOrderId) + undated SOs (NULL/'' DD) are KEPT by the filter (never dropped) and are NEVER overdue (can't be late against a date they don't have). Dept-tab date/overdue (per-dept `JC.dueDate`) unchanged. Added `sales_orders` to the overdue snapshot `sourceTables` so editing the SO DD rolls cached counts forward. Display/filter only — no scheduling / cost / targetEndDate writes. The Overdue count drops by exactly the empty-DD / CO-origin POs previously false-flagged. Shipped together with SO/PL/PO-number font normalization (those identifiers were monospace; now the normal UI font — 5 sites; the shared DataGrid `docno` cell already used `tabular-nums`).
+
+Verification: typecheck + eslint + 654 tests green; backend SQL reviewed (CO-origin/NULL handling, dept branches untouched, snapshot freshness). Live overdue-count + filter-matches-column verification to follow on the owner's browser.
+
+---
+
 ## BUG-2026-06-10-004 — Production Sheet PIC / Completion edits flickered back (cleared PIC popped to its old value)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). Live-verified on prod: a cleared PIC reads back real `null` via the new fresh endpoint while the list snapshot still served the old name — exactly the pop-back, now sidestepped. typecheck + eslint + 650 tests (incl. 6 new) green.

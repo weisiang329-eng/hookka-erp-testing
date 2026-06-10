@@ -558,6 +558,146 @@ app.get("/duedate-original-backup", async (c) => {
   return c.json({ generatedAt, count: rows.length, rows });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/job-cards/completion-pic-original-backup[?dept=UPHOLSTERY]
+//
+// READ-ONLY recovery diagnosis. Companion to /duedate-original-backup, but for
+// cleared COMPLETION DATES and PIC assignments (the cache/flicker + May-12
+// data-loss family). Every dashboard clear writes a job_card_events row whose
+// payload carries the OLD value:
+//   COMPLETED_DATE_CLEARED → { from: <old date> }
+//   PIC_CLEARED            → { slot: 'pic1'|'pic2', from: <old id>, fromName }
+// We surface the LATEST clear per (job card × field) and flag it `recoverable`
+// when the card's CURRENT value for that field is still blank — i.e. the clear
+// was never superseded by a later legitimate edit, so it's safe to restore.
+//
+// MUTATES NOTHING — pure read/dump. Optional ?dept=UPHOLSTERY narrows to one
+// department. Org-scoped through production_orders.orgId (job_card_events has
+// no orgId column), exactly like /duedate-original-backup.
+// ---------------------------------------------------------------------------
+type ClearBackupRow = {
+  jobCardId: string;
+  eventType: string;
+  payload: string;
+  ts: string;
+  actorName: string | null;
+  companySOId: string | null;
+  poNo: string | null;
+  departmentCode: string | null;
+  currentStatus: string | null;
+  currentCompletedDate: string | null;
+  currentPic1Id: string | null;
+  currentPic1Name: string | null;
+  currentPic2Id: string | null;
+  currentPic2Name: string | null;
+};
+
+app.get("/completion-pic-original-backup", async (c) => {
+  const denied = await requirePermission(c, "job-cards", "read");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+  const db = c.var.DB;
+  const dept = (c.req.query("dept") ?? "").toUpperCase(); // "" = all departments
+
+  const sql = `
+    SELECT
+      e.jobCardId          AS job_card_id,
+      e.eventType          AS event_type,
+      e.payload            AS payload,
+      e.ts                 AS ts,
+      e.actorName          AS actor_name,
+      po.companySOId       AS company_so_id,
+      po.poNo              AS po_no,
+      jc.departmentCode    AS department_code,
+      jc.status            AS current_status,
+      jc.completedDate     AS current_completed_date,
+      jc.pic1Id            AS current_pic1_id,
+      jc.pic1Name          AS current_pic1_name,
+      jc.pic2Id            AS current_pic2_id,
+      jc.pic2Name          AS current_pic2_name
+    FROM job_card_events e
+    JOIN production_orders po ON po.id = e.productionOrderId AND po.orgId = ?
+    LEFT JOIN job_cards jc    ON jc.id = e.jobCardId
+    WHERE e.eventType IN ('COMPLETED_DATE_CLEARED', 'PIC_CLEARED')
+    ORDER BY e.jobCardId, e.ts ASC
+  `;
+
+  const res = await db.prepare(sql).bind(orgId).all<ClearBackupRow>();
+  const raw = res.results ?? [];
+
+  // Keep the LATEST clear per (job card × field). Rows are sorted ts ASC, so a
+  // later clear naturally overwrites an earlier one in the map.
+  const latest = new Map<
+    string,
+    {
+      r: ClearBackupRow;
+      field: "completedDate" | "pic1" | "pic2";
+      oldValue: string;
+      oldName: string | null;
+    }
+  >();
+  for (const r of raw) {
+    if (dept && (r.departmentCode ?? "").toUpperCase() !== dept) continue;
+    const parsed = safeParseJson(r.payload) as
+      | { from?: unknown; slot?: unknown; fromName?: unknown }
+      | null;
+    if (!parsed || typeof parsed !== "object") continue;
+    const oldValue = parsed.from == null ? "" : String(parsed.from);
+    if (oldValue === "") continue; // nothing to restore
+    let field: "completedDate" | "pic1" | "pic2";
+    let oldName: string | null = null;
+    if (r.eventType === "COMPLETED_DATE_CLEARED") {
+      field = "completedDate";
+    } else {
+      field = parsed.slot === "pic2" ? "pic2" : "pic1";
+      oldName = parsed.fromName == null ? null : String(parsed.fromName);
+    }
+    latest.set(`${r.jobCardId}|${field}`, { r, field, oldValue, oldName });
+  }
+
+  const rows = Array.from(latest.values()).map(({ r, field, oldValue, oldName }) => {
+    const currentValue =
+      field === "completedDate"
+        ? r.currentCompletedDate
+        : field === "pic1"
+          ? r.currentPic1Id
+          : r.currentPic2Id;
+    const currentName =
+      field === "pic1"
+        ? r.currentPic1Name
+        : field === "pic2"
+          ? r.currentPic2Name
+          : null;
+    const recoverable = currentValue == null || currentValue === "";
+    return {
+      jobCardId: r.jobCardId,
+      companySOId: r.companySOId ?? null,
+      poNo: r.poNo ?? null,
+      departmentCode: r.departmentCode ?? null,
+      field,
+      oldValue,
+      oldName,
+      currentValue: currentValue ?? null,
+      currentName,
+      currentStatus: r.currentStatus ?? null,
+      clearedAt: r.ts,
+      actor: r.actorName ?? null,
+      recoverable,
+    };
+  });
+  rows.sort((a, b) => (a.companySOId ?? "").localeCompare(b.companySOId ?? ""));
+
+  return c.json({
+    success: true,
+    generatedAt: new Date().toISOString(),
+    dept: dept || "ALL",
+    total: rows.length,
+    recoverable: rows.filter((x) => x.recoverable).length,
+    rows,
+  });
+});
+
 // Quote a CSV cell only when needed (comma, quote, CR or LF), doubling any
 // embedded quotes per RFC 4180. Keeps simple values unquoted for readability.
 function csvCell(value: string | number | null | undefined): string {

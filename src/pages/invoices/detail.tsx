@@ -697,7 +697,7 @@ export default function InvoiceDetailPage() {
                           <td className="py-2.5 px-3 text-[#4B5563] align-top">
                             {item.sizeLabel}
                           </td>
-                          <td className="py-2.5 px-3 text-[#4B5563] align-top">
+                          <td className="py-2.5 px-3 text-[#4B5563] align-top whitespace-nowrap">
                             {item.fabricCode}
                           </td>
                           <td className="py-2.5 px-3 text-right font-medium text-[#1F1D1B] align-top">

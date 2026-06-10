@@ -1140,11 +1140,14 @@ app.get("/:id/print-extras", async (c) => {
   let customerSO = "";
   if (inv.salesOrderId) {
     const so = await c.var.DB.prepare(
-      "SELECT customerSO FROM sales_orders WHERE id = ?",
+      "SELECT customerSO, customerSOId FROM sales_orders WHERE id = ?",
     )
       .bind(inv.salesOrderId)
-      .first<{ customerSO: string | null }>();
-    customerSO = so?.customerSO ?? "";
+      .first<{ customerSO: string | null; customerSOId: string | null }>();
+    // The customer's SO reference lives in customerSOId; customerSO is a mostly-
+    // empty legacy column after the SO-field migration. Prefer the populated one
+    // (mirrors how the customer PO is read from customerPOId, not customerPO).
+    customerSO = so?.customerSOId || so?.customerSO || "";
   }
   let customerRef = "";
   if (inv.deliveryOrderId) {
@@ -1202,6 +1205,7 @@ app.get("/:id/print-extras", async (c) => {
     companySO: string | null;
     customerPO: string | null;
     customerSO: string | null;
+    customerSOId: string | null;
     reference: string | null;
   };
   const soRefByKey = new Map<string, SoRef>();
@@ -1209,7 +1213,7 @@ app.get("/:id/print-extras", async (c) => {
     const seeds = Array.from(soIdSeeds);
     const ph = seeds.map(() => "?").join(",");
     const soRes = await c.var.DB.prepare(
-      `SELECT id, companySO, companySOId, customerPO, customerSO, reference
+      `SELECT id, companySO, companySOId, customerPO, customerSO, customerSOId, reference
          FROM sales_orders
         WHERE id IN (${ph}) OR companySOId IN (${ph}) OR companySO IN (${ph})`,
     )
@@ -1220,6 +1224,7 @@ app.get("/:id/print-extras", async (c) => {
         companySOId: string | null;
         customerPO: string | null;
         customerSO: string | null;
+        customerSOId: string | null;
         reference: string | null;
       }>();
     for (const s of soRes.results ?? []) {
@@ -1231,6 +1236,7 @@ app.get("/:id/print-extras", async (c) => {
         companySO: s.companySOId ?? s.companySO ?? null,
         customerPO: s.customerPO ?? null,
         customerSO: s.customerSO ?? null,
+        customerSOId: s.customerSOId ?? null,
         reference: s.reference ?? null,
       };
       for (const k of [s.id, s.companySOId, s.companySO])
@@ -1372,7 +1378,7 @@ app.get("/:id/print-extras", async (c) => {
         soRefByKey.get(d.salesOrderNo || "");
       const rv: RefVal = {
         customerPOId: d.customerPOId || so?.customerPO || null,
-        customerSOLine: so?.customerSO || null,
+        customerSOLine: so?.customerSOId || so?.customerSO || null,
         customerRefLine: d.customerReference || so?.reference || null,
         companySO:
           so?.companySO || d.companySOId || d.salesOrderNo || null,

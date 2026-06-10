@@ -105,6 +105,31 @@ type Worker = {
   efficiencyThresholdPct?: number;
 };
 
+// Day-typed OT multipliers (owner spec 2026-06-10) for the COST side — mirror
+// SUNDAY_OT_MULTIPLIER / HOLIDAY_OT_MULTIPLIER in labor-engine.ts so the logged
+// labor cost values Sunday / public-holiday OT the SAME way payroll pays it.
+const OT_SUNDAY_MULTIPLIER = 2;
+const OT_HOLIDAY_MULTIPLIER = 3;
+// Classify a logged day → its OT hours + multiplier:
+//   • Sunday         → every logged hour is OT at 2× (rest-day premium).
+//   • public holiday → every logged hour is OT at 3×.
+//   • weekday        → only hours above the standard day, at the worker's mult.
+// A holiday that falls on a Sunday is treated as a Sunday (Sunday checked first).
+// Date is parsed from its y/m/d ints (timezone-agnostic), matching the engine.
+function dayTypedOt(
+  date: string,
+  holidays: readonly string[],
+  totalH: number,
+  stdHours: number,
+  weekdayMult: number,
+): { otHours: number; mult: number } {
+  const [yy, mm, dd] = date.split("-").map(Number);
+  const dow = new Date(yy, (mm || 1) - 1, dd || 1).getDay();
+  if (dow === 0) return { otHours: totalH, mult: OT_SUNDAY_MULTIPLIER };
+  if (holidays.includes(date))
+    return { otHours: totalH, mult: OT_HOLIDAY_MULTIPLIER };
+  return { otHours: Math.max(0, totalH - stdHours), mult: weekdayMult };
+}
 type PayslipData = {
   id: string;
   employeeId: string;
@@ -4289,14 +4314,17 @@ function DepartmentLaborTab({
       const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      const otTotalH = Math.max(0, totalH - stdHours);
-      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+      // Day-typed OT (owner spec 2026-06-10): Sunday → all hours at 2×, public
+      // holiday → all hours at 3×, weekday → hours above the standard day at the
+      // worker's multiplier — mirrors labor-engine.ts so cost ties to paid OT.
+      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult);
+      const otShare = totalH > 0 ? otDay.otHours / totalH : 0;
 
       for (const e of segs) {
         const hours = Number(e.hours) || 0;
         const otH = hours * otShare;
         const regularH = hours - otH;
-        const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        const cost = regularH * regularRateSen + otH * otBaseRateSen * otDay.mult;
         // Same branch as Labor Cost: when a category filter is on, only
         // count entries tagged with that category; entries with empty
         // category (non-production depts) always pass through.
@@ -4381,16 +4409,18 @@ function DepartmentLaborTab({
           // from the gap so it stays pure under-recorded hours. (The dept TOTAL
           // already reflects the paid OT via the gross+statutory `extra` above.)
           const ow = workerById.get(wid);
-          const otH = Number(p.otWeekdayHours) || 0;
-          const otCostSen =
-            otH > 0
-              ? Math.round(
-                  ((otH * (Number(p.basicSalary) || 0)) /
-                    (ow && ow.workingDaysPerMonth > 0 ? ow.workingDaysPerMonth : 26) /
-                    (ow && ow.workingHoursPerDay > 0 ? ow.workingHoursPerDay : 9)) *
-                    (ow && ow.otMultiplier && ow.otMultiplier > 0 ? ow.otMultiplier : 1.5),
-                )
-              : 0;
+          // Day-typed OT cost at ÷stdHours (weekday×mult + Sunday×2 + holiday×3),
+          // matching the logged bucket; otAdj bridges to the day-typed paid OT so
+          // the gap stays pure under-recorded hours.
+          const owMult = ow && ow.otMultiplier && ow.otMultiplier > 0 ? ow.otMultiplier : 1.5;
+          const owStd = ow && ow.workingHoursPerDay > 0 ? ow.workingHoursPerDay : 9;
+          const owDays = ow && ow.workingDaysPerMonth > 0 ? ow.workingDaysPerMonth : 26;
+          const otCostSen = Math.round(
+            ((Number(p.otWeekdayHours) || 0) * owMult +
+              (Number(p.otSundayHours) || 0) * OT_SUNDAY_MULTIPLIER +
+              (Number(p.otPHHours) || 0) * OT_HOLIDAY_MULTIPLIER) *
+              ((Number(p.basicSalary) || 0) / owDays / owStd),
+          );
           const otAdj = (Number(p.totalOT) || 0) - otCostSen;
           // Round each worker's gap to whole sen BEFORE summing — identical to
           // the Labor Cost tab — so per-dept rows add up to the same grand total
@@ -7346,14 +7376,17 @@ function LaborCostTab({
       const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      const otTotalH = Math.max(0, totalH - stdHours);
-      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+      // Day-typed OT (owner spec 2026-06-10): Sunday → all hours at 2×, public
+      // holiday → all hours at 3×, weekday → hours above the standard day at the
+      // worker's multiplier — mirrors labor-engine.ts so cost ties to paid OT.
+      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult);
+      const otShare = totalH > 0 ? otDay.otHours / totalH : 0;
 
       for (const e of segs) {
         const hours = Number(e.hours) || 0;
         const otH = hours * otShare;
         const regularH = hours - otH;
-        const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        const cost = regularH * regularRateSen + otH * otBaseRateSen * otDay.mult;
         // Defensive uppercase normalize so any pre-migration lower-case
         // rows in working_hour_entries.category still compare correctly.
         const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as Category;
@@ -7502,17 +7535,26 @@ function LaborCostTab({
   const otAdjustmentByPayslip = useMemo(() => {
     const m = new Map<string, number>();
     for (const p of reconPayslips) {
-      const otHours = Number(p.otWeekdayHours) || 0;
-      if (otHours <= 0) continue;
+      // Day-typed OT cost at the ÷stdHours production rate — the SAME weighting
+      // the logged cost buckets now use (weekday×mult + Sunday×2 + holiday×3).
+      // The adjustment then bridges this to the day-typed PAID OT (p.totalOT, at
+      // ÷10), so the Sunday/holiday premium lands on the worker's department line
+      // instead of silently in the Overhead plug.
+      const wkH = Number(p.otWeekdayHours) || 0;
+      const sunH = Number(p.otSundayHours) || 0;
+      const phH = Number(p.otPHHours) || 0;
+      if (wkH + sunH + phH <= 0) continue;
       const w = p.employeeId ? workersById.get(p.employeeId) : undefined;
       const mult = w && w.otMultiplier && w.otMultiplier > 0 ? w.otMultiplier : 1.5;
       const stdHours = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w && w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
+      const otBaseSen = (Number(p.basicSalary) || 0) / monthDays / stdHours;
       const costOtSen = Math.round(
-        ((otHours * (Number(p.basicSalary) || 0)) / monthDays / stdHours) * mult,
+        (wkH * mult + sunH * OT_SUNDAY_MULTIPLIER + phH * OT_HOLIDAY_MULTIPLIER) *
+          otBaseSen,
       );
       const paidOtSen = Number(p.totalOT) || 0;
-      const adj = paidOtSen - costOtSen; // negative now (÷10 pay < ÷9 cost)
+      const adj = paidOtSen - costOtSen;
       if (adj !== 0) m.set(p.id, adj);
     }
     return m;
@@ -7602,14 +7644,17 @@ function LaborCostTab({
       const otBaseRateSen = effSalarySen / monthDays / stdHours;
       const otMult = w.otMultiplier ?? 1.5;
       const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      const otTotalH = Math.max(0, totalH - stdHours);
-      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+      // Day-typed OT (owner spec 2026-06-10): Sunday → all hours at 2×, public
+      // holiday → all hours at 3×, weekday → hours above the standard day at the
+      // worker's multiplier — mirrors labor-engine.ts so cost ties to paid OT.
+      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult);
+      const otShare = totalH > 0 ? otDay.otHours / totalH : 0;
       let dayValue = 0;
       for (const e of segs) {
         const hours = Number(e.hours) || 0;
         const otH = hours * otShare;
         const regularH = hours - otH;
-        dayValue += regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        dayValue += regularH * regularRateSen + otH * otBaseRateSen * otDay.mult;
       }
       out.set(workerId, (out.get(workerId) ?? 0) + dayValue);
     }

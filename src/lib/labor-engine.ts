@@ -56,6 +56,14 @@ const FALLBACK_WORKING_DAYS_PER_MONTH = 26;
  */
 const RATE_HOURS_PER_DAY = 10;
 
+// Day-typed OT premium (owner spec 2026-06-10): a worker who comes in on a rest
+// day (Sunday) or a public holiday is paid the premium on EVERY hour from the
+// first — not just hours above the standard day. Weekday OT keeps the per-worker
+// otMultiplier (default 1.5). A public holiday that falls on a Sunday is treated
+// as a Sunday (2×), per the owner.
+const SUNDAY_OT_MULTIPLIER = 2;
+const HOLIDAY_OT_MULTIPLIER = 3;
+
 /**
  * A worker's maintained Employee Master figures. Everything the engine
  * needs about the person; no DB types leak in here so this module stays
@@ -271,13 +279,24 @@ export function computeAttendanceDayDetail(
     hoursByDate.set(row.date, (hoursByDate.get(row.date) ?? 0) + h);
   }
 
-  // Overtime days: any date whose summed hours exceed the worker's standard day.
-  // Same threshold rule computeMonthlyLabor applies; just retained per-date.
+  // Overtime days, DAY-TYPED — the same split computeMonthlyLabor pays, retained
+  // per-date so the worker's OT drill-down lists exactly the days they were paid
+  // OT for: Sunday / public holiday → the whole day is OT (premium); ordinary
+  // weekday → only the hours above the standard day.
   const otDays: Array<{ date: string; hours: number }> = [];
-  if (workingHoursPerDay > 0) {
-    for (const [date, h] of hoursByDate) {
-      if (h > workingHoursPerDay) otDays.push({ date, hours: h - workingHoursPerDay });
+  for (const [date, h] of hoursByDate) {
+    if (h <= 0) continue;
+    const [yy, mmN, dd] = date.split("-").map(Number);
+    const dow = new Date(yy, (mmN || 1) - 1, dd || 1).getDay();
+    let otH: number;
+    if (dow === 0 || holidaySet.has(date)) {
+      otH = h; // Sunday / public holiday → whole day at premium
+    } else if (workingHoursPerDay > 0 && h > workingHoursPerDay) {
+      otH = h - workingHoursPerDay; // weekday → hours above the standard day
+    } else {
+      otH = 0;
     }
+    if (otH > 0) otDays.push({ date, hours: otH });
   }
   otDays.sort((a, b) => a.date.localeCompare(b.date));
 
@@ -434,8 +453,14 @@ export type MonthlyLaborResult = {
   holidaysInMonth: number;
   /** Distinct dates the worker logged any hours. */
   daysWorked: number;
-  /** Total overtime hours (decimal) — hours above the worker's standard day. */
+  /** Total overtime hours (decimal) = weekday-above-standard + all Sunday + all holiday. */
   otHours: number;
+  /** OT hours on ordinary weekdays (Mon–Sat, non-holiday): hours above the standard day. */
+  otWeekdayHours: number;
+  /** OT hours on Sundays: EVERY logged hour (rest-day premium from hour 1). */
+  otSundayHours: number;
+  /** OT hours on public holidays (Mon–Sat): EVERY logged hour. */
+  otHolidayHours: number;
 
   /** Payroll day rate (÷ workingDaysPerMonth), in sen — may be fractional. */
   payrollDailyRateSen: number;
@@ -456,8 +481,14 @@ export type MonthlyLaborResult = {
     shortHourDeductionSen: number;
     /** Basic pay actually earned = full salary − absence − short-hour dock. */
     basicEarnedSen: number;
-    /** Overtime pay. */
+    /** Overtime pay (weekday + Sunday + holiday, day-typed multipliers). */
     otPaySen: number;
+    /** Weekday OT pay = weekday OT hours × otMultiplier × (÷26÷10). */
+    otWeekdayPaySen: number;
+    /** Sunday OT pay = all Sunday hours × 2 × (÷26÷10). */
+    otSundayPaySen: number;
+    /** Public-holiday OT pay = all holiday hours × 3 × (÷26÷10). */
+    otHolidayPaySen: number;
     /** Gross = basic earned + OT (before EPF/SOCSO/EIS/PCB). */
     grossSen: number;
   };
@@ -504,14 +535,33 @@ export function computeMonthlyLabor(
   }
   const daysWorked = hoursByDate.size;
 
-  // ── Overtime: per date, the hours above the worker's standard day.
-  //    Summed across the month. No threshold when hours/day is unset.
-  let otHours = 0;
-  if (workingHoursPerDay > 0) {
-    for (const h of hoursByDate.values()) {
-      if (h > workingHoursPerDay) otHours += h - workingHoursPerDay;
+  // ── Overtime, DAY-TYPED (owner spec 2026-06-10):
+  //    • weekday (Mon–Sat, not a public holiday): hours ABOVE the standard day.
+  //    • Sunday: EVERY logged hour that day (rest-day premium, from hour 1).
+  //    • public holiday (on a Mon–Sat): EVERY logged hour that day (× 3).
+  //    A public holiday that falls on a Sunday counts as a Sunday (Sunday wins).
+  //    Weekday OT keeps the per-worker otMultiplier; Sunday/holiday use the fixed
+  //    2× / 3× below. otHours stays the grand total (back-compat + worker My Pay).
+  //    Day-of-week is built from the date's y/m/d ints — matches the rest of the
+  //    engine (WORKING_DOW) and is timezone-agnostic.
+  const holidaySet =
+    publicHolidays instanceof Set ? publicHolidays : new Set(publicHolidays);
+  let otWeekdayHours = 0;
+  let otSundayHours = 0;
+  let otHolidayHours = 0;
+  for (const [date, h] of hoursByDate) {
+    if (h <= 0) continue;
+    const [yy, mm, dd] = date.split("-").map(Number);
+    const dow = new Date(yy, (mm || 1) - 1, dd || 1).getDay();
+    if (dow === 0) {
+      otSundayHours += h; // Sunday — whole day at 2× (wins over a holiday too)
+    } else if (holidaySet.has(date)) {
+      otHolidayHours += h; // public holiday on a weekday — whole day at 3×
+    } else if (workingHoursPerDay > 0 && h > workingHoursPerDay) {
+      otWeekdayHours += h - workingHoursPerDay; // ordinary weekday — above the standard day
     }
   }
+  const otHours = otWeekdayHours + otSundayHours + otHolidayHours;
 
   // ── Holidays + the two divisors.
   const holidaysInMonth = countPublicHolidaysInMonth(
@@ -547,7 +597,8 @@ export function computeMonthlyLabor(
   const daysInMonth = new Date(year, month, 0).getDate();
   const calendarDailyRateSen = basicSalarySen / daysInMonth; // absence /day (÷30/31)
   const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — the OT daily base
-  const otHourlyRateSen = (payrollDailyRateSen / RATE_HOURS_PER_DAY) * otMultiplier; // ÷26÷10×mult
+  const otBaseHourlyRateSen = payrollDailyRateSen / RATE_HOURS_PER_DAY; // ÷26÷10, before the day multiplier
+  const otHourlyRateSen = otBaseHourlyRateSen * otMultiplier; // weekday OT rate (÷26÷10×mult) — back-compat
   const lateHourlyRateSen = calendarDailyRateSen / RATE_HOURS_PER_DAY; // unpaid hour / lateness (÷calendar÷10)
   const costingDailyRateSen = basicSalarySen / costingDivisor;
 
@@ -597,7 +648,17 @@ export function computeMonthlyLabor(
       ? Math.round(workedWithinWindow * costingDailyRateSen)
       : Math.max(0, basicSalarySen - absenceDeductionSen)) - shortHourDeductionSen,
   );
-  const otPaySen = Math.round(otHours * otHourlyRateSen);
+  // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
+  // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
+  // 2×/3× on the base rate. Each bucket is rounded, then summed → otPaySen.
+  const otWeekdayPaySen = Math.round(otWeekdayHours * otHourlyRateSen);
+  const otSundayPaySen = Math.round(
+    otSundayHours * otBaseHourlyRateSen * SUNDAY_OT_MULTIPLIER,
+  );
+  const otHolidayPaySen = Math.round(
+    otHolidayHours * otBaseHourlyRateSen * HOLIDAY_OT_MULTIPLIER,
+  );
+  const otPaySen = otWeekdayPaySen + otSundayPaySen + otHolidayPaySen;
   const grossSen = basicEarnedSen + otPaySen;
 
   // ── Production labor cost side. Regular = days actually worked × the
@@ -610,6 +671,9 @@ export function computeMonthlyLabor(
     holidaysInMonth,
     daysWorked,
     otHours,
+    otWeekdayHours,
+    otSundayHours,
+    otHolidayHours,
     payrollDailyRateSen,
     otHourlyRateSen,
     costingDailyRateSen,
@@ -620,6 +684,9 @@ export function computeMonthlyLabor(
       shortHourDeductionSen,
       basicEarnedSen,
       otPaySen,
+      otWeekdayPaySen,
+      otSundayPaySen,
+      otHolidayPaySen,
       grossSen,
     },
     cost: {

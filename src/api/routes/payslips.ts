@@ -534,8 +534,10 @@ app.get("/projected", async (c) => {
       worker.workingHoursPerDay > 0
         ? Math.round(labor.payrollDailyRateSen / worker.workingHoursPerDay)
         : 0;
-    const otHoursWhole = Math.round(labor.otHours);
     // Build the SAME camelCase shape rowToPayslip returns — but in-memory.
+    // Day-typed OT (owner spec 2026-06-10): weekday / Sunday / public-holiday
+    // buckets — hours rounded for the INTEGER columns; money is the engine's
+    // exact per-bucket pay.
     data.push({
       id: `projected-${period}-${worker.id}`,
       employeeId: worker.id,
@@ -547,13 +549,13 @@ app.get("/projected", async (c) => {
       workingDays: worker.workingDaysPerMonth,
       absentDays: labor.payroll.absentDays,
       absenceDeductionSen: labor.payroll.absenceDeductionSen,
-      otWeekdayHours: otHoursWhole,
-      otSundayHours: 0,
-      otPHHours: 0,
+      otWeekdayHours: Math.round(labor.otWeekdayHours),
+      otSundayHours: Math.round(labor.otSundayHours),
+      otPHHours: Math.round(labor.otHolidayHours),
       hourlyRate,
-      otWeekdayAmount: labor.payroll.otPaySen,
-      otSundayAmount: 0,
-      otPHAmount: 0,
+      otWeekdayAmount: labor.payroll.otWeekdayPaySen,
+      otSundayAmount: labor.payroll.otSundayPaySen,
+      otPHAmount: labor.payroll.otHolidayPaySen,
       totalOT: labor.payroll.otPaySen,
       allowances,
       grossPay,
@@ -852,14 +854,14 @@ app.post("/", async (c) => {
       const bankAccount = `CIMB-${worker.empNo.replace("EMP-", "")}XXXX`;
 
       // Base hourly rate (full salary ÷ 26 ÷ hours/day) for the payslip's
-      // OT-calculation display. The engine returns ONE overtime figure —
-      // the operator's model is a single OT rate — so it goes in the
-      // weekday slot; the Sunday / public-holiday slots stay 0.
+      // OT-calculation display, day-typed (owner spec 2026-06-10): the engine
+      // splits OT into weekday / Sunday / public-holiday buckets. Hours are
+      // rounded for the INTEGER columns; the money is the engine's exact
+      // per-bucket pay (otWeekdayPaySen / otSundayPaySen / otHolidayPaySen).
       const hourlyRate =
         worker.workingHoursPerDay > 0
           ? Math.round(labor.payrollDailyRateSen / worker.workingHoursPerDay)
           : 0;
-      const otHoursWhole = Math.round(labor.otHours);
 
       const id = await nextPayslipId(c.var.DB, period);
       await c.var.DB.prepare(
@@ -892,13 +894,13 @@ app.post("/", async (c) => {
           worker.workingDaysPerMonth,
           labor.payroll.absentDays,
           labor.payroll.absenceDeductionSen,
-          otHoursWhole,
-          0,
-          0,
+          Math.round(labor.otWeekdayHours),
+          Math.round(labor.otSundayHours),
+          Math.round(labor.otHolidayHours),
           hourlyRate,
-          labor.payroll.otPaySen,
-          0,
-          0,
+          labor.payroll.otWeekdayPaySen,
+          labor.payroll.otSundayPaySen,
+          labor.payroll.otHolidayPaySen,
           labor.payroll.otPaySen,
           allowances,
           grossPay,

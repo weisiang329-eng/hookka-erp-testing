@@ -158,6 +158,92 @@ test("computeMonthlyLabor: ANN full attendance — payroll = RM2,879.33 (OT ÷26
   assert.equal(r.payroll.grossSen, 287_933); // 265000 + 22933 → RM2,879.33
 });
 
+// ── computeMonthlyLabor: day-typed OT — Sunday 2× / public holiday 3× ────────
+// Owner spec 2026-06-10: a worker who comes in on a rest day (Sunday) or a
+// public holiday is paid the premium on EVERY hour from the first; weekday OT
+// stays "hours above the standard day" at the per-worker multiplier (1.5×).
+// ANN base OT hour = 265000 ÷ 26 ÷ 10 = 1019.2308 sen.
+
+test("day-typed OT: weekday-only worker is unchanged + correctly bucketed", () => {
+  const r = labor.computeMonthlyLabor({
+    worker: ANN, year: 2026, month: 5,
+    days: annFullMonth, publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
+  });
+  assert.equal(r.otWeekdayHours, 15);
+  assert.equal(r.otSundayHours, 0);
+  assert.equal(r.otHolidayHours, 0);
+  assert.equal(r.otHours, 15);
+  assert.equal(r.payroll.otWeekdayPaySen, 22_933);
+  assert.equal(r.payroll.otSundayPaySen, 0);
+  assert.equal(r.payroll.otHolidayPaySen, 0);
+  assert.equal(r.payroll.otPaySen, 22_933); // identical to the flat-1.5× result
+});
+
+test("day-typed OT: Sunday work is the WHOLE day at 2× (from hour 1)", () => {
+  // 2026-05-03 is a Sunday. 8 hours → all 8 are Sunday OT (NOT 'above 8').
+  const r = labor.computeMonthlyLabor({
+    worker: ANN, year: 2026, month: 5,
+    days: [{ date: "2026-05-03", hours: 8 }],
+    publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
+  });
+  assert.equal(r.otSundayHours, 8);
+  assert.equal(r.otWeekdayHours, 0);
+  assert.equal(r.otHolidayHours, 0);
+  assert.equal(r.otHours, 8);
+  // 8h × 1019.2308 × 2 = 16307.69 → 16308 sen.
+  assert.equal(r.payroll.otSundayPaySen, 16_308);
+  assert.equal(r.payroll.otPaySen, 16_308);
+});
+
+test("day-typed OT: public-holiday work is the WHOLE day at 3×", () => {
+  // 2026-05-27 (Wed) is a public holiday. 8 hours → all 8 are holiday OT.
+  const r = labor.computeMonthlyLabor({
+    worker: ANN, year: 2026, month: 5,
+    days: [{ date: "2026-05-27", hours: 8 }],
+    publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
+  });
+  assert.equal(r.otHolidayHours, 8);
+  assert.equal(r.otSundayHours, 0);
+  assert.equal(r.otWeekdayHours, 0);
+  assert.equal(r.otHours, 8);
+  // 8h × 1019.2308 × 3 = 24461.54 → 24462 sen.
+  assert.equal(r.payroll.otHolidayPaySen, 24_462);
+  assert.equal(r.payroll.otPaySen, 24_462);
+});
+
+test("day-typed OT: a public holiday that falls on a Sunday counts as Sunday (2×)", () => {
+  // 2026-05-03 is a Sunday AND flagged a holiday here → Sunday wins → 2×, not 3×.
+  const r = labor.computeMonthlyLabor({
+    worker: ANN, year: 2026, month: 5,
+    days: [{ date: "2026-05-03", hours: 8 }],
+    publicHolidays: ["2026-05-03"], absenceThroughDay: 31,
+  });
+  assert.equal(r.otSundayHours, 8);
+  assert.equal(r.otHolidayHours, 0);
+  assert.equal(r.payroll.otSundayPaySen, 16_308); // 2×, not 3×
+  assert.equal(r.payroll.otPaySen, 16_308);
+});
+
+test("day-typed OT: a mixed month sums weekday + Sunday + holiday", () => {
+  const r = labor.computeMonthlyLabor({
+    worker: ANN, year: 2026, month: 5,
+    days: [
+      { date: "2026-05-04", hours: 11 }, // Mon → 3h weekday OT (above 8)
+      { date: "2026-05-03", hours: 8 },  // Sun → 8h Sunday OT
+      { date: "2026-05-27", hours: 8 },  // Wed holiday → 8h holiday OT
+    ],
+    publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
+  });
+  assert.equal(r.otWeekdayHours, 3);
+  assert.equal(r.otSundayHours, 8);
+  assert.equal(r.otHolidayHours, 8);
+  assert.equal(r.otHours, 19);
+  assert.equal(r.payroll.otWeekdayPaySen, 4_587); // 3 × 1528.846 → 4587
+  assert.equal(r.payroll.otSundayPaySen, 16_308); // 8 × 2038.462 → 16308
+  assert.equal(r.payroll.otHolidayPaySen, 24_462); // 8 × 3057.692 → 24462
+  assert.equal(r.payroll.otPaySen, 45_357);
+});
+
 test("computeMonthlyLabor: ANN full attendance — production cost = RM2,879.33 (OT cost = OT pay)", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,

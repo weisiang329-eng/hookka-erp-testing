@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-002 — Unpriced SO lines saved silently at RM0; editing could zero a price (PUT had no catalog fallback)
+
+**Status:** 🟢 Fixed + shipped to prod (2026-06-11, same branch as -001, deploy green). typecheck + build + full suite green.
+**Category:** sales-orders
+
+Symptom: a line whose price resolution found NO customer price and NO catalog price saved at **RM0 with no error** (POST chain ends `|| 0`), silently undercharging. Worse, the PUT (edit) path only tried the customer price — it had **no catalog fallback** (POST has one), so editing a line whose customer price didn't resolve could **zero out a previously-priced line**.
+
+Fix: `src/api/routes/sales-orders.ts` — (1) PUT now falls back to the product catalog (seatHeightPrices by height, else basePriceSen) exactly like POST, so an edit can't zero a resolvable price; (2) POST + PUT now **reject** any line whose final unit price is RM0 with `400 "No price found for <code>. Set the customer price or catalog price first, or enter the price on the line."` — reject-don't-normalize, frontend+backend unified. **Service orders exempt** (their lines are deliberately RM0). Surcharge-only lines (unit > 0) still pass.
+
+Verification: typecheck + build + full suite green. The reject fires only when the whole resolution chain (operator-typed → customer → catalog) ends at 0 — previously-impossible-to-express intentional RM0 lines are unaffected because the resolver already overwrote them.
+
+---
+
 ## BUG-2026-06-11-001 — Sofa combo discount never applied on scan-PO/OCR-created SOs and was lost on edit (combo logic lived only in the create page)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, branch fix/so-combo-on-edit → main, deploy green, e2e-verified live). typecheck + build + 8 new unit tests + full suite green.

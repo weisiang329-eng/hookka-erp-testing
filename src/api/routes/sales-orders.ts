@@ -2033,6 +2033,25 @@ app.post("/", async (c) => {
     // Sofa combo renegotiation — covers manual create AND scan-PO/OCR orders.
     await runSofaComboPass(c.var.DB, customer.id, items, rawItems);
 
+    // Reject unpriced lines (reject, don't normalize): a line whose price
+    // resolution ended at RM0 means NO customer price and NO catalog price
+    // exist — storing it would silently undercharge the order. Service orders
+    // are exempt (their lines are deliberately RM0).
+    if (body.isServiceOrder !== true) {
+      const unpriced = items.filter(
+        (i) => (Number(i.quantity) || 0) > 0 && (Number(i.unitPriceSen) || 0) <= 0,
+      );
+      if (unpriced.length > 0) {
+        return c.json(
+          {
+            success: false,
+            error: `No price found for ${[...new Set(unpriced.map((i) => i.productCode))].join(", ")}. Set the customer price or catalog price first, or enter the price on the line.`,
+          },
+          400,
+        );
+      }
+    }
+
     const subtotalSen = items.reduce((sum, i) => sum + i.lineTotalSen, 0);
     const now = new Date().toISOString();
     // 0134 — Service-Order flag. When true, pick the `SV-YYMM-NNN` id
@@ -3166,6 +3185,43 @@ app.put("/:id", async (c) => {
             // Non-fatal — keep basePriceSen at 0 if lookup fails.
           }
         }
+        // Catalog fallback — parity with POST. Without this, editing a line
+        // whose customer price didn't resolve silently zeroed basePriceSen.
+        if (basePriceSen === 0 && productIdForLookup) {
+          try {
+            const prod = await c.var.DB.prepare(
+              "SELECT * FROM products WHERE id = ?",
+            )
+              .bind(productIdForLookup)
+              .first<{
+                basePriceSen: number | null;
+                seatHeightPrices: unknown;
+              }>();
+            if (prod) {
+              const seatHeight = String(item.seatHeight ?? "");
+              let shp: Array<{ height: string; priceSen: number }> = [];
+              if (Array.isArray(prod.seatHeightPrices)) {
+                shp = prod.seatHeightPrices as typeof shp;
+              } else if (typeof prod.seatHeightPrices === "string") {
+                try {
+                  shp = JSON.parse(prod.seatHeightPrices || "[]");
+                } catch {
+                  shp = [];
+                }
+              }
+              if (seatHeight && shp.length > 0) {
+                const cell = shp.find(
+                  (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
+                );
+                basePriceSen = cell?.priceSen ?? (Number(prod.basePriceSen) || 0);
+              } else {
+                basePriceSen = Number(prod.basePriceSen) || 0;
+              }
+            }
+          } catch {
+            // Non-fatal — leave at 0; the unpriced gate below surfaces it.
+          }
+        }
         const divanPriceSen = Number(item.divanPriceSen) || 0;
         const legPriceSen = Number(item.legPriceSen) || 0;
         const specialOrderPriceSen = Number(item.specialOrderPriceSen) || 0;
@@ -3268,6 +3324,23 @@ app.put("/:id", async (c) => {
       // Sofa combo renegotiation on EDIT too — previously edit lost the combo
       // discount (the edit page has no combo logic and re-priced at full).
       await runSofaComboPass(c.var.DB, customerId, newItems, rawItems);
+
+      // Reject unpriced lines on edit too (same gate as POST; service orders
+      // exempt). Mirrors the frontend-backend-unified validation rule.
+      if (existing.isServiceOrder !== true) {
+        const unpriced = newItems.filter(
+          (i) => (Number(i.quantity) || 0) > 0 && (Number(i.unitPriceSen) || 0) <= 0,
+        );
+        if (unpriced.length > 0) {
+          return c.json(
+            {
+              success: false,
+              error: `No price found for ${[...new Set(unpriced.map((i) => i.productCode))].join(", ")}. Set the customer price or catalog price first, or enter the price on the line.`,
+            },
+            400,
+          );
+        }
+      }
 
       subtotalSen = newItems.reduce((sum, i) => sum + i.lineTotalSen, 0);
       totalSen = subtotalSen;

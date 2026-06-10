@@ -13,6 +13,7 @@
 // these as deferred but the work landed; only the comment was stale.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import {
@@ -35,6 +36,11 @@ import {
   type BomVariantContext,
 } from "../lib/bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "./fg-units";
+import { createPackingListCore } from "./packing-lists";
+import {
+  groupPosByCustomerHub,
+  projectCreditFailure,
+} from "../lib/pl-first-grouping";
 
 const app = new Hono<Env>();
 
@@ -2307,15 +2313,42 @@ app.post("/backfill-dedupe-delivered", async (c) => {
   });
 });
 
-// POST /api/delivery-orders — create
-app.post("/", async (c) => {
-  // RBAC gate — only roles with delivery-orders:create may insert a new DO.
-  const denied = await requirePermission(c, "delivery-orders", "create");
-  if (denied) return denied;
+// ---------------------------------------------------------------------------
+// DO-creation core — the verbatim body of POST / below, extracted so the
+// Packing-List-first auto-split flow (POST /packing-list-first) can create
+// each per-(customer, hub) DO through the EXACT same guards / lookups /
+// insert batch / audit emit as a hand-created DO. The route maps the result
+// 1:1 onto the original HTTP responses, so POST / behavior is unchanged.
+//
+// `body` keeps the untyped shape it had as `await c.req.json()` inside the
+// old inline handler — typing it would force casts into the extracted lines.
+// `onCreated` (optional) fires synchronously right after the INSERT batch
+// commits, BEFORE the re-read + audit emit, so a caller that creates several
+// DOs in one request can track every committed row for rollback even when a
+// later step of this function throws.
+// ---------------------------------------------------------------------------
+type DoCreateOutcome =
+  | {
+      ok: true;
+      /** The full DO payload exactly as POST / returns it. */
+      created: NonNullable<Awaited<ReturnType<typeof fetchOrderWithItems>>>;
+      id: string;
+      doNo: string;
+      /** Single-SO id stamped onto the DO row (null for multi-SO DOs). */
+      salesOrderId: string | null;
+    }
+  | { ok: false; status: 400 | 409 | 500; body: Record<string, unknown> };
 
-  try {
-    const body = await c.req.json();
-
+async function createDeliveryOrderForPOs(
+  c: Context<Env>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  body: any,
+  onCreated?: (info: {
+    id: string;
+    doNo: string;
+    salesOrderId: string | null;
+  }) => void,
+): Promise<DoCreateOutcome> {
     // Resolve salesOrderId + seed items from productionOrderIds when the
     // caller came from Pending Delivery (bulk Create DO). All POs must belong
     // to the same SO — otherwise we reject so the user can split the DO.
@@ -2353,10 +2386,11 @@ app.post("/", async (c) => {
         .all<PoRow & { consignmentOrderId?: string | null }>();
       poRowsForItems = poRes.results ?? [];
       if (poRowsForItems.length === 0) {
-        return c.json(
-          { success: false, error: "No matching production orders" },
-          400,
-        );
+        return {
+          ok: false,
+          status: 400,
+          body: { success: false, error: "No matching production orders" },
+        };
       }
       // CO POs route via Consignment Notes, not Delivery Orders. Frontend
       // already filters them out of the DO picker (delivery/index.tsx),
@@ -2370,13 +2404,14 @@ app.post("/", async (c) => {
         )
         .map((r) => r.poNo);
       if (coPoNos.length > 0) {
-        return c.json(
-          {
+        return {
+          ok: false,
+          status: 400,
+          body: {
             success: false,
             error: `Consignment-Order POs cannot be added to a Delivery Order. Use a Consignment Note instead. Offending POs: ${coPoNos.join(", ")}`,
           },
-          400,
-        );
+        };
       }
       // ROOT-CAUSE GUARD (Wei Siang 2026-05-16): a production order can
       // only be delivered ONCE. Reject any PO already on a non-cancelled
@@ -2404,13 +2439,14 @@ app.post("/", async (c) => {
               `${poNoById.get(r.poId) ?? r.poId} → ${r.doNo} (${r.status})`,
           )
           .join(", ");
-        return c.json(
-          {
+        return {
+          ok: false,
+          status: 409,
+          body: {
             success: false,
             error: `These production orders are already on a delivery order (a PO can only be delivered once): ${lines}. Remove them from the selection.`,
           },
-          409,
-        );
+        };
       }
       // Multi-SO is still allowed ONLY within the same customer + same hub
       // (operators consolidate several SOs of one customer going to one
@@ -2450,13 +2486,14 @@ app.post("/", async (c) => {
         }
         if (custMap.size > 1) {
           const names = [...custMap.values()].join(", ");
-          return c.json(
-            {
+          return {
+            ok: false,
+            status: 400,
+            body: {
               success: false,
               error: `This delivery order mixes ${custMap.size} customers (${names}). A DO can only deliver for one customer — split into separate DOs, one per customer.`,
             },
-            400,
-          );
+          };
         }
 
         // HUB-CONSISTENCY GUARD (Wei Siang 2026-05-28): a single DO must
@@ -2473,13 +2510,14 @@ app.post("/", async (c) => {
         }
         if (hubMap.size > 1) {
           const names = [...hubMap.values()].join(", ");
-          return c.json(
-            {
+          return {
+            ok: false,
+            status: 400,
+            body: {
               success: false,
               error: `This delivery order mixes ${hubMap.size} delivery hubs (${names}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
             },
-            400,
-          );
+          };
         }
       }
 
@@ -2520,10 +2558,11 @@ app.post("/", async (c) => {
         .bind(salesOrderId)
         .first();
       if (!salesOrderRow) {
-        return c.json(
-          { success: false, error: "Sales order not found" },
-          400,
-        );
+        return {
+          ok: false,
+          status: 400,
+          body: { success: false, error: "Sales order not found" },
+        };
       }
     }
 
@@ -2547,10 +2586,11 @@ app.post("/", async (c) => {
       }
     }
     if (!customerId) {
-      return c.json(
-        { success: false, error: "customerId or salesOrderId is required" },
-        400,
-      );
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: "customerId or salesOrderId is required" },
+      };
     }
     const customerRow = await c.var.DB.prepare(
       `SELECT id, name, contactName, phone, creditLimitSen, outstandingSen
@@ -2566,7 +2606,11 @@ app.post("/", async (c) => {
         outstandingSen: number;
       }>();
     if (!customerRow) {
-      return c.json({ success: false, error: "Customer not found" }, 400);
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: "Customer not found" },
+      };
     }
 
     // Resolve the (optional) default delivery hub so address/contact default
@@ -2706,8 +2750,10 @@ app.post("/", async (c) => {
       const projectedOutstanding =
         customerRow.outstandingSen + projectedDoTotalSen;
       if (projectedOutstanding > customerRow.creditLimitSen) {
-        return c.json(
-          {
+        return {
+          ok: false,
+          status: 409,
+          body: {
             success: false,
             error: "Credit limit exceeded",
             code: "CREDIT_LIMIT_EXCEEDED",
@@ -2718,8 +2764,7 @@ app.post("/", async (c) => {
               projected: projectedOutstanding,
             },
           },
-          409,
-        );
+        };
       }
     }
 
@@ -2979,12 +3024,17 @@ app.post("/", async (c) => {
 
     await c.var.DB.batch(statements);
 
+    // The row is committed from here on — let multi-DO callers track it for
+    // rollback even if the re-read or audit emit below throws.
+    onCreated?.({ id, doNo, salesOrderId: salesOrderRow?.id ?? null });
+
     const created = await fetchOrderWithItems(c.var.DB, id);
     if (!created) {
-      return c.json(
-        { success: false, error: "Failed to create delivery order" },
-        500,
-      );
+      return {
+        ok: false,
+        status: 500,
+        body: { success: false, error: "Failed to create delivery order" },
+      };
     }
 
     // Audit emit (P3.4) — DO create. Mirrors the sales-orders pattern.
@@ -2995,7 +3045,29 @@ app.post("/", async (c) => {
       after: { status: "DRAFT", doNo, salesOrderId: salesOrderRow?.id ?? null },
     });
 
-    return c.json({ success: true, data: created }, 201);
+    return {
+      ok: true,
+      created,
+      id,
+      doNo,
+      salesOrderId: salesOrderRow?.id ?? null,
+    };
+}
+
+// POST /api/delivery-orders — create
+app.post("/", async (c) => {
+  // RBAC gate — only roles with delivery-orders:create may insert a new DO.
+  const denied = await requirePermission(c, "delivery-orders", "create");
+  if (denied) return denied;
+
+  try {
+    const body = await c.req.json();
+    // The whole former inline body lives in createDeliveryOrderForPOs —
+    // same guards, same error shapes, same audit emit. Map 1:1 back onto
+    // the original HTTP responses.
+    const result = await createDeliveryOrderForPOs(c, body);
+    if (!result.ok) return c.json(result.body, result.status);
+    return c.json({ success: true, data: result.created }, 201);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/delivery-orders] failed:", msg, err);
@@ -3003,6 +3075,505 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
     }
     return c.json({ success: false, error: msg || "Internal error creating delivery order" }, 500);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/packing-list-first — Packing-List-first dispatch.
+//
+// The operator multi-selects ready production orders on Pending Delivery
+// (possibly spanning customers and hubs), fills the 3PL provider / vehicle /
+// driver / delivery date ONCE, and this endpoint:
+//   1. Groups the POs by (customerId, hubId) — one DO per customer per hub.
+//   2. PRE-VALIDATES everything (CO guard, once-only-delivery, customer
+//      resolution, credit limit summed ACROSS each customer's groups)
+//      BEFORE creating anything — any failure creates NOTHING.
+//   3. Creates one DRAFT DO per group SEQUENTIALLY through the same
+//      createDeliveryOrderForPOs core as POST / (genNextDoNo is read-MAX+1,
+//      parallel creation would collide on doNo).
+//   4. Creates ONE packing list carrying every new DO id via the same
+//      createPackingListCore as packing-lists POST /.
+// If a creation fails mid-way despite pre-validation (race), every DO this
+// request created is deleted again (DRAFT DOs have no inventory or cost
+// effects) and the SO hookkaDeliveryOrder stamps are restored — no orphans.
+//
+// body: { productionOrderIds: string[], providerId?, vehicleId?, driverId?,
+//         deliveryDate?, remarks?, preview? }
+// preview: true → run steps 1-2 only and return the grouping (the FE dialog
+// shows it), so the preview can never drift from what creation would do.
+// ---------------------------------------------------------------------------
+app.post("/packing-list-first", async (c) => {
+  // Same RBAC as DO create (packing-lists POST / uses the same pair too).
+  const denied = await requirePermission(c, "delivery-orders", "create");
+  if (denied) return denied;
+  // Org scope for the packing-list insert — resolved OUTSIDE the try so an
+  // unresolved org propagates exactly like packing-lists POST / does.
+  const orgId = getOrgId(c);
+
+  try {
+    const body = await c.req.json<{
+      productionOrderIds?: unknown;
+      providerId?: string | null;
+      vehicleId?: string | null;
+      driverId?: string | null;
+      deliveryDate?: string | null;
+      remarks?: string | null;
+      preview?: boolean;
+    }>();
+    const productionOrderIds = Array.isArray(body.productionOrderIds)
+      ? [
+          ...new Set(
+            (body.productionOrderIds as unknown[]).filter(
+              (x): x is string => typeof x === "string" && x.length > 0,
+            ),
+          ),
+        ]
+      : [];
+    if (productionOrderIds.length === 0) {
+      return c.json(
+        { success: false, error: "Select at least one production order." },
+        400,
+      );
+    }
+
+    // ---- Step 1: load the POs --------------------------------------------
+    type PlFirstPoRow = {
+      id: string;
+      poNo: string | null;
+      salesOrderId: string | null;
+      consignmentOrderId: string | null;
+      productCode: string | null;
+      quantity: number | null;
+      customerName: string | null;
+      customerState: string | null;
+    };
+    const placeholders = productionOrderIds.map(() => "?").join(",");
+    const poRes = await c.var.DB.prepare(
+      `SELECT id, poNo, salesOrderId, consignmentOrderId,
+              productCode, quantity, customerName, customerState
+         FROM production_orders WHERE id IN (${placeholders})`,
+    )
+      .bind(...productionOrderIds)
+      .all<PlFirstPoRow>();
+    const poRows = poRes.results ?? [];
+    const poById = new Map(poRows.map((r) => [r.id, r]));
+    const missingPoIds = productionOrderIds.filter((id) => !poById.has(id));
+    if (missingPoIds.length > 0) {
+      return c.json(
+        {
+          success: false,
+          error: `Some selected production orders no longer exist (${missingPoIds.length} of ${productionOrderIds.length}). Refresh and re-select.`,
+        },
+        400,
+      );
+    }
+
+    // CO POs route via Consignment Notes — same guard (and wording) as the
+    // DO-create core.
+    const coPoNos = poRows.filter((r) => r.consignmentOrderId).map((r) => r.poNo);
+    if (coPoNos.length > 0) {
+      return c.json(
+        {
+          success: false,
+          error: `Consignment-Order POs cannot be added to a Delivery Order. Use a Consignment Note instead. Offending POs: ${coPoNos.join(", ")}`,
+        },
+        400,
+      );
+    }
+
+    // Once-only-delivery pre-check across the WHOLE selection. The per-group
+    // core re-checks at create time; this catches it before anything exists.
+    const dupLinkRes = await c.var.DB.prepare(
+      `SELECT DISTINCT di.productionOrderId AS poId, d.doNo AS doNo, d.status AS status
+         FROM delivery_order_items di
+         JOIN delivery_orders d ON d.id = di.deliveryOrderId
+        WHERE di.productionOrderId IN (${placeholders})
+          AND d.status != 'CANCELLED'`,
+    )
+      .bind(...productionOrderIds)
+      .all<{ poId: string; doNo: string; status: string }>();
+    const alreadyLinked = dupLinkRes.results ?? [];
+    if (alreadyLinked.length > 0) {
+      const lines = alreadyLinked
+        .map(
+          (r) => `${poById.get(r.poId)?.poNo ?? r.poId} → ${r.doNo} (${r.status})`,
+        )
+        .join(", ");
+      return c.json(
+        {
+          success: false,
+          error: `These production orders are already on a delivery order (a PO can only be delivered once): ${lines}. Remove them from the selection.`,
+        },
+        409,
+      );
+    }
+
+    // ---- Step 2: resolve each PO's (customer, hub) and group --------------
+    const soIds = [
+      ...new Set(poRows.map((r) => r.salesOrderId ?? "").filter((x) => x !== "")),
+    ];
+    type SoMetaRow = {
+      id: string;
+      hubId: string | null;
+      hubName: string | null;
+      customerId: string | null;
+      customerName: string | null;
+    };
+    const soMetaById = new Map<string, SoMetaRow>();
+    if (soIds.length > 0) {
+      const ph = soIds.map(() => "?").join(",");
+      const soMetaRes = await c.var.DB.prepare(
+        `SELECT id, hubId, hubName, customerId, customerName
+           FROM sales_orders WHERE id IN (${ph})`,
+      )
+        .bind(...soIds)
+        .all<SoMetaRow>();
+      for (const r of soMetaRes.results ?? []) soMetaById.set(r.id, r);
+    }
+
+    // Customer fallback by PO.customerName — the same chain the DO-create
+    // core uses for POs whose parent SO carries no customer.
+    const nameToCustomerId = new Map<string, string>();
+    const unresolvedNames = new Set<string>();
+    for (const po of poRows) {
+      const so = po.salesOrderId ? soMetaById.get(po.salesOrderId) : undefined;
+      if (!so?.customerId && po.customerName) unresolvedNames.add(po.customerName);
+    }
+    for (const name of unresolvedNames) {
+      const cr = await c.var.DB.prepare(
+        `SELECT id FROM customers WHERE name = ? LIMIT 1`,
+      )
+        .bind(name)
+        .first<{ id: string }>();
+      if (cr?.id) nameToCustomerId.set(name, cr.id);
+    }
+
+    const groupInputs: { poId: string; customerId: string; hubId: string }[] = [];
+    for (const poId of productionOrderIds) {
+      const po = poById.get(poId);
+      if (!po) continue; // unreachable — missing ids rejected above
+      const so = po.salesOrderId ? soMetaById.get(po.salesOrderId) : undefined;
+      const customerId =
+        so?.customerId ??
+        (po.customerName ? nameToCustomerId.get(po.customerName) : undefined);
+      if (!customerId) {
+        return c.json(
+          {
+            success: false,
+            error: `Cannot determine the customer for production order ${po.poNo ?? poId}. Link it to a sales order or set its customer first.`,
+          },
+          400,
+        );
+      }
+      groupInputs.push({ poId, customerId, hubId: so?.hubId ?? "" });
+    }
+    const groups = groupPosByCustomerHub(groupInputs);
+
+    // ---- Step 3: customers (existence + credit inputs) --------------------
+    const customerIds = [...new Set(groups.map((g) => g.customerId))];
+    const cph = customerIds.map(() => "?").join(",");
+    const custRes = await c.var.DB.prepare(
+      `SELECT id, name, creditLimitSen, outstandingSen FROM customers WHERE id IN (${cph})`,
+    )
+      .bind(...customerIds)
+      .all<{
+        id: string;
+        name: string;
+        creditLimitSen: number;
+        outstandingSen: number;
+      }>();
+    const customerById = new Map((custRes.results ?? []).map((r) => [r.id, r]));
+    for (const g of groups) {
+      if (!customerById.has(g.customerId)) {
+        const firstPo = poById.get(g.poIds[0]);
+        return c.json(
+          {
+            success: false,
+            error: `Customer not found for production order ${firstPo?.poNo ?? g.poIds[0]}.`,
+          },
+          400,
+        );
+      }
+    }
+
+    // ---- Step 4: credit pre-validation per customer ACROSS groups ---------
+    // The per-DO gate inside the core only sees one group at a time and
+    // outstandingSen doesn't move at DO create, so N same-customer groups
+    // would each pass individually even when their SUM blows the limit.
+    // projectCreditFailure (pl-first-grouping.ts) checks the sum up front.
+    const creditGroups = groups.map((g) => {
+      const soSet = new Set<string>();
+      const items: { productCode: string; quantity: number }[] = [];
+      for (const poId of g.poIds) {
+        const po = poById.get(poId);
+        if (!po) continue;
+        if (po.salesOrderId) soSet.add(po.salesOrderId);
+        items.push({
+          productCode: po.productCode ?? "",
+          quantity: Number(po.quantity) || 0,
+        });
+      }
+      return { customerId: g.customerId, soIds: [...soSet], items };
+    });
+    let priceRows: {
+      salesOrderId: string;
+      productCode: string | null;
+      unitPriceSen: number;
+    }[] = [];
+    if (soIds.length > 0) {
+      const ph = soIds.map(() => "?").join(",");
+      const priceRes = await c.var.DB.prepare(
+        `SELECT salesOrderId, productCode, unitPriceSen
+           FROM sales_order_items
+          WHERE salesOrderId IN (${ph})`,
+      )
+        .bind(...soIds)
+        .all<{
+          salesOrderId: string;
+          productCode: string | null;
+          unitPriceSen: number;
+        }>();
+      priceRows = priceRes.results ?? [];
+    }
+    const creditFail = projectCreditFailure(
+      creditGroups,
+      priceRows,
+      [...customerById.values()].map((r) => ({
+        id: r.id,
+        creditLimitSen: Number(r.creditLimitSen) || 0,
+        outstandingSen: Number(r.outstandingSen) || 0,
+      })),
+    );
+    if (creditFail) {
+      const failName =
+        customerById.get(creditFail.customerId)?.name ?? creditFail.customerId;
+      return c.json(
+        {
+          success: false,
+          error: `Credit limit exceeded for ${failName}. The selected orders together exceed the remaining credit — nothing was created.`,
+          code: "CREDIT_LIMIT_EXCEEDED",
+          details: {
+            customerId: creditFail.customerId,
+            customerName: failName,
+            limit: creditFail.limitSen,
+            outstanding: creditFail.outstandingSen,
+            doTotal: creditFail.doTotalSen,
+            projected: creditFail.projectedSen,
+          },
+        },
+        409,
+      );
+    }
+
+    // ---- Step 5: packing_lists storage pre-flight -------------------------
+    // Fail BEFORE creating DOs when the table is missing, instead of
+    // creating and immediately rolling back. Same 503 packing-lists POST /
+    // returns for this condition.
+    try {
+      await c.var.DB.prepare("SELECT id FROM packing_lists LIMIT 1").first();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/relation .*packing_lists.* does not exist|no such table/i.test(msg)) {
+        return c.json(
+          {
+            success: false,
+            error: "Packing list storage is not set up yet. Apply migration 0139.",
+          },
+          503,
+        );
+      }
+      throw e;
+    }
+
+    // Group display metadata for the preview payload + error labels.
+    const groupMeta = groups.map((g) => {
+      const firstPo = poById.get(g.poIds[0]);
+      const so = firstPo?.salesOrderId
+        ? soMetaById.get(firstPo.salesOrderId)
+        : undefined;
+      const cust = customerById.get(g.customerId);
+      let unitCount = 0;
+      for (const poId of g.poIds) {
+        unitCount += Number(poById.get(poId)?.quantity) || 0;
+      }
+      return {
+        customerId: g.customerId,
+        customerName: cust?.name ?? firstPo?.customerName ?? g.customerId,
+        hubId: g.hubId,
+        hubName: g.hubId ? so?.hubName ?? "" : "",
+        customerState: firstPo?.customerState ?? "",
+        poCount: g.poIds.length,
+        unitCount,
+        poNos: g.poIds.map((id) => poById.get(id)?.poNo ?? id),
+      };
+    });
+
+    if (body.preview === true) {
+      return c.json({
+        success: true,
+        preview: true,
+        doCount: groups.length,
+        groups: groupMeta,
+      });
+    }
+
+    // ---- Step 6: snapshot SO stamps for surgical rollback ------------------
+    // Single-SO DO creation overwrites sales_orders.hookkaDeliveryOrder; if
+    // we have to roll back we restore exactly what was there before.
+    const soStampPrev = new Map<string, string | null>();
+    if (soIds.length > 0) {
+      const ph = soIds.map(() => "?").join(",");
+      const stampRes = await c.var.DB.prepare(
+        `SELECT id, hookkaDeliveryOrder FROM sales_orders WHERE id IN (${ph})`,
+      )
+        .bind(...soIds)
+        .all<{ id: string; hookkaDeliveryOrder: string | null }>();
+      for (const r of stampRes.results ?? []) {
+        soStampPrev.set(r.id, r.hookkaDeliveryOrder ?? null);
+      }
+    }
+
+    // ---- Step 7: create one DRAFT DO per group, SEQUENTIALLY ---------------
+    const createdDos: {
+      id: string;
+      doNo: string;
+      salesOrderId: string | null;
+    }[] = [];
+    const rollbackCreatedDos = async () => {
+      for (const d of [...createdDos].reverse()) {
+        try {
+          // Mirrors DELETE /:id for a DRAFT DO (items + header), plus the
+          // SO-stamp restore the generic delete doesn't need.
+          await c.var.DB.batch([
+            c.var.DB.prepare(
+              "DELETE FROM delivery_order_items WHERE deliveryOrderId = ?",
+            ).bind(d.id),
+            c.var.DB.prepare("DELETE FROM delivery_orders WHERE id = ?").bind(
+              d.id,
+            ),
+          ]);
+          if (d.salesOrderId) {
+            // Restore the SO's previous DO stamp only if WE set it (it still
+            // carries our doNo) — never clobber a concurrent change.
+            await c.var.DB.prepare(
+              "UPDATE sales_orders SET hookkaDeliveryOrder = ? WHERE id = ? AND hookkaDeliveryOrder = ?",
+            )
+              .bind(
+                soStampPrev.get(d.salesOrderId) ?? null,
+                d.salesOrderId,
+                d.doNo,
+              )
+              .run();
+          }
+          await emitAudit(c, {
+            resource: "delivery-orders",
+            resourceId: d.id,
+            action: "delete",
+            before: {
+              status: "DRAFT",
+              doNo: d.doNo,
+              reason: "packing-list-first rollback",
+            },
+          }).catch(() => {});
+        } catch (e) {
+          // Best effort — log loudly. A leftover DRAFT DO has no inventory
+          // or cost effects and can be deleted from Pending Dispatch.
+          console.error(
+            "[POST /api/delivery-orders/packing-list-first] rollback failed for DO",
+            d.id,
+            e,
+          );
+        }
+      }
+    };
+
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      const meta = groupMeta[gi];
+      let result: DoCreateOutcome;
+      try {
+        result = await createDeliveryOrderForPOs(
+          c,
+          {
+            productionOrderIds: g.poIds,
+            providerId: body.providerId ?? null,
+            vehicleId: body.vehicleId ?? null,
+            driverId: body.driverId ?? null,
+            // Pin the group's customer (already validated above). Without
+            // this, a multi-SO group would make the core fall back to a
+            // PO.customerName lookup, which can fail on rows whose name
+            // column is blank even though the SO knows the customer.
+            customerId: g.customerId,
+            // One DO = one customer + one hub = one drop.
+            dropPoints: 1,
+            // Pin the group's hub so the delivery address resolves to THAT
+            // hub even when the group spans several SOs (the core only
+            // auto-resolves the hub for single-SO DOs).
+            hubId: g.hubId || undefined,
+            deliveryDate:
+              typeof body.deliveryDate === "string" ? body.deliveryDate : "",
+            remarks: typeof body.remarks === "string" ? body.remarks : "",
+          },
+          (info) => createdDos.push(info),
+        );
+      } catch (err) {
+        await rollbackCreatedDos();
+        throw err;
+      }
+      if (!result.ok) {
+        // Pre-validation should have caught everything; landing here means a
+        // concurrent change (race). Undo our partial work, then surface the
+        // core's error verbatim with the failing group named.
+        await rollbackCreatedDos();
+        const label = `${meta.customerName}${meta.hubName ? ` / ${meta.hubName}` : ""}`;
+        const origError =
+          typeof result.body.error === "string"
+            ? result.body.error
+            : "Failed to create delivery order.";
+        return c.json(
+          {
+            ...result.body,
+            error: `Could not create the delivery order for ${label}: ${origError} Nothing was created.`,
+          },
+          result.status,
+        );
+      }
+    }
+
+    // ---- Step 8: one packing list carrying every new DO --------------------
+    const plResult = await createPackingListCore(c, orgId, {
+      doIds: createdDos.map((d) => d.id),
+      remarks: typeof body.remarks === "string" ? body.remarks : undefined,
+    });
+    if (!plResult.ok) {
+      await rollbackCreatedDos();
+      return c.json(plResult.body, plResult.status);
+    }
+
+    return c.json(
+      {
+        success: true,
+        data: {
+          packingList: plResult.data,
+          deliveryOrders: createdDos.map((d) => ({ id: d.id, doNo: d.doNo })),
+        },
+      },
+      201,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      "[POST /api/delivery-orders/packing-list-first] failed:",
+      msg,
+      err,
+    );
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json(
+      { success: false, error: msg || "Internal error creating packing list" },
+      500,
+    );
   }
 });
 

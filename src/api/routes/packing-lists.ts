@@ -12,6 +12,7 @@
 // the live DO line items.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
@@ -457,18 +458,41 @@ app.get("/:id", async (c) => {
   }
 });
 
-// POST / — create a packing list from selected delivery orders.
-app.post("/", async (c) => {
-  const denied = await requirePermission(c, "delivery-orders", "create");
-  if (denied) return denied;
-  const orgId = getOrgId(c);
+// ---------------------------------------------------------------------------
+// Packing-list creation core — the verbatim body of POST / below, extracted
+// so the Packing-List-first auto-split flow (delivery-orders.ts
+// POST /packing-list-first) can create a list through the EXACT same
+// validation + insert + audit path instead of duplicating it. Returns a
+// result object; the route maps it 1:1 onto the original HTTP responses.
+// ---------------------------------------------------------------------------
+export type PackingListCreateOutcome =
+  | {
+      ok: true;
+      data: ReturnType<typeof rowToPackingList> | null;
+      id: string;
+      packingNo: string;
+    }
+  | {
+      ok: false;
+      status: 400 | 503;
+      body: { success: false; error: string };
+    };
+
+export async function createPackingListCore(
+  c: Context<Env>,
+  orgId: string,
+  input: { doIds?: string[]; remarks?: string },
+): Promise<PackingListCreateOutcome> {
   try {
-    const body = await c.req.json<{ doIds?: string[]; remarks?: string }>();
-    const doIds = Array.isArray(body.doIds)
-      ? [...new Set(body.doIds.filter((x) => typeof x === "string" && x))]
+    const doIds = Array.isArray(input.doIds)
+      ? [...new Set(input.doIds.filter((x) => typeof x === "string" && x))]
       : [];
     if (doIds.length === 0) {
-      return c.json({ success: false, error: "Select at least one delivery order." }, 400);
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: "Select at least one delivery order." },
+      };
     }
 
     // Validate the DOs exist (in this org) and gather their unit/volume totals.
@@ -480,10 +504,11 @@ app.post("/", async (c) => {
       .all<{ id: string; doNo: string; totalItems: number; totalM3: number | string }>();
     const found = doRes.results ?? [];
     if (found.length !== doIds.length) {
-      return c.json(
-        { success: false, error: "Some selected delivery orders no longer exist." },
-        400,
-      );
+      return {
+        ok: false,
+        status: 400,
+        body: { success: false, error: "Some selected delivery orders no longer exist." },
+      };
     }
 
     // Business rule: a DO can belong to only ONE packing list. Scan existing.
@@ -501,13 +526,14 @@ app.post("/", async (c) => {
       const labels = found
         .filter((f) => conflictIds.includes(f.id))
         .map((f) => `${f.doNo} (already in ${usedBy.get(f.id)})`);
-      return c.json(
-        {
+      return {
+        ok: false,
+        status: 400,
+        body: {
           success: false,
           error: `These delivery orders are already in another packing list: ${labels.join(", ")}. Remove them from that list first.`,
         },
-        400,
-      );
+      };
     }
 
     const stopCount = doIds.length;
@@ -516,7 +542,7 @@ app.post("/", async (c) => {
     const id = `pl-${crypto.randomUUID().slice(0, 8)}`;
     const packingNo = await genNextPackingNo(c.var.DB, orgId);
     const now = new Date().toISOString();
-    const remarks = (body.remarks || "").trim() || null;
+    const remarks = (input.remarks || "").trim() || null;
 
     await c.var.DB.prepare(
       `INSERT INTO packing_lists (id, packing_no, status, do_ids, stop_count, total_units, total_m3, remarks, created_at, created_by, org_id)
@@ -548,8 +574,48 @@ app.post("/", async (c) => {
     )
       .bind(id)
       .first<PackingListRow>();
-    return c.json({ success: true, data: created ? rowToPackingList(created) : null }, 201);
+    return {
+      ok: true,
+      data: created ? rowToPackingList(created) : null,
+      id,
+      packingNo,
+    };
   } catch (e) {
+    if (isMissingTable(e)) {
+      return {
+        ok: false,
+        status: 503,
+        body: {
+          success: false,
+          error: "Packing list storage is not set up yet. Apply migration 0139.",
+        },
+      };
+    }
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        success: false,
+        error: e instanceof Error ? e.message : "Invalid request body",
+      },
+    };
+  }
+}
+
+// POST / — create a packing list from selected delivery orders.
+app.post("/", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "create");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  try {
+    const body = await c.req.json<{ doIds?: string[]; remarks?: string }>();
+    const result = await createPackingListCore(c, orgId, body);
+    if (!result.ok) return c.json(result.body, result.status);
+    return c.json({ success: true, data: result.data }, 201);
+  } catch (e) {
+    // createPackingListCore handles its own DB errors; this catch now only
+    // sees body-parse failures — mapped to the same responses as before the
+    // extraction (missing-table check kept for belt-and-braces parity).
     if (isMissingTable(e)) {
       return c.json(
         { success: false, error: "Packing list storage is not set up yet. Apply migration 0139." },

@@ -162,6 +162,20 @@ type PackingListRecord = {
   stops: number | null;
 };
 
+// One row of the Packing-List-first grouping preview — mirrors the `groups`
+// payload of POST /api/delivery-orders/packing-list-first (preview: true).
+// Each group becomes ONE delivery order (one customer + one hub).
+type PlFirstPreviewGroup = {
+  customerId: string;
+  customerName: string;
+  hubId: string;
+  hubName: string;
+  customerState: string;
+  poCount: number;
+  unitCount: number;
+  poNos: string[];
+};
+
 // ---------------------------------------------------------------------------
 // Map real DeliveryOrder from API to one row per DO
 // ---------------------------------------------------------------------------
@@ -491,6 +505,20 @@ export default function DeliveryPage() {
   const [printDialog, setPrintDialog] = useState<DeliveryOrderRow[] | null>(null);
   const [plRemarks, setPlRemarks] = useState("");
   const [plCreating, setPlCreating] = useState(false);
+  // ---------- Packing-List-first (auto-split) ----------
+  // "Create Packing List" on Pending Delivery: multi-select POs across
+  // customers/hubs → preview the (customer, hub) grouping fetched from the
+  // backend (the SAME grouping creation will use) → one confirm creates one
+  // DRAFT DO per group + ONE packing list carrying them all. Reuses
+  // createDOForm for the shared 3PL / vehicle / driver / date / remarks
+  // fields so the provider→vehicle/driver list fetch effect serves both
+  // dialogs (they are never open at the same time; both reset it on open).
+  const [plFirstDialogOpen, setPlFirstDialogOpen] = useState(false);
+  // null = preview still loading; [] = loaded but empty (shouldn't happen
+  // with a non-empty selection).
+  const [plFirstGroups, setPlFirstGroups] = useState<PlFirstPreviewGroup[] | null>(null);
+  const [plFirstPreviewError, setPlFirstPreviewError] = useState<string | null>(null);
+  const [plFirstCreating, setPlFirstCreating] = useState(false);
   // When set, the packing-list dialog is in EDIT mode (re-assign driver/lorry/
   // provider on an existing list) rather than CREATE mode. pendingDriverName
   // pre-selects the Driver dropdown once that provider's drivers load — the DO
@@ -1858,6 +1886,104 @@ export default function DeliveryPage() {
     setCreateDODialog(null);
     setSelectedReadyPOs(new Set());
     fetchData();
+  };
+
+  // ---------- Packing-List-first (auto-split) ----------
+  // Opens the dialog and fetches the grouping PREVIEW from the backend
+  // (preview: true runs the same load + group + pre-validate steps creation
+  // uses, and creates nothing) so the table can never drift from what the
+  // confirm will actually do. Validation errors (credit limit, already
+  // delivered, CO POs) surface here, before anything exists.
+  const openPlFirstDialog = async () => {
+    const poIds = readyPOs
+      .filter((po) => selectedReadyPOs.has(po.id))
+      .map((po) => po.id);
+    if (poIds.length === 0) return;
+    setCreateDOForm({ driverId: "", vehicleId: "", driverPersonId: "", remarks: "", deliveryDate: "" });
+    setPlFirstGroups(null);
+    setPlFirstPreviewError(null);
+    setPlFirstDialogOpen(true);
+    try {
+      const r = await fetch("/api/delivery-orders/packing-list-first", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productionOrderIds: poIds, preview: true }),
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        groups?: PlFirstPreviewGroup[];
+        error?: string;
+      };
+      if (!r.ok || !j.success) {
+        setPlFirstPreviewError(j.error || "Could not load the grouping preview.");
+        return;
+      }
+      setPlFirstGroups(j.groups ?? []);
+    } catch (e) {
+      setPlFirstPreviewError(
+        e instanceof Error ? e.message : "Could not load the grouping preview.",
+      );
+    }
+  };
+
+  // One confirm: the backend re-groups the LIVE selection, creates one DRAFT
+  // DO per (customer, hub) group sequentially, then one packing list with
+  // every new DO — all-or-nothing (any failure creates nothing).
+  const confirmCreatePlFirst = async () => {
+    // Derive poIds from the LIVE selection (not the dialog-open snapshot) —
+    // same rationale as confirmCreateDO (BUG-2026-04-27 stale snapshot).
+    const poIds = readyPOs
+      .filter((po) => selectedReadyPOs.has(po.id))
+      .map((po) => po.id);
+    if (poIds.length === 0) {
+      setPlFirstDialogOpen(false);
+      return;
+    }
+    if (!createDOForm.driverId) {
+      toast.error("Pick a 3PL provider first");
+      return;
+    }
+    setPlFirstCreating(true);
+    try {
+      const r = await fetch("/api/delivery-orders/packing-list-first", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productionOrderIds: poIds,
+          providerId: createDOForm.driverId || null,
+          vehicleId: createDOForm.vehicleId || null,
+          driverId: createDOForm.driverPersonId || null,
+          deliveryDate: createDOForm.deliveryDate || "",
+          remarks: createDOForm.remarks,
+        }),
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: {
+          packingList?: PackingListRecord | null;
+          deliveryOrders?: { id: string; doNo: string }[];
+        };
+        error?: string;
+      };
+      if (!r.ok || !j.success) {
+        toast.error(j.error || "Failed to create the packing list");
+        return;
+      }
+      const doNos = (j.data?.deliveryOrders ?? []).map((d) => d.doNo);
+      toast.success(
+        `Packing list ${j.data?.packingList?.packingNo ?? ""} created with ${doNos.join(", ")}`,
+      );
+      setPlFirstDialogOpen(false);
+      setSelectedReadyPOs(new Set());
+      fetchData();
+      setActiveTab("packing_list");
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Failed to create the packing list",
+      );
+    } finally {
+      setPlFirstCreating(false);
+    }
   };
 
   // Opens the "Create Packing List" confirm dialog from the multi-selected DOs.
@@ -3696,6 +3822,17 @@ export default function DeliveryPage() {
                       <><PackageCheck className="h-3.5 w-3.5" /> Create DO ({selectedReadyPOs.size})</>
                     )}
                   </Button>
+                  {/* Packing-List-first: mixed customers/hubs allowed — the
+                      backend auto-splits into one DO per customer + hub and
+                      wraps every DO into ONE packing list. */}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={creatingDOFromPO || plFirstCreating}
+                    onClick={openPlFirstDialog}
+                  >
+                    <ClipboardList className="h-3.5 w-3.5" /> Create Packing List ({selectedReadyPOs.size})
+                  </Button>
                 </div>
               )}
             </div>
@@ -4207,6 +4344,217 @@ export default function DeliveryPage() {
                   <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
                 ) : (
                   <><PackageCheck className="h-4 w-4" /> Create DO</>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- Packing-List-first Dialog (auto-split by customer + hub) ---------- */}
+      {plFirstDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => { if (!plFirstCreating) setPlFirstDialogOpen(false); }}
+          />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
+            <div className="px-6 py-4 border-b border-[#E2DDD8]">
+              <h2 className="text-lg font-bold text-[#1F1D1B]">Create Packing List</h2>
+              <p className="text-xs text-[#6B7280]">
+                Splits the selected orders into one delivery order per customer + hub, then groups every new DO into one packing list.
+              </p>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              {/* Grouping preview — fetched from the backend (the same split
+                  creation enforces), so the table can never drift from what
+                  the confirm button will actually create. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium mb-2 block">
+                  Delivery order split
+                  {plFirstGroups
+                    ? ` — will create ${plFirstGroups.length} delivery order${plFirstGroups.length === 1 ? "" : "s"}`
+                    : ""}
+                </label>
+                {plFirstPreviewError ? (
+                  <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 text-xs text-rose-700">
+                    {plFirstPreviewError}
+                  </div>
+                ) : plFirstGroups === null ? (
+                  <div className="bg-[#FAF9F7] border border-[#E2DDD8] rounded-lg p-3 text-xs text-[#6B7280]">
+                    Loading grouping preview...
+                  </div>
+                ) : (
+                  <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="bg-[#FAF9F7] text-[#6B7280]">
+                          <th className="text-left px-3 py-2 font-medium">#</th>
+                          <th className="text-left px-3 py-2 font-medium">Customer</th>
+                          <th className="text-left px-3 py-2 font-medium">Hub</th>
+                          <th className="text-left px-3 py-2 font-medium">State</th>
+                          <th className="text-right px-3 py-2 font-medium">Orders</th>
+                          <th className="text-right px-3 py-2 font-medium">Units</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {plFirstGroups.map((g, i) => (
+                          <tr key={`${g.customerId}-${g.hubId}-${i}`} className="border-t border-[#F0ECE9]">
+                            <td className="px-3 py-2 text-[#9CA3AF] whitespace-nowrap">DO {i + 1}</td>
+                            <td className="px-3 py-2 font-medium text-[#1F1D1B]">{g.customerName}</td>
+                            <td className="px-3 py-2 text-[#6B7280]">{g.hubName || "—"}</td>
+                            <td className="px-3 py-2 text-[#6B7280]">{g.customerState || "—"}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{g.poCount}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">{g.unitCount}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* 3PL Provider — required: the whole truck run shares one
+                  provider; it is stamped onto every DO the split creates. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">
+                  3PL Provider <span className="text-rose-600">*</span>
+                </label>
+                <select
+                  value={createDOForm.driverId}
+                  onChange={(e) =>
+                    // Reset vehicle + driver picks when provider changes —
+                    // their option lists are scoped to the chosen company.
+                    setCreateDOForm((f) => ({
+                      ...f,
+                      driverId: e.target.value,
+                      vehicleId: "",
+                      driverPersonId: "",
+                    }))
+                  }
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                >
+                  <option value="">— Select 3PL Provider —</option>
+                  {providers.filter((p) => p.status === "ACTIVE").map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Vehicle / Lorry — optional, shared across all the new DOs. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Vehicle</label>
+                <select
+                  value={createDOForm.vehicleId}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, vehicleId: e.target.value }))}
+                  disabled={!createDOForm.driverId}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                >
+                  <option value="">
+                    {createDOForm.driverId ? "— Optional —" : "Pick provider first"}
+                  </option>
+                  {createDialogVehicles
+                    .filter((v) => v.status === "ACTIVE")
+                    .map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.plateNo} — {v.vehicleType || "—"} (RM{(v.ratePerTripSen / 100).toFixed(0)}/trip)
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {/* Driver — optional, the actual person from three_pl_drivers. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Driver</label>
+                <select
+                  value={createDOForm.driverPersonId}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, driverPersonId: e.target.value }))}
+                  disabled={!createDOForm.driverId}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                >
+                  <option value="">
+                    {createDOForm.driverId ? "— Optional —" : "Pick provider first"}
+                  </option>
+                  {createDialogDrivers
+                    .filter((d) => d.status === "ACTIVE")
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}{d.phone ? ` — ${d.phone}` : ""}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {/* Est. Delivery Cost — each new DO is one customer + one hub
+                  = one drop, so every DO costs the flat per-trip rate
+                  (vehicle rate beats company rate, same as DO create). */}
+              <div className="flex items-center justify-between bg-[#F5F3F0] rounded-lg px-3 py-2">
+                <span className="text-xs text-[#6B7280]">Est. Delivery Cost</span>
+                <span className="text-sm font-semibold text-[#1F1D1B]">
+                  {(() => {
+                    const n = plFirstGroups?.length ?? 0;
+                    const v = createDialogVehicles.find((vv) => vv.id === createDOForm.vehicleId);
+                    const perTripSen = v
+                      ? v.ratePerTripSen
+                      : providers.find((pr) => pr.id === createDOForm.driverId)?.ratePerTripSen;
+                    if (!n || perTripSen == null) return "—";
+                    return `${n} DO × RM ${(perTripSen / 100).toFixed(2)} = RM ${((n * perTripSen) / 100).toFixed(2)}`;
+                  })()}
+                </span>
+              </div>
+
+              {/* Delivery Date — shared by every DO in the run. Optional. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Delivery Date</label>
+                <input
+                  type="date"
+                  value={createDOForm.deliveryDate}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, deliveryDate: e.target.value }))}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                />
+              </div>
+
+              {/* Remarks — stamped on every DO and on the packing list. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Remarks</label>
+                <input
+                  type="text"
+                  value={createDOForm.remarks}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, remarks: e.target.value }))}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                disabled={plFirstCreating}
+                onClick={() => setPlFirstDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={confirmCreatePlFirst}
+                disabled={
+                  plFirstCreating ||
+                  plFirstGroups === null ||
+                  plFirstGroups.length === 0 ||
+                  !!plFirstPreviewError ||
+                  !createDOForm.driverId
+                }
+              >
+                {plFirstCreating ? (
+                  <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
+                ) : (
+                  <>
+                    <ClipboardList className="h-4 w-4" /> Create Packing List
+                    {plFirstGroups && plFirstGroups.length > 0
+                      ? ` + ${plFirstGroups.length} DO${plFirstGroups.length === 1 ? "" : "s"}`
+                      : ""}
+                  </>
                 )}
               </Button>
             </div>

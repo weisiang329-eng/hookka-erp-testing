@@ -50,11 +50,19 @@ function parseIds(raw: string | null): string[] {
 
 function rowToPackingList(
   r: PackingListRow,
-  // Money fields are computed live by the list endpoint (see computePackingListMoney).
+  // Live fields computed by the list endpoint (see computePackingListMoney).
   // revenueSen = Σ goods value of the PL's DOs; costSen = the ONE-trip transport
-  // cost (null when no 3PL rate is resolvable). Omitted (undefined) by the
-  // single-record GET /:id, which doesn't surface money.
-  money?: { revenueSen: number; costSen: number | null },
+  // cost (null when no 3PL rate is resolvable); doCount = how many DOs the PL
+  // carries; stops = DISTINCT delivery addresses (the operator's definition of
+  // a stop — several DOs to one address are ONE stop, same rule the cost uses).
+  // Omitted (undefined) by the single-record GET /:id, which doesn't surface
+  // these.
+  money?: {
+    revenueSen: number;
+    costSen: number | null;
+    doCount: number;
+    stops: number;
+  },
 ) {
   return {
     id: r.id,
@@ -69,6 +77,10 @@ function rowToPackingList(
     createdBy: r.createdBy,
     revenueSen: money?.revenueSen ?? 0,
     costSen: money === undefined ? null : money.costSen,
+    // Live DO count + distinct-address stop count. null when not computed
+    // (single-record GET) — the FE falls back to the stored snapshot.
+    doCount: money?.doCount ?? null,
+    stops: money?.stops ?? null,
   };
 }
 
@@ -131,21 +143,28 @@ function normAddr(raw: string | null | undefined): string {
   return (raw ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+type PlLiveFields = {
+  revenueSen: number;
+  costSen: number | null;
+  doCount: number;
+  stops: number;
+};
+
 async function computePackingListMoney(
   db: D1Database,
   orgId: string,
   lists: { id: string; doIds: string[] }[],
-): Promise<Map<string, { revenueSen: number; costSen: number | null }>> {
-  const out = new Map<string, { revenueSen: number; costSen: number | null }>();
-  // Pre-seed every PL so the caller always gets an entry (revenue 0, cost null).
-  for (const l of lists) out.set(l.id, { revenueSen: 0, costSen: null });
+): Promise<Map<string, PlLiveFields>> {
+  const out = new Map<string, PlLiveFields>();
+  // Pre-seed every PL so the caller always gets an entry.
+  for (const l of lists)
+    out.set(l.id, { revenueSen: 0, costSen: null, doCount: 0, stops: 0 });
 
   const allDoIds = [...new Set(lists.flatMap((l) => l.doIds))];
   // Always load the value map (org-scoped, used for revenue even if a PL has
   // no resolvable cost). If there are no DOs at all, revenue stays 0 / cost null.
   const valueMap = await loadDoValueMap(db, orgId);
   if (allDoIds.length === 0) {
-    for (const l of lists) out.set(l.id, { revenueSen: 0, costSen: null });
     return out;
   }
 
@@ -238,12 +257,12 @@ async function computePackingListMoney(
     const rateByKey = new Map<string, RatePair>();
     const keyCount = new Map<string, number>();
     const keyOrder: string[] = []; // first-seen order for deterministic ties
-    let sawAnyDo = false;
+    let foundDos = 0;
 
     for (const did of l.doIds) {
       const d = doById.get(did);
       if (!d) continue; // do_id missing — skip gracefully
-      sawAnyDo = true;
+      foundDos += 1;
       revenueSen += valueMap.get(did) ?? 0;
       addrSet.add(normAddr(d.deliveryAddress));
       const resolved = rateForDo(d);
@@ -257,7 +276,7 @@ async function computePackingListMoney(
     }
 
     let costSen: number | null = null;
-    if (sawAnyDo && keyOrder.length > 0) {
+    if (foundDos > 0 && keyOrder.length > 0) {
       // Pick the 3PL the most DOs share; tie → first seen.
       let bestKey = keyOrder[0];
       let bestCount = keyCount.get(bestKey) ?? 0;
@@ -277,7 +296,12 @@ async function computePackingListMoney(
       }
     }
 
-    out.set(l.id, { revenueSen, costSen });
+    out.set(l.id, {
+      revenueSen,
+      costSen,
+      doCount: foundDos,
+      stops: addrSet.size,
+    });
   }
   return out;
 }
@@ -299,7 +323,15 @@ app.get("/", async (c) => {
       rows.map((r) => ({ id: r.id, doIds: parseIds(r.doIds) })),
     );
     const data = rows.map((r) =>
-      rowToPackingList(r, money.get(r.id) ?? { revenueSen: 0, costSen: null }),
+      rowToPackingList(
+        r,
+        money.get(r.id) ?? {
+          revenueSen: 0,
+          costSen: null,
+          doCount: 0,
+          stops: 0,
+        },
+      ),
     );
     return c.json({ success: true, data, total: data.length });
   } catch (e) {

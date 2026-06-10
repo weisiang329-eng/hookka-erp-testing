@@ -154,6 +154,11 @@ type PackingListRecord = {
   // PL's DOs; costSen = the one-trip 3PL transport cost (null when no rate).
   revenueSen: number;
   costSen: number | null;
+  // Live: how many DOs the PL carries, and how many DISTINCT delivery
+  // addresses (= real truck stops — several DOs to one address are ONE stop).
+  // null when not computed; fall back to the stored stopCount (legacy DO count).
+  doCount: number | null;
+  stops: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -1902,7 +1907,7 @@ export default function DeliveryPage() {
   const handleDeletePackingList = async (pl: PackingListRecord) => {
     if (
       !confirm(
-        `Delete packing list ${pl.packingNo}? Its ${pl.stopCount} delivery order(s) will be freed to add to another list. This does not delete the DOs.`,
+        `Delete packing list ${pl.packingNo}? Its ${pl.doCount ?? pl.stopCount} delivery order(s) will be freed to add to another list. This does not delete the DOs.`,
       )
     )
       return;
@@ -3737,6 +3742,7 @@ export default function DeliveryPage() {
                   <thead>
                     <tr className="border-b border-[#E2DDD8] text-left text-xs text-[#6B7280]">
                       <th className="py-2 px-3 font-medium">Packing No</th>
+                      <th className="py-2 px-3 font-medium text-center">DOs</th>
                       <th className="py-2 px-3 font-medium text-center">Stops</th>
                       <th className="py-2 px-3 font-medium text-center">Units</th>
                       <th className="py-2 px-3 font-medium text-right">Total M³</th>
@@ -3757,7 +3763,10 @@ export default function DeliveryPage() {
                           {pl.packingNo}
                         </td>
                         <td className="py-2.5 px-3 text-center tabular-nums">
-                          {pl.stopCount}
+                          {pl.doCount ?? pl.stopCount}
+                        </td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">
+                          {pl.stops ?? "—"}
                         </td>
                         <td className="py-2.5 px-3 text-center tabular-nums">
                           {pl.totalUnits}

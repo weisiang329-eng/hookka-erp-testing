@@ -8773,6 +8773,9 @@ function LaborCostTab({
                                 idPrefix={`range-gap-day-${e.id}`}
                                 breakdown={breakdown}
                                 emptyLabel="No absent or under-recorded days in this range"
+                                workerId={e.workerId}
+                                onAction={handleUnderAction}
+                                busyKey={underActionBusy}
                               />
                             </td>
                           </tr>

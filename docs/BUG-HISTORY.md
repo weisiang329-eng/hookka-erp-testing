@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-10-002 — Working Hours grid: the Hours cell snapped back to 0 (couldn't be cleared)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green). typecheck:app + build + 649 tests green.
+**Category:** ui-frontend
+
+Symptom: in the Daily Working Hours grid, clearing a worker's **Hours** cell (Backspace/Delete) immediately snapped it back to **0** — the operator could not leave it blank ("很麻烦"). A controlled-number-input glitch could also briefly show "04".
+
+Root cause: the Hours `<input>` bound `value={row.hours}` (a strict number) with `onChange` doing `Number(e.target.value)`. An emptied field is `""`, `Number("")` is `0`, so state became `0` and the box re-rendered showing `0`. The draft type `EntryDraft.hours` was `number`, so it could never hold an empty string.
+
+Fix: `src/pages/employees.tsx` — `EntryDraft.hours` is now `number | ""` so a cleared cell stays blank; the input `onChange` stores `""` when empty, else the parsed number; the save body coerces `Number(row.hours) || 0` (every place that sums hours already coerced, so no NaN leaks). Clearing the value zeroes the hours; removing the whole row is still the X button.
+
+Verification: typecheck:app + build + 649 tests green; deployed to prod (shipped together with the Emp No auto-sequence + the day-typed OT feature).
+
+---
+
 ## BUG-2026-06-10-001 — Punch-selfie photo endpoint 500'd: an explicit camelCase SELECT projection isn't translated by the d1-compat adapter
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-10, on main this session, deploy green + endpoint live-verified 500→404). typecheck:app + 644 tests + eslint green.

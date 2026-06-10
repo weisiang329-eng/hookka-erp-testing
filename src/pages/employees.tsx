@@ -8554,10 +8554,18 @@ function LaborCostTab({
 
             {/* 2. Factory workers with unlogged hours — the DATA GAP. */}
             <div className="mb-3">
-              <p className="text-xs font-semibold text-[#9A3A2D] mb-1 flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowRangeGapTbl((v) => !v)}
+                className="text-xs font-semibold text-[#9A3A2D] mb-1 flex items-center gap-1.5 hover:opacity-80"
+                title={showRangeGapTbl ? "Hide this section" : "Show this section"}
+              >
+                {showRangeGapTbl ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                 <AlertTriangle className="h-3.5 w-3.5" />
                 Factory workers with unlogged hours (data gap — record their Working Hours)
-              </p>
+              </button>
+              {showRangeGapTbl && (
+              <>
               {/* Clean per-department roll-up of the under-logged gaps (sums to
                   the Subtotal below). This is the real "by department" figure —
                   the misleading one on the reconciliation line above was removed. */}
@@ -8657,6 +8665,8 @@ function LaborCostTab({
                   </tfoot>
                 </table>
               </div>
+              </>
+              )}
             </div>
 
             {/* Prove the itemised gap equals the Under-recorded reconciliation

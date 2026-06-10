@@ -4353,10 +4353,26 @@ function DepartmentLaborTab({
             0,
             costEquivalent - (Number(p.absenceDeductionSen) || 0),
           );
+          // OT pay-vs-cost adjustment (same as the Labor Cost tab): OT is COSTED at
+          // ÷26÷9 but PAID at the stored payslip OT (÷10). Remove that difference
+          // from the gap so it stays pure under-recorded hours. (The dept TOTAL
+          // already reflects the paid OT via the gross+statutory `extra` above.)
+          const ow = workerById.get(wid);
+          const otH = Number(p.otWeekdayHours) || 0;
+          const otCostSen =
+            otH > 0
+              ? Math.round(
+                  ((otH * (Number(p.basicSalary) || 0)) /
+                    (ow && ow.workingDaysPerMonth > 0 ? ow.workingDaysPerMonth : 26) /
+                    (ow && ow.workingHoursPerDay > 0 ? ow.workingHoursPerDay : 9)) *
+                    (ow && ow.otMultiplier && ow.otMultiplier > 0 ? ow.otMultiplier : 1.5),
+                )
+              : 0;
+          const otAdj = (Number(p.totalOT) || 0) - otCostSen;
           // Round each worker's gap to whole sen BEFORE summing — identical to
           // the Labor Cost tab — so per-dept rows add up to the same grand total
           // both tabs show (no per-department rounding drift).
-          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency);
+          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency - otAdj);
           if (gap > 50) underByDept.set(reconCode, (underByDept.get(reconCode) ?? 0) + gap);
         }
       }
@@ -7452,6 +7468,32 @@ function LaborCostTab({
     }
     return m;
   }, [reconPayslips, period, from, holidayList]);
+  // OT pay-vs-cost adjustment — the SAME idea as the absence line, for overtime.
+  // The labor buckets + loggedValue value OT at the production-cost rate
+  // (÷ workingDaysPerMonth(26) ÷ workingHoursPerDay(9)); payroll now PAYS OT at the
+  // spec's ÷26÷10. We read the difference from the payslip's STORED OT amount
+  // (`totalOT`), so it auto-matches every month (old months stored at ÷9, new at
+  // ÷10) with no date logic. (paid − cost) is folded onto the worker's HOME
+  // department (reconBurden) and removed from the under-recorded gap, so the OT
+  // difference lands on the department line instead of silently in the Overhead plug.
+  const otAdjustmentByPayslip = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of reconPayslips) {
+      const otHours = Number(p.otWeekdayHours) || 0;
+      if (otHours <= 0) continue;
+      const w = p.employeeId ? workersById.get(p.employeeId) : undefined;
+      const mult = w && w.otMultiplier && w.otMultiplier > 0 ? w.otMultiplier : 1.5;
+      const stdHours = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      const monthDays = w && w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
+      const costOtSen = Math.round(
+        ((otHours * (Number(p.basicSalary) || 0)) / monthDays / stdHours) * mult,
+      );
+      const paidOtSen = Number(p.totalOT) || 0;
+      const adj = paidOtSen - costOtSen; // negative now (÷10 pay < ÷9 cost)
+      if (adj !== 0) m.set(p.id, adj);
+    }
+    return m;
+  }, [reconPayslips, workersById]);
   // We only have payroll figures once payslips exist for the period. Hide the
   // reconciliation panel (rather than show a misleading negative residual)
   // when there are none or when a category filter is narrowing the buckets.
@@ -7859,7 +7901,10 @@ function LaborCostTab({
       // (which sums the same rounded per-worker gaps) show the identical figure.
       const loggedValueSen = p.employeeId ? loggedValueByWorker.get(p.employeeId) ?? 0 : 0;
       const gapSen = Math.round(
-        grossSen - loggedValueSen - (absenceLeniencyByPayslip.get(p.id) ?? 0),
+        grossSen -
+          loggedValueSen -
+          (absenceLeniencyByPayslip.get(p.id) ?? 0) -
+          (otAdjustmentByPayslip.get(p.id) ?? 0),
       );
       // A production worker fully reconciled (gap ≈ 0) is not a data gap. Use a
       // small tolerance so rounding noise doesn't flag a fully-logged worker.
@@ -7881,7 +7926,7 @@ function LaborCostTab({
     const nonProdSubtotalSen = nonProductionStaff.reduce((s, r) => s + r.grossSen, 0);
     const underLoggedSubtotalSen = underLoggedFactory.reduce((s, r) => s + r.gapSen, 0);
     return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
-  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip]);
+  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip, otAdjustmentByPayslip]);
 
   // Clean per-department under-logged total — aggregated from the PER-WORKER
   // gaps (each worker's gross − their OWN logged value), so it is NOT polluted
@@ -7933,10 +7978,12 @@ function LaborCostTab({
       }
       const b = bucketOf(code);
       stat[b] += statutorySen;
-      adj[b] += absenceLeniencyByPayslip.get(p.id) ?? 0;
+      adj[b] +=
+        (absenceLeniencyByPayslip.get(p.id) ?? 0) +
+        (otAdjustmentByPayslip.get(p.id) ?? 0);
     }
     return { stat, adj, nonProdGrossSen };
-  }, [reconPayslips, absenceLeniencyByPayslip, prodCodes, factoryDeptCodes]);
+  }, [reconPayslips, absenceLeniencyByPayslip, otAdjustmentByPayslip, prodCodes, factoryDeptCodes]);
 
   // Loaded department buckets = logged labor + that department's own statutory
   // + its absent-day adjustment. Production / Warehousing / Shortfall computed

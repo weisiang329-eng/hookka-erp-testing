@@ -198,7 +198,7 @@ type PayAttRow = {
   clockIn: string | null;
   clockOut: string | null;
   overtimeMinutes: number;
-  lateMinutes?: number;
+  lateMinutes: number;
 };
 type PayMonthHistory = { daily: PayDailyRow[]; attendance: PayAttRow[] };
 

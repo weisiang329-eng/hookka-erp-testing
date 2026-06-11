@@ -1725,17 +1725,14 @@ export default function DashboardBPage() {
                             </>
                           )}
                           <td className="py-1.5 text-right font-bold text-[#1F1D1B] tabular-nums">
+                            {/* Category modes use totalCustRev — the SAME
+                                per-customer Σ as the header Total and the
+                                rows below. Company-level avg × count rounds
+                                differently and showed a few-sen mismatch on
+                                the same card. */}
                             {custCat === "all"
                               ? rm(ov.aovCompany.totalSen)
-                              : custCat === "bedframe"
-                                ? rm(
-                                    ov.aovCompany.bedframeAvgSen *
-                                      ov.aovCompany.bedframeUnits,
-                                  )
-                                : rm(
-                                    ov.aovCompany.sofaAvgSen *
-                                      ov.aovCompany.sofaSets,
-                                  )}
+                              : rm(totalCustRev)}
                           </td>
                         </tr>
                       )}

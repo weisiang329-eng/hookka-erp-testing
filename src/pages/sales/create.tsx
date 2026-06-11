@@ -38,10 +38,22 @@ import {
   serializeRepairScope,
   validateRepairScopeInput,
   repairScopeBadgeLabel,
+  canonicalizeComponentPicks,
   type RepairDeptCode,
 } from "@/lib/repair-scope";
 
 type SeatHeightTier = { height: string; priceSen: number };
+
+// One pickable repair component — a top-level BOM WIP piece, as served by
+// GET /api/sales-orders/repair-components (Component-level Repair Scope).
+// `key` is the builder's deterministic wipKey; `qty` is the BOM's per-FG
+// piece count (the qty input's upper bound).
+type RepairComponentOption = {
+  key: string;
+  label: string;
+  type: string;
+  qty: number;
+};
 
 // Free-text custom special order on a SO line (migration 0074). Unlike
 // the master-config "Specials" list, these are typed by the operator per
@@ -2941,7 +2953,11 @@ function LineItemCard({
   const rawScope = (() => {
     if (!item.repairScope) return null;
     try {
-      return JSON.parse(item.repairScope) as { preset?: string; depts?: string[] };
+      return JSON.parse(item.repairScope) as {
+        preset?: string;
+        depts?: string[];
+        components?: unknown;
+      };
     } catch {
       return null;
     }
@@ -2949,6 +2965,201 @@ function LineItemCard({
   const scopePresetValue = rawScope?.preset ?? "FULL";
   const scopeCustomDepts: string[] = Array.isArray(rawScope?.depts) ? rawScope.depts : [];
   const parsedScope = parseRepairScope(item.repairScope ?? null);
+
+  // ---- Component-level Repair Scope (CUSTOM only) ----
+  // Stored picks: ABSENT components field = ALL pieces at full qty (the
+  // canonical "everything" form — see canonicalizeComponentPicks). An
+  // explicit array = the subset the operator ticked (empty array = nothing
+  // ticked → Save is blocked by the shared validator).
+  const storedComponents: { key: string; label: string; qty: number }[] | undefined =
+    (() => {
+      const raw = rawScope?.components;
+      if (!Array.isArray(raw)) return undefined;
+      return raw
+        .filter(
+          (p): p is { key: string; label?: unknown; qty?: unknown } =>
+            !!p && typeof p === "object" && typeof (p as { key?: unknown }).key === "string",
+        )
+        .map((p) => ({
+          key: p.key,
+          label: typeof p.label === "string" ? p.label : "",
+          qty: Number(p.qty) || 1,
+        }));
+    })();
+
+  // The pickable pieces for this line's product — fetched from
+  // /api/sales-orders/repair-components, which runs the SAME BOM → WIP
+  // breakdown (same keys, same per-FG qty) the confirm-time builder uses,
+  // so a pick here always matches the job cards that get built. Empty =
+  // hide the picker (legacy/flat BOM → all components, today's behaviour).
+  //
+  // State holds the LAST SUCCESSFUL fetch keyed by its variant fingerprint;
+  // `repairComponents` derives to [] whenever the fingerprint is stale (no
+  // synchronous state resets in the effect). A failed fetch leaves the
+  // result null → picker hidden, stored picks untouched (a network blip
+  // must never wipe a saved selection).
+  const wantComponents =
+    isServiceOrderMode && scopePresetValue === "CUSTOM" && !!item.productCode;
+  const componentsFetchKey = wantComponents
+    ? [
+        item.productCode,
+        item.sizeLabel,
+        item.sizeCode,
+        item.fabricCode,
+        item.gapInches ?? "",
+        item.divanHeightInches ?? "",
+        item.legHeightInches ?? "",
+      ].join("|")
+    : "";
+  const [componentsResult, setComponentsResult] = useState<{
+    key: string;
+    options: RepairComponentOption[];
+  } | null>(null);
+  useEffect(() => {
+    if (!componentsFetchKey) return;
+    let cancelled = false;
+    const params = new URLSearchParams({ productCode: item.productCode });
+    if (item.sizeLabel) params.set("sizeLabel", item.sizeLabel);
+    if (item.sizeCode) params.set("sizeCode", item.sizeCode);
+    if (item.fabricCode) params.set("fabricCode", item.fabricCode);
+    if (item.gapInches != null) params.set("gapInches", String(item.gapInches));
+    if (item.divanHeightInches != null) params.set("divanHeightInches", String(item.divanHeightInches));
+    if (item.legHeightInches != null) params.set("legHeightInches", String(item.legHeightInches));
+    fetch(`/api/sales-orders/repair-components?${params.toString()}`)
+      .then((res): Promise<{ success?: boolean; data?: RepairComponentOption[] } | null> =>
+        res.ok ? res.json() : Promise.resolve(null),
+      )
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.success && Array.isArray(data.data)) {
+          setComponentsResult({ key: componentsFetchKey, options: data.data });
+        }
+      })
+      .catch(() => {
+        /* keep the previous result — picker stays hidden for this key */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    componentsFetchKey,
+    item.productCode,
+    item.sizeLabel,
+    item.sizeCode,
+    item.fabricCode,
+    item.gapInches,
+    item.divanHeightInches,
+    item.legHeightInches,
+  ]);
+  const componentsLoaded =
+    !!componentsFetchKey && componentsResult?.key === componentsFetchKey;
+  const repairComponents: RepairComponentOption[] = useMemo(
+    () =>
+      componentsResult && componentsFetchKey && componentsResult.key === componentsFetchKey
+        ? componentsResult.options
+        : [],
+    [componentsResult, componentsFetchKey],
+  );
+
+  // Reconcile stored picks against a SUCCESSFULLY fetched component list:
+  // prune keys that no longer exist (product changed / BOM edited — the
+  // survivors re-canonicalize; ALL keys vanished → reset to the fresh
+  // all-ticked default so the operator re-picks). Drops the field when the
+  // product has no pickable components (picker hidden = all components).
+  // An explicit empty array (operator unticked everything) is PRESERVED so
+  // Save stays blocked by the shared validator. Write-once guard (nextJson
+  // comparison) keeps this loop-free.
+  useEffect(() => {
+    if (!wantComponents || !componentsLoaded) return;
+    if (!item.repairScope) return;
+    let parsed: { preset?: string; depts?: string[]; components?: unknown };
+    try {
+      parsed = JSON.parse(item.repairScope);
+    } catch {
+      return;
+    }
+    if (parsed?.preset !== "CUSTOM" || !Array.isArray(parsed.components)) return;
+    const storedEntries = parsed.components as { key?: unknown; label?: unknown; qty?: unknown }[];
+    const validKeys = new Set(repairComponents.map((o) => o.key));
+    const surviving = storedEntries.filter(
+      (p): p is { key: string; label?: string; qty: number } =>
+        !!p && typeof p === "object" && typeof p.key === "string" && validKeys.has(p.key as string),
+    );
+    let canonical: ReturnType<typeof canonicalizeComponentPicks>;
+    if (repairComponents.length === 0) {
+      // No pickable components for this product (flat/legacy BOM): the
+      // picker is hidden, so any stored field — even an empty one — must
+      // go, or Save would be blocked with nothing visible to untangle.
+      canonical = undefined;
+    } else if (storedEntries.length === 0) {
+      // Operator explicitly unticked everything — keep [] so Save blocks.
+      canonical = [];
+    } else if (surviving.length === 0) {
+      // Every stored key vanished (product re-pointed / BOM rebuilt) —
+      // reset to the all-ticked default; the operator re-picks visibly.
+      canonical = undefined;
+    } else {
+      canonical = canonicalizeComponentPicks(repairComponents, surviving);
+    }
+    const nextJson = JSON.stringify({
+      preset: "CUSTOM",
+      depts: Array.isArray(parsed.depts) ? parsed.depts : [],
+      ...(canonical !== undefined ? { components: canonical } : {}),
+    });
+    if (nextJson !== item.repairScope) onUpdate(idx, { repairScope: nextJson });
+  }, [wantComponents, componentsLoaded, repairComponents, item.repairScope, onUpdate, idx]);
+
+  // Checked/qty state for one component row, derived from storage.
+  const componentPickFor = (opt: RepairComponentOption): { checked: boolean; qty: number } => {
+    const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+    if (storedComponents === undefined) return { checked: true, qty: maxQty };
+    const hit = storedComponents.find((p) => p.key === opt.key);
+    if (!hit) return { checked: false, qty: maxQty };
+    const q = Math.floor(Number(hit.qty));
+    return {
+      checked: true,
+      qty: Number.isFinite(q) && q >= 1 ? Math.min(q, maxQty) : maxQty,
+    };
+  };
+
+  const currentComponentPicks = (): { key: string; label: string; qty: number }[] =>
+    repairComponents
+      .map((opt) => ({ opt, st: componentPickFor(opt) }))
+      .filter(({ st }) => st.checked)
+      .map(({ opt, st }) => ({ key: opt.key, label: opt.label, qty: st.qty }));
+
+  const writeComponentPicks = (picks: { key: string; label: string; qty: number }[]) => {
+    const canonical = canonicalizeComponentPicks(repairComponents, picks);
+    onUpdate(idx, {
+      repairScope: JSON.stringify({
+        preset: "CUSTOM",
+        depts: scopeCustomDepts,
+        // undefined = everything ticked at full qty → omit the field (the
+        // canonical storage form). An empty array (nothing ticked) is kept
+        // so Save blocks via the shared validator.
+        ...(canonical !== undefined ? { components: canonical } : {}),
+      }),
+    });
+  };
+
+  const toggleComponent = (opt: RepairComponentOption) => {
+    const picks = currentComponentPicks();
+    const has = picks.some((p) => p.key === opt.key);
+    writeComponentPicks(
+      has
+        ? picks.filter((p) => p.key !== opt.key)
+        : [...picks, { key: opt.key, label: opt.label, qty: Math.max(1, Math.floor(opt.qty) || 1) }],
+    );
+  };
+
+  const setComponentQty = (opt: RepairComponentOption, raw: string) => {
+    const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+    const n = Math.floor(Number(raw));
+    const qty = Number.isFinite(n) ? Math.min(Math.max(1, n), maxQty) : maxQty;
+    writeComponentPicks(
+      currentComponentPicks().map((p) => (p.key === opt.key ? { ...p, qty } : p)),
+    );
+  };
 
   const handleScopePresetChange = (v: string) => {
     if (v === "FABRIC" || v === "FRAME" || v === "FOAM") {
@@ -2960,7 +3171,8 @@ function LineItemCard({
       });
     } else if (v === "CUSTOM") {
       // Start with no depts ticked — Save is blocked by the shared
-      // validator until at least one is chosen.
+      // validator until at least one is chosen. Components start absent
+      // (= all pieces ticked at full qty).
       onUpdate(idx, { repairScope: JSON.stringify({ preset: "CUSTOM", depts: [] }) });
     } else {
       onUpdate(idx, { repairScope: null });
@@ -2974,7 +3186,13 @@ function LineItemCard({
     // Keep canonical chain order regardless of tick order.
     const ordered = REPAIR_DEPT_CODES.filter((d) => next.includes(d));
     onUpdate(idx, {
-      repairScope: JSON.stringify({ preset: "CUSTOM", depts: ordered }),
+      repairScope: JSON.stringify({
+        preset: "CUSTOM",
+        depts: ordered,
+        // Dept ticks and component picks are independent narrowings of the
+        // same scope — keep the line's picks when toggling a dept.
+        ...(storedComponents !== undefined ? { components: storedComponents } : {}),
+      }),
     });
   };
 
@@ -3480,6 +3698,55 @@ function LineItemCard({
               {scopeCustomDepts.length === 0 && (
                 <div className="col-span-2 text-[11px] text-[#9A3A2D]">
                   Pick at least one department, or switch back to Full remake.
+                </div>
+              )}
+            </div>
+          )}
+          {/* Component-level Repair Scope — which BOM pieces get repaired
+              (bedframe Headboard vs Divan; sofa base / cushions / armrest /
+              headrest). All ticked at full qty by default = the whole item
+              (stored with NO components field — byte-identical to a
+              dept-only scope). Hidden when the product's BOM has no
+              top-level pieces (legacy/flat BOM = all components). */}
+          {scopePresetValue === "CUSTOM" && repairComponents.length > 0 && (
+            <div className="mt-2 space-y-1.5 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2">
+              <div className="text-[11px] font-medium text-[#6B5C32]">
+                Components to repair
+              </div>
+              {repairComponents.map((opt) => {
+                const picked = componentPickFor(opt);
+                const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+                return (
+                  <div
+                    key={opt.key}
+                    className="flex items-center gap-2 text-xs text-[#374151]"
+                  >
+                    <label className="flex flex-1 items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={picked.checked}
+                        onChange={() => toggleComponent(opt)}
+                        className="h-3.5 w-3.5 accent-[#6B5C32]"
+                      />
+                      <span className="truncate" title={opt.label}>{opt.label}</span>
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={maxQty}
+                      step={1}
+                      value={picked.qty}
+                      disabled={!picked.checked}
+                      onChange={(e) => setComponentQty(opt, e.target.value)}
+                      className="w-14 rounded border border-[#E2DDD8] px-1.5 py-0.5 text-right disabled:bg-[#F4EFE3] disabled:text-[#9CA3AF]"
+                    />
+                    <span className="text-[#9CA3AF]">/ {maxQty}</span>
+                  </div>
+                );
+              })}
+              {storedComponents !== undefined && storedComponents.length === 0 && (
+                <div className="text-[11px] text-[#9A3A2D]">
+                  Keep at least one component ticked, or switch back to Full remake.
                 </div>
               )}
             </div>

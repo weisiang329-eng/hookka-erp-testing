@@ -22,11 +22,18 @@ import {
   serializeRepairScope,
   validateRepairScopeInput,
   filterWipsByRepairScope,
+  filterWipsByRepairComponents,
+  repairComponentScale,
+  canonicalizeComponentPicks,
   materialClassForItemGroup,
   materialLineInScope,
   repairScopeBadgeLabel,
 } from "../src/lib/repair-scope.ts";
 import { DEPT_ORDER } from "../src/api/lib/lead-times.ts";
+import {
+  breakBomIntoWips,
+  deriveTopLevelWipKey,
+} from "../src/api/lib/bom-wip-breakdown.ts";
 
 // ===========================================================================
 // Constants stay in lockstep with the production chain.
@@ -279,6 +286,345 @@ test("materialLineInScope: CUSTOM is branch-based on the owning node's processes
 });
 
 // ===========================================================================
+// Component-level Repair Scope — validator (strict write side).
+// ===========================================================================
+
+const DIVAN_KEY = 'BF100::0::DIVAN::{DIVAN_HEIGHT} Divan- {SIZE}';
+const HB_KEY = "BF100::1::HEADBOARD::{MODEL}({SEAT_SIZE})-HB";
+
+test("validate components: well-formed subset canonicalizes (components ride into the stored JSON)", () => {
+  const v = validateRepairScopeInput({
+    preset: "CUSTOM",
+    depts: ["UPHOLSTERY", "PACKING"],
+    components: [{ key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 1 }],
+  });
+  assert.equal(v.ok, true);
+  assert.equal(
+    v.canonical,
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["UPHOLSTERY", "PACKING"],
+      components: [{ key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 1 }],
+    }),
+  );
+  // Canonical string re-validates to itself (fixed point).
+  const v2 = validateRepairScopeInput(v.canonical);
+  assert.equal(v2.ok, true);
+  assert.equal(v2.canonical, v.canonical);
+});
+
+test("validate components: absent / null = all components (canonical has NO components field)", () => {
+  for (const components of [undefined, null]) {
+    const v = validateRepairScopeInput({ preset: "CUSTOM", depts: ["FOAM"], components });
+    assert.equal(v.ok, true);
+    assert.equal(v.canonical, '{"preset":"CUSTOM","depts":["FOAM"]}');
+  }
+});
+
+test("validate components: rejects — empty array, bad shapes, qty bounds, duplicates, FULL+components", () => {
+  const base = { preset: "CUSTOM", depts: ["FOAM"] };
+  // At-least-one rule: an empty array means the operator unticked everything.
+  assert.equal(validateRepairScopeInput({ ...base, components: [] }).ok, false);
+  // Not an array.
+  assert.equal(validateRepairScopeInput({ ...base, components: "DIVAN" }).ok, false);
+  // Entry not an object.
+  assert.equal(validateRepairScopeInput({ ...base, components: ["DIVAN"] }).ok, false);
+  // Missing / empty / non-string key.
+  assert.equal(validateRepairScopeInput({ ...base, components: [{ label: "x", qty: 1 }] }).ok, false);
+  assert.equal(validateRepairScopeInput({ ...base, components: [{ key: "", label: "x", qty: 1 }] }).ok, false);
+  assert.equal(validateRepairScopeInput({ ...base, components: [{ key: 5, label: "x", qty: 1 }] }).ok, false);
+  // Label must be a string when sent.
+  assert.equal(validateRepairScopeInput({ ...base, components: [{ key: DIVAN_KEY, label: 7, qty: 1 }] }).ok, false);
+  // qty: integer ≥ 1 — reject 0, negatives, fractions, numeric strings.
+  for (const qty of [0, -1, 1.5, "2", null, undefined, NaN]) {
+    assert.equal(
+      validateRepairScopeInput({ ...base, components: [{ key: DIVAN_KEY, label: "Divan", qty }] }).ok,
+      false,
+      `qty=${String(qty)} must be rejected`,
+    );
+  }
+  // Duplicate keys.
+  assert.equal(
+    validateRepairScopeInput({
+      ...base,
+      components: [
+        { key: DIVAN_KEY, label: "Divan", qty: 1 },
+        { key: DIVAN_KEY, label: "Divan again", qty: 2 },
+      ],
+    }).ok,
+    false,
+  );
+  // FULL never carries component picks — a full remake repairs everything.
+  assert.equal(
+    validateRepairScopeInput({
+      preset: "FULL",
+      components: [{ key: DIVAN_KEY, label: "Divan", qty: 1 }],
+    }).ok,
+    false,
+  );
+});
+
+test("parse: components round-trip through parse ∘ serialize (canonical fixed point)", () => {
+  const canon = JSON.stringify({
+    preset: "CUSTOM",
+    depts: ["WOOD_CUT", "FRAMING"],
+    components: [
+      { key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 1 },
+      { key: HB_KEY, label: "1013(S)-HB", qty: 1 },
+    ],
+  });
+  const scope = parseRepairScope(canon);
+  assert.ok(scope);
+  assert.equal(scope.components.length, 2);
+  assert.equal(serializeRepairScope(scope), canon);
+});
+
+test("parse: lenient on components — malformed entries drop; zero survivors degrades to all-components", () => {
+  // Bad qty / missing key entries are hand-tampered → dropped silently.
+  const scope = parseRepairScope(
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["FOAM"],
+      components: [
+        { key: DIVAN_KEY, label: "Divan", qty: 1 },
+        { key: "", label: "no key", qty: 1 },
+        { key: HB_KEY, label: "bad qty", qty: 0 },
+      ],
+    }),
+  );
+  assert.ok(scope);
+  assert.deepEqual(scope.components, [{ key: DIVAN_KEY, label: "Divan", qty: 1 }]);
+  // All entries invalid → components field omitted (= all components),
+  // mirroring the dept parser's FULL-ward degradation for tampered rows.
+  const scope2 = parseRepairScope(
+    JSON.stringify({ preset: "CUSTOM", depts: ["FOAM"], components: [{ qty: 9 }] }),
+  );
+  assert.ok(scope2);
+  assert.equal(scope2.components, undefined);
+});
+
+// ===========================================================================
+// filterWipsByRepairComponents — the builder's component filter.
+// ===========================================================================
+
+const componentWips = () => [
+  { wipKey: DIVAN_KEY, wipType: "DIVAN", quantityMultiplier: 2, processes: [] },
+  { wipKey: HB_KEY, wipType: "HEADBOARD", quantityMultiplier: 1, processes: [] },
+];
+
+test("component filter: scope without components is an identity (same array back)", () => {
+  const wips = componentWips();
+  const scope = parseRepairScope('{"preset":"CUSTOM","depts":["FOAM"]}');
+  const out = filterWipsByRepairComponents(wips, scope);
+  assert.equal(out.wips, wips, "no components → input array identity");
+  assert.deepEqual(out.stale, []);
+  const outNull = filterWipsByRepairComponents(wips, null);
+  assert.equal(outNull.wips, wips);
+});
+
+test("component filter: keeps ONLY the picked wipKeys", () => {
+  const scope = parseRepairScope(
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["FOAM"],
+      components: [{ key: HB_KEY, label: "HB", qty: 1 }],
+    }),
+  );
+  const out = filterWipsByRepairComponents(componentWips(), scope);
+  assert.deepEqual(out.stale, []);
+  assert.equal(out.wips.length, 1);
+  assert.equal(out.wips[0].wipKey, HB_KEY);
+});
+
+test("component filter: scales quantityMultiplier to min(pickedQty, bomQty) — the planned JC wipQty source", () => {
+  const scope = parseRepairScope(
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["FOAM"],
+      components: [
+        { key: DIVAN_KEY, label: "Divan", qty: 1 }, // 1 of the BOM's 2 pieces
+        { key: HB_KEY, label: "HB", qty: 5 },       // over-ask clamps to BOM's 1
+      ],
+    }),
+  );
+  const out = filterWipsByRepairComponents(componentWips(), scope);
+  assert.deepEqual(out.stale, []);
+  const divan = out.wips.find((w) => w.wipKey === DIVAN_KEY);
+  const hb = out.wips.find((w) => w.wipKey === HB_KEY);
+  assert.equal(divan.quantityMultiplier, 1, "picked 1 of 2 divan pieces");
+  assert.equal(hb.quantityMultiplier, 1, "pick can never scale a WIP up");
+});
+
+test("component filter: a pick whose key left the BOM is STALE (caller throws — never builds the wrong subset)", () => {
+  const scope = parseRepairScope(
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["FOAM"],
+      components: [{ key: "BF100::9::DIVAN::gone", label: "Old Divan", qty: 1 }],
+    }),
+  );
+  const out = filterWipsByRepairComponents(componentWips(), scope);
+  assert.equal(out.stale.length, 1);
+  assert.equal(out.stale[0].label, "Old Divan");
+  assert.deepEqual(out.wips, [], "stale result must not hand back buildable wips");
+});
+
+test("component filter: stale-check runs against the FULL BOM key set, not the dept-narrowed survivors", () => {
+  // The dept filter dropped the DIVAN wip entirely (no FOAM step), but the
+  // pick is NOT stale — the key still exists in the full BOM. The scope
+  // simply narrows to nothing buildable for that piece, which the builder's
+  // existing zero-step guard handles.
+  const allBomKeys = [DIVAN_KEY, HB_KEY];
+  const survivors = componentWips().filter((w) => w.wipKey === HB_KEY);
+  const scope = parseRepairScope(
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["FOAM"],
+      components: [{ key: DIVAN_KEY, label: "Divan", qty: 1 }],
+    }),
+  );
+  const out = filterWipsByRepairComponents(survivors, scope, allBomKeys);
+  assert.deepEqual(out.stale, [], "key exists in the full BOM → not stale");
+  assert.deepEqual(out.wips, [], "picked piece has no surviving processes → nothing to build");
+});
+
+// ===========================================================================
+// repairComponentScale — the cascade's material gate + qty scale.
+// ===========================================================================
+
+test("repairComponentScale: no scope / no components → 1 (byte-identical full consumption)", () => {
+  assert.equal(repairComponentScale({ ownerWipKey: DIVAN_KEY, ownerWipQty: 2 }, null), 1);
+  const deptOnly = parseRepairScope('{"preset":"CUSTOM","depts":["FOAM"]}');
+  assert.equal(repairComponentScale({ ownerWipKey: DIVAN_KEY, ownerWipQty: 2 }, deptOnly), 1);
+});
+
+const componentScope = (qty) =>
+  parseRepairScope(
+    JSON.stringify({
+      preset: "CUSTOM",
+      depts: ["FOAM"],
+      components: [{ key: DIVAN_KEY, label: "Divan", qty }],
+    }),
+  );
+
+test("repairComponentScale: picked component scales by pickedQty/bomQty", () => {
+  assert.equal(
+    repairComponentScale({ ownerWipKey: DIVAN_KEY, ownerWipQty: 2 }, componentScope(2)),
+    1,
+    "full pick consumes the full line",
+  );
+  assert.equal(
+    repairComponentScale({ ownerWipKey: DIVAN_KEY, ownerWipQty: 2 }, componentScope(1)),
+    0.5,
+    "1 of 2 divan pieces consumes half",
+  );
+  assert.equal(
+    repairComponentScale({ ownerWipKey: DIVAN_KEY, ownerWipQty: 2 }, componentScope(9)),
+    1,
+    "over-ask clamps to the BOM qty — never over-consume",
+  );
+});
+
+test("repairComponentScale: unpicked or underivable owner → null (DROP the line)", () => {
+  const scope = componentScope(1);
+  // Owning component not picked.
+  assert.equal(repairComponentScale({ ownerWipKey: HB_KEY, ownerWipQty: 1 }, scope), null);
+  // No owner key (legacy bom_versions.tree / flat bom_components fallback).
+  assert.equal(repairComponentScale({}, scope), null);
+  assert.equal(repairComponentScale({ ownerWipQty: 2 }, scope), null);
+});
+
+// ===========================================================================
+// canonicalizeComponentPicks — storage canonicalization (shared with FE).
+// ===========================================================================
+
+const pickerOptions = [
+  { key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 2 },
+  { key: HB_KEY, label: "1013(S)-HB", qty: 1 },
+];
+
+test("canonicalize: everything ticked at full BOM qty → undefined (field omitted — today's storage byte-identical)", () => {
+  assert.equal(
+    canonicalizeComponentPicks(pickerOptions, [
+      { key: HB_KEY, label: "1013(S)-HB", qty: 1 },
+      { key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 2 },
+    ]),
+    undefined,
+  );
+  // No options at all (flat/legacy BOM) → also "all".
+  assert.equal(canonicalizeComponentPicks([], []), undefined);
+});
+
+test("canonicalize: subset / reduced qty → explicit array in BOM order, clamped", () => {
+  // Subset keeps the field.
+  assert.deepEqual(
+    canonicalizeComponentPicks(pickerOptions, [{ key: HB_KEY, label: "1013(S)-HB", qty: 1 }]),
+    [{ key: HB_KEY, label: "1013(S)-HB", qty: 1 }],
+  );
+  // Full set but a reduced qty keeps the field; order follows the BOM.
+  assert.deepEqual(
+    canonicalizeComponentPicks(pickerOptions, [
+      { key: HB_KEY, qty: 1 },
+      { key: DIVAN_KEY, qty: 1 },
+    ]),
+    [
+      { key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 1 },
+      { key: HB_KEY, label: "1013(S)-HB", qty: 1 },
+    ],
+  );
+  // Over-ask clamps down to the BOM qty.
+  assert.deepEqual(
+    canonicalizeComponentPicks(pickerOptions, [{ key: DIVAN_KEY, qty: 99 }]),
+    [{ key: DIVAN_KEY, label: '8" Divan- 6FT', qty: 2 }],
+  );
+  // Nothing ticked → [] (kept so the shared validator blocks Save).
+  assert.deepEqual(canonicalizeComponentPicks(pickerOptions, []), []);
+  // Unknown keys (product/BOM changed under the picker) are dropped.
+  assert.deepEqual(
+    canonicalizeComponentPicks(pickerOptions, [{ key: "OTHER::0::X::X", qty: 1 }]),
+    [],
+  );
+});
+
+// ===========================================================================
+// Shared wipKey derivation — breakBomIntoWips and the cascade walk must use
+// THE SAME formula. Behavioural pin: derive keys for a sample BOM both ways.
+// ===========================================================================
+
+test("deriveTopLevelWipKey matches breakBomIntoWips' wipKey for every top-level node", () => {
+  const bomNodes = [
+    {
+      wipCode: "{DIVAN_HEIGHT} Divan- {SIZE}",
+      wipType: "DIVAN",
+      quantity: 2,
+      processes: [{ deptCode: "WOOD_CUT", minutes: 10 }],
+    },
+    {
+      wipCode: "{MODEL}({SEAT_SIZE})-HB",
+      wipType: "HEADBOARD",
+      quantity: 1,
+      processes: [{ deptCode: "FAB_CUT", minutes: 5 }],
+    },
+    // No wipCode → key falls back to the UPPERCASED wipType.
+    { wipType: "sofa_armrest", quantity: 2, processes: [{ deptCode: "FOAM", minutes: 3 }] },
+  ];
+  const wips = breakBomIntoWips(JSON.stringify(bomNodes), "BF100", {
+    productCode: "BF100",
+    sizeLabel: "6FT",
+    divanHeightInches: 8,
+  });
+  assert.equal(wips.length, 3);
+  for (let i = 0; i < bomNodes.length; i++) {
+    assert.equal(
+      wips[i].wipKey,
+      deriveTopLevelWipKey("BF100", i, bomNodes[i]),
+      `node ${i} key must match the shared helper`,
+    );
+  }
+  assert.equal(wips[2].wipKey, "BF100::2::SOFA_ARMREST::SOFA_ARMREST");
+});
+
+// ===========================================================================
 // Round-trip + labels.
 // ===========================================================================
 
@@ -297,6 +643,19 @@ test("badge labels are operator-readable English", () => {
   assert.equal(
     repairScopeBadgeLabel(parseRepairScope('{"preset":"CUSTOM","depts":["FOAM","PACKING"]}')),
     "Custom: Foam + Packing",
+  );
+  // Component picks append a compact piece summary.
+  assert.equal(
+    repairScopeBadgeLabel(
+      parseRepairScope(
+        JSON.stringify({
+          preset: "CUSTOM",
+          depts: ["WOOD_CUT", "FRAMING"],
+          components: [{ key: DIVAN_KEY, label: "Divan", qty: 1 }],
+        }),
+      ),
+    ),
+    "Custom: Wood Cutting + Framing · Divan ×1",
   );
 });
 
@@ -431,4 +790,85 @@ test("builder: first-in-chain flag derives from the FILTERED chain", () => {
   // unfiltered source.
   assert.match(builderSrc, /const isFirstDeptForWip = p\.sequence === 0;/);
   assert.match(builderSrc, /const chain = wip\.processes;/);
+});
+
+// ===========================================================================
+// Component-level Repair Scope — structural pins.
+// ===========================================================================
+
+const breakdownSrc = readFileSync(
+  new URL("../src/api/lib/bom-wip-breakdown.ts", import.meta.url),
+  "utf8",
+);
+
+test("component endpoint: registered before /:id with sales-orders:read RBAC, sharing breakBomIntoWips", () => {
+  const routeIdx = soSrc.indexOf('app.get("/repair-components"');
+  const idRouteIdx = soSrc.indexOf('app.get("/:id"');
+  assert.ok(routeIdx > 0, "GET /repair-components must be registered");
+  assert.ok(idRouteIdx > routeIdx, "must be registered BEFORE the /:id catch-all");
+  const routeBody = soSrc.slice(routeIdx, soSrc.indexOf("app.get", routeIdx + 10));
+  assert.match(routeBody, /requirePermission\(c, "sales-orders", "read"\)/);
+  assert.match(
+    routeBody,
+    /breakBomIntoWips\(bomRow\.wipComponents, productCode, variants\)/,
+    "the picker must derive components with the builder's own breakdown",
+  );
+  // Same ACTIVE-first / any-version-fallback lookup the builder runs.
+  assert.match(routeBody, /versionStatus = 'ACTIVE'/);
+});
+
+test("shared wipKey derivation: ONE formula, used by the breakdown AND the cascade walk", () => {
+  // The formula string literal exists exactly once, inside the helper.
+  assert.equal(
+    (breakdownSrc.match(/\$\{productCode\}::\$\{idx\}::\$\{wipType\}::\$\{rawTopCode\}/g) ?? []).length,
+    1,
+    "wipKey format string must live ONLY in deriveTopLevelWipKey",
+  );
+  assert.match(breakdownSrc, /export function deriveTopLevelWipKey\(/);
+  // breakBomIntoWips delegates to the helper.
+  assert.match(breakdownSrc, /wipKey: deriveTopLevelWipKey\(productCode, idx, node\)/);
+  // The cascade imports the SAME helper and tags each root's subtree.
+  assert.match(cascadeSrc, /import \{ deriveTopLevelWipKey \} from "\.\/bom-wip-breakdown"/);
+  assert.match(cascadeSrc, /wipKey: deriveTopLevelWipKey\(/);
+  assert.doesNotMatch(
+    cascadeSrc,
+    /::\$\{idx\}::/,
+    "the cascade must never re-implement the wipKey format inline",
+  );
+});
+
+test("builder: component filter runs AFTER the dept filter, stale picks throw, scope stamps with components", () => {
+  const deptFilterIdx = builderSrc.indexOf("filterWipsByRepairScope(wips, repairScope)");
+  const componentFilterIdx = builderSrc.indexOf("filterWipsByRepairComponents(");
+  const schedIdx = builderSrc.indexOf("// ---- Reverse-schedule dept dueDates ----");
+  assert.ok(componentFilterIdx > deptFilterIdx, "component filter must come after the dept filter");
+  assert.ok(schedIdx > componentFilterIdx, "component filter must run before the planned/sequence loop");
+  // Stale-key detection uses the FULL pre-narrowing key set...
+  assert.match(builderSrc, /const allBomWipKeys = wips\.map\(\(w\) => w\.wipKey\);/);
+  // ...captured before the Headboard-Only filter.
+  assert.ok(
+    builderSrc.indexOf("const allBomWipKeys") <
+      builderSrc.indexOf('wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN")'),
+    "full key set must be captured before any narrowing",
+  );
+  // Stale picks fail the confirm loudly.
+  assert.match(builderSrc, /no longer matches the BOM for product/);
+  // The stamped scope keeps the components (serializeRepairScope carries
+  // them — pinned by the round-trip unit test above).
+  assert.match(builderSrc, /serializeRepairScope\(repairScope\)/);
+});
+
+test("cascade: component gate + qty scale run BEFORE the FIFO walk; owner tag rides the tree walk", () => {
+  const scaleIdx = cascadeSrc.indexOf("repairComponentScale(line, repairScope)");
+  const fifoIdx = cascadeSrc.indexOf("fifoConsume(batches, required)");
+  assert.ok(scaleIdx > 0, "repairComponentScale call must exist");
+  assert.ok(fifoIdx > scaleIdx, "component gate must run before fifoConsume");
+  // The scale multiplies into the required qty (shortage report included).
+  assert.match(cascadeSrc, /\(1 \+ Math\.max\(0, line\.wastePct \|\| 0\) \/ 100\) \*\s*componentScale/);
+  // Out-of-scope / underivable lines drop before any consumption.
+  assert.match(cascadeSrc, /if \(componentScale === null\) continue;/);
+  // collectTreeMaterials threads the owner tag through recursion.
+  assert.match(cascadeSrc, /collectTreeMaterials\(child, out, dims, owner\)/);
+  assert.match(cascadeSrc, /ownerWipKey: owner\?\.wipKey/);
+  assert.match(cascadeSrc, /ownerWipQty: owner\?\.wipQty/);
 });

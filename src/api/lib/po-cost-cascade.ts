@@ -59,7 +59,9 @@ import {
 import {
   parseRepairScope,
   materialLineInScope,
+  repairComponentScale,
 } from "../../lib/repair-scope";
+import { deriveTopLevelWipKey } from "./bom-wip-breakdown";
 
 type RMBatchRow = {
   id: string;
@@ -143,6 +145,18 @@ type MaterialLine = {
   // BOMs; the flat bom_components fallback has no process info and leaves
   // it undefined.
   ownerDeptCodes?: string[];
+  // Component-level Repair Scope: the TOP-LEVEL BOM WIP this line's owning
+  // node descends from. ownerWipKey is derived with the SAME
+  // deriveTopLevelWipKey helper breakBomIntoWips uses for job-card wipKeys
+  // (single source of truth), so a picked component matches its material
+  // lines exactly. ownerWipQty = that top-level node's per-FG piece count
+  // (the bound a pick's qty is clamped to → scale = picked/bomQty). Only
+  // the bom_templates.wipComponents walk can derive these — the legacy
+  // bom_versions.tree single-root shape and the flat bom_components
+  // fallback leave them undefined, and a component-scoped repair DROPS
+  // such lines (never over-consume on a partial repair).
+  ownerWipKey?: string;
+  ownerWipQty?: number;
 };
 
 // Walk a BOM tree JSON node and gather every `materials[]` entry across all
@@ -166,6 +180,13 @@ function collectTreeMaterials(
   node: unknown,
   out: MaterialLine[],
   dims: ProductionDimensions,
+  // Top-level WIP owner tag (Component-level Repair Scope). Passed once by
+  // the wipComponents walk for each root node and inherited UNCHANGED by
+  // every descendant — a material anywhere in the Divan subtree belongs to
+  // the Divan component. undefined for tree shapes that can't derive a
+  // component key (legacy bom_versions.tree); such lines drop under a
+  // component-scoped repair.
+  owner?: { wipKey: string; wipQty: number },
 ): void {
   if (!node || typeof node !== "object") return;
   const n = node as Record<string, unknown>;
@@ -218,6 +239,8 @@ function collectTreeMaterials(
           inventoryCode,
           autoDetect,
           ownerDeptCodes,
+          ownerWipKey: owner?.wipKey,
+          ownerWipQty: owner?.wipQty,
         });
       }
     }
@@ -225,7 +248,7 @@ function collectTreeMaterials(
   const kids = n.children;
   if (Array.isArray(kids)) {
     for (const child of kids) {
-      collectTreeMaterials(child, out, dims);
+      collectTreeMaterials(child, out, dims, owner);
     }
   }
 }
@@ -307,10 +330,38 @@ async function resolveBomMaterials(
     if (tplRow?.wipComponents) {
       try {
         const parsed = JSON.parse(tplRow.wipComponents);
-        const roots = Array.isArray(parsed) ? parsed : [parsed];
+        const isWipArray = Array.isArray(parsed);
+        const roots = isWipArray ? parsed : [parsed];
         const acc: MaterialLine[] = [];
-        for (const root of roots) {
-          collectTreeMaterials(root, acc, dims);
+        for (let rootIdx = 0; rootIdx < roots.length; rootIdx++) {
+          const root = roots[rootIdx];
+          // Component-level Repair Scope: tag every material in this root's
+          // subtree with the top-level WIP's key + per-FG piece count. The
+          // key is derived with deriveTopLevelWipKey — the EXACT formula
+          // breakBomIntoWips stamps on this product's job cards / serves to
+          // the repair-components picker — so picked components and material
+          // lines match by string equality. Derivable only for the real
+          // wipComponents array shape (mirrors breakBomIntoWips, which
+          // treats a non-array as the FG_MAIN fallback); otherwise leave
+          // the lines untagged → dropped under a component scope.
+          const rootQtyRaw =
+            root && typeof root === "object"
+              ? Number((root as Record<string, unknown>).quantity)
+              : NaN;
+          const owner = isWipArray
+            ? {
+                wipKey: deriveTopLevelWipKey(
+                  po.productCode ?? "",
+                  rootIdx,
+                  root as { wipType?: unknown; wipCode?: unknown } | null,
+                ),
+                wipQty:
+                  Number.isFinite(rootQtyRaw) && rootQtyRaw > 0
+                    ? rootQtyRaw
+                    : 1,
+              }
+            : undefined;
+          collectTreeMaterials(root, acc, dims, owner);
         }
         if (acc.length > 0) return await substituteAutoDetectMaterials(db, acc, po);
       } catch {
@@ -499,6 +550,10 @@ export async function consumeRawMaterialsForPO(
   //   FOAM  → foam-class only (B.FILLER / S.FILLER);
   //   CUSTOM → branch-based: the line's owning BOM node must have at least
   //       one process in the chosen depts.
+  // Component-level picks (scope.components) apply ON TOP of the dept/class
+  // rule: a line is consumable only when its owning top-level WIP was
+  // picked, and its quantity scales by pickedQty/bomQty for partial picks —
+  // see repairComponentScale in the loop below.
   // Out-of-scope lines are skipped BEFORE any FIFO consumption — no
   // rm_batches decrement, no RM_ISSUE ledger row, and no shortage report
   // (the material simply isn't part of this repair).
@@ -514,10 +569,26 @@ export async function consumeRawMaterialsForPO(
   const statements: D1PreparedStatement[] = [];
 
   for (const line of bomLines) {
+    // Component-level Repair Scope gate + quantity scale (on top of the
+    // dept/class filter below — both must pass). repairComponentScale:
+    //   1        → no component picks on the scope, or this line's owning
+    //              component is picked at full BOM qty (multiply-by-1 keeps
+    //              every non-component path byte-identical);
+    //   fraction → partial pick — picked 1 of the 2 divan pieces consumes
+    //              half the line's per-FG quantity (pickedQty / bomQty);
+    //   null     → DROP: the owning component wasn't picked, or the line
+    //              has no derivable owner (legacy bom_versions.tree / flat
+    //              bom_components shapes) — never over-consume on a
+    //              partial repair. No FIFO walk, no shortage report.
+    const componentScale = repairScope
+      ? repairComponentScale(line, repairScope)
+      : 1;
+    if (componentScale === null) continue;
     const required =
       line.qtyPerUnit *
       po.quantity *
-      (1 + Math.max(0, line.wastePct || 0) / 100);
+      (1 + Math.max(0, line.wastePct || 0) / 100) *
+      componentScale;
     if (required <= 0) continue;
 
     const rm = await resolveRmFromBom(db, line);

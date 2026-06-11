@@ -104,6 +104,31 @@ const DEFAULT_WIP_DEPT_CHAINS: Record<string, string[]> = {
   SOFA_HEADREST: ["FAB_CUT", "FAB_SEW", "FOAM", "UPHOLSTERY", "PACKING"],
 };
 
+// ---------------------------------------------------------------------------
+// deriveTopLevelWipKey — THE wipKey formula for a top-level wipComponents
+// node, extracted so it has exactly one definition. Consumers:
+//   * breakBomIntoWips below (job_cards.wipKey — JC grouping, upstream-lock
+//     scoping, and the Component-level Repair Scope picker keys served by
+//     GET /api/sales-orders/repair-components);
+//   * po-cost-cascade.ts resolveBomMaterials (tags each BOM material line
+//     with its owning top-level WIP so a component-scoped repair can match
+//     picked components ↔ material lines by the SAME key).
+// `idx` is the node's position in the top-level wipComponents array. The
+// UNRESOLVED raw wipCode keeps the key stable across SO lines with
+// different fabric/height variants (see the wipKey comment in
+// breakBomIntoWips). Do NOT re-implement this string format anywhere else —
+// tests/repair-scope.test.mjs structurally pins both call sites.
+// ---------------------------------------------------------------------------
+export function deriveTopLevelWipKey(
+  productCode: string,
+  idx: number,
+  node: { wipType?: unknown; wipCode?: unknown } | null | undefined,
+): string {
+  const wipType = String(node?.wipType || "FG_MAIN").toUpperCase();
+  const rawTopCode = String(node?.wipCode || wipType);
+  return `${productCode}::${idx}::${wipType}::${rawTopCode}`;
+}
+
 // Resolve `{TOKEN}` placeholders inside a master wipCode / wipLabel against
 // the SO line's variant context. Any token with no value substitutes empty,
 // then whitespace is collapsed so gaps don't cascade into trailing dashes.
@@ -355,8 +380,10 @@ export function breakBomIntoWips(
       // guarantee uniqueness even if two wips share a wipCode. We use the
       // UNRESOLVED rawTopCode here so the key stays stable across SO lines
       // with different fabric/height variants (otherwise identical POs would
-      // get different wipKeys and upstream-lock scoping breaks).
-      wipKey: `${productCode}::${idx}::${wipType}::${rawTopCode}`,
+      // get different wipKeys and upstream-lock scoping breaks). Formula
+      // lives in deriveTopLevelWipKey (shared with po-cost-cascade's
+      // material walk — do not inline it back here).
+      wipKey: deriveTopLevelWipKey(productCode, idx, node),
       quantityMultiplier,
       processes,
     });

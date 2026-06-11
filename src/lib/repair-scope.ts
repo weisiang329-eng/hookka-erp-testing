@@ -6,9 +6,22 @@
 // column, folded lowercase — read it dual-key: row.repairScope ??
 // row.repairscope). Stored value is a JSON string:
 //
-//   {"preset":"FULL"|"FABRIC"|"FRAME"|"FOAM"|"CUSTOM","depts":["FAB_CUT",...]}
+//   {"preset":"FULL"|"FABRIC"|"FRAME"|"FOAM"|"CUSTOM",
+//    "depts":["FAB_CUT",...],
+//    "components"?: [{"key":"<wipKey>","label":"8\" Divan- 6FT","qty":1}, ...]}
 //
 // or NULL (= FULL = no filtering, byte-identical to a normal order).
+//
+// `components` (Component-level Repair Scope) narrows the repair to specific
+// top-level BOM WIP pieces — bedframe Headboard vs Divan, sofa base / seat
+// cushion / back cushion / armrest / headrest. `key` is the deterministic
+// wipKey from breakBomIntoWips (src/api/lib/bom-wip-breakdown.ts) — the same
+// key the UPHOLSTERY-side job cards already group by. `qty` is the picked
+// piece count (≤ the BOM's per-FG piece count; the builder/cascade clamp).
+// ABSENT components = ALL components — byte-identical to a dept-only scope,
+// so every pre-feature row keeps today's behaviour. When the operator leaves
+// every component ticked at full BOM qty the field is OMITTED entirely
+// (see canonicalizeComponentPicks).
 //
 // Consumers:
 //   * src/api/routes/sales-orders.ts        — validate on POST/PUT writes
@@ -75,11 +88,24 @@ export const REPAIR_SCOPE_PRESET_LABELS: Record<RepairScopePreset, string> = {
   CUSTOM: "Custom",
 };
 
+// One picked repair component — a top-level BOM WIP piece. `key` is the
+// breakBomIntoWips wipKey (productCode::idx::wipType::rawTopCode — variant-
+// stable because it uses the UNRESOLVED template code); `label` is the
+// resolved display label snapshotted at pick time (used in badges and in
+// the stale-pick error); `qty` is the picked piece count, integer ≥ 1.
+export type RepairComponentPick = {
+  key: string;
+  label: string;
+  qty: number;
+};
+
 // A parsed, non-FULL repair scope. FULL parses to `null` so every consumer's
-// "no scope" branch is byte-identical to pre-feature behaviour.
+// "no scope" branch is byte-identical to pre-feature behaviour. `components`
+// absent = all components (today's behaviour for every existing row).
 export type RepairScope = {
   preset: "FABRIC" | "FRAME" | "FOAM" | "CUSTOM";
   depts: RepairDeptCode[];
+  components?: RepairComponentPick[];
 };
 
 function isKnownDept(code: unknown): code is RepairDeptCode {
@@ -96,7 +122,43 @@ function inChainOrder(depts: readonly RepairDeptCode[]): RepairDeptCode[] {
 
 export function serializeRepairScope(scope: RepairScope | null): string | null {
   if (!scope) return null;
+  // components is serialized ONLY when present and non-empty — an absent
+  // field is the canonical "all components" form, keeping dept-only scopes
+  // byte-identical to their pre-feature storage.
+  if (scope.components && scope.components.length > 0) {
+    return JSON.stringify({
+      preset: scope.preset,
+      depts: scope.depts,
+      components: scope.components.map((c) => ({
+        key: c.key,
+        label: c.label,
+        qty: c.qty,
+      })),
+    });
+  }
   return JSON.stringify({ preset: scope.preset, depts: scope.depts });
+}
+
+// Lenient read-side components parser (mirror of parseRepairScope's
+// philosophy: storage is write-validated, so malformed entries here are
+// hand-tampered — drop them; zero survivors degrades to "all components",
+// the same FULL-ward degradation the dept parser applies).
+function parseComponentsLenient(raw: unknown): RepairComponentPick[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: RepairComponentPick[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const key = (entry as { key?: unknown }).key;
+    const label = (entry as { label?: unknown }).label;
+    const qtyRaw = (entry as { qty?: unknown }).qty;
+    if (typeof key !== "string" || key.length === 0 || seen.has(key)) continue;
+    const qty = typeof qtyRaw === "number" ? qtyRaw : Number(qtyRaw);
+    if (!Number.isInteger(qty) || qty < 1) continue;
+    seen.add(key);
+    out.push({ key, label: typeof label === "string" ? label : "", qty });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,8 +181,17 @@ export function parseRepairScope(
   if (!parsed || typeof parsed !== "object") return null;
   const preset = (parsed as { preset?: unknown }).preset;
   if (preset === "FULL") return null;
+  // components ride along on any non-FULL scope (the picker only writes
+  // them for CUSTOM, but legacy preset rows edited via API keep them too).
+  const components = parseComponentsLenient(
+    (parsed as { components?: unknown }).components,
+  );
   if (preset === "FABRIC" || preset === "FRAME" || preset === "FOAM") {
-    return { preset, depts: [...REPAIR_SCOPE_PRESET_DEPTS[preset]] };
+    return {
+      preset,
+      depts: [...REPAIR_SCOPE_PRESET_DEPTS[preset]],
+      ...(components ? { components } : {}),
+    };
   }
   if (preset === "CUSTOM") {
     const rawDepts = (parsed as { depts?: unknown }).depts;
@@ -129,7 +200,7 @@ export function parseRepairScope(
       rawDepts.filter(isKnownDept) as RepairDeptCode[],
     );
     if (depts.length === 0) return null;
-    return { preset: "CUSTOM", depts };
+    return { preset: "CUSTOM", depts, ...(components ? { components } : {}) };
   }
   return null;
 }
@@ -144,6 +215,78 @@ export function parseRepairScope(
 // Reject — don't normalize: unknown presets, unknown/duplicate dept codes,
 // and CUSTOM with no depts are 400s, never silently coerced.
 // ---------------------------------------------------------------------------
+
+// Strict components validation (write side). `undefined`/`null` = field
+// absent = all components (always ok). Present → must be a non-empty array
+// of {key: non-empty string, label: string, qty: integer ≥ 1}, no duplicate
+// keys. Rejected shapes are never coerced — the qty bound against the BOM
+// (≤ per-FG piece count) is enforced by the builder/cascade clamp, not
+// here, because the validator has no BOM access.
+function validateComponentsInput(
+  raw: unknown,
+):
+  | { ok: true; components: RepairComponentPick[] | undefined }
+  | { ok: false; error: string } {
+  if (raw === undefined || raw === null) {
+    return { ok: true, components: undefined };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      error:
+        "Invalid repairScope: components must be an array of {key, label, qty}.",
+    };
+  }
+  if (raw.length === 0) {
+    return {
+      ok: false,
+      error:
+        "Invalid repairScope: keep at least one repair component ticked (or omit components to repair all of them).",
+    };
+  }
+  const out: RepairComponentPick[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return {
+        ok: false,
+        error:
+          "Invalid repairScope: each component must be an object {key, label, qty}.",
+      };
+    }
+    const key = (entry as { key?: unknown }).key;
+    const label = (entry as { label?: unknown }).label;
+    const qty = (entry as { qty?: unknown }).qty;
+    if (typeof key !== "string" || key.trim().length === 0) {
+      return {
+        ok: false,
+        error: "Invalid repairScope: component key must be a non-empty string.",
+      };
+    }
+    if (typeof label !== "string") {
+      return {
+        ok: false,
+        error: `Invalid repairScope: component "${key}" label must be a string.`,
+      };
+    }
+    if (typeof qty !== "number" || !Number.isInteger(qty) || qty < 1) {
+      return {
+        ok: false,
+        error: `Invalid repairScope: component "${label || key}" qty must be a whole number of pieces (1 or more).`,
+      };
+    }
+    if (seen.has(key)) {
+      return {
+        ok: false,
+        error: `Invalid repairScope: duplicate component key "${key}".`,
+      };
+    }
+    seen.add(key);
+    out.push({ key, label, qty });
+  }
+  return { ok: true, components: out };
+}
+
 export function validateRepairScopeInput(
   raw: unknown,
 ): { ok: true; canonical: string | null } | { ok: false; error: string } {
@@ -167,7 +310,22 @@ export function validateRepairScopeInput(
   }
   const preset = (parsed as { preset?: unknown }).preset;
   const rawDepts = (parsed as { depts?: unknown }).depts;
-  if (preset === "FULL") return { ok: true, canonical: null };
+  const rawComponents = (parsed as { components?: unknown }).components;
+  if (preset === "FULL") {
+    // A full remake repairs every component by definition — a client that
+    // sends component picks on FULL is confused; reject, don't strip.
+    if (rawComponents !== undefined && rawComponents !== null) {
+      return {
+        ok: false,
+        error:
+          "Invalid repairScope: a Full remake already repairs every component — components can only be set on a partial repair.",
+      };
+    }
+    return { ok: true, canonical: null };
+  }
+  const componentsCheck = validateComponentsInput(rawComponents);
+  if (!componentsCheck.ok) return componentsCheck;
+  const components = componentsCheck.components;
   if (preset === "FABRIC" || preset === "FRAME" || preset === "FOAM") {
     const canonicalDepts = REPAIR_SCOPE_PRESET_DEPTS[preset];
     // depts may be omitted (server derives them) or must match the preset
@@ -190,7 +348,11 @@ export function validateRepairScopeInput(
     }
     return {
       ok: true,
-      canonical: serializeRepairScope({ preset, depts: [...canonicalDepts] }),
+      canonical: serializeRepairScope({
+        preset,
+        depts: [...canonicalDepts],
+        ...(components ? { components } : {}),
+      }),
     };
   }
   if (preset === "CUSTOM") {
@@ -223,6 +385,7 @@ export function validateRepairScopeInput(
       canonical: serializeRepairScope({
         preset: "CUSTOM",
         depts: inChainOrder(rawDepts as RepairDeptCode[]),
+        ...(components ? { components } : {}),
       }),
     };
   }
@@ -254,6 +417,129 @@ export function filterWipsByRepairScope<
       processes: w.processes.filter((p) => allow.has(p.deptCode)),
     }))
     .filter((w) => w.processes.length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// filterWipsByRepairComponents — the Component-level job-card filter, applied
+// by the builder AFTER the dept filter above. No components on the scope →
+// identity (all components, byte-identical to a dept-only scope).
+//
+// Stale detection: a picked key that doesn't exist in `allBomWipKeys` (the
+// FULL breakdown's keys, captured BEFORE any narrowing) means the product's
+// BOM top-level structure changed since the operator picked — the caller
+// MUST fail loudly (never silently build the wrong subset of a paid repair),
+// so on any stale pick this returns the stale list and an EMPTY wips array.
+// A pick whose key exists but whose WIP was dropped by the Headboard-Only /
+// dept filters is NOT stale — that's legal narrowing, and a scope that
+// narrows to nothing is caught by the builder's existing zero-step throw.
+//
+// Qty scaling: the kept WIP's quantityMultiplier (its per-FG piece count —
+// the source of the planned job card's wipQty) is clamped to
+// min(pickedQty, bomQty) so a partial pick (1 of 2 divan pieces) builds
+// fewer pieces and a BOM whose qty shrank since picking never over-builds.
+// ---------------------------------------------------------------------------
+export function filterWipsByRepairComponents<
+  W extends { wipKey: string; quantityMultiplier: number },
+>(
+  wips: W[],
+  scope: RepairScope | null,
+  allBomWipKeys?: Iterable<string>,
+): { wips: W[]; stale: RepairComponentPick[] } {
+  const components = scope?.components;
+  if (!scope || !components || components.length === 0) {
+    return { wips, stale: [] };
+  }
+  const known = new Set<string>(
+    allBomWipKeys ?? wips.map((w) => w.wipKey),
+  );
+  const stale = components.filter((c) => !known.has(c.key));
+  if (stale.length > 0) return { wips: [], stale };
+  const pickByKey = new Map(components.map((c) => [c.key, c]));
+  const kept = wips
+    .filter((w) => pickByKey.has(w.wipKey))
+    .map((w) => {
+      const pick = pickByKey.get(w.wipKey)!;
+      const scaled = Math.min(pick.qty, w.quantityMultiplier);
+      return scaled === w.quantityMultiplier
+        ? w
+        : { ...w, quantityMultiplier: scaled };
+    });
+  return { wips: kept, stale: [] };
+}
+
+// ---------------------------------------------------------------------------
+// repairComponentScale — the Component-level MATERIAL rule, used by
+// consumeRawMaterialsForPO on top of materialLineInScope. Returns the
+// quantity factor for one BOM material line:
+//
+//   1         → scope has no component picks (all components), or the
+//               owning component is picked at its full BOM qty.
+//   fraction  → partial pick: pickedQty / bomQty (picked 1 of the 2 divan
+//               pieces → 0.5 of the line's per-FG quantity).
+//   null      → DROP the line: its owning component wasn't picked, or the
+//               line can't prove which component owns it (no ownerWipKey —
+//               legacy bom_versions.tree / flat bom_components shapes).
+//               For a partial repair we never consume materials we can't
+//               prove are in scope.
+//
+// line.ownerWipKey is derived during the cascade's BOM tree walk with the
+// SAME deriveTopLevelWipKey helper breakBomIntoWips uses for job-card
+// wipKeys (single source of truth — structurally pinned in tests), so a
+// picked key matches its material lines exactly. ownerWipQty is the owning
+// top-level node's per-FG piece count (the bound the pick is clamped to).
+// ---------------------------------------------------------------------------
+export function repairComponentScale(
+  line: { ownerWipKey?: string; ownerWipQty?: number },
+  scope: RepairScope | null,
+): number | null {
+  const components = scope?.components;
+  if (!scope || !components || components.length === 0) return 1;
+  if (!line.ownerWipKey) return null;
+  const pick = components.find((c) => c.key === line.ownerWipKey);
+  if (!pick) return null;
+  const bomQty =
+    line.ownerWipQty != null && line.ownerWipQty > 0 ? line.ownerWipQty : 1;
+  return Math.min(pick.qty, bomQty) / bomQty;
+}
+
+// ---------------------------------------------------------------------------
+// canonicalizeComponentPicks — storage canonicalization shared by the
+// frontend picker (and unit-tested directly). `options` is the BOM's
+// component list (from /api/sales-orders/repair-components); `picks` is the
+// operator's checked entries.
+//
+//   undefined → everything is picked at full BOM qty (or the BOM has no
+//               components) — OMIT the components field entirely, the
+//               canonical "all components" form.
+//   array     → an explicit subset / reduced-qty pick, ordered by the BOM's
+//               component order, qty clamped to [1, bomQty]. An empty array
+//               (operator unticked everything) is returned as-is so the
+//               shared validator blocks Save with its at-least-one error.
+//
+// Picks whose key isn't in `options` are dropped (the product / BOM
+// changed under the picker — the survivors are re-canonicalized).
+// ---------------------------------------------------------------------------
+export function canonicalizeComponentPicks(
+  options: readonly { key: string; label: string; qty: number }[],
+  picks: readonly { key: string; label?: string; qty: number }[],
+): RepairComponentPick[] | undefined {
+  const cleaned: RepairComponentPick[] = [];
+  let allAtFullQty = true;
+  for (const opt of options) {
+    const pick = picks.find((p) => p.key === opt.key);
+    // BOM piece counts are integers in practice (divan=2, headboard=1,
+    // cushions=2); floor() guards a pathological fractional BOM qty.
+    const bomQty = Math.max(1, Math.floor(opt.qty) || 1);
+    if (!pick) {
+      allAtFullQty = false;
+      continue;
+    }
+    const qty = Math.min(Math.max(1, Math.floor(pick.qty) || 1), bomQty);
+    if (qty !== bomQty) allAtFullQty = false;
+    cleaned.push({ key: opt.key, label: opt.label, qty });
+  }
+  if (cleaned.length === options.length && allAtFullQty) return undefined;
+  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,11 +632,19 @@ export function materialLineInScope(
 }
 
 // Compact human label for badges: "Fabric replacement", or for CUSTOM the
-// joined dept labels ("Custom: Foam + Packing").
+// joined dept labels ("Custom: Foam + Packing"). Component picks append a
+// short piece summary: "Custom: Wood Cutting + Framing · Divan ×1".
 export function repairScopeBadgeLabel(scope: RepairScope | null): string {
   if (!scope) return REPAIR_SCOPE_PRESET_LABELS.FULL;
-  if (scope.preset === "CUSTOM") {
-    return `Custom: ${scope.depts.map((d) => REPAIR_DEPT_LABELS[d]).join(" + ")}`;
+  const base =
+    scope.preset === "CUSTOM"
+      ? `Custom: ${scope.depts.map((d) => REPAIR_DEPT_LABELS[d]).join(" + ")}`
+      : REPAIR_SCOPE_PRESET_LABELS[scope.preset];
+  if (scope.components && scope.components.length > 0) {
+    const pieces = scope.components
+      .map((c) => `${c.label || c.key} ×${c.qty}`)
+      .join(" + ");
+    return `${base} · ${pieces}`;
   }
-  return REPAIR_SCOPE_PRESET_LABELS[scope.preset];
+  return base;
 }

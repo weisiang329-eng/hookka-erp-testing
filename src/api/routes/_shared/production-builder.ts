@@ -44,6 +44,7 @@ import {
   parseRepairScope,
   serializeRepairScope,
   filterWipsByRepairScope,
+  filterWipsByRepairComponents,
   repairScopeBadgeLabel,
 } from "../../../lib/repair-scope";
 
@@ -579,6 +580,13 @@ export async function createProductionOrdersForOrder(
         productCode,
         variants,
       );
+      // Full-BOM wipKey set, captured BEFORE any narrowing (Headboard-Only /
+      // dept / component filters). Component picks are stale-checked against
+      // THIS set: a picked key missing here means the product's top-level
+      // BOM structure changed since the operator picked (throw below). A
+      // pick that merely narrows to nothing via the HB-only or dept filters
+      // is legal narrowing, caught by the existing zero-step guard.
+      const allBomWipKeys = wips.map((w) => w.wipKey);
 
       // ---- Headboard-only filter ----
       // When the SO/CO line carries specialOrder "Headboard Only", the
@@ -614,6 +622,33 @@ export async function createProductionOrdersForOrder(
       const repairScope = parseRepairScope(item.repairScope ?? null);
       if (repairScope) {
         wips = filterWipsByRepairScope(wips, repairScope);
+
+        // ---- Component-level Repair Scope ----
+        // scope.components narrows further to the PICKED top-level BOM
+        // pieces (bedframe: Headboard vs Divan; sofa: base / cushions /
+        // armrest / headrest — exactly the per-component split the
+        // UPHOLSTERY job cards already use). Keys were picked against
+        // GET /api/sales-orders/repair-components, which runs the SAME
+        // breakBomIntoWips as above, so a surviving pick matches a wipKey
+        // here exactly. The helper also clamps each kept WIP's
+        // quantityMultiplier to min(pickedQty, bomQty) — the wipQty
+        // computation below picks that up unchanged. Absent components =
+        // all pieces, byte-identical to a dept-only scope.
+        const componentResult = filterWipsByRepairComponents(
+          wips,
+          repairScope,
+          allBomWipKeys,
+        );
+        if (componentResult.stale.length > 0) {
+          // BOM edited / product re-pointed since the line was saved.
+          // NEVER silently build the wrong subset of a paid repair — fail
+          // the confirm loudly so the operator re-picks.
+          const first = componentResult.stale[0];
+          throw new Error(
+            `production-builder: repair component "${first.label || first.key}" on line ${item.lineNo} no longer matches the BOM for product "${productCode}" — the product's components changed since this line was saved. Re-open the line, re-pick the repair components, then confirm again`,
+          );
+        }
+        wips = componentResult.wips;
       }
 
       // ---- Reverse-schedule dept dueDates ----

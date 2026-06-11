@@ -55,6 +55,10 @@ import {
   unknownFabricCodeError,
 } from "../lib/fabric-validation";
 import {
+  breakBomIntoWips,
+  type BomVariantContext,
+} from "../lib/bom-wip-breakdown";
+import {
   validateSofaSizeLabels,
   unknownSofaSizeLabelError,
 } from "../lib/sofa-size-validation";
@@ -1202,6 +1206,97 @@ app.get("/stats", async (c) => {
     c,
   );
   return c.json({ success: true, ...data });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/sales-orders/repair-components — the pickable repair components
+// for one product line (Component-level Repair Scope).
+//
+// Returns the product's top-level BOM WIP pieces ({key, label, type, qty})
+// derived by THE SAME breakBomIntoWips call — same ACTIVE-template lookup +
+// any-version fallback, same variant context — that production-builder.ts
+// runs at SO confirm. That shared derivation is the contract: a `key` picked
+// here is byte-identical to the wipKey the builder will stamp on this line's
+// job cards, so create-time picks always match confirm-time building (and a
+// BOM edited in between fails LOUDLY at confirm instead of building the
+// wrong subset). qty = the WIP's per-FG piece count (bedframe Divan = 2,
+// Headboard = 1) — the upper bound for the picker's per-component qty input.
+//
+// Missing / empty / unusable BOM (no top-level WIP nodes) → data: [] and the
+// frontend hides the component picker (= all components, today's behaviour
+// for legacy/flat BOMs).
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.get("/repair-components", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  const productCode = (c.req.query("productCode") ?? "").trim();
+  if (!productCode) {
+    return c.json({ success: false, error: "productCode is required" }, 400);
+  }
+  const numOrNull = (v: string | undefined): number | null => {
+    if (v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // SAME two-step BOM lookup as production-builder.ts (ACTIVE first, newest
+  // of any status otherwise) so the picker sees exactly what confirm will.
+  type BomRow = { wipComponents: string | null; baseModel: string | null };
+  let bomRow = await c.var.DB
+    .prepare(
+      `SELECT wipComponents, baseModel FROM bom_templates
+         WHERE productCode = ? AND versionStatus = 'ACTIVE'
+         ORDER BY effectiveFrom DESC LIMIT 1`,
+    )
+    .bind(productCode)
+    .first<BomRow>();
+  if (!bomRow) {
+    bomRow = await c.var.DB
+      .prepare(
+        `SELECT wipComponents, baseModel FROM bom_templates
+           WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<BomRow>();
+  }
+  if (!bomRow?.wipComponents) {
+    return c.json({ success: true, data: [] });
+  }
+
+  // SAME variant context the builder assembles from the SO line at confirm
+  // (model comes from the BOM row itself — see BUG-2026-04-27-004). The
+  // wipKey is variant-independent (raw template code); variants only shape
+  // the display labels so they match the job cards 1:1.
+  const variants: BomVariantContext = {
+    productCode,
+    model: bomRow.baseModel ?? productCode,
+    sizeLabel: c.req.query("sizeLabel") ?? "",
+    sizeCode: c.req.query("sizeCode") ?? "",
+    fabricCode: c.req.query("fabricCode") ?? "",
+    divanHeightInches: numOrNull(c.req.query("divanHeightInches")),
+    legHeightInches: numOrNull(c.req.query("legHeightInches")),
+    gapInches: numOrNull(c.req.query("gapInches")),
+  };
+  const wips = breakBomIntoWips(bomRow.wipComponents, productCode, variants);
+  // breakBomIntoWips synthesizes a single FG_MAIN walker when the BOM JSON
+  // is unusable — not a pickable component. Its 2-segment wipKey
+  // (`code::FG_MAIN`) is unambiguous: real keys always carry the
+  // ::idx::type:: segments.
+  const isFallback =
+    wips.length === 1 && wips[0].wipKey === `${productCode}::FG_MAIN`;
+  return c.json({
+    success: true,
+    data: isFallback
+      ? []
+      : wips.map((w) => ({
+          key: w.wipKey,
+          label: w.wipLabel || w.wipCode,
+          type: w.wipType,
+          qty: w.quantityMultiplier,
+        })),
+  });
 });
 
 // ---------------------------------------------------------------------------

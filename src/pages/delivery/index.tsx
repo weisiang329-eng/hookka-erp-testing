@@ -608,6 +608,9 @@ export default function DeliveryPage() {
     ratePerExtraDropSen: number;
     status: "ACTIVE" | "INACTIVE";
     remarks: string;
+    boxLengthM: number | null;
+    boxWidthM: number | null;
+    boxHeightM: number | null;
   };
   type ThreePLDriverPerson = {
     id: string;
@@ -623,6 +626,7 @@ export default function DeliveryPage() {
   const [vehicleForm, setVehicleForm] = useState({
     plateNo: "", vehicleType: "", capacityM3: "",
     ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE" as "ACTIVE" | "INACTIVE", remarks: "",
+    boxLengthM: "", boxWidthM: "", boxHeightM: "",
   });
   const [driverEditing, setDriverEditing] = useState<ThreePLDriverPerson | "new" | null>(null);
   const [driverForm, setDriverForm] = useState({
@@ -1458,6 +1462,7 @@ export default function DeliveryPage() {
       setVehicleForm({
         plateNo: "", vehicleType: "", capacityM3: "",
         ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE", remarks: "",
+        boxLengthM: "", boxWidthM: "", boxHeightM: "",
       });
     } else {
       setVehicleForm({
@@ -1468,6 +1473,9 @@ export default function DeliveryPage() {
         ratePerExtraDropRM: String((v.ratePerExtraDropSen || 0) / 100),
         status: v.status,
         remarks: v.remarks || "",
+        boxLengthM: v.boxLengthM != null ? String(v.boxLengthM) : "",
+        boxWidthM: v.boxWidthM != null ? String(v.boxWidthM) : "",
+        boxHeightM: v.boxHeightM != null ? String(v.boxHeightM) : "",
       });
     }
     setVehicleEditing(v);
@@ -1488,6 +1496,9 @@ export default function DeliveryPage() {
       ratePerExtraDropSen: Math.round((Number(vehicleForm.ratePerExtraDropRM) || 0) * 100),
       status: vehicleForm.status,
       remarks: vehicleForm.remarks,
+      boxLengthM: vehicleForm.boxLengthM !== "" ? Number(vehicleForm.boxLengthM) || null : null,
+      boxWidthM: vehicleForm.boxWidthM !== "" ? Number(vehicleForm.boxWidthM) || null : null,
+      boxHeightM: vehicleForm.boxHeightM !== "" ? Number(vehicleForm.boxHeightM) || null : null,
     };
     const isEdit = vehicleEditing !== "new" && vehicleEditing !== null;
     const url = isEdit
@@ -6063,6 +6074,7 @@ export default function DeliveryPage() {
                                   Card. Kept (Phase 1 changes no cost math). */}
                               <th className="text-right px-2 py-1.5 font-medium">Override Rate/Trip (legacy)</th>
                               <th className="text-right px-2 py-1.5 font-medium">Override +Drop (legacy)</th>
+                              <th className="text-left px-2 py-1.5 font-medium">Box (L×W×H ft)</th>
                               <th className="text-left px-2 py-1.5 font-medium">Status</th>
                               <th className="text-right px-2 py-1.5 font-medium w-20">Actions</th>
                             </tr>
@@ -6070,7 +6082,7 @@ export default function DeliveryPage() {
                           <tbody>
                             {providerVehicles.length === 0 ? (
                               <tr>
-                                <td colSpan={7} className="text-center text-[#6B7280] py-3">
+                                <td colSpan={8} className="text-center text-[#6B7280] py-3">
                                   No vehicles yet — click "Add Vehicle" above.
                                 </td>
                               </tr>
@@ -6082,6 +6094,11 @@ export default function DeliveryPage() {
                                   <td className="px-2 py-1.5 text-right">{v.capacityM3 || "-"}</td>
                                   <td className="px-2 py-1.5 text-right">RM{(v.ratePerTripSen / 100).toFixed(2)}</td>
                                   <td className="px-2 py-1.5 text-right">RM{(v.ratePerExtraDropSen / 100).toFixed(2)}</td>
+                                  <td className="px-2 py-1.5 whitespace-nowrap tabular-nums">
+                                    {v.boxLengthM != null && v.boxWidthM != null && v.boxHeightM != null
+                                      ? `${v.boxLengthM.toFixed(2)} × ${v.boxWidthM.toFixed(2)} × ${v.boxHeightM.toFixed(2)}`
+                                      : "-"}
+                                  </td>
                                   <td className="px-2 py-1.5">
                                     <Badge variant="status" status={v.status} />
                                   </td>
@@ -6172,6 +6189,44 @@ export default function DeliveryPage() {
                               <option value="ACTIVE">Active</option>
                               <option value="INACTIVE">Inactive</option>
                             </select>
+                          </div>
+                          {/* Box dimensions row — optional, three inputs on one line */}
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Length (m)</label>
+                            <input
+                              type="number" onFocus={(e) => e.currentTarget.select()}
+                              step="0.01"
+                              value={vehicleForm.boxLengthM}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, boxLengthM: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Width (m)</label>
+                            <input
+                              type="number" onFocus={(e) => e.currentTarget.select()}
+                              step="0.01"
+                              value={vehicleForm.boxWidthM}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, boxWidthM: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Height (m)</label>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number" onFocus={(e) => e.currentTarget.select()}
+                                step="0.01"
+                                value={vehicleForm.boxHeightM}
+                                onChange={(e) => setVehicleForm((f) => ({ ...f, boxHeightM: e.target.value }))}
+                                className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                              />
+                              {vehicleForm.boxLengthM !== "" && vehicleForm.boxWidthM !== "" && vehicleForm.boxHeightM !== "" && (
+                                <span className="mt-1 text-[10px] text-[#6B7280] whitespace-nowrap">
+                                  ≈ {(Number(vehicleForm.boxLengthM) * Number(vehicleForm.boxWidthM) * Number(vehicleForm.boxHeightM)).toFixed(2)} m³
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                         <div className="mt-2 flex justify-end gap-2">

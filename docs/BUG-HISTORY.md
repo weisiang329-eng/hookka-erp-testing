@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-002 — Global Ctrl+K search never showed a single record — every category read the wrong key off the API payload
+
+**Status:** 🟢 Fixed + shipped (2026-06-12). Typecheck 0; full suite green.
+**Category:** ui-frontend
+
+Found while wiring Consignment Notes into the palette (the CN parity gap build): all FIVE existing record categories (Sales Orders, Customers, Products, Delivery Orders, Invoices) called `pickRecords(data, "salesOrders"/"customers"/…)` — but every list endpoint wraps records as `{success, data: [...]}`. The keys never matched, so the palette silently rendered zero records for every query since the feature shipped; only page/action shortcuts ever appeared. Nobody filed it because the page links still "worked".
+
+Fix (src/components/layout/global-search.tsx): `"data"` prepended to every pickRecords call (legacy keys kept as fallbacks; raw-array payloads were already handled). All five endpoints were verified to support `?search=` (sales-orders:1021, customers:122, products:406, delivery-orders:978, invoices:830), so the palette now returns real filtered records — same as the new Consignment Notes category, which shipped with the correct key and exposed the contrast.
+
+---
+
 ## BUG-2026-06-12-001 — "Add Item" looked dead on long orders — the new line rendered below the fold with zero feedback
 
 **Status:** 🟢 Fixed + shipped (2026-06-12). Typecheck 0; 818 tests green.

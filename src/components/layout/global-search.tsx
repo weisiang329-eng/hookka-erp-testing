@@ -236,7 +236,10 @@ function useApiSearch(query: string) {
         fetch(`/api/sales-orders?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items = pickRecords(data, "salesOrders", "orders");
+            // Every list endpoint wraps records as {success, data:[...]} —
+            // the legacy keys never matched, so this category silently
+            // returned nothing (BUG-2026-06-12-002). Keep them as fallbacks.
+            const items = pickRecords(data, "data", "salesOrders", "orders");
             items.forEach((item) => {
               // Real field is companySOId (the SO number). soNumber/orderNumber
               // never existed on the payload, so labels were blank before.
@@ -258,7 +261,7 @@ function useApiSearch(query: string) {
         fetch(`/api/customers?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items = pickRecords(data, "customers");
+            const items = pickRecords(data, "data", "customers");
             items.forEach((item) => {
               collected.push({
                 id: `cust-${item.id}`,
@@ -276,7 +279,7 @@ function useApiSearch(query: string) {
         fetch(`/api/products?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items = pickRecords(data, "products");
+            const items = pickRecords(data, "data", "products");
             items.forEach((item) => {
               collected.push({
                 id: `prod-${item.id}`,
@@ -294,7 +297,7 @@ function useApiSearch(query: string) {
         fetch(`/api/delivery-orders?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items = pickRecords(data, "deliveryOrders", "orders");
+            const items = pickRecords(data, "data", "deliveryOrders", "orders");
             items.forEach((item) => {
               const num = item.doNo || item.doNumber || item.orderNumber || item.id || "";
               collected.push({
@@ -313,7 +316,7 @@ function useApiSearch(query: string) {
         fetch(`/api/invoices?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items = pickRecords(data, "invoices");
+            const items = pickRecords(data, "data", "invoices");
             items.forEach((item) => {
               const num = item.invoiceNo || item.invoiceNumber || item.id || "";
               collected.push({

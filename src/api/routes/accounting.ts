@@ -17,6 +17,11 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { monthsOverdue } from "../../lib/terms";
 import { getOrgId } from "../lib/tenant";
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+  type LedgerEntryInput,
+} from "../lib/journal-hash";
 
 const app = new Hono<Env>();
 
@@ -628,49 +633,114 @@ app.put("/journals/:id", async (c) => {
     }
     const body = await c.req.json();
 
-    // Status transitions — post or reverse the entry and adjust account balances.
+    // Status transitions — post or reverse the entry. Phase 1 (2026-06):
+    // a manual JV now lands in ledger_journal_entries (sourceType 'manual'
+    // / 'manual_reversal') in the SAME batch as the status flip and the
+    // legacy balanceSen updates. This ends the dual-GL split where manual
+    // entries lived only in journal_entries/balanceSen while every report
+    // read the immutable ledger — a posted JV was invisible to the P&L/BS.
+    // balanceSen is still maintained for the COA listing, but the ledger
+    // is the authoritative source (trial balance & statements read it).
     if (body.status === "POSTED" && entry.status === "DRAFT") {
-      await c.var.DB.prepare(
-        "UPDATE journal_entries SET status = 'POSTED' WHERE id = ?",
-      )
-        .bind(id)
-        .run();
       const lines = await c.var.DB.prepare(
         "SELECT * FROM journal_lines WHERE journalEntryId = ?",
       )
         .bind(id)
         .all<JournalLineRow>();
-      for (const l of lines.results ?? []) {
+      const lineRows = lines.results ?? [];
+
+      // Every line must reference a real account — the old loop silently
+      // `continue`d unknown codes, posting a half-balanced delta set.
+      const acctByCode = new Map<string, CoaRow>();
+      for (const l of lineRows) {
+        if (acctByCode.has(l.accountCode)) continue;
         const acct = await c.var.DB.prepare(
           "SELECT * FROM chart_of_accounts WHERE code = ?",
         )
           .bind(l.accountCode)
           .first<CoaRow>();
-        if (!acct) continue;
+        if (!acct) {
+          return c.json(
+            {
+              success: false,
+              error: `Journal line references unknown account ${l.accountCode} — fix the line before posting.`,
+            },
+            400,
+          );
+        }
+        acctByCode.set(l.accountCode, acct);
+      }
+
+      const statements: D1PreparedStatement[] = [
+        c.var.DB.prepare(
+          "UPDATE journal_entries SET status = 'POSTED' WHERE id = ?",
+        ).bind(id),
+      ];
+      for (const l of lineRows) {
+        const acct = acctByCode.get(l.accountCode)!;
         const delta =
           acct.type === "ASSET" ||
           acct.type === "EXPENSE" ||
           acct.type === "COST"
             ? l.debitSen - l.creditSen
             : l.creditSen - l.debitSen;
-        await c.var.DB.prepare(
-          "UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?",
-        )
-          .bind(delta, l.accountCode)
-          .run();
+        statements.push(
+          c.var.DB.prepare(
+            "UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?",
+          ).bind(delta, l.accountCode),
+        );
       }
+
+      try {
+        const orgId = getOrgId(c);
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        if (!(await ledgerHasSource(c.var.DB, orgId, "manual", id))) {
+          const legs: LedgerEntryInput[] = lineRows.map((l, idx) => ({
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "manual",
+            sourceId: id,
+            legNo: idx + 1,
+            accountCode: l.accountCode,
+            debitSen: l.debitSen || 0,
+            creditSen: l.creditSen || 0,
+            description: l.description || `JV ${entry.entryNo}`,
+            actorUserId,
+            orgId,
+          }));
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+        }
+      } catch (e) {
+        console.error(`[ledger] JV ${id} GL build failed — aborting:`, e);
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the ledger posting for this journal — nothing was saved. Retry, and report if it persists.",
+          },
+          500,
+        );
+      }
+
+      await c.var.DB.batch(statements);
     } else if (body.status === "REVERSED" && entry.status === "POSTED") {
-      await c.var.DB.prepare(
-        "UPDATE journal_entries SET status = 'REVERSED' WHERE id = ?",
-      )
-        .bind(id)
-        .run();
       const lines = await c.var.DB.prepare(
         "SELECT * FROM journal_lines WHERE journalEntryId = ?",
       )
         .bind(id)
         .all<JournalLineRow>();
-      for (const l of lines.results ?? []) {
+      const lineRows = lines.results ?? [];
+
+      const statements: D1PreparedStatement[] = [
+        c.var.DB.prepare(
+          "UPDATE journal_entries SET status = 'REVERSED' WHERE id = ?",
+        ).bind(id),
+      ];
+      for (const l of lineRows) {
         const acct = await c.var.DB.prepare(
           "SELECT * FROM chart_of_accounts WHERE code = ?",
         )
@@ -683,12 +753,56 @@ app.put("/journals/:id", async (c) => {
           acct.type === "COST"
             ? -(l.debitSen - l.creditSen)
             : -(l.creditSen - l.debitSen);
-        await c.var.DB.prepare(
-          "UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?",
-        )
-          .bind(delta, l.accountCode)
-          .run();
+        statements.push(
+          c.var.DB.prepare(
+            "UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?",
+          ).bind(delta, l.accountCode),
+        );
       }
+
+      try {
+        const orgId = getOrgId(c);
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        if (
+          !(await ledgerHasSource(c.var.DB, orgId, "manual_reversal", id))
+        ) {
+          // Mirror legs with debit/credit swapped — the immutable ledger
+          // never deletes; a reversal is a new, opposite entry.
+          const legs: LedgerEntryInput[] = lineRows.map((l, idx) => ({
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "manual_reversal",
+            sourceId: id,
+            legNo: idx + 1,
+            accountCode: l.accountCode,
+            debitSen: l.creditSen || 0,
+            creditSen: l.debitSen || 0,
+            description: `REVERSAL · ${l.description || `JV ${entry.entryNo}`}`,
+            actorUserId,
+            orgId,
+          }));
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+        }
+      } catch (e) {
+        console.error(
+          `[ledger] JV ${id} reversal GL build failed — aborting:`,
+          e,
+        );
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the ledger reversal for this journal — nothing was saved. Retry, and report if it persists.",
+          },
+          500,
+        );
+      }
+
+      await c.var.DB.batch(statements);
     } else if (entry.status === "DRAFT") {
       // Draft-only edits of header + lines.
       if (body.date !== undefined || body.description !== undefined) {

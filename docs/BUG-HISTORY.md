@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-015 — First real dispatch email said "please find the Delivery Order attached" with NO attachment (uncompressed PDF blew the 5 MB cap after the sentence was rendered)
+
+**Status:** 🟢 Fixed + shipped (2026-06-11, 879d500a, deploy green). 26 customer-notify tests; typecheck green.
+**Category:** delivery-orders
+
+First real send (DO-2606-027, 34 items, owner watching from the customer's inbox): the email rendered perfectly — but no PDF. Root cause chain: all four jsPDF constructors (DO print / email-base64 / packing summary / invoice) ran WITHOUT `compress: true`, so a 34-item branded DO PDF exceeded the outbox's 5 MB decoded attachment cap; `sanitizeAttachments` correctly dropped it at enqueue — but the "Please find the Delivery Order attached" sentence had already been rendered into the body (the endpoint decided `hasAttachment` before the cap applied), so the email lied.
+
+Fixes (one commit):
+- `compress: true` on all four jsPDF constructors (typical 5–10× shrink — the real cure; the same 34-item DO now sits far under the cap).
+- The notify endpoint applies the SAME 5 MB rule BEFORE rendering the template — `hasAttachment` can no longer disagree with reality; oversize logs a console.warn and sends the (truthful) no-attachment wording.
+- Owner additions in the same pass: Dispatch Date now carries the TIME in Asia/Kuala_Lumpur (`fmtEmailDateTime` — Worker runs UTC, would read 8 h early), and a Driver / Contact No. / Lorry Plate block from the DO's 3PL assignment (contact falls back to `COMPANY.HOOKKA.phone` when no driver phone — owner rule).
+
+Also surfaced operationally: the outbox drain cron (`*/5min`) is throttled by GitHub to erratic multi-hour gaps — both real emails today needed a manual `gh workflow run` kick. Follow-up candidate: drain inline at enqueue (cron as retry sweeper).
+
+---
+
 ## BUG-2026-06-11-014 — Worker phone showed no per-day punch facts (in/out time, OT, how late) — column was dropped when punch was hidden, never restored for rollout
 
 **Status:** 🟢 Shipped (2026-06-11). 710/711 tests; typecheck green.

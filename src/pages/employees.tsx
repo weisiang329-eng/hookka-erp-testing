@@ -6656,10 +6656,12 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     type GuideRow = { item: string; rule: string; example: string };
     // Item bold + Example in the house gold, so the three columns read as
     // name / explanation / number instead of one grey block (owner 2026-06-11).
+    // Same widths in every section so the three columns line up down the
+    // whole page (owner: sections must align, not each table auto-sizing).
     const col = [
-      { header: "Item", value: (r: unknown) => ({ text: (r as GuideRow).item, bold: true }) },
-      { header: "How it is calculated", value: (r: unknown) => (r as GuideRow).rule },
-      { header: "Example", value: (r: unknown) => ({ text: (r as GuideRow).example, color: "#6B5C32", bold: true }) },
+      { header: "Item", width: "19%", value: (r: unknown) => ({ text: (r as GuideRow).item, bold: true }) },
+      { header: "How it is calculated", width: "53%", value: (r: unknown) => (r as GuideRow).rule },
+      { header: "Example", width: "28%", value: (r: unknown) => ({ text: (r as GuideRow).example, color: "#6B5C32", bold: true }) },
     ];
     const s = (title: string, rows: GuideRow[]) => ({ title, columns: col, rows });
     printReport({

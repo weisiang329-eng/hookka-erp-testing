@@ -46,6 +46,11 @@ export type PrintColumn = {
   value: (row: unknown) => PrintCellValue;
   /** Cell + header alignment. Defaults to "left". */
   align?: "left" | "right" | "center";
+  /** Optional fixed column width (e.g. "18%"). Give EVERY section the same
+   *  widths and their columns line up down the whole page — without it each
+   *  table auto-sizes independently (owner 2026-06-12: columns must align
+   *  across sections). */
+  width?: string;
 };
 
 /** A KPI "dashboard" card in the top summary strip. */
@@ -134,7 +139,7 @@ function renderSection(section: PrintSection): string {
   const colCount = columns.length;
 
   const headCells = columns
-    .map((col) => `<th class="${col.align ?? "left"}">${escapeHtml(col.header)}</th>`)
+    .map((col) => `<th class="${col.align ?? "left"}"${col.width ? ` style="width:${escapeHtml(col.width)}"` : ""}>${escapeHtml(col.header)}</th>`)
     .join("");
 
   let body = "";

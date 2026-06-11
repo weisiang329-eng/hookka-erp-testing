@@ -58,7 +58,7 @@ Owner spotted SV-2606-001 showing RM 730.00 in the sales report — "正常来�
 
 Fix: `isServiceOrder` (POST, hoisted above the items loop) / `mergedIsServiceOrder` (PUT) now skip the ENTIRE auto-pricing machinery — customer-price resolution, catalog fallback, sofa re-derive, and the sofa-combo pass. On a service order the operator's typed price IS the price; 0 means 0 (free/goodwill repair). Normal sales orders unchanged.
 
-Data note: SV-2606-001's stored RM 730 left untouched pending the owner's call (zero it via SO edit — now sticks — or keep if the repair is genuinely chargeable).
+Data note: RESOLVED same day — owner ruled "Service 的全部都要归零;特殊情况收钱我们手动放;已经送过的不动". Read-only survey found 10 SVs carrying money; 9 zeroed via one read-back-verified SQL transaction (all six item price columns + order subtotal/total — components too, so a later edit can't re-derive a stale base price), SV-2605-002 (RM 700, DO-2606-004 DELIVERED) deliberately left as-is per the "already delivered" rule. Verified in DB (only SV-2605-002 retains money) and live on `/service-order` (SV-2606-001 shows RM 0.00). Standing policy: service orders are FREE by default; a charge is a manual, deliberate act.
 
 ---
 

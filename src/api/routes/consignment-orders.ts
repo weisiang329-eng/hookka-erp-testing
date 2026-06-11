@@ -25,6 +25,11 @@ import {
   snapItemToCatalog,
   loadProductCatalog,
 } from "./_shared/item-catalog-snap";
+import {
+  runSofaComboPass,
+  resolveLineBasePriceSen,
+  seatHeightOf,
+} from "../lib/sofa-combo-pass";
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit, buildAuditStatement } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
@@ -579,14 +584,21 @@ app.post("/", async (c) => {
     // catalog product, productId/productName/itemCategory/sizeLabel(BF/ACC)/
     // sizeCode(BF/ACC) all come from the catalog, NOT the request body.
     const productByCodeForCoPost = await loadProductCatalog(c.var.DB);
-    const itemRows: ConsignmentOrderItemRow[] = rawItems.map(
-      (it: Record<string, unknown>, idx: number) => {
+    // Price resolution + sofa combo — IDENTICAL treatment to Sales Orders
+    // (owner 2026-06-11): a line whose request carries no price resolves from
+    // the customer price list, then the catalog (same chain as SO POST). No
+    // RM0 gate, also per owner. The combo pass below then renegotiates
+    // matched sofa sets exactly like SO.
+    const coPostAsOf =
+      (typeof body.companyCODate === "string" && body.companyCODate) ||
+      new Date().toISOString().slice(0, 10);
+    const itemRows: ConsignmentOrderItemRow[] = await Promise.all(
+      rawItems.map(
+      async (it: Record<string, unknown>, idx: number) => {
         const qty = Number(it.quantity) || 1;
-        const basePrice = Number(it.basePriceSen) || 0;
         const divanPrice = Number(it.divanPriceSen) || 0;
         const legPrice = Number(it.legPriceSen) || 0;
         const specialPrice = Number(it.specialOrderPriceSen) || 0;
-        const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
         const snapped = snapItemToCatalog(
           {
             productCode: it.productCode,
@@ -598,6 +610,22 @@ app.post("/", async (c) => {
           },
           productByCodeForCoPost,
         );
+        const incomingBase = Number(it.basePriceSen) || 0;
+        const basePrice =
+          incomingBase === 0
+            ? await resolveLineBasePriceSen(c.var.DB, {
+                productId: snapped.productId || null,
+                customerId: customer.id,
+                asOf: coPostAsOf,
+                seatHeight: seatHeightOf(
+                  it,
+                  snapped.sizeCode || null,
+                  snapped.sizeLabel || null,
+                ),
+                fallbackSen: 0,
+              })
+            : incomingBase;
+        const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
         return {
           id: genItemId(),
           consignmentOrderId: id,
@@ -626,7 +654,10 @@ app.post("/", async (c) => {
           notes: (it.notes as string) ?? null,
         };
       },
+      ),
     );
+    // Sofa combo renegotiation — same engine as Sales Orders.
+    await runSofaComboPass(c.var.DB, customer.id, itemRows, rawItems);
 
     const subtotalSen = itemRows.reduce((s, it) => s + it.lineTotalSen, 0);
     const totalSen = subtotalSen; // No tax/discount in v1
@@ -1622,31 +1653,85 @@ app.put("/:id", async (c) => {
       // product, that product is the source of truth for productId/productName/
       // itemCategory/sizeLabel(BF/ACC)/sizeCode(BF/ACC).
       const productByCodeForCoPut = await loadProductCatalog(c.var.DB);
+      // Price resolution — IDENTICAL to SO PUT (owner 2026-06-11): SOFA lines
+      // ALWAYS re-derive their base from the price list (add a piece → the
+      // combo pass discounts the new set; remove a piece → survivors return
+      // to full per-piece price); other lines resolve only when the request
+      // carries no price. No RM0 gate, per owner.
+      const coPutCustomerId =
+        (typeof body.customerId === "string" && body.customerId) ||
+        existing.customerId ||
+        "";
+      const coPutAsOf = new Date().toISOString().slice(0, 10);
+      const rawPutItems = body.items as Array<Record<string, unknown>>;
+      const newRows = await Promise.all(
+        rawPutItems.map(async (it, idx) => {
+          const qty = Number(it.quantity) || 1;
+          const divanPrice = Number(it.divanPriceSen) || 0;
+          const legPrice = Number(it.legPriceSen) || 0;
+          const specialPrice = Number(it.specialOrderPriceSen) || 0;
+          const snapped = snapItemToCatalog(
+            {
+              productCode: it.productCode,
+              productId: it.productId,
+              productName: it.productName,
+              itemCategory: it.itemCategory,
+              sizeCode: it.sizeCode,
+              sizeLabel: it.sizeLabel,
+            },
+            productByCodeForCoPut,
+          );
+          const incomingBase = Number(it.basePriceSen) || 0;
+          const isSofa = (snapped.itemCategory || "") === "SOFA";
+          const basePrice =
+            isSofa || incomingBase === 0
+              ? await resolveLineBasePriceSen(c.var.DB, {
+                  productId: snapped.productId || null,
+                  customerId: coPutCustomerId,
+                  asOf: coPutAsOf,
+                  seatHeight: seatHeightOf(
+                    it,
+                    snapped.sizeCode || null,
+                    snapped.sizeLabel || null,
+                  ),
+                  fallbackSen: isSofa ? 0 : incomingBase,
+                })
+              : incomingBase;
+          const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+          return {
+            id: (it.id as string) || `coi-${crypto.randomUUID().slice(0, 8)}`,
+            consignmentOrderId: id,
+            lineNo: Number(it.lineNo) || idx + 1,
+            lineSuffix: (it.lineSuffix as string) ?? null,
+            productId: snapped.productId || null,
+            productCode: snapped.productCode || null,
+            productName: snapped.productName || null,
+            itemCategory: snapped.itemCategory || null,
+            sizeCode: snapped.sizeCode || null,
+            sizeLabel: snapped.sizeLabel || null,
+            fabricCode: ((it.fabricCode as string) ?? null) as string | null,
+            quantity: qty,
+            gapInches: it.gapInches != null ? Number(it.gapInches) : null,
+            divanHeightInches:
+              it.divanHeightInches != null ? Number(it.divanHeightInches) : null,
+            divanPriceSen: divanPrice,
+            legHeightInches:
+              it.legHeightInches != null ? Number(it.legHeightInches) : null,
+            legPriceSen: legPrice,
+            specialOrder: (it.specialOrder as string) ?? null,
+            specialOrderPriceSen: specialPrice,
+            basePriceSen: basePrice,
+            unitPriceSen: unitPrice,
+            lineTotalSen: unitPrice * qty,
+            notes: (it.notes as string) ?? null,
+          };
+        }),
+      );
+      // Sofa combo renegotiation — same engine as Sales Orders.
+      await runSofaComboPass(c.var.DB, coPutCustomerId, newRows, rawPutItems);
       let runningSubtotal = 0;
-      for (let idx = 0; idx < body.items.length; idx++) {
-        const it = body.items[idx] as Record<string, unknown>;
-        const qty = Number(it.quantity) || 1;
-        const basePrice = Number(it.basePriceSen) || 0;
-        const divanPrice = Number(it.divanPriceSen) || 0;
-        const legPrice = Number(it.legPriceSen) || 0;
-        const specialPrice = Number(it.specialOrderPriceSen) || 0;
-        const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
-        const lineTotal = unitPrice * qty;
-        runningSubtotal += lineTotal;
-        const lineNo = Number(it.lineNo) || idx + 1;
-        const itemId =
-          (it.id as string) || `coi-${crypto.randomUUID().slice(0, 8)}`;
-        const snapped = snapItemToCatalog(
-          {
-            productCode: it.productCode,
-            productId: it.productId,
-            productName: it.productName,
-            itemCategory: it.itemCategory,
-            sizeCode: it.sizeCode,
-            sizeLabel: it.sizeLabel,
-          },
-          productByCodeForCoPut,
-        );
+      for (const r of newRows) {
+        runningSubtotal += r.lineTotalSen;
         stmts.push(
           c.var.DB.prepare(
             `INSERT INTO consignment_order_items (id, consignmentOrderId, lineNo, lineSuffix,
@@ -1656,29 +1741,29 @@ app.put("/:id", async (c) => {
                basePriceSen, unitPriceSen, lineTotalSen, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
-            itemId,
-            id,
-            lineNo,
-            (it.lineSuffix as string) ?? null,
-            snapped.productId || null,
-            snapped.productCode || null,
-            snapped.productName || null,
-            snapped.itemCategory || null,
-            snapped.sizeCode || null,
-            snapped.sizeLabel || null,
-            (it.fabricCode as string) ?? null,
-            qty,
-            it.gapInches != null ? Number(it.gapInches) : null,
-            it.divanHeightInches != null ? Number(it.divanHeightInches) : null,
-            divanPrice,
-            it.legHeightInches != null ? Number(it.legHeightInches) : null,
-            legPrice,
-            (it.specialOrder as string) ?? null,
-            specialPrice,
-            basePrice,
-            unitPrice,
-            lineTotal,
-            (it.notes as string) ?? null,
+            r.id,
+            r.consignmentOrderId,
+            r.lineNo,
+            r.lineSuffix,
+            r.productId,
+            r.productCode,
+            r.productName,
+            r.itemCategory,
+            r.sizeCode,
+            r.sizeLabel,
+            r.fabricCode,
+            r.quantity,
+            r.gapInches,
+            r.divanHeightInches,
+            r.divanPriceSen,
+            r.legHeightInches,
+            r.legPriceSen,
+            r.specialOrder,
+            r.specialOrderPriceSen,
+            r.basePriceSen,
+            r.unitPriceSen,
+            r.lineTotalSen,
+            r.notes,
           ),
         );
       }

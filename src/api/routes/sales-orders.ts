@@ -31,12 +31,7 @@ import {
 } from "../lib/lead-times";
 import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { resolveCustomerPriceAsOf } from "./customer-products";
-import {
-  applySofaCombos,
-  type ComboLineInput,
-  type ComboRuleInput,
-  type SofaTier,
-} from "../lib/sofa-combo";
+import { runSofaComboPass } from "../lib/sofa-combo-pass";
 import {
   snapItemToCatalog,
   loadProductCatalog,
@@ -418,162 +413,8 @@ function genItemId(): string {
   return `soi-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-// ---------------------------------------------------------------------------
-// Sofa combo pass — renegotiates matched sofa sets down to their combo total,
-// on the BACKEND, right before the subtotal is summed. Runs on POST (manual
-// create AND scan-PO/OCR-created orders) and PUT (edit), so every path prices
-// combos identically. Previously this lived only in the create page, so
-// OCR-created orders never got the combo price and editing an order lost it.
-//
-// Idempotent by construction: applySofaCombos skips groups whose sum is not
-// MORE than the combo total (discount <= 0), so a cart the create page already
-// renegotiated client-side passes through unchanged — no double discount.
-// Best-effort: any failure leaves prices exactly as resolved (never blocks).
-// ---------------------------------------------------------------------------
-type ComboPassItem = {
-  id: string;
-  productId: string;
-  productCode: string;
-  itemCategory: string;
-  sizeCode: string;
-  sizeLabel: string;
-  fabricCode: string;
-  quantity: number;
-  basePriceSen: number;
-  divanPriceSen: number;
-  legPriceSen: number;
-  specialOrderPriceSen: number;
-  unitPriceSen: number;
-  lineTotalSen: number;
-};
-async function runSofaComboPass(
-  db: D1Database,
-  customerId: string,
-  items: ComboPassItem[],
-  rawItems: Array<Record<string, unknown>>,
-): Promise<void> {
-  try {
-    const sofa = items.filter((i) => i.itemCategory === "SOFA");
-    if (sofa.length < 2) return; // a combo needs at least two pieces
-    // baseModel per product — authoritative from the catalog (the client copy
-    // is only a fallback; scan-PO / edit payloads don't carry it).
-    const prodIds = [...new Set(sofa.map((i) => i.productId).filter(Boolean))];
-    const baseModelByProd = new Map<string, string>();
-    if (prodIds.length > 0) {
-      const ph = prodIds.map(() => "?").join(",");
-      // SELECT * (not an explicit camelCase projection — the d1-compat adapter
-      // doesn't translate explicit projections; see BUG-2026-06-10-001).
-      const res = await db
-        .prepare(`SELECT * FROM products WHERE id IN (${ph})`)
-        .bind(...prodIds)
-        .all<{ id: string; baseModel: string | null }>();
-      for (const r of res.results ?? [])
-        if (r.id) baseModelByProd.set(r.id, r.baseModel ?? "");
-    }
-    // Fabric tier — sofaPriceTier ?? priceTier ?? null. A null (untracked
-    // fabric) disqualifies the whole group, exactly like the create page.
-    const fabs = [...new Set(sofa.map((i) => i.fabricCode).filter(Boolean))];
-    const tierByFab = new Map<string, SofaTier | null>();
-    if (fabs.length > 0) {
-      const ph = fabs.map(() => "?").join(",");
-      const res = await db
-        .prepare(`SELECT * FROM fabric_trackings WHERE fabricCode IN (${ph})`)
-        .bind(...fabs)
-        .all<{
-          fabricCode: string;
-          sofaPriceTier: SofaTier | null;
-          priceTier: SofaTier | null;
-        }>();
-      for (const r of res.results ?? [])
-        tierByFab.set(r.fabricCode, r.sofaPriceTier ?? r.priceTier ?? null);
-    }
-    // Applicable rules: ALL of this customer's + company-wide, effective today
-    // (UTC — same clock the create page used). The helper picks the best.
-    const todayDateStr = new Date().toISOString().slice(0, 10);
-    const rulesRes = await db
-      .prepare(
-        "SELECT * FROM sofa_combo_rules WHERE (customerId = ? OR customerId IS NULL) AND effectiveFrom <= ?",
-      )
-      .bind(customerId, todayDateStr)
-      .all<{
-        baseModel: string;
-        componentSizes: string;
-        fabricTier: "ANY" | SofaTier;
-        pricesByHeight: string;
-        customerId: string | null;
-        effectiveFrom: string;
-      }>();
-    const rules: ComboRuleInput[] = [];
-    for (const r of rulesRes.results ?? []) {
-      try {
-        rules.push({
-          baseModel: String(r.baseModel ?? ""),
-          componentSizes: JSON.parse(r.componentSizes || "[]"),
-          fabricTier: r.fabricTier,
-          pricesByHeight: JSON.parse(r.pricesByHeight || "{}"),
-          customerId: r.customerId ?? null,
-          effectiveFrom: r.effectiveFrom,
-        });
-      } catch {
-        /* skip a malformed rule row */
-      }
-    }
-    if (rules.length === 0) return;
-    const isNum = (s: unknown): s is string =>
-      typeof s === "string" && /^\d+(\.\d+)?$/.test(s);
-    const lines: ComboLineInput[] = items.map((it, idx) => {
-      const raw = rawItems[idx] ?? {};
-      const baseModel =
-        baseModelByProd.get(it.productId) || String(raw.baseModel ?? "");
-      // Rule componentSizes match PIECE codes ("2A(LHF)"). The create page
-      // sends the piece in sizeCode, but scan-PO / stored rows carry the SEAT
-      // size there — derive the piece from productCode ("{baseModel}-{piece}").
-      const piece =
-        baseModel && it.productCode.startsWith(`${baseModel}-`)
-          ? it.productCode.slice(baseModel.length + 1)
-          : it.sizeCode;
-      // pricesByHeight is keyed by the bare seat size ("28").
-      const seatHeight = isNum(raw.seatHeight)
-        ? raw.seatHeight
-        : isNum(it.sizeCode)
-          ? it.sizeCode
-          : isNum(it.sizeLabel)
-            ? it.sizeLabel
-            : "";
-      return {
-        key: it.id,
-        itemCategory: it.itemCategory,
-        baseModel,
-        sizeCode: piece,
-        seatHeight,
-        fabricCode: it.fabricCode,
-        fabricTier: tierByFab.get(it.fabricCode) ?? null,
-        basePriceSen: it.basePriceSen,
-        divanPriceSen: it.divanPriceSen,
-        legPriceSen: it.legPriceSen,
-        totalHeightPriceSen: 0,
-        specialOrderPriceSen: it.specialOrderPriceSen,
-        quantity: it.quantity,
-      };
-    });
-    const result = applySofaCombos(lines, rules, { customerId, todayDateStr });
-    if (result.newBaseByKey.size === 0) return;
-    for (const it of items) {
-      const nb = result.newBaseByKey.get(it.id);
-      if (typeof nb !== "number") continue;
-      it.basePriceSen = nb;
-      it.unitPriceSen = calculateUnitPrice({
-        basePriceSen: nb,
-        divanPriceSen: it.divanPriceSen,
-        legPriceSen: it.legPriceSen,
-        specialOrderPriceSen: it.specialOrderPriceSen,
-      });
-      it.lineTotalSen = calculateLineTotal(it.unitPriceSen, it.quantity);
-    }
-  } catch (e) {
-    console.warn("[sales-orders] sofa combo pass skipped:", e);
-  }
-}
+// Sofa combo pass — moved to src/api/lib/sofa-combo-pass.ts (2026-06-11) so
+// Sales Orders AND Consignment Orders run the identical renegotiation.
 function genStatusId(): string {
   return `sc-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -2033,24 +1874,9 @@ app.post("/", async (c) => {
     // Sofa combo renegotiation — covers manual create AND scan-PO/OCR orders.
     await runSofaComboPass(c.var.DB, customer.id, items, rawItems);
 
-    // Reject unpriced lines (reject, don't normalize): a line whose price
-    // resolution ended at RM0 means NO customer price and NO catalog price
-    // exist — storing it would silently undercharge the order. Service orders
-    // are exempt (their lines are deliberately RM0).
-    if (body.isServiceOrder !== true) {
-      const unpriced = items.filter(
-        (i) => (Number(i.quantity) || 0) > 0 && (Number(i.unitPriceSen) || 0) <= 0,
-      );
-      if (unpriced.length > 0) {
-        return c.json(
-          {
-            success: false,
-            error: `No price found for ${[...new Set(unpriced.map((i) => i.productCode))].join(", ")}. Set the customer price or catalog price first, or enter the price on the line.`,
-          },
-          400,
-        );
-      }
-    }
+    // NOTE (owner 2026-06-11): NO RM0 gate here by explicit request — a line
+    // whose resolution ends at RM0 saves as-is (the resolution chain above
+    // still fills customer/catalog prices whenever they exist).
 
     const subtotalSen = items.reduce((sum, i) => sum + i.lineTotalSen, 0);
     const now = new Date().toISOString();
@@ -3159,10 +2985,29 @@ app.put("/:id", async (c) => {
       const productByCodeForPut = await loadProductCatalog(c.var.DB);
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
-        let basePriceSen = incomingBase;
-        // Customer-specific override: only when request didn't supply a price.
+        // SOFA lines ALWAYS re-derive their base from the price list, ignoring
+        // the incoming value (owner 2026-06-11): every edit re-prices the
+        // CURRENT composition — add a piece and the combo pass below discounts
+        // the new set; remove a piece and the survivors return to full
+        // per-piece price (a combo-split base must not stick once the set is
+        // broken). Non-sofa lines keep the operator-typed price (Tier 1).
+        const isSofaLine = String(item.itemCategory ?? "") === "SOFA";
+        // Seat height for per-seat pricing: the create page sends seatHeight,
+        // but edit/stored payloads carry the bare seat size in sizeCode/sizeLabel.
+        const numericSize = (s: unknown): s is string =>
+          typeof s === "string" && /^\d+(\.\d+)?$/.test(s);
+        const seatHeightForPrice = numericSize(item.seatHeight)
+          ? (item.seatHeight as string)
+          : numericSize(item.sizeCode)
+            ? (item.sizeCode as string)
+            : numericSize(item.sizeLabel)
+              ? (item.sizeLabel as string)
+              : "";
+        let basePriceSen = isSofaLine ? 0 : incomingBase;
+        // Customer-specific price: when the request didn't supply a usable
+        // price (or the line is a sofa being re-derived).
         const productIdForLookup = (item.productId as string) || "";
-        if (incomingBase === 0 && productIdForLookup && customerId) {
+        if (basePriceSen === 0 && productIdForLookup && customerId) {
           try {
             const cp = await resolveCustomerPriceAsOf(
               c.var.DB,
@@ -3171,10 +3016,9 @@ app.put("/:id", async (c) => {
               priceAsOf,
             );
             if (cp) {
-              const seatHeight = String(item.seatHeight ?? "");
-              if (cp.seatHeightPrices && cp.seatHeightPrices.length > 0 && seatHeight) {
+              if (cp.seatHeightPrices && cp.seatHeightPrices.length > 0 && seatHeightForPrice) {
                 const shp = cp.seatHeightPrices.find(
-                  (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
+                  (p) => p.height === seatHeightForPrice || p.height === `${seatHeightForPrice}"`,
                 );
                 basePriceSen = shp?.priceSen ?? cp.basePriceSen ?? 0;
               } else {
@@ -3198,7 +3042,6 @@ app.put("/:id", async (c) => {
                 seatHeightPrices: unknown;
               }>();
             if (prod) {
-              const seatHeight = String(item.seatHeight ?? "");
               let shp: Array<{ height: string; priceSen: number }> = [];
               if (Array.isArray(prod.seatHeightPrices)) {
                 shp = prod.seatHeightPrices as typeof shp;
@@ -3209,9 +3052,9 @@ app.put("/:id", async (c) => {
                   shp = [];
                 }
               }
-              if (seatHeight && shp.length > 0) {
+              if (seatHeightForPrice && shp.length > 0) {
                 const cell = shp.find(
-                  (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
+                  (p) => p.height === seatHeightForPrice || p.height === `${seatHeightForPrice}"`,
                 );
                 basePriceSen = cell?.priceSen ?? (Number(prod.basePriceSen) || 0);
               } else {
@@ -3325,22 +3168,7 @@ app.put("/:id", async (c) => {
       // discount (the edit page has no combo logic and re-priced at full).
       await runSofaComboPass(c.var.DB, customerId, newItems, rawItems);
 
-      // Reject unpriced lines on edit too (same gate as POST; service orders
-      // exempt). Mirrors the frontend-backend-unified validation rule.
-      if (existing.isServiceOrder !== true) {
-        const unpriced = newItems.filter(
-          (i) => (Number(i.quantity) || 0) > 0 && (Number(i.unitPriceSen) || 0) <= 0,
-        );
-        if (unpriced.length > 0) {
-          return c.json(
-            {
-              success: false,
-              error: `No price found for ${[...new Set(unpriced.map((i) => i.productCode))].join(", ")}. Set the customer price or catalog price first, or enter the price on the line.`,
-            },
-            400,
-          );
-        }
-      }
+      // NOTE (owner 2026-06-11): NO RM0 gate on edit either — by explicit request.
 
       subtotalSen = newItems.reduce((sum, i) => sum + i.lineTotalSen, 0);
       totalSen = subtotalSen;

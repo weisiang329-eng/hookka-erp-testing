@@ -27,6 +27,7 @@ import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { nextInvoiceNo, buildInvoiceLedgerLegs } from "./invoices";
+import { readGstRatePct } from "../lib/note-ledger";
 import {
   ledgerHasSource,
   buildJournalEntryStatements,
@@ -732,6 +733,32 @@ async function buildDoDeliveredSoAndInvoice(
     // isn't orphaned; the authoritative link is deliveryOrderId.
     const headerSoId = doRow.salesOrderId || soIds[0] || null;
 
+    // Phase 2 (2026-06) — build the ledger legs FIRST so the INSERT can
+    // carry the decided tax and the GROSS total (subtotal + SST). The
+    // in-memory invItems are passed straight to the builder (itemsOverride)
+    // because the invoice_items INSERTs are in this same un-executed batch
+    // — the old post-INSERT build saw zero items and misposted every
+    // auto-invoice's revenue to the generic BEDFRAME sales account.
+    const { legs: autoLegs, taxSen: autoTaxSen } =
+      await buildInvoiceLedgerLegs(
+        db,
+        orgId,
+        {
+          id: invId,
+          invoiceNo,
+          customerId: doRow.customerId,
+          subtotalSen: computedTotal,
+        },
+        actorUserId,
+        false,
+        null,
+        invItems.map((it) => ({
+          productCode: it.productCode,
+          totalSen: it.totalSen,
+        })),
+      );
+    const grossTotalSen = computedTotal + autoTaxSen;
+
     rebuildInvoiceInsert = (no: string) =>
       db
         .prepare(
@@ -742,9 +769,9 @@ async function buildDoDeliveredSoAndInvoice(
              id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
              customerId, customerName, customerState, customerAddress,
              attention, customerPhone, customerPOId, hubId, hubName,
-             subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+             subtotalSen, taxSen, totalSen, status, invoiceDate, dueDate, paidAmount,
              paymentDate, paymentMethod, notes, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           invId,
@@ -763,7 +790,8 @@ async function buildDoDeliveredSoAndInvoice(
           doRow.hubId,
           doRow.hubName,
           computedTotal,
-          computedTotal,
+          autoTaxSen,
+          grossTotalSen,
           // Auto-confirmed: created already POSTED (SENT), with its ledger
           // legs written below — not left as a DRAFT for a second manual step.
           "SENT",
@@ -801,48 +829,29 @@ async function buildDoDeliveredSoAndInvoice(
       );
     }
     // Outstanding A/R follows delivered goods (same batch as the invoice
-    // so a partial failure can't strand one without the other).
+    // so a partial failure can't strand one without the other). GROSS —
+    // the customer owes the SST too (Phase 2).
     statements.push(
       db
         .prepare(
           `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
         )
-        .bind(computedTotal, doRow.customerId),
+        .bind(grossTotalSen, doRow.customerId),
     );
     createdInvoice = true;
-    invoiceTotalSen = computedTotal;
+    invoiceTotalSen = grossTotalSen;
 
     // ---- Auto-post the just-created invoice (no DRAFT step) --------------
-    // Write the balanced double-entry ledger legs (DR receivable / CR revenue
-    // + GST) with the SAME builders the manual "post" and the under-billed
-    // repair use, so the accounting can't drift. The invoice row above is
-    // already status='SENT'; here we add its journal and flip the billed SOs
-    // + the DO to INVOICED — mirroring a manual post exactly. Can't double-
-    // post: this branch only runs when no invoice yet exists for the DO
-    // (existingInvoice guard above).
-    const { legs, taxSen } = await buildInvoiceLedgerLegs(
-      db,
-      orgId,
-      {
-        id: invId,
-        invoiceNo,
-        customerId: doRow.customerId,
-        subtotalSen: computedTotal,
-      },
-      actorUserId,
-      false,
-    );
+    // The legs were built ABOVE (before the INSERT) so the row could carry
+    // the decided tax + gross total; here they join the same batch. Can't
+    // double-post: this branch only runs when no invoice yet exists for
+    // the DO (existingInvoice guard above).
     const { statements: ledgerStmts } = await buildJournalEntryStatements(
       db,
       orgId,
-      legs,
+      autoLegs,
     );
-    statements.push(
-      ...ledgerStmts,
-      db
-        .prepare("UPDATE invoices SET taxSen = ? WHERE id = ?")
-        .bind(taxSen, invId),
-    );
+    statements.push(...ledgerStmts);
     // SOs were advanced to DELIVERED above; now that they're billed, bump to
     // INVOICED (matches the manual post's SO cascade).
     for (const sid of soAdvanced) {
@@ -1882,7 +1891,15 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
       // void ALL of them + re-issue ONE correct invoice. One safe path for
       // both the single-invoice case (the 40) and the merged multi-invoice
       // case (e.g. DO-2604-001's two RM 616 invoices).
-      const deltaSen = computedTotal - oldTotal;
+      // Phase 2 — the reissued invoice carries tax decided NOW (gross
+      // basis); the A/R delta therefore compares new GROSS vs old total.
+      const reissueRatePct = await readGstRatePct(c.var.DB);
+      const reissueTaxSen = Math.max(
+        0,
+        Math.round((computedTotal * reissueRatePct) / 100),
+      );
+      const reissueGrossSen = computedTotal + reissueTaxSen;
+      const deltaSen = reissueGrossSen - oldTotal;
       const oldNos = invs.map((v) => v.invoiceNo).join(", ");
       rows.push({
         doNo: doRow.doNo,
@@ -1934,6 +1951,8 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
             },
             actorUserId,
             true,
+            // Phase 2 — reverse EXACTLY what the old invoice posted.
+            Number((oldInv as { taxSen?: number }).taxSen) || 0,
           );
           const { statements } = await buildJournalEntryStatements(
             c.var.DB,
@@ -1953,9 +1972,9 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
           `INSERT INTO invoices (
              id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
              customerId, customerName, customerState, hubId, hubName,
-             subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+             subtotalSen, taxSen, totalSen, status, invoiceDate, dueDate, paidAmount,
              paymentDate, paymentMethod, notes, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           newId,
           newNo,
@@ -1969,7 +1988,8 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
           doRow.hubId,
           doRow.hubName,
           computedTotal,
-          computedTotal,
+          reissueTaxSen,
+          reissueGrossSen,
           "SENT",
           invoiceDate,
           dueDate,
@@ -2018,7 +2038,7 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
 
       // ---- batch 2: post the NEW invoice's ledger (items now committed) --
       if (!(await ledgerHasSource(c.var.DB, orgId, "invoice", newId))) {
-        const { legs, taxSen } = await buildInvoiceLedgerLegs(
+        const { legs } = await buildInvoiceLedgerLegs(
           c.var.DB,
           orgId,
           {
@@ -2029,18 +2049,15 @@ app.post("/backfill-void-reissue-underbilled", async (c) => {
           },
           actorUserId,
           false,
+          // Phase 2 — post the tax decided at re-issue (stored on the row).
+          reissueTaxSen,
         );
         const { statements } = await buildJournalEntryStatements(
           c.var.DB,
           orgId,
           legs,
         );
-        await c.var.DB.batch([
-          ...statements,
-          c.var.DB.prepare(
-            "UPDATE invoices SET taxSen = ? WHERE id = ?",
-          ).bind(taxSen, newId),
-        ]);
+        await c.var.DB.batch(statements);
       }
     } catch (e) {
       errors.push({

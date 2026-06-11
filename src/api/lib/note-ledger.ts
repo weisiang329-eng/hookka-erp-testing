@@ -87,6 +87,20 @@ export interface NoteForLedger {
   reason: string | null;
 }
 
+// Phase 2 (2026-06) — note amounts are GROSS (invoice totals are now
+// subtotal + SST, so the operator enters what the customer actually gets
+// back / additionally owes). The tax portion is BACKED OUT of the gross:
+//   tax = round(gross × pct / (100 + pct)), net = gross − tax
+// so the debtor-control leg always equals the entered amount exactly.
+function backOutTax(
+  grossSen: number,
+  pct: number,
+): { netSen: number; taxSen: number } {
+  if (pct <= 0) return { netSen: grossSen, taxSen: 0 };
+  const taxSen = Math.round((grossSen * pct) / (100 + pct));
+  return { netSen: grossSen - taxSen, taxSen };
+}
+
 export async function buildCreditNoteLedgerLegs(
   db: Db,
   orgId: string,
@@ -98,7 +112,7 @@ export async function buildCreditNoteLedgerLegs(
   if (amount === 0) return [];
   const controlCode = await resolveDebtorControl(db, note.customerId);
   const pct = await readGstRatePct(db);
-  const taxSen = Math.max(0, Math.round((amount * pct) / 100));
+  const { netSen, taxSen } = backOutTax(amount, pct);
   const legs: LedgerEntryInput[] = [];
   let legNo = 1;
   legs.push({
@@ -107,7 +121,7 @@ export async function buildCreditNoteLedgerLegs(
     sourceId: note.id,
     legNo: legNo++,
     accountCode: cnDebitAccount(note.reason),
-    debitSen: amount,
+    debitSen: netSen,
     creditSen: 0,
     description: `CN ${note.noteNumber} · ${note.reason ?? "OTHER"}`,
     actorUserId,
@@ -134,7 +148,7 @@ export async function buildCreditNoteLedgerLegs(
     legNo: legNo++,
     accountCode: controlCode,
     debitSen: 0,
-    creditSen: amount + taxSen,
+    creditSen: amount,
     description: `CN ${note.noteNumber} · AR credit`,
     actorUserId,
     orgId,
@@ -153,7 +167,7 @@ export async function buildDebitNoteLedgerLegs(
   if (amount === 0) return [];
   const controlCode = await resolveDebtorControl(db, note.customerId);
   const pct = await readGstRatePct(db);
-  const taxSen = Math.max(0, Math.round((amount * pct) / 100));
+  const { netSen, taxSen } = backOutTax(amount, pct);
   const legs: LedgerEntryInput[] = [];
   let legNo = 1;
   legs.push({
@@ -162,7 +176,7 @@ export async function buildDebitNoteLedgerLegs(
     sourceId: note.id,
     legNo: legNo++,
     accountCode: controlCode,
-    debitSen: amount + taxSen,
+    debitSen: amount,
     creditSen: 0,
     description: `DN ${note.noteNumber} · AR debit`,
     actorUserId,
@@ -175,7 +189,7 @@ export async function buildDebitNoteLedgerLegs(
     legNo: legNo++,
     accountCode: DN_SALES_ACCT,
     debitSen: 0,
-    creditSen: amount,
+    creditSen: netSen,
     description: `DN ${note.noteNumber} · ${note.reason ?? "OTHER"}`,
     actorUserId,
     orgId,

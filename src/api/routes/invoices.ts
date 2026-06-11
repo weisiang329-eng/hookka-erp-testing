@@ -37,6 +37,7 @@ import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 import { parseDebtorCode } from "../../lib/debtor";
 import { nextMonthDueDate } from "../../lib/terms";
+import { readGstRatePct } from "../lib/note-ledger";
 
 const app = new Hono<Env>();
 
@@ -67,6 +68,13 @@ export type InvLedgerLeg = {
 // Credits are reconciled to EXACTLY subtotalSen so debits == credits even
 // when invoice_items don't sum cleanly. `reverse` swaps DR/CR and tags the
 // source 'invoice_void' for an idempotent, auditable reversal.
+//
+// Phase 2 (2026-06) — `taxSenOverride`: tax is decided ONCE when the
+// invoice is created and stored on the row (taxSen, with totalSen gross).
+// Post / void / reversal call sites pass the STORED value so a mid-flight
+// rate change can never make the reversal differ from the original
+// posting. Pass null/undefined to compute from the current kv rate
+// (creation-time call sites only).
 export async function buildInvoiceLedgerLegs(
   db: Env["Variables"]["DB"],
   orgId: string,
@@ -78,6 +86,8 @@ export async function buildInvoiceLedgerLegs(
   },
   actorUserId: string | null,
   reverse: boolean,
+  taxSenOverride?: number | null,
+  itemsOverride?: { productCode: string; totalSen: number }[],
 ): Promise<{ legs: InvLedgerLeg[]; taxSen: number }> {
   const subtotal = Math.max(0, Math.round(inv.subtotalSen) || 0);
 
@@ -91,13 +101,20 @@ export async function buildInvoiceLedgerLegs(
 
   // 2. Split subtotal by product category (from invoice_items ⨝ products),
   //    allocated proportionally and reconciled to subtotal exactly.
+  //    Phase 2 fix — `itemsOverride`: the auto-on-delivered path builds
+  //    legs in the SAME batch as the invoice INSERT, so the invoice_items
+  //    query below saw NOTHING and every auto-invoice fell back to the
+  //    generic BEDFRAME sales account — sofa revenue never reached
+  //    500-0020. Creation-time callers now pass their in-memory items.
   const [itemsRes, prodRes] = await Promise.all([
-    db
-      .prepare(
-        "SELECT productCode, totalSen FROM invoice_items WHERE invoiceId = ?",
-      )
-      .bind(inv.id)
-      .all<{ productCode: string; totalSen: number }>(),
+    itemsOverride
+      ? Promise.resolve({ results: itemsOverride })
+      : db
+          .prepare(
+            "SELECT productCode, totalSen FROM invoice_items WHERE invoiceId = ?",
+          )
+          .bind(inv.id)
+          .all<{ productCode: string; totalSen: number }>(),
     db.prepare("SELECT code, category FROM products").all<{
       code: string;
       category: string;
@@ -128,19 +145,26 @@ export async function buildInvoiceLedgerLegs(
     });
   }
 
-  // 3. GST from the operator-configured rate.
-  const gstRow = await db
-    .prepare("SELECT value FROM kv_config WHERE key = ?")
-    .bind("gst_rate_pct")
-    .first<{ value: string }>();
-  let pct = 0;
-  try {
-    const v = JSON.parse(gstRow?.value ?? "null") as { pct?: number } | null;
-    if (v && typeof v.pct === "number" && isFinite(v.pct)) pct = v.pct;
-  } catch {
-    pct = 0;
+  // 3. Tax: STORED value when the caller supplies one (post/void/reversal
+  //    of an existing row), else computed from the operator-configured
+  //    rate (creation-time call sites).
+  let taxSen: number;
+  if (taxSenOverride != null && Number.isFinite(taxSenOverride)) {
+    taxSen = Math.max(0, Math.round(taxSenOverride));
+  } else {
+    const gstRow = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("gst_rate_pct")
+      .first<{ value: string }>();
+    let pct = 0;
+    try {
+      const v = JSON.parse(gstRow?.value ?? "null") as { pct?: number } | null;
+      if (v && typeof v.pct === "number" && isFinite(v.pct)) pct = v.pct;
+    } catch {
+      pct = 0;
+    }
+    taxSen = Math.max(0, Math.round((subtotal * pct) / 100));
   }
-  const taxSen = Math.max(0, Math.round((subtotal * pct) / 100));
 
   const sourceType = reverse ? "invoice_void" : "invoice";
   const tag = reverse ? "REVERSAL · " : "";
@@ -215,6 +239,8 @@ type InvoiceRow = {
   hubId: string | null;
   hubName: string | null;
   subtotalSen: number;
+  // Phase 2: SST stored at creation; totalSen is GROSS (subtotal + tax).
+  taxSen: number;
   totalSen: number;
   status: string;
   invoiceDate: string | null;
@@ -1019,7 +1045,14 @@ app.post("/", async (c) => {
     );
     const items = invItems;
     const subtotalSen = computedTotal;
-    const totalSen = subtotalSen;
+    // Phase 2 (2026-06) — SST billed to the customer: tax is computed ONCE
+    // at creation from the operator-configured rate and stored; posting,
+    // void, payments, aging and the CN cap all read the STORED values, so
+    // a mid-flight rate change can never split the GL from the subledger.
+    // totalSen is the GROSS amount the customer owes (subtotal + SST).
+    const ratePct = await readGstRatePct(c.var.DB);
+    const taxSen = Math.max(0, Math.round((subtotalSen * ratePct) / 100));
+    const totalSen = subtotalSen + taxSen;
     const now = new Date().toISOString();
     const invoiceDate = now.split("T")[0];
     // Owner term: fixed 1 month, by calendar month — due = end of next
@@ -1037,9 +1070,9 @@ app.post("/", async (c) => {
            id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
            customerId, customerName, customerState, customerAddress,
            attention, customerPhone, customerPOId, hubId, hubName,
-           subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+           subtotalSen, taxSen, totalSen, status, invoiceDate, dueDate, paidAmount,
            paymentDate, paymentMethod, notes, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         invoiceNo,
@@ -1057,6 +1090,7 @@ app.post("/", async (c) => {
         doRow.hubId,
         doRow.hubName,
         subtotalSen,
+        taxSen,
         totalSen,
         "DRAFT",
         invoiceDate,
@@ -1090,6 +1124,15 @@ app.post("/", async (c) => {
       c.var.DB.prepare(
         `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?`,
       ).bind(now, doRow.id),
+      // Phase 2 (2026-06) — closes a long-noted gap: the auto-created
+      // invoice (delivery-orders.ts) bumped customers.outstandingSen on
+      // create but this manual path never did, so manually-invoiced
+      // customers under-reported what they owe. Bump GROSS (incl. SST) —
+      // void/cancel/delete already reverse the unpaid portion for both
+      // paths.
+      c.var.DB.prepare(
+        `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+      ).bind(totalSen, doRow.customerId),
     ];
 
     await c.var.DB.batch(statements);
@@ -1660,11 +1703,30 @@ app.put("/:id", async (c) => {
           ),
         );
       }
+      // Phase 2 — re-derive tax with the subtotal (same rule as creation)
+      // and keep totalSen GROSS; adjust the customer's outstanding by the
+      // gross delta in the same batch.
+      const replRatePct = await readGstRatePct(c.var.DB);
+      const replTaxSen = Math.max(
+        0,
+        Math.round((computedSubtotal * replRatePct) / 100),
+      );
+      const replGrossSen = computedSubtotal + replTaxSen;
       statements.push(
         c.var.DB.prepare(
-          "UPDATE invoices SET subtotalSen = ?, totalSen = ? WHERE id = ?",
-        ).bind(computedSubtotal, computedSubtotal, id),
+          "UPDATE invoices SET subtotalSen = ?, taxSen = ?, totalSen = ? WHERE id = ?",
+        ).bind(computedSubtotal, replTaxSen, replGrossSen, id),
       );
+      const replDelta = replGrossSen - (Number(existing.totalSen) || 0);
+      const replCustId =
+        (existing as unknown as { customerId?: string }).customerId ?? "";
+      if (replDelta !== 0 && replCustId) {
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE customers SET outstandingSen = MAX(0, outstandingSen + ?) WHERE id = ?`,
+          ).bind(replDelta, replCustId),
+        );
+      }
     }
 
     // ------------------------------------------------------------------
@@ -1738,11 +1800,32 @@ app.put("/:id", async (c) => {
         }
       }
       if (touched > 0) {
+        // Phase 2 — an item edit re-derives the subtotal, so it re-derives
+        // tax too (same rule as creation); totalSen stays GROSS. The
+        // customer's outstanding moves by the gross delta in the same
+        // batch (the old code never adjusted it on a price edit).
+        const editRatePct = await readGstRatePct(c.var.DB);
+        const newTaxSen = Math.max(
+          0,
+          Math.round((newSubtotal * editRatePct) / 100),
+        );
+        const newGrossSen = newSubtotal + newTaxSen;
         statements.push(
           c.var.DB.prepare(
-            "UPDATE invoices SET subtotalSen = ?, totalSen = ? WHERE id = ?",
-          ).bind(newSubtotal, newSubtotal, id),
+            "UPDATE invoices SET subtotalSen = ?, taxSen = ?, totalSen = ? WHERE id = ?",
+          ).bind(newSubtotal, newTaxSen, newGrossSen, id),
         );
+        const grossDelta =
+          newGrossSen - (Number(existing.totalSen) || 0);
+        const custIdForOutstanding =
+          (existing as unknown as { customerId?: string }).customerId ?? "";
+        if (grossDelta !== 0 && custIdForOutstanding) {
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE customers SET outstandingSen = MAX(0, outstandingSen + ?) WHERE id = ?`,
+            ).bind(grossDelta, custIdForOutstanding),
+          );
+        }
 
         // SENT (unpaid) was already GL-posted at the OLD subtotal.
         // Reverse that posting and re-post the NEW one in the SAME
@@ -1774,8 +1857,10 @@ app.put("/:id", async (c) => {
                 },
                 actorUserId,
                 true,
+                // Reverse EXACTLY what was posted (stored tax).
+                existing.taxSen ?? 0,
               );
-              const { legs: postLegs, taxSen } =
+              const { legs: postLegs } =
                 await buildInvoiceLedgerLegs(
                   c.var.DB,
                   orgId,
@@ -1787,6 +1872,8 @@ app.put("/:id", async (c) => {
                   },
                   actorUserId,
                   false,
+                  // Re-post with the freshly-derived tax persisted above.
+                  newTaxSen,
                 );
               for (const l of revLegs)
                 l.sourceType = `invoice_restate_rev:${stamp}`;
@@ -1801,11 +1888,6 @@ app.put("/:id", async (c) => {
                   ...postLegs,
                 ]);
               statements.push(...jeStmts);
-              statements.push(
-                c.var.DB.prepare(
-                  "UPDATE invoices SET taxSen = ? WHERE id = ?",
-                ).bind(taxSen, id),
-              );
               const auditStmt = await buildAuditStatement(c, {
                 resource: "invoices",
                 resourceId: id,
@@ -1814,8 +1896,8 @@ app.put("/:id", async (c) => {
                 after: {
                   ...existing,
                   subtotalSen: newSubtotal,
-                  totalSen: newSubtotal,
-                  taxSen,
+                  totalSen: newGrossSen,
+                  taxSen: newTaxSen,
                   updatedAt: now,
                 },
               });
@@ -1954,7 +2036,10 @@ app.put("/:id", async (c) => {
             `[ledger] invoice ${id} already posted — skipping (idempotent)`,
           );
         } else {
-          const { legs, taxSen } = await buildInvoiceLedgerLegs(
+          // Phase 2 — post the STORED tax (decided at creation), never a
+          // recompute: a rate change between create and post must not
+          // split the GL from the row's gross totalSen.
+          const { legs } = await buildInvoiceLedgerLegs(
             c.var.DB,
             orgId,
             {
@@ -1967,16 +2052,11 @@ app.put("/:id", async (c) => {
             },
             actorUserId,
             false,
+            existing.taxSen ?? 0,
           );
           const { statements: ledgerStmts } =
             await buildJournalEntryStatements(c.var.DB, orgId, legs);
           statements.push(...ledgerStmts);
-          // Persist computed tax so the GST leg is re-derivable/auditable.
-          statements.push(
-            c.var.DB.prepare(
-              "UPDATE invoices SET taxSen = ? WHERE id = ?",
-            ).bind(taxSen, id),
-          );
         }
       } catch (e) {
         // Phase 1 (2026-06) — abort: an invoice must never flip to SENT
@@ -2037,6 +2117,8 @@ app.put("/:id", async (c) => {
             },
             actorUserId,
             true,
+            // Phase 2 — reverse EXACTLY what was posted (stored tax).
+            existing.taxSen ?? 0,
           );
           const { statements: ledgerStmts } =
             await buildJournalEntryStatements(c.var.DB, orgId, legs);

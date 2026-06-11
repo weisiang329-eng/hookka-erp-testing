@@ -6456,7 +6456,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       title: "Salary Calculation Guide",
       filterSummary:
         "Worked example: RM2,050/month · every pay rate uses the fixed 26-day month · June 2026 (25 working days, 1 public holiday) · Shift 08:00-18:00, 1h unpaid lunch = 9h standard day",
-      orientation: "landscape",
+      // Portrait A4 (owner 2026-06-11) — a handout reads top-to-bottom like the
+      // printed page; the 3-column tables fit portrait fine.
       cards: [
         { label: "Example salary", value: "RM2,050 / month" },
         { label: "Day rate", value: "2,050 ÷ 26 = RM78.85" },
@@ -6948,7 +6949,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             <div className="grid grid-cols-1 gap-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Daily & hourly rate (the base for everything)</p>
-                <p><b>Daily rate = salary ÷ 26</b> — always 26 (the worker&rsquo;s &ldquo;Working days/month&rdquo;, Employee Master), never 30/31 or the month&rsquo;s actual count. <b>Hourly rate = daily rate ÷ (the worker&rsquo;s daily hours + {(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)</b>: 9h day → ÷10 · 7.5h → ÷8.5. Example RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b>. These two rates price absence, lateness, OT and join/resign missed days.</p>
+                <p className="mb-1"><b>Daily rate = salary ÷ 26</b> · <b>Hourly rate = daily rate ÷ (daily hours + {(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)</b> — 9h day → ÷10, 7.5h → ÷8.5. RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b>. Absence uses the daily rate; lateness and OT use the hourly rate.</p>
+                <p><b>To adjust someone&rsquo;s rate</b>: Employee Master → edit the worker → <b>&ldquo;Working days/month&rdquo;</b> (the 26) and <b>&ldquo;Hours/day&rdquo;</b>. Lunch is set below.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Shift & working hours</p>

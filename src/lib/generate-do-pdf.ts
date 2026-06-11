@@ -666,6 +666,24 @@ export function generateDOPdf(
   doc.save(fileName);
 }
 
+// Same branded single-DO document as generateDOPdf, returned as a base64
+// string instead of saved/opened — feeds the customer dispatch notice
+// attachment (POST /api/delivery-orders/:id/notify-customer). Renders via
+// the EXACT renderDoInto + stampDoFooters path the print flows use, so the
+// emailed PDF is byte-for-byte the printed one.
+export function generateDoPdfBase64(
+  order: DeliveryOrder,
+  extras?: DOPrintExtras,
+): string {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  renderDoInto(doc, order, extras);
+  stampDoFooters(doc);
+  // datauristring = "data:application/pdf;filename=…;base64,<payload>".
+  const uri = String(doc.output("datauristring"));
+  const at = uri.indexOf("base64,");
+  return at >= 0 ? uri.slice(at + "base64,".length) : "";
+}
+
 // Cover page for the consolidated packing list: a manifest so the driver/
 // loader sees the whole run at a glance — how many DOs, which hubs +
 // customers, how many drop points, and the DO numbers (with line/unit

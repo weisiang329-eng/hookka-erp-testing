@@ -11,11 +11,21 @@
 // admin can copy / paste it manually.
 // ---------------------------------------------------------------------------
 
+// One email attachment, base64-encoded. Resend's POST /emails takes
+// `attachments: [{ filename, content }]`; Brevo's smtp/email takes
+// `attachment: [{ name, content }]` — both with base64 content, so the
+// neutral shape here maps 1:1 onto either provider.
+export interface EmailAttachment {
+  filename: string;
+  contentBase64: string;
+}
+
 export interface SendEmailArgs {
   to: string;
   subject: string;
   html: string;
   text?: string;
+  attachments?: EmailAttachment[];
 }
 
 export interface SendEmailResult {
@@ -109,6 +119,17 @@ export async function sendEmail(
         subject: args.subject,
         html: args.html,
         text: args.text,
+        // Resend attachment shape: [{ filename, content }] with base64
+        // content. Omitted entirely when the message carries none so the
+        // payload stays byte-identical to the pre-attachment behaviour.
+        ...(args.attachments && args.attachments.length > 0
+          ? {
+              attachments: args.attachments.map((a) => ({
+                filename: a.filename,
+                content: a.contentBase64,
+              })),
+            }
+          : {}),
       }),
     });
 
@@ -186,6 +207,17 @@ export async function sendEmailViaBrevo(
         subject: args.subject,
         htmlContent: args.html,
         textContent: args.text ?? args.html.replace(/<[^>]+>/g, ""),
+        // Brevo attachment shape: `attachment: [{ name, content }]` with
+        // base64 content. Brevo is the preferred provider (2026-05-27
+        // cutover), so the customer-notice PDFs must ride this path too.
+        ...(args.attachments && args.attachments.length > 0
+          ? {
+              attachment: args.attachments.map((a) => ({
+                name: a.filename,
+                content: a.contentBase64,
+              })),
+            }
+          : {}),
       }),
     });
     const bodyText = await res.text();

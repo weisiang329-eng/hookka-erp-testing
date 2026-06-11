@@ -41,6 +41,15 @@ import {
   groupPosByCustomerHub,
   projectCreditFailure,
 } from "../lib/pl-first-grouping";
+import { enqueueEmail } from "../lib/email-outbox";
+import {
+  dispatchNoticeTemplate,
+  invoiceNoticeTemplate,
+  resolveDispatchRecipient,
+  resolveInvoiceRecipient,
+  fmtEmailDate,
+} from "../lib/customer-notify";
+import { buildSimpleTablePdf } from "../lib/assistant-exports";
 
 const app = new Hono<Env>();
 
@@ -4421,6 +4430,383 @@ app.get("/:id/print-extras", async (c) => {
       items,
     },
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/:id/notify-customer — customer goods-movement
+// emails (2026-06-11).
+//
+//   kind "DISPATCHED": dispatch notice with the branded DO PDF attached.
+//     Recipient: hub email first, customer email second, both blank → skip
+//     silently (console.log only, nothing recorded).
+//   kind "DELIVERED": invoice notice with the Invoice PDF attached.
+//     Recipient: customer email first, hub email second. Requires the
+//     auto-created invoice row — no invoice → skip (it's an invoice notice).
+//
+// The frontend (src/pages/delivery/index.tsx) calls this fire-and-forget
+// AFTER a successful status transition; an email failure must NEVER block,
+// slow, or roll back the transition, so this endpoint only ever enqueues
+// into the durable outbox (outbox_emails — drained by the cron at
+// /api/internal/process-email-outbox) and answers 200 for every skip case.
+//
+// Numbers come from the DB row (doNo, dispatch/delivery dates, invoice
+// no/date/amount) — never from the caller. The caller supplies only what it
+// derived from our own /print-extras payload (the per-item component
+// breakdown + customer PO list, the same object that fed the attached PDF)
+// plus the PDF itself.
+//
+// Idempotency: dispatchEmailAt / deliveredEmailAt stamps on
+// delivery_orders, claimed atomically (UPDATE … WHERE col IS NULL) so a
+// double-click or a re-transition can't spam the customer. The columns are
+// runtime self-applied below; unquoted camelCase DDL folds to lowercase
+// (dispatchemailat / deliveredemailat), so reads are dual-key — see
+// BUG-2026-06-11-007 in docs/BUG-HISTORY.md.
+// ---------------------------------------------------------------------------
+let notifyEmailColumns: Promise<void> | null = null;
+function ensureNotifyEmailColumns(db: D1Database): Promise<void> {
+  if (notifyEmailColumns) return notifyEmailColumns;
+  notifyEmailColumns = (async () => {
+    const stmts = [
+      "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS dispatchEmailAt TEXT",
+      "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS deliveredEmailAt TEXT",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch {
+        // ignore — column may already exist or DDL transiently rejected
+      }
+    }
+  })();
+  return notifyEmailColumns;
+}
+
+// Uint8Array → base64 (chunked so a multi-page PDF doesn't blow the arg
+// limit of String.fromCharCode). Workers runtime has btoa built in.
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+app.post("/:id/notify-customer", async (c) => {
+  // Same RBAC gate as the status transition that triggers it.
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  try {
+    await ensureNotifyEmailColumns(c.var.DB);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      kind?: string;
+      pdfBase64?: string;
+      pdfFilename?: string;
+      itemsBreakdown?: string;
+      customerPOIds?: string[];
+    };
+    const kind =
+      body.kind === "DISPATCHED" || body.kind === "DELIVERED"
+        ? body.kind
+        : null;
+    if (!kind) {
+      return c.json(
+        { success: false, error: 'kind must be "DISPATCHED" or "DELIVERED"' },
+        400,
+      );
+    }
+
+    // SELECT * so the runtime-added stamp columns come back too (they live
+    // folded-lowercase; never use an explicit camelCase projection for them).
+    const doRow = await c.var.DB.prepare(
+      "SELECT * FROM delivery_orders WHERE id = ?",
+    )
+      .bind(id)
+      .first<
+        DeliveryOrderRow & {
+          dispatchEmailAt?: string | null;
+          dispatchemailat?: string | null;
+          deliveredEmailAt?: string | null;
+          deliveredemailat?: string | null;
+        }
+      >();
+    if (!doRow) {
+      return c.json({ success: false, error: "Delivery order not found" }, 404);
+    }
+
+    // Status guard — a notice for a state the DO isn't in is a stray call.
+    if (
+      kind === "DISPATCHED" &&
+      doRow.status !== "LOADED" &&
+      doRow.status !== "IN_TRANSIT"
+    ) {
+      return c.json(
+        {
+          success: false,
+          error: `Dispatch notice requires a dispatched DO (LOADED/IN_TRANSIT); ${doRow.doNo} is ${doRow.status}`,
+        },
+        409,
+      );
+    }
+    if (
+      kind === "DELIVERED" &&
+      doRow.status !== "DELIVERED" &&
+      doRow.status !== "INVOICED"
+    ) {
+      return c.json(
+        {
+          success: false,
+          error: `Invoice notice requires a delivered DO (DELIVERED/INVOICED); ${doRow.doNo} is ${doRow.status}`,
+        },
+        409,
+      );
+    }
+
+    // Idempotency pre-check (dual-key read — runtime column is folded).
+    const alreadySentAt =
+      kind === "DISPATCHED"
+        ? (doRow.dispatchEmailAt ?? doRow.dispatchemailat ?? null)
+        : (doRow.deliveredEmailAt ?? doRow.deliveredemailat ?? null);
+    if (alreadySentAt) {
+      return c.json({ success: true, skipped: true, reason: "already sent" });
+    }
+
+    // Recipient chain — hub email + customer email straight from the DB.
+    let hubEmail: string | null = null;
+    let hubShortName = "";
+    let hubAddress = "";
+    if (doRow.hubId) {
+      const hub = await c.var.DB.prepare(
+        "SELECT shortName, address, email FROM delivery_hubs WHERE id = ?",
+      )
+        .bind(doRow.hubId)
+        .first<{
+          shortName: string | null;
+          address: string | null;
+          email: string | null;
+        }>();
+      if (hub) {
+        hubEmail = hub.email;
+        hubShortName = hub.shortName ?? "";
+        hubAddress = hub.address ?? "";
+      }
+    }
+    const customer = await c.var.DB.prepare(
+      "SELECT email FROM customers WHERE id = ?",
+    )
+      .bind(doRow.customerId)
+      .first<{ email: string | null }>();
+    const to =
+      kind === "DISPATCHED"
+        ? resolveDispatchRecipient(hubEmail, customer?.email)
+        : resolveInvoiceRecipient(customer?.email, hubEmail);
+    if (!to) {
+      // Owner rule: both blank → don't send, don't record anything.
+      console.log(
+        `[delivery-orders] ${doRow.doNo}: ${kind} notice skipped — no hub or customer email on file`,
+      );
+      return c.json({ success: true, skipped: true, reason: "no recipient" });
+    }
+
+    // Caller-supplied display strings (derived from our own /print-extras —
+    // the same object that fed the attached PDF). Numbering stays DB-owned.
+    const customerPOIds = Array.isArray(body.customerPOIds)
+      ? body.customerPOIds.map((s) => String(s).trim()).filter(Boolean)
+      : [];
+    if (customerPOIds.length === 0 && (doRow.customerPOId ?? "").trim()) {
+      customerPOIds.push(String(doRow.customerPOId).trim());
+    }
+    const itemsBreakdown = String(body.itemsBreakdown ?? "").trim();
+    const pdfBase64 =
+      typeof body.pdfBase64 === "string" && body.pdfBase64.trim()
+        ? body.pdfBase64.trim()
+        : null;
+
+    let subjectHtmlText: {
+      subject: string;
+      html: string;
+      text: string;
+    };
+    let attachments:
+      | Array<{ filename: string; contentBase64: string }>
+      | undefined;
+
+    if (kind === "DISPATCHED") {
+      const deliverTo =
+        [hubShortName, hubAddress].filter(Boolean).join(", ") ||
+        doRow.deliveryAddress ||
+        "";
+      if (pdfBase64) {
+        attachments = [
+          {
+            filename:
+              String(body.pdfFilename ?? "").trim() || `${doRow.doNo}.pdf`,
+            contentBase64: pdfBase64,
+          },
+        ];
+      }
+      subjectHtmlText = dispatchNoticeTemplate({
+        doNo: doRow.doNo,
+        customerName: doRow.customerName,
+        customerPOIds,
+        dispatchedAt: doRow.dispatchedAt ?? null,
+        deliverTo,
+        itemsBreakdown,
+        hasAttachment: !!attachments,
+      });
+    } else {
+      // Invoice notice — resolve the DO's LIVE invoice the same way
+      // loadDoInvoiceMap does (newest non-CANCELLED row for this DO).
+      const inv = await c.var.DB.prepare(
+        `SELECT id, invoiceNo, invoiceDate, totalSen
+           FROM invoices
+          WHERE deliveryOrderId = ? AND status <> 'CANCELLED'
+          ORDER BY createdAt DESC
+          LIMIT 1`,
+      )
+        .bind(id)
+        .first<{
+          id: string;
+          invoiceNo: string;
+          invoiceDate: string | null;
+          totalSen: number;
+        }>();
+      if (!inv) {
+        // The email IS the invoice notice; without an invoice row there is
+        // nothing to send.
+        return c.json({ success: true, skipped: true, reason: "no invoice" });
+      }
+
+      if (pdfBase64) {
+        attachments = [
+          {
+            filename:
+              String(body.pdfFilename ?? "").trim() ||
+              `INV-${inv.invoiceNo}.pdf`,
+            contentBase64: pdfBase64,
+          },
+        ];
+      } else {
+        // Server-rendered fallback (frontend couldn't produce the branded
+        // PDF): a clean simple-table invoice via the shared
+        // buildSimpleTablePdf helper. Best-effort — a fallback-render
+        // failure must not kill the notice.
+        try {
+          const itRes = await c.var.DB.prepare(
+            `SELECT productCode, productName, quantity, unitPriceSen, totalSen
+               FROM invoice_items WHERE invoiceId = ?`,
+          )
+            .bind(inv.id)
+            .all<{
+              productCode: string | null;
+              productName: string | null;
+              quantity: number;
+              unitPriceSen: number;
+              totalSen: number;
+            }>();
+          const rm = (sen: number) =>
+            ((Number(sen) || 0) / 100).toLocaleString("en-MY", {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            });
+          const lineRows = (itRes.results ?? []).map((it) => [
+            it.productCode || "-",
+            it.productName || "-",
+            String(it.quantity ?? 0),
+            rm(it.unitPriceSen),
+            rm(it.totalSen),
+          ]);
+          const bytes = await buildSimpleTablePdf({
+            title: `Invoice ${inv.invoiceNo}`,
+            subtitle: `${doRow.customerName} · Delivery Order ${doRow.doNo} · ${fmtEmailDate(inv.invoiceDate)}`,
+            columns: [
+              "Product Code",
+              "Description",
+              "Qty",
+              "Unit Price (RM)",
+              "Amount (RM)",
+            ],
+            rows: lineRows,
+            totals: ["", "", "", "TOTAL (RM)", rm(inv.totalSen)],
+            footer: `HOOKKA INDUSTRIES SDN BHD · Computer-generated invoice ${inv.invoiceNo}`,
+          });
+          attachments = [
+            {
+              filename: `INV-${inv.invoiceNo}.pdf`,
+              contentBase64: bytesToBase64(bytes),
+            },
+          ];
+        } catch (pdfErr) {
+          console.warn(
+            `[delivery-orders] ${doRow.doNo}: fallback invoice PDF failed — sending notice without attachment`,
+            pdfErr instanceof Error ? pdfErr.message : pdfErr,
+          );
+        }
+      }
+
+      subjectHtmlText = invoiceNoticeTemplate({
+        invoiceNo: inv.invoiceNo,
+        invoiceDate: inv.invoiceDate,
+        doNo: doRow.doNo,
+        customerName: doRow.customerName,
+        customerPOIds,
+        deliveredAt: doRow.deliveredAt ?? null,
+        totalSen: Number(inv.totalSen) || 0,
+      });
+    }
+
+    // Atomic idempotency claim BEFORE the enqueue — two racing calls both
+    // pass the pre-check above, but only one wins this UPDATE. The column
+    // name is one of two fixed literals (never user input).
+    const stampCol =
+      kind === "DISPATCHED" ? "dispatchEmailAt" : "deliveredEmailAt";
+    const nowIso = new Date().toISOString();
+    const claim = await c.var.DB.prepare(
+      `UPDATE delivery_orders SET ${stampCol} = ? WHERE id = ? AND ${stampCol} IS NULL`,
+    )
+      .bind(nowIso, id)
+      .run();
+    if ((claim.meta?.changes ?? 0) === 0) {
+      return c.json({ success: true, skipped: true, reason: "already sent" });
+    }
+
+    try {
+      await enqueueEmail(c, {
+        to,
+        subject: subjectHtmlText.subject,
+        html: subjectHtmlText.html,
+        text: subjectHtmlText.text,
+        attachments,
+      });
+    } catch (enqErr) {
+      // Release the claim so the operator can retry; the transition itself
+      // is long done and stays untouched.
+      try {
+        await c.var.DB.prepare(
+          `UPDATE delivery_orders SET ${stampCol} = NULL WHERE id = ?`,
+        )
+          .bind(id)
+          .run();
+      } catch {
+        /* best-effort release */
+      }
+      throw enqErr;
+    }
+
+    return c.json({ success: true, queued: true, to });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[POST /api/delivery-orders/${id}/notify-customer] failed:`,
+      msg,
+    );
+    return c.json(
+      { success: false, error: msg || "Failed to queue customer notice" },
+      500,
+    );
+  }
 });
 
 // GET /api/delivery-orders/:id — single

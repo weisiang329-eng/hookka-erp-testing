@@ -505,6 +505,146 @@ type ProductionOrderApiShape = {
 // dashboard's "Pending Delivery" card and this page's "Pending Delivery"
 // tab share ONE gate and can never drift apart.
 
+// ---------------------------------------------------------------------------
+// Customer goods-movement notices (2026-06-11). After a SUCCESSFUL status
+// transition, the page fires POST /api/delivery-orders/:id/notify-customer:
+//   * → LOADED:    dispatch notice with the REAL branded DO PDF attached
+//     (same generateDOPdf path the Print buttons use).
+//   * → DELIVERED: invoice notice with the REAL branded Invoice PDF attached
+//     (same generateInvoicePdf path the Invoice page uses); when the client
+//     PDF can't be produced, the backend attaches a server-rendered simple
+//     invoice PDF instead.
+// Strictly fire-and-forget: every failure here is swallowed — an email must
+// NEVER block, slow, or roll back the delivery flow. The backend owns the
+// recipient rules (hub/customer email chains), the idempotency stamps, and
+// every number (doNo / dates / invoice row); this side only contributes the
+// PDF plus display fields derived from ONE fetched print-extras object — the
+// same object that feeds the attached PDF, so email and PDF cannot diverge.
+// ---------------------------------------------------------------------------
+async function sendCustomerNotice(
+  row: DeliveryOrderRow,
+  kind: "DISPATCHED" | "DELIVERED",
+): Promise<"queued" | "skipped" | "failed"> {
+  try {
+    let pdfBase64: string | undefined;
+    let pdfFilename: string | undefined;
+    let itemsBreakdown: string | undefined;
+    let customerPOIds: string[] | undefined;
+
+    if (kind === "DISPATCHED") {
+      let extras: import("@/lib/generate-do-pdf").DOPrintExtras = {};
+      try {
+        const r = await fetch(
+          `/api/delivery-orders/${encodeURIComponent(row.id)}/print-extras`,
+        );
+        const j = (await r.json()) as {
+          success?: boolean;
+          data?: import("@/lib/generate-do-pdf").DOPrintExtras;
+        };
+        if (j?.success && j.data) extras = j.data;
+      } catch {
+        /* graceful — the notice still goes out without the breakdown */
+      }
+      const { buildDoComponentBreakdown, collectCustomerPOIds } = await import(
+        "@/lib/do-component-breakdown"
+      );
+      itemsBreakdown = buildDoComponentBreakdown(row.items, extras);
+      customerPOIds = collectCustomerPOIds(row.items, extras, row.customerPOId);
+      try {
+        const { generateDoPdfBase64 } = await import("@/lib/generate-do-pdf");
+        pdfBase64 = generateDoPdfBase64(
+          row as unknown as import("@/types").DeliveryOrder,
+          extras,
+        );
+        pdfFilename = `${row.doNo.startsWith("DO-") ? row.doNo : `DO-${row.doNo}`}.pdf`;
+      } catch {
+        /* graceful — backend sends the notice without the attachment */
+      }
+    } else {
+      // DELIVERED — find the DO's live invoice (auto-created by the
+      // DELIVERED cascade, committed before this runs) and render the real
+      // branded invoice PDF. Any failure → POST without pdfBase64 and let
+      // the backend attach its server-rendered fallback.
+      try {
+        const lr = await fetch(
+          `/api/invoices?customerId=${encodeURIComponent(row.customerId)}&_v=${Date.now()}`,
+          { cache: "no-store" },
+        );
+        const lj = (await lr.json()) as {
+          success?: boolean;
+          data?: Array<{
+            id: string;
+            invoiceNo: string;
+            deliveryOrderId?: string;
+            status?: string;
+            createdAt?: string;
+          }>;
+        };
+        const candidates = (lj?.success ? (lj.data ?? []) : [])
+          .filter(
+            (inv) =>
+              inv.deliveryOrderId === row.id && inv.status !== "CANCELLED",
+          )
+          .sort((a, b) =>
+            String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")),
+          );
+        const slim = candidates[0];
+        if (slim) {
+          const [ir, er] = await Promise.all([
+            fetch(`/api/invoices/${encodeURIComponent(slim.id)}`),
+            fetch(`/api/invoices/${encodeURIComponent(slim.id)}/print-extras`),
+          ]);
+          const ij = (await ir.json()) as {
+            success?: boolean;
+            data?: import("@/types").Invoice;
+          };
+          const ej = (await er.json().catch(() => ({}))) as {
+            success?: boolean;
+            data?: import("@/lib/generate-invoice-pdf").InvoicePrintExtras;
+          };
+          const invoice = ij?.success ? ij.data : undefined;
+          if (invoice) {
+            const { generateInvoicePdfBase64 } = await import(
+              "@/lib/generate-invoice-pdf"
+            );
+            pdfBase64 = generateInvoicePdfBase64(
+              invoice,
+              ej?.success ? ej.data : undefined,
+            );
+            pdfFilename = `INV-${invoice.invoiceNo}.pdf`;
+          }
+        }
+      } catch {
+        /* graceful — backend attaches its own fallback invoice PDF */
+      }
+    }
+
+    const r = await fetch(
+      `/api/delivery-orders/${encodeURIComponent(row.id)}/notify-customer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind,
+          pdfBase64,
+          pdfFilename,
+          itemsBreakdown,
+          customerPOIds,
+        }),
+      },
+    );
+    const j = (await r.json().catch(() => ({}))) as {
+      queued?: boolean;
+      skipped?: boolean;
+    };
+    if (r.ok && j?.queued) return "queued";
+    if (r.ok && j?.skipped) return "skipped";
+    return "failed";
+  } catch {
+    return "failed";
+  }
+}
+
 export default function DeliveryPage() {
   const { toast } = useToast();
   // Top-level "Orders" / "3PL" tab — URL-synced so refresh and back/forward
@@ -2312,6 +2452,31 @@ export default function DeliveryPage() {
     }
   };
 
+  // Queue the customer notices for the DOs that JUST transitioned —
+  // kicked off (not awaited) so the page stays snappy; inside, the POSTs
+  // run sequentially after the transitions finished. One summary toast
+  // when ≥1 notice actually queued; silent when everything was skipped
+  // (no email on file / already sent) or failed.
+  const notifyCustomersAfterTransition = (
+    rows: DeliveryOrderRow[],
+    kind: "DISPATCHED" | "DELIVERED",
+  ) => {
+    if (rows.length === 0) return;
+    void (async () => {
+      let queued = 0;
+      for (const row of rows) {
+        if ((await sendCustomerNotice(row, kind)) === "queued") queued++;
+      }
+      if (queued > 0) {
+        toast.success(
+          kind === "DISPATCHED"
+            ? `Dispatch notice emailed for ${queued} DO(s)`
+            : `Invoice notice emailed for ${queued} DO(s)`,
+        );
+      }
+    })();
+  };
+
   // Wei Siang 2026-05-16: bulk Mark Dispatched / Mark Delivered run
   // the DO PUTs SEQUENTIALLY, not in parallel. Each DO transition is
   // a heavy multi-statement batch (fg_units, COGS, auto-invoice, SO
@@ -2334,6 +2499,7 @@ export default function DeliveryPage() {
   ) => {
     if (doIds.length === 0) return;
     const failures: string[] = [];
+    const succeededIds: string[] = [];
     for (const id of doIds) {
       try {
         const r = await fetch(`/api/delivery-orders/${id}`, {
@@ -2344,6 +2510,8 @@ export default function DeliveryPage() {
         if (!r.ok) {
           const body = (await r.json().catch(() => ({}))) as { error?: string };
           failures.push(body?.error || `HTTP ${r.status}`);
+        } else {
+          succeededIds.push(id);
         }
       } catch (e) {
         failures.push(e instanceof Error ? e.message : String(e));
@@ -2356,6 +2524,13 @@ export default function DeliveryPage() {
       setSelectedIds(new Set());
     }
     fetchData();
+    // Customer notices for every DO that actually transitioned — covers the
+    // bulk buttons AND the PL-level bulk actions (runPlBulkTransition reuses
+    // this path). Fire-and-forget; transitions above are already committed.
+    notifyCustomersAfterTransition(
+      deliveryOrders.filter((d) => succeededIds.includes(d.id)),
+      nextStatus === "LOADED" ? "DISPATCHED" : "DELIVERED",
+    );
   };
 
   const handleMarkDispatched = async () => {
@@ -2452,6 +2627,9 @@ export default function DeliveryPage() {
         expect: { status: "DELIVERED" },
       });
       if (result.ok) {
+        // Invoice notice (fire-and-forget) — the DELIVERED cascade just
+        // auto-created the invoice; email it with the invoice PDF attached.
+        notifyCustomersAfterTransition([podDialog], "DELIVERED");
         setPodDialog(null);
         fetchData();
       } else if (result.reason === "mismatch") {
@@ -3634,6 +3812,9 @@ export default function DeliveryPage() {
               } catch { /* keep raw body */ }
               toast.error(parsedErr || `Failed to mark dispatched (HTTP ${result.status})`);
             } else toast.error(`Save failed: ${result.details}`);
+          } else {
+            // Dispatch notice (fire-and-forget) with the branded DO PDF.
+            notifyCustomersAfterTransition([row], "DISPATCHED");
           }
           fetchData();
         },
@@ -5695,6 +5876,9 @@ export default function DeliveryPage() {
                             expect: { status: "LOADED" },
                           });
                           if (result.ok) {
+                            // Dispatch notice (fire-and-forget) with the
+                            // branded DO PDF attached.
+                            notifyCustomersAfterTransition([detailDO], "DISPATCHED");
                             setDetailDO({ ...detailDO, status: "LOADED", dispatchDate: new Date().toISOString() });
                             fetchData();
                           } else if (result.reason === "mismatch") {

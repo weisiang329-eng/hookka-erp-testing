@@ -179,13 +179,15 @@ function priceLines(
 // then Set | Price | Total Price. Letterhead + reference + column header
 // repeat on every page.
 // ---------------------------------------------------------------------------
-export function generateInvoicePdf(
+// Builds the complete invoice document into a fresh jsPDF instance. Shared
+// by generateInvoicePdf (save / view) and generateInvoicePdfBase64 (email
+// attachment for the customer invoice notice) so every consumer renders the
+// IDENTICAL document.
+function buildInvoiceDoc(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   invoice: any,
   extras?: InvoicePrintExtras,
-  // "download" = save the file (default); "view" = open on screen.
-  mode: "download" | "view" = "download",
-) {
+): jsPDF {
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -645,6 +647,17 @@ export function generateInvoicePdf(
     doc.text(`Page ${p} of ${pages}`, pageW - m, fy, { align: "right" });
   }
 
+  return doc;
+}
+
+export function generateInvoicePdf(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  invoice: any,
+  extras?: InvoicePrintExtras,
+  // "download" = save the file (default); "view" = open on screen.
+  mode: "download" | "view" = "download",
+) {
+  const doc = buildInvoiceDoc(invoice, extras);
   const fileName = `INV-${invoice.invoiceNo || "INVOICE"}.pdf`;
   if (mode === "view") {
     try {
@@ -657,4 +670,19 @@ export function generateInvoicePdf(
     return;
   }
   doc.save(fileName);
+}
+
+// Same branded invoice document, returned as a base64 string instead of
+// saved/opened — feeds the customer invoice notice attachment
+// (POST /api/delivery-orders/:id/notify-customer, kind "DELIVERED").
+export function generateInvoicePdfBase64(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  invoice: any,
+  extras?: InvoicePrintExtras,
+): string {
+  const doc = buildInvoiceDoc(invoice, extras);
+  // datauristring = "data:application/pdf;filename=…;base64,<payload>".
+  const uri = String(doc.output("datauristring"));
+  const at = uri.indexOf("base64,");
+  return at >= 0 ? uri.slice(at + "base64,".length) : "";
 }

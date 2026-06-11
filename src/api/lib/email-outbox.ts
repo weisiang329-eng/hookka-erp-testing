@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
 import type { Env } from "../worker";
-import { sendMail } from "./email";
+import { sendMail, type EmailAttachment } from "./email";
 import { tryGetOrgId } from "./tenant";
 
 export interface EnqueueEmailArgs {
@@ -27,6 +27,84 @@ export interface EnqueueEmailArgs {
    * (e.g. invite expiry calculated at SEND time, not enqueue time).
    */
   payloadJson?: Record<string, unknown>;
+  /**
+   * Optional base64 file attachments (e.g. the DO / Invoice PDF on the
+   * customer dispatch + invoice notices). Stored in outbox_emails.
+   * attachments_json (migration 0161) and forwarded by the drain to the
+   * provider. Total DECODED size is capped at MAX_ATTACHMENT_TOTAL_BYTES —
+   * oversize payloads are enqueued WITHOUT the attachment (console.warn)
+   * so the email itself still goes out.
+   */
+  attachments?: EmailAttachment[];
+}
+
+// 5 MB decoded — comfortably under both Resend's and Brevo's per-message
+// limits while keeping the outbox row (and the drain's Resend POST) sane.
+export const MAX_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
+
+/** Decoded byte length of a base64 string (without actually decoding). */
+export function base64DecodedBytes(b64: string): number {
+  const s = (b64 || "").trim();
+  if (!s) return 0;
+  const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((s.length * 3) / 4) - padding);
+}
+
+/**
+ * Validate the attachment list for enqueue. Drops the WHOLE list (returning
+ * null + a console.warn) when malformed or when the combined decoded size
+ * exceeds the 5 MB cap — the email is still enqueued, just without the
+ * attachment, because a notice without a PDF beats no notice at all.
+ */
+export function sanitizeAttachments(
+  attachments: EmailAttachment[] | undefined,
+): EmailAttachment[] | null {
+  if (!attachments || attachments.length === 0) return null;
+  const cleaned: EmailAttachment[] = [];
+  let totalBytes = 0;
+  for (const a of attachments) {
+    const filename = String(a?.filename || "").trim();
+    const contentBase64 = String(a?.contentBase64 || "").trim();
+    if (!filename || !contentBase64) continue;
+    totalBytes += base64DecodedBytes(contentBase64);
+    cleaned.push({ filename, contentBase64 });
+  }
+  if (cleaned.length === 0) return null;
+  if (totalBytes > MAX_ATTACHMENT_TOTAL_BYTES) {
+    console.warn(
+      `[email-outbox] attachments dropped — ${totalBytes} bytes decoded exceeds the ${MAX_ATTACHMENT_TOTAL_BYTES}-byte cap; enqueueing without attachment`,
+    );
+    return null;
+  }
+  return cleaned;
+}
+
+// ---------------------------------------------------------------------------
+// Self-applying migration for the attachments_json column (mirrors
+// migrations-postgres/0161_outbox_attachments.sql). Module-level promise =
+// one round of ALTER per isolate boot — same pattern as
+// ensurePendingMigrations in src/api/routes/sales-orders.ts. Runs at BOTH
+// the enqueue and the drain so deploy ordering can't break either side.
+// attachments_json is snake_case like its sibling columns, so it passes
+// translateSql() untouched and lands exactly as spelled.
+// ---------------------------------------------------------------------------
+let outboxMigrations: Promise<void> | null = null;
+function ensureOutboxMigrations(db: D1Database): Promise<void> {
+  if (outboxMigrations) return outboxMigrations;
+  outboxMigrations = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE outbox_emails ADD COLUMN IF NOT EXISTS attachments_json TEXT",
+        )
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected; a
+      // real schema error resurfaces on the INSERT/SELECT with a clearer
+      // message.
+    }
+  })();
+  return outboxMigrations;
 }
 
 /**
@@ -47,6 +125,10 @@ export async function enqueueEmail<E extends Env>(
   // column has DEFAULT 'hookka' and the cron drain doesn't filter by
   // org_id, so this is purely informational.
   const orgId = tryGetOrgId(c) ?? "hookka";
+  // Make sure the attachments_json column exists before the INSERT names it
+  // (runtime self-apply of migration 0161; no-op after the first call).
+  await ensureOutboxMigrations(c.var.DB);
+  const attachments = sanitizeAttachments(args.attachments);
   // NB: column identifiers are spelled in snake_case to match the migration
   // (0081_email_outbox.sql). The translateSql() identifier rewriter in
   // supabase-compat.ts only rewrites camelCase identifiers that appear in
@@ -55,8 +137,8 @@ export async function enqueueEmail<E extends Env>(
   // here would slip through translateSql unchanged and Postgres would reject
   // the query ("column toaddress does not exist"). Same shape as audit-replay.ts.
   await c.var.DB.prepare(
-    `INSERT INTO outbox_emails (id, to_address, subject, body_html, body_text, payload_json, org_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO outbox_emails (id, to_address, subject, body_html, body_text, payload_json, attachments_json, org_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -65,6 +147,7 @@ export async function enqueueEmail<E extends Env>(
       args.html,
       args.text ?? null,
       args.payloadJson ? JSON.stringify(args.payloadJson) : null,
+      attachments ? JSON.stringify(attachments) : null,
       orgId,
     )
     .run();
@@ -91,9 +174,34 @@ interface OutboxRow {
   subject: string;
   bodyHtml: string | null;
   bodyText: string | null;
+  attachmentsJson: string | null;
   status: string;
   attempts: number;
   lastAttemptAt: string | null;
+}
+
+// Parse the stored attachments_json back into the provider-neutral shape.
+// Bad/legacy values (NULL, truncated JSON, wrong shape) degrade to "no
+// attachment" — never fail the send over the attachment.
+function parseStoredAttachments(
+  raw: string | null,
+): EmailAttachment[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const list = parsed
+      .map((a) => ({
+        filename: String((a as EmailAttachment)?.filename || "").trim(),
+        contentBase64: String(
+          (a as EmailAttachment)?.contentBase64 || "",
+        ).trim(),
+      }))
+      .filter((a) => a.filename && a.contentBase64);
+    return list.length > 0 ? list : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -149,6 +257,10 @@ export async function processOutbox(
     env.RESEND_FROM_EMAIL ||
     "Hookka Manufacturing ERP <noreply@hookka.com>";
 
+  // attachments_json may predate this isolate's schema — self-apply the
+  // 0161 column before the SELECT names it (no-op after the first call).
+  await ensureOutboxMigrations(db);
+
   // Columns are snake_case in DB (see migration 0081). Aliases pin the
   // result-set keys back to camelCase so OutboxRow stays readable; we can't
   // rely on the global snake→camel transform (transform.column.from in
@@ -162,6 +274,7 @@ export async function processOutbox(
               subject,
               body_html       AS "bodyHtml",
               body_text       AS "bodyText",
+              attachments_json AS "attachmentsJson",
               status,
               attempts,
               last_attempt_at AS "lastAttemptAt"
@@ -195,6 +308,10 @@ export async function processOutbox(
       subject: row.subject,
       html: row.bodyHtml ?? "",
       text: row.bodyText ?? undefined,
+      // Stored attachments ride along to the provider (Resend
+      // `attachments` / Brevo `attachment`); rows without a value behave
+      // exactly as before.
+      attachments: parseStoredAttachments(row.attachmentsJson),
     });
 
     const newAttempts = row.attempts + 1;

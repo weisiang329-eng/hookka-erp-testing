@@ -37,6 +37,11 @@ type CoaRow = {
   isActive: number;
   cashFlowCategory: string | null;
   specialAccountType: string | null;
+  // Phase 1 (migration 0154): FIXED | VARIABLE | OTHERS | null (untagged).
+  pnlCategory: string | null;
+  // Phase 1 (migration 0154): 0 = header/parent account, journals and
+  // auto-postings must hit postable (leaf) accounts only.
+  isPostable: number;
   created_at: string;
 };
 
@@ -94,6 +99,9 @@ function rowToCoa(r: CoaRow) {
     isActive: r.isActive === 1,
     cashFlowCategory: r.cashFlowCategory ?? undefined,
     specialAccountType: r.specialAccountType ?? undefined,
+    pnlCategory: r.pnlCategory ?? undefined,
+    // Default 1 — rows predating migration 0154 stay postable.
+    isPostable: (r.isPostable ?? 1) === 1,
   };
 }
 
@@ -394,6 +402,20 @@ app.post("/coa", async (c) => {
       specialAccountType == null || specialAccountType === ""
         ? null
         : String(specialAccountType).trim();
+    const pnlCat =
+      body.pnlCategory == null || body.pnlCategory === ""
+        ? null
+        : String(body.pnlCategory).toUpperCase();
+    if (pnlCat && !["FIXED", "VARIABLE", "OTHERS"].includes(pnlCat)) {
+      return c.json(
+        {
+          success: false,
+          error: "pnlCategory must be FIXED, VARIABLE, or OTHERS",
+        },
+        400,
+      );
+    }
+    const isPostable = body.isPostable === false ? 0 : 1;
     const dup = await c.var.DB.prepare(
       "SELECT code FROM chart_of_accounts WHERE code = ?",
     )
@@ -404,10 +426,10 @@ app.post("/coa", async (c) => {
     }
 
     await c.var.DB.prepare(
-      `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive, cashFlowCategory, specialAccountType)
-       VALUES (?, ?, ?, ?, 0, 1, ?, ?)`,
+      `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive, cashFlowCategory, specialAccountType, pnlCategory, isPostable)
+       VALUES (?, ?, ?, ?, 0, 1, ?, ?, ?, ?)`,
     )
-      .bind(code, name, type, parentCode ?? null, cfCat, satType)
+      .bind(code, name, type, parentCode ?? null, cfCat, satType, pnlCat, isPostable)
       .run();
 
     const created = await c.var.DB.prepare(
@@ -460,6 +482,18 @@ app.put("/coa", async (c) => {
           : body.specialAccountType == null || body.specialAccountType === ""
             ? null
             : String(body.specialAccountType).trim(),
+      pnlCategory:
+        body.pnlCategory === undefined
+          ? existing.pnlCategory
+          : body.pnlCategory == null || body.pnlCategory === ""
+            ? null
+            : String(body.pnlCategory).toUpperCase(),
+      isPostable:
+        body.isPostable === undefined
+          ? (existing.isPostable ?? 1)
+          : body.isPostable
+            ? 1
+            : 0,
     };
     if (
       merged.cashFlowCategory &&
@@ -470,8 +504,20 @@ app.put("/coa", async (c) => {
         400,
       );
     }
+    if (
+      merged.pnlCategory &&
+      !["FIXED", "VARIABLE", "OTHERS"].includes(merged.pnlCategory)
+    ) {
+      return c.json(
+        {
+          success: false,
+          error: "pnlCategory must be FIXED, VARIABLE, or OTHERS",
+        },
+        400,
+      );
+    }
     await c.var.DB.prepare(
-      `UPDATE chart_of_accounts SET name = ?, parentCode = ?, isActive = ?, cashFlowCategory = ?, specialAccountType = ? WHERE code = ?`,
+      `UPDATE chart_of_accounts SET name = ?, parentCode = ?, isActive = ?, cashFlowCategory = ?, specialAccountType = ?, pnlCategory = ?, isPostable = ? WHERE code = ?`,
     )
       .bind(
         merged.name,
@@ -479,6 +525,8 @@ app.put("/coa", async (c) => {
         merged.isActive,
         merged.cashFlowCategory,
         merged.specialAccountType,
+        merged.pnlCategory,
+        merged.isPostable,
         code,
       )
       .run();
@@ -664,6 +712,15 @@ app.put("/journals/:id", async (c) => {
             {
               success: false,
               error: `Journal line references unknown account ${l.accountCode} — fix the line before posting.`,
+            },
+            400,
+          );
+        }
+        if ((acct.isPostable ?? 1) === 0) {
+          return c.json(
+            {
+              success: false,
+              error: `Account ${l.accountCode} (${acct.name}) is a header account — post to one of its child accounts instead.`,
             },
             400,
           );

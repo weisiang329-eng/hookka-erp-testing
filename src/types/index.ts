@@ -628,6 +628,10 @@ export type ChartOfAccount = {
   cashFlowCategory?: "O" | "I" | "F";
   /** AutoCount-style special-account marker (SDC, SCC, SBK, SBS, …). */
   specialAccountType?: string;
+  /** P&L expense classification, owner-maintained (Phase 1, migration 0154). */
+  pnlCategory?: "FIXED" | "VARIABLE" | "OTHERS";
+  /** False = header/parent account; journals must post to leaf accounts. */
+  isPostable?: boolean;
 };
 
 export type JournalLine = {

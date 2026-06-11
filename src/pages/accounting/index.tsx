@@ -536,6 +536,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     parentCode: "",
     cashFlowCategory: "" as "" | "O" | "I" | "F",
     specialAccountType: "",
+    pnlCategory: "" as "" | "FIXED" | "VARIABLE" | "OTHERS",
   });
   const [editCode, setEditCode] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -585,11 +586,25 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
         parentCode: "",
         cashFlowCategory: "",
         specialAccountType: "",
+        pnlCategory: "",
       });
       onRefresh();
     } else {
       toast.error(data?.error || "Failed to create account");
     }
+  };
+
+  // Phase 1 — quick per-row P&L category tagging (FIXED / VARIABLE /
+  // OTHERS). Drives the expense grouping on the Phase-5 reports.
+  const handleSetPnl = async (code: string, value: string) => {
+    const res = await fetch("/api/accounting/coa", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, pnlCategory: value || null }),
+    });
+    const data = asMutationResponse(await res.json());
+    if (data?.success) onRefresh();
+    else toast.error(data?.error || "Failed to update P&L category");
   };
 
   const handleEdit = async (code: string) => {
@@ -707,6 +722,24 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                   className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                 />
               </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">P&L Category</label>
+                <select
+                  value={formData.pnlCategory}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      pnlCategory: e.target.value as "" | "FIXED" | "VARIABLE" | "OTHERS",
+                    })
+                  }
+                  className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+                >
+                  <option value="">(None)</option>
+                  <option value="FIXED">Fixed</option>
+                  <option value="VARIABLE">Variable</option>
+                  <option value="OTHERS">Others</option>
+                </select>
+              </div>
               <div className="flex gap-2">
                 <Button variant="primary" size="sm" onClick={handleAdd}>
                   Save
@@ -722,9 +755,88 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
 
       {typeOrder.map((type) => {
         const typeAccounts = accounts.filter((a) => a.type === type);
-        const parents = typeAccounts.filter((a) => !a.parentCode);
         const children = (parentCode: string) => typeAccounts.filter((a) => a.parentCode === parentCode);
+        // Phase 1 — real hierarchy (migration 0154): top-level accounts
+        // with children (or flagged non-postable) render as section
+        // headers; standalone postable top-level accounts render as
+        // normal rows (previously EVERY parentless account rendered as a
+        // bare header with no balance or actions).
+        const topLevel = typeAccounts.filter((a) => !a.parentCode);
+        const headers = topLevel.filter(
+          (a) => a.isPostable === false || children(a.code).length > 0,
+        );
+        const standalone = topLevel.filter(
+          (a) => a.isPostable !== false && children(a.code).length === 0,
+        );
         const isExpanded = expanded[type];
+
+        const renderRow = (child: ChartOfAccount, indent: boolean) => (
+          <div
+            key={child.code}
+            className={`flex items-center justify-between py-2 px-2 ${indent ? "pl-8" : ""} text-sm border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30 group`}
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-[#6B7280] font-mono text-xs">{child.code}</span>
+              {editCode === child.code ? (
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleEdit(child.code)}
+                  className="rounded border border-[#E2DDD8] px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                  autoFocus
+                />
+              ) : (
+                <span className="text-[#1F1D1B]">{child.name}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              {(child.type === "EXPENSE" || child.type === "COST") && (
+                <select
+                  value={child.pnlCategory ?? ""}
+                  onChange={(e) => handleSetPnl(child.code, e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] text-[#6B7280] focus:outline-none"
+                  title="P&L category (Fixed / Variable / Others)"
+                >
+                  <option value="">P&L: —</option>
+                  <option value="FIXED">Fixed</option>
+                  <option value="VARIABLE">Variable</option>
+                  <option value="OTHERS">Others</option>
+                </select>
+              )}
+              <span className={`font-medium ${child.balance < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                {formatCurrency(Math.abs(child.balance))}
+                {child.balance < 0 ? " CR" : ""}
+              </span>
+              <div className="flex gap-1">
+                {editCode === child.code ? (
+                  <>
+                    <button onClick={() => handleEdit(child.code)} className="text-[#4F7C3A] hover:text-[#3D6329] p-1 cursor-pointer"><Check className="h-3.5 w-3.5" /></button>
+                    <button onClick={() => setEditCode(null)} className="text-[#6B7280] hover:text-[#1F1D1B] p-1 cursor-pointer"><X className="h-3.5 w-3.5" /></button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setEditCode(child.code); setEditName(child.name); }}
+                      className="text-[#6B7280] hover:text-[#6B5C32] p-1 cursor-pointer"
+                      title="Edit"
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeactivate(child.code); }}
+                      className="text-[#6B7280] hover:text-[#9A3A2D] p-1 cursor-pointer"
+                      title="Deactivate"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        );
 
         return (
           <Card key={type}>
@@ -740,89 +852,28 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                 </span>
               </div>
               <span className="font-semibold text-[#1F1D1B]">
-                {formatCurrency(typeAccounts.filter((a) => a.parentCode).reduce((s, a) => s + a.balance, 0))}
+                {formatCurrency(typeAccounts.filter((a) => a.isPostable !== false).reduce((s, a) => s + a.balance, 0))}
               </span>
             </div>
             {isExpanded && (
               <CardContent className="pt-0 pb-2">
                 <div className="border-t border-[#E2DDD8]">
-                  {parents.map((parent) => (
+                  {headers.map((parent) => (
                     <div key={parent.code}>
-                      {/* Parent row */}
+                      {/* Header / parent row — non-postable, no balance */}
                       <div className="flex items-center justify-between py-2 px-2 text-sm font-medium text-[#4B5563] border-b border-[#F0ECE9]">
                         <span>{parent.code} - {parent.name}</span>
+                        <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">header</span>
                       </div>
-                      {/* Children */}
-                      {children(parent.code).map((child) => (
-                        <div
-                          key={child.code}
-                          className="flex items-center justify-between py-2 px-2 pl-8 text-sm border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30 group"
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="text-[#6B7280] font-mono text-xs">{child.code}</span>
-                            {editCode === child.code ? (
-                              <input
-                                type="text"
-                                value={editName}
-                                onChange={(e) => setEditName(e.target.value)}
-                                onKeyDown={(e) => e.key === "Enter" && handleEdit(child.code)}
-                                className="rounded border border-[#E2DDD8] px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
-                                autoFocus
-                              />
-                            ) : (
-                              <span className="text-[#1F1D1B]">{child.name}</span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <span className={`font-medium ${child.balance < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
-                              {formatCurrency(Math.abs(child.balance))}
-                              {child.balance < 0 ? " CR" : ""}
-                            </span>
-                            <div className="flex gap-1">
-                              {editCode === child.code ? (
-                                <>
-                                  <button onClick={() => handleEdit(child.code)} className="text-[#4F7C3A] hover:text-[#3D6329] p-1 cursor-pointer"><Check className="h-3.5 w-3.5" /></button>
-                                  <button onClick={() => setEditCode(null)} className="text-[#6B7280] hover:text-[#1F1D1B] p-1 cursor-pointer"><X className="h-3.5 w-3.5" /></button>
-                                </>
-                              ) : (
-                                <>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); setEditCode(child.code); setEditName(child.name); }}
-                                    className="text-[#6B7280] hover:text-[#6B5C32] p-1 cursor-pointer"
-                                    title="Edit"
-                                  >
-                                    <FileText className="h-3.5 w-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); handleDeactivate(child.code); }}
-                                    className="text-[#6B7280] hover:text-[#9A3A2D] p-1 cursor-pointer"
-                                    title="Deactivate"
-                                  >
-                                    <X className="h-3.5 w-3.5" />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
+                      {children(parent.code).map((child) => renderRow(child, true))}
                     </div>
                   ))}
-                  {/* Accounts without parent in this type (direct children of the type) */}
+                  {/* Standalone postable top-level accounts */}
+                  {standalone.map((a) => renderRow(a, false))}
+                  {/* Orphans — parentCode points outside this type's headers */}
                   {typeAccounts
-                    .filter((a) => a.parentCode && !parents.find((p) => p.code === a.parentCode))
-                    .map((child) => (
-                      <div
-                        key={child.code}
-                        className="flex items-center justify-between py-2 px-2 text-sm border-b border-[#F0ECE9]"
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="text-[#6B7280] font-mono text-xs">{child.code}</span>
-                          <span className="text-[#1F1D1B]">{child.name}</span>
-                        </div>
-                        <span className="font-medium text-[#1F1D1B]">{formatCurrency(child.balance)}</span>
-                      </div>
-                    ))}
+                    .filter((a) => a.parentCode && !headers.find((p) => p.code === a.parentCode))
+                    .map((child) => renderRow(child, false))}
                 </div>
               </CardContent>
             )}

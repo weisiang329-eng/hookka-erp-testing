@@ -4066,7 +4066,12 @@ export default function DeliveryPage() {
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#E2DDD8] text-left text-xs text-[#6B7280]">
+                    {/* whitespace-nowrap inherits to every th/td: a squeezed
+                        table was mid-word-wrapping "PL-2606-010" onto three
+                        lines and splitting "RM" from its amount (owner
+                        screenshot 2026-06-11). Long free text (Remarks) is
+                        explicitly clipped with truncate instead. */}
+                    <tr className="border-b border-[#E2DDD8] text-left text-xs text-[#6B7280] whitespace-nowrap">
                       <th className="py-2 px-3 font-medium">Packing No</th>
                       <th className="py-2 px-3 font-medium text-center">DOs</th>
                       <th className="py-2 px-3 font-medium text-center">Stops</th>
@@ -4087,7 +4092,7 @@ export default function DeliveryPage() {
                         key={pl.id}
                         className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]"
                       >
-                        <td className="py-2.5 px-3 font-medium text-[#1F1D1B]">
+                        <td className="py-2.5 px-3 font-medium text-[#1F1D1B] whitespace-nowrap">
                           {pl.packingNo}
                         </td>
                         <td className="py-2.5 px-3 text-center tabular-nums">
@@ -4096,7 +4101,7 @@ export default function DeliveryPage() {
                         <td className="py-2.5 px-3 text-center tabular-nums">
                           {pl.stops ?? "—"}
                         </td>
-                        <td className="py-2.5 px-3 text-center">
+                        <td className="py-2.5 px-3 text-center whitespace-nowrap">
                           {pl.states && pl.states.length > 0
                             ? pl.states.join(", ")
                             : "—"}
@@ -4107,10 +4112,10 @@ export default function DeliveryPage() {
                         <td className="py-2.5 px-3 text-right tabular-nums">
                           {pl.totalM3.toFixed(2)}
                         </td>
-                        <td className="py-2.5 px-3 text-right tabular-nums">
+                        <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
                           {formatRM(pl.revenueSen ?? 0)}
                         </td>
-                        <td className="py-2.5 px-3 text-right tabular-nums">
+                        <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
                           {pl.costSen == null ? "—" : formatRM(pl.costSen)}
                         </td>
                         <td className="py-2.5 px-3 text-center">
@@ -4126,27 +4131,33 @@ export default function DeliveryPage() {
                               return <span className="text-[#9CA3AF]">—</span>;
                             if (cnt.delivered === total)
                               return (
-                                <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-[#E3EBE6] text-[#2F5D3F]">
+                                <span className="inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-[#E3EBE6] text-[#2F5D3F]">
                                   Delivered {total}/{total}
                                 </span>
                               );
                             if (cnt.dispatched + cnt.delivered > 0)
                               return (
-                                <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-[#E0EDF0] text-[#3E6570]">
+                                <span className="inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-[#E0EDF0] text-[#3E6570]">
                                   Dispatched {cnt.dispatched + cnt.delivered}/{total}
                                 </span>
                               );
                             return (
-                              <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-[#F5EDDC] text-[#9C6F1E]">
+                              <span className="inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-[#F5EDDC] text-[#9C6F1E]">
                                 Pending {total}
                               </span>
                             );
                           })()}
                         </td>
-                        <td className="py-2.5 px-3 text-[#6B7280]">
+                        <td className="py-2.5 px-3 text-[#6B7280] whitespace-nowrap">
                           {pl.createdAt ? formatDate(pl.createdAt) : "-"}
                         </td>
-                        <td className="py-2.5 px-3 text-[#6B7280]">
+                        {/* Remarks is the one free-text cell — clip it with an
+                            ellipsis instead of letting it wrap the row taller;
+                            the full text shows on hover via title. */}
+                        <td
+                          className="py-2.5 px-3 text-[#6B7280] max-w-[180px] truncate"
+                          title={pl.remarks || undefined}
+                        >
                           {pl.remarks || "-"}
                         </td>
                         <td className="py-2.5 px-3">
@@ -4171,30 +4182,40 @@ export default function DeliveryPage() {
                                 <CheckCircle2 className="h-3.5 w-3.5" /> Delivered
                               </Button>
                             )}
+                            {/* Icon-only with hover tooltips — five labeled
+                                buttons per row squeezed the data columns into
+                                mid-word wraps (owner screenshot 2026-06-11).
+                                Dispatch / Delivered keep their labels above:
+                                they change real order status and must read
+                                unambiguously. */}
                             <Button
                               variant="outline"
                               size="sm"
+                              title="Edit"
                               onClick={() => void handleEditPackingList(pl)}
                             >
-                              <Pencil className="h-3.5 w-3.5" /> Edit
+                              <Pencil className="h-3.5 w-3.5" />
                             </Button>
                             <Button
                               variant="outline"
                               size="sm"
+                              title="View"
                               onClick={() => void handlePrintPackingListRecord(pl, "view")}
                             >
-                              <Eye className="h-3.5 w-3.5" /> View
+                              <Eye className="h-3.5 w-3.5" />
                             </Button>
                             <Button
                               variant="outline"
                               size="sm"
+                              title="Print"
                               onClick={() => void handlePrintPackingListRecord(pl, "download")}
                             >
-                              <Printer className="h-3.5 w-3.5" /> Print
+                              <Printer className="h-3.5 w-3.5" />
                             </Button>
                             <Button
                               variant="outline"
                               size="sm"
+                              title="Delete"
                               onClick={() => void handleDeletePackingList(pl)}
                             >
                               <Trash2 className="h-3.5 w-3.5" />

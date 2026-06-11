@@ -1749,6 +1749,14 @@ app.post("/", async (c) => {
         ? body.companySODate.slice(0, 10)
         : new Date().toISOString().slice(0, 10);
 
+    // Service orders price at EXACTLY what the operator typed — 0 means 0
+    // (free / goodwill repair). The price-resolution chain below treats 0 as
+    // "no price" and fills the customer/catalog price, which silently billed
+    // repairs at full price (SV-2606-001 got catalog RM 730 and surfaced in
+    // the sales report — owner 2026-06-11). Hoisted here so the items loop
+    // and the combo pass can both skip.
+    const isServiceOrder = body.isServiceOrder === true;
+
     // Build items — resolve product basePrice fallback
     const items = await Promise.all(
       rawItems.map(async (item, idx) => {
@@ -1788,7 +1796,7 @@ app.post("/", async (c) => {
         let cpSeatHeightPrices: Array<{ height: string; priceSen: number }> | null = null;
         let cpBasePrice: number | null = null;
         const productIdForLookup = (item.productId as string) || resolvedProduct?.id || "";
-        if (incomingBasePrice === 0 && productIdForLookup && customer.id) {
+        if (!isServiceOrder && incomingBasePrice === 0 && productIdForLookup && customer.id) {
           try {
             const cp = await resolveCustomerPriceAsOf(
               c.var.DB,
@@ -1805,7 +1813,7 @@ app.post("/", async (c) => {
           }
         }
 
-        if (basePriceSen === 0 && resolvedProduct) {
+        if (!isServiceOrder && basePriceSen === 0 && resolvedProduct) {
           const seatHeight = String(item.seatHeight ?? "");
           if (cpSeatHeightPrices && cpSeatHeightPrices.length > 0 && seatHeight) {
             const shp = cpSeatHeightPrices.find(
@@ -1926,7 +1934,11 @@ app.post("/", async (c) => {
     );
 
     // Sofa combo renegotiation — covers manual create AND scan-PO/OCR orders.
-    await runSofaComboPass(c.var.DB, customer.id, items, rawItems);
+    // Combo discounts are SALES pricing — service-order lines keep the
+    // operator-typed price untouched.
+    if (!isServiceOrder) {
+      await runSofaComboPass(c.var.DB, customer.id, items, rawItems);
+    }
 
     // NOTE (owner 2026-06-11): NO RM0 gate here by explicit request — a line
     // whose resolution ends at RM0 saves as-is (the resolution chain above
@@ -1934,12 +1946,12 @@ app.post("/", async (c) => {
 
     const subtotalSen = items.reduce((sum, i) => sum + i.lineTotalSen, 0);
     const now = new Date().toISOString();
-    // 0134 — Service-Order flag. When true, pick the `SV-YYMM-NNN` id
+    // 0134 — Service-Order flag (hoisted above the items loop so pricing can
+    // skip; see the comment there). When true, pick the `SV-YYMM-NNN` id
     // prefix instead of `SO-YYMM-NNN` and persist is_service_order = TRUE
     // so the new SO lands on the Service Orders list (and stays out of
     // the regular Sales Orders list, which filters
     // ?isServiceOrder=false by default).
-    const isServiceOrder = body.isServiceOrder === true;
     // Number the SO by its order date (companySODate = the customer's PO date),
     // not the system clock — see generateCompanySOId. Falls back to today when
     // no order date was supplied (mirrors the INSERT's `companySODate ?? today`).
@@ -3088,11 +3100,15 @@ app.put("/:id", async (c) => {
             : numericSize(item.sizeLabel)
               ? (item.sizeLabel as string)
               : "";
-        let basePriceSen = isSofaLine ? 0 : incomingBase;
+        // Service orders: the operator's typed price IS the price — no sofa
+        // re-derive, no customer/catalog resolution (0 = free repair; see
+        // the POST-side comment, SV-2606-001 RM 730 incident).
+        let basePriceSen =
+          isSofaLine && !mergedIsServiceOrder ? 0 : incomingBase;
         // Customer-specific price: when the request didn't supply a usable
         // price (or the line is a sofa being re-derived).
         const productIdForLookup = (item.productId as string) || "";
-        if (basePriceSen === 0 && productIdForLookup && customerId) {
+        if (!mergedIsServiceOrder && basePriceSen === 0 && productIdForLookup && customerId) {
           try {
             const cp = await resolveCustomerPriceAsOf(
               c.var.DB,
@@ -3116,7 +3132,7 @@ app.put("/:id", async (c) => {
         }
         // Catalog fallback — parity with POST. Without this, editing a line
         // whose customer price didn't resolve silently zeroed basePriceSen.
-        if (basePriceSen === 0 && productIdForLookup) {
+        if (!mergedIsServiceOrder && basePriceSen === 0 && productIdForLookup) {
           try {
             const prod = await c.var.DB.prepare(
               "SELECT * FROM products WHERE id = ?",
@@ -3253,7 +3269,11 @@ app.put("/:id", async (c) => {
 
       // Sofa combo renegotiation on EDIT too — previously edit lost the combo
       // discount (the edit page has no combo logic and re-priced at full).
-      await runSofaComboPass(c.var.DB, customerId, newItems, rawItems);
+      // Combo discounts are SALES pricing — service-order lines keep the
+      // operator-typed price untouched.
+      if (!mergedIsServiceOrder) {
+        await runSofaComboPass(c.var.DB, customerId, newItems, rawItems);
+      }
 
       // NOTE (owner 2026-06-11): NO RM0 gate on edit either — by explicit request.
 

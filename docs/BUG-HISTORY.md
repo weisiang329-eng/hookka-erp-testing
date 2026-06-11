@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-016 — Service orders were auto-priced at catalog price (0 treated as "no price"), silently billing repairs at full price
+
+**Status:** 🟢 Fixed + shipped (2026-06-11). Pricing tests green; typecheck green.
+**Category:** sales-orders
+
+Owner spotted SV-2606-001 showing RM 730.00 in the sales report — "正常来讲应该没有的,除非是我手动填了". DB check: unit_price_sen = 73000 stored on the line (created 06-05). Root cause: the SO price-resolution chain treats a submitted price of 0 as "no price" and fills the customer/catalog price (POST `incomingBasePrice === 0 → resolveCustomerPriceAsOf → product.basePriceSen`; PUT same chain + the BUG-004 sofa force-re-derive). Service orders deliberately submit 0 ("All prices reset to 0 — edit each line's price before saving"), so every SV line got silently re-priced to catalog — fake revenue in reports, and a PUT would re-stamp it even after a manual zero.
+
+Fix: `isServiceOrder` (POST, hoisted above the items loop) / `mergedIsServiceOrder` (PUT) now skip the ENTIRE auto-pricing machinery — customer-price resolution, catalog fallback, sofa re-derive, and the sofa-combo pass. On a service order the operator's typed price IS the price; 0 means 0 (free/goodwill repair). Normal sales orders unchanged.
+
+Data note: SV-2606-001's stored RM 730 left untouched pending the owner's call (zero it via SO edit — now sticks — or keep if the repair is genuinely chargeable).
+
+---
+
 ## BUG-2026-06-11-015 — First real dispatch email said "please find the Delivery Order attached" with NO attachment (uncompressed PDF blew the 5 MB cap after the sentence was rendered)
 
 **Status:** 🟢 Fixed + shipped (2026-06-11, 879d500a, deploy green). 26 customer-notify tests; typecheck green.

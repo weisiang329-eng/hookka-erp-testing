@@ -203,12 +203,15 @@ function capturePunchPhoto(): Promise<string | null> {
     input.addEventListener("cancel", () => done(null));
     // Fallback for browsers without 'cancel': when the window regains focus
     // after the camera closes, give onchange a beat; if still no file, cancel.
+    // 3s (was 1s): slow phones can take over a second to hand the photo file
+    // back after the camera app closes — a 1s window misread a REAL photo as
+    // a cancel and told the worker "please take a photo" again.
     window.addEventListener(
       "focus",
       () => {
         setTimeout(() => {
           if (!input.files || input.files.length === 0) done(null);
-        }, 1000);
+        }, 3000);
       },
       { once: true },
     );
@@ -441,9 +444,16 @@ export default function WorkerHomePage() {
           </div>
         )}
         {clockErr && (
-          <p className="mt-2 text-center text-sm font-medium text-[#9A3A2D]">
-            {clockErr}
-          </p>
+          <div className="mt-2 text-center">
+            <p className="text-sm font-medium text-[#9A3A2D]">{clockErr}</p>
+            {/* The selfie uses the phone's native camera: if the OS has camera
+                blocked for the browser app, the picker opens with no camera and
+                the worker only sees "photo required" forever. Tell them the fix
+                — every new tap retries, so once allowed it just works. */}
+            <p className="mt-1 text-xs text-[#8A8680]">
+              {t("home.cameraBlockedHint")}
+            </p>
+          </div>
         )}
       </div>
       )}

@@ -659,8 +659,22 @@ export default function WorkerScanPage() {
       }
       setLiveScanning(true);
       // Video element attach + RAF loop happens in the effect below.
-    } catch {
-      setResult({ kind: "error", message: t("scan.cameraFail") });
+    } catch (e) {
+      // Tell a PERMISSION block apart from no-camera/HTTPS problems. After a
+      // hard "Block" the browser remembers and getUserMedia rejects instantly
+      // WITHOUT showing the prompt again — no code can force it back, so the
+      // only fix is the worker unblocking it at the address bar. (A dismissed
+      // prompt stays "ask": every new tap on Scan QR re-prompts — that part
+      // already works.) Everything else keeps the generic message + the
+      // Take photo / Upload photo fallbacks.
+      const name = e instanceof DOMException ? e.name : "";
+      setResult({
+        kind: "error",
+        message:
+          name === "NotAllowedError" || name === "SecurityError"
+            ? t("scan.cameraDenied")
+            : t("scan.cameraFail"),
+      });
     }
   }, [liveScanning, t]);
 

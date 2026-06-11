@@ -174,6 +174,12 @@ const dict: Dict = {
     zh: '请拍照后才能打卡',
     my: 'ဓာတ်ပုံ ဦးစွာရိုက်ပါ',
   },
+  'home.cameraBlockedHint': {
+    en: "Camera didn't open? Allow Camera for your browser in the phone's Settings (Apps → browser → Permissions → Camera), then tap the button again.",
+    ms: 'Kamera tidak terbuka? Benarkan Kamera untuk pelayar dalam Tetapan telefon (Apl → pelayar → Kebenaran → Kamera), kemudian tekan butang sekali lagi.',
+    zh: '相机没有打开？请到手机 设置 → 应用 → 浏览器 → 权限 → 相机 选择允许，然后再点一次按钮。',
+    my: 'ကင်မရာ မပွင့်ပါသလား? ဖုန်း Settings → Apps → browser → Permissions → Camera တွင် ခွင့်ပြုပြီး ခလုတ်ကို ထပ်နှိပ်ပါ။',
+  },
   'home.openingCamera': {
     en: 'Opening camera…',
     ms: 'Membuka kamera…',
@@ -260,6 +266,12 @@ const dict: Dict = {
     ms: 'Kamera tidak boleh diakses. Guna Muat naik gambar, atau muat semula guna HTTPS.',
     zh: '无法开启摄像头，请改用上传照片，或改用 HTTPS 访问。',
     my: 'ကင်မရာဖွင့်၍မရပါ။ ဓာတ်ပုံတင်ရန်ကို အသုံးပြုပါ၊ သို့ HTTPS ဖြင့် ပြန်ဖွင့်ပါ။',
+  },
+  'scan.cameraDenied': {
+    en: 'Camera permission is blocked. Tap the lock icon next to the web address, allow Camera, then try again — or use Take photo / Upload photo below.',
+    ms: 'Kebenaran kamera disekat. Tekan ikon mangga di sebelah alamat web, benarkan Kamera, kemudian cuba lagi — atau guna Ambil gambar / Muat naik di bawah.',
+    zh: '摄像头权限被拒绝。请点网址旁的锁头图标，允许“相机”，再试一次；或改用下方的 拍照 / 上传照片。',
+    my: 'ကင်မရာခွင့်ပြုချက် ပိတ်ထားသည်။ ဝက်ဘ်လိပ်စာဘေးရှိ သော့ပုံကိုနှိပ်ပြီး Camera ကို ခွင့်ပြုပါ၊ ထို့နောက် ထပ်စမ်းပါ — သို့ အောက်ရှိ ဓာတ်ပုံရိုက်ရန်/တင်ရန် ကိုသုံးပါ။',
   },
   'scan.batchProgress': {
     en: 'Photo {i} of {n}',

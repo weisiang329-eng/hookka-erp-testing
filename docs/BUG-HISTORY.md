@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-013 — Camera permission denied = worker stuck punching/scanning with no way out shown
+
+**Status:** 🟢 Shipped + verified live (2026-06-11). 710/711 tests; typecheck green.
+**Category:** ui-frontend
+
+Owner report: workers who rejected the camera permission could not complete the punch (selfie is REQUIRED, anti-buddy-punching) and saw only "Please take a photo to punch" forever, with no path to recovery. Two different permission models were involved:
+- **Punch selfie** uses the phone's NATIVE camera (`<input capture="user">`) — the gate is the OS-level camera permission for the browser APP (Android Settings → Apps → Chrome → Permissions), not a web prompt. When blocked, the picker yields no photo and the worker just loops on the error.
+- **Scan QR** uses the in-page camera (`getUserMedia`) — the browser prompts ONCE; after a hard "Block" it remembers and rejects instantly with `NotAllowedError`, never re-prompting (browser security — no code can force the prompt back). A merely DISMISSED prompt stays "ask", and every new tap already re-prompts.
+- **GPS is soft by design** — denying location never blocks the punch (it goes through unstamped); scanning needs no location at all.
+
+Fix (guidance + retry, since auto-re-prompt after a hard block is impossible):
+- `src/pages/worker/index.tsx` — under the punch error, a new hint (`home.cameraBlockedHint`, 4 languages) tells the worker exactly where to allow Camera for the browser and to tap again (each tap recreates the picker, so once allowed it just works). Also widened the photo-return race: the no-`cancel`-event fallback waited only 1s after window refocus before declaring "no photo" — slow phones can take longer to hand the file back, misreading a REAL selfie as a cancel; now 3s.
+- `src/pages/worker/scan.tsx` — `startLiveScan`'s catch now tells a permission block (`NotAllowedError`/`SecurityError` → new `scan.cameraDenied`: unblock at the address-bar lock icon, or use the Take photo / Upload photo fallbacks) apart from generic camera failure (`scan.cameraFail` unchanged).
+- `src/lib/worker-i18n.ts` — the two new keys in en/ms/zh/my.
+
+---
+
 ## BUG-2026-06-11-012 — Hourly rate divisor was a fixed ÷10 for everyone; owner: divide by EACH worker's day span (daily hours + lunch)
 
 **Status:** 🟢 Shipped + verified live (2026-06-11). Owner: "有些人的工作时间是 9 个小时,有些是 7.5 个小时…拿总数除以 26 天,再除以他的工作时间加休息时间 (9+1 或 8+1)". 710/711 tests; typecheck green.

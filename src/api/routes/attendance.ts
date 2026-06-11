@@ -143,6 +143,26 @@ app.get("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// DELETE /api/attendance/:id — remove one attendance record (admin cleanup,
+// e.g. test-account punches before go-live). Org-scoped; RBAC-gated.
+// ---------------------------------------------------------------------------
+app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "attendance", "delete");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  const res = await c.var.DB.prepare(
+    "DELETE FROM attendance_records WHERE id = ? AND orgId = ?",
+  )
+    .bind(id, orgId)
+    .run();
+  if ((res.meta?.changes ?? 0) === 0) {
+    return c.json({ success: false, error: "Attendance record not found" }, 404);
+  }
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/attendance/:id/photo?which=in|out → the punch selfie as a real JPEG
 // response (Content-Type image/jpeg), so the Attendance view can render it with
 // a plain <img src> (browser lazy-loads + caches; the list itself stays lean).

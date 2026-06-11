@@ -4249,6 +4249,18 @@ function DepartmentLaborTab({
     () => asArray(deptPayslipResp) as PayslipData[],
     [deptPayslipResp],
   );
+  // Period late/short docks (Deduct / AUTO punch) — feeds the dock bridge in
+  // the under-recorded gap, mirroring the Labor Cost tab.
+  const { data: deptDeductionsResp } = useCachedJson<{
+    data?: Array<{ workerId: string; hours: number }>;
+  }>(deptPayslipPeriod ? `/api/payroll-hour-deductions?period=${deptPayslipPeriod}` : null);
+  const deptDockHoursByWorker = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of deptDeductionsResp?.data ?? []) {
+      m.set(r.workerId, (m.get(r.workerId) ?? 0) + (Number(r.hours) || 0));
+    }
+    return m;
+  }, [deptDeductionsResp]);
   const deptFullMonth = isFullSingleMonth(dateFrom, dateTo);
   // Only fully-load (add statutory + under-recorded to tie to full payroll) once
   // the month is OVER. An in-progress month is still being logged, so it shows
@@ -4440,10 +4452,26 @@ function DepartmentLaborTab({
           // Round each worker's gap to whole sen BEFORE summing — identical to
           // the Labor Cost tab — so per-dept rows add up to the same grand total
           // both tabs show (no per-department rounding drift).
+          // Late/short dock bridge — mirrors the Labor Cost tab: a docked hour
+          // shrinks gross at the spec rate (S ÷ calendar ÷ 10) while the gap
+          // measures it at the costing rate (S ÷ working days ÷ std); without
+          // the bridge a Deduct leaves ~RM5/h flagged as under-recorded.
+          const dockH = deptDockHoursByWorker.get(wid) ?? 0;
+          let lateAdj = 0;
+          if (dockH > 0) {
+            const [dY, dM] = deptPayslipPeriod.split("-").map(Number);
+            const dCal = dY && dM ? new Date(dY, dM, 0).getDate() : 30;
+            const S = Number(p.basicSalary) || 0;
+            lateAdj = Math.max(
+              0,
+              Math.round((dockH * S) / actualWorkingDays / owStd) -
+                Math.round((dockH * S) / dCal / 10),
+            );
+          }
           // Exclude the efficiency allowance (a flat bonus, not logged hours) so
           // it doesn't show as a spurious "under-recorded" gap — same as the
           // Labor Cost tab. The dept's `extra` above still carries the bonus cost.
-          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency - otAdj - (Number(p.allowances) || 0));
+          const gap = Math.round(gross - (loggedByWorker.get(wid) ?? 0) - leniency - otAdj - lateAdj - (Number(p.allowances) || 0));
           if (gap > 50) underByDept.set(reconCode, (underByDept.get(reconCode) ?? 0) + gap);
         }
       }
@@ -4528,7 +4556,7 @@ function DepartmentLaborTab({
       });
     }
     return allRows;
-  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished]);
+  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished, deptDockHoursByWorker, deptPayslipPeriod]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -7614,6 +7642,48 @@ function LaborCostTab({
     }
     return m;
   }, [reconPayslips, workersById]);
+  // Late/short-hour dock bridge — same idea as the absence leniency, for the
+  // Deduct action (and AUTO punch docks). The dock reduces gross at the spec
+  // rate (salary ÷ calendar days ÷ 10 — the owner's RM6.83/h) but the
+  // under-recorded gap measures the missing hours at the costing rate
+  // (salary ÷ working days ÷ std hours). Bridge = docked hours ×
+  // (costing hourly − dock hourly), folded onto the worker's department like
+  // the absence bridge — so after a Deduct the worker's gap closes to RM0
+  // ("选择扣除 → 账目就能对上") instead of leaving a ~RM5/h residual flagged.
+  const lateDockAdjByPayslip = useMemo(() => {
+    const m = new Map<string, number>();
+    const rows = deductionsResp?.data ?? [];
+    if (!rows.length) return m;
+    const [hY, hM] = (period || from).slice(0, 7).split("-").map(Number);
+    if (!hY || !hM) return m;
+    const aWD = Math.max(
+      1,
+      countElapsedWorkingDays(hY, hM, new Date(hY, hM, 0).getDate(), holidayList),
+    );
+    const calDays = new Date(hY, hM, 0).getDate();
+    const dockHoursByWorker = new Map<string, number>();
+    for (const r of rows) {
+      dockHoursByWorker.set(
+        r.workerId,
+        (dockHoursByWorker.get(r.workerId) ?? 0) + (Number(r.hours) || 0),
+      );
+    }
+    for (const p of reconPayslips) {
+      const wid = p.employeeId;
+      if (!wid) continue;
+      const h = dockHoursByWorker.get(wid) ?? 0;
+      if (h <= 0) continue;
+      const w = workersById.get(wid);
+      const std = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      const S = Number(p.basicSalary) || 0;
+      const costEquivalentSen = Math.round((h * S) / aWD / std);
+      // Same formula the engine docks with: (salary ÷ calendar days) ÷ 10.
+      const dockSen = Math.round((h * S) / calDays / 10);
+      const adj = Math.max(0, costEquivalentSen - dockSen);
+      if (adj > 0) m.set(p.id, adj);
+    }
+    return m;
+  }, [deductionsResp, reconPayslips, period, from, holidayList, workersById]);
   // We only have payroll figures once payslips exist for the period. Hide the
   // reconciliation panel (rather than show a misleading negative residual)
   // when there are none or when a category filter is narrowing the buckets.
@@ -8048,6 +8118,8 @@ function LaborCostTab({
           loggedValueSen -
           (absenceLeniencyByPayslip.get(p.id) ?? 0) -
           (otAdjustmentByPayslip.get(p.id) ?? 0) -
+          // Docked late/short hours bridge — after a Deduct the gap closes to 0.
+          (lateDockAdjByPayslip.get(p.id) ?? 0) -
           // Efficiency allowance is a flat bonus, not logged hours — it has its
           // OWN reconciliation line, so exclude it here or a fully-logged earner
           // shows a spurious ~RM150 "under-recorded" gap.
@@ -8073,7 +8145,7 @@ function LaborCostTab({
     const nonProdSubtotalSen = nonProductionStaff.reduce((s, r) => s + r.grossSen, 0);
     const underLoggedSubtotalSen = underLoggedFactory.reduce((s, r) => s + r.gapSen, 0);
     return { nonProductionStaff, underLoggedFactory, nonProdSubtotalSen, underLoggedSubtotalSen };
-  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip, otAdjustmentByPayslip]);
+  }, [showReconciliation, reconPayslips, allDepts, workersById, factoryDeptCodes, loggedValueByWorker, absenceLeniencyByPayslip, otAdjustmentByPayslip, lateDockAdjByPayslip]);
 
   // Clean per-department under-logged total — aggregated from the PER-WORKER
   // gaps (each worker's gross − their OWN logged value), so it is NOT polluted
@@ -8127,10 +8199,13 @@ function LaborCostTab({
       stat[b] += statutorySen;
       adj[b] +=
         (absenceLeniencyByPayslip.get(p.id) ?? 0) +
-        (otAdjustmentByPayslip.get(p.id) ?? 0);
+        (otAdjustmentByPayslip.get(p.id) ?? 0) +
+        // Docked late/short hours: the cost-vs-dock rate difference belongs on
+        // the worker's department line (same treatment as the absence bridge).
+        (lateDockAdjByPayslip.get(p.id) ?? 0);
     }
     return { stat, adj, nonProdGrossSen };
-  }, [reconPayslips, absenceLeniencyByPayslip, otAdjustmentByPayslip, prodCodes, factoryDeptCodes]);
+  }, [reconPayslips, absenceLeniencyByPayslip, otAdjustmentByPayslip, lateDockAdjByPayslip, prodCodes, factoryDeptCodes]);
 
   // Loaded department buckets = logged labor + that department's own statutory
   // + its absent-day adjustment. Production / Warehousing / Shortfall computed

@@ -25,8 +25,8 @@
 //     existence rather than per-PO linkage). Same caveat documented.
 // ---------------------------------------------------------------------------
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
-import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -96,6 +96,13 @@ type ConsignmentNoteRow = {
   inTransitAt: string | null;
   deliveredDate: string | null;
   status: CNStatus;
+  // RAW backend status (ACTIVE/PARTIALLY_SOLD/IN_TRANSIT/FULLY_SOLD/
+  // RETURNED/CLOSED). The display `status` above folds RETURNED into
+  // DELIVERED for the grid, which let RETURNED rows slip through the bulk
+  // Mark buttons' display-status filters into PUTs the backend rejects
+  // (CN_VALID_TRANSITIONS: RETURNED → ACTIVE only). The bulk handlers gate
+  // on THIS field via BULK_ELIGIBLE_RAW_STATUSES instead.
+  rawStatus: ConsignmentNote["status"];
   // Transport fields — backend already stores these on CN as of migration 0066
   // (consignment_notes.vehicleId / driverId / vehicleNo / vehicleType /
   // driverName / driverPhone). We surface them on the row so the Edit dialog
@@ -203,6 +210,36 @@ const TAB_CN_STATUSES: Record<string, CNStatus[]> = {
 };
 
 const PO_TABS = new Set(["planning", "pending_cn"]);
+
+// Reverse of TAB_CN_STATUSES: which CN-list tab a given display status lives
+// on. Derived from the one map above so the two can never drift apart —
+// mirrors TAB_FOR_STATUS on the DO page (src/pages/delivery/index.tsx).
+// Feeds the unified search auto-jump + the ?focus= deep link below.
+const TAB_FOR_CN_STATUS: Partial<Record<CNStatus, string>> = (() => {
+  const m: Partial<Record<CNStatus, string>> = {};
+  for (const [tab, statuses] of Object.entries(TAB_CN_STATUSES)) {
+    for (const s of statuses) m[s] = tab;
+  }
+  return m;
+})();
+
+// Bulk Mark eligibility, by RAW backend status. Keyed by the bulk target;
+// each list is the set of FROM statuses the bulk button may PUT from —
+// exactly the FORWARD edges of CN_VALID_TRANSITIONS in
+// src/api/lib/consignment-note-shared.ts (reverse edges like
+// CLOSED → FULLY_SOLD stay single-row "Reverse to X" context-menu actions,
+// never bulk). RETURNED appears in no list: the backend only allows
+// RETURNED → ACTIVE, so a RETURNED row (displayed as Delivered) must be
+// counted as skipped, not PUT. Pinned against the imported transition
+// table in tests/cn-do-parity-gaps.test.mjs.
+const BULK_ELIGIBLE_RAW_STATUSES: Record<
+  "PARTIALLY_SOLD" | "FULLY_SOLD" | "CLOSED",
+  ReadonlyArray<ConsignmentNote["status"]>
+> = {
+  PARTIALLY_SOLD: ["ACTIVE"],
+  FULLY_SOLD: ["PARTIALLY_SOLD", "IN_TRANSIT"],
+  CLOSED: ["FULLY_SOLD"],
+};
 
 // ---------------------------------------------------------------------------
 // Production order row (used for Planning + Pending CN tabs). Mirrors
@@ -328,6 +365,8 @@ function mapCNToRow(
     inTransitAt: cn.inTransitAt || null,
     deliveredDate: cn.deliveredAt || null,
     status: cnStatusFromBackend(cn.status),
+    // Straight from the API row — see the rawStatus note on the row type.
+    rawStatus: cn.status,
     // Display the 3PL company name (driverContactPerson holds the dispatcher
     // contact, but for the Transport Co. column we want the company itself —
     // resolved from cn.driverId via the providers list at render time, with
@@ -544,6 +583,12 @@ export default function ConsignmentNotePage() {
   // Same rationale as DO: 200 page size keeps daily working set on page 1.
   const PAGE_SIZE = 200;
   const [page, setPage] = useUrlStateNumber("page", 1);
+  // Mirrors the CN grid's global search box (fed via DataGrid
+  // onSearchChange) — the CN twin of doGridSearch on the DO page. Drives
+  // cross-status search: while non-empty, filteredCNs spans every status
+  // instead of just the active tab, so a CN is findable regardless of
+  // which stage/tab it sits on, and feeds the auto-jump index below.
+  const [cnGridSearch, setCnGridSearch] = useState("");
 
   // ---------- Fetch ----------
   // Pull CN list from /api/consignment-notes (legacy CN dispatch table).
@@ -1008,12 +1053,102 @@ export default function ConsignmentNotePage() {
   }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap, poToFabricMap, poToRackMap]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // ---------- One-shot ?focus=<cnId> deep link (global Ctrl+K palette) ----------
+  // The palette's Consignment Notes results navigate here with
+  // /consignment/note?focus=<id>. Once the CN list loads, find the row,
+  // hop to its status tab, open the Detail dialog, and clear the param so
+  // refresh/back doesn't re-fire (same one-shot consume pattern as
+  // /procurement?prefillRm=). Tab write + param clear go through ONE
+  // useUrlBatch call — two back-to-back setSearchParams calls race on
+  // react-router v7 (see use-url-state.ts header). A deleted/unknown id
+  // just clears the param and lands on the page, no error.
+  const [searchParams] = useSearchParams();
+  const setUrlBatch = useUrlBatch();
+  useEffect(() => {
+    const focusId = searchParams.get("focus");
+    if (!focusId) return;
+    if (cnList.length === 0) return; // wait for the CN list to load
+    const focusRow = cnList.find((c) => c.id === focusId) ?? null;
+    if (focusRow) {
+      // One-shot deep-link consume — runs once when the list arrives with
+      // a ?focus param present; not a render-loop risk.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDetailCN(focusRow);
+      setUrlBatch({
+        focus: null,
+        tab: TAB_FOR_CN_STATUS[focusRow.status] ?? null,
+      });
+    } else {
+      setUrlBatch({ focus: null });
+    }
+  }, [searchParams, cnList, setUrlBatch]);
+
   // ---------- Filtered data (CN-list tabs only) ----------
   const filteredCNs = useMemo(() => {
     const statuses = TAB_CN_STATUSES[activeTab];
     if (!statuses) return []; // PO-based tab — no CN rows
+    // Cross-status search (mirrors DO's filteredOrders): while the user is
+    // typing in the grid search box, span EVERY status so a CN is findable
+    // no matter which stage/tab it's on — searching a CGN number must
+    // surface the row even if it sits on another tab. The DataGrid then
+    // narrows these by the search term; the auto-jump below follows the
+    // matches to their tab. Empty search keeps the normal tab-scoped view.
+    // (Covers the loaded page — newest 200 CNs across all statuses.)
+    if (cnGridSearch.trim()) return cnList;
     return cnList.filter((c) => statuses.includes(c.status));
-  }, [cnList, activeTab]);
+  }, [cnList, activeTab, cnGridSearch]);
+
+  // Unified search index (DO parity, 2026-06-12): the CN twin of the DO
+  // page's searchJumpIndex — one index so the auto-jump below works across
+  // all 4 CN-list tabs. Each entry = { tab, haystack }; CN rows map to
+  // their stage tab via TAB_FOR_CN_STATUS. Planning / Pending CN (PO-side)
+  // rows are deliberately NOT indexed, exactly as the DO page leaves its
+  // Planning tab out of the jump set. The per-item consignmentOrderNo
+  // values are the CN twin of DO's row-level salesOrderNos field.
+  const searchJumpIndex = useMemo(() => {
+    const entries: { tab: string; haystack: string }[] = [];
+    for (const cn of cnList) {
+      const tab = TAB_FOR_CN_STATUS[cn.status];
+      if (!tab) continue; // status with no tab — never a jump target
+      entries.push({
+        tab,
+        haystack: [
+          cn.cnNo,
+          cn.coRef,
+          ...cn.items.map((it) => it.consignmentOrderNo),
+          cn.customerName,
+          cn.branchName,
+          cn.vehicleNo,
+        ]
+          .join(" ")
+          .toLowerCase(),
+      });
+    }
+    return entries;
+  }, [cnList]);
+
+  // Follow the record to its tab (mirrors the DO page's auto-jump 1:1): a
+  // matching CN is surfaced no matter which tab it sits on, but the tab
+  // header should follow so the page context matches what the operator
+  // searched. We look at where the matches actually live across the
+  // unified index: if every match sits on ONE tab, hop to that tab.
+  // Matches spanning several tabs leave the tab alone. The active tab is
+  // read OUTSIDE the deps on purpose so a manual tab click during an
+  // active search is respected, not yanked back.
+  useEffect(() => {
+    const term = cnGridSearch.trim().toLowerCase();
+    if (!term) return;
+    const tabsHit = new Set<string>();
+    for (const entry of searchJumpIndex) {
+      if (entry.haystack.includes(term)) tabsHit.add(entry.tab);
+    }
+    if (tabsHit.size === 1) {
+      const only = Array.from(tabsHit)[0];
+      if (only !== activeTab) setActiveTab(only);
+    }
+    // activeTab intentionally excluded — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cnGridSearch, searchJumpIndex]);
 
   // ---------- Summary counts (mirrors DO's KPI strip) ----------
   // Counts pulled from /api/consignment-notes/stats (hoisted hook above)
@@ -1443,15 +1578,18 @@ export default function ConsignmentNotePage() {
     }
   };
 
-  // Bulk Mark Dispatched — PENDING (ACTIVE) rows only. Uses the stored
-  // transport from CN creation; PUT { status } alone never touches the
-  // carrier columns (updateConsignmentNoteById only re-resolves transport
-  // when a transport key is on the body). Rows in any other status are
-  // skipped with the count shown.
+  // Bulk Mark Dispatched — ACTIVE rows only (raw backend status; see
+  // BULK_ELIGIBLE_RAW_STATUSES). Uses the stored transport from CN
+  // creation; PUT { status } alone never touches the carrier columns
+  // (updateConsignmentNoteById only re-resolves transport when a transport
+  // key is on the body). Rows in any other raw status are skipped with the
+  // count shown.
   const handleBulkMarkDispatched = async () => {
     if (selectedCNIds.size === 0) return;
     const selected = cnList.filter((c) => selectedCNIds.has(c.id));
-    const eligible = selected.filter((c) => c.status === "PENDING");
+    const eligible = selected.filter((c) =>
+      BULK_ELIGIBLE_RAW_STATUSES.PARTIALLY_SOLD.includes(c.rawStatus),
+    );
     const skipped = selected.length - eligible.length;
     if (eligible.length === 0) {
       toast.error(
@@ -1467,14 +1605,17 @@ export default function ConsignmentNotePage() {
     );
   };
 
-  // Bulk Mark Delivered — DISPATCHED or IN_TRANSIT rows (same eligibility
-  // as the single-row context-menu action; PARTIALLY_SOLD → FULLY_SOLD
-  // direct is a valid backend transition, IN_TRANSIT is optional).
+  // Bulk Mark Delivered — PARTIALLY_SOLD or IN_TRANSIT rows only (raw
+  // backend status; PARTIALLY_SOLD → FULLY_SOLD direct is a valid backend
+  // transition, IN_TRANSIT is optional). Gating on rawStatus keeps
+  // RETURNED rows out: they display as Delivered but the backend rejects
+  // every forward move from RETURNED, so they count as skipped instead of
+  // surfacing a raw transition error in the toast.
   const handleBulkMarkDelivered = async () => {
     if (selectedCNIds.size === 0) return;
     const selected = cnList.filter((c) => selectedCNIds.has(c.id));
-    const eligible = selected.filter(
-      (c) => c.status === "DISPATCHED" || c.status === "IN_TRANSIT",
+    const eligible = selected.filter((c) =>
+      BULK_ELIGIBLE_RAW_STATUSES.FULLY_SOLD.includes(c.rawStatus),
     );
     const skipped = selected.length - eligible.length;
     if (eligible.length === 0) {
@@ -1491,11 +1632,16 @@ export default function ConsignmentNotePage() {
     );
   };
 
-  // Bulk Mark Acknowledged — DELIVERED rows only (FULLY_SOLD → CLOSED).
+  // Bulk Mark Acknowledged — FULLY_SOLD rows only (raw backend status;
+  // FULLY_SOLD → CLOSED). This is where RETURNED rows used to slip
+  // through: they share the DELIVERED display status, but
+  // CN_VALID_TRANSITIONS has no RETURNED → CLOSED edge.
   const handleBulkMarkAcknowledged = async () => {
     if (selectedCNIds.size === 0) return;
     const selected = cnList.filter((c) => selectedCNIds.has(c.id));
-    const eligible = selected.filter((c) => c.status === "DELIVERED");
+    const eligible = selected.filter((c) =>
+      BULK_ELIGIBLE_RAW_STATUSES.CLOSED.includes(c.rawStatus),
+    );
     const skipped = selected.length - eligible.length;
     if (eligible.length === 0) {
       toast.error(
@@ -2721,6 +2867,7 @@ export default function ConsignmentNotePage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No CO items in planning."
               groupBy="customerState"
+              initialSearch={cnGridSearch}
             />
           </CardContent>
         </Card>
@@ -2766,6 +2913,10 @@ export default function ConsignmentNotePage() {
               emptyMessage="No CO items pending CN."
               groupBy="customerState"
               selectable
+              // Carries an active CN-grid search term across a manual hop to
+              // this PO tab (DO does the same on its planning grids). No
+              // onSearchChange: PO-side tabs stay out of the jump set.
+              initialSearch={cnGridSearch}
               onSelectionChange={(rows) =>
                 setSelectedReadyPOs(new Set(rows.map((r) => r.id)))
               }
@@ -2823,6 +2974,8 @@ export default function ConsignmentNotePage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No consignment notes found."
               onDoubleClick={(row) => setDetailCN(row)}
+              initialSearch={cnGridSearch}
+              onSearchChange={setCnGridSearch}
               contextMenuItems={getContextMenuItems}
               selectable
               onSelectionChange={(rows) =>

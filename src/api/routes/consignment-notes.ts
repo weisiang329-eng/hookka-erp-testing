@@ -54,6 +54,14 @@ app.get("/", async (c) => {
   const customerId = c.req.query("customerId");
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
+  // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
+  // match on note number / customer / branch; fires ONLY when present, so
+  // the CN list page (no search param) keeps the exact legacy query. The
+  // linked CO numbers are deliberately NOT searched: this endpoint never
+  // joins consignment_orders (the FE resolves CO numbers client-side via
+  // production_orders), and adding a join just for search would change the
+  // list query shape. Mirrors the ?search pattern on /api/delivery-orders.
+  const q = (c.req.query("search") || c.req.query("q") || "").trim();
   const clauses: string[] = [];
   const params: string[] = [];
   if (status) {
@@ -64,11 +72,21 @@ app.get("/", async (c) => {
     clauses.push("customerId = ?");
     params.push(customerId);
   }
+  if (q) {
+    clauses.push("(noteNumber ILIKE ? OR customerName ILIKE ? OR branchName ILIKE ?)");
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
   // Pagination defaults: no params → return everything (legacy callers).
-  const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : null;
+  let page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : null;
   const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : null;
+  // The palette sends ?search=&limit=5 with no ?page. Under the legacy
+  // contract (page AND limit both required) the limit would silently not
+  // apply and a search would return every match. Default the page only
+  // when a search is active so no-search callers keep the exact legacy
+  // limit-ignored behavior.
+  if (q && limit !== null && page === null) page = 1;
 
   const totalRes = await c.var.DB
     .prepare(`SELECT COUNT(*) AS n FROM consignment_notes ${where}`)

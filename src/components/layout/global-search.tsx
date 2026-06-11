@@ -43,7 +43,7 @@ import { cn } from "@/lib/utils";
 // Types
 // ---------------------------------------------------------------------------
 
-type ResultCategory = "pages" | "actions" | "sales_orders" | "customers" | "products" | "delivery_orders" | "invoices";
+type ResultCategory = "pages" | "actions" | "sales_orders" | "customers" | "products" | "delivery_orders" | "invoices" | "consignment_notes";
 
 interface SearchResult {
   id: string;
@@ -127,6 +127,7 @@ const CATEGORY_CONFIG: Record<ResultCategory, { label: string; icon: LucideIcon 
   products: { label: "Products", icon: Boxes },
   delivery_orders: { label: "Delivery Orders", icon: Truck },
   invoices: { label: "Invoices", icon: FileText },
+  consignment_notes: { label: "Consignment Notes", icon: ClipboardList },
 };
 
 // ---------------------------------------------------------------------------
@@ -178,6 +179,8 @@ interface ApiRecord {
   customerPO?: string;
   doNo?: string;
   invoiceNo?: string;
+  // Consignment note rows (/api/consignment-notes payload).
+  noteNumber?: string;
 }
 
 type UnknownObj = Record<string, unknown>;
@@ -324,6 +327,27 @@ function useApiSearch(query: string) {
             });
           })
           .catch(() => {}),
+
+        // Consignment Notes — payload is { success, data: [...] }, hence the
+        // explicit "data" key. The ?focus= deep link makes the CN page hop
+        // to the record's status tab and open its Detail dialog.
+        fetch(`/api/consignment-notes?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
+          .then((r) => r.ok ? r.json() : null)
+          .then((data) => {
+            const items = pickRecords(data, "consignmentNotes", "data");
+            items.forEach((item) => {
+              const num = item.noteNumber || item.id || "";
+              collected.push({
+                id: `cn-${item.id}`,
+                label: num,
+                description: item.customerName || "",
+                href: `/consignment/note?focus=${item.id}`,
+                icon: ClipboardList,
+                category: "consignment_notes",
+              });
+            });
+          })
+          .catch(() => {}),
       ];
 
       await Promise.allSettled(fetchers);
@@ -396,6 +420,7 @@ export function GlobalSearch() {
       "invoices",
       "customers",
       "products",
+      "consignment_notes",
     ];
 
     for (const cat of categoryOrder) {

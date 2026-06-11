@@ -221,7 +221,11 @@ export function buildReportHTML(opts: PrintReportOptions): string {
     @page { size: A4 ${orientation}; margin: 13mm; }
     @media print { body { margin: 0; } .card, tr { page-break-inside: avoid; } h2 { page-break-after: avoid; } }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 11px; color: #1F1D1B; padding: 18px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    /* On SCREEN the page previews at the real paper width (A4 portrait ≈
+       794px / landscape ≈ 1123px at 96dpi) so what you see is what prints —
+       a portrait report no longer smears across a wide monitor. Print output
+       is unchanged (@page + 100%-width tables reflow as before). */
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 11px; color: #1F1D1B; padding: 18px; -webkit-print-color-adjust: exact; print-color-adjust: exact; max-width: ${orientation === "landscape" ? "1123px" : "794px"}; margin: 0 auto; }
     .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 14px; }
     .header img { height: 38px; width: auto; margin-bottom: 6px; }
     .header h1 { font-size: 17px; color: #000; margin-bottom: 2px; }

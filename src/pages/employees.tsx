@@ -6610,68 +6610,107 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   }, [payslipData, isProjected, selectedMonth, selectedYear, months, prorationSenOf, totalPayrollCost, totals]);
 
   // Printable salary-calculation guide (owner 2026-06-11): a worked example of
-  // EVERY pay rule, in plain English, to hand to workers. Uses a fixed example
-  // (RM2,050 / June 2026) so the arithmetic on paper is concrete.
+  // EVERY pay rule, in plain English, to hand to workers. GENERATED from the
+  // rules in force TODAY (divisor modes, shift, grace, multipliers, statutory)
+  // so it can never go stale — change a rule, reprint, the guide follows.
+  // Worked example fixed at RM2,050 · 9h/day so the arithmetic is concrete.
   const printCalcGuide = useCallback(() => {
+    const cfg = payRulesToday;
+    const S = 2050; // example salary (RM)
+    const now = new Date();
+    const monthName = now.toLocaleDateString("en-MY", { month: "long", year: "numeric" });
+    const calDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    let monSat = 0;
+    for (let i = 1; i <= calDays; i++) {
+      if (new Date(now.getFullYear(), now.getMonth(), i).getDay() !== 0) monSat++;
+    }
+    const lunchH = cfg.lunchMin / 60;
+    const lunchTxt = `${cfg.lunchMin % 60 === 0 ? lunchH.toFixed(0) : lunchH.toFixed(1)}h`;
+    const stdH = (cfg.shiftEndMin - cfg.shiftStartMin - cfg.lunchMin) / 60;
+    const shiftTxt = `${minToHhmm(cfg.shiftStartMin)}-${minToHhmm(cfg.shiftEndMin)}`;
+    // Day rate per the configured divisor mode.
+    const dayDiv = cfg.dayRateDivisorMode === "calendarDays" ? calDays : cfg.dayRateDivisorMode === "workingDays" ? monSat : 26;
+    const dayDivTxt =
+      cfg.dayRateDivisorMode === "calendarDays"
+        ? `the month's calendar days (${monthName}: ${calDays})`
+        : cfg.dayRateDivisorMode === "workingDays"
+          ? `the month's working days (${monthName}: ${monSat}, Mon-Sat before public holidays)`
+          : "26 — the same every month";
+    const dayRate = S / dayDiv;
+    // Hour rate per the configured mode (example worker = 9h/day).
+    const hourDiv = cfg.hourRateDivisorMode === "fixed" ? cfg.rateHoursPerDay : cfg.hourRateDivisorMode === "hoursOnly" ? 9 : 9 + lunchH;
+    const hourDivTxt =
+      cfg.hourRateDivisorMode === "fixed"
+        ? `${cfg.rateHoursPerDay} (the same fixed number for everyone)`
+        : cfg.hourRateDivisorMode === "hoursOnly"
+          ? "the worker's daily hours (9h worker → ÷9)"
+          : `the worker's daily hours + ${lunchTxt} lunch (9h worker → ÷${9 + lunchH})`;
+    const hourRate = dayRate / Math.max(1, hourDiv);
+    const rm = (v: number) => `RM${v.toFixed(2)}`;
+    const grace = cfg.lateGraceMin;
+    const block = cfg.lateBlockMin;
+    const lateIn = minToHhmm(cfg.shiftStartMin + grace + 1);
+    const onTimeIn = minToHhmm(cfg.shiftStartMin + Math.max(0, grace - 2));
+    const sun = cfg.sundayOtMultiplier;
+    const ph = cfg.holidayOtMultiplier;
     type GuideRow = { item: string; rule: string; example: string };
+    // Item bold + Example in the house gold, so the three columns read as
+    // name / explanation / number instead of one grey block (owner 2026-06-11).
     const col = [
-      { header: "Item", value: (r: unknown) => (r as GuideRow).item },
+      { header: "Item", value: (r: unknown) => ({ text: (r as GuideRow).item, bold: true }) },
       { header: "How it is calculated", value: (r: unknown) => (r as GuideRow).rule },
-      { header: "Example", value: (r: unknown) => (r as GuideRow).example },
+      { header: "Example", value: (r: unknown) => ({ text: (r as GuideRow).example, color: "#6B5C32", bold: true }) },
     ];
     const s = (title: string, rows: GuideRow[]) => ({ title, columns: col, rows });
     printReport({
       title: "Salary Calculation Guide",
-      filterSummary:
-        "Worked example: RM2,050/month · every pay rate uses the fixed 26-day month · June 2026 (25 working days, 1 public holiday) · Shift 08:00-18:00, 1h unpaid lunch = 9h standard day",
-      // Portrait A4 (owner 2026-06-11) — a handout reads top-to-bottom like the
-      // printed page; the 3-column tables fit portrait fine.
+      filterSummary: `Worked example: RM2,050/month · 9h/day worker · ${monthName} · Shift ${shiftTxt}, ${lunchTxt} unpaid lunch = ${stdH}h standard day · printed from the rules in force today`,
       cards: [
         { label: "Example salary", value: "RM2,050 / month" },
-        { label: "Day rate", value: "2,050 ÷ 26 = RM78.85" },
-        { label: "Standard day", value: "08:00-18:00 · 1h lunch = 9h" },
-        { label: "OT rates", value: "Weekday 1.5x · Sunday 2x · Holiday 3x" },
+        { label: "Day rate", value: `2,050 ÷ ${dayDiv} = ${rm(dayRate)}` },
+        { label: "Hour rate", value: `${rm(dayRate)} ÷ ${hourDiv} = ${rm(hourRate)}` },
+        { label: "OT rates", value: `Weekday 1.5x · Sunday ${sun}x · Holiday ${ph}x` },
       ],
       sections: [
-        s("1. Daily & hourly rates (one fixed divisor: 26)", [
-          { item: "Day rate", rule: "Monthly salary ÷ 26 — the same divisor every month, used for absences", example: "2,050 ÷ 26 = RM78.85 / day" },
-          { item: "Hour rate", rule: "Day rate ÷ (the worker's daily hours + 1h lunch) — 9h day → ÷10, 7.5h → ÷8.5 · used for lateness, short hours AND the overtime base", example: "78.85 ÷ 10 = RM7.88 / hour (9h worker)" },
-          { item: "Production cost day rate", rule: "Monthly salary ÷ working days of the month (internal costing only — never changes pay)", example: "2,050 ÷ 25 = RM82.00 / day" },
+        s("1. Daily & hourly rates", [
+          { item: "Day rate", rule: `Monthly salary ÷ ${dayDivTxt} · used for absences and join/resign`, example: `2,050 ÷ ${dayDiv} = ${rm(dayRate)} / day` },
+          { item: "Hour rate", rule: `Day rate ÷ ${hourDivTxt} · used for lateness, short hours AND the overtime base`, example: `${rm(dayRate)} ÷ ${hourDiv} = ${rm(hourRate)} / hour` },
+          { item: "Production cost day rate", rule: "Monthly salary ÷ working days of the month (internal costing only — never changes pay)", example: `2,050 ÷ ${monSat} ≈ ${rm(S / Math.max(1, monSat))} / day` },
         ]),
         s("2. Working hours from the punch clock", [
-          { item: "Standard day", rule: "Punch in to punch out, minus the 1h unpaid lunch", example: "08:00-18:00 = 10h − 1h = 9.0h" },
-          { item: "Late grace", rule: "Up to 10 minutes late is forgiven", example: "08:08 in → counted as on time" },
-          { item: "Lateness rounding", rule: "Beyond grace, lateness rounds UP in 15-min blocks", example: "08:11 → 15 min late; 08:16 → 30 min" },
-          { item: "Overtime counting", rule: "Only after 18:00, in 15-min blocks (a block must be filled)", example: "18:16-18:29 → 15 min; 18:14 → 0" },
+          { item: "Standard day", rule: `Punch in to punch out, minus the ${lunchTxt} unpaid lunch`, example: `${shiftTxt} − ${lunchTxt} = ${stdH}h` },
+          { item: "Late grace", rule: `Up to ${grace} minutes late is forgiven`, example: `${onTimeIn} in → counted as on time` },
+          { item: "Lateness rounding", rule: `Beyond grace, lateness rounds UP in ${block}-min blocks`, example: `${lateIn} → ${block} min late` },
+          { item: "Overtime counting", rule: `Only after ${minToHhmm(cfg.shiftEndMin)}, in 15-min blocks (a block must be filled)`, example: "16-29 min → 15 min; 14 min → 0" },
         ]),
         s("3. Lateness / short hours deduction", [
-          { item: "Deduction", rule: "Short hours × the hour rate (RM7.88/h)", example: "30 min late, no OT → 0.5h × 7.88 = −RM3.94" },
-          { item: "Same-day OT offsets first", rule: "Evening OT covers the morning gap 1:1; only the remainder is deducted", example: "08:30 in + 2h OT → deduction RM0, paid OT 1.5h" },
+          { item: "Deduction", rule: `Short hours × the hour rate (${rm(hourRate)}/h)`, example: `30 min late, no OT → 0.5h × ${hourRate.toFixed(2)} = −${rm(hourRate / 2)}` },
+          { item: "Same-day OT offsets first", rule: "Evening OT covers the morning gap 1:1; only the remainder is deducted", example: "30 min late + 2h OT → deduction RM0, paid OT 1.5h" },
           { item: "Review", rule: "The office can Keep pay (no deduction) or Deduct each short day; every deduction can be undone", example: "Shown in the worker app under 'Late / short hours'" },
         ]),
         s("4. Overtime pay", [
-          { item: "Weekday OT", rule: "Hours above the 9h standard × base rate × 1.5", example: "2h → 2 × 7.88 × 1.5 = RM23.65" },
-          { item: "Sunday work", rule: "EVERY hour that day × base rate × 2 (Sundays are non-working)", example: "8h Sunday → RM126.15" },
-          { item: "Public holiday work", rule: "EVERY hour that day × base rate × 3", example: "8h holiday → RM189.23" },
+          { item: "Weekday OT", rule: `Hours above the ${stdH}h standard × hour rate × the worker's multiplier (usually 1.5)`, example: `2h → 2 × ${hourRate.toFixed(2)} × 1.5 = ${rm(2 * hourRate * 1.5)}` },
+          { item: "Sunday work", rule: `EVERY hour that day × hour rate × ${sun} (Sundays are non-working)`, example: `8h Sunday → ${rm(8 * hourRate * sun)}` },
+          { item: "Public holiday work", rule: `EVERY hour that day × hour rate × ${ph}`, example: `8h holiday → ${rm(8 * hourRate * ph)}` },
         ]),
         s("5. Absence", [
-          { item: "Absent working day", rule: "Each confirmed absent day deducts the day rate (÷26)", example: "1 day → −RM78.85" },
-          { item: "Grace before confirming", rule: "A blank day only becomes an absence after 2 working days (it may just not be keyed yet)", example: "Shown as 'Pending' until confirmed" },
+          { item: "Absent working day", rule: "Each confirmed absent day deducts the day rate", example: `1 day → −${rm(dayRate)}` },
+          { item: "Grace before confirming", rule: `A blank day only becomes an absence after ${cfg.absenceGraceWorkingDays} working days (it may just not be keyed yet)`, example: "Shown as 'Pending' until confirmed" },
           { item: "Backfilling hours", rule: "Keying the hours later removes the absence automatically", example: "No button needed; regenerate if the month was finalised" },
         ]),
         s("6. Joining / resigning mid-month", [
-          { item: "One rule for everyone", rule: "No separate part-month formula — every working day of the month not worked counts as an absent day at the day rate (÷26)", example: "Same −RM78.85 per day" },
-          { item: "Join mid-month", rule: "Full salary − the working days before the join date (they count as absences)", example: "Join 5 June → 2-4 June = 3 working days (1 June is a holiday) → 2,050 − 3 × 78.85 = RM1,813.46" },
-          { item: "Resign mid-month", rule: "Working days after the last day also count as absent days", example: "Resign 5 June → every later working day deducts RM78.85" },
+          { item: "One rule for everyone", rule: "No separate part-month formula — every working day of the month not worked counts as an absent day at the day rate", example: `Same −${rm(dayRate)} per day` },
+          { item: "Join mid-month", rule: "Full salary − the working days before the join date (they count as absences)", example: `3 working days before joining → 2,050 − 3 × ${dayRate.toFixed(2)} = ${rm(S - 3 * dayRate)}` },
+          { item: "Resign mid-month", rule: "Working days after the last day also count as absent days", example: `Each later working day deducts ${rm(dayRate)}` },
         ]),
         s("7. Allowance, statutory & net pay", [
           { item: "Efficiency allowance", rule: "Flat bonus when the month's cumulative efficiency reaches the worker's target, else RM0 (no proration)", example: "RM150 at 100%" },
-          { item: "Statutory (per-worker toggle)", rule: "EPF 11% employee / 13% employer on basic; SOCSO ~RM7.45/26.15; EIS ~RM3.90/3.90", example: "Deducted only when enabled" },
+          { item: "Statutory (per-worker toggle)", rule: `EPF ${cfg.epfEmployeePct}% employee / ${cfg.epfEmployerPct}% employer on basic · SOCSO RM${(cfg.socsoEmployeeSen / 100).toFixed(2)}/${(cfg.socsoEmployerSen / 100).toFixed(2)} · EIS RM${(cfg.eisEmployeeSen / 100).toFixed(2)}/${(cfg.eisEmployerSen / 100).toFixed(2)}`, example: "Deducted only when enabled" },
           { item: "Net pay", rule: "Basic − absence − late/short + OT + allowance − employee statutory", example: "What the worker receives" },
         ]),
       ],
     });
-  }, []);
+  }, [payRulesToday]);
 
   return (
     <div className="space-y-4">
@@ -7114,7 +7153,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             </button>
             {showPayRules && (
             <div className="px-3 pb-3">
-            <div className="grid grid-cols-1 gap-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-x-6 gap-y-4 text-xs leading-relaxed text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Daily & hourly rate</p>
                 <p>

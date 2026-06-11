@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "ar" | "ap" | "pl" | "bs";
+type TabKey = "overview" | "coa" | "journals" | "gl" | "ar" | "ap" | "pl" | "bs";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -76,6 +76,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" /> },
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" /> },
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" /> },
+  { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" /> },
   { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
   { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
 ];
@@ -148,6 +149,7 @@ export default function AccountingPage() {
           {tab === "journals" && (
             <JournalsTab journals={journals} accounts={accounts} onRefresh={fetchAll} />
           )}
+          {tab === "gl" && <GeneralLedgerTab />}
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
         </>
@@ -2166,6 +2168,250 @@ function PLReportTab() {
         )}
       </div>
 
+    </div>
+  );
+}
+
+// =============== TAB: GENERAL LEDGER (Phase 1, 2026-06) ===============
+//
+// Trial balance (all accounts, natural debit/credit columns, balanced
+// flag) + per-account GL inquiry: click a row to see that account's
+// leg-by-leg flow with opening/running balances and a link back to the
+// source document of every auto-posted leg.
+
+type TbRow = {
+  accountCode: string;
+  accountName: string;
+  type: string;
+  debitSen: number;
+  creditSen: number;
+};
+type GlRow = {
+  id: string;
+  postedAt: string;
+  description: string;
+  sourceType: string;
+  sourceId: string;
+  debitSen: number;
+  creditSen: number;
+  runningSen: number;
+};
+
+// Best-effort deep link for a ledger leg's source document.
+function sourceHref(sourceType: string, sourceId: string): string | null {
+  switch (sourceType) {
+    case "invoice":
+    case "invoice_void":
+      return `/invoices/${sourceId}`;
+    case "payment":
+    case "payment_bounce":
+      return "/invoices/payments";
+    case "credit_note":
+      return "/invoices/credit-notes";
+    case "debit_note":
+      return "/invoices/debit-notes";
+    case "purchase_invoice":
+    case "supplier_payment":
+      return "/procurement/pi";
+    default:
+      return null; // manual / manual_reversal / year_close — no doc page
+  }
+}
+
+function GeneralLedgerTab() {
+  const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
+  const [tb, setTb] = useState<{
+    rows: TbRow[];
+    totalDr: number;
+    totalCr: number;
+    balanced: boolean;
+  } | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [glFrom, setGlFrom] = useState("");
+  const [glTo, setGlTo] = useState("");
+  const [gl, setGl] = useState<{
+    account: { code: string; name: string; type: string };
+    openingSen: number;
+    closingSen: number;
+    rows: GlRow[];
+  } | null>(null);
+  // Loading is derived (no setState in effect bodies — react-hooks rule):
+  // TB loading = no data yet; GL loading = account selected, data not in.
+  const loadingTb = tb === null;
+  const loadingGl = selected !== null && gl === null;
+
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/trial-balance?asOf=${asOf}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { rows: TbRow[]; totalDr: number; totalCr: number; balanced: boolean } }>)
+      .then((j) => { if (!stale && j?.success && j.data) setTb(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [asOf]);
+
+  useEffect(() => {
+    if (!selected) return;
+    let stale = false;
+    const params = new URLSearchParams({ account: selected });
+    if (glFrom) params.set("from", glFrom);
+    if (glTo) params.set("to", glTo);
+    fetch(`/api/accounting/gl?${params.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { account: { code: string; name: string; type: string }; openingSen: number; closingSen: number; rows: GlRow[] } }>)
+      .then((j) => { if (!stale && j?.success && j.data) setGl(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [selected, glFrom, glTo]);
+
+  const pickAccount = (code: string) => {
+    setSelected(code);
+    setGl(null);
+  };
+  const changeRange = (which: "from" | "to", v: string) => {
+    if (which === "from") setGlFrom(v);
+    else setGlTo(v);
+    setGl(null);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Trial Balance</h2>
+        <div className="flex items-end gap-3">
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">As of</label>
+            <input
+              type="date"
+              value={asOf}
+              onChange={(e) => setAsOf(e.target.value)}
+              className="rounded-md border border-[#E2DDD8] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+            />
+          </div>
+          {tb && (
+            <span
+              className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-medium border ${tb.balanced ? "bg-[#EAF3DE] text-[#27500A] border-[#C0DD97]" : "bg-[#FCEBEB] text-[#791F1F] border-[#F7C1C1]"}`}
+            >
+              {tb.balanced ? "Balanced ✓" : "OUT OF BALANCE"}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {loadingTb || !tb ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading trial balance…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-4 py-2 text-left">Account</th>
+                  <th className="px-4 py-2 text-left">Type</th>
+                  <th className="px-4 py-2 text-right">Debit</th>
+                  <th className="px-4 py-2 text-right">Credit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tb.rows.map((r) => (
+                  <tr
+                    key={r.accountCode}
+                    onClick={() => pickAccount(r.accountCode)}
+                    className={`border-b border-[#F0ECE9] cursor-pointer hover:bg-[#F0ECE9]/40 ${selected === r.accountCode ? "bg-[#F0ECE9]/60" : ""}`}
+                  >
+                    <td className="px-4 py-1.5">
+                      <span className="font-mono text-xs text-[#6B7280] mr-2">{r.accountCode}</span>
+                      <span className="text-[#1F1D1B]">{r.accountName}</span>
+                    </td>
+                    <td className="px-4 py-1.5 text-xs text-[#6B7280]">{r.type}</td>
+                    <td className="px-4 py-1.5 text-right font-medium">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                    <td className="px-4 py-1.5 text-right font-medium">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                  </tr>
+                ))}
+                <tr className="border-t-2 border-[#1F1D1B] font-semibold">
+                  <td className="px-4 py-2" colSpan={2}>TOTAL</td>
+                  <td className="px-4 py-2 text-right">{formatCurrency(tb.totalDr)}</td>
+                  <td className="px-4 py-2 text-right">{formatCurrency(tb.totalCr)}</td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+
+      {selected && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h3 className="font-semibold text-[#1F1D1B]">
+                  GL Inquiry — <span className="font-mono text-sm">{selected}</span>{" "}
+                  {gl?.account.name ?? ""}
+                </h3>
+                {gl && (
+                  <p className="text-xs text-[#6B7280] mt-0.5">
+                    Opening {formatCurrency(gl.openingSen)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
+                  </p>
+                )}
+              </div>
+              <div className="flex items-end gap-2">
+                <div>
+                  <label className="text-[11px] text-[#6B7280] block">From</label>
+                  <input type="date" value={glFrom} onChange={(e) => changeRange("from", e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1 text-xs" />
+                </div>
+                <div>
+                  <label className="text-[11px] text-[#6B7280] block">To</label>
+                  <input type="date" value={glTo} onChange={(e) => changeRange("to", e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1 text-xs" />
+                </div>
+                <Button variant="outline" size="sm" onClick={() => { setSelected(null); setGl(null); }}>Close</Button>
+              </div>
+            </div>
+            {loadingGl || !gl ? (
+              <div className="py-8 text-center text-[#6B7280] text-sm">Loading account flow…</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                      <th className="px-3 py-2 text-left">Date</th>
+                      <th className="px-3 py-2 text-left">Description</th>
+                      <th className="px-3 py-2 text-left">Source</th>
+                      <th className="px-3 py-2 text-right">Debit</th>
+                      <th className="px-3 py-2 text-right">Credit</th>
+                      <th className="px-3 py-2 text-right">Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                      <td className="px-3 py-1.5" colSpan={5}>Opening balance</td>
+                      <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(gl.openingSen)}</td>
+                    </tr>
+                    {gl.rows.map((r) => {
+                      const href = sourceHref(r.sourceType, r.sourceId);
+                      return (
+                        <tr key={r.id} className="border-b border-[#F0ECE9]">
+                          <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
+                          <td className="px-3 py-1.5 text-[#1F1D1B]">{r.description}</td>
+                          <td className="px-3 py-1.5 text-xs">
+                            {href ? (
+                              <a href={href} className="text-[#6B5C32] underline decoration-dotted hover:text-[#1F1D1B]" title={r.sourceId}>
+                                {r.sourceType}
+                              </a>
+                            ) : (
+                              <span className="text-[#6B7280]" title={r.sourceId}>{r.sourceType}</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5 text-right">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                          <td className="px-3 py-1.5 text-right">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                          <td className={`px-3 py-1.5 text-right font-medium ${r.runningSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>{formatCurrency(r.runningSen)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

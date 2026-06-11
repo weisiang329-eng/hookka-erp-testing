@@ -957,6 +957,160 @@ app.delete("/journals/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// TRIAL BALANCE + GL INQUIRY (Phase 1, 2026-06)
+//
+// The immutable ledger previously had NO read surface beyond the P&L/BS
+// aggregate — auto-posted legs were unbrowsable and there was no way to
+// eyeball "do all accounts balance". Two read-only endpoints:
+//   GET /trial-balance?asOf=YYYY-MM-DD  — per-account net balances in
+//     natural debit/credit columns, with a balanced flag.
+//   GET /gl?account=&from=&to=          — one account's leg-by-leg flow
+//     with opening balance and running balance, each leg carrying its
+//     source document reference for drill-down.
+// ---------------------------------------------------------------------------
+app.get("/trial-balance", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
+  const [legRes, coaRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+    ).all<{
+      accountCode: string;
+      debitSen: number;
+      creditSen: number;
+      postedAt: string;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT code, name, type FROM chart_of_accounts",
+    ).all<{ code: string; name: string; type: CoaRow["type"] }>(),
+  ]);
+  const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+  const dr = new Map<string, number>();
+  const cr = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    if (String(l.postedAt ?? "").slice(0, 10) > asOf) continue;
+    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+  }
+  const rows: {
+    accountCode: string;
+    accountName: string;
+    type: string;
+    debitSen: number;
+    creditSen: number;
+  }[] = [];
+  let totalDr = 0;
+  let totalCr = 0;
+  for (const code of [...new Set([...dr.keys(), ...cr.keys()])].sort()) {
+    const net = (dr.get(code) ?? 0) - (cr.get(code) ?? 0);
+    if (net === 0) continue;
+    const acct = coa.get(code);
+    const row = {
+      accountCode: code,
+      accountName: acct?.name ?? "(unknown account)",
+      type: acct?.type ?? "?",
+      debitSen: net > 0 ? net : 0,
+      creditSen: net < 0 ? -net : 0,
+    };
+    totalDr += row.debitSen;
+    totalCr += row.creditSen;
+    rows.push(row);
+  }
+  return c.json({
+    success: true,
+    data: { asOf, rows, totalDr, totalCr, balanced: totalDr === totalCr },
+  });
+});
+
+app.get("/gl", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const account = c.req.query("account");
+  if (!account) {
+    return c.json({ success: false, error: "account is required" }, 400);
+  }
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const acct = await c.var.DB.prepare(
+    "SELECT code, name, type FROM chart_of_accounts WHERE code = ?",
+  )
+    .bind(account)
+    .first<{ code: string; name: string; type: CoaRow["type"] }>();
+  if (!acct) {
+    return c.json({ success: false, error: "Account not found" }, 404);
+  }
+  const legRes = await c.var.DB.prepare(
+    `SELECT id, sourceType, sourceId, debitSen, creditSen, description,
+            postedAt
+       FROM ledger_journal_entries
+      WHERE accountCode = ?
+      ORDER BY postedAt ASC, id ASC`,
+  )
+    .bind(account)
+    .all<{
+      id: string;
+      sourceType: string;
+      sourceId: string;
+      debitSen: number;
+      creditSen: number;
+      description: string;
+      postedAt: string;
+    }>();
+  // Natural direction: debit-normal for ASSET/EXPENSE/COST, credit-normal
+  // for LIABILITY/EQUITY/REVENUE — running balance grows in the account's
+  // normal direction.
+  const debitNormal =
+    acct.type === "ASSET" || acct.type === "EXPENSE" || acct.type === "COST";
+  let openingSen = 0;
+  let running = 0;
+  const rows: {
+    id: string;
+    postedAt: string;
+    description: string;
+    sourceType: string;
+    sourceId: string;
+    debitSen: number;
+    creditSen: number;
+    runningSen: number;
+  }[] = [];
+  for (const l of legRes.results ?? []) {
+    const d10 = String(l.postedAt ?? "").slice(0, 10);
+    const delta = debitNormal
+      ? (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0)
+      : (Number(l.creditSen) || 0) - (Number(l.debitSen) || 0);
+    if (d10 < from) {
+      openingSen += delta;
+      continue;
+    }
+    if (d10 > to) continue;
+    running = (rows.length === 0 ? openingSen : running) + delta;
+    rows.push({
+      id: l.id,
+      postedAt: l.postedAt,
+      description: l.description ?? "",
+      sourceType: l.sourceType,
+      sourceId: l.sourceId,
+      debitSen: Number(l.debitSen) || 0,
+      creditSen: Number(l.creditSen) || 0,
+      runningSen: running,
+    });
+  }
+  return c.json({
+    success: true,
+    data: {
+      account: { code: acct.code, name: acct.name, type: acct.type },
+      debitNormal,
+      from: from || null,
+      to: to === "9999-12-31" ? null : to,
+      openingSen,
+      closingSen: rows.length ? rows[rows.length - 1].runningSen : openingSen,
+      rows,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // YEAR-END PROFIT CLOSE (Phase 1, 2026-06)
 //
 // Closes the un-closed P&L result of an ENDED financial year into

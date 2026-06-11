@@ -2001,11 +2001,62 @@ app.get("/gl", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const account = c.req.query("account");
-  if (!account) {
-    return c.json({ success: false, error: "account is required" }, 400);
-  }
   const from = c.req.query("from") || "";
   const to = c.req.query("to") || "9999-12-31";
+  // No account → journal-listing mode (Phase 2 follow-up, owner request):
+  // EVERY ledger leg in the date window, newest first, capped at 1000
+  // rows so an all-time listing can't flatten the browser. Per-account
+  // running balances only make sense in single-account mode.
+  if (!account) {
+    const legRes = await c.var.DB.prepare(
+      `SELECT id, accountCode, sourceType, sourceId, debitSen, creditSen,
+              description, postedAt
+         FROM ledger_journal_entries
+        ORDER BY postedAt DESC, id DESC`,
+    ).all<{
+      id: string;
+      accountCode: string;
+      sourceType: string;
+      sourceId: string;
+      debitSen: number;
+      creditSen: number;
+      description: string;
+      postedAt: string;
+    }>();
+    const coaRes = await c.var.DB.prepare(
+      "SELECT code, name FROM chart_of_accounts",
+    ).all<{ code: string; name: string }>();
+    const names = new Map(
+      (coaRes.results ?? []).map((a) => [a.code, a.name] as const),
+    );
+    const all = (legRes.results ?? []).filter((l) => {
+      const d10 = String(l.postedAt ?? "").slice(0, 10);
+      return d10 >= from && d10 <= to;
+    });
+    const CAP = 1000;
+    const rows = all.slice(0, CAP).map((l) => ({
+      id: l.id,
+      postedAt: l.postedAt,
+      accountCode: l.accountCode,
+      accountName: names.get(l.accountCode) ?? "",
+      description: l.description ?? "",
+      sourceType: l.sourceType,
+      sourceId: l.sourceId,
+      debitSen: Number(l.debitSen) || 0,
+      creditSen: Number(l.creditSen) || 0,
+    }));
+    return c.json({
+      success: true,
+      data: {
+        mode: "all",
+        from: from || null,
+        to: to === "9999-12-31" ? null : to,
+        totalRows: all.length,
+        capped: all.length > CAP,
+        rows,
+      },
+    });
+  }
   const acct = await c.var.DB.prepare(
     "SELECT code, name, type FROM chart_of_accounts WHERE code = ?",
   )

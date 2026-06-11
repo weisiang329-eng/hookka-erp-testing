@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -70,12 +70,108 @@ function asMutationResponse(v: unknown): MutationResponse | null {
   return null;
 }
 
+// Phase 2 follow-up (owner) — searchable account combobox: type a keyword
+// (code or name fragment) to filter, click to pick. Headers (isPostable
+// false) are excluded — journals must hit leaf accounts.
+function AccountPicker({
+  accounts,
+  value,
+  onChange,
+  placeholder,
+  allowAll,
+}: {
+  accounts: ChartOfAccount[];
+  value: string;
+  onChange: (code: string) => void;
+  placeholder?: string;
+  allowAll?: boolean;
+}) {
+  const [text, setText] = useState("");
+  const [open, setOpen] = useState(false);
+  const selected = accounts.find((a) => a.code === value);
+  const shown = open
+    ? text
+    : selected
+      ? `${selected.code} - ${selected.name}`
+      : allowAll && value === ""
+        ? ""
+        : text;
+  const kw = text.trim().toLowerCase();
+  const matches = accounts
+    .filter((a) => a.isPostable !== false && a.isActive !== false)
+    .filter(
+      (a) =>
+        !kw ||
+        a.code.toLowerCase().includes(kw) ||
+        a.name.toLowerCase().includes(kw),
+    )
+    .slice(0, 50);
+  return (
+    <div className="relative">
+      <input
+        type="text"
+        value={shown}
+        placeholder={placeholder ?? "Type code or name…"}
+        onFocus={() => {
+          setOpen(true);
+          setText("");
+        }}
+        // eslint-disable-next-line no-restricted-syntax -- event-handler-only delay so the option's onMouseDown fires before the dropdown closes; not a React render timer
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setOpen(true);
+        }}
+        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+      />
+      {open && (
+        <div className="absolute z-20 mt-1 max-h-64 w-full min-w-72 overflow-y-auto rounded-md border border-[#E2DDD8] bg-white shadow-lg">
+          {allowAll && (
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onChange("");
+                setText("");
+                setOpen(false);
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm text-[#6B7280] hover:bg-[#F0ECE9] cursor-pointer"
+            >
+              (All accounts)
+            </button>
+          )}
+          {matches.map((a) => (
+            <button
+              key={a.code}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onChange(a.code);
+                setText("");
+                setOpen(false);
+              }}
+              className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[#F0ECE9] cursor-pointer"
+            >
+              <span className="font-mono text-xs text-[#6B7280] mr-2">{a.code}</span>
+              {a.name}
+            </button>
+          ))}
+          {matches.length === 0 && (
+            <div className="px-3 py-2 text-sm text-[#9CA3AF]">No match</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
   { key: "pl", label: "P&L Report", icon: <BarChart3 className="h-4 w-4" /> },
   { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" /> },
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" /> },
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" /> },
+  { key: "tb", label: "Trial Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" /> },
   { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
   { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
@@ -150,7 +246,8 @@ export default function AccountingPage() {
           {tab === "journals" && (
             <JournalsTab journals={journals} accounts={accounts} onRefresh={fetchAll} />
           )}
-          {tab === "gl" && <GeneralLedgerTab />}
+          {tab === "tb" && <TrialBalanceTab />}
+          {tab === "gl" && <GeneralLedgerTab accounts={accounts} />}
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
           {tab === "odc" && <OtherPartiesTab />}
@@ -621,14 +718,47 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
   });
   const [editCode, setEditCode] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({
-    "ASSET": true,
-    "LIABILITY": true,
-    "EQUITY": true,
-    "REVENUE": true,
-    "COST": true,
-    "EXPENSE": true,
-  });
+  // Phase 2 follow-up (owner) — nine balance-sheet/P&L sections instead of
+  // the six raw DB types, classified from type + account-number band per
+  // the owner's workbook:
+  //   ASSET   <300 → Non-Current Assets; ≥300 → Current Assets
+  //   LIABILITY 480-489 (hire purchase) → Non-Current; else Current
+  //   REVENUE ≥530 (forex gain, discount received) → Other Income
+  //   COST → Cost of Goods Sold · EXPENSE → Expenses · EQUITY → Equity
+  const SECTIONS = [
+    { key: "NCA", label: "Non-Current Assets", type: "ASSET" as const },
+    { key: "CA", label: "Current Assets", type: "ASSET" as const },
+    { key: "CL", label: "Current Liabilities", type: "LIABILITY" as const },
+    { key: "NCL", label: "Non-Current Liabilities", type: "LIABILITY" as const },
+    { key: "EQ", label: "Equity", type: "EQUITY" as const },
+    { key: "REV", label: "Revenue", type: "REVENUE" as const },
+    { key: "COGS", label: "Cost of Goods Sold", type: "COST" as const },
+    { key: "OI", label: "Other Income", type: "REVENUE" as const },
+    { key: "EXP", label: "Expenses", type: "EXPENSE" as const },
+  ];
+  const sectionOf = (a: ChartOfAccount): string => {
+    const p = parseInt(a.code.split("-")[0], 10) || 0;
+    switch (a.type) {
+      case "ASSET":
+        return p < 300 ? "NCA" : "CA";
+      case "LIABILITY":
+        return p >= 480 && p < 490 ? "NCL" : "CL";
+      case "EQUITY":
+        return "EQ";
+      case "REVENUE":
+        return p >= 530 ? "OI" : "REV";
+      case "COST":
+        return "COGS";
+      default:
+        return "EXP";
+    }
+  };
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(
+    Object.fromEntries(SECTIONS.map((s) => [s.key, true])),
+  );
+  // Per-parent expand/collapse (owner request) — default expanded;
+  // a missing key means expanded.
+  const [collapsedParents, setCollapsedParents] = useState<Record<string, boolean>>({});
 
   const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "COST", "EXPENSE"];
   const typeLabels: Record<string, string> = {
@@ -834,8 +964,9 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
         </Card>
       )}
 
-      {typeOrder.map((type) => {
-        const typeAccounts = accounts.filter((a) => a.type === type);
+      {SECTIONS.map((section) => {
+        const type = section.type;
+        const typeAccounts = accounts.filter((a) => sectionOf(a) === section.key);
         const children = (parentCode: string) => typeAccounts.filter((a) => a.parentCode === parentCode);
         // Phase 1 — real hierarchy (migration 0154): top-level accounts
         // with children (or flagged non-postable) render as section
@@ -849,7 +980,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
         const standalone = topLevel.filter(
           (a) => a.isPostable !== false && children(a.code).length === 0,
         );
-        const isExpanded = expanded[type];
+        const isExpanded = expanded[section.key];
 
         const renderRow = (child: ChartOfAccount, indent: boolean) => (
           <div
@@ -920,14 +1051,14 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
         );
 
         return (
-          <Card key={type}>
+          <Card key={section.key}>
             <div
               className="flex items-center justify-between p-4 cursor-pointer hover:bg-[#F0ECE9]/50"
-              onClick={() => setExpanded({ ...expanded, [type]: !isExpanded })}
+              onClick={() => setExpanded({ ...expanded, [section.key]: !isExpanded })}
             >
               <div className="flex items-center gap-2">
                 {isExpanded ? <ChevronDownIcon className="h-4 w-4 text-[#6B7280]" /> : <ChevronRight className="h-4 w-4 text-[#6B7280]" />}
-                <span className="font-semibold text-[#1F1D1B]">{typeLabels[type]}</span>
+                <span className="font-semibold text-[#1F1D1B]">{section.label}</span>
                 <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${typeColors[type]}`}>
                   {typeAccounts.length} accounts
                 </span>
@@ -939,16 +1070,32 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
             {isExpanded && (
               <CardContent className="pt-0 pb-2">
                 <div className="border-t border-[#E2DDD8]">
-                  {headers.map((parent) => (
+                  {headers.map((parent) => {
+                    const open = !collapsedParents[parent.code];
+                    return (
                     <div key={parent.code}>
-                      {/* Header / parent row — non-postable, no balance */}
-                      <div className="flex items-center justify-between py-2 px-2 text-sm font-medium text-[#4B5563] border-b border-[#F0ECE9]">
-                        <span>{parent.code} - {parent.name}</span>
-                        <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">header</span>
+                      {/* Header / parent row — click to expand/collapse children */}
+                      <div
+                        className="flex items-center justify-between py-2 px-2 text-sm font-medium text-[#4B5563] border-b border-[#F0ECE9] cursor-pointer hover:bg-[#F0ECE9]/40"
+                        onClick={() =>
+                          setCollapsedParents({
+                            ...collapsedParents,
+                            [parent.code]: open,
+                          })
+                        }
+                      >
+                        <span className="flex items-center gap-1">
+                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 text-[#9CA3AF]" /> : <ChevronRight className="h-3.5 w-3.5 text-[#9CA3AF]" />}
+                          {parent.code} - {parent.name}
+                        </span>
+                        <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">
+                          {children(parent.code).length} sub-accounts
+                        </span>
                       </div>
-                      {children(parent.code).map((child) => renderRow(child, true))}
+                      {open && children(parent.code).map((child) => renderRow(child, true))}
                     </div>
-                  ))}
+                    );
+                  })}
                   {/* Standalone postable top-level accounts */}
                   {standalone.map((a) => renderRow(a, false))}
                   {/* Orphans — parentCode points outside this type's headers */}
@@ -1126,7 +1273,10 @@ function JournalEntryForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const leafAccounts = accounts.filter((a) => a.parentCode);
+  // Postable accounts only (headers excluded). Phase 2 fix: the old
+  // `parentCode` filter also dropped legitimate TOP-LEVEL postable
+  // accounts (300-0000, 100-0000, …) from the journal picker entirely.
+  const leafAccounts = accounts.filter((a) => a.isPostable !== false);
 
   const totalDebit = lines.reduce((s, l) => s + l.debitSen, 0);
   const totalCredit = lines.reduce((s, l) => s + l.creditSen, 0);
@@ -1243,18 +1393,12 @@ function JournalEntryForm({
                 {lines.map((line, idx) => (
                   <tr key={line._uid} className="border-b border-[#F0ECE9]">
                     <td className="py-1.5 px-2">
-                      <select
+                      <AccountPicker
+                        accounts={leafAccounts}
                         value={line.accountCode}
-                        onChange={(e) => updateLine(idx, "accountCode", e.target.value)}
-                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
-                      >
-                        <option value="">Select account...</option>
-                        {leafAccounts.map((a) => (
-                          <option key={a.code} value={a.code}>
-                            {a.code} - {a.name}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(code) => updateLine(idx, "accountCode", code)}
+                        placeholder="Type code or name…"
+                      />
                     </td>
                     <td className="py-1.5 px-2">
                       <input
@@ -2874,7 +3018,9 @@ function sourceHref(sourceType: string, sourceId: string): string | null {
   }
 }
 
-function GeneralLedgerTab() {
+// Phase 2 follow-up (owner): Trial Balance is its OWN tab now — just the
+// statement, no inquiry attached.
+function TrialBalanceTab() {
   const [asOf, setAsOf] = useState(() => new Date().toISOString().slice(0, 10));
   const [tb, setTb] = useState<{
     rows: TbRow[];
@@ -2882,19 +3028,7 @@ function GeneralLedgerTab() {
     totalCr: number;
     balanced: boolean;
   } | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [glFrom, setGlFrom] = useState("");
-  const [glTo, setGlTo] = useState("");
-  const [gl, setGl] = useState<{
-    account: { code: string; name: string; type: string };
-    openingSen: number;
-    closingSen: number;
-    rows: GlRow[];
-  } | null>(null);
-  // Loading is derived (no setState in effect bodies — react-hooks rule):
-  // TB loading = no data yet; GL loading = account selected, data not in.
   const loadingTb = tb === null;
-  const loadingGl = selected !== null && gl === null;
 
   useEffect(() => {
     let stale = false;
@@ -2904,29 +3038,6 @@ function GeneralLedgerTab() {
       .catch(() => {});
     return () => { stale = true; };
   }, [asOf]);
-
-  useEffect(() => {
-    if (!selected) return;
-    let stale = false;
-    const params = new URLSearchParams({ account: selected });
-    if (glFrom) params.set("from", glFrom);
-    if (glTo) params.set("to", glTo);
-    fetch(`/api/accounting/gl?${params.toString()}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: { account: { code: string; name: string; type: string }; openingSen: number; closingSen: number; rows: GlRow[] } }>)
-      .then((j) => { if (!stale && j?.success && j.data) setGl(j.data); })
-      .catch(() => {});
-    return () => { stale = true; };
-  }, [selected, glFrom, glTo]);
-
-  const pickAccount = (code: string) => {
-    setSelected(code);
-    setGl(null);
-  };
-  const changeRange = (which: "from" | "to", v: string) => {
-    if (which === "from") setGlFrom(v);
-    else setGlTo(v);
-    setGl(null);
-  };
 
   return (
     <div className="space-y-4">
@@ -2970,8 +3081,7 @@ function GeneralLedgerTab() {
                 {tb.rows.map((r) => (
                   <tr
                     key={r.accountCode}
-                    onClick={() => pickAccount(r.accountCode)}
-                    className={`border-b border-[#F0ECE9] cursor-pointer hover:bg-[#F0ECE9]/40 ${selected === r.accountCode ? "bg-[#F0ECE9]/60" : ""}`}
+                    className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30"
                   >
                     <td className="px-4 py-1.5">
                       <span className="font-mono text-xs text-[#6B7280] mr-2">{r.accountCode}</span>
@@ -2993,81 +3103,195 @@ function GeneralLedgerTab() {
         </CardContent>
       </Card>
 
-      {selected && (
-        <Card>
-          <CardContent className="p-4 space-y-3">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <h3 className="font-semibold text-[#1F1D1B]">
-                  GL Inquiry — <span className="font-mono text-sm">{selected}</span>{" "}
-                  {gl?.account.name ?? ""}
-                </h3>
-                {gl && (
-                  <p className="text-xs text-[#6B7280] mt-0.5">
-                    Opening {formatCurrency(gl.openingSen)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
-                  </p>
-                )}
-              </div>
-              <div className="flex items-end gap-2">
-                <div>
-                  <label className="text-[11px] text-[#6B7280] block">From</label>
-                  <input type="date" value={glFrom} onChange={(e) => changeRange("from", e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1 text-xs" />
-                </div>
-                <div>
-                  <label className="text-[11px] text-[#6B7280] block">To</label>
-                  <input type="date" value={glTo} onChange={(e) => changeRange("to", e.target.value)} className="rounded-md border border-[#E2DDD8] px-2 py-1 text-xs" />
-                </div>
-                <Button variant="outline" size="sm" onClick={() => { setSelected(null); setGl(null); }}>Close</Button>
-              </div>
-            </div>
-            {loadingGl || !gl ? (
-              <div className="py-8 text-center text-[#6B7280] text-sm">Loading account flow…</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                      <th className="px-3 py-2 text-left">Date</th>
-                      <th className="px-3 py-2 text-left">Description</th>
-                      <th className="px-3 py-2 text-left">Source</th>
-                      <th className="px-3 py-2 text-right">Debit</th>
-                      <th className="px-3 py-2 text-right">Credit</th>
-                      <th className="px-3 py-2 text-right">Balance</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
-                      <td className="px-3 py-1.5" colSpan={5}>Opening balance</td>
-                      <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(gl.openingSen)}</td>
-                    </tr>
-                    {gl.rows.map((r) => {
-                      const href = sourceHref(r.sourceType, r.sourceId);
-                      return (
-                        <tr key={r.id} className="border-b border-[#F0ECE9]">
-                          <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
-                          <td className="px-3 py-1.5 text-[#1F1D1B]">{r.description}</td>
-                          <td className="px-3 py-1.5 text-xs">
-                            {href ? (
-                              <a href={href} className="text-[#6B5C32] underline decoration-dotted hover:text-[#1F1D1B]" title={r.sourceId}>
-                                {r.sourceType}
-                              </a>
-                            ) : (
-                              <span className="text-[#6B7280]" title={r.sourceId}>{r.sourceType}</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-1.5 text-right">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
-                          <td className="px-3 py-1.5 text-right">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
-                          <td className={`px-3 py-1.5 text-right font-medium ${r.runningSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>{formatCurrency(r.runningSen)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+    </div>
+  );
+}
+
+// =============== TAB: GENERAL LEDGER (Phase 2 follow-up, owner) ===============
+//
+// Default = the FULL ledger (every leg, newest first, capped at 1000).
+// Filters: date range + searchable account picker. Picking an account
+// switches to inquiry mode with opening / running / closing balances.
+
+type GlAllRow = {
+  id: string;
+  postedAt: string;
+  accountCode: string;
+  accountName: string;
+  description: string;
+  sourceType: string;
+  sourceId: string;
+  debitSen: number;
+  creditSen: number;
+};
+
+function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const [account, setAccount] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [all, setAll] = useState<{ rows: GlAllRow[]; totalRows: number; capped: boolean } | null>(null);
+  const [gl, setGl] = useState<{
+    account: { code: string; name: string; type: string };
+    openingSen: number;
+    closingSen: number;
+    rows: GlRow[];
+  } | null>(null);
+  const loading = account ? gl === null : all === null;
+
+  useEffect(() => {
+    let stale = false;
+    const params = new URLSearchParams();
+    if (account) params.set("account", account);
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    fetch(`/api/accounting/gl?${params.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+      .then((j) => {
+        if (stale || !j?.success || !j.data) return;
+        if (account) setGl(j.data as NonNullable<typeof gl>);
+        else setAll(j.data as NonNullable<typeof all>);
+      })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [account, from, to]);
+
+  const setFilter = (fn: () => void) => {
+    fn();
+    setAll(null);
+    setGl(null);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">General Ledger</h2>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="w-72">
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Account</label>
+            <AccountPicker
+              accounts={accounts}
+              value={account}
+              onChange={(code) => setFilter(() => setAccount(code))}
+              placeholder="All accounts — type to search…"
+              allowAll
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">From</label>
+            <input type="date" value={from} onChange={(e) => setFilter(() => setFrom(e.target.value))} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">To</label>
+            <input type="date" value={to} onChange={(e) => setFilter(() => setTo(e.target.value))} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+          </div>
+        </div>
+      </div>
+
+      {account && gl && (
+        <p className="text-sm text-[#6B7280]">
+          <span className="font-mono text-xs mr-1">{gl.account.code}</span>
+          <span className="font-medium text-[#1F1D1B]">{gl.account.name}</span>
+          {" · "}Opening {formatCurrency(gl.openingSen)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
+        </p>
       )}
+      {!account && all && (
+        <p className="text-sm text-[#6B7280]">
+          {all.totalRows} entries{all.capped ? ` — showing latest ${all.rows.length}, narrow the date range to see older ones` : ""}
+        </p>
+      )}
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {loading ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading ledger…</div>
+          ) : account && gl ? (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Description</th>
+                  <th className="px-3 py-2 text-left">Source</th>
+                  <th className="px-3 py-2 text-right">Debit</th>
+                  <th className="px-3 py-2 text-right">Credit</th>
+                  <th className="px-3 py-2 text-right">Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                  <td className="px-3 py-1.5" colSpan={5}>Opening balance</td>
+                  <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(gl.openingSen)}</td>
+                </tr>
+                {gl.rows.map((r) => {
+                  const href = sourceHref(r.sourceType, r.sourceId);
+                  return (
+                    <tr key={r.id} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
+                      <td className="px-3 py-1.5 text-[#1F1D1B]">{r.description}</td>
+                      <td className="px-3 py-1.5 text-xs">
+                        {href ? (
+                          <a href={href} className="text-[#6B5C32] underline decoration-dotted hover:text-[#1F1D1B]" title={r.sourceId}>
+                            {r.sourceType}
+                          </a>
+                        ) : (
+                          <span className="text-[#6B7280]" title={r.sourceId}>{r.sourceType}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-right">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                      <td className="px-3 py-1.5 text-right">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                      <td className={`px-3 py-1.5 text-right font-medium ${r.runningSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>{formatCurrency(r.runningSen)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : all ? (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Account</th>
+                  <th className="px-3 py-2 text-left">Description</th>
+                  <th className="px-3 py-2 text-left">Source</th>
+                  <th className="px-3 py-2 text-right">Debit</th>
+                  <th className="px-3 py-2 text-right">Credit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {all.rows.map((r) => {
+                  const href = sourceHref(r.sourceType, r.sourceId);
+                  return (
+                    <tr key={r.id} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
+                      <td className="px-3 py-1.5">
+                        <button
+                          onClick={() => setFilter(() => setAccount(r.accountCode))}
+                          className="text-left cursor-pointer hover:underline"
+                          title="Filter to this account"
+                        >
+                          <span className="font-mono text-xs text-[#6B7280] mr-1">{r.accountCode}</span>
+                          <span className="text-[#1F1D1B]">{r.accountName}</span>
+                        </button>
+                      </td>
+                      <td className="px-3 py-1.5 text-[#4B5563]">{r.description}</td>
+                      <td className="px-3 py-1.5 text-xs">
+                        {href ? (
+                          <a href={href} className="text-[#6B5C32] underline decoration-dotted hover:text-[#1F1D1B]" title={r.sourceId}>
+                            {r.sourceType}
+                          </a>
+                        ) : (
+                          <span className="text-[#6B7280]" title={r.sourceId}>{r.sourceType}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-right">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                      <td className="px-3 py-1.5 text-right">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }

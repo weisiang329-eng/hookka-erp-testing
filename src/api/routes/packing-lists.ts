@@ -66,6 +66,7 @@ function rowToPackingList(
     states: string[];
     totalUnits: number;
     totalM3: number;
+    doStatusCounts: { pending: number; dispatched: number; delivered: number };
   },
 ) {
   return {
@@ -92,6 +93,8 @@ function rowToPackingList(
     // Distinct delivery states across the PL's DOs (customerState, hub
     // fallback). null when not computed.
     states: money?.states ?? null,
+    // Live per-status DO tally (see PlLiveFields). null when not computed.
+    doStatusCounts: money?.doStatusCounts ?? null,
   };
 }
 
@@ -151,6 +154,7 @@ type PlDoRow = {
   hubId: string | null;
   totalItems: number | null;
   totalM3: number | string | null;
+  status: string | null;
 };
 type RatePair = { ratePerTripSen: number; ratePerExtraDropSen: number };
 
@@ -174,6 +178,12 @@ type PlLiveFields = {
   // these live sums.
   totalUnits: number;
   totalM3: number;
+  // Live per-status DO tally so the PL row shows how far the truck run has
+  // progressed and the PL-level bulk buttons know what's actionable
+  // (Wei Siang 2026-06-11: "Packing List 那边跟 DO 那边是互通的").
+  // pending = DRAFT, dispatched = LOADED + IN_TRANSIT,
+  // delivered = DELIVERED + INVOICED. CANCELLED DOs count toward none.
+  doStatusCounts: { pending: number; dispatched: number; delivered: number };
 };
 
 async function computePackingListMoney(
@@ -192,6 +202,7 @@ async function computePackingListMoney(
       states: [],
       totalUnits: 0,
       totalM3: 0,
+      doStatusCounts: { pending: 0, dispatched: 0, delivered: 0 },
     });
 
   const allDoIds = [...new Set(lists.flatMap((l) => l.doIds))];
@@ -207,7 +218,7 @@ async function computePackingListMoney(
   const doRes = await db
     .prepare(
       `SELECT id, deliveryAddress, driverId, vehicleId, customerState, hubId,
-              totalItems, totalM3
+              totalItems, totalM3, status
          FROM delivery_orders WHERE orgId = ? AND id IN (${ph})`,
     )
     .bind(orgId, ...allDoIds)
@@ -325,6 +336,7 @@ async function computePackingListMoney(
     const states: string[] = [];
     let totalUnits = 0;
     let totalM3 = 0;
+    const doStatusCounts = { pending: 0, dispatched: 0, delivered: 0 };
 
     for (const did of l.doIds) {
       const d = doById.get(did);
@@ -333,6 +345,12 @@ async function computePackingListMoney(
       revenueSen += valueMap.get(did) ?? 0;
       totalUnits += Number(d.totalItems) || 0;
       totalM3 += Number(d.totalM3) || 0;
+      const doStatus = (d.status || "").toUpperCase();
+      if (doStatus === "DRAFT") doStatusCounts.pending += 1;
+      else if (doStatus === "LOADED" || doStatus === "IN_TRANSIT")
+        doStatusCounts.dispatched += 1;
+      else if (doStatus === "DELIVERED" || doStatus === "INVOICED")
+        doStatusCounts.delivered += 1;
       addrSet.add(normAddr(d.deliveryAddress));
       const st = (
         (d.customerState || "").trim() ||
@@ -379,6 +397,7 @@ async function computePackingListMoney(
       states,
       totalUnits,
       totalM3: Math.round(totalM3 * 100) / 100,
+      doStatusCounts,
     });
   }
   return out;
@@ -411,6 +430,7 @@ app.get("/", async (c) => {
           states: [],
           totalUnits: 0,
           totalM3: 0,
+          doStatusCounts: { pending: 0, dispatched: 0, delivered: 0 },
         },
       ),
     );

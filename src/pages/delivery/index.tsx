@@ -163,6 +163,14 @@ type PackingListRecord = {
   // Distinct delivery states across the PL's DOs (e.g. ["KL"] or
   // ["KL","PG"]); null when not computed.
   states: string[] | null;
+  // Live per-status DO tally (pending = DRAFT, dispatched = LOADED +
+  // IN_TRANSIT, delivered = DELIVERED + INVOICED; CANCELLED counts toward
+  // none). Drives the Delivery chip + the PL-level bulk status buttons.
+  doStatusCounts: {
+    pending: number;
+    dispatched: number;
+    delivered: number;
+  } | null;
 };
 
 // One row of the Packing-List-first grouping preview — mirrors the `groups`
@@ -2322,6 +2330,58 @@ export default function DeliveryPage() {
     await runBulkDoTransition(doIds, "DELIVERED", "marked delivered");
   };
 
+  // PL-level one-click status (Wei Siang 2026-06-11: "我可以直接 mark as
+  // dispatched,里面的 DO 全部就已经是出货状态" — manage the whole truck run
+  // from the Packing List row instead of DO by DO). Reuses the EXACT same
+  // sequential per-DO transition path as the bulk buttons above
+  // (runBulkDoTransition), so every guard + cascade (fg_units, COGS,
+  // auto-invoice, SO status) runs once per DO exactly as if the operator
+  // clicked each DO — no second write path to drift.
+  const [plBulkBusy, setPlBulkBusy] = useState<string | null>(null);
+  const runPlBulkTransition = async (
+    pl: PackingListRecord,
+    nextStatus: "LOADED" | "DELIVERED",
+  ) => {
+    if (plBulkBusy) return;
+    const eligible = deliveryOrders.filter(
+      (d) =>
+        pl.doIds.includes(d.id) &&
+        (nextStatus === "LOADED"
+          ? d.status === "DRAFT"
+          : d.status === "LOADED" || d.status === "IN_TRANSIT"),
+    );
+    const verb = nextStatus === "LOADED" ? "Dispatched" : "Delivered";
+    if (eligible.length === 0) {
+      toast.error(
+        nextStatus === "LOADED"
+          ? `No pending DOs in ${pl.packingNo} — they are already dispatched or delivered.`
+          : `No dispatched DOs in ${pl.packingNo} — dispatch them first, or they are already delivered.`,
+      );
+      return;
+    }
+    if (
+      !confirm(
+        `Mark ${eligible.length} delivery order(s) in ${pl.packingNo} as ${verb}? (${eligible
+          .map((d) => d.doNo)
+          .slice(0, 5)
+          .join(", ")}${eligible.length > 5 ? "…" : ""})`,
+      )
+    )
+      return;
+    setPlBulkBusy(pl.id);
+    try {
+      await runBulkDoTransition(
+        eligible.map((d) => d.id),
+        nextStatus,
+        `marked ${verb.toLowerCase()}`,
+      );
+      invalidateCachePrefix("/api/packing-lists");
+      refreshPLs();
+    } finally {
+      setPlBulkBusy(null);
+    }
+  };
+
   const handleGenerateInvoice = (doRow: DeliveryOrderRow) => {
     setInvoiceDialog(doRow);
   };
@@ -4015,6 +4075,7 @@ export default function DeliveryPage() {
                       <th className="py-2 px-3 font-medium text-right">Total M³</th>
                       <th className="py-2 px-3 font-medium text-right">Revenue</th>
                       <th className="py-2 px-3 font-medium text-right">Cost</th>
+                      <th className="py-2 px-3 font-medium text-center">Delivery</th>
                       <th className="py-2 px-3 font-medium">Created</th>
                       <th className="py-2 px-3 font-medium">Remarks</th>
                       <th className="py-2 px-3 font-medium text-right">Actions</th>
@@ -4052,6 +4113,36 @@ export default function DeliveryPage() {
                         <td className="py-2.5 px-3 text-right tabular-nums">
                           {pl.costSen == null ? "—" : formatRM(pl.costSen)}
                         </td>
+                        <td className="py-2.5 px-3 text-center">
+                          {(() => {
+                            // Live rollup of the member DOs' statuses — the
+                            // PL mirrors the DOs, so a status change on
+                            // either side shows here on the next load.
+                            const cnt = pl.doStatusCounts;
+                            const total = cnt
+                              ? cnt.pending + cnt.dispatched + cnt.delivered
+                              : 0;
+                            if (!cnt || total === 0)
+                              return <span className="text-[#9CA3AF]">—</span>;
+                            if (cnt.delivered === total)
+                              return (
+                                <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-[#E3EBE6] text-[#2F5D3F]">
+                                  Delivered {total}/{total}
+                                </span>
+                              );
+                            if (cnt.dispatched + cnt.delivered > 0)
+                              return (
+                                <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-[#E0EDF0] text-[#3E6570]">
+                                  Dispatched {cnt.dispatched + cnt.delivered}/{total}
+                                </span>
+                              );
+                            return (
+                              <span className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-[#F5EDDC] text-[#9C6F1E]">
+                                Pending {total}
+                              </span>
+                            );
+                          })()}
+                        </td>
                         <td className="py-2.5 px-3 text-[#6B7280]">
                           {pl.createdAt ? formatDate(pl.createdAt) : "-"}
                         </td>
@@ -4060,6 +4151,26 @@ export default function DeliveryPage() {
                         </td>
                         <td className="py-2.5 px-3">
                           <div className="flex items-center justify-end gap-2">
+                            {(pl.doStatusCounts?.pending ?? 0) > 0 && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={plBulkBusy !== null}
+                                onClick={() => void runPlBulkTransition(pl, "LOADED")}
+                              >
+                                <Send className="h-3.5 w-3.5" /> Dispatch
+                              </Button>
+                            )}
+                            {(pl.doStatusCounts?.dispatched ?? 0) > 0 && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={plBulkBusy !== null}
+                                onClick={() => void runPlBulkTransition(pl, "DELIVERED")}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" /> Delivered
+                              </Button>
+                            )}
                             <Button
                               variant="outline"
                               size="sm"

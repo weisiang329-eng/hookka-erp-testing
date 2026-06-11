@@ -2164,8 +2164,20 @@ function CopyFromSourceModal({
   const [sourceLines, setSourceLines] = useState<SourceLineRow[]>([]);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [qtyById, setQtyById] = useState<Map<string, number>>(new Map());
+  // Ambiguous-lookup chooser: a customer PO/SO number can span several of
+  // our SOs (split orders share the customer's paperwork), so a lookup by
+  // those may legitimately hit 2+ rows — the operator picks which one.
+  const [matchChoices, setMatchChoices] = useState<
+    Array<{ id: string; label: string; customerName: string; matched: string }>
+  >([]);
 
-  // Step 1 → Step 2: look up the typed order id, then fetch its lines.
+  // Step 1 → Step 2: look up the typed order number, then fetch its lines.
+  // The SO lookup accepts THREE document numbers (Wei Siang 2026-06-11:
+  // customers report aftersales issues quoting THEIR paperwork, not ours):
+  //   1. our company SO id  (companySOId, SO-YYMM-NNN)
+  //   2. the customer's PO number (customerPOId)
+  //   3. the customer's own SO number (customerSO / customerSOId)
+  // CO lookups stay company-CO-id only.
   async function handleResolveSource() {
     if (!sourceLookup.trim()) {
       setError("Enter a source order number");
@@ -2173,9 +2185,10 @@ function CopyFromSourceModal({
     }
     setBusy(true);
     setError("");
+    setMatchChoices([]);
     try {
-      // Resolve the typed company-order-id to the underlying row id. The
-      // copy endpoint takes a row id; the operator types the human id.
+      // Resolve the typed number to the underlying row id. The copy
+      // endpoint takes a row id; the operator types a human document no.
       const listUrl =
         sourceType === "SO"
           ? `/api/sales-orders?isServiceOrder=all`
@@ -2183,26 +2196,71 @@ function CopyFromSourceModal({
       const listRes = await fetch(listUrl);
       const listJson = (await listRes.json()) as {
         success?: boolean;
-        data?: Array<{ id: string; companySOId?: string; companyCOId?: string }>;
+        data?: Array<{
+          id: string;
+          companySOId?: string;
+          companyCOId?: string;
+          customerPOId?: string;
+          customerSO?: string;
+          customerSOId?: string;
+          customerName?: string;
+        }>;
       };
       const candidates = listJson.data ?? [];
-      const target = String(sourceLookup).trim().toUpperCase();
-      const match = candidates.find(
-        (r) =>
-          (sourceType === "SO" ? r.companySOId : r.companyCOId)
-            ?.toUpperCase() === target,
-      );
-      if (!match) {
-        setError(`No ${sourceType} found with id ${target}`);
+      const norm = (s?: string | null) => (s ?? "").trim().toUpperCase();
+      const target = norm(sourceLookup);
+      const matchedField = (r: (typeof candidates)[number]): string | null => {
+        if (sourceType === "CO")
+          return norm(r.companyCOId) === target ? "our CO" : null;
+        if (norm(r.companySOId) === target) return "our SO";
+        if (norm(r.customerPOId) === target) return "customer PO";
+        if (norm(r.customerSO) === target || norm(r.customerSOId) === target)
+          return "customer SO";
+        return null;
+      };
+      const matches = candidates
+        .map((r) => ({ row: r, matched: matchedField(r) }))
+        .filter((m): m is { row: (typeof candidates)[number]; matched: string } => m.matched !== null);
+      if (matches.length === 0) {
+        setError(
+          sourceType === "SO"
+            ? `No order found matching ${target} — tried our SO, customer PO, and customer SO numbers.`
+            : `No CO found with id ${target}`,
+        );
         setBusy(false);
         return;
       }
+      if (matches.length > 1) {
+        // Several of our SOs carry that customer document — let the
+        // operator pick the right one instead of guessing.
+        setMatchChoices(
+          matches.map((m) => ({
+            id: m.row.id,
+            label: m.row.companySOId || m.row.id,
+            customerName: m.row.customerName || "",
+            matched: m.matched,
+          })),
+        );
+        setBusy(false);
+        return;
+      }
+      await loadSourceLines(matches[0].row.id);
+    } catch (e) {
+      setError(humanizeError(e, "Network problem — please try again."));
+      setBusy(false);
+    }
+  }
 
+  // Shared by the single-match path and the ambiguous-match chooser.
+  async function loadSourceLines(matchId: string) {
+    setBusy(true);
+    setError("");
+    try {
       // Fetch the source order detail to pull its line items for the picker.
       const detailUrl =
         sourceType === "SO"
-          ? `/api/sales-orders/${match.id}`
-          : `/api/consignment-orders/${match.id}`;
+          ? `/api/sales-orders/${matchId}`
+          : `/api/consignment-orders/${matchId}`;
       const detailRes = await fetch(detailUrl);
       const detailJson = (await detailRes.json()) as {
         success?: boolean;
@@ -2236,7 +2294,7 @@ function CopyFromSourceModal({
       }
       const rawItems = detailJson.data.items ?? [];
       if (rawItems.length === 0) {
-        setError(`${target} has no line items to copy`);
+        setError("That order has no line items to copy");
         setBusy(false);
         return;
       }
@@ -2284,12 +2342,13 @@ function CopyFromSourceModal({
         specialOrder: it.specialOrder ?? "",
         customSpecials: normalizeCustomSpecials(it.customSpecials ?? null),
       }));
-      setResolvedSourceId(match.id);
+      setResolvedSourceId(matchId);
       setResolvedSourceNo(
         (sourceType === "SO"
           ? detailJson.data.companySOId
-          : detailJson.data.companyCOId) ?? target,
+          : detailJson.data.companyCOId) ?? sourceLookup.trim().toUpperCase(),
       );
+      setMatchChoices([]);
       setSourceLines(lines);
       // Default all checked — operator unchecks what they don't want.
       setCheckedIds(new Set(lines.map((l) => l.id)));
@@ -2397,16 +2456,23 @@ function CopyFromSourceModal({
         {step === 1 ? (
           <>
             <p className="text-xs text-[#6B7280]">
-              Enter the source order number (e.g. <span className="font-mono">SO-2605-014</span>{" "}
-              or <span className="font-mono">CO-2605-003</span>). The next
-              step lets you pick which lines to copy. All prices reset to 0 —
-              edit each line&apos;s price before saving.
+              For Sales Orders you can enter <span className="font-medium">our SO</span> (e.g.{" "}
+              <span className="font-mono">SO-2605-014</span>), the{" "}
+              <span className="font-medium">customer&apos;s PO</span> or the{" "}
+              <span className="font-medium">customer&apos;s SO</span> number — whichever
+              document the customer quoted. Consignment lookups use our CO number
+              (e.g. <span className="font-mono">CO-2605-003</span>). The next step lets
+              you pick which lines to copy. All prices reset to 0 — edit each
+              line&apos;s price before saving.
             </p>
 
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => setSourceType("SO")}
+                onClick={() => {
+                  setSourceType("SO");
+                  setMatchChoices([]);
+                }}
                 className={`flex-1 py-1.5 text-sm rounded border ${
                   sourceType === "SO"
                     ? "bg-[#6B5C32] text-white border-[#6B5C32]"
@@ -2417,7 +2483,10 @@ function CopyFromSourceModal({
               </button>
               <button
                 type="button"
-                onClick={() => setSourceType("CO")}
+                onClick={() => {
+                  setSourceType("CO");
+                  setMatchChoices([]);
+                }}
                 className={`flex-1 py-1.5 text-sm rounded border ${
                   sourceType === "CO"
                     ? "bg-[#6B5C32] text-white border-[#6B5C32]"
@@ -2431,14 +2500,49 @@ function CopyFromSourceModal({
             <Input
               autoFocus
               value={sourceLookup}
-              onChange={(e) => setSourceLookup(e.target.value)}
+              onChange={(e) => {
+                setSourceLookup(e.target.value);
+                setMatchChoices([]);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !busy) handleResolveSource();
               }}
               placeholder={
-                sourceType === "SO" ? "SO-YYMM-NNN" : "CO-YYMM-NNN"
+                sourceType === "SO"
+                  ? "SO-YYMM-NNN / customer PO / customer SO"
+                  : "CO-YYMM-NNN"
               }
             />
+
+            {matchChoices.length > 0 && (
+              <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                <p className="px-3 py-1.5 text-[11px] text-[#6B7280] bg-[#F9F7F5] border-b border-[#E2DDD8]">
+                  {matchChoices.length} of our orders carry that customer
+                  document — pick the right one:
+                </p>
+                <div className="max-h-44 overflow-y-auto">
+                  {matchChoices.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void loadSourceLines(m.id)}
+                      className="w-full flex items-center justify-between px-3 py-2 text-left text-sm border-b border-[#F0ECE9] last:border-b-0 hover:bg-[#F4EFE3]"
+                    >
+                      <span>
+                        <span className="font-medium text-[#1F1D1B]">{m.label}</span>
+                        {m.customerName && (
+                          <span className="text-[#6B7280]"> · {m.customerName}</span>
+                        )}
+                      </span>
+                      <span className="text-[11px] text-[#9CA3AF]">
+                        matched {m.matched}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {error && (
               <p className="text-xs text-[#7A2E24]">{error}</p>

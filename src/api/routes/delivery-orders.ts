@@ -50,6 +50,9 @@ import {
   fmtEmailDate,
 } from "../lib/customer-notify";
 import { buildSimpleTablePdf } from "../lib/assistant-exports";
+// Company office number — the driver-contact fallback on dispatch notices
+// (owner rule: no driver phone on file → give the company's number).
+import { COMPANY } from "../../lib/constants";
 
 const app = new Hono<Env>();
 
@@ -4633,17 +4636,32 @@ app.post("/:id/notify-customer", async (c) => {
       | Array<{ filename: string; contentBase64: string }>
       | undefined;
 
+    // Honesty guard: the outbox drops attachments over its 5 MB decoded cap
+    // AFTER this template is rendered — so decide "attached or not" with the
+    // SAME size rule up front, or the email claims an attachment it doesn't
+    // carry (first real send, DO-2606-027: 34-item PDF blew the cap and the
+    // customer got "please find attached" with nothing attached).
+    const PDF_ATTACH_CAP_BYTES = 5 * 1024 * 1024;
+    const pdfTooBig =
+      !!pdfBase64 && Math.floor(pdfBase64.length * 0.75) > PDF_ATTACH_CAP_BYTES;
+    if (pdfTooBig) {
+      console.warn(
+        `[delivery-orders] ${doRow.doNo}: ${kind} PDF exceeds the 5 MB attachment cap — sending the notice without it`,
+      );
+    }
+    const attachablePdf = pdfTooBig ? null : pdfBase64;
+
     if (kind === "DISPATCHED") {
       const deliverTo =
         [hubShortName, hubAddress].filter(Boolean).join(", ") ||
         doRow.deliveryAddress ||
         "";
-      if (pdfBase64) {
+      if (attachablePdf) {
         attachments = [
           {
             filename:
               String(body.pdfFilename ?? "").trim() || `${doRow.doNo}.pdf`,
-            contentBase64: pdfBase64,
+            contentBase64: attachablePdf,
           },
         ];
       }
@@ -4655,6 +4673,13 @@ app.post("/:id/notify-customer", async (c) => {
         deliverTo,
         itemsBreakdown,
         hasAttachment: !!attachments,
+        // Driver block (owner 2026-06-11): name + lorry plate from the DO's
+        // 3PL assignment; contact = driver's phone, company office number
+        // when none is on file.
+        driverName: doRow.driverName ?? null,
+        driverContact:
+          (doRow.driverPhone ?? "").trim() || COMPANY.HOOKKA.phone,
+        lorryPlate: doRow.vehicleNo ?? null,
       });
     } else {
       // Invoice notice — resolve the DO's LIVE invoice the same way

@@ -188,7 +188,7 @@ function buildInvoiceDoc(
   invoice: any,
   extras?: InvoicePrintExtras,
 ): jsPDF {
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const m = 14;

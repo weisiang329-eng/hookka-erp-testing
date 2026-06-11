@@ -642,7 +642,7 @@ export function generateDOPdf(
   // "download" = save the file (default); "view" = open in the browser.
   mode: "download" | "view" = "download",
 ) {
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   renderDoInto(doc, order, extras);
   stampDoFooters(doc);
 
@@ -675,7 +675,7 @@ export function generateDoPdfBase64(
   order: DeliveryOrder,
   extras?: DOPrintExtras,
 ): string {
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   renderDoInto(doc, order, extras);
   stampDoFooters(doc);
   // datauristring = "data:application/pdf;filename=…;base64,<payload>".
@@ -1089,7 +1089,7 @@ export function generateConsolidatedDoPdf(
   includeDoPages = true,
 ) {
   if (!orders || orders.length === 0) return;
-  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
   renderPackingSummary(doc, orders, packingNo, extrasById);
   if (includeDoPages) {
     orders.forEach((o, i) => {

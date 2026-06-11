@@ -71,6 +71,26 @@ export function fmtEmailDate(iso: string | null | undefined): string {
   });
 }
 
+/**
+ * ISO timestamp → "11 Jun 2026, 4:03 PM" in MALAYSIA time. The Worker runs
+ * UTC, so without the explicit timeZone the dispatch time would read 8 hours
+ * early (owner 2026-06-11: the customer must know what time the truck left).
+ */
+export function fmtEmailDateTime(iso: string | null | undefined): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "-";
+  return d.toLocaleString("en-MY", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Kuala_Lumpur",
+  });
+}
+
 /** Sen → "RM 12,345.67". */
 export function fmtEmailRM(sen: number): string {
   const v = (Number(sen) || 0) / 100;
@@ -165,6 +185,12 @@ export interface DispatchNoticeArgs {
   itemsBreakdown?: string;
   /** Whether the DO PDF is actually attached (drives the "attached" line). */
   hasAttachment: boolean;
+  /** 3PL driver person's name (delivery_orders.driverName). Row omitted when blank. */
+  driverName?: string | null;
+  /** Driver's phone, or the company office number as fallback (owner rule). */
+  driverContact?: string | null;
+  /** Lorry plate number (delivery_orders.vehicleNo). Row omitted when blank. */
+  lorryPlate?: string | null;
 }
 
 export function dispatchNoticeTemplate(args: DispatchNoticeArgs): EmailTemplate {
@@ -173,13 +199,21 @@ export function dispatchNoticeTemplate(args: DispatchNoticeArgs): EmailTemplate 
     .map((s) => String(s).trim())
     .filter(Boolean)
     .join(", ");
-  const dispatchDate = fmtEmailDate(args.dispatchedAt);
+  // Date AND time (Malaysia) — the customer must know what time the truck
+  // left, not just the day (owner 2026-06-11).
+  const dispatchDate = fmtEmailDateTime(args.dispatchedAt);
   const breakdown = (args.itemsBreakdown ?? "").trim();
+  const driverName = (args.driverName ?? "").trim();
+  const driverContact = (args.driverContact ?? "").trim();
+  const lorryPlate = (args.lorryPlate ?? "").trim();
 
   const rows: string[] = [tableRow("Delivery Order No.", escapeHtml(args.doNo))];
   if (poJoined) rows.push(tableRow("Your PO No.", escapeHtml(poJoined)));
   rows.push(tableRow("Dispatch Date", escapeHtml(dispatchDate)));
   rows.push(tableRow("Deliver To", escapeHtml(args.deliverTo || "-")));
+  if (driverName) rows.push(tableRow("Driver", escapeHtml(driverName)));
+  if (driverContact) rows.push(tableRow("Contact No.", escapeHtml(driverContact)));
+  if (lorryPlate) rows.push(tableRow("Lorry Plate", escapeHtml(lorryPlate)));
   if (breakdown) rows.push(tableRow("Items", escapeHtml(breakdown)));
 
   const attachedLine = args.hasAttachment
@@ -211,6 +245,9 @@ export function dispatchNoticeTemplate(args: DispatchNoticeArgs): EmailTemplate 
     ...(poJoined ? [`  Your PO No.        : ${poJoined}`] : []),
     `  Dispatch Date      : ${dispatchDate}`,
     `  Deliver To         : ${args.deliverTo || "-"}`,
+    ...(driverName ? [`  Driver             : ${driverName}`] : []),
+    ...(driverContact ? [`  Contact No.        : ${driverContact}`] : []),
+    ...(lorryPlate ? [`  Lorry Plate        : ${lorryPlate}`] : []),
     ...(breakdown ? [`  Items              : ${breakdown}`] : []),
     "",
     attachedLine,

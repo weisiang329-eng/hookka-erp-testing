@@ -124,6 +124,36 @@ test("dispatch template: subject + body carry doNo, breakdown, PO list, deliver-
   );
 });
 
+test("dispatch template: driver block + Malaysia-time dispatch timestamp (owner 2026-06-11)", () => {
+  const tpl = dispatchNoticeTemplate({
+    doNo: "DO-2606-032",
+    customerName: "Houzs Century Sdn Bhd",
+    dispatchedAt: "2026-06-11T03:30:00.000Z", // = 11:30 AM in Malaysia (UTC+8)
+    deliverTo: "Houzs KL",
+    hasAttachment: false,
+    driverName: "Ah Seng",
+    driverContact: "012-3456789",
+    lorryPlate: "BHM9130",
+  });
+  for (const out of [tpl.html, tpl.text]) {
+    assert.match(out, /Ah Seng/);
+    assert.match(out, /012-3456789/);
+    assert.match(out, /BHM9130/);
+    // Date carries the TIME, rendered in Asia/Kuala_Lumpur (not UTC).
+    assert.match(out, /11:30\s*AM/i);
+  }
+  // Blank driver fields omit their rows entirely.
+  const bare = dispatchNoticeTemplate({
+    doNo: "DO-2606-033",
+    customerName: "X",
+    dispatchedAt: null,
+    deliverTo: "Y",
+    hasAttachment: false,
+  });
+  assert.doesNotMatch(bare.text, /Driver\s*:/);
+  assert.doesNotMatch(bare.text, /Lorry Plate/);
+});
+
 test("dispatch template: PO row omitted when the DO carries no customer PO", () => {
   const tpl = dispatchNoticeTemplate({
     doNo: "DO-2606-032",

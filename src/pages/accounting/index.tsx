@@ -130,6 +130,7 @@ export default function AccountingPage() {
       </div>
 
       <GstRateCard />
+      <FyeCard />
       <StockMapCard />
 
       {loading ? (
@@ -224,6 +225,82 @@ function GstRateCard() {
         <p className="text-[11px] text-[#9CA3AF] max-w-sm">
           Applied automatically when a sales invoice is posted: tax =
           subtotal × this rate, credited to GST 350-0000. 0 = no GST.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Operator-configurable financial year end (kv_config key `fye_month`).
+// Phase 1 (2026-06): every fiscal-year-aware report (P&L YTD window,
+// quarter/half buckets, year-end profit close, cost-structure pages)
+// reads this single setting.
+function FyeCard() {
+  const { toast } = useToast();
+  const [month, setMonth] = useState<number>(12);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const MONTHS = [
+    "31 Jan", "28/29 Feb", "31 Mar", "30 Apr", "31 May", "30 Jun",
+    "31 Jul", "31 Aug", "30 Sep", "31 Oct", "30 Nov", "31 Dec",
+  ];
+  useEffect(() => {
+    fetch("/api/kv-config/fye_month")
+      .then((r) => r.json() as Promise<{ data?: { month?: number } | null }>)
+      .then((j) => {
+        const v = (j?.data as { month?: number } | null)?.month;
+        if (typeof v === "number" && v >= 1 && v <= 12) setMonth(v);
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true));
+  }, []);
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/kv-config/fye_month", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) toast.success(`Financial year end saved: ${MONTHS[month - 1]}`);
+      else toast.error(j?.error || "Failed to save FYE");
+    } catch {
+      toast.error("Failed to save FYE");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4 flex flex-wrap items-end gap-4">
+        <div>
+          <label className="text-xs font-medium text-[#6B7280] mb-1 block">
+            Financial Year End (FYE)
+          </label>
+          <select
+            value={month}
+            disabled={!loaded}
+            onChange={(e) => setMonth(Number(e.target.value))}
+            className="w-36 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+          >
+            {MONTHS.map((label, i) => (
+              <option key={i + 1} value={i + 1}>{label}</option>
+            ))}
+          </select>
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
+          onClick={save}
+          disabled={saving || !loaded}
+        >
+          {saving ? "Saving…" : "Save"}
+        </Button>
+        <p className="text-[11px] text-[#9CA3AF] max-w-sm">
+          Sets the FY window for YTD figures, quarter/half buckets, the
+          year-end profit close and cost-structure pages. Changing it after
+          posting re-bases historical YTD groupings — set once at go-live.
         </p>
       </CardContent>
     </Card>

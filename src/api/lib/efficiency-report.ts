@@ -171,7 +171,20 @@ export async function collectEfficiencyData(
       )
       .bind(dateYmd)
       .all<AttendanceRow>();
-    attRows = attRes.results ?? [];
+    // The runtime-added geo columns are folded-lowercase on prod (created
+    // through the adapter, which only renames map-known identifiers), so the
+    // result keys come back as "clockinlat" etc. Normalise to camelCase here
+    // or the OFF-SITE badge can never fire.
+    attRows = (attRes.results ?? []).map((r) => {
+      const rr = r as unknown as Record<string, unknown>;
+      return {
+        ...r,
+        clockInLat: (r.clockInLat ?? rr.clockinlat ?? null) as number | null,
+        clockInLng: (r.clockInLng ?? rr.clockinlng ?? null) as number | null,
+        clockOutLat: (r.clockOutLat ?? rr.clockoutlat ?? null) as number | null,
+        clockOutLng: (r.clockOutLng ?? rr.clockoutlng ?? null) as number | null,
+      };
+    });
   } catch {
     const attRes = await db
       .prepare(

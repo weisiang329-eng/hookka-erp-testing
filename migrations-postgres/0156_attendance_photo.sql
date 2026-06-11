@@ -10,5 +10,9 @@
 -- ~640px before sending). Additive + nullable: an office-keyed row, a legacy
 -- punch, or a phone with no camera simply leaves them NULL — the attendance view
 -- shows "No photo" so a skip is visible. SOFT — never blocks the punch.
-ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clock_in_photo TEXT;
-ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clock_out_photo TEXT;
+-- CORRECTED 2026-06-11: the runtime self-apply runs through the d1-compat
+-- adapter (static rename map only) → on PROD these columns are FOLDED-LOWERCASE
+-- (clockinphoto / clockoutphoto), not snake_case. File matches reality; reads
+-- use dual-key fallbacks (attendance.ts).
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockinphoto TEXT;
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockoutphoto TEXT;

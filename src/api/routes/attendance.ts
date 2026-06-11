@@ -71,6 +71,15 @@ function parseDeptBreakdown(raw: string): Array<{
 }
 
 function rowToAttendance(r: AttendanceRow) {
+  // Runtime-added columns (geo + punch selfie) were created through the
+  // d1-compat adapter, whose identifier rewrite only knows the STATIC rename
+  // map — unknown camelCase identifiers pass through unquoted and Postgres
+  // folds them to all-lowercase ("clockinlat"). Writes target the same folded
+  // names (consistent), but a SELECT * returns the folded key, so reading
+  // r.clockInLat alone is forever null. Read BOTH keys.
+  const rr = r as unknown as Record<string, unknown>;
+  const dual = <T>(camel: T | null | undefined, folded: string): T | null =>
+    (camel ?? (rr[folded] as T | null | undefined) ?? null);
   return {
     id: r.id,
     employeeId: r.employeeId,
@@ -82,14 +91,14 @@ function rowToAttendance(r: AttendanceRow) {
     clockOut: r.clockOut,
     // Soft-geofence punch coordinates (null when the phone gave no GPS). The
     // Attendance view flags out-of-fence punches from these.
-    clockInLat: r.clockInLat ?? null,
-    clockInLng: r.clockInLng ?? null,
-    clockOutLat: r.clockOutLat ?? null,
-    clockOutLng: r.clockOutLng ?? null,
+    clockInLat: dual(r.clockInLat, "clockinlat"),
+    clockInLng: dual(r.clockInLng, "clockinlng"),
+    clockOutLat: dual(r.clockOutLat, "clockoutlat"),
+    clockOutLng: dual(r.clockOutLng, "clockoutlng"),
     // Punch selfies: the list returns only a HAS-flag (the base64 image is heavy,
     // fetched on demand via GET /:id/photo when the operator clicks to view).
-    hasClockInPhoto: !!r.clockInPhoto,
-    hasClockOutPhoto: !!r.clockOutPhoto,
+    hasClockInPhoto: !!dual(r.clockInPhoto, "clockinphoto"),
+    hasClockOutPhoto: !!dual(r.clockOutPhoto, "clockoutphoto"),
     status: r.status,
     workingMinutes: r.workingMinutes,
     productionTimeMinutes: r.productionTimeMinutes,
@@ -153,7 +162,13 @@ app.get("/:id/photo", async (c) => {
   )
     .bind(id, orgId)
     .first<{ clockInPhoto?: string | null; clockOutPhoto?: string | null }>();
-  const dataUrl = which === "out" ? row?.clockOutPhoto : row?.clockInPhoto;
+  // Dual-key read — the runtime-added photo columns are folded-lowercase on
+  // prod (see rowToAttendance), so check both key spellings.
+  const rowAny = (row ?? {}) as Record<string, unknown>;
+  const dataUrl =
+    which === "out"
+      ? ((row?.clockOutPhoto ?? rowAny.clockoutphoto) as string | null | undefined)
+      : ((row?.clockInPhoto ?? rowAny.clockinphoto) as string | null | undefined);
   if (!dataUrl) return c.json({ success: false, error: "No photo" }, 404);
   // Stored as a data URL (data:image/jpeg;base64,...). Decode to raw bytes so an
   // <img> can render it directly and the browser can cache it.

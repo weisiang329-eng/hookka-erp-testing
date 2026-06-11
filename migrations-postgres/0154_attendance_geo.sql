@@ -9,7 +9,13 @@
 -- Additive + nullable: a punch from a phone that denies / can't get location
 -- simply leaves them NULL. SOFT — location is recorded for review, never blocks
 -- the punch, never touches payroll.
-ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clock_in_lat DOUBLE PRECISION;
-ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clock_in_lng DOUBLE PRECISION;
-ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clock_out_lat DOUBLE PRECISION;
-ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clock_out_lng DOUBLE PRECISION;
+-- CORRECTED 2026-06-11: the runtime self-apply (ensureAttendanceGeo) runs its
+-- DDL through the d1-compat adapter, whose identifier rewrite only knows the
+-- static rename map — so on PROD these columns exist FOLDED-LOWERCASE
+-- (clockinlat, ...), NOT snake_case. This file now matches reality so a tool
+-- apply is a true no-op instead of creating duplicate snake_case columns.
+-- Reads use dual-key fallbacks (see attendance.ts rowToAttendance).
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockinlat DOUBLE PRECISION;
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockinlng DOUBLE PRECISION;
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockoutlat DOUBLE PRECISION;
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS clockoutlng DOUBLE PRECISION;

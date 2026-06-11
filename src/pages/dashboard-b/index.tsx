@@ -194,7 +194,15 @@ type PODeliveryShape = PipelinePO & {
 type POResp = { success?: boolean; data?: PODeliveryShape[] };
 type DOResp = {
   success?: boolean;
-  data?: { id: string; status: string; items?: { productionOrderId?: string | null }[] }[];
+  data?: {
+    id: string;
+    status: string;
+    // Goods value the list endpoint attaches per DO (loadDoValueMap — the
+    // same resolver behind the Delivery page tab totals, so card figures
+    // built from it always tie to that screen).
+    valueSen?: number;
+    items?: { productionOrderId?: string | null }[];
+  }[];
 };
 type POValuesResp = { success?: boolean; values?: Record<string, number> };
 type SOItemsResp = {
@@ -753,6 +761,23 @@ export default function DashboardBPage() {
     return total;
   }, [poRaw, doRaw, poValRaw, soItemsRaw]);
 
+  // Dispatch-chain fold (owner 2026-06-11: "Pending Dispatch 放入 Pending
+  // Delivery,Dispatch 放进 Delivered"): value of DOs created but not yet
+  // dispatched joins the PENDING DELIVERY card; value on the truck
+  // (LOADED / IN_TRANSIT) joins the DELIVERED card. Summed from the same
+  // per-DO valueSen the Delivery page tab strip uses, so both screens tie.
+  const dispatchChain = useMemo(() => {
+    const dos = doRaw?.success ? doRaw.data ?? [] : [];
+    let pendingDispatchSen = 0;
+    let inTransitSen = 0;
+    for (const d of dos) {
+      if (d.status === "DRAFT") pendingDispatchSen += d.valueSen ?? 0;
+      else if (d.status === "LOADED" || d.status === "IN_TRANSIT")
+        inTransitSen += d.valueSen ?? 0;
+    }
+    return { pendingDispatchSen, inTransitSen };
+  }, [doRaw]);
+
   // Worker efficiency — identical computation to /dashboard.
   const efficiency = useMemo(() => {
     const prodMin = new Map<string, number>();
@@ -943,6 +968,9 @@ export default function DashboardBPage() {
   // (Outstanding / Pending Delivery) are point-in-time and carry a "live" tag.
   const isAllTime = period === "all";
   const isCurrentMonth = period === CUR_YM;
+  // Past-month views are reconstructed snapshots — live dispatch-chain money
+  // (in-transit) must NOT fold into them.
+  const isPastMonth = !isAllTime && !isCurrentMonth;
   const salesLabel = isAllTime
     ? "Total Sales"
     : isCurrentMonth
@@ -1037,14 +1065,25 @@ export default function DashboardBPage() {
           spark={soSpark}
           delta={isMonthScoped ? null : salesDelta}
         />
+        {/* Owner 2026-06-11: goods already ON THE TRUCK count toward the
+            delivered side. Folded for the live views only (current month /
+            all-time) — a past month's in-transit state is unknowable. */}
         <KTile
           label={deliveredLabel}
-          value={rm(ov.deliveredThisMonthSen)}
-          sub={deliveredSub}
+          value={rm(
+            ov.deliveredThisMonthSen +
+              (isPastMonth ? 0 : dispatchChain.inTransitSen),
+          )}
+          sub={
+            !isPastMonth && dispatchChain.inTransitSen > 0
+              ? `${deliveredSub} + in transit ${rm(dispatchChain.inTransitSen)}`
+              : deliveredSub
+          }
           icon={Truck}
           accent={C_PROD}
           spark={delSpark}
           delta={isMonthScoped ? null : prodDelta}
+          loading={isPastMonth ? false : doL}
         />
         <KTile
           label="Outstanding"
@@ -1055,10 +1094,13 @@ export default function DashboardBPage() {
           loading={soL}
           tag="live"
         />
+        {/* Owner 2026-06-11: DOs waiting to leave (Pending Dispatch) belong
+            with the pending-delivery money — one card for everything made
+            but not yet on the road. */}
         <KTile
           label="Pending Delivery"
-          value={rm(pendingDeliveryValueSen)}
-          sub="made, not yet on a DO"
+          value={rm(pendingDeliveryValueSen + dispatchChain.pendingDispatchSen)}
+          sub="made + on DO, not yet dispatched"
           icon={Package}
           accent={C_GREEN}
           loading={pendingL}

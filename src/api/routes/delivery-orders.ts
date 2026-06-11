@@ -53,7 +53,6 @@ import {
 import { buildSimpleTablePdf } from "../lib/assistant-exports";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).
-import { COMPANY } from "../../lib/constants";
 
 const app = new Hono<Env>();
 
@@ -4690,12 +4689,14 @@ app.post("/:id/notify-customer", async (c) => {
         deliverTo,
         itemsBreakdown,
         hasAttachment: !!attachments,
-        // Driver block (owner 2026-06-11): name + lorry plate from the DO's
-        // 3PL assignment; contact = driver's phone, company office number
-        // when none is on file.
+        // Driver block (owner 2026-06-11; 2026-06-12 rule "2A"): name +
+        // lorry plate from the DO's 3PL assignment; Contact No. is the
+        // DRIVER's phone ONLY. When the driver has no phone on file the row
+        // is omitted entirely (the template drops blank rows) — the owner's
+        // earlier company-number fallback was dropped: a company line under
+        // "Contact No." next to a named driver is useless to the customer.
         driverName: doRow.driverName ?? null,
-        driverContact:
-          (doRow.driverPhone ?? "").trim() || COMPANY.HOOKKA.phone,
+        driverContact: (doRow.driverPhone ?? "").trim() || null,
         lorryPlate: doRow.vehicleNo ?? null,
       });
     } else {

@@ -3588,7 +3588,6 @@ export default function ConsignmentNotePage() {
                       <tr>
                         <th className="text-left px-3 py-2 font-medium text-xs">#</th>
                         <th className="text-left px-3 py-2 font-medium text-xs">CO No.</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">CO ID</th>
                         <th className="text-left px-3 py-2 font-medium text-xs">Product Code</th>
                         <th className="text-left px-3 py-2 font-medium text-xs">Product Name</th>
                         <th className="text-left px-3 py-2 font-medium text-xs">Size</th>
@@ -3603,20 +3602,21 @@ export default function ConsignmentNotePage() {
                       {(editMode ? editItems : detailCN.items).map((item, idx) => (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">
                           <td className="px-3 py-1.5 text-[#9CA3AF] text-xs">{idx + 1}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32]">{item.consignmentOrderNo || "-"}</td>
-                          {/* CO ID column shows the linked PO id since one
-                              CN line = one PO. Operators wanted the visible
-                              PO link for traceability — same role as DO's
-                              "SO ID" (which actually shows po.poNo there).
-                              For CN we surface the productionOrderId. */}
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.productionOrderId || "-"}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32]">{item.productCode}</td>
+                          {/* Match the DO detail items table: plain system
+                              font (no font-mono), and no internal id column —
+                              "CO No." is the operator-facing reference, the
+                              same role DO's "SO ID" plays. The old "CO ID"
+                              column surfaced the raw productionOrderId
+                              ("pord-co-…"), internal noise meaningless to
+                              anyone, so it was dropped (owner 2026-06-12). */}
+                          <td className="px-3 py-1.5 text-xs text-[#6B5C32]">{item.consignmentOrderNo || "-"}</td>
+                          <td className="px-3 py-1.5 text-xs text-[#6B5C32]">{item.productCode}</td>
                           <td className="px-3 py-1.5">{item.productName}</td>
                           <td className="px-3 py-1.5 text-[#6B7280]">{item.sizeLabel || "-"}</td>
                           <td className="px-3 py-1.5 text-[#6B7280]">{item.fabricCode || "-"}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{item.quantity}</td>
                           <td className="px-3 py-1.5 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
-                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.rackingNumber || "-"}</td>
+                          <td className="px-3 py-1.5 text-xs text-[#6B7280]">{item.rackingNumber || "-"}</td>
                           {editMode && (
                             <td className="px-3 py-1.5 text-center">
                               <button
@@ -3633,7 +3633,7 @@ export default function ConsignmentNotePage() {
                     </tbody>
                     <tfoot className="bg-[#FAF9F7]">
                       <tr className="border-t border-[#E2DDD8] font-medium">
-                        <td colSpan={7} className="px-3 py-1.5 text-right text-xs text-[#6B7280]">Total</td>
+                        <td colSpan={6} className="px-3 py-1.5 text-right text-xs text-[#6B7280]">Total</td>
                         <td className="px-3 py-1.5 text-right tabular-nums">
                           {(editMode ? editItems : detailCN.items).reduce((s, i) => s + i.quantity, 0)}
                         </td>

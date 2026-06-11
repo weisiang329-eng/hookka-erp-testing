@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-017 — Working Hours dept/category still keyed by hand; owner: department QR codes + auto-fill on punch-out
+
+**Status:** 🟢 Shipped (2026-06-11). 725 tests green (12 new); typecheck green. First REAL scan + punch-out round-trip awaits a worker phone (worker PIN untestable from here) — structurally verified.
+**Category:** ui-frontend
+
+Owner flow (approved: category mode A + default home dept + EVERY department gets a QR, incl. Repair/Warehousing): workers punch in/out and hours auto-compute, but the office still keyed WHICH department and WHICH category each day. Now:
+- **Default = home department, scan only when borrowed.** Most workers never scan anything: punch-out auto-creates their Working Hours row(s) for their own department. A worker helping another department scans that department's QR on arrival; scanning another moves the clock again; punch-out ends the last stretch.
+- **Scans decide the SPLIT only — pay maths untouched.** Day hours come from the same attendance-rules figure the grid auto-fills (lunch/late-ceiling/OT floors, effective-dated); segments carve that total pro-rata (`src/lib/dept-scan-split.ts`, largest-remainder so rows sum back exactly; 12 unit tests).
+- **Category mode A**: each production-dept bucket splits by the job cards that department actually worked — completed that day first, else its open cards, else one row flagged "category unknown, please check". Non-production depts (Repair/Warehousing/…) get the category-less row the validator requires.
+- **Never overwrites**: if ANY entries exist for the day (office keyed, or an earlier punch-out), auto-fill does nothing. Auto rows carry an "Auto from punch (+ dept scan)" note and stay fully editable in the grid.
+- Pieces: `dept_scan_events` table (lowercase cols; runtime-ensured + migration 0162), `POST /api/worker/dept-scan` (requires an OPEN punch), clock-out hook in worker.ts (best-effort, never fails the punch), scan.tsx recognises `deptscan=` QRs (green confirmation card, 4-language strings), and a **"Dept QR Codes"** print button on Department Labor (one A4 card per department; PRODUCTION_SHORTFALL skipped — it's a bucket, not a place).
+- Downstream untouched by design: Labor Cost / Department Labor / payroll already read working_hour_entries, so auto rows flow into costing + reconciliation like office-keyed ones.
+
+---
+
 ## BUG-2026-06-11-016 — Service orders were auto-priced at catalog price (0 treated as "no price"), silently billing repairs at full price
 
 **Status:** 🟢 Fixed + shipped (2026-06-11). Pricing tests green; typecheck green.
@@ -74,7 +89,7 @@ Fix: `GET /api/worker/history` (worker.ts) now returns `lateMinutes` per attenda
 
 ---
 
-## BUG-2026-06-11-015 — Pay Rules editor was a flat 16-field wall: no divisor choice, statutory mixed in, zero explanation
+## BUG-2026-06-11-018 — Pay Rules editor was a flat 16-field wall: no divisor choice, statutory mixed in, zero explanation
 
 **Status:** 🟢 Shipped (2026-06-11). 713 tests green (5 new mode pins); typecheck green.
 **Category:** ui-frontend

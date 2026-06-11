@@ -41,7 +41,9 @@ type EntryRow = {
 // Production departments — for these, category (SOFA / BEDFRAME / ACCESSORY)
 // is required. Everything else (WAREHOUSING / REPAIR / MAINTENANCE /
 // PRODUCTION_SHORTFALL) is non-production and must NOT carry a category.
-const PRODUCTION_DEPTS = new Set([
+// Exported: the punch auto-fill (api/lib/punch-autofill.ts) builds rows that
+// must pass the SAME category rule this route enforces.
+export const PRODUCTION_DEPTS = new Set([
   "FAB_CUT",
   "FAB_SEW",
   "WOOD_CUT",
@@ -51,7 +53,7 @@ const PRODUCTION_DEPTS = new Set([
   "UPHOLSTERY",
   "PACKING",
 ]);
-const VALID_CATEGORIES = new Set(["SOFA", "BEDFRAME", "ACCESSORY"]);
+export const VALID_CATEGORIES = new Set(["SOFA", "BEDFRAME", "ACCESSORY"]);
 
 function rowToEntry(r: EntryRow) {
   return {

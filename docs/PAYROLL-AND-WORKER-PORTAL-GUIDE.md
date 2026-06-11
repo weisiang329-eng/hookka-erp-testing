@@ -87,7 +87,12 @@ Maintained where:
 
 - **Working Hours** — the source of truth for hours. Punches pre-fill the
   Punch column and auto-compute Hours via the same rules (lunch deducted,
-  late rounded, OT blocks).
+  late rounded, OT blocks). On punch-out the day's rows are **auto-created**:
+  department defaults to the worker's own; a worker helping elsewhere scans
+  that department's QR (print them from Department Labor → "Dept QR Codes")
+  and the day splits by time per department; category follows the job cards
+  that department actually worked. Auto rows carry an "Auto from punch" note
+  and stay fully editable — office-keyed rows are never overwritten.
 - **Payroll** — the month's pay per worker (estimate mid-month, locked by
   Generate). Columns include the day-typed OT split and the Allowance column;
   expanding a row shows the OT calculation, statutory, pay summary, and the

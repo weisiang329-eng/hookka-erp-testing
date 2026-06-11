@@ -5,6 +5,7 @@ import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { countElapsedWorkingDays } from "@/lib/labor-engine";
 import { computeAttendanceDay, hhmmToMinutes, type AttendanceRules } from "@/lib/attendance-rules";
+import { getQRCodeDataURL } from "@/lib/qr-utils";
 import {
   resolvePayRulesAsOf,
   toAttendanceRules,
@@ -4799,6 +4800,66 @@ function DepartmentLaborTab({
     });
   }, [rows, printRows, splitVisible, categoryFilter, dateFrom, dateTo]);
 
+  // Printable department QR poster (owner 2026-06-11): one big QR per
+  // department — a worker scans it on their phone when they START working
+  // there (borrowed workers only; a normal day needs no scan). ALL real
+  // departments get one, incl. Repair / Warehousing; PRODUCTION_SHORTFALL is
+  // a virtual bucket, not a place, so it's skipped.
+  const printDeptQrPoster = useCallback(async () => {
+    try {
+      const res = await fetch("/api/departments");
+      const j = (await res.json().catch(() => ({}))) as {
+        data?: Array<{ code?: string; name?: string; shortName?: string }>;
+      };
+      const depts = (j?.data ?? []).filter(
+        (d) => d.code && d.code !== "PRODUCTION_SHORTFALL",
+      );
+      if (depts.length === 0) return;
+      const origin = window.location.origin;
+      const cards = await Promise.all(
+        depts.map(async (d) => ({
+          code: d.code as string,
+          label: d.shortName || d.name || (d.code as string),
+          qr: await getQRCodeDataURL(
+            `${origin}/worker/scan?deptscan=${encodeURIComponent(d.code as string)}`,
+            600,
+          ),
+        })),
+      );
+      const cardsHtml = cards
+        .map(
+          (cd) => `
+        <div class="card">
+          <div class="dept">${cd.label}</div>
+          <div class="code">${cd.code}</div>
+          <img src="${cd.qr}" alt="${cd.code}" />
+          <div class="hint">Scan with the Worker Portal when you START working in this department.<br/>Scan another department when you move · punching out ends it.</div>
+        </div>`,
+        )
+        .join("");
+      const w = window.open("", "_blank");
+      if (!w) return;
+      w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Department QR Codes - Hookka</title>
+        <style>
+          @page { size: A4 portrait; margin: 10mm; }
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body { font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color: #1F1D1B; }
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; }
+          .card { border: 1.5px solid #1F1D1B; border-radius: 4mm; padding: 6mm; text-align: center; page-break-inside: avoid; }
+          .dept { font-size: 22pt; font-weight: 800; }
+          .code { font-size: 10pt; color: #6B7280; margin-bottom: 3mm; letter-spacing: 1px; }
+          img { width: 62mm; height: 62mm; }
+          .hint { margin-top: 3mm; font-size: 8.5pt; color: #4B5563; line-height: 1.35; }
+        </style></head><body>
+        <div class="grid">${cardsHtml}</div>
+        <script>window.onload = () => setTimeout(() => window.print(), 250);</script>
+        </body></html>`);
+      w.document.close();
+    } catch {
+      /* poster is a convenience — never crash the tab */
+    }
+  }, []);
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -4815,6 +4876,15 @@ function DepartmentLaborTab({
             >
               <Users className="h-4 w-4" />
               {manageOpen ? "Close Manage Departments" : "Manage Departments"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={printDeptQrPoster}
+              title="Print one QR per department — workers scan it when they start working there; hours auto-split by department"
+            >
+              <Printer className="h-4 w-4" />
+              Dept QR Codes
             </Button>
             <div className="flex items-center gap-1.5">
               <label className="text-xs text-[#6B7280]">Month</label>

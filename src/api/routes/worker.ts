@@ -26,6 +26,10 @@ import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effe
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
+import {
+  recordDeptScan,
+  autofillWorkingHoursFromPunch,
+} from "../lib/punch-autofill";
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
 import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
 import { computeAttendanceDay, hhmmToMinutes } from "../../lib/attendance-rules";
@@ -789,6 +793,22 @@ app.post("/clock", async (c) => {
     } catch (e) {
       console.warn("[worker/clock] auto short-hour dock skipped:", e);
     }
+    // Auto-fill Working Hours from the punch + today's dept scans (owner
+    // 2026-06-11): default = the worker's home department; scans re-route
+    // stretches of the day; category follows the dept's actual job cards.
+    // Never overwrites office-keyed rows; best-effort like the dock.
+    try {
+      await autofillWorkingHoursFromPunch(c.var.DB, {
+        attendanceId: existing.id,
+        workerId: worker.id,
+        date,
+        clockIn: existing.clockIn,
+        clockOut: time,
+        homeDeptCode: worker.departmentCode,
+      });
+    } catch (e) {
+      console.warn("[worker/clock] working-hours auto-fill skipped:", e);
+    }
   }
 
   const row = await c.var.DB.prepare(
@@ -797,6 +817,65 @@ app.post("/clock", async (c) => {
     .bind(existing.id)
     .first<AttendanceRow>();
   return c.json({ success: true, data: row });
+});
+
+// ============================================================
+// POST /api/worker/dept-scan
+// Body: { departmentCode } — the worker scanned a department QR ("I am now
+// working in <dept>"). Owner 2026-06-11: the day defaults to the worker's
+// HOME department; a scan re-routes time to the scanned department from this
+// minute until the next scan or punch-out. Requires an OPEN punch (clocked
+// in, not yet out) so a stray scan can't create time out of thin air.
+// ============================================================
+app.post("/dept-scan", async (c) => {
+  const auth = await getWorker(c);
+  if (!auth.ok) return auth.response;
+  const { worker } = auth;
+  const body = await c.req.json().catch(() => ({}));
+  const code = String((body as { departmentCode?: unknown }).departmentCode ?? "")
+    .trim()
+    .toUpperCase();
+  if (!code) {
+    return c.json({ success: false, error: "departmentCode required" }, 400);
+  }
+  const dept = await c.var.DB.prepare(
+    "SELECT code, shortName, name FROM departments WHERE code = ?",
+  )
+    .bind(code)
+    .first<{ code: string; shortName: string | null; name: string | null }>();
+  if (!dept) {
+    return c.json({ success: false, error: "UNKNOWN_DEPT" }, 404);
+  }
+
+  const my = malaysiaNow();
+  const date = my.toISOString().slice(0, 10);
+  const time = my.toISOString().slice(11, 16);
+  const att = await c.var.DB.prepare(
+    "SELECT id, clockIn, clockOut FROM attendance_records WHERE employeeId = ? AND date = ?",
+  )
+    .bind(worker.id, date)
+    .first<{ id: string; clockIn: string | null; clockOut: string | null }>();
+  if (!att?.clockIn || att.clockOut) {
+    // Not punched in (or already punched out) — the scan has no open day to
+    // attach to. The phone shows "punch in first".
+    return c.json({ success: false, error: "PUNCH_IN_FIRST" }, 400);
+  }
+
+  const [hh, mm] = time.split(":").map(Number);
+  await recordDeptScan(c.var.DB, {
+    workerId: worker.id,
+    date,
+    departmentCode: dept.code,
+    atMin: hh * 60 + mm,
+  });
+  return c.json({
+    success: true,
+    data: {
+      departmentCode: dept.code,
+      departmentName: dept.shortName || dept.name || dept.code,
+      time,
+    },
+  });
 });
 
 // ============================================================

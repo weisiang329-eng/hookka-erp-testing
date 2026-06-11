@@ -279,6 +279,24 @@ const dict: Dict = {
     zh: '摄像头权限被拒绝。请点网址旁的锁头图标，允许“相机”，再试一次；或改用下方的 拍照 / 上传照片。',
     my: 'ကင်မရာခွင့်ပြုချက် ပိတ်ထားသည်။ ဝက်ဘ်လိပ်စာဘေးရှိ သော့ပုံကိုနှိပ်ပြီး Camera ကို ခွင့်ပြုပါ၊ ထို့နောက် ထပ်စမ်းပါ — သို့ အောက်ရှိ ဓာတ်ပုံရိုက်ရန်/တင်ရန် ကိုသုံးပါ။',
   },
+  'scan.deptScanOk': {
+    en: 'Now working in',
+    ms: 'Sekarang bekerja di',
+    zh: '现在开始计入部门',
+    my: 'ယခု အလုပ်လုပ်နေသည့်ဌာန',
+  },
+  'scan.deptScanHint': {
+    en: 'Your hours count to this department from now. Scan another department code when you move; punching out ends it.',
+    ms: 'Jam kerja anda dikira untuk jabatan ini mulai sekarang. Imbas kod jabatan lain bila berpindah; daftar keluar menamatkannya.',
+    zh: '从现在起你的工时算给这个部门。换部门时再扫那个部门的码；打卡下班自动结束。',
+    my: 'ယခုမှစ၍ သင့်အလုပ်ချိန်ကို ဤဌာနသို့ တွက်သည်။ ဌာနပြောင်းလျှင် ထိုဌာန၏ကုဒ်ကို ထပ်စကင်န်ပါ၊ အလုပ်ထွက်ကတ်နှိပ်လျှင် ပြီးဆုံးသည်။',
+  },
+  'scan.deptNeedPunchIn': {
+    en: 'Please punch in first, then scan the department code.',
+    ms: 'Sila daftar masuk dahulu, kemudian imbas kod jabatan.',
+    zh: '请先打卡上班，再扫部门码。',
+    my: 'ကျေးဇူးပြု၍ အရင် punch in လုပ်ပြီးမှ ဌာနကုဒ်ကို စကင်န်ပါ။',
+  },
   'scan.batchProgress': {
     en: 'Photo {i} of {n}',
     ms: 'Gambar {i} dari {n}',

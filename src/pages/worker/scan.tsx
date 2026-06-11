@@ -207,7 +207,11 @@ type Result =
       assignedPoId?: string;
       fifoDueDate?: string;
     }
-  | { kind: "error"; message: string; decoded?: string };
+  | { kind: "error"; message: string; decoded?: string }
+  // Department QR (owner 2026-06-11): "I am now working in <dept>" — the
+  // day's hours re-route to this department from `time` until the next scan
+  // or punch-out. No job card involved.
+  | { kind: "deptscan"; deptName: string; time: string };
 
 // Shape of /api/worker/history — we pass from=today&to=today so we
 // only get today's slice. Fields unused on this page are elided from
@@ -456,6 +460,46 @@ export default function WorkerScanPage() {
   // 2/2 on a qty=2 job card is otherwise indistinguishable.
   const handleDecoded = useCallback(
     async (raw: string) => {
+      // Department QR (deptscan=<CODE> in the QR's URL) — not a job card.
+      // Tells payroll "I am now working in this department"; handled before
+      // any sticker parsing so it can never fall into the JC lookup.
+      const deptScan = /[?&]deptscan=([A-Za-z_]+)/.exec(raw);
+      if (deptScan) {
+        const code = decodeURIComponent(deptScan[1]).toUpperCase();
+        setLoading(true);
+        setResult({ kind: "idle" });
+        try {
+          const res = await workerFetch("/api/worker/dept-scan", {
+            method: "POST",
+            body: JSON.stringify({ departmentCode: code }),
+          });
+          const j = (await res.json().catch(() => ({}))) as {
+            success?: boolean;
+            error?: string;
+            data?: { departmentName?: string; time?: string };
+          };
+          if (j?.success && j.data) {
+            setResult({
+              kind: "deptscan",
+              deptName: j.data.departmentName || code,
+              time: j.data.time || "",
+            });
+          } else {
+            setResult({
+              kind: "error",
+              message:
+                j?.error === "PUNCH_IN_FIRST"
+                  ? t("scan.deptNeedPunchIn")
+                  : t("common.error"),
+            });
+          }
+        } catch {
+          setResult({ kind: "error", message: t("common.error") });
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
       const parsed = parseStickerData(raw);
       const primaryTerm = parsed?.opId || raw;
       const deptHint = parsed?.deptCode;
@@ -1502,6 +1546,20 @@ export default function WorkerScanPage() {
       )}
 
       {/* Error */}
+      {/* Department QR confirmation — "now working in <dept>". */}
+      {result.kind === "deptscan" && (
+        <div className="bg-[#F1F7F3] border border-[#BFD9C8] rounded-xl p-4 text-[#2A6B4A] flex items-start gap-2">
+          <CheckCircle2 className="h-5 w-5 mt-0.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold">
+              {t("scan.deptScanOk")}: {result.deptName}
+              {result.time ? ` · ${result.time}` : ""}
+            </p>
+            <p className="text-sm mt-0.5">{t("scan.deptScanHint")}</p>
+          </div>
+        </div>
+      )}
+
       {result.kind === "error" && (
         <div className="bg-[#FDF6F4] border border-[#F5C5BF] rounded-xl p-4 text-[#9A3A2D] flex items-start gap-2">
           <AlertTriangle className="h-5 w-5 mt-0.5 shrink-0" />

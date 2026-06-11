@@ -64,6 +64,8 @@ function rowToPackingList(
     doCount: number;
     stops: number;
     states: string[];
+    totalUnits: number;
+    totalM3: number;
   },
 ) {
   return {
@@ -72,8 +74,12 @@ function rowToPackingList(
     status: r.status,
     doIds: parseIds(r.doIds),
     stopCount: r.stopCount ?? 0,
-    totalUnits: r.totalUnits ?? 0,
-    totalM3: Number(r.totalM3 ?? 0),
+    // Units / M³ prefer the LIVE sums over the create-time snapshot columns —
+    // a DO edited after the PL was created (3 items → 4) otherwise leaves the
+    // list showing stale totals while the print (live) shows the new ones.
+    // Snapshot remains the fallback for the single-record GET /:id.
+    totalUnits: money?.totalUnits ?? r.totalUnits ?? 0,
+    totalM3: money !== undefined ? money.totalM3 : Number(r.totalM3 ?? 0),
     remarks: r.remarks ?? "",
     createdAt: r.createdAt,
     createdBy: r.createdBy,
@@ -143,6 +149,8 @@ type PlDoRow = {
   vehicleId: string | null;
   customerState: string | null;
   hubId: string | null;
+  totalItems: number | null;
+  totalM3: number | string | null;
 };
 type RatePair = { ratePerTripSen: number; ratePerExtraDropSen: number };
 
@@ -159,6 +167,13 @@ type PlLiveFields = {
   // raw stored codes (KL / PG / SBH …), customerState falling back to the
   // DO's hub state. Multiple states on one truck run all show.
   states: string[];
+  // Live Σ of the DOs' CURRENT totalItems / totalM3. The packing_lists row
+  // stores create-time snapshots of these, which go stale the moment a DO is
+  // edited (3 items → 4 left the PL showing 3 while the print — which reads
+  // live — showed 4, Wei Siang 2026-06-11). The list view always prefers
+  // these live sums.
+  totalUnits: number;
+  totalM3: number;
 };
 
 async function computePackingListMoney(
@@ -175,6 +190,8 @@ async function computePackingListMoney(
       doCount: 0,
       stops: 0,
       states: [],
+      totalUnits: 0,
+      totalM3: 0,
     });
 
   const allDoIds = [...new Set(lists.flatMap((l) => l.doIds))];
@@ -189,7 +206,8 @@ async function computePackingListMoney(
   const ph = allDoIds.map(() => "?").join(",");
   const doRes = await db
     .prepare(
-      `SELECT id, deliveryAddress, driverId, vehicleId, customerState, hubId
+      `SELECT id, deliveryAddress, driverId, vehicleId, customerState, hubId,
+              totalItems, totalM3
          FROM delivery_orders WHERE orgId = ? AND id IN (${ph})`,
     )
     .bind(orgId, ...allDoIds)
@@ -305,12 +323,16 @@ async function computePackingListMoney(
     const keyOrder: string[] = []; // first-seen order for deterministic ties
     let foundDos = 0;
     const states: string[] = [];
+    let totalUnits = 0;
+    let totalM3 = 0;
 
     for (const did of l.doIds) {
       const d = doById.get(did);
       if (!d) continue; // do_id missing — skip gracefully
       foundDos += 1;
       revenueSen += valueMap.get(did) ?? 0;
+      totalUnits += Number(d.totalItems) || 0;
+      totalM3 += Number(d.totalM3) || 0;
       addrSet.add(normAddr(d.deliveryAddress));
       const st = (
         (d.customerState || "").trim() ||
@@ -355,6 +377,8 @@ async function computePackingListMoney(
       doCount: foundDos,
       stops: addrSet.size,
       states,
+      totalUnits,
+      totalM3: Math.round(totalM3 * 100) / 100,
     });
   }
   return out;
@@ -385,6 +409,8 @@ app.get("/", async (c) => {
           doCount: 0,
           stops: 0,
           states: [],
+          totalUnits: 0,
+          totalM3: 0,
         },
       ),
     );

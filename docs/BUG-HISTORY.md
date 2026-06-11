@@ -65,6 +65,7 @@ Fix:
 - `src/pages/delivery/index.tsx` — Add Items picker now lists only ready POs of the SAME customer + SAME state as the open DO (`resolveStateCode` normalises legacy KL/PG vs canonical codes): the wrong-state row can't even be clicked.
 - Blank-address quirk: create bound `body.deliveryAddress ?? hub.address` — an explicit `""` from the caller beat the hub's real address (`??` only falls through null/undefined). Blank/whitespace now falls through to the hub address.
 - DO detail adds a "Delivery State" line (hub-sourced) and flags a blank address/state in red instead of a silent "-".
+- Follow-up (owner "3 ok"): PL list Units / Total M³ switched from create-time snapshots to LIVE sums of the DOs' current totals (`computePackingListMoney`) — a DO edited after the PL was created (3 items → 4) no longer leaves the PL row stale while the print (already live) shows the new items.
 
 Existing DO-2606-029 left as-is per owner ("不需要清"); editing it now requires removing the wrong-hub lines first (guard working as intended).
 

@@ -1209,6 +1209,330 @@ app.get("/customer-statement", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// PURCHASE CREDIT NOTES (Phase 2, 2026-06) — supplier CN for purchase
+// returns / price credits. Pure finance document (never touches PO/GRN
+// operations). POSTED legs mirror the PI APPROVED posting flipped:
+//   DR 400-0000 TRADE CREDITORS   gross (we owe less)
+//   CR <mapped purchase accounts> per line (TAX lines → 706-0000)
+// via the SAME account mapper the PI uses, so a CN always reverses into
+// the accounts its PI debited. Supplier outstanding decremented in the
+// same batch; idempotent; GL build failure aborts.
+// ---------------------------------------------------------------------------
+type PcnItem = {
+  materialCode?: string | null;
+  description: string;
+  quantity: number;
+  unitPriceSen: number;
+  lineType: string;
+};
+type PcnRow = {
+  id: string;
+  noteNumber: string;
+  supplierId: string;
+  supplierName: string;
+  purchaseInvoiceId: string | null;
+  piNo: string | null;
+  date: string;
+  reason: string | null;
+  reasonDetail: string | null;
+  items: string | null;
+  totalAmount: number;
+  status: string;
+};
+
+function rowToPcn(r: PcnRow) {
+  let items: PcnItem[] = [];
+  try {
+    items = JSON.parse(r.items ?? "[]") as PcnItem[];
+  } catch {
+    items = [];
+  }
+  return {
+    id: r.id,
+    noteNumber: r.noteNumber,
+    supplierId: r.supplierId,
+    supplierName: r.supplierName,
+    purchaseInvoiceId: r.purchaseInvoiceId ?? "",
+    piNo: r.piNo ?? "",
+    date: r.date,
+    reason: r.reason ?? "",
+    reasonDetail: r.reasonDetail ?? "",
+    items,
+    totalAmount: r.totalAmount,
+    status: r.status,
+  };
+}
+
+async function nextPcnNo(db: Env["Variables"]["DB"]): Promise<string> {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const prefix = `PCN-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT noteNumber FROM purchase_credit_notes WHERE noteNumber LIKE ? ORDER BY noteNumber DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ noteNumber: string }>();
+  if (!res) return `${prefix}001`;
+  const seq = parseInt(res.noteNumber.replace(prefix, ""), 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
+}
+
+app.get("/purchase-credit-notes", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const res = await c.var.DB.prepare(
+    "SELECT * FROM purchase_credit_notes WHERE orgId = ? ORDER BY date DESC",
+  )
+    .bind(orgId)
+    .all<PcnRow>();
+  const data = (res.results ?? []).map(rowToPcn);
+  return c.json({ success: true, data, total: data.length });
+});
+
+app.post("/purchase-credit-notes", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as {
+      supplierId?: string;
+      purchaseInvoiceId?: string;
+      reason?: string;
+      reasonDetail?: string;
+      items?: Array<{
+        materialCode?: string;
+        description?: string;
+        quantity?: number;
+        unitPriceSen?: number;
+        lineType?: string;
+      }>;
+    };
+    if (!body.supplierId || !Array.isArray(body.items) || body.items.length === 0) {
+      return c.json(
+        { success: false, error: "supplierId and items are required" },
+        400,
+      );
+    }
+    const supplier = await c.var.DB.prepare(
+      "SELECT id, name FROM suppliers WHERE id = ?",
+    )
+      .bind(body.supplierId)
+      .first<{ id: string; name: string }>();
+    if (!supplier) {
+      return c.json({ success: false, error: "Supplier not found" }, 404);
+    }
+    let piNo: string | null = null;
+    if (body.purchaseInvoiceId) {
+      const pi = await c.var.DB.prepare(
+        "SELECT id, piNo FROM purchase_invoices WHERE id = ?",
+      )
+        .bind(body.purchaseInvoiceId)
+        .first<{ id: string; piNo: string }>();
+      if (!pi) {
+        return c.json(
+          { success: false, error: "Purchase invoice not found" },
+          404,
+        );
+      }
+      piNo = pi.piNo;
+    }
+    const items: PcnItem[] = [];
+    for (const raw of body.items) {
+      const quantity = Number(raw.quantity);
+      const unitPriceSen = Number(raw.unitPriceSen);
+      if (!Number.isInteger(unitPriceSen) || unitPriceSen < 0) {
+        return c.json(
+          {
+            success: false,
+            error: `unitPriceSen must be a non-negative integer (got ${raw.unitPriceSen}).`,
+          },
+          400,
+        );
+      }
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        return c.json(
+          { success: false, error: `quantity must be > 0 (got ${raw.quantity}).` },
+          400,
+        );
+      }
+      const lt = String(raw.lineType ?? "STOCKED").toUpperCase();
+      items.push({
+        materialCode: raw.materialCode ?? null,
+        description: String(raw.description ?? ""),
+        quantity,
+        unitPriceSen,
+        lineType: ["STOCKED", "FEE", "TAX", "REBATE", "DISCOUNT", "OTHER"].includes(lt)
+          ? lt
+          : "OTHER",
+      });
+    }
+    const totalAmount = items.reduce(
+      (s, it) => s + Math.round(it.quantity * it.unitPriceSen),
+      0,
+    );
+    if (totalAmount <= 0) {
+      return c.json({ success: false, error: "Total must be > 0" }, 400);
+    }
+    const orgId = getOrgId(c);
+    const id = `pcn-${crypto.randomUUID().slice(0, 8)}`;
+    const noteNumber = await nextPcnNo(c.var.DB);
+    const now = new Date().toISOString();
+    await c.var.DB.prepare(
+      `INSERT INTO purchase_credit_notes
+         (id, noteNumber, supplierId, supplierName, purchaseInvoiceId, piNo,
+          date, reason, reasonDetail, items, totalAmount, status, orgId, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`,
+    )
+      .bind(
+        id,
+        noteNumber,
+        supplier.id,
+        supplier.name,
+        body.purchaseInvoiceId ?? null,
+        piNo,
+        now.slice(0, 10),
+        body.reason ?? "",
+        body.reasonDetail ?? "",
+        JSON.stringify(items),
+        totalAmount,
+        orgId,
+        now,
+      )
+      .run();
+    const created = await c.var.DB.prepare(
+      "SELECT * FROM purchase_credit_notes WHERE id = ?",
+    )
+      .bind(id)
+      .first<PcnRow>();
+    return c.json({ success: true, data: rowToPcn(created!) }, 201);
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.put("/purchase-credit-notes/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const id = c.req.param("id");
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM purchase_credit_notes WHERE id = ?",
+    )
+      .bind(id)
+      .first<PcnRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "Purchase CN not found" }, 404);
+    }
+    const body = (await c.req.json()) as { status?: string };
+    if (body.status !== "POSTED") {
+      return c.json(
+        { success: false, error: "Only status: 'POSTED' is supported" },
+        400,
+      );
+    }
+    if (existing.status === "POSTED") {
+      return c.json({ success: true, data: rowToPcn(existing) });
+    }
+    const orgId = getOrgId(c);
+    const gross = Number(existing.totalAmount) || 0;
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        "UPDATE purchase_credit_notes SET status = 'POSTED', updatedAt = ? WHERE id = ?",
+      ).bind(new Date().toISOString(), id),
+      c.var.DB.prepare(
+        "UPDATE suppliers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?",
+      ).bind(gross, existing.supplierId),
+    ];
+    try {
+      if (
+        !(await ledgerHasSource(c.var.DB, orgId, "purchase_credit_note", id))
+      ) {
+        const { mapPurchaseLinesToAccounts } = await import(
+          "./purchase-invoices"
+        );
+        let items: PcnItem[] = [];
+        try {
+          items = JSON.parse(existing.items ?? "[]") as PcnItem[];
+        } catch {
+          items = [];
+        }
+        const { bucket, pdefault } = await mapPurchaseLinesToAccounts(
+          c.var.DB,
+          items.map((it) => ({
+            mc: it.materialCode ?? null,
+            amt: Math.round(it.quantity * it.unitPriceSen),
+            lt: it.lineType,
+          })),
+        );
+        const sumLines = Object.values(bucket).reduce((s, v) => s + v, 0);
+        if (sumLines !== gross)
+          bucket[pdefault] = (bucket[pdefault] ?? 0) + (gross - sumLines);
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        const legs: LedgerEntryInput[] = [];
+        let legNo = 1;
+        legs.push({
+          id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+          sourceType: "purchase_credit_note",
+          sourceId: id,
+          legNo: legNo++,
+          accountCode: "400-0000",
+          debitSen: gross,
+          creditSen: 0,
+          description: `Purchase CN ${existing.noteNumber} · ${existing.supplierName}`,
+          actorUserId,
+          orgId,
+        });
+        for (const [acct, amt] of Object.entries(bucket)) {
+          if (amt === 0) continue;
+          legs.push({
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "purchase_credit_note",
+            sourceId: id,
+            legNo: legNo++,
+            accountCode: acct,
+            debitSen: 0,
+            creditSen: amt,
+            description: `Purchase CN ${existing.noteNumber} · return/credit`,
+            actorUserId,
+            orgId,
+          });
+        }
+        const { statements: ledgerStmts } = await buildJournalEntryStatements(
+          c.var.DB,
+          orgId,
+          legs,
+        );
+        statements.push(...ledgerStmts);
+      }
+    } catch (e) {
+      console.error(`[ledger] PCN ${id} GL build failed — aborting:`, e);
+      return c.json(
+        {
+          success: false,
+          error:
+            "Failed to build the GL posting for this purchase CN — nothing was saved. Retry, and report if it persists.",
+        },
+        500,
+      );
+    }
+    await c.var.DB.batch(statements);
+    const updated = await c.var.DB.prepare(
+      "SELECT * FROM purchase_credit_notes WHERE id = ?",
+    )
+      .bind(id)
+      .first<PcnRow>();
+    return c.json({ success: true, data: rowToPcn(updated!) });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // AP CONTROL (Phase 2, 2026-06) — mirror of /ar-control for the payable
 // side: SCC creditor-control ledger balances vs Σ booked-unpaid purchase
 // invoices (APPROVED) vs the suppliers.outstandingSen counter, supplier
@@ -1240,6 +1564,12 @@ app.get("/ap-control", async (c) => {
       "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
     ).first<{ s: number }>(),
   ]);
+  // Posted purchase CNs reduce what we owe — net them off the subledger
+  // (the control account already absorbed their DR 400-0000 legs).
+  const pcnRes = await c.var.DB.prepare(
+    "SELECT COALESCE(SUM(totalAmount),0) AS s FROM purchase_credit_notes WHERE status = 'POSTED'",
+  ).first<{ s: number }>();
+  const pcnPostedSen = Number(pcnRes?.s) || 0;
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   for (const l of legRes.results ?? []) {
@@ -1310,16 +1640,18 @@ app.get("/ap-control", async (c) => {
   }
   const aging = [...bySupplier.values()].sort((a, b) => b.totalSen - a.totalSen);
   const supplierCounterSen = Number(supRes?.s) || 0;
+  const netSubledgerSen = piOutstandingSen - pcnPostedSen;
   return c.json({
     success: true,
     data: {
       asOf: today,
       controls,
       tradeControlSen,
-      piOutstandingSen,
+      piOutstandingSen: netSubledgerSen,
+      pcnPostedSen,
       supplierCounterSen,
-      driftControlVsPiSen: tradeControlSen - piOutstandingSen,
-      driftCounterVsPiSen: supplierCounterSen - piOutstandingSen,
+      driftControlVsPiSen: tradeControlSen - netSubledgerSen,
+      driftCounterVsPiSen: supplierCounterSen - netSubledgerSen,
       aging,
     },
   });
@@ -1334,7 +1666,7 @@ app.get("/supplier-statement", async (c) => {
   }
   const from = c.req.query("from") || "";
   const to = c.req.query("to") || "9999-12-31";
-  const [sup, piRes, payRes] = await Promise.all([
+  const [sup, piRes, payRes, pcnStmtRes] = await Promise.all([
     c.var.DB.prepare("SELECT id, name FROM suppliers WHERE id = ?")
       .bind(supplierId)
       .first<{ id: string; name: string }>(),
@@ -1349,6 +1681,12 @@ app.get("/supplier-statement", async (c) => {
     )
       .bind(supplierId)
       .all<{ paymentNo: string; date: string; amountSen: number }>(),
+    c.var.DB.prepare(
+      `SELECT noteNumber, date, totalAmount FROM purchase_credit_notes
+        WHERE supplierId = ? AND status = 'POSTED'`,
+    )
+      .bind(supplierId)
+      .all<{ noteNumber: string; date: string; totalAmount: number }>(),
   ]);
   if (!sup) {
     return c.json({ success: false, error: "Supplier not found" }, 404);
@@ -1375,6 +1713,14 @@ app.get("/supplier-statement", async (c) => {
       ref: p.paymentNo,
       type: "PAYMENT",
       debitSen: Number(p.amountSen) || 0,
+      creditSen: 0,
+    });
+  for (const n of pcnStmtRes.results ?? [])
+    lines.push({
+      date: n.date ?? "",
+      ref: n.noteNumber,
+      type: "PURCHASE_CN",
+      debitSen: Number(n.totalAmount) || 0,
       creditSen: 0,
     });
   lines.sort((a, b) =>

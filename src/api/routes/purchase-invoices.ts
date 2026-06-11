@@ -43,6 +43,60 @@ function apBankAcct(method: string | null | undefined): string {
     : "310-0010";
 }
 
+// Map purchase-document lines to GL purchase accounts — the SINGLE place
+// that decides which 70x account a bought line belongs to (owner-editable
+// kv `coa_stock_map` → DEFAULT_PURCHASE_MAP fallback → pdefault). Shared
+// by the PI APPROVED posting and the purchase-credit-note posting so a
+// supplier CN always reverses into the SAME accounts its PI debited.
+// Phase 2 (2026-06): lines typed 'TAX' go to 706-0000 SST CHARGES —
+// Malaysian SST is single-stage with no input credit, so supplier-billed
+// tax is a manufacturing COST (matches the owner's P&L sample), not a
+// recoverable asset.
+export async function mapPurchaseLinesToAccounts(
+  db: Env["Variables"]["DB"],
+  lines: { mc: string | null; amt: number; lt: string }[],
+): Promise<{ bucket: Record<string, number>; pdefault: string }> {
+  const rmRes = await db
+    .prepare("SELECT * FROM raw_materials")
+    .all<Record<string, unknown>>();
+  const grpByCode = new Map<string, string>();
+  for (const r of rmRes.results ?? []) {
+    const code = String(r.item_code ?? r.itemCode ?? "");
+    const grp = String(r.item_group ?? r.itemGroup ?? "");
+    if (code) grpByCode.set(code, grp);
+  }
+  let pmap: Record<string, string> = {};
+  let pdefault = DEFAULT_PURCHASE_ACCT;
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("coa_stock_map")
+      .first<{ value: string }>();
+    const m = JSON.parse(row?.value ?? "null") as {
+      rm?: Record<string, { purchase?: string }>;
+      rmDefault?: { purchase?: string };
+    } | null;
+    if (m?.rmDefault?.purchase) pdefault = m.rmDefault.purchase;
+    if (m?.rm)
+      for (const [g, v] of Object.entries(m.rm))
+        if (v?.purchase) pmap[g] = v.purchase;
+  } catch {
+    pmap = {};
+  }
+  const bucket: Record<string, number> = {};
+  for (const ln of lines) {
+    if (ln.lt === "TAX") {
+      bucket["706-0000"] = (bucket["706-0000"] ?? 0) + (Number(ln.amt) || 0);
+      continue;
+    }
+    const grp = ln.mc ? grpByCode.get(ln.mc) ?? "" : "";
+    const acct =
+      (grp && (pmap[grp] ?? DEFAULT_PURCHASE_MAP[grp])) || pdefault;
+    bucket[acct] = (bucket[acct] ?? 0) + (Number(ln.amt) || 0);
+  }
+  return { bucket, pdefault };
+}
+
 const app = new Hono<Env>();
 
 type PurchaseInvoiceRow = {
@@ -633,50 +687,10 @@ app.put("/:id", async (c) => {
               amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
               lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
             }));
-        const rmRes = await db
-          .prepare("SELECT * FROM raw_materials")
-          .all<Record<string, unknown>>();
-        const grpByCode = new Map<string, string>();
-        for (const r of rmRes.results ?? []) {
-          const code = String(r.item_code ?? r.itemCode ?? "");
-          const grp = String(r.item_group ?? r.itemGroup ?? "");
-          if (code) grpByCode.set(code, grp);
-        }
-        let pmap: Record<string, string> = {};
-        let pdefault = DEFAULT_PURCHASE_ACCT;
-        try {
-          const row = await db
-            .prepare("SELECT value FROM kv_config WHERE key = ?")
-            .bind("coa_stock_map")
-            .first<{ value: string }>();
-          const m = JSON.parse(row?.value ?? "null") as {
-            rm?: Record<string, { purchase?: string }>;
-            rmDefault?: { purchase?: string };
-          } | null;
-          if (m?.rmDefault?.purchase) pdefault = m.rmDefault.purchase;
-          if (m?.rm)
-            for (const [g, v] of Object.entries(m.rm))
-              if (v?.purchase) pmap[g] = v.purchase;
-        } catch {
-          pmap = {};
-        }
-        const bucket: Record<string, number> = {};
-        for (const ln of lines) {
-          // Phase 2 (2026-06) — input SST. Malaysian SST is single-stage
-          // with NO input credit: tax a supplier bills us is a COST, not a
-          // recoverable asset. A PI line typed 'TAX' therefore posts to
-          // 706-0000 SST CHARGES (inside manufacturing cost — exactly the
-          // owner's P&L sample), instead of being lumped into the default
-          // purchase account like before.
-          if (ln.lt === "TAX") {
-            bucket["706-0000"] = (bucket["706-0000"] ?? 0) + (Number(ln.amt) || 0);
-            continue;
-          }
-          const grp = ln.mc ? grpByCode.get(ln.mc) ?? "" : "";
-          const acct =
-            (grp && (pmap[grp] ?? DEFAULT_PURCHASE_MAP[grp])) || pdefault;
-          bucket[acct] = (bucket[acct] ?? 0) + (Number(ln.amt) || 0);
-        }
+        const { bucket, pdefault } = await mapPurchaseLinesToAccounts(
+          db,
+          lines,
+        );
         const apTotal = Math.round(Number(merged.amountSen) || 0);
         const sumLines = Object.values(bucket).reduce((s, v) => s + v, 0);
         if (sumLines !== apTotal)

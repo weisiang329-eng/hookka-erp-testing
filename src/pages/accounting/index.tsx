@@ -1689,6 +1689,52 @@ function APControlPanel() {
     closingSen: number;
     rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
   } | null>(null);
+  const { toast } = useToast();
+  const [pcns, setPcns] = useState<{ id: string; noteNumber: string; supplierName: string; date: string; reason: string; totalAmount: number; status: string }[]>([]);
+  const [showPcnForm, setShowPcnForm] = useState(false);
+  const [pcnForm, setPcnForm] = useState({ supplierId: "", reason: "", netRm: "", sstRm: "" });
+
+  const loadPcns = () => {
+    fetch("/api/accounting/purchase-credit-notes")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof pcns }>)
+      .then((j) => { if (j?.success && j.data) setPcns(j.data); })
+      .catch(() => {});
+  };
+  useEffect(loadPcns, []);
+
+  const createPcn = async () => {
+    const netSen = Math.round(Number(pcnForm.netRm) * 100);
+    const sstSen = Math.round(Number(pcnForm.sstRm || 0) * 100);
+    if (!pcnForm.supplierId) { toast.error("Select a supplier"); return; }
+    if (!(netSen > 0)) { toast.error("Net amount must be > 0"); return; }
+    const items: { description: string; quantity: number; unitPriceSen: number; lineType: string }[] = [
+      { description: pcnForm.reason || "Purchase return / credit", quantity: 1, unitPriceSen: netSen, lineType: "STOCKED" },
+    ];
+    if (sstSen > 0) items.push({ description: "SST portion", quantity: 1, unitPriceSen: sstSen, lineType: "TAX" });
+    const res = await fetch("/api/accounting/purchase-credit-notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ supplierId: pcnForm.supplierId, reason: pcnForm.reason, items }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      setShowPcnForm(false);
+      setPcnForm({ supplierId: "", reason: "", netRm: "", sstRm: "" });
+      loadPcns();
+    } else toast.error(j?.error || "Failed to create purchase CN");
+  };
+
+  const postPcn = async (id: string, noteNumber: string, amount: number) => {
+    if (!window.confirm(`Post ${noteNumber} (${formatCurrency(amount)})?\n\nDR 400-0000 Trade Creditors / CR purchase accounts — immutable ledger entries.`)) return;
+    const res = await fetch(`/api/accounting/purchase-credit-notes/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "POSTED" }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) loadPcns();
+    else toast.error(j?.error || "Failed to post purchase CN");
+  };
 
   useEffect(() => {
     fetch("/api/accounting/ap-control")
@@ -1810,6 +1856,78 @@ function APControlPanel() {
                 </tbody>
               </table>
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-semibold text-[#1F1D1B]">Purchase credit notes</h3>
+              <p className="text-xs text-[#6B7280]">Supplier returns / price credits — pure finance document; posting reverses into the same purchase accounts the PI debited (SST portion → 706-0000).</p>
+            </div>
+            <Button variant="primary" size="sm" onClick={() => setShowPcnForm(!showPcnForm)}>
+              <Plus className="h-4 w-4" /> New
+            </Button>
+          </div>
+          {showPcnForm && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end border-t border-[#F0ECE9] pt-3">
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Supplier</label>
+                <select value={pcnForm.supplierId} onChange={(e) => setPcnForm({ ...pcnForm, supplierId: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm">
+                  <option value="">— select —</option>
+                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Reason</label>
+                <input type="text" value={pcnForm.reason} onChange={(e) => setPcnForm({ ...pcnForm, reason: e.target.value })} placeholder="e.g. damaged fabric returned" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+              </div>
+              <div className="flex gap-2 items-end">
+                <div>
+                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Net (RM)</label>
+                  <input type="number" step="0.01" value={pcnForm.netRm} onChange={(e) => setPcnForm({ ...pcnForm, netRm: e.target.value })} className="w-28 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">SST (RM)</label>
+                  <input type="number" step="0.01" value={pcnForm.sstRm} onChange={(e) => setPcnForm({ ...pcnForm, sstRm: e.target.value })} className="w-24 rounded-md border border-[#E2DDD8] px-3 py-2 text-sm" />
+                </div>
+                <Button variant="primary" size="sm" onClick={createPcn}>Save</Button>
+              </div>
+            </div>
+          )}
+          {pcns.length > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">No.</th>
+                  <th className="px-3 py-2 text-left">Supplier</th>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Reason</th>
+                  <th className="px-3 py-2 text-right">Amount</th>
+                  <th className="px-3 py-2 text-right">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pcns.map((n) => (
+                  <tr key={n.id} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 font-mono text-xs">{n.noteNumber}</td>
+                    <td className="px-3 py-1.5">{n.supplierName}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.date}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.reason}</td>
+                    <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(n.totalAmount)}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      {n.status === "POSTED" ? (
+                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-[#EAF3DE] text-[#27500A] border border-[#C0DD97]">POSTED</span>
+                      ) : (
+                        <button onClick={() => postPcn(n.id, n.noteNumber, n.totalAmount)} className="text-xs text-[#6B5C32] underline decoration-dotted cursor-pointer">Post</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </CardContent>
       </Card>

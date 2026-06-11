@@ -243,7 +243,10 @@ APP_URL = "https://erp.hookka.com"
 # path (auth/forgot-password, supplier-PO, invite). Once Brevo finishes
 # its background domain authentication (~5-15 min from DNS-record-add,
 # can take up to 48h max), all outbound mail comes from @hookka.com.
-RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@hookka.com>"
+# 2026-06-11 — Display name "Hookka Industries" (owner: matches the formal
+# company name customers know; was "Hookka Manufacturing ERP"). Same
+# verified address, so no re-authentication needed on Brevo.
+RESEND_FROM_EMAIL = "Hookka Industries <noreply@hookka.com>"
 # 2026-05-31 — Per-user daily cap on AI Assistant questions. Each question is
 # a full Claude call plus a multi-step tool loop, so worst case ~RM 0.5-1 a
 # question. This bounds the worst-case daily spend per user (applies to every

@@ -34,6 +34,42 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-009 — Service orders carried NO delivery hub, so service DOs printed blank addresses (DO-2606-030)
+
+**Status:** 🟡 Fix on branch `fix/do-hub-integrity`, tests green, awaiting merge.
+**Category:** delivery-orders
+
+PL-2606-010's DROP 1 (DO-2606-030, from service order SV-2606-001) printed "Deliver to: -". Root cause was structural, not one bad row: the service chain never carried a hub. `service_orders` had no hub column; the repair POs it spawns have `salesOrderId NULL`; so the DO create path had no SO to pull a hub/address from and fell back to the customer's *default* hub (wrong branch) — and the blank-address quirk (BUG-008 below) then discarded even that address. Owner: "我们的 service 单也是要选什么顾客、什么 hub 的…它就是 sales order 来的".
+
+Fix (the hub now flows source SO/CO → service order → DO):
+- `service_orders.hubId` copied from the source order at creation (`src/api/routes/service-orders.ts` — `loadSourceOrder` returns hubId; EXTERNAL stays NULL). Runtime self-apply + migration `0158_service_orders_hub.sql`.
+- `src/api/routes/delivery-orders.ts` — `loadServiceOrderHubMeta` (stored hub first, legacy rows live-derive from the source order) feeds: the DO-create hub resolution, `validateDoComposition` (service customer/hub fold into the same one-customer/one-hub guard), and packing-list-first grouping.
+- SO + CO `PATCH /:id/hub` cascades now also move `service_orders.hubId` (with audit rows) — caught by `tests/hub-cascade-completeness.test.mjs` during the build; a hub change after a service order spawns no longer leaves it stale.
+- Pinned by `tests/service-hub-chain.test.mjs` (6 structural tests).
+
+Existing DO-2606-030 left as-is per owner ("不需要清").
+
+---
+
+## BUG-2026-06-11-008 — DO edit "Add Items" bypassed ALL composition guards → mixed-hub DO printed wrong address (DO-2606-029)
+
+**Status:** 🟡 Fix on branch `fix/do-hub-integrity`, tests green, awaiting merge.
+**Category:** delivery-orders
+
+Printed PL-2606-010 DROP 2 (DO-2606-029) was labeled "Houzs KL" but carried a Penang delivery address. The DO genuinely mixed hubs: 4 SOs → hub-h2 (Houzs PG) + 1 SO → hub-h1 (Houzs KL) in one DO. Owner: "不同 State、不同 Hub 是不能开在同一张 DO 上的,为什么他可以开出来?"
+
+Root cause: the three DO composition rules (PO delivered once / one customer / one hub, Wei Siang 2026-05-16 + 2026-05-28) lived ONLY in the create path (`createDeliveryOrderForPOs`). The edit screen's "Add Items" replaced the whole item set via PUT `/:id` with **zero** validation, and its picker listed every ready PO across all customers/states. Adding a Penang PO to a KL DO swapped the stored address while the hub label stayed KL.
+
+Fix:
+- `src/api/routes/delivery-orders.ts` — the three rules extracted into ONE shared `validateDoComposition()`; called from create AND the PUT items branch (`excludeDoId` so a DO's own POs don't trip the once-only rule). Create-path behaviour byte-identical (guard-count structural test still green); new structural test pins the edit-path call.
+- `src/pages/delivery/index.tsx` — Add Items picker now lists only ready POs of the SAME customer + SAME state as the open DO (`resolveStateCode` normalises legacy KL/PG vs canonical codes): the wrong-state row can't even be clicked.
+- Blank-address quirk: create bound `body.deliveryAddress ?? hub.address` — an explicit `""` from the caller beat the hub's real address (`??` only falls through null/undefined). Blank/whitespace now falls through to the hub address.
+- DO detail adds a "Delivery State" line (hub-sourced) and flags a blank address/state in red instead of a silent "-".
+
+Existing DO-2606-029 left as-is per owner ("不需要清"); editing it now requires removing the wrong-hub lines first (guard working as intended).
+
+---
+
 ## BUG-2026-06-11-007 — Punch GPS + selfie were STORED all along but unreadable ("No GPS"/"No photo" forever): runtime-added columns are folded-lowercase
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green, live-verified on the owner's first real phone punch). typecheck + build + suite green.

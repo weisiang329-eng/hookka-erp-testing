@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-019 — DataGrid cell content stayed clamped at the DECLARED column width — stretched columns were half dead space, grid never "fit" the page
+
+**Status:** 🟢 Fixed (2026-06-11). New tests/data-grid-fill.test.mjs structural pin + full suite green; CSS mechanism verified in headless Chrome against a structural replica of the grid markup. Real-page Chrome-MCP verify owed post-deploy.
+**Category:** ui-frontend
+
+Owner: the CN/DO grids never filled the page left-to-right — visible dead space to the right of values in every wide grid. Diagnosis overturned the audit's theory ("table does not stretch"): measured in headless Chrome, the `w-full` + `table-layout:auto` table ALREADY stretches and flexes columns proportionally to their declared `<col>` widths (declared 100/150/200 in a 1000px container render 222/333/444). The real culprit was one line lower: every body cell wrapped its content in `<div className="truncate" style={{ maxWidth: <declared px> }}>` — so when the browser flexed a column to 333px the content stayed capped at 150px, leaving the right half of EVERY stretched column as permanent dead space, keeping long values ellipsized despite the room, and parking right-aligned numbers mid-column instead of under their right-aligned header.
+
+Fix (src/components/ui/data-grid.tsx, body-cell render): width-bearing columns (declared `width` or user-resized) now clip via the `width: 0; min-width: 100%` fill — the div contributes ~nothing to the auto-layout intrinsic widths (a long value still can't balloon the column; the `<col>` width remains the floor) and then renders at 100% of the LIVE cell width. Width-less columns keep the legacy 300px cap (no `<col>` floor exists, so the fill would let them collapse to header width). Headless-Chrome replica verified all three regimes: wide container → columns flex proportionally and content fills the flexed cell (ellipsis only on true overflow); narrow container → columns hold exactly their declared minimums with the horizontal scrollbar, byte-identical to before; right-aligned cells now reach the cell edge. Resize handles / double-click reset / sticky headers + columns untouched — they read and write the same `colWidths` map the colgroup and the fill fork consume. Contract pinned regex-on-source in tests/data-grid-fill.test.mjs (colgroup floor, fill trick, resize wiring).
+
+---
+
 ## BUG-2026-06-11-017 — Working Hours dept/category still keyed by hand; owner: department QR codes + auto-fill on punch-out
 
 **Status:** 🟢 Shipped (2026-06-11). 725 tests green (12 new); typecheck green. First REAL scan + punch-out round-trip awaits a worker phone (worker PIN untestable from here) — structurally verified.

@@ -4,8 +4,8 @@ import { COMPANY } from "@/lib/constants";
 import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
 
 // ---------------------------------------------------------------------------
-// Consignment Note PDF — the CN twin of generate-do-pdf.ts ("整個 consignment
-// 要跟 SO/DO 一樣", 2026-06-11). Same A4-portrait greyscale document family:
+// Consignment Note PDF — the CN twin of generate-do-pdf.ts (owner asked for
+// full CN/DO document parity, 2026-06-11). Same A4-portrait greyscale family:
 // Hookka letterhead, reference block (deliver-to / state / dispatch info /
 // 3PL driver + lorry), items table, totals footer, signature strip, and the
 // per-page footer + "Page X of Y" stamp.

@@ -34,6 +34,23 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-007 — Punch GPS + selfie were STORED all along but unreadable ("No GPS"/"No photo" forever): runtime-added columns are folded-lowercase
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green, live-verified on the owner's first real phone punch). typecheck + build + suite green.
+**Category:** infrastructure
+
+Symptom: the owner's first real phone punch (Lim, 10:01/10:09) showed "No photo" although the camera demonstrably fired, and "No GPS" — like every punch before it (earlier off-site tests were mis-blamed on GPS permission).
+
+Root cause: the runtime-self-applied columns (clockInLat… clockInPhoto…) are created through the d1-compat adapter, whose identifier rewrite renames only STATIC-map-known words — unknown camelCase passes through unquoted and **Postgres folds it to all-lowercase** (`clockinlat`, `clockinphoto`). WRITES target the same folded names → every punch's GPS + selfie **was being stored correctly**. READS (`SELECT *`) return the folded key, all readers looked up `r.clockInLat`/`r.clockInPhoto` → undefined → null forever. (Same family as BUG-2026-06-10-001 but the read-side twin.)
+
+Fix: dual-key reads (`camel ?? folded`) in attendance.ts `rowToAttendance` + the photo endpoint, normalisation in efficiency-report's attendance fetch (OFF-SITE badge can now actually fire); migrations 0154/0156 corrected to the folded names so a tool apply stays a no-op.
+
+Verification (live, post-deploy): Lim's row now returns `hasClockInPhoto/OutPhoto: true`, the photo endpoint serves real JPEGs (36.6KB in / 45.9KB out), and stored GPS (3.0539, 101.6178 — ~15km from the fence) means the row correctly flips to **⚠ Off-site**. Camera → store → serve round-trip proven end-to-end.
+
+**RULE (adapter, now two bugs deep):** any runtime-added column lives as folded-lowercase; never read it via the camelCase key alone, never use explicit camelCase projections, and migration files must use the folded name.
+
+---
+
 ## BUG-2026-06-11-006 — "Deduct" on an under-recorded day left a ~RM5/hour residual flagged (dock rate ≠ gap rate)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green). typecheck + build + full suite green.

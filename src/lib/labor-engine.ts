@@ -31,15 +31,19 @@
 //     ("output 价变高"). Overtime inside production cost still uses the
 //     ÷26 rate — OT cost equals OT pay exactly.
 //
-// Worked example — ANN: RM2,650/mo, 26 days, 8 h/day, OT ×1.5; May 2026
-// has one public holiday (1 May):
-//   payroll day rate   = 265000 ÷ 26      ≈ 101.92 sen-RM  (RM101.92)
-//   OT hourly rate     = 265000 ÷ 26 ÷ 8 × 1.5 ≈ RM19.11
-//   production day rate= 265000 ÷ (26−1)  = RM106.00
-// Full attendance + 15 h OT → payroll gross = production cost = RM2,936.66.
+// Worked example — ANN: RM2,650/mo, 26 days, 8 h/day (span 8+1h lunch = ÷9),
+// OT ×1.5; May 2026 has two weekday public holidays (1 + 27 May):
+//   payroll day rate   = 265000 ÷ 26            ≈ RM101.92
+//   OT hourly rate     = 265000 ÷ 26 ÷ 9 × 1.5  ≈ RM16.99
+//   production day rate= 265000 ÷ 24            ≈ RM110.42
+// Full attendance + 15 h OT → payroll gross = production cost = RM2,904.81.
 // ---------------------------------------------------------------------------
 
-import { resolvePayRulesAsOf, type PayRuleVersion } from "./pay-rules";
+import {
+  resolvePayRulesAsOf,
+  type PayRuleVersion,
+  type PayRulesConfig,
+} from "./pay-rules";
 
 /** Monday(1)..Saturday(6) are working weekdays; Sunday(0) is off. */
 const WORKING_DOW: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 6]);
@@ -436,9 +440,9 @@ export type MonthlyLaborInput = {
    * Hours the owner has explicitly docked from this worker this month, set per
    * day from the Labor Cost "Under-recorded hours" review when the short time is
    * NOT to be paid (it was neither a data-entry miss to backfill nor idle-but-
-   * paid standby). Valued at the UNIFIED ÷26÷rateHoursPerDay hourly rate and
-   * subtracted from basic earned, so the under-recorded gap closes and Payroll
-   * reconciles with Labor Cost. Default 0.
+   * paid standby). Valued at the UNIFIED hourly rate (÷26 ÷ the worker's
+   * hours+lunch span) and subtracted from basic earned, so the under-recorded
+   * gap closes and Payroll reconciles with Labor Cost. Default 0.
    */
   shortHourDeductionHours?: number;
 };
@@ -479,11 +483,11 @@ export type MonthlyLaborResult = {
     basicEarnedSen: number;
     /** Overtime pay (weekday + Sunday + holiday, day-typed multipliers). */
     otPaySen: number;
-    /** Weekday OT pay = weekday OT hours × otMultiplier × (÷26÷10). */
+    /** Weekday OT pay = weekday OT hours × otMultiplier × (÷26 ÷ day-span). */
     otWeekdayPaySen: number;
-    /** Sunday OT pay = all Sunday hours × 2 × (÷26÷10). */
+    /** Sunday OT pay = all Sunday hours × 2 × (÷26 ÷ day-span). */
     otSundayPaySen: number;
-    /** Public-holiday OT pay = all holiday hours × 3 × (÷26÷10). */
+    /** Public-holiday OT pay = all holiday hours × 3 × (÷26 ÷ day-span). */
     otHolidayPaySen: number;
     /** Gross = basic earned + OT (before EPF/SOCSO/EIS/PCB). */
     grossSen: number;
@@ -582,8 +586,10 @@ export function computeMonthlyLabor(
   // Two divisors, on purpose — UNIFIED ÷26 model (owner 2026-06-11):
   //   • PAYROLL (absence, late/short docks, the OT base) → ÷ the nominal
   //     workingDaysPerMonth (26, per-worker): ONE contractual day rate for
-  //     everything money-side. Hourly rates divide it again by rateHoursPerDay
-  //     (10, the 08:00–18:00 shift span) — RM78.85/day, RM7.88/h on RM2,050.
+  //     everything money-side. Hourly rates divide it again by the worker's
+  //     day SPAN = daily working hours + lunch (9h+1h = ÷10 → RM78.85/day,
+  //     RM7.88/h on RM2,050; a 7.5h worker → ÷8.5). rateHoursPerDay is only
+  //     the fallback for workers with no hours set.
   //     Join/resign is NOT a proration: unworked working days (pre-join and
   //     post-resign included) just count and dock as absences.
   //   • PRODUCTION COST → ÷ the ACTUAL working days in THIS calendar month
@@ -599,8 +605,8 @@ export function computeMonthlyLabor(
     countElapsedWorkingDays(year, month, new Date(year, month, 0).getDate(), publicHolidays),
   );
 
-  // The 9 PAYABLE hours (workingHoursPerDay) stays the OT THRESHOLD only —
-  // it never enters a pay rate.
+  // workingHoursPerDay is the OT THRESHOLD and (plus lunch) the hourly-rate
+  // divisor; it never divides the DAY rate (that's always ÷26).
   const daysInMonth = new Date(year, month, 0).getDate();
   // Effective-dated pay rules (owner 2026-06-11): day-level maths resolve the
   // rules in force ON each date; month-level rates (the display OT rate + the
@@ -612,8 +618,19 @@ export function computeMonthlyLabor(
     resolvePayRulesAsOf(input.payRuleVersions, date);
   const cfgMonthEnd = rulesAt(monthEndYmd);
   const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — THE unified payroll day rate
+  // Hourly divisor (owner 2026-06-11): the worker's OWN day span — their daily
+  // working hours + the unpaid lunch (9h + 1h = ÷10; 7.5h → ÷8.5; 8h → ÷9).
+  // A worker with no hours set falls back to the rules' rateHoursPerDay (10).
+  // Lunch is effective-dated, so the divisor resolves per date like the rest.
+  const hourDivisorAt = (cfg: PayRulesConfig): number =>
+    Math.max(
+      1,
+      workingHoursPerDay > 0
+        ? workingHoursPerDay + cfg.lunchMin / 60
+        : cfg.rateHoursPerDay,
+    );
   const otBaseHourlyRateSen =
-    payrollDailyRateSen / Math.max(1, cfgMonthEnd.rateHoursPerDay); // ÷26÷10, before the day multiplier
+    payrollDailyRateSen / hourDivisorAt(cfgMonthEnd); // ÷26 ÷ day-span, before the day multiplier
   const otHourlyRateSen = otBaseHourlyRateSen * otMultiplier; // weekday OT rate (÷26÷10×mult) — back-compat
   // Unified ÷26 (owner 2026-06-11): the late/short hourly rate uses the SAME
   // ÷26 base as OT (was ÷calendar÷10).
@@ -632,7 +649,7 @@ export function computeMonthlyLabor(
     const [py, pm, pd] = date.split("-").map(Number);
     const pdow = new Date(py, (pm || 1) - 1, pd || 1).getDay();
     const cfg = rulesAt(date);
-    const base = payrollDailyRateSen / Math.max(1, cfg.rateHoursPerDay);
+    const base = payrollDailyRateSen / hourDivisorAt(cfg);
     if (pdow === 0) {
       otSundayPayExact += h * base * cfg.sundayOtMultiplier;
     } else if (holidaySet.has(date)) {

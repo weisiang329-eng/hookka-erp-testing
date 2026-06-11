@@ -138,6 +138,17 @@ function dayTypedOt(
     return { otHours: totalH, mult: cfg.holidayOtMultiplier };
   return { otHours: Math.max(0, totalH - stdHours), mult: weekdayMult };
 }
+// Hourly-rate divisor (owner 2026-06-11): the worker's own day SPAN — daily
+// working hours + the unpaid lunch (9h+1h = ÷10; 7.5h → ÷8.5); a worker with
+// no hours set falls back to the rules' rateHoursPerDay. MUST mirror the
+// engine's hourDivisorAt so the recon bridges price docks exactly like pay.
+function hourDivisorFor(
+  workingHoursPerDay: number | null | undefined,
+  cfg: PayRulesConfig,
+): number {
+  const h = Number(workingHoursPerDay) || 0;
+  return Math.max(1, h > 0 ? h + cfg.lunchMin / 60 : cfg.rateHoursPerDay);
+}
 // Shared fetch of the effective-dated pay-rule versions (cached).
 function usePayRuleVersions(): PayRuleVersion[] {
   const { data } = useCachedJson<{ data?: { versions?: PayRuleVersion[] } }>(
@@ -4490,8 +4501,11 @@ function DepartmentLaborTab({
             lateAdj = Math.max(
               0,
               Math.round((dockH * S) / actualWorkingDays / owStd) -
-                // UNIFIED ÷26 dock rate (owner 2026-06-11), same as the engine.
-                Math.round((dockH * S) / owDays / Math.max(1, cfgDeptEnd.rateHoursPerDay)),
+                // UNIFIED ÷26 dock rate (owner 2026-06-11), same as the engine:
+                // ÷26 ÷ the worker's day span (hours + lunch).
+                Math.round(
+                  (dockH * S) / owDays / hourDivisorFor(ow?.workingHoursPerDay, cfgDeptEnd),
+                ),
             );
           }
           // Exclude the efficiency allowance (a flat bonus, not logged hours) so
@@ -6452,7 +6466,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       sections: [
         s("1. Daily & hourly rates (one fixed divisor: 26)", [
           { item: "Day rate", rule: "Monthly salary ÷ 26 — the same divisor every month, used for absences", example: "2,050 ÷ 26 = RM78.85 / day" },
-          { item: "Hour rate", rule: "Day rate ÷ 10 — used for lateness, short hours AND the overtime base", example: "78.85 ÷ 10 = RM7.88 / hour" },
+          { item: "Hour rate", rule: "Day rate ÷ (the worker's daily hours + 1h lunch) — 9h day → ÷10, 7.5h → ÷8.5 · used for lateness, short hours AND the overtime base", example: "78.85 ÷ 10 = RM7.88 / hour (9h worker)" },
           { item: "Production cost day rate", rule: "Monthly salary ÷ working days of the month (internal costing only — never changes pay)", example: "2,050 ÷ 25 = RM82.00 / day" },
         ]),
         s("2. Working hours from the punch clock", [
@@ -6933,16 +6947,20 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             <div className="px-3 pb-3">
             <div className="grid grid-cols-1 gap-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
               <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Daily & hourly rate (the base for everything)</p>
+                <p><b>Daily rate = salary ÷ 26</b> — always 26 (the worker&rsquo;s &ldquo;Working days/month&rdquo;, Employee Master), never 30/31 or the month&rsquo;s actual count. <b>Hourly rate = daily rate ÷ (the worker&rsquo;s daily hours + {(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)</b>: 9h day → ÷10 · 7.5h → ÷8.5. Example RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b>. These two rates price absence, lateness, OT and join/resign missed days.</p>
+              </div>
+              <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Shift & working hours</p>
                 <p>Shift {minToHhmm(payRulesToday.shiftStartMin)}–{minToHhmm(payRulesToday.shiftEndMin)} · {payRulesToday.lunchMin} min unpaid lunch = <b>{((payRulesToday.shiftEndMin - payRulesToday.shiftStartMin - payRulesToday.lunchMin) / 60).toFixed(1)}h standard day</b> · Working days Mon–Sat (excluding public holidays). Hours auto-fill from the punch clock.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Lateness</p>
-                <p>≤{payRulesToday.lateGraceMin} min forgiven · beyond that, lateness rounds <b>UP</b> in {payRulesToday.lateBlockMin}-min blocks · deducted at salary ÷ 26 ÷ {payRulesToday.rateHoursPerDay} · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
+                <p>≤{payRulesToday.lateGraceMin} min forgiven · beyond that, lateness rounds <b>UP</b> in {payRulesToday.lateBlockMin}-min blocks · deducted at <b>the hourly rate</b> (see Daily & hourly rate) · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Overtime</p>
-                <p>After {minToHhmm(payRulesToday.shiftEndMin)} only, 15-min blocks (floors) · base = salary ÷ 26 ÷ {payRulesToday.rateHoursPerDay} · <b>Weekday ×worker&rsquo;s multiplier</b> (Employee Master) · <b>Sunday {payRulesToday.sundayOtMultiplier}×</b> / <b>Public Holiday {payRulesToday.holidayOtMultiplier}×</b> on every hour of the day.</p>
+                <p>After {minToHhmm(payRulesToday.shiftEndMin)} only, 15-min blocks (floors) · base = <b>the hourly rate</b> · <b>Weekday ×worker&rsquo;s multiplier</b> (Employee Master) · <b>Sunday {payRulesToday.sundayOtMultiplier}×</b> / <b>Public Holiday {payRulesToday.holidayOtMultiplier}×</b> on every hour of the day.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Absence & join/resign</p>
@@ -6974,7 +6992,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                   {payRuleVersionList.map((v) => (
                     <div key={v.id} className="flex items-center justify-between gap-2 rounded bg-white px-2 py-1">
                       <span>
-                        <b>From {v.effectiveFrom}</b> — Sun {v.rules.sundayOtMultiplier}× · PH {v.rules.holidayOtMultiplier}× · grace {v.rules.lateGraceMin}m · block {v.rules.lateBlockMin}m · ÷{v.rules.rateHoursPerDay} · lunch {v.rules.lunchMin}m · {minToHhmm(v.rules.shiftStartMin)}–{minToHhmm(v.rules.shiftEndMin)}
+                        <b>From {v.effectiveFrom}</b> — Sun {v.rules.sundayOtMultiplier}× · PH {v.rules.holidayOtMultiplier}× · grace {v.rules.lateGraceMin}m · block {v.rules.lateBlockMin}m · fallback ÷{v.rules.rateHoursPerDay} · lunch {v.rules.lunchMin}m · {minToHhmm(v.rules.shiftStartMin)}–{minToHhmm(v.rules.shiftEndMin)}
                         {v.note ? <span className="text-[#9CA3AF]"> · {v.note}</span> : null}
                       </span>
                       {v.effectiveFrom > new Date().toISOString().slice(0, 10) && (
@@ -7001,7 +7019,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                       ["lunchMin", "Lunch (min)", "number"],
                       ["lateGraceMin", "Late grace (min)", "number"],
                       ["lateBlockMin", "Late block (min)", "number"],
-                      ["rateHoursPerDay", "Hour divisor (÷)", "number"],
+                      ["rateHoursPerDay", "Hour divisor (fallback ÷)", "number"],
                       ["sundayOtMultiplier", "Sunday OT ×", "number"],
                       ["holidayOtMultiplier", "Holiday OT ×", "number"],
                       ["absenceGraceWorkingDays", "Absence grace (working days)", "number"],
@@ -7992,13 +8010,13 @@ function LaborCostTab({
       const S = Number(p.basicSalary) || 0;
       const costEquivalentSen = Math.round((h * S) / aWD / std);
       // Same formula the engine docks with — UNIFIED ÷26 (owner 2026-06-11):
-      // (salary ÷ workingDaysPerMonth) ÷ the effective-dated hour divisor.
+      // (salary ÷ workingDaysPerMonth) ÷ the worker's day span (hours + lunch).
       const wDays = w && w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const cfgDock = resolvePayRulesAsOf(
         payRuleVersions,
         `${(period || from).slice(0, 7)}-${String(calDays).padStart(2, "0")}`,
       );
-      const dockSen = Math.round((h * S) / wDays / Math.max(1, cfgDock.rateHoursPerDay));
+      const dockSen = Math.round((h * S) / wDays / hourDivisorFor(w?.workingHoursPerDay, cfgDock));
       const adj = Math.max(0, costEquivalentSen - dockSen);
       if (adj > 0) m.set(p.id, adj);
     }

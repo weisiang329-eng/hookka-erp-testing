@@ -13,7 +13,9 @@
 // NOT configurable here (structural, by the owner's own specs):
 //   • the UNIFIED ÷26 day-rate divisor (per-worker workingDaysPerMonth in
 //     Employee Master) — absences, late/short docks and the OT base all
-//     dock/pay salary ÷ 26 (÷ rateHoursPerDay for the hourly rates)
+//     dock/pay salary ÷ 26; HOURLY rates divide again by the worker's own
+//     day span (daily hours + lunch — Employee Master), with rateHoursPerDay
+//     as the fallback when hours are unset
 //   • the per-worker weekday OT multiplier (also Employee Master)
 //
 // Shared by frontend AND backend so the grid, the engine, the auto-dock and
@@ -33,7 +35,9 @@ export type PayRulesConfig = {
   lateGraceMin: number;
   /** Penal lateness rounds UP to blocks of this many minutes (15). */
   lateBlockMin: number;
-  /** Hour divisor for OT + late/short rates: rate = day-rate ÷ this (10). */
+  /** FALLBACK hour divisor for OT + late/short rates, used only when a worker
+   *  has no daily hours set. Normally the divisor is the worker's own day
+   *  span: daily working hours + lunch (9h + 1h = ÷10; 7.5h → ÷8.5). */
   rateHoursPerDay: number;
   /** Sunday work: every hour × this (2). */
   sundayOtMultiplier: number;

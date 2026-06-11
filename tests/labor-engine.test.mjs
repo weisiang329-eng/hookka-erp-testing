@@ -7,6 +7,8 @@
 // figure silently disagrees. Lock the numbers in here.
 //
 // Reference worker throughout: ANN — RM2,650/mo, 26 days, 8 h/day, OT ×1.5.
+// Hourly divisor = her day SPAN: 8h + 1h lunch = ÷9 (owner 2026-06-11 — the
+// fixed ÷10 only remains as the fallback for workers with no hours set).
 // Reference month: May 2026. Its public holidays — verified against the
 // live kv_config['public_holidays'] on 2026-05-22 — are 1 May (Friday) and
 // 27 May (Wednesday): two working-weekday holidays, so May has 24 working
@@ -133,15 +135,15 @@ test("computeMonthlyLabor: ANN full attendance — rates", () => {
     Math.abs(r.costingDailyRateSen - 265_000 / 24) < 1e-6,
     `production day rate ${r.costingDailyRateSen}`,
   );
-  // OT hourly per the owner spec = (salary ÷ 26 work days) ÷ 10 × 1.5 ≈ 1528.85 sen.
-  // (÷10 = the 08:00–18:00 shift span, NOT the 8h OT threshold.)
+  // OT hourly = (salary ÷ 26) ÷ HER day span (8h + 1h lunch = 9) × 1.5
+  // ≈ 1698.72 sen. (The span divides the HOURLY rate; 8h stays the OT threshold.)
   assert.ok(
-    Math.abs(r.otHourlyRateSen - (265_000 / 26 / 10) * 1.5) < 1e-6,
+    Math.abs(r.otHourlyRateSen - (265_000 / 26 / 9) * 1.5) < 1e-6,
     `OT hourly ${r.otHourlyRateSen}`,
   );
 });
 
-test("computeMonthlyLabor: ANN full attendance — payroll = RM2,879.33 (OT ÷26÷10)", () => {
+test("computeMonthlyLabor: ANN full attendance — payroll = RM2,904.81 (OT ÷26÷span 9)", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -154,15 +156,15 @@ test("computeMonthlyLabor: ANN full attendance — payroll = RM2,879.33 (OT ÷26
   assert.equal(r.payroll.absentDays, 0);
   assert.equal(r.payroll.absenceDeductionSen, 0);
   assert.equal(r.payroll.basicEarnedSen, 265_000);
-  assert.equal(r.payroll.otPaySen, 22_933); // 15h × (265000/26/10)×1.5 = 1528.85 → 22933
-  assert.equal(r.payroll.grossSen, 287_933); // 265000 + 22933 → RM2,879.33
+  assert.equal(r.payroll.otPaySen, 25_481); // 15h × (265000/26/9)×1.5 = 1698.72 → 25481
+  assert.equal(r.payroll.grossSen, 290_481); // 265000 + 25481 → RM2,904.81
 });
 
 // ── computeMonthlyLabor: day-typed OT — Sunday 2× / public holiday 3× ────────
 // Owner spec 2026-06-10: a worker who comes in on a rest day (Sunday) or a
 // public holiday is paid the premium on EVERY hour from the first; weekday OT
 // stays "hours above the standard day" at the per-worker multiplier (1.5×).
-// ANN base OT hour = 265000 ÷ 26 ÷ 10 = 1019.2308 sen.
+// ANN base OT hour = 265000 ÷ 26 ÷ 9 (her 8h + 1h lunch span) = 1132.4786 sen.
 
 test("day-typed OT: weekday-only worker is unchanged + correctly bucketed", () => {
   const r = labor.computeMonthlyLabor({
@@ -173,10 +175,10 @@ test("day-typed OT: weekday-only worker is unchanged + correctly bucketed", () =
   assert.equal(r.otSundayHours, 0);
   assert.equal(r.otHolidayHours, 0);
   assert.equal(r.otHours, 15);
-  assert.equal(r.payroll.otWeekdayPaySen, 22_933);
+  assert.equal(r.payroll.otWeekdayPaySen, 25_481);
   assert.equal(r.payroll.otSundayPaySen, 0);
   assert.equal(r.payroll.otHolidayPaySen, 0);
-  assert.equal(r.payroll.otPaySen, 22_933); // identical to the flat-1.5× result
+  assert.equal(r.payroll.otPaySen, 25_481); // identical to the flat-1.5× result
 });
 
 test("day-typed OT: Sunday work is the WHOLE day at 2× (from hour 1)", () => {
@@ -190,9 +192,9 @@ test("day-typed OT: Sunday work is the WHOLE day at 2× (from hour 1)", () => {
   assert.equal(r.otWeekdayHours, 0);
   assert.equal(r.otHolidayHours, 0);
   assert.equal(r.otHours, 8);
-  // 8h × 1019.2308 × 2 = 16307.69 → 16308 sen.
-  assert.equal(r.payroll.otSundayPaySen, 16_308);
-  assert.equal(r.payroll.otPaySen, 16_308);
+  // 8h × 1132.4786 × 2 = 18119.66 → 18120 sen.
+  assert.equal(r.payroll.otSundayPaySen, 18_120);
+  assert.equal(r.payroll.otPaySen, 18_120);
 });
 
 test("day-typed OT: public-holiday work is the WHOLE day at 3×", () => {
@@ -206,9 +208,9 @@ test("day-typed OT: public-holiday work is the WHOLE day at 3×", () => {
   assert.equal(r.otSundayHours, 0);
   assert.equal(r.otWeekdayHours, 0);
   assert.equal(r.otHours, 8);
-  // 8h × 1019.2308 × 3 = 24461.54 → 24462 sen.
-  assert.equal(r.payroll.otHolidayPaySen, 24_462);
-  assert.equal(r.payroll.otPaySen, 24_462);
+  // 8h × 1132.4786 × 3 = 27179.49 → 27179 sen.
+  assert.equal(r.payroll.otHolidayPaySen, 27_179);
+  assert.equal(r.payroll.otPaySen, 27_179);
 });
 
 test("day-typed OT: a public holiday that falls on a Sunday counts as Sunday (2×)", () => {
@@ -220,8 +222,8 @@ test("day-typed OT: a public holiday that falls on a Sunday counts as Sunday (2�
   });
   assert.equal(r.otSundayHours, 8);
   assert.equal(r.otHolidayHours, 0);
-  assert.equal(r.payroll.otSundayPaySen, 16_308); // 2×, not 3×
-  assert.equal(r.payroll.otPaySen, 16_308);
+  assert.equal(r.payroll.otSundayPaySen, 18_120); // 2×, not 3×
+  assert.equal(r.payroll.otPaySen, 18_120);
 });
 
 test("day-typed OT: a mixed month sums weekday + Sunday + holiday", () => {
@@ -238,13 +240,13 @@ test("day-typed OT: a mixed month sums weekday + Sunday + holiday", () => {
   assert.equal(r.otSundayHours, 8);
   assert.equal(r.otHolidayHours, 8);
   assert.equal(r.otHours, 19);
-  assert.equal(r.payroll.otWeekdayPaySen, 4_587); // 3 × 1528.846 → 4587
-  assert.equal(r.payroll.otSundayPaySen, 16_308); // 8 × 2038.462 → 16308
-  assert.equal(r.payroll.otHolidayPaySen, 24_462); // 8 × 3057.692 → 24462
-  assert.equal(r.payroll.otPaySen, 45_357);
+  assert.equal(r.payroll.otWeekdayPaySen, 5_096); // 3 × 1698.718 → 5096
+  assert.equal(r.payroll.otSundayPaySen, 18_120); // 8 × 2264.957 → 18120
+  assert.equal(r.payroll.otHolidayPaySen, 27_179); // 8 × 3397.436 → 27179
+  assert.equal(r.payroll.otPaySen, 50_395);
 });
 
-test("computeMonthlyLabor: ANN full attendance — production cost = RM2,879.33 (OT cost = OT pay)", () => {
+test("computeMonthlyLabor: ANN full attendance — production cost = RM2,904.81 (OT cost = OT pay)", () => {
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -255,8 +257,8 @@ test("computeMonthlyLabor: ANN full attendance — production cost = RM2,879.33 
   });
   // 24 days × (265000/24) = 265000 sen exactly.
   assert.equal(r.cost.regularCostSen, 265_000);
-  assert.equal(r.cost.otCostSen, 22_933); // identical to payroll OT (now ÷26÷10)
-  assert.equal(r.cost.totalCostSen, 287_933); // RM2,879.33
+  assert.equal(r.cost.otCostSen, 25_481); // identical to payroll OT (÷26÷span 9)
+  assert.equal(r.cost.totalCostSen, 290_481); // RM2,904.81
 });
 
 test("computeMonthlyLabor: full attendance — payroll gross equals production cost", () => {
@@ -289,7 +291,7 @@ test("computeMonthlyLabor: ANN absent 2 days — UNIFIED ÷26 dock; signed gap v
   // uses: 2 × 265000/26 = 20384.6 → 20385 sen.
   assert.equal(r.payroll.absenceDeductionSen, 20_385);
   assert.equal(r.payroll.basicEarnedSen, 244_615); // 265000 − 20385
-  assert.equal(r.payroll.grossSen, 267_548); // 244615 + 22933 (OT ÷26÷10)
+  assert.equal(r.payroll.grossSen, 270_096); // 244615 + 25481 (OT ÷26÷span 9)
   // Cost removes the 2 unworked days at the ÷working-days rate (÷24 in May);
   // the dock(÷26)-vs-cost(÷24) difference per absent day is the signed
   // absence bridge on the Labor Cost screen: 244615 − 242917 = 1698 sen.
@@ -347,10 +349,10 @@ test("join mid-month worked example (UNIFIED ÷26): RM4,000, joins 22 May, works
   assert.equal(r.cost.regularCostSen, Math.round(7 * (400_000 / 24)));
 });
 
-test("computeMonthlyLabor: short-hour deduction docks the UNIFIED ÷26÷10 hourly rate", () => {
+test("computeMonthlyLabor: short-hour deduction docks the UNIFIED ÷26÷span hourly rate", () => {
   // ANN full attendance, but the owner docks 5 unworked hours (under-recorded
-  // review). UNIFIED rate = (265000/26)/10 = 1019.23 sen/h — the SAME base the
-  // OT rate uses; 5h → 5096 sen.
+  // review). UNIFIED rate = (265000/26)/9 = 1132.48 sen/h (her 8h+1h span) —
+  // the SAME base the OT rate uses; 5h → 5662 sen.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -360,9 +362,9 @@ test("computeMonthlyLabor: short-hour deduction docks the UNIFIED ÷26÷10 hourl
     absenceThroughDay: 31,
     shortHourDeductionHours: 5,
   });
-  assert.equal(r.payroll.shortHourDeductionSen, 5_096); // 5 × (265000/26)/10
-  assert.equal(r.payroll.basicEarnedSen, 265_000 - 5_096); // full salary − dock
-  assert.equal(r.payroll.grossSen, 265_000 - 5_096 + 22_933); // + OT (÷26÷10)
+  assert.equal(r.payroll.shortHourDeductionSen, 5_662); // 5 × (265000/26)/9
+  assert.equal(r.payroll.basicEarnedSen, 265_000 - 5_662); // full salary − dock
+  assert.equal(r.payroll.grossSen, 265_000 - 5_662 + 25_481); // + OT (÷26÷span 9)
   // The dock does not touch production cost — that stays hours/day based.
   assert.equal(r.cost.regularCostSen, 265_000);
 });
@@ -378,7 +380,7 @@ test("computeMonthlyLabor: ANN absent 2 days — production cost is days-worked 
   });
   // 22 days × (265000/24) = 242916.67 → 242917 sen.
   assert.equal(r.cost.regularCostSen, 242_917);
-  assert.equal(r.cost.totalCostSen, 265_850); // 242917 + 22933 (OT ÷26÷10)
+  assert.equal(r.cost.totalCostSen, 268_398); // 242917 + 25481 (OT ÷26÷span 9)
 });
 
 // ── Holiday effect ──────────────────────────────────────────────────────────
@@ -842,7 +844,7 @@ test("Sunday work does NOT mask a weekday absence (pure 2x OT; absence still doc
   assert.equal(r.payroll.absentDays, 1);
   assert.equal(r.payroll.absenceDeductionSen, Math.round(265000 / 26));
   assert.equal(r.otSundayHours, 8);
-  const otBase = 265000 / 26 / 10;
+  const otBase = 265000 / 26 / 9; // ANN's span: 8h + 1h lunch
   assert.equal(r.payroll.otPaySen, Math.round(8 * otBase * 2));
   assert.equal(r.cost.regularCostSen, Math.round(23 * (265000 / 24)));
 });

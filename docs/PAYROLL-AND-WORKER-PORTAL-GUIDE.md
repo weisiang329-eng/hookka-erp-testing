@@ -56,9 +56,10 @@ Workers log in with their employee PIN at `/worker`. Pages:
 | Late grace | First 10 minutes forgiven |
 | Lateness rounding | Rounds **UP** in 15-min blocks (08:11 → 15 min late) |
 | Day rate (unified) | Salary ÷ **26** — the same fixed divisor every month, for every money rule below |
-| Late/short rate | Salary ÷ 26 ÷ 10 (= the OT base rate — one hourly rate) |
+| Hour rate (unified) | Day rate ÷ **(the worker's daily hours + 1 h lunch)** — 9 h day → ÷10, 8 h → ÷9, 7.5 h → ÷8.5. ONE hourly rate for lateness, short hours and the OT base |
+| Late/short rate | = the hour rate |
 | OT window | After 18:00 only, 15-min blocks (must fill a block: 16–29 → 15) |
-| OT base rate | Salary ÷ 26 ÷ 10 |
+| OT base rate | = the hour rate |
 | OT multipliers | Weekday 1.5× (per-worker) · **Sunday 2×** · **Public holiday 3×** (whole day counts as OT on Sun/PH) |
 | OT offsets lateness | Same-day OT covers the late/short gap 1:1 first; only the remainder is docked |
 | Absence | − salary ÷ 26 per confirmed absent working day; a blank day is "Pending" for 2 working days before it becomes an absence; backfilling the hours removes it automatically |
@@ -71,13 +72,14 @@ Maintained where:
   working-day counts).
 - **Salary (with effective date), OT multiplier, hours/day, statutory
   toggles, efficiency allowance** → Employee Master.
-- **Shift times, lunch, late grace/blocks, the ÷10 hour divisor, Sunday /
+- **Shift times, lunch, late grace/blocks, the fallback hour divisor, Sunday /
   holiday multipliers, absence grace, statutory rates** → the **Pay Rules
   panel** on the Payroll tab. Changes are scheduled with an effective date
   (history is kept; past months keep the rules that were in force).
-- The ÷26 day-rate divisor itself is per-worker (Employee Master,
-  "working days per month") and the weekday OT multiplier is per-worker —
-  everything else above is engine-locked (tested).
+- The ÷26 day-rate divisor (Employee Master "working days per month"), the
+  daily hours that set the hour divisor (Employee Master "hours/day" + lunch)
+  and the weekday OT multiplier are all per-worker — everything else above is
+  engine-locked (tested).
 
 ---
 

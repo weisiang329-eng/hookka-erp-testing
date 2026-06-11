@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-012 — Hourly rate divisor was a fixed ÷10 for everyone; owner: divide by EACH worker's day span (daily hours + lunch)
+
+**Status:** 🟢 Shipped + verified live (2026-06-11). Owner: "有些人的工作时间是 9 个小时,有些是 7.5 个小时…拿总数除以 26 天,再除以他的工作时间加休息时间 (9+1 或 8+1)". 710/711 tests; typecheck green.
+**Category:** ui-frontend
+
+The unified hourly rate (late/short docks + the OT base, weekday × multiplier / Sunday ×2 / holiday ×3) divided salary÷26 by a fixed **÷10** (the global `rateHoursPerDay` knob) regardless of the worker's actual day. A 7.5-hour worker was priced as if they worked a 10-hour span — under-paying their OT hour and under-docking their late hour.
+
+Now: **hourly = (salary ÷ 26) ÷ (the worker's daily working hours + lunch)** — 9 h → ÷10 (unchanged), 8 h → ÷9, 7.5 h → ÷8.5. Hours come from Employee Master ("hours/day"); lunch from the effective-dated pay rules (60 min), so the divisor resolves per date like every other day-level rule. `rateHoursPerDay` remains only as the FALLBACK for workers with no hours set (relabelled "Hour divisor (fallback ÷)" in the editor). Prod impact at ship time: 30 active workers at 9 h (rates unchanged), 1 at 7.5 h (now correctly ÷8.5), 3 unset (fallback, unchanged).
+
+Fix: `src/lib/labor-engine.ts` `hourDivisorAt(cfg)` (per-date, used by the OT money loop + the month-end late/short rate), `src/pages/employees.tsx` `hourDivisorFor()` mirrored in BOTH late-dock recon bridges + a new **"Daily & hourly rate"** box in the Pay Rules panel (the owner's ask: the panel now states daily = ÷26 — never 30/31 or the month's actual count — and exactly how the hourly is derived, with the RM2,050 example), Calculation Guide print + `docs/PAYROLL-AND-WORKER-PORTAL-GUIDE.md` reworded. Tests: 13 re-pinned to ANN's 8h fixture (span ÷9) + a new span/fallback/lunch-change test in `tests/pay-rules.test.mjs`.
+
+---
+
 ## BUG-2026-06-11-011 — Pay maths used THREE day-divisors (÷26, ÷calendar 30/31, ÷actual-working-days); owner unified everything payroll-side on ÷26
 
 **Status:** 🟢 Shipped + verified live (2026-06-11). Owner directive: "缺席、OT 和迟到,统统都用一个月 26 天来计算…新入职/离职:没来上班的日子就当作缺席处理" + "/26 /10 來計算 hourly rate 和 daily rate". 709/710 tests (1 pre-existing skip); typecheck green.

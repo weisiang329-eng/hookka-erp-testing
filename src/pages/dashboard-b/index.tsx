@@ -1071,7 +1071,7 @@ export default function DashboardBPage() {
         <KTile
           label={deliveredLabel}
           value={rm(
-            ov.deliveredThisMonthSen +
+            (ov.deliveredThisMonthSen ?? 0) +
               (isPastMonth ? 0 : dispatchChain.inTransitSen),
           )}
           sub={

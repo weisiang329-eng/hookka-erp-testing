@@ -33,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
 import {
   Package,
   PackageCheck,
@@ -1469,6 +1470,63 @@ export default function ConsignmentNotePage() {
     [fetchData, toast],
   );
 
+  // ---------- Print / View CN PDF ----------
+  // Mirrors DO's printDOPdf: lazy-import the PDF lib so jsPDF stays out of
+  // the page bundle, build the print payload from the row plus the cached
+  // customer-hub + provider lookups (CN has no /print-extras endpoint —
+  // everything the document needs is already client-side), then download
+  // ("download") or open on screen ("view"). Replaces the old "Print CN —
+  // coming soon" toast (owner 2026-06-11: CN documents must match DO).
+  const printCNPdf = useCallback(
+    async (
+      row: ConsignmentNoteRow,
+      mode: "download" | "view" = "download",
+    ) => {
+      const cust = customersData.find((c) => c.id === row.customerId);
+      const hub = cust?.deliveryHubs?.find((h) => h.id === row.hubId);
+      // Resolve the destination state to its full label — hub state wins,
+      // else the CN's free-text branch label. Same resolveStateCode chain
+      // the DO detail uses for its Delivery State line.
+      const rawState = hub?.state || row.branchName || "";
+      const code = resolveStateCode(rawState);
+      const stateLabel =
+        MALAYSIA_STATES.find((s) => s.code === code)?.label ?? rawState;
+      const transportCompany =
+        providers.find((p) => p.id === row.driverId)?.name ||
+        row.driverCompany ||
+        "";
+      const { generateCNPdf } = await import("@/lib/generate-cn-pdf");
+      generateCNPdf(
+        {
+          cnNo: row.cnNo,
+          customerName: row.customerName,
+          deliverTo: hub?.shortName || row.branchName || "",
+          deliveryAddress: hub?.address || "",
+          stateLabel,
+          contactPerson: hub?.contactName || "",
+          contactPhone: hub?.phone || "",
+          dispatchDate: row.dispatchDate,
+          transportCompany,
+          driverName: row.driverName,
+          driverPhone: row.driverPhone,
+          vehicleNo: row.vehicleNo,
+          vehicleType: row.vehicleType,
+          items: row.items.map((it) => ({
+            productCode: it.productCode,
+            productName: it.productName,
+            sizeLabel: it.sizeLabel,
+            fabricCode: it.fabricCode,
+            quantity: it.quantity,
+            itemM3: it.itemM3,
+            consignmentOrderNo: it.consignmentOrderNo,
+          })),
+        },
+        mode,
+      );
+    },
+    [customersData, providers],
+  );
+
   // ---------- Inline Expected DD update on the CO ----------
   // DO updates SO.hookkaExpectedDD via PUT /api/sales-orders/:id; same
   // pattern here against /api/consignment-orders/:id.
@@ -1923,7 +1981,9 @@ export default function ConsignmentNotePage() {
       {
         label: "Print CN",
         icon: <Printer className="h-3.5 w-3.5" />,
-        action: () => toast.info(`Printing CN: ${row.cnNo} — coming soon`),
+        // Unified with DO: every "Print CN" entry point produces the SAME
+        // branded CN PDF (was previously a "coming soon" toast).
+        action: () => void printCNPdf(row),
       },
       { label: "", separator: true, action: () => {} },
       // Mark Dispatched — opens a dialog that mirrors DO's Create-DO 3PL
@@ -2079,7 +2139,7 @@ export default function ConsignmentNotePage() {
         action: () => fetchData(),
       },
     ],
-    [fetchData, toast, reverseStatus, reverseToPendingCN, openDispatchDialog],
+    [fetchData, toast, reverseStatus, reverseToPendingCN, openDispatchDialog, printCNPdf],
   );
 
   // ---------- Tab counts (mirrors DO) ----------
@@ -2573,12 +2633,22 @@ export default function ConsignmentNotePage() {
                     so the user isn't tempted to print a half-edited CN. */}
                 {!editMode && (
                   <>
+                    {/* Print (download) + View (opens on screen) — same
+                        printDOPdf pair the DO detail header has, against the
+                        branded CN PDF (generate-cn-pdf.ts). */}
                     <button
-                      onClick={() => toast.info(`Printing CN: ${detailCN.cnNo} — coming soon`)}
+                      onClick={() => void printCNPdf(detailCN)}
                       className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
                       title="Print CN"
                     >
                       <Printer className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() => void printCNPdf(detailCN, "view")}
+                      className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
+                      title="View Documentation (opens on screen)"
+                    >
+                      <Eye className="h-4 w-4" />
                     </button>
                     {/* Document — drill through to parent CO detail page (DO
                         equivalent: triggerPrint("packing-list") icon, but we

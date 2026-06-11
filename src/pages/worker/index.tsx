@@ -601,78 +601,9 @@ export default function WorkerHomePage() {
         </div>
       )}
 
-      {/* Daily attendance — Work/Prod/Eff per day. Clock In/Out column dropped
-          since the clock-in flow itself is hidden (Wei Siang 2026-05-10). */}
-      {hist && (
-        <TableSection title={t("pay.dailyAttendance")}>
-          <TableHeader
-            cols={[
-              t("pay.colDate"),
-              t("home.colWorkingHrs"),
-              t("home.colProductionHrs"),
-              t("home.efficiencyPct"),
-            ]}
-            align={["left", "right", "right", "right"]}
-          />
-          {hist.daily.length === 0 ? (
-            <EmptyRow />
-          ) : (
-            hist.daily.map((r) => {
-              const eff =
-                r.workingMinutes > 0
-                  ? Math.round((r.productionMinutes / r.workingMinutes) * 100)
-                  : null;
-              const effTone =
-                eff == null
-                  ? "text-[#9CA3AF]"
-                  : eff >= 80
-                    ? "text-[#2A6B4A]"
-                    : eff >= 60
-                      ? "text-[#9C6F1E]"
-                      : "text-[#9A3A2D]";
-              // Punch facts for the date (owner rollout 2026-06-11): the
-              // worker must see their own clock-in/out, OT and how late —
-              // shown as a small line under the day once a punch exists.
-              const att = hist.attendance.find(
-                (a) => a.date === r.date && (a.clockIn || a.clockOut),
-              );
-              return (
-                <div key={r.date} className="py-2.5 border-t border-[#F0ECE9]">
-                  <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 text-sm items-center">
-                    <span className="text-[#1F1D1B] font-medium">
-                      {fmtDay(r.date)}
-                    </span>
-                    <span className="tabular-nums text-right font-semibold">
-                      {mins2hrs(r.workingMinutes)}
-                    </span>
-                    <span className="tabular-nums text-right font-semibold text-[#3E6570]">
-                      {mins2hrs(r.productionMinutes)}
-                    </span>
-                    <span className={`tabular-nums text-right font-semibold ${effTone}`}>
-                      {eff == null ? "—" : `${eff}%`}
-                    </span>
-                  </div>
-                  {att && (
-                    <p className="mt-1 text-xs text-[#8A8680] tabular-nums">
-                      {att.clockIn ?? "—"} → {att.clockOut ?? "—"}
-                      {att.overtimeMinutes > 0 && (
-                        <span className="text-[#3E6570] font-medium">
-                          {" "}· OT {mins2hrs(att.overtimeMinutes)}
-                        </span>
-                      )}
-                      {(att.lateMinutes ?? 0) > 0 && (
-                        <span className="text-[#9A3A2D] font-medium">
-                          {" "}· {t("home.lateBy")} {att.lateMinutes}m
-                        </span>
-                      )}
-                    </p>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </TableSection>
-      )}
+      {/* Daily attendance MOVED to the Pay page (owner 2026-06-12: the per-day
+          punch records belong under the pay breakdown, following its month
+          picker). Home stays focused on today + completed pieces. */}
 
       {/* Team summary lived here pre-2026-05-10. Moved to /worker/team
           (dedicated tab on the bottom nav) so the leader gets the full

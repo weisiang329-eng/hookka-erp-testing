@@ -6048,6 +6048,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const [generating, setGenerating] = useState(false);
   const [approving, setApproving] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  // Pay Rules maintenance panel (collapsed by default).
+  const [showPayRules, setShowPayRules] = useState(false);
 
   const period = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}`;
 
@@ -6330,6 +6332,70 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     });
   }, [payslipData, isProjected, selectedMonth, selectedYear, months, prorationSenOf, totalPayrollCost, totals]);
 
+  // Printable salary-calculation guide (owner 2026-06-11): a worked example of
+  // EVERY pay rule, in plain English, to hand to workers. Uses a fixed example
+  // (RM2,050 / June 2026) so the arithmetic on paper is concrete.
+  const printCalcGuide = useCallback(() => {
+    type GuideRow = { item: string; rule: string; example: string };
+    const col = [
+      { header: "Item", value: (r: unknown) => (r as GuideRow).item },
+      { header: "How it is calculated", value: (r: unknown) => (r as GuideRow).rule },
+      { header: "Example", value: (r: unknown) => (r as GuideRow).example },
+    ];
+    const s = (title: string, rows: GuideRow[]) => ({ title, columns: col, rows });
+    printReport({
+      title: "Salary Calculation Guide",
+      filterSummary:
+        "Worked example: RM2,050/month · June 2026 (30 calendar days, 25 working days, 1 public holiday) · Shift 08:00-18:00, 1h unpaid lunch = 9h standard day",
+      orientation: "landscape",
+      cards: [
+        { label: "Example salary", value: "RM2,050 / month" },
+        { label: "Example month", value: "June 2026 · 30 days · 25 working" },
+        { label: "Standard day", value: "08:00-18:00 · 1h lunch = 9h" },
+        { label: "OT rates", value: "Weekday 1.5x · Sunday 2x · Holiday 3x" },
+      ],
+      sections: [
+        s("1. Daily & hourly rates", [
+          { item: "Absence day rate", rule: "Monthly salary ÷ calendar days of the month", example: "2,050 ÷ 30 = RM68.33 / day" },
+          { item: "Late / short-hour rate", rule: "Monthly salary ÷ calendar days ÷ 10", example: "RM6.83 / hour" },
+          { item: "Overtime base rate", rule: "Monthly salary ÷ 26 ÷ 10", example: "RM7.88 / hour (before multiplier)" },
+          { item: "Production cost day rate", rule: "Monthly salary ÷ working days of the month", example: "2,050 ÷ 25 = RM82.00 / day" },
+        ]),
+        s("2. Working hours from the punch clock", [
+          { item: "Standard day", rule: "Punch in to punch out, minus the 1h unpaid lunch", example: "08:00-18:00 = 10h − 1h = 9.0h" },
+          { item: "Late grace", rule: "Up to 10 minutes late is forgiven", example: "08:08 in → counted as on time" },
+          { item: "Lateness rounding", rule: "Beyond grace, lateness rounds UP in 15-min blocks", example: "08:11 → 15 min late; 08:16 → 30 min" },
+          { item: "Overtime counting", rule: "Only after 18:00, in 15-min blocks (a block must be filled)", example: "18:16-18:29 → 15 min; 18:14 → 0" },
+        ]),
+        s("3. Lateness / short hours deduction", [
+          { item: "Deduction", rule: "Short hours × the late rate (RM6.83/h)", example: "30 min late, no OT → 0.5h × 6.83 = −RM3.42" },
+          { item: "Same-day OT offsets first", rule: "Evening OT covers the morning gap 1:1; only the remainder is deducted", example: "08:30 in + 2h OT → deduction RM0, paid OT 1.5h" },
+          { item: "Review", rule: "The office can Keep pay (no deduction) or Deduct each short day; every deduction can be undone", example: "Shown in the worker app under 'Late / short hours'" },
+        ]),
+        s("4. Overtime pay", [
+          { item: "Weekday OT", rule: "Hours above the 9h standard × base rate × 1.5", example: "2h → 2 × 7.88 × 1.5 = RM23.65" },
+          { item: "Sunday work", rule: "EVERY hour that day × base rate × 2 (Sundays are non-working)", example: "8h Sunday → RM126.15" },
+          { item: "Public holiday work", rule: "EVERY hour that day × base rate × 3", example: "8h holiday → RM189.23" },
+        ]),
+        s("5. Absence", [
+          { item: "Absent working day", rule: "Each confirmed absent day deducts the absence day rate", example: "1 day → −RM68.33" },
+          { item: "Grace before confirming", rule: "A blank day only becomes an absence after 2 working days (it may just not be keyed yet)", example: "Shown as 'Pending' until confirmed" },
+          { item: "Backfilling hours", rule: "Keying the hours later removes the absence automatically", example: "No button needed; regenerate if the month was finalised" },
+        ]),
+        s("6. Joining / resigning mid-month", [
+          { item: "Part-month salary", rule: "Salary ÷ calendar days × employed calendar days", example: "Join 5 June → 2,050 ÷ 30 × 26 = RM1,776.67" },
+          { item: "Absence inside the window", rule: "Still deducts the absence day rate per missed working day", example: "−RM68.33 each" },
+          { item: "Last day", rule: "Resignation date = last employed day; days after are simply unpaid", example: "Resign 5 June → paid 1-5 June" },
+        ]),
+        s("7. Allowance, statutory & net pay", [
+          { item: "Efficiency allowance", rule: "Flat bonus when the month's cumulative efficiency reaches the worker's target, else RM0 (no proration)", example: "RM150 at 100%" },
+          { item: "Statutory (per-worker toggle)", rule: "EPF 11% employee / 13% employer on basic; SOCSO ~RM7.45/26.15; EIS ~RM3.90/3.90", example: "Deducted only when enabled" },
+          { item: "Net pay", rule: "Basic − absence − late/short + OT + allowance − employee statutory", example: "What the worker receives" },
+        ]),
+      ],
+    });
+  }, []);
+
   return (
     <div className="space-y-4">
       {/* Summary Cards */}
@@ -6433,6 +6499,14 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                   <Printer className="h-4 w-4 mr-1" /> Print Report
                 </Button>
               )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={printCalcGuide}
+                title="Print the salary calculation guide — a worked example of every pay rule, to hand to workers"
+              >
+                <Printer className="h-4 w-4 mr-1" /> Calculation Guide
+              </Button>
             </div>
           </div>
         </CardHeader>
@@ -6747,16 +6821,48 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             </div>
           )}
 
-          {/* OT Rate Reference */}
-          <div className="mt-4 p-3 rounded-lg bg-[#F0ECE9] text-xs text-[#6B7280]">
-            <span className="font-semibold text-[#1F1D1B]">Malaysian Statutory Rates:</span>{" "}
-            EPF Employee 11% | EPF Employer 13% (on basic salary) &nbsp;&bull;&nbsp;
-            SOCSO EE ~RM7.45 | SOCSO ER ~RM26.15 &nbsp;&bull;&nbsp;
-            EIS EE ~RM3.90 | EIS ER ~RM3.90 &nbsp;&bull;&nbsp;
-            <br className="sm:hidden" />
-            <span className="font-semibold text-[#1F1D1B]">OT Rates:</span>{" "}
-            Weekday 1.5x | Sunday 2.0x | Public Holiday 3.0x &nbsp;&bull;&nbsp;
-            <span className="font-semibold text-[#1F1D1B]">Hourly Rate</span> = Monthly Salary / (26 days x 9 hrs)
+          {/* Pay Rules — maintenance panel. Single reference for every live pay
+              rule (matches the engine + the printable Calculation Guide), with
+              pointers to where the editable pieces are maintained. */}
+          <div className="mt-4 rounded-lg bg-[#F0ECE9]">
+            <button
+              type="button"
+              onClick={() => setShowPayRules((v) => !v)}
+              className="flex w-full items-center gap-2 px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:opacity-80"
+              title={showPayRules ? "Hide the pay rules" : "Show every pay rule the system applies"}
+            >
+              {showPayRules ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              Pay Rules (Maintenance)
+              <span className="text-xs font-normal text-[#6B7280]">— every rule the payroll engine applies · use the Calculation Guide button above to print a worked example for workers</span>
+            </button>
+            {showPayRules && (
+            <div className="grid grid-cols-1 gap-3 px-3 pb-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Shift & working hours</p>
+                <p>Shift 08:00–18:00 · 1h unpaid lunch = <b>9h standard day</b> · Working days Mon–Sat (excluding public holidays). Hours auto-fill from the punch clock.</p>
+              </div>
+              <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Lateness</p>
+                <p>≤10 min forgiven · beyond that, lateness rounds <b>UP</b> in 15-min blocks (08:11 → 15 min) · deducted at salary ÷ calendar days ÷ 10 · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
+              </div>
+              <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Overtime</p>
+                <p>After 18:00 only, 15-min blocks (floors: 16–29 → 15) · base = salary ÷ 26 ÷ 10 · <b>Weekday 1.5×</b> (per-worker, Employee Master) · <b>Sunday 2×</b> / <b>Public Holiday 3×</b> on every hour of the day.</p>
+              </div>
+              <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Absence & part-month</p>
+                <p>Absent working day = − salary ÷ calendar days · confirmed after a 2-working-day grace (backfilling hours removes it) · join/resign: salary ÷ calendar days × employed days.</p>
+              </div>
+              <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Allowance & statutory</p>
+                <p>Efficiency allowance: flat amount when monthly efficiency hits the worker&rsquo;s target (set per worker in Employee Master) · EPF 11%/13% · SOCSO ~RM7.45/26.15 · EIS ~RM3.90/3.90 (per-worker toggle).</p>
+              </div>
+              <div>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Where to maintain</p>
+                <p><b>Public holidays</b>: the Public Holidays panel (drives 3× OT + working-day counts) · <b>Salary (effective-dated), OT multiplier, hours/day, statutory toggles, allowance</b>: Employee Master · <b>Fixed rules above</b> (shift, grace, blocks, divisors): engine-locked — ask to change.</p>
+              </div>
+            </div>
+            )}
           </div>
         </CardContent>
       </Card>

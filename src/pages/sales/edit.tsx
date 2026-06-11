@@ -656,7 +656,17 @@ export default function EditSalesOrderPage() {
   // namespace translation. fabricId is no longer touched anywhere on this
   // page; the legacy column on sales_order_items is being dropped.
 
-  const addItem = () => setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
+  const addItem = () => {
+    // Same below-the-fold no-op feel as the create page (owner 2026-06-12):
+    // scroll the freshly added card into view once React commits it.
+    const newIdx = items.length;
+    setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
+    window.setTimeout(() => {
+      document
+        .getElementById(`line-item-card-${newIdx}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+  };
 
   const removeItem = (idx: number) => {
     if (items.length <= 1) return;
@@ -1039,7 +1049,11 @@ export default function EditSalesOrderPage() {
         <CardContent className="space-y-4">
           {items.map((item, idx) => {
             return (
-              <div key={item.id ?? item._uid ?? idx} className="rounded-md border border-[#E2DDD8] p-4 space-y-3">
+              <div
+                key={item.id ?? item._uid ?? idx}
+                id={`line-item-card-${idx}`}
+                className="rounded-md border border-[#E2DDD8] p-4 space-y-3"
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-[#6B5C32]">Line {idx + 1}</span>

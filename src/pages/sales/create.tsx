@@ -721,7 +721,19 @@ function CreateSalesOrderPage() {
   }, [searchParams]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const addItem = () => setItems([...items, makeEmptyLine()]);
+  const addItem = () => {
+    // New line lands at the BOTTOM of the list — on a long order it renders
+    // below the fold and the click looks like a no-op (owner 2026-06-12:
+    // "Add item 沒反應嗎?" after stacking 4 invisible blank lines). Scroll
+    // the fresh card into view once React has committed it.
+    const newIdx = items.length;
+    setItems([...items, makeEmptyLine()]);
+    window.setTimeout(() => {
+      document
+        .getElementById(`line-item-card-${newIdx}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+  };
 
   /** For sofa: replace the template line at `idx` with N line items (one per selected module productId) */
   const addSofaModules = (idx: number, moduleProductIds: string[]) => {
@@ -3197,7 +3209,10 @@ function LineItemCard({
   };
 
   return (
-    <div className="rounded-md border border-[#E2DDD8] p-4 space-y-3">
+    <div
+      id={`line-item-card-${idx}`}
+      className="rounded-md border border-[#E2DDD8] p-4 space-y-3"
+    >
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">

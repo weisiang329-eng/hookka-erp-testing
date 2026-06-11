@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-001 — "Add Item" looked dead on long orders — the new line rendered below the fold with zero feedback
+
+**Status:** 🟢 Fixed + shipped (2026-06-12). Typecheck 0; 818 tests green.
+**Category:** ui-frontend
+
+Owner (on the service-order create page, 5-line draft): "Add item 沒反應嗎?" — clicking + Add Item appeared to do nothing. Reproduced live: the click DOES append a line, but the new card lands at the BOTTOM of the Line Items list, below the fold on any long order, with no scroll and no visual cue — so the operator clicks again and again, silently stacking blank lines (his screenshot showed Line Items (5) with only 1 real line: four invisible blanks from four "dead" clicks).
+
+Fix (src/pages/sales/create.tsx + sales/edit.tsx — both pages share the pattern): each line card now carries a DOM id (`line-item-card-<idx>`), and addItem scrolls the freshly committed card into view (smooth, centered) ~80 ms after the state update. Applies to normal Sales Orders and Service Orders alike (same component). Operator note: stray blank lines from earlier clicks can be removed with each line's trash icon; Save also rejects product-less lines, so none could have been silently saved.
+
+---
+
 ## BUG-2026-06-11-020 — Dept QR v2: scans capture the LINE (Sofa/Bedframe) too — per-person attribution, not the department average
 
 **Status:** 🟢 Shipped (2026-06-11). 726 tests green; typecheck green.

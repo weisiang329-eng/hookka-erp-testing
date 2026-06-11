@@ -71,8 +71,12 @@ test("late beyond grace deducts from 08:00 (08:15 → 15 min short)", () => {
   assert.equal(d.otMin, 0);
 });
 
-test("11 min late = just over grace → 11 min short", () => {
-  assert.equal(day("08:11", "18:00").shortfallMin, 11);
+test("11 min late = just over grace → rounds UP to a 15-min block (owner 2026-06-11)", () => {
+  // Lateness ceils to 15-min blocks: even 1 min into a block costs the block.
+  assert.equal(day("08:11", "18:00").shortfallMin, 15);
+  assert.equal(day("08:16", "18:00").shortfallMin, 30); // 16 min → next block
+  assert.equal(day("08:30", "18:00").shortfallMin, 30); // exact block boundary
+  assert.equal(day("08:31", "18:00").shortfallMin, 45);
 });
 
 test("leaving early is also a shortfall (17:30 → 30 min short), no grace", () => {
@@ -84,8 +88,9 @@ test("leaving early is also a shortfall (17:30 → 30 min short), no grace", () 
 test("late + early are one combined shortfall, not double-counted", () => {
   // 08:20 in (20 late) + 17:40 out (20 early) → 40 min short total.
   const d = day("08:20", "17:40");
-  assert.equal(d.lateMin, 20);
-  assert.equal(d.shortfallMin, 40);
+  assert.equal(d.lateMin, 20); // raw lateness reported as-is
+  // Late 20 → penal 30 (ceiled block) + early 20 (exact) = 50 min short total.
+  assert.equal(d.shortfallMin, 50);
 });
 
 test("OT must exceed 15 min: 18:14 and 18:15 → 0, 18:16 → 15", () => {

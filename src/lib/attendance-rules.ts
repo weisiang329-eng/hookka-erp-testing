@@ -28,6 +28,8 @@ export type AttendanceRules = {
   standardWorkMin: number;
   /** Lateness forgiven up to this many minutes (10). */
   lateGraceMin: number;
+  /** Penal lateness rounds UP to blocks of this many minutes (15). */
+  lateBlockMin: number;
 };
 
 export const HOOKKA_ATTENDANCE: AttendanceRules = {
@@ -36,6 +38,7 @@ export const HOOKKA_ATTENDANCE: AttendanceRules = {
   lunchMin: 60,
   standardWorkMin: 9 * 60, // 540
   lateGraceMin: 10,
+  lateBlockMin: 15,
 };
 
 export type AttendanceDay = {
@@ -87,8 +90,14 @@ export function computeAttendanceDay(
   const rawLate = Math.max(0, clockInMin - rules.startMin);
   const isLate = rawLate > rules.lateGraceMin;
   const lateMin = isLate ? rawLate : 0;
-  // Within grace → treat as on-time for the work-hours maths.
-  const effectiveIn = isLate ? clockInMin : rules.startMin;
+  // Penal lateness rounds UP to 15-min blocks (owner 2026-06-11): one minute
+  // into a block costs the whole block (08:11 → charged as 08:15; 08:16 →
+  // 08:30). Deliberately ASYMMETRIC with OT, which floors (16–29 min OT → 15)
+  // — both directions favour the company. Within grace → on-time.
+  const penalLateMin = isLate
+    ? Math.ceil(rawLate / rules.lateBlockMin) * rules.lateBlockMin
+    : 0;
+  const effectiveIn = rules.startMin + penalLateMin;
 
   // Regular (non-OT) work ends at the shift end; lunch is always unpaid.
   const regularEnd = Math.min(clockOutMin, rules.endMin);

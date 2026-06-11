@@ -100,10 +100,11 @@ test("leaving an hour early 08:00–17:00 → 1.0h shortfall", () => {
   assert.equal(r.shortfallHours, 1);
 });
 
-test("late 12 min (past grace) 08:12–18:00 → 0.2h shortfall, lateMin 12", () => {
+test("late 12 min (past grace) 08:12–18:00 → ceiled to a 15-min block = 0.25h, lateMin 12", () => {
+  // Owner 2026-06-11: penal lateness rounds UP to 15-min blocks.
   const r = dock.computePunchShortfallHours("08:12", "18:00");
   assert.equal(r.lateMin, 12);
-  assert.equal(r.shortfallHours, 0.2);
+  assert.equal(r.shortfallHours, 0.25);
 });
 
 test("late within the 10-min grace 08:08–18:00 → no shortfall, no late", () => {
@@ -156,13 +157,13 @@ test("clean late/short day → applies an AUTO dock with the shortfall hours", a
   });
   assert.equal(res.applied, true);
   assert.equal(res.reason, "applied");
-  assert.equal(res.hours, 0.2);
+  assert.equal(res.hours, 0.25);
   assert.equal(db.__calls.inserts.length, 1);
   const ins = db.__calls.inserts[0];
   // INSERT (id, workerId, date, hours, note, source)
   assert.equal(ins.bound[1], "W1");
   assert.equal(ins.bound[2], "2026-06-03");
-  assert.equal(ins.bound[3], 0.2);
+  assert.equal(ins.bound[3], 0.25);
   assert.equal(ins.bound[5], dock.AUTO_DOCK_SOURCE);
 });
 

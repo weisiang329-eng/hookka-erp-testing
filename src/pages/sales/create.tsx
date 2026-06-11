@@ -3436,9 +3436,13 @@ function LineItemCard({
       </div>
 
       {/* Repair Scope (0160) — service-order mode only. Full remake keeps
-          today's behaviour (every department, full materials); the other
-          presets build job cards only for their departments and consume
-          only that class of material. Custom reveals dept checkboxes. */}
+          today's behaviour (every department, full materials); Partial
+          reveals dept checkboxes and builds job cards only for the ticked
+          departments. Owner 2026-06-11 ("点选部门最万能"): the named
+          FABRIC/FRAME/FOAM presets are hidden from the picker — dept
+          checkboxes cover every real repair. The lib still accepts stored
+          preset values, and a legacy line renders its preset via the
+          conditional option below instead of silently snapping to FULL. */}
       {isServiceOrderMode && (
         <div>
           <label className="block text-xs text-[#9CA3AF] mb-1">Repair Scope</label>
@@ -3448,10 +3452,14 @@ function LineItemCard({
             className={selectClass}
           >
             <option value="FULL">{REPAIR_SCOPE_PRESET_LABELS.FULL}</option>
-            <option value="FABRIC">{REPAIR_SCOPE_PRESET_LABELS.FABRIC}</option>
-            <option value="FRAME">{REPAIR_SCOPE_PRESET_LABELS.FRAME}</option>
-            <option value="FOAM">{REPAIR_SCOPE_PRESET_LABELS.FOAM}</option>
-            <option value="CUSTOM">{REPAIR_SCOPE_PRESET_LABELS.CUSTOM}…</option>
+            {(scopePresetValue === "FABRIC" ||
+              scopePresetValue === "FRAME" ||
+              scopePresetValue === "FOAM") && (
+              <option value={scopePresetValue}>
+                {REPAIR_SCOPE_PRESET_LABELS[scopePresetValue]}
+              </option>
+            )}
+            <option value="CUSTOM">Partial repair — pick departments…</option>
           </select>
           {scopePresetValue === "CUSTOM" && (
             <div className="mt-2 grid grid-cols-2 gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2">

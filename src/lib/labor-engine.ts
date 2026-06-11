@@ -533,7 +533,23 @@ export function computeMonthlyLabor(
     const h = Number(row.hours) || 0;
     hoursByDate.set(row.date, (hoursByDate.get(row.date) ?? 0) + h);
   }
-  const daysWorked = hoursByDate.size;
+  // Days WORKED for pay/cost purposes = dates with hours on a WORKING weekday
+  // (Mon–Sat, not a public holiday). Sunday / public-holiday dates are pure OT
+  // days — every hour on them is classified 2×/3× below, so they earn OT pay +
+  // OT cost ONLY. They must NOT offset a weekday absence (a Sunday shift can't
+  // cancel a Monday no-show), charge a regular day-rate in production cost, or
+  // count as a served day for part-month proration. (Owner 2026-06-11:
+  // Sundays are non-working; anyone punching one is paid straight 2× OT and a
+  // weekday absence still docks.)
+  const holidaySet =
+    publicHolidays instanceof Set ? publicHolidays : new Set(publicHolidays);
+  let daysWorked = 0;
+  for (const [date, h] of hoursByDate) {
+    if (h <= 0) continue;
+    const [yy, mm, dd] = date.split("-").map(Number);
+    const dow = new Date(yy, (mm || 1) - 1, dd || 1).getDay();
+    if (dow !== 0 && !holidaySet.has(date)) daysWorked++;
+  }
 
   // ── Overtime, DAY-TYPED (owner spec 2026-06-10):
   //    • weekday (Mon–Sat, not a public holiday): hours ABOVE the standard day.
@@ -544,8 +560,6 @@ export function computeMonthlyLabor(
   //    2× / 3× below. otHours stays the grand total (back-compat + worker My Pay).
   //    Day-of-week is built from the date's y/m/d ints — matches the rest of the
   //    engine (WORKING_DOW) and is timezone-agnostic.
-  const holidaySet =
-    publicHolidays instanceof Set ? publicHolidays : new Set(publicHolidays);
   let otWeekdayHours = 0;
   let otSundayHours = 0;
   let otHolidayHours = 0;

@@ -4397,9 +4397,22 @@ function DepartmentLaborTab({
         const reconCode = p.departmentCode || "UNASSIGNED";
         if (gross > 0 && factoryCodes.has(reconCode)) {
           const absent = Number(p.absentDays) || 0;
+          // Part-month skip — same rule as the Labor Cost tab's leniency memo:
+          // a joined/resigned-this-month worker is paid days-served, the stored
+          // absence deduction was never applied, so no leniency exists.
+          const ww = workerById.get(wid) as
+            | { joinDate?: string | null; resignedAt?: string | null; status?: string }
+            | undefined;
+          const partMonth =
+            !!ww &&
+            !!p.period &&
+            ((typeof ww.joinDate === "string" && ww.joinDate.startsWith(p.period)) ||
+              (ww.status === "RESIGNED" &&
+                typeof ww.resignedAt === "string" &&
+                ww.resignedAt.startsWith(p.period)));
           const costingDivisor = actualWorkingDays;
           const costEquivalent =
-            absent > 0
+            absent > 0 && !partMonth
               ? Math.round((absent * (Number(p.basicSalary) || 0)) / costingDivisor)
               : 0;
           const leniency = Math.max(
@@ -7537,6 +7550,23 @@ function LaborCostTab({
     for (const p of reconPayslips) {
       const absent = Number(p.absentDays) || 0;
       if (absent <= 0) continue;
+      // PART-MONTH workers (joined / resigned inside this period) are paid
+      // days-served × costing rate — the engine never applies the stored
+      // absence deduction, so there is NO ÷calendar-vs-÷working-days gap to
+      // bridge. Without this skip the recon manufactured a phantom leniency
+      // (~RM25/absent-day) onto the dept, offset by a hidden negative in the
+      // Overhead plug.
+      const ww = (p.employeeId ? workersById.get(p.employeeId) : undefined) as
+        | { joinDate?: string | null; resignedAt?: string | null; status?: string }
+        | undefined;
+      const partMonth =
+        !!ww &&
+        !!p.period &&
+        ((typeof ww.joinDate === "string" && ww.joinDate.startsWith(p.period)) ||
+          (ww.status === "RESIGNED" &&
+            typeof ww.resignedAt === "string" &&
+            ww.resignedAt.startsWith(p.period)));
+      if (partMonth) continue;
       const costingDivisor = actualWorkingDays;
       const costEquivalentSen = Math.round(
         (absent * (Number(p.basicSalary) || 0)) / costingDivisor,
@@ -7548,7 +7578,7 @@ function LaborCostTab({
       if (leniency > 0) m.set(p.id, leniency);
     }
     return m;
-  }, [reconPayslips, period, from, holidayList]);
+  }, [reconPayslips, period, from, holidayList, workersById]);
   // OT pay-vs-cost adjustment — the SAME idea as the absence line, for overtime.
   // The labor buckets + loggedValue value OT at the production-cost rate
   // (÷ workingDaysPerMonth(26) ÷ workingHoursPerDay(9)); payroll now PAYS OT at the

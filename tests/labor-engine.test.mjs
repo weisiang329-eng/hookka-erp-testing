@@ -790,3 +790,23 @@ test("prorateToService mid-month: future window days count as will-be-worked (es
   const fin = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 31 });
   assert.equal(fin.payroll.basicEarnedSen, Math.round(2 * rate));
 });
+
+// -- Sunday work must not mask a weekday absence ------------------------------
+test("Sunday work does NOT mask a weekday absence (pure 2x OT; absence still docks)", () => {
+  // ANN misses Mon 4 May but works Sunday 10 May (8h). The Sunday is pure 2x
+  // OT - it cannot cancel the Monday absence, count as a served day, or
+  // charge a regular day-rate in production cost.
+  const days = MAY_WORKDAYS.filter((d) => d !== "2026-05-04").map((date) => ({ date, hours: 8 }));
+  days.push({ date: "2026-05-10", hours: 8 }); // Sunday
+  const r = labor.computeMonthlyLabor({
+    worker: ANN, year: 2026, month: 5, days,
+    publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
+  });
+  assert.equal(r.daysWorked, 23); // 24 working days - 1 absent; Sunday NOT counted
+  assert.equal(r.payroll.absentDays, 1);
+  assert.equal(r.payroll.absenceDeductionSen, Math.round(265000 / 31));
+  assert.equal(r.otSundayHours, 8);
+  const otBase = 265000 / 26 / 10;
+  assert.equal(r.payroll.otPaySen, Math.round(8 * otBase * 2));
+  assert.equal(r.cost.regularCostSen, Math.round(23 * (265000 / 24)));
+});

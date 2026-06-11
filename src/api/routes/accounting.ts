@@ -22,6 +22,7 @@ import {
   ledgerHasSource,
   type LedgerEntryInput,
 } from "../lib/journal-hash";
+import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 
 const app = new Hono<Env>();
 
@@ -956,6 +957,257 @@ app.delete("/journals/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// YEAR-END PROFIT CLOSE (Phase 1, 2026-06)
+//
+// Closes the un-closed P&L result of an ENDED financial year into
+// 150-0000 RETAINED EARNING with sourceType='year_close' ledger legs:
+// every revenue/cost/expense account's residual balance (cumulative to
+// the FYE date, INCLUDING prior year_close legs, so re-closing is a
+// no-op) is flipped, balanced by one retained-earnings leg. P&L reports
+// exclude year_close legs; the BS includes them — that is how retained
+// earnings accumulates and the "Current Year Earnings (unclosed)" line
+// shrinks to just the open year.
+// ---------------------------------------------------------------------------
+const RETAINED_EARNINGS_ACCT = "150-0000";
+
+// Most recent FYE date strictly before `today`.
+function lastEndedFyeIso(today: Date, fyeMonth: number): string {
+  const win = fyWindowFor(today, fyeMonth);
+  const start = new Date(`${win.startIso}T00:00:00Z`);
+  return new Date(start.getTime() - 86400000).toISOString().slice(0, 10);
+}
+
+// Residual (un-closed) balance per P&L account, cumulative to endIso.
+async function computeUnclosedAsOf(
+  db: Env["Variables"]["DB"],
+  endIso: string,
+): Promise<{
+  accounts: {
+    code: string;
+    name: string;
+    type: "REVENUE" | "COST" | "EXPENSE";
+    residualSen: number;
+  }[];
+  netSen: number;
+}> {
+  const [legRes, coaRes] = await Promise.all([
+    db
+      .prepare(
+        "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+      )
+      .all<{
+        accountCode: string;
+        debitSen: number;
+        creditSen: number;
+        postedAt: string;
+      }>(),
+    db
+      .prepare("SELECT code, name, type FROM chart_of_accounts")
+      .all<{ code: string; name: string; type: CoaRow["type"] }>(),
+  ]);
+  const coa = new Map(
+    (coaRes.results ?? []).map((a) => [a.code, a] as const),
+  );
+  const dr = new Map<string, number>();
+  const cr = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    const d10 = String(l.postedAt ?? "").slice(0, 10);
+    if (d10 > endIso) continue;
+    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+  }
+  const accounts: {
+    code: string;
+    name: string;
+    type: "REVENUE" | "COST" | "EXPENSE";
+    residualSen: number;
+  }[] = [];
+  let netSen = 0;
+  for (const code of new Set([...dr.keys(), ...cr.keys()])) {
+    const acct = coa.get(code);
+    if (!acct) continue;
+    if (
+      acct.type !== "REVENUE" &&
+      acct.type !== "COST" &&
+      acct.type !== "EXPENSE"
+    )
+      continue;
+    const d = dr.get(code) ?? 0;
+    const c2 = cr.get(code) ?? 0;
+    // Residual in the account's NORMAL direction: revenue credit-normal,
+    // cost/expense debit-normal. Sign-carrying (a debit-heavy revenue
+    // account yields a negative residual and reverses correctly).
+    const residualSen = acct.type === "REVENUE" ? c2 - d : d - c2;
+    if (residualSen === 0) continue;
+    accounts.push({ code, name: acct.name, type: acct.type, residualSen });
+    netSen += acct.type === "REVENUE" ? residualSen : -residualSen;
+  }
+  return { accounts, netSen };
+}
+
+// GET /api/accounting/year-close/preview?fyEnd=YYYY-MM-DD
+app.get("/year-close/preview", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const fyeMonth = await getFyeMonth(c.var.DB);
+  const fyEndIso =
+    c.req.query("fyEnd") || lastEndedFyeIso(new Date(), fyeMonth);
+  const orgId = getOrgId(c);
+  const alreadyClosed = await ledgerHasSource(
+    c.var.DB,
+    orgId,
+    "year_close",
+    `fyclose-${fyEndIso}`,
+  );
+  const { accounts, netSen } = await computeUnclosedAsOf(c.var.DB, fyEndIso);
+  return c.json({
+    success: true,
+    data: {
+      fyEnd: fyEndIso,
+      fyeMonth,
+      alreadyClosed,
+      netSen,
+      accountCount: accounts.length,
+      accounts,
+      retainedAccount: RETAINED_EARNINGS_ACCT,
+    },
+  });
+});
+
+// POST /api/accounting/year-close  { fyEnd?: "YYYY-MM-DD" }
+app.post("/year-close", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      fyEnd?: string;
+    };
+    const fyeMonth = await getFyeMonth(c.var.DB);
+    const fyEndIso = body.fyEnd || lastEndedFyeIso(new Date(), fyeMonth);
+    const today = new Date().toISOString().slice(0, 10);
+    if (fyEndIso >= today) {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot close FY ending ${fyEndIso} — the year has not ended yet.`,
+        },
+        400,
+      );
+    }
+    const orgId = getOrgId(c);
+    const sourceId = `fyclose-${fyEndIso}`;
+    if (await ledgerHasSource(c.var.DB, orgId, "year_close", sourceId)) {
+      return c.json(
+        {
+          success: false,
+          error: `FY ended ${fyEndIso} is already closed (idempotent — nothing re-posted).`,
+        },
+        400,
+      );
+    }
+    const re = await c.var.DB.prepare(
+      "SELECT code FROM chart_of_accounts WHERE code = ?",
+    )
+      .bind(RETAINED_EARNINGS_ACCT)
+      .first<{ code: string }>();
+    if (!re) {
+      return c.json(
+        {
+          success: false,
+          error: `Retained-earnings account ${RETAINED_EARNINGS_ACCT} not found in the chart of accounts.`,
+        },
+        500,
+      );
+    }
+    const { accounts, netSen } = await computeUnclosedAsOf(
+      c.var.DB,
+      fyEndIso,
+    );
+    if (accounts.length === 0) {
+      return c.json(
+        { success: false, error: "Nothing to close — all P&L accounts are at zero as of that date." },
+        400,
+      );
+    }
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+    const legs: LedgerEntryInput[] = [];
+    let legNo = 1;
+    let totalDr = 0;
+    let totalCr = 0;
+    for (const a of accounts) {
+      // Flip the residual: a credit-normal residual is DEBITED away and
+      // vice versa. Negative residuals flip the flip.
+      const closesAsDebit =
+        a.type === "REVENUE" ? a.residualSen > 0 : a.residualSen < 0;
+      const amt = Math.abs(a.residualSen);
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "year_close",
+        sourceId,
+        legNo: legNo++,
+        accountCode: a.code,
+        debitSen: closesAsDebit ? amt : 0,
+        creditSen: closesAsDebit ? 0 : amt,
+        description: `Year-end close · FY ended ${fyEndIso}`,
+        actorUserId,
+        orgId,
+      });
+      totalDr += closesAsDebit ? amt : 0;
+      totalCr += closesAsDebit ? 0 : amt;
+    }
+    if (netSen !== 0) {
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "year_close",
+        sourceId,
+        legNo: legNo++,
+        accountCode: RETAINED_EARNINGS_ACCT,
+        debitSen: netSen < 0 ? Math.abs(netSen) : 0,
+        creditSen: netSen > 0 ? netSen : 0,
+        description: `Year-end close · FY ended ${fyEndIso} · net ${netSen > 0 ? "profit" : "loss"}`,
+        actorUserId,
+        orgId,
+      });
+      totalDr += netSen < 0 ? Math.abs(netSen) : 0;
+      totalCr += netSen > 0 ? netSen : 0;
+    }
+    if (totalDr !== totalCr) {
+      return c.json(
+        {
+          success: false,
+          error: `Close legs do not balance (DR ${totalDr} vs CR ${totalCr}) — aborted, nothing posted.`,
+        },
+        500,
+      );
+    }
+    const { statements } = await buildJournalEntryStatements(
+      c.var.DB,
+      orgId,
+      legs,
+    );
+    await c.var.DB.batch(statements);
+    return c.json({
+      success: true,
+      data: {
+        fyEnd: fyEndIso,
+        netSen,
+        legCount: legs.length,
+        retainedAccount: RETAINED_EARNINGS_ACCT,
+      },
+    });
+  } catch (e) {
+    console.error("[year-close] failed:", e);
+    return c.json(
+      { success: false, error: "Year-end close failed — nothing was posted." },
+      500,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
 // P&L
 // ---------------------------------------------------------------------------
 // Is a YYYY-MM string inside the requested period? period forms:
@@ -1135,15 +1387,22 @@ app.get("/pl", async (c) => {
 
   // --- ledger legs ---
   const legRes = await c.var.DB.prepare(
-    "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+    "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries",
   ).all<{
     accountCode: string;
     debitSen: number;
     creditSen: number;
     postedAt: string;
+    sourceType: string;
   }>();
   const endYm = periodEndYm(period);
   // Per-account net for the P&L period and cumulative-as-of for the BS.
+  // Phase 1 (2026-06): year-close legs zero the P&L accounts into 150-0000
+  // Retained Earning — they are bookkeeping, not trading activity, so the
+  // P&L view skips them (a close inside the period would otherwise show
+  // as a giant negative revenue). The BS view keeps them: that is exactly
+  // how retained earnings accumulates and the unclosed-earnings line
+  // shrinks to the open year.
   const plDr = new Map<string, number>();
   const plCr = new Map<string, number>();
   const bsDr = new Map<string, number>();
@@ -1152,7 +1411,7 @@ app.get("/pl", async (c) => {
     const ym = String(l.postedAt ?? "").slice(0, 7);
     const d = Number(l.debitSen) || 0;
     const cr = Number(l.creditSen) || 0;
-    if (ymInPeriod(ym, period)) {
+    if (l.sourceType !== "year_close" && ymInPeriod(ym, period)) {
       plDr.set(l.accountCode, (plDr.get(l.accountCode) ?? 0) + d);
       plCr.set(l.accountCode, (plCr.get(l.accountCode) ?? 0) + cr);
     }
@@ -1386,15 +1645,28 @@ app.get("/pl", async (c) => {
       asOfDate: asOf,
     });
   }
-  // Net result not yet closed to an equity account — surface it so the
-  // sheet balances (Assets = Liabilities + Equity + current-year earnings).
-  if (netProfit !== 0)
+  // Un-closed P&L result as of the BS cutoff — CUMULATIVE revenue/cost/
+  // expense nets including year_close legs (a closed FY nets to zero
+  // here, leaving only the open year). Phase 1 fix: the old code injected
+  // the PERIOD-scoped netProfit, so viewing a single month understated
+  // equity by every other month's earnings and the sheet didn't balance.
+  let unclosedEarnings = 0;
+  for (const code of bsCodes) {
+    const acct = coa.get(code);
+    if (!acct) continue;
+    const dr = bsDr.get(code) ?? 0;
+    const cr = bsCr.get(code) ?? 0;
+    if (acct.type === "REVENUE") unclosedEarnings += cr - dr;
+    else if (acct.type === "COST" || acct.type === "EXPENSE")
+      unclosedEarnings -= dr - cr;
+  }
+  if (unclosedEarnings !== 0)
     balanceSheet.push({
       id: "NP-CURRENT",
       accountCode: "NP-CURRENT",
-      accountName: "Current Year Earnings",
+      accountName: "Current Year Earnings (unclosed)",
       category: "EQUITY",
-      balance: netProfit,
+      balance: unclosedEarnings,
       asOfDate: asOf,
     });
 

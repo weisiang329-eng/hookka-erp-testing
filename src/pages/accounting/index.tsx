@@ -2172,6 +2172,81 @@ function PLReportTab() {
 
 // =============== TAB 7: BALANCE SHEET ===============
 
+// Phase 1 (2026-06) — year-end profit close. Previews the un-closed P&L
+// result of the last ENDED financial year (per the FYE setting) and posts
+// it into 150-0000 RETAINED EARNING with sourceType='year_close' ledger
+// legs. Idempotent server-side; the button disables once closed.
+function YearCloseCard() {
+  const { toast } = useToast();
+  const [preview, setPreview] = useState<{
+    fyEnd: string;
+    alreadyClosed: boolean;
+    netSen: number;
+    accountCount: number;
+  } | null>(null);
+  const [posting, setPosting] = useState(false);
+  const load = () => {
+    fetch("/api/accounting/year-close/preview")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { fyEnd: string; alreadyClosed: boolean; netSen: number; accountCount: number } }>)
+      .then((j) => { if (j?.success && j.data) setPreview(j.data); })
+      .catch(() => {});
+  };
+  useEffect(load, []);
+  const post = async () => {
+    if (!preview) return;
+    if (!window.confirm(
+      `Close FY ended ${preview.fyEnd}?\n\nNet ${preview.netSen >= 0 ? "profit" : "loss"} of ${formatCurrency(Math.abs(preview.netSen))} across ${preview.accountCount} P&L accounts will be posted to 150-0000 RETAINED EARNING. This writes immutable ledger entries.`,
+    )) return;
+    setPosting(true);
+    try {
+      const res = await fetch("/api/accounting/year-close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fyEnd: preview.fyEnd }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (j?.success) {
+        toast.success(`FY ended ${preview.fyEnd} closed to retained earnings`);
+        load();
+      } else toast.error(j?.error || "Year-end close failed");
+    } catch {
+      toast.error("Year-end close failed");
+    } finally {
+      setPosting(false);
+    }
+  };
+  if (!preview) return null;
+  return (
+    <Card className="mb-4">
+      <CardContent className="p-4 flex flex-wrap items-center gap-4">
+        <div className="text-sm">
+          <span className="font-medium text-[#1F1D1B]">Year-end close</span>
+          <span className="text-[#6B7280]"> · FY ended {preview.fyEnd}: </span>
+          {preview.alreadyClosed ? (
+            <span className="text-[#4F7C3A] font-medium">already closed ✓</span>
+          ) : preview.accountCount === 0 ? (
+            <span className="text-[#6B7280]">nothing to close</span>
+          ) : (
+            <span className={preview.netSen >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}>
+              net {preview.netSen >= 0 ? "profit" : "loss"} {formatCurrency(Math.abs(preview.netSen))} un-closed
+            </span>
+          )}
+        </div>
+        {!preview.alreadyClosed && preview.accountCount > 0 && (
+          <Button variant="primary" size="sm" onClick={post} disabled={posting}>
+            {posting ? "Posting…" : "Close to Retained Earnings"}
+          </Button>
+        )}
+        <p className="text-[11px] text-[#9CA3AF] max-w-md">
+          Posts every P&L account's un-closed balance to 150-0000. P&L
+          reports exclude close entries; the balance sheet absorbs them —
+          "Current Year Earnings (unclosed)" then shows only the open year.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function BalanceSheetTab() {
   const { data: bsResp, loading: bsLoading } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[] } }>("/api/accounting/pl");
   const bsData: BalanceSheetEntry[] = useMemo(
@@ -2231,6 +2306,7 @@ function BalanceSheetTab() {
 
   return (
     <div className="space-y-6">
+      <YearCloseCard />
       {/* Balance equation */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
         <Card>

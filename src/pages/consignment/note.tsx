@@ -410,6 +410,15 @@ export default function ConsignmentNotePage() {
   const [selectedReadyPOs, setSelectedReadyPOs] = useState<Set<string>>(new Set());
   const [creatingCNFromPO, setCreatingCNFromPO] = useState(false);
 
+  // ----- Selection (CN-list tabs) -----
+  // Drives the bulk Mark Dispatched / Delivered / Acknowledged toolbar
+  // (mirrors DO's grid-header bulk buttons). Mirrors the DataGrid's
+  // internal checkbox state via onSelectionChange; the grid instance stays
+  // mounted across the four CN tabs, so this set is the page's read-only
+  // mirror — never cleared independently of the grid (a one-sided clear
+  // would leave ticked rows with a hidden toolbar).
+  const [selectedCNIds, setSelectedCNIds] = useState<Set<string>>(new Set());
+
   // ----- Inline Expected DD editing on Planning / Pending CN -----
   const [editingDDId, setEditingDDId] = useState<string | null>(null);
   const [editingDDValue, setEditingDDValue] = useState("");
@@ -1206,6 +1215,129 @@ export default function ConsignmentNotePage() {
       setDispatchSaving(false);
     }
   }, [dispatchDialog, dispatchForm, fetchData, toast]);
+
+  // ---------- Bulk status transitions (mirrors DO's bulk buttons) ----------
+  // Copied from runBulkDoTransition (src/pages/delivery/index.tsx) with the
+  // DO→CN endpoint/status swaps. Wei Siang 2026-05-16 (DO side): the PUTs
+  // run SEQUENTIALLY, not in parallel — each CN status flip is a heavy
+  // multi-statement batch (fg_units stamp/flip, stock_movements, CO
+  // completion cascade), and siblings under the same CO share rows, so
+  // parallel fires risk the same lock collisions the DO bulk path hit.
+  // One-at-a-time lets each batch commit before the next starts. Slower
+  // for big selections but correct; this runs once per dispatch run.
+  //
+  // `skipped` = selected rows whose current status doesn't allow this
+  // transition (already filtered out by the caller); surfaced in the ONE
+  // summary toast so the operator knows why fewer rows moved.
+  const runBulkCnTransition = async (
+    cnIds: string[],
+    nextStatus: "PARTIALLY_SOLD" | "FULLY_SOLD" | "CLOSED",
+    successVerb: string,
+    skipped: number,
+  ) => {
+    if (cnIds.length === 0) return;
+    const skippedNote =
+      skipped > 0 ? ` (${skipped} skipped — status doesn't allow it)` : "";
+    const failures: string[] = [];
+    for (const id of cnIds) {
+      try {
+        const r = await fetch(`/api/consignment-notes/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        if (!r.ok) {
+          const body = (await r.json().catch(() => ({}))) as { error?: string };
+          failures.push(body?.error || `HTTP ${r.status}`);
+        }
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (failures.length) {
+      toast.error(
+        `${failures.length} of ${cnIds.length} failed: ${failures[0]}${skippedNote}`,
+      );
+    } else {
+      toast.success(
+        `${cnIds.length} consignment note${cnIds.length === 1 ? "" : "s"} ${successVerb}${skippedNote}`,
+      );
+    }
+    // Selection is intentionally NOT cleared here (DO clears its page-level
+    // set; CN's checkboxes live INSIDE the DataGrid and can't be cleared
+    // from the page). The transitioned rows leave the current tab on
+    // refresh, and staying selected lets the operator chain transitions
+    // (Mark Dispatched → Mark Delivered) without re-ticking.
+    fetchData();
+  };
+
+  // Bulk Mark Dispatched — PENDING (ACTIVE) rows only. Uses the stored
+  // transport from CN creation; PUT { status } alone never touches the
+  // carrier columns (updateConsignmentNoteById only re-resolves transport
+  // when a transport key is on the body). Rows in any other status are
+  // skipped with the count shown.
+  const handleBulkMarkDispatched = async () => {
+    if (selectedCNIds.size === 0) return;
+    const selected = cnList.filter((c) => selectedCNIds.has(c.id));
+    const eligible = selected.filter((c) => c.status === "PENDING");
+    const skipped = selected.length - eligible.length;
+    if (eligible.length === 0) {
+      toast.error(
+        `No selected CNs are Pending Dispatch (${skipped} skipped — status doesn't allow it)`,
+      );
+      return;
+    }
+    await runBulkCnTransition(
+      eligible.map((c) => c.id),
+      "PARTIALLY_SOLD",
+      "marked dispatched",
+      skipped,
+    );
+  };
+
+  // Bulk Mark Delivered — DISPATCHED or IN_TRANSIT rows (same eligibility
+  // as the single-row context-menu action; PARTIALLY_SOLD → FULLY_SOLD
+  // direct is a valid backend transition, IN_TRANSIT is optional).
+  const handleBulkMarkDelivered = async () => {
+    if (selectedCNIds.size === 0) return;
+    const selected = cnList.filter((c) => selectedCNIds.has(c.id));
+    const eligible = selected.filter(
+      (c) => c.status === "DISPATCHED" || c.status === "IN_TRANSIT",
+    );
+    const skipped = selected.length - eligible.length;
+    if (eligible.length === 0) {
+      toast.error(
+        `No selected CNs are Dispatched or In Transit (${skipped} skipped — status doesn't allow it)`,
+      );
+      return;
+    }
+    await runBulkCnTransition(
+      eligible.map((c) => c.id),
+      "FULLY_SOLD",
+      "marked delivered",
+      skipped,
+    );
+  };
+
+  // Bulk Mark Acknowledged — DELIVERED rows only (FULLY_SOLD → CLOSED).
+  const handleBulkMarkAcknowledged = async () => {
+    if (selectedCNIds.size === 0) return;
+    const selected = cnList.filter((c) => selectedCNIds.has(c.id));
+    const eligible = selected.filter((c) => c.status === "DELIVERED");
+    const skipped = selected.length - eligible.length;
+    if (eligible.length === 0) {
+      toast.error(
+        `No selected CNs are Delivered (${skipped} skipped — status doesn't allow it)`,
+      );
+      return;
+    }
+    await runBulkCnTransition(
+      eligible.map((c) => c.id),
+      "CLOSED",
+      "marked acknowledged",
+      skipped,
+    );
+  };
 
   // ---------- Edit mode helpers (mirrors DO's enterEditMode etc.) ----------
   // enterEditMode seeds the editForm/editItems from the CN row currently
@@ -2499,6 +2631,27 @@ export default function ConsignmentNotePage() {
               <CardTitle className="flex items-center gap-2">
                 <ClipboardList className="h-5 w-5 text-[#6B5C32]" /> Consignment Notes
               </CardTitle>
+              {/* Bulk actions once CNs are ticked — sits right next to the
+                  grid like DO's Mark Dispatched / Mark Delivered buttons.
+                  Each button only acts on rows whose status allows that
+                  transition; the rest are skipped with the count shown in
+                  the summary toast. */}
+              {selectedCNIds.size > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-[#6B7280]">
+                    {selectedCNIds.size} selected
+                  </span>
+                  <Button variant="outline" size="sm" onClick={handleBulkMarkDispatched}>
+                    <Send className="h-3.5 w-3.5" /> Mark Dispatched
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleBulkMarkDelivered}>
+                    <CheckCircle2 className="h-3.5 w-3.5" /> Mark Delivered
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleBulkMarkAcknowledged}>
+                    <PackageCheck className="h-3.5 w-3.5" /> Mark Acknowledged
+                  </Button>
+                </div>
+              )}
             </div>
           </CardHeader>
           <CardContent>
@@ -2512,6 +2665,10 @@ export default function ConsignmentNotePage() {
               emptyMessage="No consignment notes found."
               onDoubleClick={(row) => setDetailCN(row)}
               contextMenuItems={getContextMenuItems}
+              selectable
+              onSelectionChange={(rows) =>
+                setSelectedCNIds(new Set(rows.map((r) => r.id)))
+              }
             />
 
             {/* Pagination footer — same shape as DO. */}

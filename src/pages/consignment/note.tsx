@@ -57,6 +57,9 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { ConsignmentNote, Customer } from "@/types";
+// Type-only — erased at compile time, so the jsPDF module still loads
+// lazily (its own chunk) via the await import() in the print handlers.
+import type { CNPdfData } from "@/lib/generate-cn-pdf";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1609,11 +1612,13 @@ export default function ConsignmentNotePage() {
   // everything the document needs is already client-side), then download
   // ("download") or open on screen ("view"). Replaces the old "Print CN —
   // coming soon" toast (owner 2026-06-11: CN documents must match DO).
-  const printCNPdf = useCallback(
-    async (
-      row: ConsignmentNoteRow,
-      mode: "download" | "view" = "download",
-    ) => {
+  //
+  // buildCnPdfData is the SINGLE payload assembler — the single-CN print
+  // and the consolidated packing-list print both go through it so the hub
+  // address/contact/state/transport resolution can never drift between
+  // the two documents.
+  const buildCnPdfData = useCallback(
+    (row: ConsignmentNoteRow): CNPdfData => {
       const cust = customersData.find((c) => c.id === row.customerId);
       const hub = cust?.deliveryHubs?.find((h) => h.id === row.hubId);
       // Resolve the destination state to its full label — hub state wins,
@@ -1627,37 +1632,58 @@ export default function ConsignmentNotePage() {
         providers.find((p) => p.id === row.driverId)?.name ||
         row.driverCompany ||
         "";
-      const { generateCNPdf } = await import("@/lib/generate-cn-pdf");
-      generateCNPdf(
-        {
-          cnNo: row.cnNo,
-          customerName: row.customerName,
-          deliverTo: hub?.shortName || row.branchName || "",
-          deliveryAddress: hub?.address || "",
-          stateLabel,
-          contactPerson: hub?.contactName || "",
-          contactPhone: hub?.phone || "",
-          dispatchDate: row.dispatchDate,
-          transportCompany,
-          driverName: row.driverName,
-          driverPhone: row.driverPhone,
-          vehicleNo: row.vehicleNo,
-          vehicleType: row.vehicleType,
-          items: row.items.map((it) => ({
-            productCode: it.productCode,
-            productName: it.productName,
-            sizeLabel: it.sizeLabel,
-            fabricCode: it.fabricCode,
-            quantity: it.quantity,
-            itemM3: it.itemM3,
-            consignmentOrderNo: it.consignmentOrderNo,
-          })),
-        },
-        mode,
-      );
+      return {
+        cnNo: row.cnNo,
+        customerName: row.customerName,
+        deliverTo: hub?.shortName || row.branchName || "",
+        deliveryAddress: hub?.address || "",
+        stateLabel,
+        contactPerson: hub?.contactName || "",
+        contactPhone: hub?.phone || "",
+        dispatchDate: row.dispatchDate,
+        transportCompany,
+        driverName: row.driverName,
+        driverPhone: row.driverPhone,
+        vehicleNo: row.vehicleNo,
+        vehicleType: row.vehicleType,
+        items: row.items.map((it) => ({
+          productCode: it.productCode,
+          productName: it.productName,
+          sizeLabel: it.sizeLabel,
+          fabricCode: it.fabricCode,
+          quantity: it.quantity,
+          itemM3: it.itemM3,
+          consignmentOrderNo: it.consignmentOrderNo,
+        })),
+      };
     },
     [customersData, providers],
   );
+
+  const printCNPdf = useCallback(
+    async (
+      row: ConsignmentNoteRow,
+      mode: "download" | "view" = "download",
+    ) => {
+      const { generateCNPdf } = await import("@/lib/generate-cn-pdf");
+      generateCNPdf(buildCnPdfData(row), mode);
+    },
+    [buildCnPdfData],
+  );
+
+  // ---------- Consolidated Packing List print (owner decision "2B") ----------
+  // One PDF for the ticked CNs: cover summary page, then each CN's full
+  // branded document, page-numbered as one file. Pure print — no DB rows,
+  // no status transition — so unlike the bulk Mark buttons there is no
+  // status gating; it works from every CN-list tab.
+  const handlePrintPackingList = async () => {
+    if (selectedCNIds.size === 0) return;
+    const selected = cnList
+      .filter((c) => selectedCNIds.has(c.id))
+      .sort((a, b) => a.cnNo.localeCompare(b.cnNo));
+    const { printCnPackingList } = await import("@/lib/generate-cn-pdf");
+    printCnPackingList(selected.map(buildCnPdfData));
+  };
 
   // ---------- Inline Expected DD update on the CO ----------
   // DO updates SO.hookkaExpectedDD via PUT /api/sales-orders/:id; same
@@ -2633,9 +2659,10 @@ export default function ConsignmentNotePage() {
               </CardTitle>
               {/* Bulk actions once CNs are ticked — sits right next to the
                   grid like DO's Mark Dispatched / Mark Delivered buttons.
-                  Each button only acts on rows whose status allows that
-                  transition; the rest are skipped with the count shown in
-                  the summary toast. */}
+                  Each Mark button only acts on rows whose status allows
+                  that transition; the rest are skipped with the count shown
+                  in the summary toast. Print Packing List is a pure print
+                  (no transition), so it takes every ticked row on any tab. */}
               {selectedCNIds.size > 0 && (
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-[#6B7280]">
@@ -2649,6 +2676,13 @@ export default function ConsignmentNotePage() {
                   </Button>
                   <Button variant="outline" size="sm" onClick={handleBulkMarkAcknowledged}>
                     <PackageCheck className="h-3.5 w-3.5" /> Mark Acknowledged
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handlePrintPackingList()}
+                  >
+                    <Printer className="h-3.5 w-3.5" /> Print Packing List
                   </Button>
                 </div>
               )}

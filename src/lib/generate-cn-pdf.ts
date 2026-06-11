@@ -10,9 +10,10 @@ import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
 // 3PL driver + lorry), items table, totals footer, signature strip, and the
 // per-page footer + "Page X of Y" stamp.
 //
-// The render/stamp split mirrors renderDoInto + stampDoFooters so a future
-// consolidated CN packing list (Batch 2) can draw several CNs into one doc
-// and number the whole document once — same contract as the DO side.
+// The render/stamp split mirrors renderDoInto + stampDoFooters so the
+// consolidated CN packing list (printCnPackingList below) can draw several
+// CNs into one doc and number the whole document once — same contract as
+// the DO side.
 // ---------------------------------------------------------------------------
 
 // All print fields are resolved CLIENT-SIDE by the CN page (hub address /
@@ -345,4 +346,184 @@ export function generateCNPdf(
     return;
   }
   doc.save(fileName);
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated CN packing list (owner decision "2B", 2026-06-11): pure
+// print, CN-side twin of generateConsolidatedDoPdf. ONE document = a cover
+// summary page (one line per CN + grand totals), then every selected CN
+// rendered in full via renderCnInto, each starting on a fresh page.
+// stampCnFooters runs once at the end so "Page X of Y" numbers the whole
+// file continuously. Unlike the DO side there is NO packing_lists row and
+// no backend involvement — the caller hands over ready CNPdfData payloads.
+// ---------------------------------------------------------------------------
+
+// Cover page: letterhead + one summary line per CN so the loader sees the
+// whole run at a glance before the full documents follow.
+function renderCnPackingSummary(doc: jsPDF, cns: CNPdfData[]) {
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const m = 14;
+  const co = COMPANY.HOOKKA;
+
+  // --- Letterhead — same block the CN document header draws ---
+  addHookkaLetterhead(doc, m, 12, 12);
+  const tx = m + 12 * (2038 / 907) + 5;
+  doc.setTextColor(...INK);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(13);
+  doc.text(co.name, tx, 16);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6.8);
+  doc.setTextColor(...FAINT);
+  doc.text(`Reg. ${co.regNo}   |   TIN ${co.tin}`, tx, 20.5);
+  doc.text(co.address, tx, 24);
+  doc.text(`Tel ${co.phone}   |   ${co.email}`, tx, 27.5);
+
+  doc.setTextColor(...INK);
+  doc.setFont("helvetica", "bold");
+  // 14.5pt (the CN doc title runs 17): this title is 8 characters longer
+  // and must still clear the company-name block on the same header band.
+  doc.setFontSize(14.5);
+  doc.text("CONSIGNMENT PACKING LIST", pageW - m, 17, { align: "right" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.5);
+  doc.setTextColor(...FAINT);
+  doc.text(
+    `${cns.length} CN${cns.length === 1 ? "" : "s"}   |   Printed ${fmtDate(new Date().toISOString())}`,
+    pageW - m,
+    23,
+    { align: "right" },
+  );
+
+  doc.setDrawColor(...RULE);
+  doc.setLineWidth(0.5);
+  doc.line(m, 31, pageW - m, 31);
+
+  // One line per CN; grand totals use the same qty / m³ math as the CN
+  // items-table footer so cover and per-CN documents always agree.
+  let grandQty = 0;
+  let grandM3 = 0;
+  const body: RowInput[] = cns.map((cn, i) => {
+    const qty = cn.items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+    const m3 = cn.items.reduce(
+      (s, it) => s + (Number(it.itemM3) || 0) * (Number(it.quantity) || 0),
+      0,
+    );
+    grandQty += qty;
+    grandM3 += m3;
+    return [
+      String(i + 1),
+      cn.cnNo,
+      cn.customerName || "-",
+      cn.deliverTo || "-",
+      cn.stateLabel || "-",
+      String(cn.items.length),
+      String(qty),
+      m3 > 0 ? m3.toFixed(2) : "-",
+    ];
+  });
+
+  autoTable(doc, {
+    startY: 38,
+    head: [
+      [
+        { content: "#", styles: { halign: "center" } },
+        { content: "CN No." },
+        { content: "Customer" },
+        { content: "Deliver To" },
+        { content: "State" },
+        { content: "Items", styles: { halign: "right" } },
+        { content: "Qty", styles: { halign: "right" } },
+        { content: "M³", styles: { halign: "right" } },
+      ],
+    ],
+    body,
+    foot: [
+      [
+        { content: "Total", colSpan: 6, styles: { halign: "right" } },
+        { content: `${grandQty} PCS`, styles: { halign: "right" } },
+        { content: grandM3.toFixed(2), styles: { halign: "right" } },
+      ],
+    ],
+    margin: { top: 18, left: m, right: m, bottom: 16 },
+    showHead: "everyPage",
+    showFoot: "lastPage",
+    theme: "plain",
+    rowPageBreak: "avoid",
+    styles: {
+      font: "helvetica",
+      fontSize: 7.2,
+      cellPadding: { top: 1.3, bottom: 1.8, left: 1.8, right: 1.8 },
+      textColor: INK,
+      lineColor: HAIR,
+      lineWidth: 0,
+      valign: "top",
+    },
+    headStyles: {
+      fontStyle: "bold",
+      fontSize: 7,
+      lineWidth: { top: 0, bottom: 0.5, left: 0, right: 0 },
+      lineColor: RULE,
+    },
+    footStyles: {
+      fontStyle: "bold",
+      fontSize: 7,
+      lineWidth: { top: 0.5, bottom: 0, left: 0, right: 0 },
+      lineColor: RULE,
+    },
+    columnStyles: {
+      0: { cellWidth: 8, halign: "center" }, // #
+      1: { cellWidth: 28 }, // CN No.
+      2: { cellWidth: "auto" }, // Customer
+      3: { cellWidth: 32 }, // Deliver To
+      4: { cellWidth: 24 }, // State
+      5: { cellWidth: 13, halign: "right" }, // Items (line count)
+      6: { cellWidth: 13, halign: "right" }, // Qty (pieces)
+      7: { cellWidth: 16, halign: "right" }, // M³ (CN total)
+    },
+    didDrawCell: (d) => {
+      // Same thin dashed separator the CN items table draws per row.
+      if (d.section === "body" && d.column.index === 7) {
+        const y = d.cell.y + d.cell.height;
+        doc.setDrawColor(...HAIR);
+        doc.setLineWidth(0.1);
+        doc.setLineDashPattern([0.7, 0.7], 0);
+        doc.line(m, y, pageW - m, y);
+        doc.setLineDashPattern([], 0);
+      }
+    },
+  });
+
+  // Skip the footnote when the table ends inside the footer band (same
+  // guard the DO cover uses) — stampCnFooters owns that strip.
+  const afterY =
+    (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable
+      ?.finalY ?? 38;
+  if (afterY + 6 < pageH - 16) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(7);
+    doc.setTextColor(...FAINT);
+    doc.text(
+      "Each consignment note follows in full on its own page.",
+      m,
+      afterY + 6,
+    );
+  }
+}
+
+// Entry point — caller passes the CNs already ordered (the CN list page
+// sorts by CN number ascending). Download only; there is no "view" twin
+// because the file regularly runs tens of pages.
+export function printCnPackingList(cns: CNPdfData[]) {
+  if (!cns || cns.length === 0) return;
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
+  renderCnPackingSummary(doc, cns);
+  cns.forEach((cn) => {
+    doc.addPage();
+    renderCnInto(doc, cn);
+  });
+  stampCnFooters(doc);
+  const stamp = new Date().toISOString().slice(0, 10);
+  doc.save(`Consignment-PackingList-${stamp}.pdf`);
 }

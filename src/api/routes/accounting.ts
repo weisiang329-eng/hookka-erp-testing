@@ -1209,6 +1209,205 @@ app.get("/customer-statement", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// AP CONTROL (Phase 2, 2026-06) — mirror of /ar-control for the payable
+// side: SCC creditor-control ledger balances vs Σ booked-unpaid purchase
+// invoices (APPROVED) vs the suppliers.outstandingSen counter, supplier
+// aging by due date, and a supplier statement (PI CR / payment DR).
+// ---------------------------------------------------------------------------
+app.get("/ap-control", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const [coaRes, legRes, piRes, supRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT code, name FROM chart_of_accounts WHERE specialAccountType = 'SCC'",
+    ).all<{ code: string; name: string }>(),
+    c.var.DB.prepare(
+      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries",
+    ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
+    c.var.DB.prepare(
+      `SELECT supplierId, supplierName, piNo, amountSen, status, dueDate
+         FROM purchase_invoices
+        WHERE status = 'APPROVED'`,
+    ).all<{
+      supplierId: string;
+      supplierName: string;
+      piNo: string;
+      amountSen: number;
+      status: string;
+      dueDate: string | null;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM suppliers",
+    ).first<{ s: number }>(),
+  ]);
+  const dr = new Map<string, number>();
+  const cr = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+  }
+  const controls = (coaRes.results ?? [])
+    .map((a) => ({
+      code: a.code,
+      name: a.name,
+      // Liability: credit-normal.
+      balanceSen: (cr.get(a.code) ?? 0) - (dr.get(a.code) ?? 0),
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+  const tradeControlSen = controls
+    .filter((a) => a.code !== "405-0000")
+    .reduce((s, a) => s + a.balanceSen, 0);
+
+  const today = new Date().toISOString().slice(0, 10);
+  type ApAging = {
+    supplierId: string;
+    supplierName: string;
+    notDueSen: number;
+    d30Sen: number;
+    d60Sen: number;
+    d90Sen: number;
+    d120Sen: number;
+    over120Sen: number;
+    totalSen: number;
+  };
+  const bySupplier = new Map<string, ApAging>();
+  let piOutstandingSen = 0;
+  for (const pi of piRes.results ?? []) {
+    const amt = Number(pi.amountSen) || 0;
+    if (amt === 0) continue;
+    piOutstandingSen += amt;
+    let row = bySupplier.get(pi.supplierId);
+    if (!row) {
+      row = {
+        supplierId: pi.supplierId,
+        supplierName: pi.supplierName || "Unknown",
+        notDueSen: 0,
+        d30Sen: 0,
+        d60Sen: 0,
+        d90Sen: 0,
+        d120Sen: 0,
+        over120Sen: 0,
+        totalSen: 0,
+      };
+      bySupplier.set(pi.supplierId, row);
+    }
+    const due = pi.dueDate || today;
+    const overdueDays =
+      due >= today
+        ? 0
+        : Math.floor(
+            (new Date(`${today}T00:00:00Z`).getTime() -
+              new Date(`${due}T00:00:00Z`).getTime()) /
+              86400000,
+          );
+    if (overdueDays <= 0) row.notDueSen += amt;
+    else if (overdueDays <= 30) row.d30Sen += amt;
+    else if (overdueDays <= 60) row.d60Sen += amt;
+    else if (overdueDays <= 90) row.d90Sen += amt;
+    else if (overdueDays <= 120) row.d120Sen += amt;
+    else row.over120Sen += amt;
+    row.totalSen += amt;
+  }
+  const aging = [...bySupplier.values()].sort((a, b) => b.totalSen - a.totalSen);
+  const supplierCounterSen = Number(supRes?.s) || 0;
+  return c.json({
+    success: true,
+    data: {
+      asOf: today,
+      controls,
+      tradeControlSen,
+      piOutstandingSen,
+      supplierCounterSen,
+      driftControlVsPiSen: tradeControlSen - piOutstandingSen,
+      driftCounterVsPiSen: supplierCounterSen - piOutstandingSen,
+      aging,
+    },
+  });
+});
+
+app.get("/supplier-statement", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const supplierId = c.req.query("supplierId");
+  if (!supplierId) {
+    return c.json({ success: false, error: "supplierId is required" }, 400);
+  }
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const [sup, piRes, payRes] = await Promise.all([
+    c.var.DB.prepare("SELECT id, name FROM suppliers WHERE id = ?")
+      .bind(supplierId)
+      .first<{ id: string; name: string }>(),
+    c.var.DB.prepare(
+      `SELECT piNo, invoiceDate, amountSen, status FROM purchase_invoices
+        WHERE supplierId = ? AND status IN ('APPROVED','PAID')`,
+    )
+      .bind(supplierId)
+      .all<{ piNo: string; invoiceDate: string; amountSen: number; status: string }>(),
+    c.var.DB.prepare(
+      `SELECT paymentNo, date, amountSen FROM supplier_payments WHERE supplierId = ?`,
+    )
+      .bind(supplierId)
+      .all<{ paymentNo: string; date: string; amountSen: number }>(),
+  ]);
+  if (!sup) {
+    return c.json({ success: false, error: "Supplier not found" }, 404);
+  }
+  type Line = {
+    date: string;
+    ref: string;
+    type: string;
+    debitSen: number;
+    creditSen: number;
+  };
+  const lines: Line[] = [];
+  for (const pi of piRes.results ?? [])
+    lines.push({
+      date: pi.invoiceDate ?? "",
+      ref: pi.piNo,
+      type: "PURCHASE_INVOICE",
+      debitSen: 0,
+      creditSen: Number(pi.amountSen) || 0,
+    });
+  for (const p of payRes.results ?? [])
+    lines.push({
+      date: p.date ?? "",
+      ref: p.paymentNo,
+      type: "PAYMENT",
+      debitSen: Number(p.amountSen) || 0,
+      creditSen: 0,
+    });
+  lines.sort((a, b) =>
+    a.date === b.date ? a.ref.localeCompare(b.ref) : a.date.localeCompare(b.date),
+  );
+  // AP balance is credit-normal: what we still owe = credits − debits.
+  let openingSen = 0;
+  const rows: (Line & { runningSen: number })[] = [];
+  let running = 0;
+  for (const l of lines) {
+    const delta = l.creditSen - l.debitSen;
+    if (l.date < from) {
+      openingSen += delta;
+      continue;
+    }
+    if (l.date > to) continue;
+    running = (rows.length === 0 ? openingSen : running) + delta;
+    rows.push({ ...l, runningSen: running });
+  }
+  return c.json({
+    success: true,
+    data: {
+      supplier: { id: sup.id, name: sup.name },
+      from: from || null,
+      to: to === "9999-12-31" ? null : to,
+      openingSen,
+      closingSen: rows.length ? rows[rows.length - 1].runningSen : openingSen,
+      rows,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // OTHER DEBTOR / OTHER CREDITOR REGISTRY (Phase 1, 2026-06)
 //
 // Non-trade counterparties (transporters, deposit holders, staff advances,

@@ -1668,6 +1668,155 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
 
 // =============== TAB 5: ACCOUNTS PAYABLE ===============
 
+// Phase 2 (2026-06) — AP control reconciliation + supplier statement.
+// Mirror of ARControlPanel for the payable side.
+function APControlPanel() {
+  const [data, setData] = useState<{
+    controls: { code: string; name: string; balanceSen: number }[];
+    tradeControlSen: number;
+    piOutstandingSen: number;
+    supplierCounterSen: number;
+    driftControlVsPiSen: number;
+    driftCounterVsPiSen: number;
+  } | null>(null);
+  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  const [stmtSupplier, setStmtSupplier] = useState("");
+  const [stmtFrom, setStmtFrom] = useState("");
+  const [stmtTo, setStmtTo] = useState("");
+  const [stmt, setStmt] = useState<{
+    supplier: { id: string; name: string };
+    openingSen: number;
+    closingSen: number;
+    rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
+  } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/accounting/ap-control")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
+      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    fetch("/api/suppliers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
+      .then((j) => { if (j?.success) setSuppliers((j.data ?? []).map((s) => ({ id: s.id, name: s.name }))); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!stmtSupplier) return;
+    let stale = false;
+    const p = new URLSearchParams({ supplierId: stmtSupplier });
+    if (stmtFrom) p.set("from", stmtFrom);
+    if (stmtTo) p.set("to", stmtTo);
+    fetch(`/api/accounting/supplier-statement?${p.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof stmt> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setStmt(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [stmtSupplier, stmtFrom, stmtTo]);
+
+  const drift = (n: number) => (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${n === 0 ? "bg-[#EAF3DE] text-[#27500A] border-[#C0DD97]" : "bg-[#FCEBEB] text-[#791F1F] border-[#F7C1C1]"}`}>
+      {n === 0 ? "matches ✓" : `drift ${formatCurrency(n)}`}
+    </span>
+  );
+
+  return (
+    <div className="space-y-4 mb-2">
+      {data && (
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">Creditor control (ledger{data.controls.filter((x) => x.code !== "405-0000").map((x) => ` ${x.code}`).join(",")})</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{formatCurrency(data.tradeControlSen)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">Booked-unpaid purchase invoices (APPROVED)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.piOutstandingSen)}</p>
+              <div className="mt-1">{drift(data.driftControlVsPiSen)}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">Supplier running counter (outstandingSen)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.supplierCounterSen)}</p>
+              <div className="mt-1">{drift(data.driftCounterVsPiSen)}</div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Supplier statement</label>
+              <select
+                value={stmtSupplier}
+                onChange={(e) => { setStmtSupplier(e.target.value); setStmt(null); }}
+                className="rounded-md border border-[#E2DDD8] px-3 py-2 text-sm min-w-56 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="">— select supplier —</option>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[11px] text-[#6B7280] block">From</label>
+              <input type="date" value={stmtFrom} onChange={(e) => { setStmtFrom(e.target.value); setStmt(null); }} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-xs" />
+            </div>
+            <div>
+              <label className="text-[11px] text-[#6B7280] block">To</label>
+              <input type="date" value={stmtTo} onChange={(e) => { setStmtTo(e.target.value); setStmt(null); }} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-xs" />
+            </div>
+          </div>
+          {stmtSupplier && !stmt && (
+            <div className="py-6 text-center text-[#6B7280] text-sm">Loading statement…</div>
+          )}
+          {stmt && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Ref</th>
+                    <th className="px-3 py-2 text-left">Type</th>
+                    <th className="px-3 py-2 text-right">Debit</th>
+                    <th className="px-3 py-2 text-right">Credit</th>
+                    <th className="px-3 py-2 text-right">Owing</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                    <td className="px-3 py-1.5" colSpan={5}>Opening balance</td>
+                    <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(stmt.openingSen)}</td>
+                  </tr>
+                  {stmt.rows.map((r, i) => (
+                    <tr key={`${r.ref}-${i}`} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
+                      <td className="px-3 py-1.5 text-[#1F1D1B]">{r.ref}</td>
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.type}</td>
+                      <td className="px-3 py-1.5 text-right">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                      <td className="px-3 py-1.5 text-right">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                      <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(r.runningSen)}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-t border-[#1F1D1B] font-semibold">
+                    <td className="px-3 py-2" colSpan={5}>Closing balance</td>
+                    <td className="px-3 py-2 text-right">{formatCurrency(stmt.closingSen)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () => void }) {
   const [paymentForm, setPaymentForm] = useState<string | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -1697,6 +1846,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
 
   return (
     <div className="space-y-4">
+      <APControlPanel />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Payable</h2>

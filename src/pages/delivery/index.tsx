@@ -187,6 +187,36 @@ type PlFirstPreviewGroup = {
   poNos: string[];
 };
 
+// Cap (m³) auto-fills from the cargo box dimensions — exact ft³ → m³
+// conversion (1 ft = 0.3048 m, so ×0.028316846592). Owner spec 2026-06-11:
+// fill all three FEET fields and the m³ computes itself (e.g. 17 × 7.2 ×
+// 7.2 ft → 24.95 m³); Cap stays hand-editable while any dimension is
+// missing, and a later manual Cap edit is overwritten only when a dimension
+// changes again.
+function withAutoCap<
+  T extends {
+    boxLengthFt: string;
+    boxWidthFt: string;
+    boxHeightFt: string;
+    capacityM3: string;
+  },
+>(f: T): T {
+  const L = Number(f.boxLengthFt);
+  const W = Number(f.boxWidthFt);
+  const H = Number(f.boxHeightFt);
+  if (
+    f.boxLengthFt !== "" &&
+    f.boxWidthFt !== "" &&
+    f.boxHeightFt !== "" &&
+    isFinite(L) && L > 0 &&
+    isFinite(W) && W > 0 &&
+    isFinite(H) && H > 0
+  ) {
+    return { ...f, capacityM3: (L * W * H * 0.028316846592).toFixed(2) };
+  }
+  return f;
+}
+
 // ---------------------------------------------------------------------------
 // Map real DeliveryOrder from API to one row per DO
 // ---------------------------------------------------------------------------
@@ -608,9 +638,9 @@ export default function DeliveryPage() {
     ratePerExtraDropSen: number;
     status: "ACTIVE" | "INACTIVE";
     remarks: string;
-    boxLengthM: number | null;
-    boxWidthM: number | null;
-    boxHeightM: number | null;
+    boxLengthFt: number | null;
+    boxWidthFt: number | null;
+    boxHeightFt: number | null;
   };
   type ThreePLDriverPerson = {
     id: string;
@@ -626,7 +656,7 @@ export default function DeliveryPage() {
   const [vehicleForm, setVehicleForm] = useState({
     plateNo: "", vehicleType: "", capacityM3: "",
     ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE" as "ACTIVE" | "INACTIVE", remarks: "",
-    boxLengthM: "", boxWidthM: "", boxHeightM: "",
+    boxLengthFt: "", boxWidthFt: "", boxHeightFt: "",
   });
   const [driverEditing, setDriverEditing] = useState<ThreePLDriverPerson | "new" | null>(null);
   const [driverForm, setDriverForm] = useState({
@@ -1462,7 +1492,7 @@ export default function DeliveryPage() {
       setVehicleForm({
         plateNo: "", vehicleType: "", capacityM3: "",
         ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE", remarks: "",
-        boxLengthM: "", boxWidthM: "", boxHeightM: "",
+        boxLengthFt: "", boxWidthFt: "", boxHeightFt: "",
       });
     } else {
       setVehicleForm({
@@ -1473,9 +1503,9 @@ export default function DeliveryPage() {
         ratePerExtraDropRM: String((v.ratePerExtraDropSen || 0) / 100),
         status: v.status,
         remarks: v.remarks || "",
-        boxLengthM: v.boxLengthM != null ? String(v.boxLengthM) : "",
-        boxWidthM: v.boxWidthM != null ? String(v.boxWidthM) : "",
-        boxHeightM: v.boxHeightM != null ? String(v.boxHeightM) : "",
+        boxLengthFt: v.boxLengthFt != null ? String(v.boxLengthFt) : "",
+        boxWidthFt: v.boxWidthFt != null ? String(v.boxWidthFt) : "",
+        boxHeightFt: v.boxHeightFt != null ? String(v.boxHeightFt) : "",
       });
     }
     setVehicleEditing(v);
@@ -1496,9 +1526,9 @@ export default function DeliveryPage() {
       ratePerExtraDropSen: Math.round((Number(vehicleForm.ratePerExtraDropRM) || 0) * 100),
       status: vehicleForm.status,
       remarks: vehicleForm.remarks,
-      boxLengthM: vehicleForm.boxLengthM !== "" ? Number(vehicleForm.boxLengthM) || null : null,
-      boxWidthM: vehicleForm.boxWidthM !== "" ? Number(vehicleForm.boxWidthM) || null : null,
-      boxHeightM: vehicleForm.boxHeightM !== "" ? Number(vehicleForm.boxHeightM) || null : null,
+      boxLengthFt: vehicleForm.boxLengthFt !== "" ? Number(vehicleForm.boxLengthFt) || null : null,
+      boxWidthFt: vehicleForm.boxWidthFt !== "" ? Number(vehicleForm.boxWidthFt) || null : null,
+      boxHeightFt: vehicleForm.boxHeightFt !== "" ? Number(vehicleForm.boxHeightFt) || null : null,
     };
     const isEdit = vehicleEditing !== "new" && vehicleEditing !== null;
     const url = isEdit
@@ -6095,8 +6125,8 @@ export default function DeliveryPage() {
                                   <td className="px-2 py-1.5 text-right">RM{(v.ratePerTripSen / 100).toFixed(2)}</td>
                                   <td className="px-2 py-1.5 text-right">RM{(v.ratePerExtraDropSen / 100).toFixed(2)}</td>
                                   <td className="px-2 py-1.5 whitespace-nowrap tabular-nums">
-                                    {v.boxLengthM != null && v.boxWidthM != null && v.boxHeightM != null
-                                      ? `${v.boxLengthM.toFixed(2)} × ${v.boxWidthM.toFixed(2)} × ${v.boxHeightM.toFixed(2)}`
+                                    {v.boxLengthFt != null && v.boxWidthFt != null && v.boxHeightFt != null
+                                      ? `${v.boxLengthFt.toFixed(2)} × ${v.boxWidthFt.toFixed(2)} × ${v.boxHeightFt.toFixed(2)}`
                                       : "-"}
                                   </td>
                                   <td className="px-2 py-1.5">
@@ -6158,6 +6188,9 @@ export default function DeliveryPage() {
                               onChange={(e) => setVehicleForm((f) => ({ ...f, capacityM3: e.target.value }))}
                               className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
                             />
+                            <p className="mt-0.5 text-[10px] text-[#9CA3AF]">
+                              Auto-calculated from L×W×H (ft)
+                            </p>
                           </div>
                           <div>
                             <label className="text-[10px] text-[#6B7280] font-medium">Override Rate/Trip (RM, legacy)</label>
@@ -6192,41 +6225,34 @@ export default function DeliveryPage() {
                           </div>
                           {/* Box dimensions row — optional, three inputs on one line */}
                           <div>
-                            <label className="text-[10px] text-[#6B7280] font-medium">Length (m)</label>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Length (ft)</label>
                             <input
                               type="number" onFocus={(e) => e.currentTarget.select()}
                               step="0.01"
-                              value={vehicleForm.boxLengthM}
-                              onChange={(e) => setVehicleForm((f) => ({ ...f, boxLengthM: e.target.value }))}
+                              value={vehicleForm.boxLengthFt}
+                              onChange={(e) => setVehicleForm((f) => withAutoCap({ ...f, boxLengthFt: e.target.value }))}
                               className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
                             />
                           </div>
                           <div>
-                            <label className="text-[10px] text-[#6B7280] font-medium">Width (m)</label>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Width (ft)</label>
                             <input
                               type="number" onFocus={(e) => e.currentTarget.select()}
                               step="0.01"
-                              value={vehicleForm.boxWidthM}
-                              onChange={(e) => setVehicleForm((f) => ({ ...f, boxWidthM: e.target.value }))}
+                              value={vehicleForm.boxWidthFt}
+                              onChange={(e) => setVehicleForm((f) => withAutoCap({ ...f, boxWidthFt: e.target.value }))}
                               className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
                             />
                           </div>
                           <div>
-                            <label className="text-[10px] text-[#6B7280] font-medium">Height (m)</label>
-                            <div className="flex items-center gap-1.5">
-                              <input
-                                type="number" onFocus={(e) => e.currentTarget.select()}
-                                step="0.01"
-                                value={vehicleForm.boxHeightM}
-                                onChange={(e) => setVehicleForm((f) => ({ ...f, boxHeightM: e.target.value }))}
-                                className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
-                              />
-                              {vehicleForm.boxLengthM !== "" && vehicleForm.boxWidthM !== "" && vehicleForm.boxHeightM !== "" && (
-                                <span className="mt-1 text-[10px] text-[#6B7280] whitespace-nowrap">
-                                  ≈ {(Number(vehicleForm.boxLengthM) * Number(vehicleForm.boxWidthM) * Number(vehicleForm.boxHeightM)).toFixed(2)} m³
-                                </span>
-                              )}
-                            </div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Height (ft)</label>
+                            <input
+                              type="number" onFocus={(e) => e.currentTarget.select()}
+                              step="0.01"
+                              value={vehicleForm.boxHeightFt}
+                              onChange={(e) => setVehicleForm((f) => withAutoCap({ ...f, boxHeightFt: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
                           </div>
                         </div>
                         <div className="mt-2 flex justify-end gap-2">

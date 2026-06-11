@@ -21,12 +21,15 @@ import { getOrgId } from "../lib/tenant";
 const app = new Hono<Env>();
 
 // ---------------------------------------------------------------------------
-// Self-applying schema migration — cargo box dimensions (mig 0143).
+// Self-applying schema migration — cargo box dimensions (mig 0159).
+//
+// Dimensions are in FEET (the unit the owner's fleet is quoted in); the FE
+// auto-computes Cap (m³) from them.
 //
 // The d1-compat adapter rewrites only STATIC-known identifiers; unknown
 // camelCase passes through unquoted and Postgres folds it to all-lowercase.
-// So the ALTER uses unquoted camelCase (boxLengthM etc.) which folds to
-// boxlengthm / boxwidthm / boxheightm on disk. rowToVehicle() reads with
+// So the ALTER uses unquoted camelCase (boxLengthFt etc.) which folds to
+// boxlengthft / boxwidthft / boxheightft on disk. rowToVehicle() reads with
 // dual-key (camelCase ?? folded) to handle both adapter modes. See
 // BUG-2026-06-10-001 and BUG-2026-06-11-007 for prior art.
 // ---------------------------------------------------------------------------
@@ -35,10 +38,10 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
   if (pendingMigrations) return pendingMigrations;
   pendingMigrations = (async () => {
     const stmts = [
-      // 0143 — cargo box L/W/H in metres. Unquoted camelCase folds to lowercase.
-      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxLengthM DOUBLE PRECISION",
-      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxWidthM DOUBLE PRECISION",
-      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxHeightM DOUBLE PRECISION",
+      // 0159 — cargo box L/W/H in feet. Unquoted camelCase folds to lowercase.
+      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxLengthFt DOUBLE PRECISION",
+      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxWidthFt DOUBLE PRECISION",
+      "ALTER TABLE three_pl_vehicles ADD COLUMN IF NOT EXISTS boxHeightFt DOUBLE PRECISION",
     ];
     for (const sql of stmts) {
       try {
@@ -56,7 +59,8 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Validation helper for box dimensions.
-// Each value, when provided, must be a finite positive number < 30 m.
+// Each value, when provided, must be a finite positive number < 100 ft
+// (a 40 ft container is the realistic ceiling; 100 catches typos like 450).
 // ---------------------------------------------------------------------------
 function validateDimension(
   val: unknown,
@@ -69,8 +73,8 @@ function validateDimension(
   if (!isFinite(n) || n <= 0) {
     return { ok: false, error: `${label} must be a positive number` };
   }
-  if (n >= 30) {
-    return { ok: false, error: `${label} must be less than 30 m` };
+  if (n >= 100) {
+    return { ok: false, error: `${label} must be less than 100 ft` };
   }
   return { ok: true, value: n };
 }
@@ -90,12 +94,12 @@ type VehicleRow = {
   // Cargo box dimensions — stored as folded-lowercase by Postgres (see above).
   // The adapter may return either the camelCase key (if it rewrites the column)
   // or the folded key; rowToVehicle uses dual-key access for safety.
-  boxLengthM?: number | null;
-  boxlengthm?: number | null;
-  boxWidthM?: number | null;
-  boxwidthm?: number | null;
-  boxHeightM?: number | null;
-  boxheightm?: number | null;
+  boxLengthFt?: number | null;
+  boxlengthft?: number | null;
+  boxWidthFt?: number | null;
+  boxwidthft?: number | null;
+  boxHeightFt?: number | null;
+  boxheightft?: number | null;
 };
 
 function rowToVehicle(row: VehicleRow) {
@@ -114,9 +118,9 @@ function rowToVehicle(row: VehicleRow) {
     // Dual-key reads: folded-lowercase is what Postgres actually stores;
     // camelCase key is a fallback in case the adapter rewrites on a future
     // column-rename-map update.
-    boxLengthM: row.boxLengthM ?? row.boxlengthm ?? null,
-    boxWidthM: row.boxWidthM ?? row.boxwidthm ?? null,
-    boxHeightM: row.boxHeightM ?? row.boxheightm ?? null,
+    boxLengthFt: row.boxLengthFt ?? row.boxlengthft ?? null,
+    boxWidthFt: row.boxWidthFt ?? row.boxwidthft ?? null,
+    boxHeightFt: row.boxHeightFt ?? row.boxheightft ?? null,
   };
 }
 
@@ -176,11 +180,11 @@ app.post("/", async (c) => {
     }
 
     // Validate box dimensions.
-    const dimL = validateDimension(body.boxLengthM, "Length");
+    const dimL = validateDimension(body.boxLengthFt, "Length");
     if (!dimL.ok) return c.json({ success: false, error: dimL.error }, 400);
-    const dimW = validateDimension(body.boxWidthM, "Width");
+    const dimW = validateDimension(body.boxWidthFt, "Width");
     if (!dimW.ok) return c.json({ success: false, error: dimW.error }, 400);
-    const dimH = validateDimension(body.boxHeightM, "Height");
+    const dimH = validateDimension(body.boxHeightFt, "Height");
     if (!dimH.ok) return c.json({ success: false, error: dimH.error }, 400);
 
     const id = genId();
@@ -189,7 +193,7 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO three_pl_vehicles (id, providerId, plateNo, vehicleType,
          capacityM3, ratePerTripSen, ratePerExtraDropSen, status, remarks,
-         boxLengthM, boxWidthM, boxHeightM,
+         boxLengthFt, boxWidthFt, boxHeightFt,
          created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
@@ -257,28 +261,28 @@ app.put("/:id", async (c) => {
 
     // Validate box dimensions when present in the request body.
     const dimL = validateDimension(
-      body.boxLengthM !== undefined ? body.boxLengthM : undefined,
+      body.boxLengthFt !== undefined ? body.boxLengthFt : undefined,
       "Length",
     );
     if (!dimL.ok) return c.json({ success: false, error: dimL.error }, 400);
     const dimW = validateDimension(
-      body.boxWidthM !== undefined ? body.boxWidthM : undefined,
+      body.boxWidthFt !== undefined ? body.boxWidthFt : undefined,
       "Width",
     );
     if (!dimW.ok) return c.json({ success: false, error: dimW.error }, 400);
     const dimH = validateDimension(
-      body.boxHeightM !== undefined ? body.boxHeightM : undefined,
+      body.boxHeightFt !== undefined ? body.boxHeightFt : undefined,
       "Height",
     );
     if (!dimH.ok) return c.json({ success: false, error: dimH.error }, 400);
 
     // Resolve final dimension values: use incoming if provided, else keep existing.
-    const existingL = existing.boxLengthM ?? existing.boxlengthm ?? null;
-    const existingW = existing.boxWidthM ?? existing.boxwidthm ?? null;
-    const existingH = existing.boxHeightM ?? existing.boxheightm ?? null;
-    const nextL = body.boxLengthM !== undefined ? dimL.value : existingL;
-    const nextW = body.boxWidthM !== undefined ? dimW.value : existingW;
-    const nextH = body.boxHeightM !== undefined ? dimH.value : existingH;
+    const existingL = existing.boxLengthFt ?? existing.boxlengthft ?? null;
+    const existingW = existing.boxWidthFt ?? existing.boxwidthft ?? null;
+    const existingH = existing.boxHeightFt ?? existing.boxheightft ?? null;
+    const nextL = body.boxLengthFt !== undefined ? dimL.value : existingL;
+    const nextW = body.boxWidthFt !== undefined ? dimW.value : existingW;
+    const nextH = body.boxHeightFt !== undefined ? dimH.value : existingH;
 
     const merged = {
       plateNo:
@@ -312,7 +316,7 @@ app.put("/:id", async (c) => {
       `UPDATE three_pl_vehicles SET
          plateNo = ?, vehicleType = ?, capacityM3 = ?, ratePerTripSen = ?,
          ratePerExtraDropSen = ?, status = ?, remarks = ?,
-         boxLengthM = ?, boxWidthM = ?, boxHeightM = ?,
+         boxLengthFt = ?, boxWidthFt = ?, boxHeightFt = ?,
          updated_at = ?
        WHERE id = ?`,
     )

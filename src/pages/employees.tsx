@@ -7116,24 +7116,23 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             <div className="px-3 pb-3">
             <div className="grid grid-cols-1 gap-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
               <div>
-                <p className="font-semibold text-[#1F1D1B] mb-1">Daily & hourly rate (the base for everything)</p>
-                <p className="mb-1">
-                  <b>Daily rate = salary ÷ {payRulesToday.dayRateDivisorMode === "calendarDays"
-                    ? "the month's calendar days (30/31)"
+                <p className="font-semibold text-[#1F1D1B] mb-1">Daily & hourly rate</p>
+                <p>
+                  <b>Daily = salary ÷ {payRulesToday.dayRateDivisorMode === "calendarDays"
+                    ? "calendar days (30/31)"
                     : payRulesToday.dayRateDivisorMode === "workingDays"
-                      ? "the month's actual working days"
+                      ? "the month's working days"
                       : "26"}</b>{" "}
-                  · <b>Hourly rate = daily rate ÷ {payRulesToday.hourRateDivisorMode === "fixed"
+                  · <b>Hourly = daily ÷ {payRulesToday.hourRateDivisorMode === "fixed"
                     ? `${payRulesToday.rateHoursPerDay} (fixed)`
                     : payRulesToday.hourRateDivisorMode === "hoursOnly"
-                      ? "the worker's daily hours"
-                      : `(daily hours + ${(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)`}</b>
+                      ? "the worker's hours"
+                      : `(hours + ${(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)`}</b>.
                   {payRulesToday.dayRateDivisorMode === "fixed26" && payRulesToday.hourRateDivisorMode === "hoursPlusLunch"
-                    ? <> — 9h day → ÷10, 7.5h → ÷8.5. RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b>.</>
+                    ? <> RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b> (9h → ÷10, 7.5h → ÷8.5).</>
                     : null}{" "}
                   Absence uses the daily rate; lateness and OT use the hourly rate.
                 </p>
-                <p><b>To adjust someone&rsquo;s rate</b>: Employee Master → edit the worker → <b>&ldquo;Working days/month&rdquo;</b> and <b>&ldquo;Hours/day&rdquo;</b>. The divisor CHOICES (÷26 / ÷calendar / ÷working days) are in the editor below; lunch too.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Shift & working hours</p>
@@ -7155,10 +7154,11 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                 <p className="font-semibold text-[#1F1D1B] mb-1">Allowance & statutory</p>
                 <p>Efficiency allowance: flat amount on target (per worker, Employee Master) · EPF {payRulesToday.epfEmployeePct}%/{payRulesToday.epfEmployerPct}% · SOCSO RM{(payRulesToday.socsoEmployeeSen / 100).toFixed(2)}/{(payRulesToday.socsoEmployerSen / 100).toFixed(2)} · EIS RM{(payRulesToday.eisEmployeeSen / 100).toFixed(2)}/{(payRulesToday.eisEmployerSen / 100).toFixed(2)} (per-worker toggle).</p>
               </div>
-              <div>
-                <p className="font-semibold text-[#1F1D1B] mb-1">Where to maintain</p>
-                <p><b>Public holidays</b>: the Public Holidays panel · <b>Salary (effective-dated), OT multiplier, hours/day, statutory toggles, allowance</b>: Employee Master · <b>Everything shown here</b>: schedule a change below — it takes effect ON its date.</p>
-              </div>
+            </div>
+            {/* One tidy "where to adjust" strip instead of a 7th box hanging
+                under the grid (owner 2026-06-11: the panel read messy). */}
+            <div className="mt-3 border-t border-[#E2DDD8] pt-2 text-xs text-[#4B5563]">
+              <p><b className="text-[#1F1D1B]">Where to adjust</b> — <b>per worker</b> (salary with effective date · Working days/month · Hours/day · OT multiplier · statutory toggles · allowance): Employee Master · <b>public holidays</b>: the Public Holidays panel · <b>everything else</b> (divisor choices, shift, lunch, grace, OT ×, statutory rates): schedule a change below — it takes effect ON its date.</p>
             </div>
             <div className="mt-3 border-t border-[#E2DDD8] pt-2 text-xs text-[#4B5563]">
               <div className="flex items-center justify-between flex-wrap gap-2">

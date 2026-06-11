@@ -41,6 +41,8 @@
 
 import {
   resolvePayRulesAsOf,
+  payrollDayRateSen,
+  payrollHourDivisor,
   type PayRuleVersion,
   type PayRulesConfig,
 } from "./pay-rules";
@@ -617,18 +619,25 @@ export function computeMonthlyLabor(
   const rulesAt = (date: string) =>
     resolvePayRulesAsOf(input.payRuleVersions, date);
   const cfgMonthEnd = rulesAt(monthEndYmd);
-  const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — THE unified payroll day rate
-  // Hourly divisor (owner 2026-06-11): the worker's OWN day span — their daily
-  // working hours + the unpaid lunch (9h + 1h = ÷10; 7.5h → ÷8.5; 8h → ÷9).
-  // A worker with no hours set falls back to the rules' rateHoursPerDay (10).
+  // The payroll DAY rate under the configured divisor mode (owner 2026-06-11:
+  // ÷26 / ÷calendar days / ÷actual working days — a dropdown choice now).
+  // Default "fixed26" = salary ÷ workingDaysPerMonth, the unified rate.
+  // Month-level (resolved at month end), like the absence dock it prices.
+  const payrollDailyRateSen = payrollDayRateSen(
+    basicSalarySen,
+    {
+      workingDaysPerMonth,
+      calendarDays: daysInMonth,
+      workingDaysInMonth: costingDivisor,
+    },
+    cfgMonthEnd,
+  );
+  // Hourly divisor (owner 2026-06-11): default = the worker's OWN day span —
+  // daily hours + lunch (9h + 1h = ÷10; 7.5h → ÷8.5); mode can switch it to
+  // hours-only or a fixed number. No hours set → rateHoursPerDay fallback.
   // Lunch is effective-dated, so the divisor resolves per date like the rest.
   const hourDivisorAt = (cfg: PayRulesConfig): number =>
-    Math.max(
-      1,
-      workingHoursPerDay > 0
-        ? workingHoursPerDay + cfg.lunchMin / 60
-        : cfg.rateHoursPerDay,
-    );
+    payrollHourDivisor(workingHoursPerDay, cfg);
   const otBaseHourlyRateSen =
     payrollDailyRateSen / hourDivisorAt(cfgMonthEnd); // ÷26 ÷ day-span, before the day multiplier
   const otHourlyRateSen = otBaseHourlyRateSen * otMultiplier; // weekday OT rate (÷26÷10×mult) — back-compat

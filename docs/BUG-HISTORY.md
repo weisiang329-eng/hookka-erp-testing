@@ -61,6 +61,20 @@ Fix: `GET /api/worker/history` (worker.ts) now returns `lateMinutes` per attenda
 
 ---
 
+## BUG-2026-06-11-015 — Pay Rules editor was a flat 16-field wall: no divisor choice, statutory mixed in, zero explanation
+
+**Status:** 🟢 Shipped (2026-06-11). 713 tests green (5 new mode pins); typecheck green.
+**Category:** ui-frontend
+
+Owner: "我没有看到你是除以 30、31 还是除以 26 — 提供选项让我们选择"; "Statutory 是跟着我们的,基本上不用填写"; "增加一个 explanation 的 column,填写了内容之后 explanation 直接变换"。
+
+Changes:
+- **Divisor modes are now effective-dated CHOICES** (`src/lib/pay-rules.ts`): `dayRateDivisorMode` = ÷26 (Working days/month, default) / ÷calendar days (30/31) / ÷actual working days of the month; `hourRateDivisorMode` = worker's hours + lunch (default) / hours only / fixed number. Shared `payrollDayRateSen` + `payrollHourDivisor` helpers are used by the ENGINE and by BOTH recon late-dock bridges (employees.tsx), so any mode keeps Payroll ↔ Labor Cost ↔ Dept Labor tying. Defaults = byte-identical current behaviour; old stored versions normalize to the defaults.
+- **Editor redesigned** (PayrollTab): grouped sections (1 Day & hour rate with the two dropdowns · 2 Shift & lateness · 3 Overtime & absence · 4 Statutory in a COLLAPSED details block "follows the law, usually leave as-is") and a right-hand **live explainer** (`RuleDraftExplainer`) that recomputes the RM2,050 · 9h worked example on every keystroke — day rate, hour rate, a lateness example at the draft's grace/block, and the three OT rates.
+- The static "Daily & hourly rate" box + the versions list now reflect the configured modes instead of hardcoding ÷26.
+
+---
+
 ## BUG-2026-06-11-013 — Camera permission denied = worker stuck punching/scanning with no way out shown
 
 **Status:** 🟢 Shipped + verified live (2026-06-11). 710/711 tests; typecheck green.

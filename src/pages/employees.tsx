@@ -8,6 +8,8 @@ import { computeAttendanceDay, hhmmToMinutes, type AttendanceRules } from "@/lib
 import {
   resolvePayRulesAsOf,
   toAttendanceRules,
+  payrollDayRateSen,
+  payrollHourDivisor,
   DEFAULT_PAY_RULES,
   minToHhmm,
   type PayRuleVersion,
@@ -138,17 +140,9 @@ function dayTypedOt(
     return { otHours: totalH, mult: cfg.holidayOtMultiplier };
   return { otHours: Math.max(0, totalH - stdHours), mult: weekdayMult };
 }
-// Hourly-rate divisor (owner 2026-06-11): the worker's own day SPAN — daily
-// working hours + the unpaid lunch (9h+1h = ÷10; 7.5h → ÷8.5); a worker with
-// no hours set falls back to the rules' rateHoursPerDay. MUST mirror the
-// engine's hourDivisorAt so the recon bridges price docks exactly like pay.
-function hourDivisorFor(
-  workingHoursPerDay: number | null | undefined,
-  cfg: PayRulesConfig,
-): number {
-  const h = Number(workingHoursPerDay) || 0;
-  return Math.max(1, h > 0 ? h + cfg.lunchMin / 60 : cfg.rateHoursPerDay);
-}
+// Hourly-rate divisor: imported `payrollHourDivisor` from pay-rules — the
+// SAME implementation the engine uses, so the recon bridges price docks
+// exactly like pay (mode-aware: hours+lunch / hours-only / fixed).
 // Shared fetch of the effective-dated pay-rule versions (cached).
 function usePayRuleVersions(): PayRuleVersion[] {
   const { data } = useCachedJson<{ data?: { versions?: PayRuleVersion[] } }>(
@@ -4498,13 +4492,21 @@ function DepartmentLaborTab({
           let lateAdj = 0;
           if (dockH > 0) {
             const S = Number(p.basicSalary) || 0;
+            // Same DAY rate + hour divisor the engine docks with (mode-aware).
+            const dockDayRate = payrollDayRateSen(
+              S,
+              {
+                workingDaysPerMonth: owDays,
+                calendarDays: bdY && bdM ? new Date(bdY, bdM, 0).getDate() : 30,
+                workingDaysInMonth: actualWorkingDays,
+              },
+              cfgDeptEnd,
+            );
             lateAdj = Math.max(
               0,
               Math.round((dockH * S) / actualWorkingDays / owStd) -
-                // UNIFIED ÷26 dock rate (owner 2026-06-11), same as the engine:
-                // ÷26 ÷ the worker's day span (hours + lunch).
                 Math.round(
-                  (dockH * S) / owDays / hourDivisorFor(ow?.workingHoursPerDay, cfgDeptEnd),
+                  (dockH * dockDayRate) / payrollHourDivisor(ow?.workingHoursPerDay, cfgDeptEnd),
                 ),
             );
           }
@@ -6055,6 +6057,80 @@ function DailyDrillDown({
 
 // ========== TAB 5: PAYROLL ==========
 
+// Live explanation for the Pay Rules editor (owner 2026-06-11: "当我填写了
+// 内容之后,那个 explanation 会直接变换"). Recomputes a worked example
+// (RM2,050 · 9h worker · the CURRENT month) from the draft values on every
+// keystroke, so the admin sees exactly what each setting does before saving.
+function RuleDraftExplainer({ d }: { d: Record<string, string> }) {
+  const S = 2050; // example salary, RM
+  const now = new Date();
+  const calDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  let monSat = 0;
+  for (let i = 1; i <= calDays; i++) {
+    if (new Date(now.getFullYear(), now.getMonth(), i).getDay() !== 0) monSat++;
+  }
+  const lunchH = (Number(d.lunchMin) || 0) / 60;
+  const dayMode = d.dayRateDivisorMode || "fixed26";
+  const dayDiv = dayMode === "calendarDays" ? calDays : dayMode === "workingDays" ? monSat : 26;
+  const dayLabel =
+    dayMode === "calendarDays"
+      ? `${calDays} calendar days (this month — changes every month)`
+      : dayMode === "workingDays"
+        ? `${monSat} working days (this month's Mon–Sat, before public holidays — changes every month)`
+        : "26 (the worker's Working days/month — the same every month)";
+  const dayRate = S / Math.max(1, dayDiv);
+  const hourMode = d.hourRateDivisorMode || "hoursPlusLunch";
+  const fixedDiv = Number(d.rateHoursPerDay) || 10;
+  const hourDiv = hourMode === "fixed" ? fixedDiv : hourMode === "hoursOnly" ? 9 : 9 + lunchH;
+  const hourLabel =
+    hourMode === "fixed"
+      ? `${fixedDiv} (the same fixed number for everyone)`
+      : hourMode === "hoursOnly"
+        ? "the worker's daily hours (9h worker → ÷9)"
+        : `the worker's daily hours + ${lunchH}h lunch (9h worker → ÷${9 + lunchH})`;
+  const hourRate = dayRate / Math.max(1, hourDiv);
+  const grace = Number(d.lateGraceMin) || 0;
+  const block = Math.max(1, Number(d.lateBlockMin) || 15);
+  const sun = Number(d.sundayOtMultiplier) || 2;
+  const ph = Number(d.holidayOtMultiplier) || 3;
+  const absGrace = Number(d.absenceGraceWorkingDays) || 2;
+  const startMin = (() => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec((d.shiftStart || "").trim());
+    return m ? Number(m[1]) * 60 + Number(m[2]) : 480;
+  })();
+  const lateInMin = startMin + grace + 1;
+  const lateIn = `${String(Math.floor(lateInMin / 60)).padStart(2, "0")}:${String(lateInMin % 60).padStart(2, "0")}`;
+  const rm = (v: number) => `RM${v.toFixed(2)}`;
+  return (
+    <div className="rounded-md border border-[#E8E2DC] bg-[#FBF9F7] p-3 text-[11px] leading-relaxed text-[#4B5563]">
+      <p className="mb-1 font-semibold text-[#6B5C32]">What these settings mean (live example: RM2,050 salary · 9h/day worker)</p>
+      <p>
+        <b>Day rate</b> = 2,050 ÷ {dayLabel} = <b>{rm(dayRate)}/day</b> — each
+        confirmed absent day deducts this (confirmed after {absGrace} working
+        day{absGrace === 1 ? "" : "s"}; backfilling hours removes it).
+      </p>
+      <p className="mt-1">
+        <b>Hour rate</b> = {rm(dayRate)} ÷ {hourLabel} = <b>{rm(hourRate)}/hour</b> —
+        prices lateness, short hours and the OT base.
+      </p>
+      <p className="mt-1">
+        <b>Lateness</b>: arrive {lateIn} (1 min past the {grace}-min grace) →
+        charged {block} min = <b>−{rm((block / 60) * hourRate)}</b> · same-day OT
+        offsets the gap first.
+      </p>
+      <p className="mt-1">
+        <b>Overtime</b>: weekday ×1.5 → <b>{rm(hourRate * 1.5)}/h</b> · Sunday ×{sun} →{" "}
+        <b>{rm(hourRate * sun)}/h</b> · Public holiday ×{ph} → <b>{rm(hourRate * ph)}/h</b>{" "}
+        (Sunday/holiday count EVERY hour of the day).
+      </p>
+      <p className="mt-1 text-[#9CA3AF]">
+        Each worker&rsquo;s own salary, Working days/month and Hours/day come from
+        Employee Master — this example just shows the formulas.
+      </p>
+    </div>
+  );
+}
+
 function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const { toast } = useToast();
   const now = new Date();
@@ -6083,6 +6159,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     const c = payRulesToday;
     setRuleDraft({
       effectiveFrom: "",
+      dayRateDivisorMode: c.dayRateDivisorMode,
+      hourRateDivisorMode: c.hourRateDivisorMode,
       shiftStart: minToHhmm(c.shiftStartMin),
       shiftEnd: minToHhmm(c.shiftEndMin),
       lunchMin: String(c.lunchMin),
@@ -6124,6 +6202,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
           effectiveFrom: d.effectiveFrom,
           note: d.note || undefined,
           rules: {
+            dayRateDivisorMode: d.dayRateDivisorMode,
+            hourRateDivisorMode: d.hourRateDivisorMode,
             shiftStartMin: hhmmToMinLocal(d.shiftStart),
             shiftEndMin: hhmmToMinLocal(d.shiftEnd),
             lunchMin: Number(d.lunchMin),
@@ -6949,8 +7029,23 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
             <div className="grid grid-cols-1 gap-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Daily & hourly rate (the base for everything)</p>
-                <p className="mb-1"><b>Daily rate = salary ÷ 26</b> · <b>Hourly rate = daily rate ÷ (daily hours + {(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)</b> — 9h day → ÷10, 7.5h → ÷8.5. RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b>. Absence uses the daily rate; lateness and OT use the hourly rate.</p>
-                <p><b>To adjust someone&rsquo;s rate</b>: Employee Master → edit the worker → <b>&ldquo;Working days/month&rdquo;</b> (the 26) and <b>&ldquo;Hours/day&rdquo;</b>. Lunch is set below.</p>
+                <p className="mb-1">
+                  <b>Daily rate = salary ÷ {payRulesToday.dayRateDivisorMode === "calendarDays"
+                    ? "the month's calendar days (30/31)"
+                    : payRulesToday.dayRateDivisorMode === "workingDays"
+                      ? "the month's actual working days"
+                      : "26"}</b>{" "}
+                  · <b>Hourly rate = daily rate ÷ {payRulesToday.hourRateDivisorMode === "fixed"
+                    ? `${payRulesToday.rateHoursPerDay} (fixed)`
+                    : payRulesToday.hourRateDivisorMode === "hoursOnly"
+                      ? "the worker's daily hours"
+                      : `(daily hours + ${(payRulesToday.lunchMin / 60).toFixed(payRulesToday.lunchMin % 60 === 0 ? 0 : 1)}h lunch)`}</b>
+                  {payRulesToday.dayRateDivisorMode === "fixed26" && payRulesToday.hourRateDivisorMode === "hoursPlusLunch"
+                    ? <> — 9h day → ÷10, 7.5h → ÷8.5. RM2,050 · 9h: <b>RM78.85/day · RM7.88/hour</b>.</>
+                    : null}{" "}
+                  Absence uses the daily rate; lateness and OT use the hourly rate.
+                </p>
+                <p><b>To adjust someone&rsquo;s rate</b>: Employee Master → edit the worker → <b>&ldquo;Working days/month&rdquo;</b> and <b>&ldquo;Hours/day&rdquo;</b>. The divisor CHOICES (÷26 / ÷calendar / ÷working days) are in the editor below; lunch too.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Shift & working hours</p>
@@ -6994,7 +7089,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                   {payRuleVersionList.map((v) => (
                     <div key={v.id} className="flex items-center justify-between gap-2 rounded bg-white px-2 py-1">
                       <span>
-                        <b>From {v.effectiveFrom}</b> — Sun {v.rules.sundayOtMultiplier}× · PH {v.rules.holidayOtMultiplier}× · grace {v.rules.lateGraceMin}m · block {v.rules.lateBlockMin}m · fallback ÷{v.rules.rateHoursPerDay} · lunch {v.rules.lunchMin}m · {minToHhmm(v.rules.shiftStartMin)}–{minToHhmm(v.rules.shiftEndMin)}
+                        <b>From {v.effectiveFrom}</b> — day ÷{v.rules.dayRateDivisorMode === "calendarDays" ? "cal" : v.rules.dayRateDivisorMode === "workingDays" ? "work-days" : "26"} · hour ÷{v.rules.hourRateDivisorMode === "fixed" ? v.rules.rateHoursPerDay : v.rules.hourRateDivisorMode === "hoursOnly" ? "hours" : "hours+lunch"} · Sun {v.rules.sundayOtMultiplier}× · PH {v.rules.holidayOtMultiplier}× · grace {v.rules.lateGraceMin}m · block {v.rules.lateBlockMin}m · lunch {v.rules.lunchMin}m · {minToHhmm(v.rules.shiftStartMin)}–{minToHhmm(v.rules.shiftEndMin)}
                         {v.note ? <span className="text-[#9CA3AF]"> · {v.note}</span> : null}
                       </span>
                       {v.effectiveFrom > new Date().toISOString().slice(0, 10) && (
@@ -7013,43 +7108,144 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
               )}
               {ruleDraftOpen && (
                 <div className="mt-2 rounded-md border border-[#E2DDD8] bg-white p-3">
-                  <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                    {([
-                      ["effectiveFrom", "Effective from (YYYY-MM-DD)", "date"],
-                      ["shiftStart", "Shift start (HH:MM)", "text"],
-                      ["shiftEnd", "Shift end (HH:MM)", "text"],
-                      ["lunchMin", "Lunch (min)", "number"],
-                      ["lateGraceMin", "Late grace (min)", "number"],
-                      ["lateBlockMin", "Late block (min)", "number"],
-                      ["rateHoursPerDay", "Hour divisor (fallback ÷)", "number"],
-                      ["sundayOtMultiplier", "Sunday OT ×", "number"],
-                      ["holidayOtMultiplier", "Holiday OT ×", "number"],
-                      ["absenceGraceWorkingDays", "Absence grace (working days)", "number"],
-                      ["epfEmployeePct", "EPF employee %", "number"],
-                      ["epfEmployerPct", "EPF employer %", "number"],
-                      ["socsoEmployee", "SOCSO employee (RM)", "number"],
-                      ["socsoEmployer", "SOCSO employer (RM)", "number"],
-                      ["eisEmployee", "EIS employee (RM)", "number"],
-                      ["eisEmployer", "EIS employer (RM)", "number"],
-                    ] as Array<[string, string, string]>).map(([k, label, type]) => (
-                      <label key={k} className="text-[11px] text-[#6B7280]">
-                        {label}
+                  {/* Two columns (owner 2026-06-11 "左右排列"): settings on the
+                      left, a LIVE worked example on the right that recomputes
+                      as you type — explanation first, then adjust. */}
+                  <div className="grid gap-3 lg:grid-cols-[1fr_340px]">
+                    <div className="space-y-3">
+                      <label className="block text-[11px] text-[#6B7280] max-w-[220px]">
+                        Effective from
                         <Input
-                          type={type}
-                          value={ruleDraft[k] ?? ""}
-                          onChange={(e) => ruleDraftField(k, e.target.value)}
+                          type="date"
+                          value={ruleDraft.effectiveFrom ?? ""}
+                          onChange={(e) => ruleDraftField("effectiveFrom", e.target.value)}
                           className="mt-0.5 h-8 text-xs"
                         />
                       </label>
-                    ))}
-                    <label className="col-span-2 text-[11px] text-[#6B7280]">
-                      Note (optional)
-                      <Input
-                        value={ruleDraft.note ?? ""}
-                        onChange={(e) => ruleDraftField("note", e.target.value)}
-                        className="mt-0.5 h-8 text-xs"
-                      />
-                    </label>
+
+                      <div>
+                        <p className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide mb-1">1 · Day & hour rate</p>
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                          <label className="text-[11px] text-[#6B7280]">
+                            Day rate = salary ÷ …
+                            <select
+                              value={ruleDraft.dayRateDivisorMode ?? "fixed26"}
+                              onChange={(e) => ruleDraftField("dayRateDivisorMode", e.target.value)}
+                              className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                            >
+                              <option value="fixed26">26 — Working days/month (fixed)</option>
+                              <option value="calendarDays">Calendar days (30/31)</option>
+                              <option value="workingDays">Actual working days of the month</option>
+                            </select>
+                          </label>
+                          <label className="text-[11px] text-[#6B7280]">
+                            Hour rate = day rate ÷ …
+                            <select
+                              value={ruleDraft.hourRateDivisorMode ?? "hoursPlusLunch"}
+                              onChange={(e) => ruleDraftField("hourRateDivisorMode", e.target.value)}
+                              className="mt-0.5 h-8 w-full rounded-md border border-[#D8D2CC] bg-white px-2 text-xs"
+                            >
+                              <option value="hoursPlusLunch">Worker&rsquo;s hours + lunch (9+1 = ÷10)</option>
+                              <option value="hoursOnly">Worker&rsquo;s hours only (÷9)</option>
+                              <option value="fixed">Fixed number (below)</option>
+                            </select>
+                          </label>
+                          <label className="text-[11px] text-[#6B7280]">
+                            Fixed ÷ / fallback
+                            <Input
+                              type="number"
+                              value={ruleDraft.rateHoursPerDay ?? ""}
+                              onChange={(e) => ruleDraftField("rateHoursPerDay", e.target.value)}
+                              className="mt-0.5 h-8 text-xs"
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide mb-1">2 · Shift & lateness</p>
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+                          {([
+                            ["shiftStart", "Shift start (HH:MM)", "text"],
+                            ["shiftEnd", "Shift end (HH:MM)", "text"],
+                            ["lunchMin", "Lunch (min)", "number"],
+                            ["lateGraceMin", "Late grace (min)", "number"],
+                            ["lateBlockMin", "Late block (min)", "number"],
+                          ] as Array<[string, string, string]>).map(([k, label, type]) => (
+                            <label key={k} className="text-[11px] text-[#6B7280]">
+                              {label}
+                              <Input
+                                type={type}
+                                value={ruleDraft[k] ?? ""}
+                                onChange={(e) => ruleDraftField(k, e.target.value)}
+                                className="mt-0.5 h-8 text-xs"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide mb-1">3 · Overtime & absence</p>
+                        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                          {([
+                            ["sundayOtMultiplier", "Sunday OT ×", "number"],
+                            ["holidayOtMultiplier", "Holiday OT ×", "number"],
+                            ["absenceGraceWorkingDays", "Absence grace (working days)", "number"],
+                          ] as Array<[string, string, string]>).map(([k, label, type]) => (
+                            <label key={k} className="text-[11px] text-[#6B7280]">
+                              {label}
+                              <Input
+                                type={type}
+                                value={ruleDraft[k] ?? ""}
+                                onChange={(e) => ruleDraftField(k, e.target.value)}
+                                className="mt-0.5 h-8 text-xs"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Statutory follows the law (owner: "Statutory 是跟着
+                          我们的,基本上不用填写") — tucked away, opened only
+                          when the law actually changes. */}
+                      <details className="rounded border border-[#E8E2DC] bg-[#FBF9F7] px-2 py-1.5">
+                        <summary className="cursor-pointer text-[11px] font-semibold text-[#6B7280]">
+                          4 · Statutory (EPF / SOCSO / EIS) — follows the law, usually leave as-is
+                        </summary>
+                        <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-3">
+                          {([
+                            ["epfEmployeePct", "EPF employee %", "number"],
+                            ["epfEmployerPct", "EPF employer %", "number"],
+                            ["socsoEmployee", "SOCSO employee (RM)", "number"],
+                            ["socsoEmployer", "SOCSO employer (RM)", "number"],
+                            ["eisEmployee", "EIS employee (RM)", "number"],
+                            ["eisEmployer", "EIS employer (RM)", "number"],
+                          ] as Array<[string, string, string]>).map(([k, label, type]) => (
+                            <label key={k} className="text-[11px] text-[#6B7280]">
+                              {label}
+                              <Input
+                                type={type}
+                                value={ruleDraft[k] ?? ""}
+                                onChange={(e) => ruleDraftField(k, e.target.value)}
+                                className="mt-0.5 h-8 text-xs"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </details>
+
+                      <label className="block text-[11px] text-[#6B7280]">
+                        Note (optional)
+                        <Input
+                          value={ruleDraft.note ?? ""}
+                          onChange={(e) => ruleDraftField("note", e.target.value)}
+                          className="mt-0.5 h-8 text-xs"
+                        />
+                      </label>
+                    </div>
+
+                    <RuleDraftExplainer d={ruleDraft} />
                   </div>
                   <div className="mt-2 flex gap-2">
                     <Button size="sm" onClick={saveRuleDraft} disabled={!ruleDraftValid || savingRules}>
@@ -8011,14 +8207,19 @@ function LaborCostTab({
       const std = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const S = Number(p.basicSalary) || 0;
       const costEquivalentSen = Math.round((h * S) / aWD / std);
-      // Same formula the engine docks with — UNIFIED ÷26 (owner 2026-06-11):
-      // (salary ÷ workingDaysPerMonth) ÷ the worker's day span (hours + lunch).
+      // Same DAY rate + hour divisor the engine docks with (mode-aware:
+      // ÷26 / ÷calendar / ÷working days, then ÷ the worker's span).
       const wDays = w && w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const cfgDock = resolvePayRulesAsOf(
         payRuleVersions,
         `${(period || from).slice(0, 7)}-${String(calDays).padStart(2, "0")}`,
       );
-      const dockSen = Math.round((h * S) / wDays / hourDivisorFor(w?.workingHoursPerDay, cfgDock));
+      const dockDayRate = payrollDayRateSen(
+        S,
+        { workingDaysPerMonth: wDays, calendarDays: calDays, workingDaysInMonth: aWD },
+        cfgDock,
+      );
+      const dockSen = Math.round((h * dockDayRate) / payrollHourDivisor(w?.workingHoursPerDay, cfgDock));
       const adj = Math.max(0, costEquivalentSen - dockSen);
       if (adj > 0) m.set(p.id, adj);
     }

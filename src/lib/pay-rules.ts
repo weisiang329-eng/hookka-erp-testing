@@ -24,7 +24,25 @@
 // changes nothing.
 // ---------------------------------------------------------------------------
 
+/** How the DAY rate divides the monthly salary (owner 2026-06-11: "提供选项
+ *  让我们选择" — ÷26 / ÷calendar days / ÷actual working days). */
+export type DayRateDivisorMode = "fixed26" | "calendarDays" | "workingDays";
+/** How the HOUR rate divides the day rate. */
+export type HourRateDivisorMode = "hoursPlusLunch" | "hoursOnly" | "fixed";
+
 export type PayRulesConfig = {
+  /** Day rate = salary ÷ …
+   *  - "fixed26": the worker's Working days/month (26) — the default.
+   *  - "calendarDays": the month's calendar days (28/30/31).
+   *  - "workingDays": the month's ACTUAL Mon–Sat working days minus public
+   *    holidays. */
+  dayRateDivisorMode: DayRateDivisorMode;
+  /** Hour rate = day rate ÷ …
+   *  - "hoursPlusLunch": the worker's daily hours + lunch (9h+1h = ÷10) — default.
+   *  - "hoursOnly": the worker's daily hours alone (9h = ÷9).
+   *  - "fixed": rateHoursPerDay for everyone.
+   *  Workers with no hours set always fall back to rateHoursPerDay. */
+  hourRateDivisorMode: HourRateDivisorMode;
   /** Shift start, minutes since midnight (480 = 08:00). */
   shiftStartMin: number;
   /** Shift end / OT boundary, minutes since midnight (1080 = 18:00). */
@@ -71,6 +89,8 @@ export type PayRuleVersion = {
 
 /** The previously-hardcoded behaviour. An empty versions list = exactly this. */
 export const DEFAULT_PAY_RULES: PayRulesConfig = {
+  dayRateDivisorMode: "fixed26",
+  hourRateDivisorMode: "hoursPlusLunch",
   shiftStartMin: 8 * 60,
   shiftEndMin: 18 * 60,
   lunchMin: 60,
@@ -95,9 +115,19 @@ export function normalizePayRules(raw: unknown): PayRulesConfig {
   const r = (raw ?? {}) as Record<string, unknown>;
   const num = (k: keyof PayRulesConfig): number => {
     const v = Number(r[k]);
-    return Number.isFinite(v) && v >= 0 ? v : DEFAULT_PAY_RULES[k];
+    return Number.isFinite(v) && v >= 0 ? v : (DEFAULT_PAY_RULES[k] as number);
   };
+  const dayMode: DayRateDivisorMode =
+    r.dayRateDivisorMode === "calendarDays" || r.dayRateDivisorMode === "workingDays"
+      ? r.dayRateDivisorMode
+      : "fixed26";
+  const hourMode: HourRateDivisorMode =
+    r.hourRateDivisorMode === "hoursOnly" || r.hourRateDivisorMode === "fixed"
+      ? r.hourRateDivisorMode
+      : "hoursPlusLunch";
   return {
+    dayRateDivisorMode: dayMode,
+    hourRateDivisorMode: hourMode,
     shiftStartMin: num("shiftStartMin"),
     shiftEndMin: num("shiftEndMin"),
     lunchMin: num("lunchMin"),
@@ -130,6 +160,49 @@ export function resolvePayRulesAsOf(
     if (!best || v.effectiveFrom > best.effectiveFrom) best = v;
   }
   return best ? normalizePayRules(best.rules) : DEFAULT_PAY_RULES;
+}
+
+/**
+ * The payroll DAY rate (sen) for a month under the configured divisor mode.
+ * Callers pass the three candidate divisors pre-computed (the worker's
+ * nominal working days, the month's calendar days, the month's actual
+ * Mon–Sat-minus-holidays working days) so this stays dependency-free and the
+ * engine + the reconciliation bridges price with ONE implementation.
+ */
+export function payrollDayRateSen(
+  basicSalarySen: number,
+  divisors: {
+    workingDaysPerMonth: number;
+    calendarDays: number;
+    workingDaysInMonth: number;
+  },
+  cfg: PayRulesConfig,
+): number {
+  switch (cfg.dayRateDivisorMode) {
+    case "calendarDays":
+      return basicSalarySen / Math.max(1, divisors.calendarDays);
+    case "workingDays":
+      return basicSalarySen / Math.max(1, divisors.workingDaysInMonth);
+    default:
+      return basicSalarySen / Math.max(1, divisors.workingDaysPerMonth);
+  }
+}
+
+/** The HOUR-rate divisor for a worker under the configured mode. A worker
+ *  with no daily hours set always falls back to cfg.rateHoursPerDay. */
+export function payrollHourDivisor(
+  workingHoursPerDay: number | null | undefined,
+  cfg: PayRulesConfig,
+): number {
+  if (cfg.hourRateDivisorMode === "fixed") {
+    return Math.max(1, cfg.rateHoursPerDay);
+  }
+  const h = Number(workingHoursPerDay) || 0;
+  if (h <= 0) return Math.max(1, cfg.rateHoursPerDay);
+  return Math.max(
+    1,
+    cfg.hourRateDivisorMode === "hoursOnly" ? h : h + cfg.lunchMin / 60,
+  );
 }
 
 /** Adapter to the attendance-rules engine's config shape. */

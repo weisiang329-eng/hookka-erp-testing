@@ -115,6 +115,62 @@ test("hourly divisor = the worker's day span (hours + lunch); rateHoursPerDay on
   assert.equal(rLunch.payroll.shortHourDeductionSen, Math.round(day / 9.5));
 });
 
+test("divisor MODES (owner 2026-06-11 dropdown): day ÷26 / ÷calendar / ÷working-days; hour span/only/fixed", () => {
+  // ANN: RM2,650, 26 days, 8h. May 2026: 31 calendar days, 24 working days
+  // (2 weekday holidays). Absent 2 of the 24 working days.
+  const holidays = ["2026-05-01", "2026-05-27"];
+  const days = [];
+  for (let i = 2; i <= 30; i++) {
+    const d = new Date(2026, 4, i);
+    if (d.getDay() === 0) continue;
+    const iso = `2026-05-${String(i).padStart(2, "0")}`;
+    if (holidays.includes(iso)) continue;
+    days.push({ date: iso, hours: 8 });
+  }
+  days.splice(0, 2); // first 2 working days absent
+  const run = (rules) =>
+    labor.computeMonthlyLabor({
+      worker: { basicSalarySen: 265_000, workingDaysPerMonth: 26, workingHoursPerDay: 8, otMultiplier: 1.5 },
+      year: 2026, month: 5, days,
+      publicHolidays: holidays, absenceThroughDay: 31,
+      payRuleVersions: rules ? [v("2026-05-01", rules)] : undefined,
+    });
+  // Default fixed26: 2 × 265000/26.
+  assert.equal(run(undefined).payroll.absenceDeductionSen, Math.round(2 * (265_000 / 26)));
+  // Calendar days: 2 × 265000/31 (the old pre-unification behaviour, now a choice).
+  assert.equal(
+    run({ dayRateDivisorMode: "calendarDays" }).payroll.absenceDeductionSen,
+    Math.round(2 * (265_000 / 31)),
+  );
+  // Actual working days: 2 × 265000/24.
+  assert.equal(
+    run({ dayRateDivisorMode: "workingDays" }).payroll.absenceDeductionSen,
+    Math.round(2 * (265_000 / 24)),
+  );
+  // Hour modes price a 1h dock differently (ANN is an 8h worker):
+  const dock = (rules) =>
+    labor.computeMonthlyLabor({
+      worker: { basicSalarySen: 265_000, workingDaysPerMonth: 26, workingHoursPerDay: 8, otMultiplier: 1.5 },
+      year: 2026, month: 5, days,
+      publicHolidays: holidays, absenceThroughDay: 31,
+      shortHourDeductionHours: 1,
+      payRuleVersions: rules ? [v("2026-05-01", rules)] : undefined,
+    }).payroll.shortHourDeductionSen;
+  assert.equal(dock(undefined), Math.round(265_000 / 26 / 9)); // hours+lunch: 8+1
+  assert.equal(dock({ hourRateDivisorMode: "hoursOnly" }), Math.round(265_000 / 26 / 8));
+  assert.equal(dock({ hourRateDivisorMode: "fixed" }), Math.round(265_000 / 26 / 10)); // rateHoursPerDay
+});
+
+test("normalizePayRules: divisor modes — garbage falls back, valid values kept", () => {
+  assert.equal(pr.normalizePayRules({}).dayRateDivisorMode, "fixed26");
+  assert.equal(pr.normalizePayRules({}).hourRateDivisorMode, "hoursPlusLunch");
+  assert.equal(pr.normalizePayRules({ dayRateDivisorMode: "banana" }).dayRateDivisorMode, "fixed26");
+  assert.equal(pr.normalizePayRules({ dayRateDivisorMode: "calendarDays" }).dayRateDivisorMode, "calendarDays");
+  assert.equal(pr.normalizePayRules({ dayRateDivisorMode: "workingDays" }).dayRateDivisorMode, "workingDays");
+  assert.equal(pr.normalizePayRules({ hourRateDivisorMode: "hoursOnly" }).hourRateDivisorMode, "hoursOnly");
+  assert.equal(pr.normalizePayRules({ hourRateDivisorMode: "fixed" }).hourRateDivisorMode, "fixed");
+});
+
 test("toAttendanceRules: a 15-min grace version makes 08:12 on-time", () => {
   const cfg = pr.normalizePayRules({ lateGraceMin: 15 });
   const rules = pr.toAttendanceRules(cfg);

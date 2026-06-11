@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-006 — "Deduct" on an under-recorded day left a ~RM5/hour residual flagged (dock rate ≠ gap rate)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green). typecheck + build + full suite green.
+**Category:** ui-frontend
+
+Owner's spec for the under-recorded review: "Deduct → payroll 扣款,账目就能对上;Keep → Labor 加一笔,同样平账". **Keep already tied** (the PRODUCTION_SHORTFALL working-hour entry closes the gap at the costing rate). **Deduct did not fully tie**: the dock reduces gross at the salary-spec rate (S ÷ calendar days ÷ 10 ≈ RM6.83/h) while the under-recorded gap measures the missing hours at the costing rate (S ÷ working days ÷ std hours ≈ RM12/h) — so after a Deduct, hours × the rate difference stayed flagged as Under-recorded and the dept line was missing that amount.
+
+Fix: `src/pages/employees.tsx` — new `lateDockAdjByPayslip` bridge (mirrors the absence-leniency treatment): period dock hours per worker (from `payroll_hour_deductions`, the Labor Cost tab already fetched it; the Department Labor tab now fetches it too) × (costing hourly − dock hourly), subtracted from the under-recorded gap and folded onto the worker's department line via `reconBurden.adj`. After a full Deduct the worker's gap closes to RM0 and drops off the list; totals tie by construction in both tabs.
+
+---
+
 ## BUG-2026-06-11-005 — Sunday/holiday work masked weekday absences + part-month phantom leniency (deep-audit findings, owner-directed fixes)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, branch fix/payroll-sunday-partmonth, deploy green). 50/50 engine tests (new Sunday-mask test); typecheck + full suite green.

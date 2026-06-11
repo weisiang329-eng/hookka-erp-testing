@@ -2744,14 +2744,29 @@ export function DataGrid<T extends Record<string, any>>({
                         const value = getNestedValue(row, col.key);
                         const stickyLeft = stickyOffsets.get(col.key);
                         const isSticky = stickyLeft !== undefined;
-                        // Clip overflow to the column's resolved width so long
-                        // values don't grow the column. Follows the live
-                        // (resizable, persisted) width, so dragging the column
-                        // wider reveals more text. Falls back to a sensible cap
-                        // for columns that declare no width. Opt out per column
-                        // with `noClip` (cells that must wrap / go multi-line).
-                        const clipWidth =
-                          colWidths[col.key] || col.width || "300px";
+                        // Cell-content sizing ("fit fit", 2026-06-11). For a
+                        // column WITH a resolved width (declared `width` or a
+                        // user resize) the content div clips via width:0 +
+                        // min-width:100%: it contributes ~nothing to the auto
+                        // table layout's intrinsic widths (the <col> width
+                        // stays the column's floor), then renders at 100% of
+                        // the LIVE cell width. When the declared widths sum to
+                        // less than the container, the browser flexes every
+                        // column proportionally — and the content now USES
+                        // that flexed width instead of staying clamped at the
+                        // declared px. The previous maxWidth clamp left the
+                        // right side of every stretched column as permanent
+                        // dead space and kept long values ellipsized even when
+                        // the column had room (Wei Siang: the grid never "fit"
+                        // the page). Narrow viewports are unchanged: the <col>
+                        // width floors the column, the table overflows into
+                        // the horizontal scrollbar exactly as before, and the
+                        // div truncates at that floor. Columns with NO width
+                        // keep the legacy 300px cap — they have no <col> floor,
+                        // so the fill trick would let them collapse to header
+                        // width. Opt out per column with `noClip` (cells that
+                        // must wrap / go multi-line).
+                        const resolvedWidth = colWidths[col.key] || col.width;
                         return (
                           <td
                             key={col.key}
@@ -2783,7 +2798,14 @@ export function DataGrid<T extends Record<string, any>>({
                             {col.noClip ? (
                               <DefaultCellRenderer column={col} value={value} row={row} index={index} />
                             ) : (
-                              <div className="truncate" style={{ maxWidth: clipWidth }}>
+                              <div
+                                className="truncate"
+                                style={
+                                  resolvedWidth
+                                    ? { width: 0, minWidth: "100%" }
+                                    : { maxWidth: "300px" }
+                                }
+                              >
                                 <DefaultCellRenderer column={col} value={value} row={row} index={index} />
                               </div>
                             )}

@@ -13,6 +13,11 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+} from "../lib/journal-hash";
+import { buildDebitNoteLedgerLegs } from "../lib/note-ledger";
 
 const app = new Hono<Env>();
 
@@ -334,23 +339,85 @@ app.put("/:id", async (c) => {
           `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
         ).bind(existing.totalAmount, existing.customerId),
       );
-      // If pinned to a specific invoice, bump that invoice's totalSen
-      // so downstream balance math is consistent.
+      // If pinned to a specific invoice, bump that invoice's totalSen AND
+      // re-evaluate its status. Phase 1 fix (2026-06): the original code
+      // bumped totals without touching status, so a PAID invoice gained a
+      // DN, owed money again, yet still displayed PAID and dropped out of
+      // aging. Mirror of buildInvoiceCascadeForCN with the sign flipped:
+      //   paidAmount >= newTotal && paidAmount > 0 → PAID
+      //   paidAmount > 0                            → PARTIAL_PAID
+      //   else                                      → SENT (re-opened)
       if (existing.invoiceId) {
-        const now = new Date().toISOString();
-        statements.push(
-          c.var.DB.prepare(
-            `UPDATE invoices
-               SET totalSen = totalSen + ?,
-                   subtotalSen = subtotalSen + ?,
-                   updated_at = ?
-             WHERE id = ?`,
-          ).bind(
+        const inv = await c.var.DB.prepare(
+          "SELECT totalSen, subtotalSen, paidAmount, status FROM invoices WHERE id = ?",
+        )
+          .bind(existing.invoiceId)
+          .first<{
+            totalSen: number;
+            subtotalSen: number;
+            paidAmount: number;
+            status: string;
+          }>();
+        if (inv) {
+          const now = new Date().toISOString();
+          const newTotal = (Number(inv.totalSen) || 0) + existing.totalAmount;
+          const newSubtotal =
+            (Number(inv.subtotalSen) || 0) + existing.totalAmount;
+          const paid = Number(inv.paidAmount) || 0;
+          const nextStatus =
+            paid >= newTotal && paid > 0
+              ? "PAID"
+              : paid > 0
+                ? "PARTIAL_PAID"
+                : inv.status === "PAID"
+                  ? "SENT"
+                  : inv.status;
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE invoices
+                 SET totalSen = ?, subtotalSen = ?, status = ?, updated_at = ?
+               WHERE id = ?`,
+            ).bind(newTotal, newSubtotal, nextStatus, now, existing.invoiceId),
+          );
+        }
+      }
+
+      // Phase 1 (2026-06) — GL legs in the SAME batch as the cascade:
+      // DR debtor control / CR 500 sales (+ CR 350 output tax). Build
+      // failure ABORTS the request — the subledger must never move
+      // without the GL.
+      try {
+        const orgId = getOrgId(c);
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        if (!(await ledgerHasSource(c.var.DB, orgId, "debit_note", id))) {
+          const legs = await buildDebitNoteLedgerLegs(
+            c.var.DB,
+            orgId,
+            {
+              id,
+              noteNumber: existing.noteNumber,
+              customerId: existing.customerId,
+              reason: existing.reason,
+            },
             existing.totalAmount,
-            existing.totalAmount,
-            now,
-            existing.invoiceId,
-          ),
+            actorUserId,
+          );
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+        }
+      } catch (e) {
+        console.error(`[ledger] DN ${id} GL build failed — aborting:`, e);
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the GL posting for this debit note — nothing was saved. Retry, and report if it persists.",
+          },
+          500,
         );
       }
     }

@@ -13,6 +13,11 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
+import {
+  buildJournalEntryStatements,
+  ledgerHasSource,
+} from "../lib/journal-hash";
+import { buildCreditNoteLedgerLegs } from "../lib/note-ledger";
 
 const app = new Hono<Env>();
 
@@ -218,7 +223,7 @@ app.post("/", async (c) => {
     // populated at invoice-create time.
     const invoice = await c.var.DB.prepare(
       `SELECT id, invoiceNo, customerId, customerName, customerState,
-              customerAddress, attention, customerPhone
+              customerAddress, attention, customerPhone, totalSen, paidAmount
          FROM invoices WHERE id = ?`,
     )
       .bind(invoiceId)
@@ -231,6 +236,8 @@ app.post("/", async (c) => {
         customerAddress: string | null;
         attention: string | null;
         customerPhone: string | null;
+        totalSen: number;
+        paidAmount: number;
       }>();
     if (!invoice) {
       return c.json({ success: false, error: "Invoice not found" }, 404);
@@ -306,6 +313,26 @@ app.post("/", async (c) => {
         ? body.approvedBy
         : null;
 
+    // Phase 1 (2026-06) — a CN must not exceed what is still uncollected on
+    // the linked invoice. Without this cap, an oversized CN floors the
+    // invoice at 0 but still decrements customer A/R by the FULL amount,
+    // driving outstandingSen negative and splitting the control account
+    // from the subledger. Validated at creation for ANY status (a DRAFT CN
+    // that could never be issued is a data-entry error worth failing fast).
+    const uncollectedSen = Math.max(
+      0,
+      (Number(invoice.totalSen) || 0) - (Number(invoice.paidAmount) || 0),
+    );
+    if (totalAmount > uncollectedSen) {
+      return c.json(
+        {
+          success: false,
+          error: `Credit note amount (${totalAmount} sen) exceeds the invoice's uncollected balance (${uncollectedSen} sen) on ${invoice.invoiceNo}. Reduce the CN amount or issue a refund instead.`,
+        },
+        400,
+      );
+    }
+
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
         // PR 5 — INSERT carries customerState / customerAddress /
@@ -350,6 +377,44 @@ app.post("/", async (c) => {
         now,
       );
       statements.push(...invStmts);
+
+      // Phase 1 (2026-06) — GL legs land in the SAME batch as the cascade:
+      // DR 510/520 (+ DR 350 tax) / CR debtor control. A build failure
+      // ABORTS the request — the subledger must never move without the GL.
+      try {
+        const orgId = getOrgId(c);
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        if (!(await ledgerHasSource(c.var.DB, orgId, "credit_note", id))) {
+          const legs = await buildCreditNoteLedgerLegs(
+            c.var.DB,
+            orgId,
+            {
+              id,
+              noteNumber,
+              customerId: invoice.customerId,
+              reason: String(reason),
+            },
+            totalAmount,
+            actorUserId,
+          );
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+        }
+      } catch (e) {
+        console.error(`[ledger] CN ${id} GL build failed — aborting:`, e);
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the GL posting for this credit note — nothing was saved. Retry, and report if it persists.",
+          },
+          500,
+        );
+      }
     }
 
     await c.var.DB.batch(statements);
@@ -441,6 +506,34 @@ app.put("/:id", async (c) => {
     ];
 
     if (transitionedToIssued && existing.totalAmount > 0) {
+      // Phase 1 (2026-06) — cap at issue time: the CN must not exceed the
+      // invoice's uncollected balance (totalSen − paidAmount). Without this
+      // an oversized CN floors the invoice at 0 but still strips the FULL
+      // amount off customer A/R → negative outstanding + control-account
+      // drift.
+      if (existing.invoiceId) {
+        const inv = await c.var.DB.prepare(
+          "SELECT invoiceNo, totalSen, paidAmount FROM invoices WHERE id = ?",
+        )
+          .bind(existing.invoiceId)
+          .first<{ invoiceNo: string; totalSen: number; paidAmount: number }>();
+        if (inv) {
+          const uncollectedSen = Math.max(
+            0,
+            (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0),
+          );
+          if (existing.totalAmount > uncollectedSen) {
+            return c.json(
+              {
+                success: false,
+                error: `Credit note amount (${existing.totalAmount} sen) exceeds the invoice's uncollected balance (${uncollectedSen} sen) on ${inv.invoiceNo}. Reduce the CN amount or issue a refund instead.`,
+              },
+              400,
+            );
+          }
+        }
+      }
+
       // Customer A/R: a credit note reduces what the customer owes.
       statements.push(
         c.var.DB.prepare(
@@ -460,6 +553,43 @@ app.put("/:id", async (c) => {
           now,
         );
         statements.push(...invStmts);
+      }
+
+      // Phase 1 (2026-06) — GL legs in the SAME batch as the cascade.
+      // Build failure ABORTS the request (no silent skip).
+      try {
+        const orgId = getOrgId(c);
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        if (!(await ledgerHasSource(c.var.DB, orgId, "credit_note", id))) {
+          const legs = await buildCreditNoteLedgerLegs(
+            c.var.DB,
+            orgId,
+            {
+              id,
+              noteNumber: existing.noteNumber,
+              customerId: existing.customerId,
+              reason: existing.reason,
+            },
+            existing.totalAmount,
+            actorUserId,
+          );
+          const { statements: ledgerStmts } =
+            await buildJournalEntryStatements(c.var.DB, orgId, legs);
+          statements.push(...ledgerStmts);
+        }
+      } catch (e) {
+        console.error(`[ledger] CN ${id} GL build failed — aborting:`, e);
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the GL posting for this credit note — nothing was saved. Retry, and report if it persists.",
+          },
+          500,
+        );
       }
     }
 

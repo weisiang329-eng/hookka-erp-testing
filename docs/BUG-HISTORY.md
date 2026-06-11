@@ -34,6 +34,31 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-005 — Sunday/holiday work masked weekday absences + part-month phantom leniency (deep-audit findings, owner-directed fixes)
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, branch fix/payroll-sunday-partmonth, deploy green). 50/50 engine tests (new Sunday-mask test); typecheck + full suite green.
+**Category:** ui-frontend
+
+Two findings from the 2026-06-11 reconciliation deep audit, both confirmed by the owner ("星期天完全不上班 — 有人打卡直接按 2× OT,缺席照扣" / "月中入职离职也要 tally"):
+
+(a) **Sunday masking**: engine `daysWorked = hoursByDate.size` counted Sunday/holiday dates, and `absentDays = elapsedWorkingDays − min(daysWorked, …)` — so each Sunday worked cancelled one weekday absence 1:1 (no absence dock + full salary + 2× Sunday OT), and production cost charged a regular day-rate for the Sunday on top of its OT cost. Fix: `daysWorked` counts WORKING-WEEKDAY dates only (Mon–Sat minus holidays); Sunday/holiday punches are pure 2×/3× OT. Weekday-only months byte-identical (all existing data unaffected — May/June have zero Sunday logs).
+
+(b) **Part-month phantom leniency**: payslips store `absentDays` + `absenceDeductionSen` even for prorated (joined/resigned mid-month) workers whose engine path never applies that deduction (they're paid days-served). The recon's absence-leniency bridge then manufactured ~RM25/absent-day onto the worker's dept, offset by a hidden negative in the Overhead plug. Fix: both reconciliation tabs (Labor Cost `absenceLeniencyByPayslip` + Department Labor twin) skip payslips whose worker joined/resigned inside the period. Confirms the owner's ask: mid-month join/resign now ties cleanly.
+
+---
+
+## BUG-2026-06-11-004 — Sofa combo discount stuck after edit broke the set + CO priced nothing like SO (owner directives batch)
+
+**Status:** 🟢 Shipped to prod (2026-06-11, branch feat/pricing-directives, deploy green). typecheck + build + full suite green.
+**Category:** sales-orders
+
+Owner directives ("无论减了还是添加了,都要重新以 Combo 的 Price 去算" / "CO 处理方式要跟 SO 完全一样" / "不要有 RM0 的挡板"):
+1. **SO PUT: sofa lines always re-derive** their base from the price list (customer seat price → catalog), ignoring the incoming value — add a piece → the combo pass discounts the new set; REMOVE a piece → survivors return to full per-piece price (previously the combo-split base stuck → under-charging).
+2. **Consignment Orders now price identically to SO**: per-line resolution on POST (when the request carries no price), sofa force-re-derive on PUT, and the same combo pass on both (previously CO had NO pricing logic at all — full price + silent RM0). Shared lib `src/api/lib/sofa-combo-pass.ts` so SO/CO can never drift.
+3. **RM0 gate REMOVED** from SO POST + PUT per explicit owner request (supersedes the gate added in BUG-2026-06-11-002 — the PUT catalog fallback from that fix stays).
+
+---
+
 ## BUG-2026-06-11-003 — Mid-month joiner's projected payslip showed a scary near-zero (counted only days already served)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green, live-verified: KINM MG HLA June estimate RM396 → RM1,954). 49/49 engine tests green (new test locks both halves).

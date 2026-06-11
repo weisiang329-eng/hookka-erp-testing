@@ -957,6 +957,258 @@ app.delete("/journals/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// AR CONTROL (Phase 2, 2026-06)
+//
+// "Can the debtor control account be trusted?" in one screen:
+//   GET /ar-control          — every SDC control account's ledger balance,
+//     the invoice-derived outstanding (gross), the customers.outstandingSen
+//     running counter, the drift between them, and per-customer aging
+//     buckets (not-due / 1-30 / 31-60 / 61-90 / 91-120 / 120+ by dueDate).
+//   GET /customer-statement  — one customer's chronological statement
+//     (invoices DR, receipts CR, CN CR, DN DR, bounce reversals) with
+//     opening / running / closing balances. Printable from the UI.
+// ---------------------------------------------------------------------------
+app.get("/ar-control", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const [coaRes, legRes, invRes, custRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT code, name, type, specialAccountType FROM chart_of_accounts WHERE specialAccountType = 'SDC'",
+    ).all<{ code: string; name: string; type: string; specialAccountType: string }>(),
+    c.var.DB.prepare(
+      "SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries",
+    ).all<{ accountCode: string; debitSen: number; creditSen: number }>(),
+    c.var.DB.prepare(
+      `SELECT customerId, customerName, invoiceNo, totalSen, paidAmount, status, dueDate
+         FROM invoices
+        WHERE status NOT IN ('DRAFT','CANCELLED')`,
+    ).all<{
+      customerId: string;
+      customerName: string;
+      invoiceNo: string;
+      totalSen: number;
+      paidAmount: number;
+      status: string;
+      dueDate: string | null;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT COALESCE(SUM(outstandingSen),0) AS s FROM customers",
+    ).first<{ s: number }>(),
+  ]);
+  const dr = new Map<string, number>();
+  const cr = new Map<string, number>();
+  for (const l of legRes.results ?? []) {
+    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+  }
+  const controls = (coaRes.results ?? [])
+    .map((a) => ({
+      code: a.code,
+      name: a.name,
+      balanceSen: (dr.get(a.code) ?? 0) - (cr.get(a.code) ?? 0),
+    }))
+    .sort((a, b) => a.code.localeCompare(b.code));
+  // Trade controls only — 305-0000 OTHER DEBTOR has its own registry and
+  // is reconciled on the Other D/C tab, not against the customers table.
+  const tradeControlSen = controls
+    .filter((a) => a.code !== "305-0000")
+    .reduce((s, a) => s + a.balanceSen, 0);
+
+  const today = new Date().toISOString().slice(0, 10);
+  type AgingRow = {
+    customerId: string;
+    customerName: string;
+    notDueSen: number;
+    d30Sen: number;
+    d60Sen: number;
+    d90Sen: number;
+    d120Sen: number;
+    over120Sen: number;
+    totalSen: number;
+  };
+  const byCustomer = new Map<string, AgingRow>();
+  let invoiceOutstandingSen = 0;
+  for (const inv of invRes.results ?? []) {
+    const unpaid = Math.max(
+      0,
+      (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0),
+    );
+    if (unpaid === 0) continue;
+    invoiceOutstandingSen += unpaid;
+    let row = byCustomer.get(inv.customerId);
+    if (!row) {
+      row = {
+        customerId: inv.customerId,
+        customerName: inv.customerName || "Unknown",
+        notDueSen: 0,
+        d30Sen: 0,
+        d60Sen: 0,
+        d90Sen: 0,
+        d120Sen: 0,
+        over120Sen: 0,
+        totalSen: 0,
+      };
+      byCustomer.set(inv.customerId, row);
+    }
+    const due = inv.dueDate || today;
+    const overdueDays =
+      due >= today
+        ? 0
+        : Math.floor(
+            (new Date(`${today}T00:00:00Z`).getTime() -
+              new Date(`${due}T00:00:00Z`).getTime()) /
+              86400000,
+          );
+    if (overdueDays <= 0) row.notDueSen += unpaid;
+    else if (overdueDays <= 30) row.d30Sen += unpaid;
+    else if (overdueDays <= 60) row.d60Sen += unpaid;
+    else if (overdueDays <= 90) row.d90Sen += unpaid;
+    else if (overdueDays <= 120) row.d120Sen += unpaid;
+    else row.over120Sen += unpaid;
+    row.totalSen += unpaid;
+  }
+  const aging = [...byCustomer.values()].sort(
+    (a, b) => b.totalSen - a.totalSen,
+  );
+  const customerCounterSen = Number(custRes?.s) || 0;
+  return c.json({
+    success: true,
+    data: {
+      asOf: today,
+      controls,
+      tradeControlSen,
+      invoiceOutstandingSen,
+      customerCounterSen,
+      driftControlVsInvoicesSen: tradeControlSen - invoiceOutstandingSen,
+      driftCounterVsInvoicesSen: customerCounterSen - invoiceOutstandingSen,
+      aging,
+    },
+  });
+});
+
+app.get("/customer-statement", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const customerId = c.req.query("customerId");
+  if (!customerId) {
+    return c.json({ success: false, error: "customerId is required" }, 400);
+  }
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const [cust, invRes, payRes, cnRes, dnRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT id, name, code, outstandingSen FROM customers WHERE id = ?",
+    )
+      .bind(customerId)
+      .first<{ id: string; name: string; code: string; outstandingSen: number }>(),
+    c.var.DB.prepare(
+      `SELECT invoiceNo, invoiceDate, totalSen, status FROM invoices
+        WHERE customerId = ? AND status NOT IN ('DRAFT','CANCELLED')`,
+    )
+      .bind(customerId)
+      .all<{ invoiceNo: string; invoiceDate: string; totalSen: number; status: string }>(),
+    c.var.DB.prepare(
+      `SELECT receiptNumber, date, amount, status, method FROM payment_records
+        WHERE customerId = ?`,
+    )
+      .bind(customerId)
+      .all<{ receiptNumber: string; date: string; amount: number; status: string; method: string }>(),
+    c.var.DB.prepare(
+      `SELECT noteNumber, date, totalAmount, status FROM credit_notes
+        WHERE customerId = ? AND status IN ('APPROVED','POSTED')`,
+    )
+      .bind(customerId)
+      .all<{ noteNumber: string; date: string; totalAmount: number; status: string }>(),
+    c.var.DB.prepare(
+      `SELECT noteNumber, date, totalAmount, status FROM debit_notes
+        WHERE customerId = ? AND status = 'POSTED'`,
+    )
+      .bind(customerId)
+      .all<{ noteNumber: string; date: string; totalAmount: number; status: string }>(),
+  ]);
+  if (!cust) {
+    return c.json({ success: false, error: "Customer not found" }, 404);
+  }
+  type Line = {
+    date: string;
+    ref: string;
+    type: string;
+    debitSen: number;
+    creditSen: number;
+  };
+  const lines: Line[] = [];
+  for (const i of invRes.results ?? [])
+    lines.push({
+      date: i.invoiceDate ?? "",
+      ref: i.invoiceNo,
+      type: "INVOICE",
+      debitSen: Number(i.totalSen) || 0,
+      creditSen: 0,
+    });
+  for (const p of payRes.results ?? []) {
+    lines.push({
+      date: p.date ?? "",
+      ref: p.receiptNumber,
+      type: "RECEIPT",
+      debitSen: 0,
+      creditSen: Number(p.amount) || 0,
+    });
+    // A bounced cheque re-opens the debt: show the reversal explicitly.
+    if (p.status === "BOUNCED")
+      lines.push({
+        date: p.date ?? "",
+        ref: p.receiptNumber,
+        type: "BOUNCED",
+        debitSen: Number(p.amount) || 0,
+        creditSen: 0,
+      });
+  }
+  for (const n of cnRes.results ?? [])
+    lines.push({
+      date: n.date ?? "",
+      ref: n.noteNumber,
+      type: "CREDIT_NOTE",
+      debitSen: 0,
+      creditSen: Number(n.totalAmount) || 0,
+    });
+  for (const n of dnRes.results ?? [])
+    lines.push({
+      date: n.date ?? "",
+      ref: n.noteNumber,
+      type: "DEBIT_NOTE",
+      debitSen: Number(n.totalAmount) || 0,
+      creditSen: 0,
+    });
+  lines.sort((a, b) =>
+    a.date === b.date ? a.ref.localeCompare(b.ref) : a.date.localeCompare(b.date),
+  );
+  let openingSen = 0;
+  const rows: (Line & { runningSen: number })[] = [];
+  let running = 0;
+  for (const l of lines) {
+    const delta = l.debitSen - l.creditSen;
+    if (l.date < from) {
+      openingSen += delta;
+      continue;
+    }
+    if (l.date > to) continue;
+    running = (rows.length === 0 ? openingSen : running) + delta;
+    rows.push({ ...l, runningSen: running });
+  }
+  return c.json({
+    success: true,
+    data: {
+      customer: { id: cust.id, name: cust.name, code: cust.code },
+      from: from || null,
+      to: to === "9999-12-31" ? null : to,
+      openingSen,
+      closingSen: rows.length ? rows[rows.length - 1].runningSen : openingSen,
+      rows,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // OTHER DEBTOR / OTHER CREDITOR REGISTRY (Phase 1, 2026-06)
 //
 // Non-trade counterparties (transporters, deposit holders, staff advances,

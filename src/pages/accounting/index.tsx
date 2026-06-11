@@ -1339,6 +1339,183 @@ function JournalEntryForm({
 
 // =============== TAB 4: ACCOUNTS RECEIVABLE ===============
 
+// Phase 2 (2026-06) — AR control reconciliation + customer statement.
+// Three numbers that must agree: the SDC control accounts in the ledger,
+// the invoice-derived outstanding (gross of SST), and the running
+// customers.outstandingSen counter. Drift badges make divergence loud.
+function ARControlPanel() {
+  const [data, setData] = useState<{
+    asOf: string;
+    controls: { code: string; name: string; balanceSen: number }[];
+    tradeControlSen: number;
+    invoiceOutstandingSen: number;
+    customerCounterSen: number;
+    driftControlVsInvoicesSen: number;
+    driftCounterVsInvoicesSen: number;
+  } | null>(null);
+  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
+  const [stmtCustomer, setStmtCustomer] = useState("");
+  const [stmtFrom, setStmtFrom] = useState("");
+  const [stmtTo, setStmtTo] = useState("");
+  const [stmt, setStmt] = useState<{
+    customer: { id: string; name: string; code: string };
+    openingSen: number;
+    closingSen: number;
+    rows: { date: string; ref: string; type: string; debitSen: number; creditSen: number; runningSen: number }[];
+  } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/accounting/ar-control")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: typeof data }>)
+      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    fetch("/api/customers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
+      .then((j) => { if (j?.success) setCustomers((j.data ?? []).map((c2) => ({ id: c2.id, name: c2.name }))); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!stmtCustomer) return;
+    let stale = false;
+    const p = new URLSearchParams({ customerId: stmtCustomer });
+    if (stmtFrom) p.set("from", stmtFrom);
+    if (stmtTo) p.set("to", stmtTo);
+    fetch(`/api/accounting/customer-statement?${p.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof stmt> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setStmt(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [stmtCustomer, stmtFrom, stmtTo]);
+
+  const printStmt = () => {
+    if (!stmt) return;
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const rows = stmt.rows
+      .map(
+        (r) =>
+          `<tr><td>${r.date}</td><td>${r.ref}</td><td>${r.type}</td><td style="text-align:right">${r.debitSen ? formatCurrency(r.debitSen) : ""}</td><td style="text-align:right">${r.creditSen ? formatCurrency(r.creditSen) : ""}</td><td style="text-align:right">${formatCurrency(r.runningSen)}</td></tr>`,
+      )
+      .join("");
+    w.document.write(`<html><head><title>Statement — ${stmt.customer.name}</title>
+<style>body{font-family:Segoe UI,sans-serif;font-size:12px;padding:24px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:4px 8px;text-align:left}h2{margin:0}p{color:#555}</style>
+</head><body><h2>HOOKKA MANUFACTURING SDN BHD</h2><p>Statement of Account — ${stmt.customer.name} (${stmt.customer.code})${stmtFrom || stmtTo ? ` · ${stmtFrom || "…"} → ${stmtTo || "…"}` : ""}</p>
+<table><tr><th>Date</th><th>Ref</th><th>Type</th><th style="text-align:right">Debit</th><th style="text-align:right">Credit</th><th style="text-align:right">Balance</th></tr>
+<tr><td colspan="5">Opening balance</td><td style="text-align:right">${formatCurrency(stmt.openingSen)}</td></tr>
+${rows}
+<tr><td colspan="5" style="font-weight:bold">Closing balance</td><td style="text-align:right;font-weight:bold">${formatCurrency(stmt.closingSen)}</td></tr>
+</table></body></html>`);
+    w.document.close();
+    w.print();
+  };
+
+  const drift = (n: number) => (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${n === 0 ? "bg-[#EAF3DE] text-[#27500A] border-[#C0DD97]" : "bg-[#FCEBEB] text-[#791F1F] border-[#F7C1C1]"}`}>
+      {n === 0 ? "matches ✓" : `drift ${formatCurrency(n)}`}
+    </span>
+  );
+
+  return (
+    <div className="space-y-4 mb-2">
+      {data && (
+        <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">Debtor control (ledger{data.controls.filter((x) => x.code !== "305-0000").map((x) => ` ${x.code}`).join(",")})</p>
+              <p className="text-xl font-bold text-[#3E6570]">{formatCurrency(data.tradeControlSen)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">Outstanding from invoices (gross)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.invoiceOutstandingSen)}</p>
+              <div className="mt-1">{drift(data.driftControlVsInvoicesSen)}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="text-xs text-[#6B7280]">Customer running counter (outstandingSen)</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(data.customerCounterSen)}</p>
+              <div className="mt-1">{drift(data.driftCounterVsInvoicesSen)}</div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Customer statement</label>
+              <select
+                value={stmtCustomer}
+                onChange={(e) => { setStmtCustomer(e.target.value); setStmt(null); }}
+                className="rounded-md border border-[#E2DDD8] px-3 py-2 text-sm min-w-56 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="">— select customer —</option>
+                {customers.map((c2) => (
+                  <option key={c2.id} value={c2.id}>{c2.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[11px] text-[#6B7280] block">From</label>
+              <input type="date" value={stmtFrom} onChange={(e) => { setStmtFrom(e.target.value); setStmt(null); }} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-xs" />
+            </div>
+            <div>
+              <label className="text-[11px] text-[#6B7280] block">To</label>
+              <input type="date" value={stmtTo} onChange={(e) => { setStmtTo(e.target.value); setStmt(null); }} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-xs" />
+            </div>
+            {stmt && (
+              <Button variant="outline" size="sm" onClick={printStmt}>Print</Button>
+            )}
+          </div>
+          {stmtCustomer && !stmt && (
+            <div className="py-6 text-center text-[#6B7280] text-sm">Loading statement…</div>
+          )}
+          {stmt && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Ref</th>
+                    <th className="px-3 py-2 text-left">Type</th>
+                    <th className="px-3 py-2 text-right">Debit</th>
+                    <th className="px-3 py-2 text-right">Credit</th>
+                    <th className="px-3 py-2 text-right">Balance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                    <td className="px-3 py-1.5" colSpan={5}>Opening balance</td>
+                    <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(stmt.openingSen)}</td>
+                  </tr>
+                  {stmt.rows.map((r, i) => (
+                    <tr key={`${r.ref}-${i}`} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
+                      <td className="px-3 py-1.5 text-[#1F1D1B]">{r.ref}</td>
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.type}</td>
+                      <td className="px-3 py-1.5 text-right">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                      <td className="px-3 py-1.5 text-right">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                      <td className="px-3 py-1.5 text-right font-medium">{formatCurrency(r.runningSen)}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-t border-[#1F1D1B] font-semibold">
+                    <td className="px-3 py-2" colSpan={5}>Closing balance</td>
+                    <td className="px-3 py-2 text-right">{formatCurrency(stmt.closingSen)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () => void }) {
   const [paymentForm, setPaymentForm] = useState<string | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -1368,6 +1545,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
 
   return (
     <div className="space-y-4">
+      <ARControlPanel />
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-lg font-semibold text-[#1F1D1B]">Accounts Receivable</h2>

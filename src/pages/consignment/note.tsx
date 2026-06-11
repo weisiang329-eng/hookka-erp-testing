@@ -3130,8 +3130,42 @@ export default function ConsignmentNotePage() {
                         </div>
                         <div>
                           <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Address</p>
-                          <p className="font-medium text-xs">{address || "-"}</p>
+                          {/* A blank address is a data fault (the hub never
+                              resolved or has no address) — flag it red
+                              instead of a silent "-" so the operator fixes
+                              it before the truck rolls. Same rule as the DO
+                              detail (Wei Siang 2026-06-11). */}
+                          {address.trim() ? (
+                            <p className="font-medium text-xs">{address}</p>
+                          ) : (
+                            <p className="font-medium text-xs text-[#DC2626]">
+                              ⚠ No delivery address — check the delivery hub
+                            </p>
+                          )}
                         </div>
+                        {(() => {
+                          // Delivery State — sourced from the hub (the
+                          // reliable signal for where this CN goes), falling
+                          // back to the CN's free-text branch label. Same
+                          // resolveStateCode chain + red no-state warning as
+                          // the DO detail (Wei Siang 2026-06-11).
+                          const raw = hub?.state || detailCN.branchName || "";
+                          const code = resolveStateCode(raw);
+                          const label =
+                            MALAYSIA_STATES.find((s) => s.code === code)?.label ?? raw;
+                          return (
+                            <div>
+                              <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery State</p>
+                              {label ? (
+                                <p className="font-medium text-xs">{label}</p>
+                              ) : (
+                                <p className="font-medium text-xs text-[#DC2626]">
+                                  ⚠ No state — check the delivery hub
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
                         <div className="grid grid-cols-2 gap-4">
                           <div>
                             <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Contact</p>

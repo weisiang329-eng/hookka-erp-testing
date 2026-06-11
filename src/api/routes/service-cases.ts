@@ -103,6 +103,93 @@ function genCaseId(): string {
   return `svccase-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// ---------------------------------------------------------------------------
+// affectedProducts sanitizer (POST + PUT). Entries pass through verbatim
+// ({productId, code, name, qty?} — unchanged behaviour), but the optional
+// `components` layer (damaged-part picks from GET /api/sales-orders/
+// repair-components, 2026-06-12) is sanitized: keep only well-formed
+// {key, label, qty>=1} picks, cap label length + list size so a bad client
+// can't bloat the JSON column. A malformed / empty components field is
+// dropped entirely (absent = all parts, same as before the feature).
+// ---------------------------------------------------------------------------
+function sanitizeAffectedProductsJson(raw: unknown): string | null {
+  if (!Array.isArray(raw)) return null;
+  const out = raw.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    if (!("components" in entry)) return entry;
+    const { components, ...rest } = entry as Record<string, unknown>;
+    if (!Array.isArray(components)) return rest;
+    const cleaned = components
+      .map((p) => {
+        if (!p || typeof p !== "object" || Array.isArray(p)) return null;
+        const key = (p as { key?: unknown }).key;
+        const label = (p as { label?: unknown }).label;
+        const qty = Math.floor(Number((p as { qty?: unknown }).qty));
+        if (typeof key !== "string" || !key.trim()) return null;
+        if (typeof label !== "string") return null;
+        if (!Number.isFinite(qty) || qty < 1) return null;
+        return { key: key.trim(), label: label.trim().slice(0, 120), qty };
+      })
+      .filter((p): p is { key: string; label: string; qty: number } => p !== null)
+      .slice(0, 40);
+    return cleaned.length > 0 ? { ...rest, components: cleaned } : rest;
+  });
+  return JSON.stringify(out);
+}
+
+// ---------------------------------------------------------------------------
+// SV Service Orders (sales_orders rows with is_service_order=TRUE) created
+// from /service-order/create?fromCase=… carry the parent case id in the
+// runtime-added lowercase column sales_orders.caseid (migration 0165). The
+// case's "Service Orders" panel merges them with the legacy service_orders
+// rows so production-backed SV orders show up on the case either way.
+// ---------------------------------------------------------------------------
+let caseLinkColumns: Promise<void> | null = null;
+function ensureCaseLinkColumns(db: D1Database): Promise<void> {
+  if (caseLinkColumns) return caseLinkColumns;
+  caseLinkColumns = (async () => {
+    try {
+      await db
+        .prepare("ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS caseid TEXT")
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+  })();
+  return caseLinkColumns;
+}
+
+type SvOrderRow = {
+  id: string;
+  companySOId: string | null;
+  status: string;
+  // caseid is a runtime-added lowercase column — read dual-key.
+  caseId?: string | null;
+  caseid?: string | null;
+  createdAt: string | null;
+};
+
+async function loadSvOrdersForCases(
+  db: D1Database,
+  caseId?: string,
+): Promise<SvOrderRow[]> {
+  await ensureCaseLinkColumns(db);
+  try {
+    const sql = `SELECT id, companySOId AS "companySOId", status, caseid, created_at AS "createdAt" FROM sales_orders WHERE ${
+      caseId ? "caseid = ?" : "caseid IS NOT NULL"
+    }`;
+    const stmt = db.prepare(sql);
+    const res = caseId
+      ? await stmt.bind(caseId).all<SvOrderRow>()
+      : await stmt.all<SvOrderRow>();
+    return res.results ?? [];
+  } catch {
+    // Column missing (ALTER rejected) — degrade to "no SV orders" rather
+    // than failing the whole case read.
+    return [];
+  }
+}
+
 async function nextCaseNo(db: D1Database, now: Date): Promise<string> {
   // 2026-04-29 operator request: rename Case # prefix from "CASE-YYMM-NNN" to
   // the more compact "SC-YYMM-NNN" so it's the same length as Sales Order #s
@@ -123,7 +210,11 @@ async function nextCaseNo(db: D1Database, now: Date): Promise<string> {
   return `${prefix}-${String(seq).padStart(3, "0")}`;
 }
 
-function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
+function rowToApi(
+  row: ServiceCaseRow,
+  orders: ServiceOrderRow[] = [],
+  svOrders: SvOrderRow[] = [],
+) {
   let photos: string[] = [];
   if (row.issuePhotos) {
     try {
@@ -193,15 +284,30 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
     createdAt: row.createdAt ?? "",
     closedAt: row.closedAt ?? "",
     notes: row.notes ?? "",
-    orders: orders
-      .filter((o) => o.caseId === row.id)
-      .map((o) => ({
-        id: o.id,
-        serviceOrderNo: o.serviceOrderNo,
-        mode: o.mode,
-        status: o.status,
-        createdAt: o.createdAt ?? "",
-      })),
+    orders: [
+      ...orders
+        .filter((o) => o.caseId === row.id)
+        .map((o) => ({
+          id: o.id,
+          serviceOrderNo: o.serviceOrderNo,
+          mode: o.mode as string | null,
+          status: o.status,
+          createdAt: o.createdAt ?? "",
+          isSv: false,
+        })),
+      // SV Service Orders (sales_orders rows) linked via caseid. isSv steers
+      // the case page's link to /service-order/:id instead of /service-orders.
+      ...svOrders
+        .filter((o) => (o.caseId ?? o.caseid) === row.id)
+        .map((o) => ({
+          id: o.id,
+          serviceOrderNo: o.companySOId ?? o.id,
+          mode: null as string | null,
+          status: o.status,
+          createdAt: o.createdAt ?? "",
+          isSv: true,
+        })),
+    ].sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1)),
   };
 }
 
@@ -229,14 +335,15 @@ app.get("/", async (c) => {
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-  const [caseRes, orderRes] = await Promise.all([
+  const [caseRes, orderRes, svOrders] = await Promise.all([
     c.var.DB.prepare(`SELECT * FROM service_cases ${where} ORDER BY created_at DESC LIMIT 500`)
       .bind(...params)
       .all<ServiceCaseRow>(),
     c.var.DB.prepare("SELECT id, serviceOrderNo, caseId, sourceType, sourceId, sourceNo, customerId, customerName, mode, status, createdBy, createdByName, created_at as createdAt, closedAt, notes FROM service_orders").all<ServiceOrderRow>(),
+    loadSvOrdersForCases(c.var.DB),
   ]);
   const data = (caseRes.results ?? []).map((r) =>
-    rowToApi(r, orderRes.results ?? []),
+    rowToApi(r, orderRes.results ?? [], svOrders),
   );
   return c.json({ success: true, data, total: data.length });
 });
@@ -246,7 +353,7 @@ app.get("/", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const [caseRow, orders] = await Promise.all([
+  const [caseRow, orders, svOrders] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM service_cases WHERE id = ?")
       .bind(id)
       .first<ServiceCaseRow>(),
@@ -256,13 +363,14 @@ app.get("/:id", async (c) => {
       )
       .bind(id)
       .all<ServiceOrderRow>(),
+    loadSvOrdersForCases(c.var.DB, id),
   ]);
   if (!caseRow) {
     return c.json({ success: false, error: "Service case not found" }, 404);
   }
   return c.json({
     success: true,
-    data: rowToApi(caseRow, orders.results ?? []),
+    data: rowToApi(caseRow, orders.results ?? [], svOrders),
   });
 });
 
@@ -369,10 +477,9 @@ app.post("/", async (c) => {
       : null;
 
     // Affected products on the case (migration 0077). Stored as JSON array
-    // of {productId, code, name, qty?} — optional, can be 0..N.
-    const affectedProductsJson = Array.isArray(body.affectedProducts)
-      ? JSON.stringify(body.affectedProducts)
-      : null;
+    // of {productId, code, name, qty?, components?} — optional, can be 0..N.
+    // components (damaged-part picks) are sanitized; the rest passes through.
+    const affectedProductsJson = sanitizeAffectedProductsJson(body.affectedProducts);
 
     await c.var.DB
       .prepare(
@@ -481,14 +588,13 @@ app.put("/:id", async (c) => {
           ? null
           : JSON.stringify(body.rootCauseDetails);
 
-    // affectedProducts — JSON array of {productId, code, name, qty?}.
-    // Migration 0077. Optional, undefined = keep existing.
+    // affectedProducts — JSON array of {productId, code, name, qty?,
+    // components?}. Migration 0077. Optional, undefined = keep existing;
+    // components (damaged-part picks) go through the shared sanitizer.
     const affectedProductsJson =
       body.affectedProducts === undefined
         ? existing.affectedProductIds
-        : Array.isArray(body.affectedProducts)
-          ? JSON.stringify(body.affectedProducts)
-          : null;
+        : sanitizeAffectedProductsJson(body.affectedProducts);
 
     await c.var.DB
       .prepare(
@@ -529,7 +635,7 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const [updated, orders] = await Promise.all([
+    const [updated, orders, svOrders] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM service_cases WHERE id = ?")
         .bind(id)
         .first<ServiceCaseRow>(),
@@ -539,11 +645,12 @@ app.put("/:id", async (c) => {
         )
         .bind(id)
         .all<ServiceOrderRow>(),
+      loadSvOrdersForCases(c.var.DB, id),
     ]);
     if (!updated) {
       return c.json({ success: false, error: "Failed to reload after update" }, 500);
     }
-    return c.json({ success: true, data: rowToApi(updated, orders.results ?? []) });
+    return c.json({ success: true, data: rowToApi(updated, orders.results ?? [], svOrders) });
   } catch (err) {
     console.error("[PUT /api/service-cases/:id] failed:", err);
     const message = err instanceof Error ? err.message : "Invalid request body";

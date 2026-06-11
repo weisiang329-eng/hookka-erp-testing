@@ -34,6 +34,7 @@ type AdjustmentReason =
   | "DAMAGED"
   | "COUNT_CORRECTION"
   | "WRITE_OFF"
+  | "SERVICE_REPLACEMENT"
   | "OTHER";
 
 type AdjustmentRow = {
@@ -116,6 +117,9 @@ const REASON_OPTIONS: { value: AdjustmentReason; label: string }[] = [
   { value: "DAMAGED", label: "Damaged" },
   { value: "COUNT_CORRECTION", label: "Count Corr." },
   { value: "WRITE_OFF", label: "Write-Off" },
+  // Stock-only part top-ups issued from a Service Case (the case detail's
+  // "Replacement Parts" card posts with this reason + a caseId backlink).
+  { value: "SERVICE_REPLACEMENT", label: "Service replacement" },
   { value: "OTHER", label: "Other" },
 ];
 

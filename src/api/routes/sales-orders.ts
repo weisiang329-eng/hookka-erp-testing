@@ -1673,6 +1673,11 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // never race the column into existence mid-request.
       "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS repairScope TEXT",
       "ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS repairScope TEXT",
+      // 0165 — Service Case linkage for SV orders spawned from
+      // /service-order/create?fromCase=… . Lowercase on purpose (adapter
+      // rule); service-cases.ts reads it to merge SV orders into the case's
+      // "Service Orders" panel. NULL on every normal sales order.
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS caseid TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -1851,6 +1856,33 @@ app.post("/", async (c) => {
     // the sales report — owner 2026-06-11). Hoisted here so the items loop
     // and the combo pass can both skip.
     const isServiceOrder = body.isServiceOrder === true;
+
+    // 0165 — optional Service Case linkage. /service-order/create?fromCase=…
+    // sends the parent case id so the spawned SV order shows on the case's
+    // "Service Orders" panel (service-cases.ts merges sales_orders rows by
+    // caseid). Service-order-only: no UI anywhere puts a case on a normal
+    // sales order, so reject instead of silently storing it.
+    const caseIdRaw = typeof body.caseId === "string" ? body.caseId.trim() : "";
+    if (caseIdRaw && !isServiceOrder) {
+      return c.json(
+        { success: false, error: "caseId is only available on Service Orders." },
+        400,
+      );
+    }
+    let linkedCaseId: string | null = null;
+    if (caseIdRaw) {
+      const caseRow = await c.var.DB
+        .prepare("SELECT id FROM service_cases WHERE id = ?")
+        .bind(caseIdRaw)
+        .first<{ id: string }>();
+      if (!caseRow) {
+        return c.json(
+          { success: false, error: `Service case ${caseIdRaw} not found` },
+          400,
+        );
+      }
+      linkedCaseId = caseRow.id;
+    }
 
     // Build items — resolve product basePrice fallback
     const items = await Promise.all(
@@ -2110,8 +2142,8 @@ app.post("/", async (c) => {
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
            subtotalSen, totalSen, status, overdue, notes,
-           customerPOImageB64, is_service_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           customerPOImageB64, is_service_order, caseid, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -2139,6 +2171,7 @@ app.post("/", async (c) => {
         body.notes ?? "",
         customerPOImageB64,
         isServiceOrder,
+        linkedCaseId,
         now,
         now,
       ),

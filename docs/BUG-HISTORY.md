@@ -34,6 +34,20 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-003 — Service Case chain: narrow source search, no damaged-part layer, Spawn forced re-picking everything, no stock-only top-up path
+
+**Status:** 🟢 Shipped (2026-06-12). 831 tests green; typecheck + build:strict green. Agent-built, diff fully reviewed line-by-line before ship.
+**Category:** ui-frontend
+
+Owner directives (4): case source search must match the Sales-Order lookup breadth; after picking the order the case must capture SKU → damaged COMPONENT (compartment); Spawn must land on the service-order create page with everything carried over (no re-search, no re-pick); and missing-part top-ups ("少送桌脚") need a stock-deduct-with-record path that never spawns production.
+
+- **Case modal** (service-cases/index.tsx): source search now matches SO#/customer/customer PO/customer SO/reference (option rows show the refs); each checked product gets a "Damaged parts" picker fed by `GET /api/sales-orders/repair-components` (the canonical BOM→WIP breakdown — never re-derived client-side); picks stored as `affectedProducts[].components: [{key: wipKey, label, qty}]` (absent = all parts). Backend sanitizer caps label 120 / list 40 (service-cases.ts, POST + PUT). Detail page shows the picks as chips.
+- **Spawn hand-off**: SO/CO-sourced cases navigate to `/service-order/create?fromCase=<id>` — the page hydrates via the SAME copy-for-service-order loader the Copy-from modal uses (modal's inline hydration extracted verbatim into shared helpers, zero behaviour change), keeps only the case's affected lines (case qty wins), and pre-sets each line's Repair Scope to CUSTOM + full dept chain + the component picks (the existing reconcile effect re-canonicalizes against the live BOM). EXTERNAL cases keep the legacy spawn modal (no source order to copy).
+- **Case linkage closed**: SV orders created on the create page were INVISIBLE on the case (its panel read the legacy service_orders table only). `sales_orders.caseid` (lowercase, runtime-ensured + migration 0165; caseId rejected on non-service orders, case existence validated) and service-cases.ts merges those rows into every case's "Service Orders" list (`isSv` rows link to /service-order/:id).
+- **Replacement Parts (stock only)** card on the case detail: RM/WIP/FG item search → qty → "Issue & deduct" posts the standard stock adjustment (`qtyDelta: -qty`, new reason `SERVICE_REPLACEMENT`, full ledger chain: stock_adjustments + stock_movements + cost_ledger + item qty) tagged with the new `stock_adjustments.caseid` (migration 0164); the card lists this case's issues and appends a case action-log entry. Stock Adjustment page gained the reason label.
+
+---
+
 ## BUG-2026-06-12-002 — Global Ctrl+K search never showed a single record — every category read the wrong key off the API payload
 
 **Status:** 🟢 Fixed + shipped (2026-06-12). Typecheck 0; full suite green.

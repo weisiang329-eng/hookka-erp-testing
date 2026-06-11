@@ -46,6 +46,7 @@ type AdjustmentReason =
   | "DAMAGED"
   | "COUNT_CORRECTION"
   | "WRITE_OFF"
+  | "SERVICE_REPLACEMENT"
   | "OTHER";
 
 type StockAdjustmentRow = {
@@ -64,6 +65,10 @@ type StockAdjustmentRow = {
   adjustedBy: string | null;
   adjustedByName: string | null;
   adjustedAt: string;
+  // Service-case backlink (SERVICE_REPLACEMENT issues from the case detail
+  // page). Runtime-added lowercase column (migration 0164) — read dual-key.
+  caseId?: string | null;
+  caseid?: string | null;
 };
 
 const VALID_TYPES: AdjustmentType[] = ["RM", "WIP", "FG"];
@@ -72,8 +77,27 @@ const VALID_REASONS: AdjustmentReason[] = [
   "DAMAGED",
   "COUNT_CORRECTION",
   "WRITE_OFF",
+  "SERVICE_REPLACEMENT",
   "OTHER",
 ];
+
+// Self-applying migration — 0164. caseid is the optional service_cases.id
+// backlink for SERVICE_REPLACEMENT adjustments (the "Replacement Parts" card
+// on the case detail page). Module-level promise = one ALTER per isolate.
+let pendingColumns: Promise<void> | null = null;
+function ensureStockAdjustmentColumns(db: D1Database): Promise<void> {
+  if (pendingColumns) return pendingColumns;
+  pendingColumns = (async () => {
+    try {
+      await db
+        .prepare("ALTER TABLE stock_adjustments ADD COLUMN IF NOT EXISTS caseid TEXT")
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+  })();
+  return pendingColumns;
+}
 
 function genId(): string {
   return `adj-${crypto.randomUUID().slice(0, 8)}`;
@@ -117,6 +141,7 @@ function rowToApi(r: StockAdjustmentRow) {
     adjustedBy: r.adjustedBy ?? "",
     adjustedByName: r.adjustedByName ?? "",
     adjustedAt: r.adjustedAt,
+    caseId: r.caseId ?? r.caseid ?? "",
   };
 }
 
@@ -125,8 +150,10 @@ function rowToApi(r: StockAdjustmentRow) {
 // date range. Newest first.
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  await ensureStockAdjustmentColumns(c.var.DB);
   const type = c.req.query("type");
   const itemId = c.req.query("itemId");
+  const caseId = c.req.query("caseId");
   const from = c.req.query("from");
   const to = c.req.query("to");
   const orgId = getOrgId(c);
@@ -139,6 +166,10 @@ app.get("/", async (c) => {
   if (itemId) {
     clauses.push("itemId = ?");
     params.push(itemId);
+  }
+  if (caseId) {
+    clauses.push("caseid = ?");
+    params.push(caseId);
   }
   if (from) {
     clauses.push("adjustedAt >= ?");
@@ -168,15 +199,17 @@ app.get("/", async (c) => {
 //   itemId: string,         // raw_materials.id | wip_items.id | fg_batches.id
 //   qtyDelta: number,       // signed; positive = add, negative = subtract
 //   unitCostSen: number,    // per-unit cost at adjustment time (from UI prefill)
-//   reason: 'FOUND'|'DAMAGED'|'COUNT_CORRECTION'|'WRITE_OFF'|'OTHER',
+//   reason: 'FOUND'|'DAMAGED'|'COUNT_CORRECTION'|'WRITE_OFF'|'SERVICE_REPLACEMENT'|'OTHER',
 //   notes?: string,
 //   adjustedBy?: string,    // user id (frontend pulls from auth)
 //   adjustedByName?: string,
+//   caseId?: string,        // service_cases.id — SERVICE_REPLACEMENT backlink
 // }
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "inventory", "create");
   if (denied) return denied;
+  await ensureStockAdjustmentColumns(c.var.DB);
   try {
     const body = await c.req.json();
     const type = body.type as AdjustmentType;
@@ -205,11 +238,16 @@ app.post("/", async (c) => {
       return c.json(
         {
           success: false,
-          error: "reason must be one of FOUND/DAMAGED/COUNT_CORRECTION/WRITE_OFF/OTHER",
+          error:
+            "reason must be one of FOUND/DAMAGED/COUNT_CORRECTION/WRITE_OFF/SERVICE_REPLACEMENT/OTHER",
         },
         400,
       );
     }
+    const caseId =
+      typeof body.caseId === "string" && body.caseId.trim()
+        ? body.caseId.trim()
+        : null;
 
     // ---- look up the item to get itemCode + itemName + current qty ----
     let itemCode = "";
@@ -353,8 +391,8 @@ app.post("/", async (c) => {
       c.var.DB.prepare(
         `INSERT INTO stock_adjustments (id, adjNo, type, itemId, itemCode, itemName,
            qtyDelta, unitCostSen, totalCostSen, direction, reason, notes,
-           adjustedBy, adjustedByName, adjustedAt, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           adjustedBy, adjustedByName, adjustedAt, caseid, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         adjNo,
@@ -371,6 +409,7 @@ app.post("/", async (c) => {
         (body.adjustedBy as string) ?? null,
         (body.adjustedByName as string) ?? null,
         nowIso,
+        caseId,
         nowIso,
       ),
     );

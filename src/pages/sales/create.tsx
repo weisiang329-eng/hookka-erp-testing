@@ -1,4 +1,4 @@
-import { useState, useEffect, Suspense, useMemo } from "react";
+import { useState, useEffect, Suspense, useMemo, useRef } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSOMode, soBasePath, soSingularNoun } from "@/lib/so-mode";
@@ -428,6 +428,183 @@ function CreateSalesOrderPage() {
   // that share product+size but differ on attributes. All prices reset
   // to 0 on the copied draft — operator must price each line before save.
   const [copyFromOpen, setCopyFromOpen] = useState(false);
+
+  // Service Case hand-off (?fromCase=<caseId>, service-order mode only).
+  // "Spawn Service Order" on a SO/CO-sourced case lands here; the effect
+  // below drives the SAME copy-for-service-order loader the Copy-from modal
+  // uses, then narrows the seeded lines to the case's affected products.
+  // linkedCase rides into the POST body (caseId) so the created SV order
+  // shows on the case's "Service Orders" panel (migration 0165).
+  const fromCaseId = isServiceOrderMode ? (searchParams.get("fromCase") ?? "") : "";
+  const [linkedCase, setLinkedCase] = useState<{ id: string; caseNo: string } | null>(null);
+  const caseHydrationRan = useRef(false);
+
+  // ---- Shared copy-draft hydration (Copy-from modal + ?fromCase) --------
+  // Header fields seed from the draft payload; only blank date fields take
+  // the draft's today-defaults (same rule the modal handler always had).
+  const applyCopyDraftHeader = (draft: CopyDraft) => {
+    setCustomerId(draft.customerId || "");
+    setCustomerPOId(draft.customerPOId || "");
+    // 0134 — copy-from-SO/CO writes "EX-<sourceNo>" (e.g. "EX-SO-2605-121")
+    // into the Customer SO slot so the destination Service Order visibly
+    // carries the source id in the right field. Reference takes the
+    // source's own reference field (EX-prefixed), not the source id.
+    setCustomerSOId(draft.customerSOId || "");
+    setReference(draft.reference || "");
+    if (draft.hubId) setDeliveryHubId(draft.hubId);
+    if (!companySODate) setCompanySODate(draft.companySODate || "");
+    if (!customerDeliveryDate)
+      setCustomerDeliveryDate(draft.customerDeliveryDate || "");
+  };
+  // Build LineItems from draft items. Prices are all 0 per the Service
+  // Order policy — operator MUST price each line before save.
+  const buildLinesFromCopyDraft = (draftItems: CopyDraftItem[]): LineItem[] =>
+    (draftItems || []).map((it) => ({
+      ...EMPTY_LINE,
+      _uid: crypto.randomUUID(),
+      productId: it.productId || "",
+      productCode: it.productCode || "",
+      productName: it.productName || "",
+      itemCategory: it.itemCategory || "BEDFRAME",
+      baseModel: "",
+      sizeCode: it.sizeCode || "",
+      sizeLabel: it.sizeLabel || "",
+      fabricCode: it.fabricCode || "",
+      quantity: Number(it.quantity) || 1,
+      basePriceSen: 0,
+      seatHeight: "",
+      selectedModules: [],
+      gapInches: it.gapInches ?? null,
+      divanHeightInches: it.divanHeightInches ?? null,
+      divanPriceSen: 0,
+      legHeightInches: it.legHeightInches ?? null,
+      legPriceSen: 0,
+      totalHeightPriceSen: 0,
+      specialOrders: it.specialOrder
+        ? String(it.specialOrder)
+            .split(/[;,]/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [],
+      specialOrderPriceSen: 0,
+      specialOrder: it.specialOrder || "",
+      customSpecials: Array.isArray(it.customSpecials)
+        ? it.customSpecials.map((cs) => ({
+            description: cs.description,
+            surchargeSen: 0,
+          }))
+        : [],
+      notes: it.notes || "",
+    }));
+
+  // Hydrate from the linked case: load the case → copy its source order →
+  // keep only the affected products' lines (case qty + damaged-part picks
+  // override per line). One-shot (ref-guarded).
+  useEffect(() => {
+    if (!fromCaseId || caseHydrationRan.current) return;
+    caseHydrationRan.current = true;
+    let cancelled = false;
+    type CaseAffectedProduct = {
+      productId?: string;
+      code?: string;
+      qty?: number | null;
+      components?: Array<{ key: string; label: string; qty: number }>;
+    };
+    (async () => {
+      try {
+        const caseRes = await fetch(`/api/service-cases/${encodeURIComponent(fromCaseId)}`);
+        const caseJson = (await caseRes.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+          data?: {
+            id: string;
+            caseNo: string;
+            sourceType: "SO" | "CO" | "EXTERNAL";
+            sourceId: string;
+            affectedProducts?: CaseAffectedProduct[];
+          };
+        };
+        if (!caseRes.ok || !caseJson.success || !caseJson.data) {
+          throw new Error(caseJson.error || `Couldn't load the case (HTTP ${caseRes.status})`);
+        }
+        const sc = caseJson.data;
+        if ((sc.sourceType !== "SO" && sc.sourceType !== "CO") || !sc.sourceId) {
+          if (!cancelled) {
+            toast.warning("This case has no source order to copy from — fill the form manually.");
+          }
+          return;
+        }
+        // Same loader the Copy-from modal posts to; omitting lineItems
+        // copies EVERY source line — the affected-products filter below
+        // narrows the result.
+        const res = await fetch("/api/sales-orders/copy-for-service-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sourceType: sc.sourceType, sourceId: sc.sourceId }),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+          data?: CopyDraft;
+        };
+        if (!res.ok || !json.success || !json.data) {
+          throw new Error(json.error || `Couldn't copy the case's source order (HTTP ${res.status})`);
+        }
+        if (cancelled) return;
+        const draft = json.data;
+        const affected = Array.isArray(sc.affectedProducts) ? sc.affectedProducts : [];
+        const matchEntry = (it: CopyDraftItem): CaseAffectedProduct | undefined =>
+          affected.find(
+            (ap) =>
+              (!!ap.productId && ap.productId === it.productId) ||
+              (!!ap.code && ap.code === it.productCode),
+          );
+        // Keep only the lines the case flagged. No affected products on the
+        // case — or zero overlap (product edited off the source order since
+        // the case was opened) — keeps every line so the operator still has
+        // something to work from.
+        const kept = affected.length > 0 ? draft.items.filter((it) => !!matchEntry(it)) : draft.items;
+        const baseItems = kept.length > 0 ? kept : draft.items;
+        applyCopyDraftHeader(draft);
+        const built = buildLinesFromCopyDraft(baseItems).map((line, i) => {
+          const ap = matchEntry(baseItems[i]);
+          if (!ap) return line;
+          const apQty = Number(ap.qty);
+          const next: LineItem = {
+            ...line,
+            ...(Number.isFinite(apQty) && apQty > 0 ? { quantity: Math.floor(apQty) } : {}),
+          };
+          // Damaged-part picks → CUSTOM scope over the full dept chain (the
+          // components do the narrowing) — the same storage shape the
+          // per-line Repair Scope picker writes; its reconcile effect
+          // re-canonicalizes the picks against the live BOM.
+          if (Array.isArray(ap.components) && ap.components.length > 0) {
+            next.repairScope = JSON.stringify({
+              preset: "CUSTOM",
+              depts: [...REPAIR_DEPT_CODES],
+              components: ap.components.map((cp) => ({
+                key: cp.key,
+                label: cp.label,
+                qty: cp.qty,
+              })),
+            });
+          }
+          return next;
+        });
+        if (built.length > 0) setItems(built);
+        setLinkedCase({ id: sc.id, caseNo: sc.caseNo });
+        toast.success(`Loaded ${built.length} line(s) from case ${sc.caseNo}. Set prices before saving.`);
+      } catch (e) {
+        if (!cancelled) {
+          toast.error(e instanceof Error ? e.message : "Couldn't hydrate from the case");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot; helpers are stable per render and the ref guards re-runs
+  }, [fromCaseId]);
 
   // Mark this tab as dirty (un-evictable from the 10-tab cap) the moment
   // the user has touched the form. Heuristic: any of the header fields
@@ -1652,6 +1829,9 @@ function CreateSalesOrderPage() {
           // prefix + is_service_order = TRUE) when the operator came
           // from /service-order/create.
           isServiceOrder: isServiceOrderMode,
+          // 0165 — case linkage when hydrated via ?fromCase: the created SV
+          // order lands on the case's "Service Orders" panel.
+          caseId: isServiceOrderMode && linkedCase ? linkedCase.id : undefined,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string; companySOId?: string } };
@@ -1824,7 +2004,7 @@ function CreateSalesOrderPage() {
           </h1>
           <p className="text-xs text-[#6B7280]">
             {isServiceOrderMode
-              ? "Aftersales order — copy lines from an existing Sales / Consignment Order, then edit each line's price (defaults to 0)."
+              ? `Aftersales order — copy lines from an existing Sales / Consignment Order, then edit each line's price (defaults to 0).${linkedCase ? ` Linked to case ${linkedCase.caseNo}.` : ""}`
               : isClone
                 ? "Create a new order based on an existing one"
                 : "Create a new sales order for a customer"}
@@ -2044,63 +2224,11 @@ function CreateSalesOrderPage() {
         <CopyFromSourceModal
           onClose={() => setCopyFromOpen(false)}
           onCopied={(draft) => {
-            // Hydrate the form from the draft payload returned by
-            // POST /api/sales-orders/copy-for-service-order. We deliberately
-            // skip the `companySODate` / `customerDeliveryDate` overrides if
-            // the operator already typed something in — only blank fields
-            // get the today-default from the draft.
-            setCustomerId(draft.customerId || "");
-            setCustomerPOId(draft.customerPOId || "");
-            // 0134 — copy-from-SO/CO writes "EX-<sourceNo>" (e.g.
-            // "EX-SO-2605-121") into the Customer SO slot so the destination
-            // Service Order visibly carries the source id in the right field.
-            // Reference takes the source's own reference field (EX-prefixed),
-            // not the source id — that lives in Customer SO now.
-            setCustomerSOId(draft.customerSOId || "");
-            setReference(draft.reference || "");
-            if (draft.hubId) setDeliveryHubId(draft.hubId);
-            if (!companySODate) setCompanySODate(draft.companySODate || "");
-            if (!customerDeliveryDate)
-              setCustomerDeliveryDate(draft.customerDeliveryDate || "");
-            // Build LineItems from the draft's items. Prices are all 0
-            // per spec — operator MUST edit each line before save.
-            const built: LineItem[] = (draft.items || []).map((it) => ({
-              ...EMPTY_LINE,
-              _uid: crypto.randomUUID(),
-              productId: it.productId || "",
-              productCode: it.productCode || "",
-              productName: it.productName || "",
-              itemCategory: it.itemCategory || "BEDFRAME",
-              baseModel: "",
-              sizeCode: it.sizeCode || "",
-              sizeLabel: it.sizeLabel || "",
-              fabricCode: it.fabricCode || "",
-              quantity: Number(it.quantity) || 1,
-              basePriceSen: 0,
-              seatHeight: "",
-              selectedModules: [],
-              gapInches: it.gapInches ?? null,
-              divanHeightInches: it.divanHeightInches ?? null,
-              divanPriceSen: 0,
-              legHeightInches: it.legHeightInches ?? null,
-              legPriceSen: 0,
-              totalHeightPriceSen: 0,
-              specialOrders: it.specialOrder
-                ? String(it.specialOrder)
-                    .split(/[;,]/)
-                    .map((s) => s.trim())
-                    .filter(Boolean)
-                : [],
-              specialOrderPriceSen: 0,
-              specialOrder: it.specialOrder || "",
-              customSpecials: Array.isArray(it.customSpecials)
-                ? it.customSpecials.map((cs) => ({
-                    description: cs.description,
-                    surchargeSen: 0,
-                  }))
-                : [],
-              notes: it.notes || "",
-            }));
+            // Hydrate the form via the shared copy-draft helpers (also used
+            // by the ?fromCase hand-off above). Prices are all 0 per spec —
+            // operator MUST edit each line before save.
+            applyCopyDraftHeader(draft);
+            const built = buildLinesFromCopyDraft(draft.items);
             if (built.length > 0) setItems(built);
             setCopyFromOpen(false);
             toast.success(

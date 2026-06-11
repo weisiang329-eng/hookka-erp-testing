@@ -7,7 +7,7 @@
 // button to open a new resolution flow (REPRODUCE / STOCK_SWAP / REPAIR).
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -82,6 +82,10 @@ type AffectedProduct = {
   code: string;
   name: string;
   qty?: number | null;
+  // Damaged-part picks captured in the create modal (keys from
+  // GET /api/sales-orders/repair-components). Read-only chips here —
+  // absent = all parts.
+  components?: Array<{ key: string; label: string; qty: number }>;
 };
 
 type ServiceCaseDetail = {
@@ -123,6 +127,9 @@ type ServiceCaseDetail = {
     mode: Mode | null;
     status: string;
     createdAt: string;
+    // true = SV Service Order (sales_orders row linked via caseid) —
+    // detail lives at /service-order/:id, not /service-orders/:id.
+    isSv?: boolean;
   }>;
 };
 
@@ -161,6 +168,7 @@ function dateLabel(iso: string): string {
 export default function ServiceCaseDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
   const { toast } = useToast();
+  const navigate = useNavigate();
   const user = getCurrentUser();
 
   const { data: resp, refresh } = useCachedJson<{ data?: ServiceCaseDetail }>(
@@ -352,10 +360,23 @@ export default function ServiceCaseDetailPage() {
         }}
       />
 
+      {/* Stock-only replacement parts (missing legs etc.) — deducts stock
+          via the standard stock-adjustments path, no production order. */}
+      <ReplacementPartsPanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+
       {/* Service-agent action log — chronological entries the agent logs
           over the case's lifetime (called customer, scheduled inspection,
-          sent missing parts, etc.). */}
+          sent missing parts, etc.). Keyed by entry count so an append from
+          the Replacement Parts panel re-seeds this panel's local state
+          (it captures caseDetail.actionLog once on mount). */}
       <ActionLogPanel
+        key={`actions-${caseDetail.actionLog.length}`}
         caseDetail={caseDetail}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
@@ -382,7 +403,17 @@ export default function ServiceCaseDetailPage() {
             <Button
               size="sm"
               variant="primary"
-              onClick={() => setSpawnOpen(true)}
+              onClick={() => {
+                // SO/CO cases hand off to the service-order create page,
+                // pre-filled from the case (source lines narrowed to the
+                // affected products + their damaged-part picks). EXTERNAL
+                // cases keep the legacy modal — no source order to copy.
+                if (caseDetail.sourceType === "SO" || caseDetail.sourceType === "CO") {
+                  navigate(`/service-order/create?fromCase=${caseDetail.id}`);
+                } else {
+                  setSpawnOpen(true);
+                }
+              }}
               className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
             >
               <Plus className="h-4 w-4" /> Spawn Service Order
@@ -409,12 +440,18 @@ export default function ServiceCaseDetailPage() {
                 {caseDetail.orders.map((o) => (
                   <tr key={o.id} className="border-b border-[#F0ECE9]">
                     <td className="py-2 px-3 font-mono text-xs">
-                      <Link to={`/service-orders/${o.id}`} className="text-[#6B5C32] hover:underline">
+                      {/* SV orders (spawned via the create-page hand-off) are
+                          sales_orders rows — their detail lives under
+                          /service-order/:id. */}
+                      <Link
+                        to={o.isSv ? `/service-order/${o.id}` : `/service-orders/${o.id}`}
+                        className="text-[#6B5C32] hover:underline"
+                      >
                         {o.serviceOrderNo}
                       </Link>
                     </td>
                     <td className="py-2 px-3 text-xs">
-                      {o.mode ?? <span className="text-[#9CA3AF]">pending</span>}
+                      {o.isSv ? "SV" : (o.mode ?? <span className="text-[#9CA3AF]">pending</span>)}
                     </td>
                     <td className="py-2 px-3 text-xs">{o.status}</td>
                     <td className="py-2 px-3 text-xs text-[#6B7280]">
@@ -1399,6 +1436,20 @@ function AffectedProductsPanel({
                   <span className="font-mono text-[#6B5C32]">{p.code}</span>
                   <span className="text-[#9CA3AF]"> — </span>
                   <span className="text-[#1F1D1B]">{p.name}</span>
+                  {/* Damaged-part picks from the create modal — read-only
+                      chips (absent = all parts). */}
+                  {p.components && p.components.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {p.components.map((cp) => (
+                        <span
+                          key={cp.key}
+                          className="text-[10px] bg-[#F0ECE9] text-[#5A5550] px-1.5 py-0.5 rounded"
+                        >
+                          {cp.label || cp.key} × {cp.qty}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Input
@@ -1426,6 +1477,323 @@ function AffectedProductsPanel({
               </li>
             ))}
           </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ===========================================================================
+// ReplacementPartsPanel — stock-only part top-ups recorded against the case.
+// ===========================================================================
+// For "missing legs" style fixes: deducts RM / WIP / FG stock through the
+// standard POST /api/stock-adjustments write path (reason
+// SERVICE_REPLACEMENT, tagged with this case's id — migration 0164) and
+// lists this case's issues below. No production order, no service order.
+// Item sources mirror the Stock Adjustments page (inventory/adjustments.tsx):
+// RM = /api/raw-materials, WIP = /api/inventory/wip, FG = /api/inventory
+// finishedProducts; unit cost prefill mirrors the same page (RM unitCostSen,
+// FG basePriceSen, WIP unknown → 0).
+type ReplacementType = "RM" | "WIP" | "FG";
+type ReplacementItemOpt = {
+  id: string;
+  code: string;
+  name: string;
+  onHand: number;
+  unitCostSen: number;
+};
+type ReplacementAdjRow = {
+  id: string;
+  adjNo: string;
+  type: string;
+  itemCode: string;
+  itemName: string;
+  qtyDelta: number;
+  adjustedAt: string;
+  adjustedByName: string;
+  notes: string;
+};
+
+function ReplacementPartsPanel({
+  caseDetail,
+  onSaved,
+}: {
+  caseDetail: ServiceCaseDetail;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const user = getCurrentUser();
+  const [type, setType] = useState<ReplacementType>("RM");
+  const [itemId, setItemId] = useState("");
+  const [search, setSearch] = useState("");
+  const [qty, setQtyInput] = useState("1");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Only the active type's list is fetched (null URL = skip).
+  const { data: rmResp } = useCachedJson<{
+    data?: Array<{ id: string; itemCode: string; itemName?: string; balanceQty: number; unitCostSen?: number }>;
+  }>(type === "RM" ? "/api/raw-materials" : null);
+  const { data: wipResp } = useCachedJson<{
+    data?: Array<{ id: string; code: string; type: string; stockQty: number }>;
+  }>(type === "WIP" ? "/api/inventory/wip" : null);
+  const { data: invResp } = useCachedJson<{
+    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; stockQty?: number; basePriceSen?: number }> };
+  }>(type === "FG" ? "/api/inventory" : null);
+
+  const itemOptions: ReplacementItemOpt[] = useMemo(() => {
+    if (type === "RM") {
+      return (rmResp?.data ?? []).map((r) => ({
+        id: r.id,
+        code: r.itemCode,
+        name: r.itemName ?? "",
+        onHand: r.balanceQty,
+        unitCostSen: r.unitCostSen ?? 0,
+      }));
+    }
+    if (type === "WIP") {
+      return (wipResp?.data ?? []).map((w) => ({
+        id: w.id,
+        code: w.code,
+        name: w.type ?? "",
+        onHand: w.stockQty,
+        unitCostSen: 0,
+      }));
+    }
+    return (invResp?.data?.finishedProducts ?? []).map((p) => ({
+      id: p.id,
+      code: p.code,
+      name: p.name ?? "",
+      onHand: p.stockQty ?? 0,
+      unitCostSen: p.basePriceSen ?? 0,
+    }));
+  }, [type, rmResp, wipResp, invResp]);
+
+  // Search-then-pick — empty query shows nothing, results capped at 10
+  // (same pattern as every other picker on this page).
+  const matches = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    return itemOptions
+      .filter((o) => o.code.toLowerCase().includes(q) || o.name.toLowerCase().includes(q))
+      .slice(0, 10);
+  }, [search, itemOptions]);
+
+  const selected = itemOptions.find((o) => o.id === itemId) ?? null;
+  const qtyNum = Number(qty);
+  const canIssue = !!selected && Number.isFinite(qtyNum) && qtyNum > 0 && !saving;
+
+  // This case's issued parts — GET filtered by caseid (migration 0164).
+  const { data: adjResp, refresh: refreshAdj } = useCachedJson<{ data?: ReplacementAdjRow[] }>(
+    `/api/stock-adjustments?caseId=${encodeURIComponent(caseDetail.id)}`,
+  );
+  const issued = useMemo(() => adjResp?.data ?? [], [adjResp]);
+
+  async function handleIssue() {
+    if (!selected || !Number.isFinite(qtyNum) || qtyNum <= 0) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/stock-adjustments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type,
+          itemId: selected.id,
+          qtyDelta: -Math.abs(qtyNum),
+          unitCostSen: selected.unitCostSen,
+          reason: "SERVICE_REPLACEMENT",
+          notes: `${caseDetail.caseNo}${note.trim() ? " — " + note.trim() : ""}`,
+          caseId: caseDetail.id,
+          adjustedBy: user?.id ?? null,
+          adjustedByName: user?.displayName ?? user?.email ?? null,
+        }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      // Append to the case's agent action log (same PUT shape the
+      // ActionLogPanel persists) so the timeline shows the part went out.
+      // Best-effort — the stock deduction above already committed.
+      try {
+        await fetch(`/api/service-cases/${caseDetail.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actionLog: [
+              ...(caseDetail.actionLog ?? []),
+              {
+                id: `act-${Math.random().toString(36).slice(2, 8)}`,
+                date: new Date().toISOString().slice(0, 10),
+                description: `Issued replacement part: ${selected.code} × ${Math.abs(qtyNum)} (${type} stock deducted${note.trim() ? " — " + note.trim() : ""})`,
+                createdAt: new Date().toISOString(),
+                createdByName: user?.displayName ?? user?.email ?? "",
+              },
+            ],
+          }),
+        });
+      } catch {
+        /* tolerate — log entry is a nicety */
+      }
+      toast.success(`Deducted ${Math.abs(qtyNum)} × ${selected.code} from ${type} stock`);
+      setItemId("");
+      setSearch("");
+      setQtyInput("1");
+      setNote("");
+      invalidateCachePrefix("/api/stock-adjustments");
+      invalidateCachePrefix("/api/raw-materials");
+      invalidateCachePrefix("/api/inventory");
+      refreshAdj();
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const sel =
+    "h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">
+          Replacement Parts (stock only)
+          {issued.length > 0 ? ` (${issued.length})` : ""}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <p className="text-[10px] text-[#9CA3AF]">
+          For top-ups like missing legs — deducts stock and keeps a record; no production order.
+        </p>
+        <div className="flex flex-wrap items-start gap-2">
+          <select
+            value={type}
+            onChange={(e) => {
+              // Type change invalidates the picked item — option lists are
+              // scoped per type (mirrors the Stock Adjustments page).
+              setType(e.target.value as ReplacementType);
+              setItemId("");
+              setSearch("");
+            }}
+            disabled={saving}
+            className={`${sel} w-[70px]`}
+          >
+            <option value="RM">RM</option>
+            <option value="WIP">WIP</option>
+            <option value="FG">FG</option>
+          </select>
+          <div className="relative flex-1 min-w-[220px]">
+            {selected ? (
+              <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-[#FAF9F7] px-2 py-1.5 text-xs">
+                <div className="truncate">
+                  <span className="font-mono text-[#6B5C32]">{selected.code}</span>
+                  {selected.name ? (
+                    <span className="text-[#9CA3AF]"> — {selected.name}</span>
+                  ) : null}
+                  <span className="text-[#9CA3AF]"> · {selected.onHand} on hand</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setItemId("");
+                    setSearch("");
+                  }}
+                  disabled={saving}
+                  className="ml-2 text-xs text-[#6B5C32] hover:underline"
+                >
+                  Change
+                </button>
+              </div>
+            ) : (
+              <>
+                <Input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  disabled={saving}
+                  placeholder={`Search ${type} item by code or name…`}
+                  className="h-8 text-xs"
+                />
+                {matches.length > 0 && (
+                  <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
+                    {matches.map((o) => (
+                      <button
+                        key={o.id}
+                        type="button"
+                        onClick={() => {
+                          setItemId(o.id);
+                          setSearch("");
+                        }}
+                        className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
+                      >
+                        <span className="font-mono text-[#6B5C32]">{o.code}</span>
+                        {o.name ? <span className="text-[#9CA3AF]"> — {o.name}</span> : null}
+                        <span className="text-[#9CA3AF]"> · {o.onHand} on hand</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <Input
+            type="number"
+            onFocus={(e) => e.currentTarget.select()}
+            min={1}
+            value={qty}
+            onChange={(e) => setQtyInput(e.target.value)}
+            disabled={saving}
+            placeholder="Qty"
+            className="h-8 w-20 text-xs"
+          />
+          <Input
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            disabled={saving}
+            placeholder="Note (optional)"
+            className="h-8 flex-1 min-w-[160px] text-xs"
+          />
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={handleIssue}
+            disabled={!canIssue}
+            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+          >
+            {saving ? "Issuing…" : "Issue & deduct"}
+          </Button>
+        </div>
+
+        {issued.length > 0 && (
+          <table className="w-full text-xs border border-[#E2DDD8] rounded">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-left text-[10px] uppercase text-[#6B7280] bg-[#FAF9F7]">
+                <th className="py-1.5 px-2">Date</th>
+                <th className="py-1.5 px-2">Item</th>
+                <th className="py-1.5 px-2 text-right">Qty</th>
+                <th className="py-1.5 px-2">By</th>
+                <th className="py-1.5 px-2">Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              {issued.map((r) => (
+                <tr key={r.id} className="border-b border-[#F0ECE9] last:border-b-0">
+                  <td className="py-1.5 px-2 whitespace-nowrap text-[#6B7280]">
+                    {dateLabel(r.adjustedAt)}
+                  </td>
+                  <td className="py-1.5 px-2">
+                    <span className="font-mono text-[#6B5C32]">{r.itemCode}</span>
+                    {r.itemName ? <span className="text-[#9CA3AF]"> — {r.itemName}</span> : null}
+                    <span className="text-[10px] text-[#9CA3AF]"> ({r.type})</span>
+                  </td>
+                  <td className="py-1.5 px-2 text-right font-mono text-[#9A3A2D]">{r.qtyDelta}</td>
+                  <td className="py-1.5 px-2 text-[#6B7280]">{r.adjustedByName || "—"}</td>
+                  <td className="py-1.5 px-2 text-[#6B7280]">{r.notes || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </CardContent>
     </Card>

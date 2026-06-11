@@ -11,7 +11,7 @@
 //   On the detail page, you see the case info + any spawned orders, and
 //   can spawn more orders or close the case.
 // ---------------------------------------------------------------------------
-import { useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Link, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -73,6 +73,12 @@ type SourceOrderOption = {
   customerName: string;
   status: string;
   companyOrderId: string;
+  // Customer-side document numbers the operator may quote instead of our
+  // order id (customers report issues off THEIR paperwork — same rationale
+  // as the service-order Copy-from lookup, 2026-06-11). Empty when unset.
+  customerPO: string;
+  customerSO: string;
+  reference: string;
 };
 
 function dateLabel(iso: string): string {
@@ -322,17 +328,27 @@ type SalesOrderApi = {
   customerName: string;
   status: string;
   companySOId?: string;
+  customerPO?: string;
+  customerPOId?: string;
+  customerSO?: string;
+  customerSOId?: string;
+  reference?: string;
 };
 type ConsignmentOrderApi = {
   id: string;
   customerName: string;
   status: string;
   companyCOId?: string;
+  customerCO?: string;
+  customerCOId?: string;
+  reference?: string;
 };
 
 // Source-order line item shape returned by GET /api/sales-orders/:id and
 // /api/consignment-orders/:id. Used for the "Which product?" picker that
-// follows source-order selection on SO/CO cases (2026-04-29).
+// follows source-order selection on SO/CO cases (2026-04-29). The variant
+// fields (size / fabric / gap / divan / leg) feed the damaged-parts lookup
+// (GET /api/sales-orders/repair-components) added 2026-06-12.
 type SourceOrderItemApi = {
   id: string;
   productId?: string | null;
@@ -340,8 +356,24 @@ type SourceOrderItemApi = {
   productName?: string | null;
   quantity?: number | null;
   sizeLabel?: string | null;
+  sizeCode?: string | null;
   fabricCode?: string | null;
+  gapInches?: number | null;
+  divanHeightInches?: number | null;
+  legHeightInches?: number | null;
 };
+
+// One pickable damaged part — a top-level BOM WIP piece as served by
+// GET /api/sales-orders/repair-components (the canonical BOM → WIP
+// breakdown; same options the service-order Repair Scope picker shows).
+type RepairComponentOption = {
+  key: string;
+  label: string;
+  type: string;
+  qty: number;
+};
+// One pick stored on an affectedProducts entry.
+type AffectedComponentPick = { key: string; label: string; qty: number };
 type SourceOrderDetailApi = {
   data?: {
     id: string;
@@ -390,13 +422,15 @@ export function CreateServiceCaseModal({
   // operators on 2026-04-29 (Bug #13).
   const [formError, setFormError] = useState<string | null>(null);
   // Affected products picked from the source order (for SO/CO sources).
-  // Stored as an array of { productId, code, name, qty? } — matches the
-  // backend's affected_product_ids JSON shape (migration 0077).
+  // Stored as an array of { productId, code, name, qty?, components? } —
+  // matches the backend's affected_product_ids JSON shape (migration 0077).
+  // components = optional damaged-part picks (absent = all parts).
   const [affectedProducts, setAffectedProducts] = useState<Array<{
     productId: string;
     code: string;
     name: string;
     qty?: number | null;
+    components?: AffectedComponentPick[];
   }>>([]);
 
   const { data: soResp, loading: soLoading } = useCachedJson<{ data?: SalesOrderApi[] }>("/api/sales-orders");
@@ -445,6 +479,11 @@ export function CreateServiceCaseModal({
           customerName: s.customerName,
           status: s.status,
           companyOrderId: s.companySOId ?? "",
+          // The create form writes the *Id variants; OCR fills the plain
+          // ones — surface whichever is set so either entry path matches.
+          customerPO: s.customerPOId || s.customerPO || "",
+          customerSO: s.customerSOId || s.customerSO || "",
+          reference: s.reference ?? "",
         }));
     }
     if (sourceType === "CO") {
@@ -455,6 +494,11 @@ export function CreateServiceCaseModal({
           customerName: s.customerName,
           status: s.status,
           companyOrderId: s.companyCOId ?? "",
+          // COs carry the customer's CO number in the PO slot (their
+          // document number); there's no customer-SO concept on COs.
+          customerPO: s.customerCOId || s.customerCO || "",
+          customerSO: "",
+          reference: s.reference ?? "",
         }));
     }
     return [];
@@ -466,6 +510,7 @@ export function CreateServiceCaseModal({
     const productId = item.productId ?? "";
     if (!productId) return;
     setAffectedProducts((prev) => {
+      // Unchecking removes the whole entry — its component picks go with it.
       const has = prev.some((p) => p.productId === productId);
       if (has) return prev.filter((p) => p.productId !== productId);
       return [
@@ -478,6 +523,18 @@ export function CreateServiceCaseModal({
         },
       ];
     });
+  }
+
+  // Damaged-part picks for one checked product. Empty list = field removed
+  // (absent components = all parts, the canonical "everything" form).
+  function setAffectedComponents(productId: string, components: AffectedComponentPick[]) {
+    setAffectedProducts((prev) =>
+      prev.map((p) =>
+        p.productId === productId
+          ? { ...p, components: components.length > 0 ? components : undefined }
+          : p,
+      ),
+    );
   }
 
   // ---- Photo helpers (resize → base64) ----
@@ -732,35 +789,49 @@ export function CreateServiceCaseModal({
                   This order has no line items recorded.
                 </div>
               ) : (
-                <div className="space-y-1 rounded border border-[#E2DDD8] bg-white max-h-56 overflow-auto">
+                <div className="space-y-1 rounded border border-[#E2DDD8] bg-white max-h-72 overflow-auto">
                   {sourceItems.map((it) => {
                     const productId = it.productId ?? "";
-                    const picked = !!productId && affectedProducts.some((p) => p.productId === productId);
+                    const entry = productId
+                      ? affectedProducts.find((p) => p.productId === productId)
+                      : undefined;
+                    const picked = !!entry;
                     return (
-                      <button
-                        key={it.id}
-                        type="button"
-                        onClick={() => toggleAffectedProduct(it)}
-                        disabled={!productId}
-                        className={`w-full text-left px-2 py-1.5 text-xs border-b border-[#F0ECE9] last:border-b-0 flex items-center gap-2 ${
-                          picked ? "bg-[#F4EFE3]" : "hover:bg-[#FAF9F7]"
-                        } ${!productId ? "opacity-50 cursor-not-allowed" : ""}`}
-                      >
-                        <span
-                          className={`inline-block w-3.5 h-3.5 rounded-sm border ${
-                            picked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#9CA3AF]"
-                          } flex items-center justify-center text-white text-[10px]`}
+                      <div key={it.id} className="border-b border-[#F0ECE9] last:border-b-0">
+                        <button
+                          type="button"
+                          onClick={() => toggleAffectedProduct(it)}
+                          disabled={!productId}
+                          className={`w-full text-left px-2 py-1.5 text-xs flex items-center gap-2 ${
+                            picked ? "bg-[#F4EFE3]" : "hover:bg-[#FAF9F7]"
+                          } ${!productId ? "opacity-50 cursor-not-allowed" : ""}`}
                         >
-                          {picked ? "✓" : ""}
-                        </span>
-                        <span className="font-mono text-[#6B5C32]">{it.productCode || "—"}</span>
-                        <span className="text-[#9CA3AF]"> — </span>
-                        <span className="truncate">{it.productName || "(unnamed)"}</span>
-                        {it.sizeLabel ? (
-                          <span className="text-[#9CA3AF]"> · {it.sizeLabel}</span>
-                        ) : null}
-                        <span className="ml-auto text-[#6B7280]">qty {it.quantity ?? 0}</span>
-                      </button>
+                          <span
+                            className={`inline-block w-3.5 h-3.5 rounded-sm border ${
+                              picked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#9CA3AF]"
+                            } flex items-center justify-center text-white text-[10px]`}
+                          >
+                            {picked ? "✓" : ""}
+                          </span>
+                          <span className="font-mono text-[#6B5C32]">{it.productCode || "—"}</span>
+                          <span className="text-[#9CA3AF]"> — </span>
+                          <span className="truncate">{it.productName || "(unnamed)"}</span>
+                          {it.sizeLabel ? (
+                            <span className="text-[#9CA3AF]"> · {it.sizeLabel}</span>
+                          ) : null}
+                          <span className="ml-auto text-[#6B7280]">qty {it.quantity ?? 0}</span>
+                        </button>
+                        {/* Damaged-parts narrowing for the checked product —
+                            renders only when the BOM has pickable top-level
+                            pieces (legacy/flat BOM = no component layer). */}
+                        {picked && (
+                          <DamagedPartsPicker
+                            item={it}
+                            picks={entry?.components ?? []}
+                            onChange={(next) => setAffectedComponents(productId, next)}
+                          />
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -938,11 +1009,17 @@ function SourceSearchPicker({
   const q = query.trim().toLowerCase();
   const filtered = useMemo(() => {
     if (!q) return [];
+    // Matches our order id, customer name, AND the customer-side document
+    // numbers (PO / SO / reference) — customers quote their own paperwork
+    // when they report an issue (2026-06-12, mirrors the Copy-from lookup).
     return options
       .filter(
         (o) =>
           o.companyOrderId.toLowerCase().includes(q) ||
-          o.customerName.toLowerCase().includes(q),
+          o.customerName.toLowerCase().includes(q) ||
+          o.customerPO.toLowerCase().includes(q) ||
+          o.customerSO.toLowerCase().includes(q) ||
+          o.reference.toLowerCase().includes(q),
       )
       .slice(0, 15);
   }, [options, q]);
@@ -954,7 +1031,7 @@ function SourceSearchPicker({
   // fetching. (Bug #11 — 2026-04-29)
   const placeholder = loading
     ? "Loading orders…"
-    : `Type order # or customer name… (${options.length} available)`;
+    : `Type SO# / customer / customer PO / reference… (${options.length} available)`;
 
   return (
     <div className="space-y-1">
@@ -974,21 +1051,147 @@ function SourceSearchPicker({
           ) : filtered.length === 0 ? (
             <div className="p-2 text-xs text-[#9CA3AF]">No matches for "{q}".</div>
           ) : (
-            filtered.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => onPick(s.id)}
-                className="block w-full text-left px-2 py-1.5 text-xs hover:bg-[#F4EFE3] border-b border-[#F0ECE9] last:border-b-0"
-              >
-                <span className="font-mono">{s.companyOrderId}</span>
-                <span className="text-[#6B7280]"> — {s.customerName}</span>
-                <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
-              </button>
-            ))
+            filtered.map((s) => {
+              // Second line surfaces the customer-side refs so the operator
+              // can confirm the match against the paperwork they're holding.
+              const refs = [
+                s.customerPO ? `PO ${s.customerPO}` : "",
+                s.customerSO ? `SO ${s.customerSO}` : "",
+                s.reference ? `Ref ${s.reference}` : "",
+              ].filter(Boolean);
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => onPick(s.id)}
+                  className="block w-full text-left px-2 py-1.5 text-xs hover:bg-[#F4EFE3] border-b border-[#F0ECE9] last:border-b-0"
+                >
+                  <span className="font-mono">{s.companyOrderId}</span>
+                  <span className="text-[#6B7280]"> — {s.customerName}</span>
+                  <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
+                  {refs.length > 0 && (
+                    <div className="text-[10px] text-[#9CA3AF]">{refs.join(" · ")}</div>
+                  )}
+                </button>
+              );
+            })
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// DamagedPartsPicker — compact component-level narrowing under a checked
+// affected product (SO/CO sources only).
+// ===========================================================================
+// Options come from GET /api/sales-orders/repair-components — the canonical
+// BOM → WIP breakdown (the same endpoint the service-order create page's
+// Repair Scope picker consumes); components are NEVER re-derived client-side.
+// Empty result / failed fetch → renders nothing (legacy/flat BOM = no
+// component layer, identical to before the feature). No pick = all parts.
+function DamagedPartsPicker({
+  item,
+  picks,
+  onChange,
+}: {
+  item: SourceOrderItemApi;
+  picks: AffectedComponentPick[];
+  onChange: (next: AffectedComponentPick[]) => void;
+}) {
+  const [options, setOptions] = useState<RepairComponentOption[] | null>(null);
+  const productCode = item.productCode ?? "";
+  useEffect(() => {
+    if (!productCode) return;
+    let cancelled = false;
+    const params = new URLSearchParams({ productCode });
+    if (item.sizeLabel) params.set("sizeLabel", item.sizeLabel);
+    if (item.sizeCode) params.set("sizeCode", item.sizeCode);
+    if (item.fabricCode) params.set("fabricCode", item.fabricCode);
+    if (item.gapInches != null) params.set("gapInches", String(item.gapInches));
+    if (item.divanHeightInches != null) params.set("divanHeightInches", String(item.divanHeightInches));
+    if (item.legHeightInches != null) params.set("legHeightInches", String(item.legHeightInches));
+    fetch(`/api/sales-orders/repair-components?${params.toString()}`)
+      .then((res): Promise<{ success?: boolean; data?: RepairComponentOption[] } | null> =>
+        res.ok ? res.json() : Promise.resolve(null),
+      )
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.success && Array.isArray(data.data)) setOptions(data.data);
+      })
+      .catch(() => {
+        // Endpoint unreachable — keep the picker hidden (= all parts).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    productCode,
+    item.sizeLabel,
+    item.sizeCode,
+    item.fabricCode,
+    item.gapInches,
+    item.divanHeightInches,
+    item.legHeightInches,
+  ]);
+
+  if (!options || options.length === 0) return null;
+
+  const toggle = (opt: RepairComponentOption) => {
+    const has = picks.some((p) => p.key === opt.key);
+    onChange(
+      has
+        ? picks.filter((p) => p.key !== opt.key)
+        : [
+            ...picks,
+            { key: opt.key, label: opt.label, qty: Math.max(1, Math.floor(opt.qty) || 1) },
+          ],
+    );
+  };
+  const setQty = (opt: RepairComponentOption, raw: string) => {
+    const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+    const n = Math.floor(Number(raw));
+    const qty = Number.isFinite(n) ? Math.min(Math.max(1, n), maxQty) : maxQty;
+    onChange(picks.map((p) => (p.key === opt.key ? { ...p, qty } : p)));
+  };
+
+  return (
+    <div className="ml-7 mr-2 mb-1.5 rounded border border-[#E8D8B2] bg-[#FAF7F0] px-2 py-1.5">
+      <div className="text-[10px] text-[#6B5C32] mb-1">
+        Damaged parts (optional — all if none picked)
+      </div>
+      <div className="space-y-1">
+        {options.map((opt) => {
+          const pick = picks.find((p) => p.key === opt.key);
+          const maxQty = Math.max(1, Math.floor(opt.qty) || 1);
+          return (
+            <div key={opt.key} className="flex items-center gap-2 text-[11px]">
+              <label className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!pick}
+                  onChange={() => toggle(opt)}
+                  className="h-3 w-3"
+                />
+                <span className="truncate">{opt.label}</span>
+                <span className="text-[#9CA3AF]">×{maxQty}</span>
+              </label>
+              {pick ? (
+                <Input
+                  type="number"
+                  min={1}
+                  max={maxQty}
+                  value={pick.qty}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => setQty(opt, e.target.value)}
+                  className="h-6 w-14 text-[11px] px-1.5"
+                />
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

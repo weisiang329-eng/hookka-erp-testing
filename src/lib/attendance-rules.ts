@@ -96,7 +96,6 @@ export function computeAttendanceDay(
     0,
     regularEnd - effectiveIn - rules.lunchMin,
   );
-  const shortfallMin = Math.max(0, rules.standardWorkMin - regularWorkMin);
 
   // Overtime past the shift end — clock-out minute floored to a quarter.
   let otMin = 0;
@@ -105,6 +104,19 @@ export function computeAttendanceDay(
       Math.floor(clockOutMin / 60) * 60 + roundOutMinute(clockOutMin % 60);
     otMin = Math.max(0, roundedOut - rules.endMin);
   }
+
+  // Shortfall — same-day OT OFFSETS it first (owner 2026-06-11): a worker who
+  // comes 30 min late but works 2 h past 18:00 is short NOTHING — the evening
+  // time covers the morning gap at 1:1 (plain time, not 1.5×); only a
+  // remainder gets docked. The otMin figure itself stays UN-netted on purpose:
+  // the grid logs regular+OT as ONE Hours figure and the payroll engine pays
+  // OT only on hours ABOVE the 9-h standard, so the PAID OT nets naturally
+  // there (8.5 regular + 2 punch-OT = 10.5 logged → engine pays 1.5 h at the
+  // OT rate). Netting otMin here too would double-net.
+  const shortfallMin = Math.max(
+    0,
+    rules.standardWorkMin - regularWorkMin - otMin,
+  );
 
   return { lateMin, isLate, regularWorkMin, shortfallMin, otMin };
 }

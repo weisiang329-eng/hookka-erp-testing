@@ -109,8 +109,28 @@ test("OT across hours (19:00→60, 20:30→150, 20:50→165)", () => {
   assert.equal(day("08:00", "20:50").otMin, 165);
 });
 
-test("late AND overtime in the same day are independent (08:20 → 19:00)", () => {
+test("same-day OT OFFSETS the morning shortfall (08:20 → 19:00)", () => {
+  // Owner spec 2026-06-11: evening OT covers the morning gap at 1:1 first —
+  // only a remainder is docked. 20 min late, 60 min OT → shortfall 0; otMin
+  // stays the FULL 60 (the grid logs regular+OT, and the payroll engine pays
+  // only hours above the 9h standard, so the paid OT nets naturally there).
   const d = day("08:20", "19:00");
-  assert.equal(d.shortfallMin, 20); // 20 min late in the morning
-  assert.equal(d.otMin, 60); // 1h OT in the evening
+  assert.equal(d.shortfallMin, 0);
+  assert.equal(d.otMin, 60);
+});
+
+test("owner scenario: 30 min late + 2h OT (08:30 -> 20:00) -> no dock, engine pays 1.5h OT", () => {
+  const d = day("08:30", "20:00");
+  assert.equal(d.isLate, true);
+  assert.equal(d.regularWorkMin, 8.5 * 60); // 18:00 - 08:30 - 1h lunch
+  assert.equal(d.otMin, 120); // grid Hours = 8.5 + 2 = 10.5 logged
+  assert.equal(d.shortfallMin, 0); // OT covered the 30 min — nothing docked
+  // (10.5 logged - 9 std -> the payroll engine pays exactly 1.5h at the OT rate)
+});
+
+test("OT smaller than the shortfall -> only the remainder is docked (08:30 -> 18:20)", () => {
+  // 30 min late, 15 min rounded OT -> dock 15 min only.
+  const d = day("08:30", "18:20");
+  assert.equal(d.otMin, 15);
+  assert.equal(d.shortfallMin, 15);
 });

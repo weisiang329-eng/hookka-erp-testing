@@ -58,6 +58,7 @@ import {
   validateSofaSizeLabels,
   unknownSofaSizeLabelError,
 } from "../lib/sofa-size-validation";
+import { validateRepairScopeInput } from "../../lib/repair-scope";
 
 const app = new Hono<Env>();
 
@@ -130,6 +131,14 @@ export type SalesOrderItemRow = {
   unitPriceSen: number;
   lineTotalSen: number;
   notes: string | null;
+  // Service-order Repair Scope (0160). JSON
+  // {"preset":"FULL|FABRIC|FRAME|FOAM|CUSTOM","depts":[...]} or NULL
+  // (= FULL). Runtime-added column → Postgres folds the unquoted camelCase
+  // ALTER to lowercase, so SELECT * rows carry the `repairscope` key
+  // (BUG-2026-06-11-007). ALWAYS read dual-key:
+  // `r.repairScope ?? r.repairscope`.
+  repairScope?: string | null;
+  repairscope?: string | null;
 };
 
 type SOStatusChangeRow = {
@@ -241,6 +250,9 @@ function rowToItem(r: SalesOrderItemRow) {
     unitPriceSen: r.unitPriceSen,
     lineTotalSen: r.lineTotalSen,
     notes: r.notes ?? "",
+    // Repair Scope (0160) — dual-key read; runtime-added column comes back
+    // as the folded-lowercase key on SELECT * rows.
+    repairScope: r.repairScope ?? r.repairscope ?? null,
   };
 }
 
@@ -469,6 +481,9 @@ export async function createProductionOrdersForSO(
       legHeightInches: it.legHeightInches,
       specialOrder: it.specialOrder,
       notes: it.notes,
+      // Repair Scope (0160) — dual-key: rows fetched via SELECT * carry the
+      // folded-lowercase key (runtime-added column, BUG-2026-06-11-007).
+      repairScope: it.repairScope ?? it.repairscope ?? null,
     })),
     opts,
   );
@@ -1552,6 +1567,17 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
       // SOFA fan-out the toggle controlled is moot; FAB_CUT cross-PO merge
       // becomes unconditional. See migrations-postgres/0114_drop_so_is_project_order.sql.
       "ALTER TABLE sales_orders DROP COLUMN IF EXISTS is_project_order",
+      // 0160 — Service-order Repair Scope, per line. ⚠ ADAPTER RULE
+      // (BUG-2026-06-10-001 / BUG-2026-06-11-007): the unquoted camelCase
+      // identifier is folded to lowercase `repairscope` by Postgres; the
+      // migration file uses the folded name so a tool apply no-ops, and
+      // every read is dual-key (`row.repairScope ?? row.repairscope`).
+      // production_orders gets the same column via the builder's own
+      // ensure (production-builder.ts) so CO confirms are covered too;
+      // duplicated here so a POST-then-confirm on a fresh isolate can
+      // never race the column into existence mid-request.
+      "ALTER TABLE sales_order_items ADD COLUMN IF NOT EXISTS repairScope TEXT",
+      "ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS repairScope TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -1688,6 +1714,32 @@ app.post("/", async (c) => {
           400,
         );
       }
+    }
+
+    // Repair Scope gate (0160) — service orders may scope each line to a
+    // department subset; normal sales orders must keep the column NULL
+    // (the UI has no scope cell outside service mode — reject, don't
+    // silently strip). Unknown presets / dept codes are 400s via the
+    // shared validator (reject — don't normalize).
+    const repairScopeByLine: (string | null)[] = [];
+    for (let i = 0; i < rawItems.length; i++) {
+      const check = validateRepairScopeInput(rawItems[i].repairScope);
+      if (!check.ok) {
+        return c.json(
+          { success: false, error: `Line ${i + 1}: ${check.error}` },
+          400,
+        );
+      }
+      if (check.canonical && body.isServiceOrder !== true) {
+        return c.json(
+          {
+            success: false,
+            error: `Line ${i + 1}: Repair Scope is only available on Service Orders — normal sales orders are always a full build.`,
+          },
+          400,
+        );
+      }
+      repairScopeByLine.push(check.canonical);
     }
 
     // Price-resolution date: use companySODate (may be future-dated) when given,
@@ -1867,6 +1919,8 @@ app.post("/", async (c) => {
           unitPriceSen,
           lineTotalSen,
           notes: (item.notes as string) || "",
+          // Canonical Repair Scope from the gate above (null = FULL).
+          repairScope: repairScopeByLine[idx] ?? null,
         };
       }),
     );
@@ -1983,12 +2037,15 @@ app.post("/", async (c) => {
       ),
       ...items.map((item) =>
         c.var.DB.prepare(
+          // repairScope: unquoted camelCase folds to the runtime-added
+          // lowercase column `repairscope` — matches both the self-applied
+          // ALTER above and migration 0160.
           `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches,
              divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes, repairScope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           soId,
@@ -2014,6 +2071,7 @@ app.post("/", async (c) => {
           item.unitPriceSen,
           item.lineTotalSen,
           item.notes,
+          item.repairScope,
         ),
       ),
     ];
@@ -2631,6 +2689,10 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "update");
   if (denied) return denied;
+  // Self-applying columns (incl. 0160 repairScope) — PUT replaces items via
+  // DELETE+INSERT, so the column must exist before the INSERT runs on a
+  // fresh isolate that never served a POST.
+  await ensurePendingMigrations(c.var.DB);
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -2970,6 +3032,29 @@ app.put("/:id", async (c) => {
         }
       }
 
+      // Repair Scope gate (0160) — same rule as POST: validate every line,
+      // and only service orders may carry a non-FULL scope.
+      const repairScopeByLine: (string | null)[] = [];
+      for (let i = 0; i < rawItems.length; i++) {
+        const check = validateRepairScopeInput(rawItems[i].repairScope);
+        if (!check.ok) {
+          return c.json(
+            { success: false, error: `Line ${i + 1}: ${check.error}` },
+            400,
+          );
+        }
+        if (check.canonical && !mergedIsServiceOrder) {
+          return c.json(
+            {
+              success: false,
+              error: `Line ${i + 1}: Repair Scope is only available on Service Orders — normal sales orders are always a full build.`,
+            },
+            400,
+          );
+        }
+        repairScopeByLine.push(check.canonical);
+      }
+
       const oldItemsRes = await c.var.DB.prepare(
         "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
       )
@@ -3159,6 +3244,8 @@ app.put("/:id", async (c) => {
           unitPriceSen,
           lineTotalSen,
           notes: (item.notes as string) || "",
+          // Canonical Repair Scope from the gate above (null = FULL).
+          repairScope: repairScopeByLine[idx] ?? null,
           _priceOverride: priceOverride,
           _lineIndex: idx,
         };
@@ -3182,12 +3269,14 @@ app.put("/:id", async (c) => {
       for (const item of newItems) {
         statements.push(
           c.var.DB.prepare(
+            // repairScope: unquoted camelCase folds to the runtime-added
+            // lowercase column `repairscope` (matches POST + migration 0160).
             `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricCode, quantity, gapInches, divanHeightInches,
                divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes, repairScope)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -3213,6 +3302,7 @@ app.put("/:id", async (c) => {
             item.unitPriceSen,
             item.lineTotalSen,
             item.notes,
+            item.repairScope,
           ),
         );
 
@@ -3401,6 +3491,13 @@ app.put("/:id", async (c) => {
             unitPriceSen: 0,
             lineTotalSen: 0,
             notes: (item.notes as string) || "",
+            // Repair Scope — the items gate above already validated every
+            // line (this branch only runs when body.items was provided);
+            // re-canonicalize so the cascade sees the same stored form.
+            repairScope: (() => {
+              const v = validateRepairScopeInput(item.repairScope);
+              return v.ok ? v.canonical : null;
+            })(),
           };
         });
       } else {
@@ -3531,6 +3628,9 @@ app.put("/:id", async (c) => {
             legHeightInches: it.legHeightInches,
             specialOrder: it.specialOrder,
             notes: it.notes,
+            // Repair Scope (0160) — dual-key: SELECT * rows carry the
+            // folded-lowercase key (runtime-added column).
+            repairScope: it.repairScope ?? it.repairscope ?? null,
           })),
           { forceRebuild: true },
         );

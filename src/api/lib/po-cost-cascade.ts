@@ -56,6 +56,10 @@ import {
   parseSofaSeatHeightInches,
   type ProductionDimensions,
 } from "./material-scaling";
+import {
+  parseRepairScope,
+  materialLineInScope,
+} from "../../lib/repair-scope";
 
 type RMBatchRow = {
   id: string;
@@ -92,6 +96,11 @@ type ProductionOrderRow = {
   // keyed by itemCode === fabricCode (e.g. "PC151-01"), so this drives
   // the autoDetect=FABRIC substitution at consumption time.
   fabricCode: string | null;
+  // Repair Scope snapshot stamped at PO creation (0160). Runtime-added
+  // column → SELECT * returns the folded-lowercase key
+  // (BUG-2026-06-11-007); read dual-key.
+  repairScope?: string | null;
+  repairscope?: string | null;
 };
 
 type BomVersionRow = {
@@ -125,6 +134,15 @@ type MaterialLine = {
   //   "LEG"    → no current schema mapping → falls through to shortage
   //              report with the original "Leg (from order)" name.
   autoDetect?: "FABRIC" | "LEG";
+  // deptCodes of the BOM node that OWNS this material line (the node whose
+  // materials[] array carried it). Captured by collectTreeMaterials for
+  // the Repair-Scope CUSTOM branch rule: a material is consumed only when
+  // its owning node has at least one process in the chosen depts. Live
+  // BOM audit 2026-06-11: every material-carrying node also carries its
+  // own processes (399/399), so this is reliably populated for tree-based
+  // BOMs; the flat bom_components fallback has no process info and leaves
+  // it undefined.
+  ownerDeptCodes?: string[];
 };
 
 // Walk a BOM tree JSON node and gather every `materials[]` entry across all
@@ -158,6 +176,15 @@ function collectTreeMaterials(
     typeof rawNodeQty === "number" ? rawNodeQty : Number(rawNodeQty);
   const nodeQuantity =
     Number.isFinite(parsedNodeQty) && parsedNodeQty > 0 ? parsedNodeQty : 1;
+  // Owning node's dept set — drives the Repair-Scope CUSTOM branch rule.
+  const nodeProcs = Array.isArray(n.processes) ? n.processes : [];
+  const ownerDeptCodes = nodeProcs
+    .map((p) =>
+      p && typeof p === "object"
+        ? String((p as { deptCode?: unknown }).deptCode ?? "").toUpperCase()
+        : "",
+    )
+    .filter((d) => d.length > 0);
   const mats = n.materials;
   if (Array.isArray(mats)) {
     for (const m of mats) {
@@ -190,6 +217,7 @@ function collectTreeMaterials(
           wastePct: waste,
           inventoryCode,
           autoDetect,
+          ownerDeptCodes,
         });
       }
     }
@@ -362,35 +390,44 @@ async function substituteAutoDetectMaterials(
 //   1. inventoryCode exact match on raw_materials.itemCode
 //   2. code on itemCode
 //   3. name on description (case-insensitive)
+// itemGroup rides along for the Repair-Scope material-class filter
+// (fabric / wood / foam — see src/lib/repair-scope.ts). It is a
+// rename-map-known identifier, so the adapter translates it in the
+// explicit projection (unlike the BUG-2026-06-10-001 runtime-column case).
 async function resolveRmFromBom(
   db: D1Database,
   line: MaterialLine,
-): Promise<{ id: string; itemCode: string; description: string } | null> {
+): Promise<{
+  id: string;
+  itemCode: string;
+  description: string;
+  itemGroup: string | null;
+} | null> {
   if (line.inventoryCode) {
     const hit = await db
       .prepare(
-        "SELECT id, itemCode, description FROM raw_materials WHERE itemCode = ? LIMIT 1",
+        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE itemCode = ? LIMIT 1",
       )
       .bind(line.inventoryCode)
-      .first<{ id: string; itemCode: string; description: string }>();
+      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
     if (hit) return hit;
   }
   if (line.code) {
     const hit = await db
       .prepare(
-        "SELECT id, itemCode, description FROM raw_materials WHERE itemCode = ? LIMIT 1",
+        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE itemCode = ? LIMIT 1",
       )
       .bind(line.code)
-      .first<{ id: string; itemCode: string; description: string }>();
+      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
     if (hit) return hit;
   }
   if (line.name) {
     const hit = await db
       .prepare(
-        "SELECT id, itemCode, description FROM raw_materials WHERE description = ? COLLATE NOCASE LIMIT 1",
+        "SELECT id, itemCode, description, itemGroup FROM raw_materials WHERE description = ? COLLATE NOCASE LIMIT 1",
       )
       .bind(line.name)
-      .first<{ id: string; itemCode: string; description: string }>();
+      .first<{ id: string; itemCode: string; description: string; itemGroup: string | null }>();
     if (hit) return hit;
   }
   return null;
@@ -433,13 +470,12 @@ export async function consumeRawMaterialsForPO(
     return { skipped: true, materialCostSen: 0, linesConsumed: 0, shortages: [] };
   }
 
+  // SELECT * (not an explicit projection) — the Repair-Scope column is
+  // runtime-added so an unquoted camelCase projection entry would be the
+  // BUG-2026-06-10-001 trap; SELECT * returns it under the folded key
+  // (`repairscope`), read dual-key below.
   const po = await db
-    .prepare(
-      `SELECT id, poNo, productId, productCode, quantity, completedDate,
-              itemCategory, gapInches, divanHeightInches, legHeightInches,
-              sizeCode, sizeLabel, fabricCode
-         FROM production_orders WHERE id = ?`,
-    )
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
     .bind(poId)
     .first<ProductionOrderRow>();
   if (!po || !po.quantity || po.quantity <= 0) {
@@ -451,6 +487,22 @@ export async function consumeRawMaterialsForPO(
     // No BOM → nothing to consume; also no FG materialCost.
     return { skipped: false, materialCostSen: 0, linesConsumed: 0, shortages: [] };
   }
+
+  // ---- Repair Scope material filter (0160) -------------------------------
+  // A scoped (non-FULL) repair must NEVER consume the full BOM. The scope
+  // was stamped onto the PO at creation (production-builder), so it always
+  // matches the job cards that were actually built. Per-line rule (see
+  // materialLineInScope in src/lib/repair-scope.ts):
+  //   FABRIC preset → fabric-class lines only (autoDetect:"FABRIC" or
+  //       raw_materials.itemGroup in the fabric groups);
+  //   FRAME → wood-class only (PLYWOOD / WD STRIP);
+  //   FOAM  → foam-class only (B.FILLER / S.FILLER);
+  //   CUSTOM → branch-based: the line's owning BOM node must have at least
+  //       one process in the chosen depts.
+  // Out-of-scope lines are skipped BEFORE any FIFO consumption — no
+  // rm_batches decrement, no RM_ISSUE ledger row, and no shortage report
+  // (the material simply isn't part of this repair).
+  const repairScope = parseRepairScope(po.repairScope ?? po.repairscope);
 
   const dateIso = po.completedDate
     ? new Date(`${po.completedDate}T12:00:00`).toISOString()
@@ -469,6 +521,20 @@ export async function consumeRawMaterialsForPO(
     if (required <= 0) continue;
 
     const rm = await resolveRmFromBom(db, line);
+
+    // Repair Scope: out-of-scope material → skip before any consumption.
+    // Class lookup needs the resolved itemGroup, hence after resolveRmFromBom
+    // but before the shortage report / FIFO walk. Unresolvable AND
+    // unclassifiable lines drop too (never over-consume on a partial
+    // repair); an in-scope-by-autoDetect line that fails to resolve still
+    // falls through to the normal shortage report below.
+    if (
+      repairScope &&
+      !materialLineInScope(line, rm?.itemGroup ?? null, repairScope)
+    ) {
+      continue;
+    }
+
     if (!rm) {
       shortages.push({ materialName: line.name, shortageQty: required });
       continue;

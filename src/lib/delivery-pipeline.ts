@@ -4,6 +4,8 @@
 // each re-deriving the gate (the dashboard previously replicated it off the
 // raw job_cards table and drifted to RM 25,218 vs the page's RM 50,793).
 
+import { parseRepairScope } from "./repair-scope";
+
 export type PipelineJobCard = {
   departmentCode: string;
   status: string;
@@ -17,6 +19,10 @@ export type PipelinePO = {
   consignmentOrderId?: string;
   itemCategory?: string;
   specialOrder?: string;
+  // Service-order Repair Scope snapshot (0160, JSON string or null).
+  // A CUSTOM scope can exclude UPHOLSTERY entirely — the readiness
+  // fallback below keys on this field, never on card absence alone.
+  repairScope?: string | null;
   jobCards?: PipelineJobCard[];
 };
 
@@ -42,24 +48,48 @@ export function pickRelevantUphCards(po: PipelinePO): PipelineJobCard[] {
   return uph.filter((j) => (j.wipType || "").toUpperCase() !== "DIVAN");
 }
 
+// Repair-Scope fallback predicate (0160): TRUE only when the PO carries a
+// stamped non-FULL scope that EXCLUDES UPHOLSTERY (only a CUSTOM scope can —
+// every owner preset includes it). Keyed on the scope, never on UPH-card
+// absence alone, so a normal full PO whose UPH cards merely haven't been
+// created yet can NOT slip through the gates below.
+function repairScopeExcludesUph(po: PipelinePO): boolean {
+  const scope = parseRepairScope(po.repairScope ?? null);
+  return scope !== null && !scope.depts.includes("UPHOLSTERY");
+}
+
 // Planning: PO still in production — has upholstery cards and at least one
 // is not yet done. Excludes CANCELLED/COMPLETED and CO-sourced POs.
+// Scoped PO without UPHOLSTERY in scope: fall back to "any existing job
+// card not yet done" (its UPH cards were never built, by design).
 export function poInPlanning(po: PipelinePO): boolean {
   if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
   if (po.consignmentOrderId) return false;
   const uphCards = pickRelevantUphCards(po);
-  if (uphCards.length === 0) return false;
+  if (uphCards.length === 0) {
+    if (!repairScopeExcludesUph(po)) return false;
+    const jcs = po.jobCards || [];
+    if (jcs.length === 0) return false;
+    return jcs.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
+  }
   return uphCards.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
 }
 
 // Pending Delivery: production complete (all upholstery cards done), not
 // CANCELLED, not CO-sourced, and not already on a non-cancelled DO.
+// Scoped PO without UPHOLSTERY in scope: ready when EVERY existing job card
+// is COMPLETED/TRANSFERRED (zero cards never qualifies).
 export function poReadyForDelivery(po: PipelinePO, linkedPOIds: Set<string>): boolean {
   if (po.status === "CANCELLED") return false;
   if (po.consignmentOrderId) return false;
   if (linkedPOIds.has(po.id)) return false;
   const uphCards = pickRelevantUphCards(po);
-  if (uphCards.length === 0) return false;
+  if (uphCards.length === 0) {
+    if (!repairScopeExcludesUph(po)) return false;
+    const jcs = po.jobCards || [];
+    if (jcs.length === 0) return false;
+    return jcs.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+  }
   return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
 }
 

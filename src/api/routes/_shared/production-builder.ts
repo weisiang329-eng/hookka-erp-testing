@@ -40,6 +40,12 @@ import {
   type BomVariantContext,
 } from "../../lib/bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../fg-units";
+import {
+  parseRepairScope,
+  serializeRepairScope,
+  filterWipsByRepairScope,
+  repairScopeBadgeLabel,
+} from "../../../lib/repair-scope";
 
 // ---------------------------------------------------------------------------
 // L1 (FG-level) processes — BOM column shape:
@@ -350,6 +356,10 @@ export interface OrderItemForProduction {
   legHeightInches: number | null;
   specialOrder: string | null;
   notes: string | null;
+  // Service-order Repair Scope (sales_order_items.repairscope, JSON string
+  // or null = FULL). Optional so the CO wrapper and legacy backfill callers
+  // compile unchanged — absent means no filtering, byte-identical to today.
+  repairScope?: string | null;
 }
 
 export type CreatedProductionOrder = {
@@ -359,6 +369,31 @@ export type CreatedProductionOrder = {
   quantity: number;
   status: string;
 };
+
+// Self-applying migration for production_orders.repairscope — runs before
+// the first PO INSERT per isolate so EVERY builder caller (SO confirm, CO
+// confirm, PUT rebuild, backfills) sees the column. ⚠ ADAPTER RULE
+// (BUG-2026-06-10-001 / BUG-2026-06-11-007): the unquoted camelCase name is
+// folded to lowercase `repairscope` by Postgres; migration file
+// 0160_so_items_repair_scope.sql uses the folded name so a tool apply
+// no-ops; all reads are dual-key (`row.repairScope ?? row.repairscope`).
+let repairScopeColumnEnsured: Promise<void> | null = null;
+function ensureRepairScopeColumn(db: D1Database): Promise<void> {
+  if (repairScopeColumnEnsured) return repairScopeColumnEnsured;
+  repairScopeColumnEnsured = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE production_orders ADD COLUMN IF NOT EXISTS repairScope TEXT",
+        )
+        .run();
+    } catch {
+      // ignore — column already exists or DDL transiently rejected; the
+      // INSERT below resurfaces a real schema mismatch with a clear error.
+    }
+  })();
+  return repairScopeColumnEnsured;
+}
 
 export async function createProductionOrdersForOrder(
   db: D1Database,
@@ -372,6 +407,7 @@ export async function createProductionOrdersForOrder(
 }> {
   await ensureLeadTimesSeeded(db);
   await ensureHookkaDDBufferSeeded(db);
+  await ensureRepairScopeColumn(db);
   const leadTimes = await loadLeadTimes(db);
   const hookkaDDBuffer = await loadHookkaDDBuffer(db);
 
@@ -565,6 +601,21 @@ export async function createProductionOrdersForOrder(
         wips = wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN");
       }
 
+      // ---- Repair Scope filter (service orders) ----
+      // When the SO line carries a non-FULL repairScope, the customer is
+      // paying for a PARTIAL repair — only the chosen departments do work.
+      // Keep each WIP's in-scope processes (order preserved, so the first
+      // surviving dept becomes sequence 0 → prerequisiteMet=1 below) and
+      // drop WIPs with zero surviving processes entirely. Scopes without
+      // FAB_CUT simply contribute no slots to the FAB_CUT aggregator
+      // (aggregateFcSlots only ever sees non-empty groups, so no merge
+      // crash). NULL / FULL / absent scope = no filtering — byte-identical
+      // to today. Same pattern as the Headboard-Only filter above.
+      const repairScope = parseRepairScope(item.repairScope ?? null);
+      if (repairScope) {
+        wips = filterWipsByRepairScope(wips, repairScope);
+      }
+
       // ---- Reverse-schedule dept dueDates ----
       type PlannedJc = {
         wipType: string;
@@ -672,6 +723,12 @@ export async function createProductionOrdersForOrder(
       // ---- INSERT production_orders ----
       // Two new columns vs the original SO-only INSERT: consignmentOrderId,
       // companyCOId. Either is non-null per the source-mutex invariant.
+      // repairScope: canonical re-serialization of the line's parsed scope
+      // (null = FULL). Stamped here — NOT joined back to sales_order_items
+      // at read time — so the cost cascade always consumes against the
+      // exact scope the job cards were built with, even if the SO line is
+      // edited later. ⚠ unquoted camelCase folds to `repairscope`; read it
+      // dual-key.
       statements.push(
         db
           .prepare(
@@ -681,8 +738,8 @@ export async function createProductionOrdersForOrder(
                itemCategory, sizeCode, sizeLabel, fabricCode, quantity, gapInches,
                divanHeightInches, legHeightInches, specialOrder, notes, status,
                currentDepartment, progress, startDate, targetEndDate, completedDate,
-               rackingNumber, stockedIn, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               rackingNumber, stockedIn, repairScope, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             poId,
@@ -718,6 +775,7 @@ export async function createProductionOrdersForOrder(
             null,
             "",
             0,
+            serializeRepairScope(repairScope),
             nowIso,
             nowIso,
           ),
@@ -808,7 +866,26 @@ export async function createProductionOrdersForOrder(
       }
 
       // ---- job_cards — FG-level (one per l1Process) ----
-      const l1Procs = parseL1Processes(bomRow?.l1Processes ?? null);
+      // Repair Scope also filters FG-level processes: a PACKING L1 card
+      // survives only when PACKING is in scope (it is, in every owner
+      // preset — only a CUSTOM scope can drop it).
+      const l1ProcsAll = parseL1Processes(bomRow?.l1Processes ?? null);
+      const l1Procs = repairScope
+        ? l1ProcsAll.filter((p) =>
+            (repairScope.depts as readonly string[]).includes(p.deptCode),
+          )
+        : l1ProcsAll;
+
+      // A non-FULL scope that matches NOTHING in this product's BOM would
+      // emit a PO with zero job cards — an unfinishable husk (the status
+      // recompute only flips COMPLETED when at least one card exists).
+      // Fail loud at confirm so the operator picks real departments, same
+      // pattern as the contradictory HB-only/divan-only throw above.
+      if (repairScope && planned.length === 0 && l1Procs.length === 0) {
+        throw new Error(
+          `production-builder: repair scope "${repairScopeBadgeLabel(repairScope)}" on line ${item.lineNo} matches no production steps for product "${productCode}" — pick departments that exist in this product's BOM, or use Full remake`,
+        );
+      }
       for (const l1p of l1Procs) {
         const deptMeta = deptByCode.get(l1p.deptCode);
         if (!deptMeta) continue;

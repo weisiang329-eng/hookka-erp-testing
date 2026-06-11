@@ -29,6 +29,17 @@ import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
+import {
+  REPAIR_DEPT_CODES,
+  REPAIR_DEPT_LABELS,
+  REPAIR_SCOPE_PRESET_DEPTS,
+  REPAIR_SCOPE_PRESET_LABELS,
+  parseRepairScope,
+  serializeRepairScope,
+  validateRepairScopeInput,
+  repairScopeBadgeLabel,
+  type RepairDeptCode,
+} from "@/lib/repair-scope";
 
 type SeatHeightTier = { height: string; priceSen: number };
 
@@ -81,6 +92,10 @@ type LineItem = {
   specialOrder: string; // comma-joined text for submission (predefined names + "OTHER: <desc>" suffixes)
   customSpecials: CustomSpecial[]; // free-text per-line specials
   notes: string;
+  // Service-order Repair Scope (0160). Canonical JSON string
+  // {"preset":...,"depts":[...]} or null (= Full remake). Only ever set in
+  // service-order mode; normal SOs always submit null.
+  repairScope: string | null;
   // Price hints cached on the line so seat-height / fabric pickers can resolve
   // the correct tier without re-fetching. Populated from the customer-aware
   // price endpoint when a customer is selected; otherwise falls back to the
@@ -99,6 +114,7 @@ const makeEmptyLine = (): LineItem => ({
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", customSpecials: [], notes: "",
+  repairScope: null,
   price1Sen: null, seatHeightPrices: [],
 });
 
@@ -1509,6 +1525,16 @@ function CreateSalesOrderPage() {
         return;
       }
     }
+    // Repair Scope (0160) — same shared validator the backend POST runs, so
+    // Save fails fast with the identical English error (e.g. Custom with no
+    // departments ticked). Normal SO mode always submits null.
+    for (let i = 0; i < items.length; i++) {
+      const scopeCheck = validateRepairScopeInput(items[i].repairScope ?? null);
+      if (!scopeCheck.ok) {
+        toast.error(`Line ${i + 1}: ${scopeCheck.error}`);
+        return;
+      }
+    }
 
     setPendingStatus(status);
     setSaving(true);
@@ -2908,6 +2934,50 @@ function LineItemCard({
 
   const selectClass = "w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
 
+  // Repair Scope (0160, service-order mode only). The RAW stored JSON drives
+  // the select + checkboxes (so a Custom pick with zero depts ticked yet
+  // doesn't snap back to Full); the LENIENT parse drives the badge (only a
+  // valid, non-FULL scope earns one).
+  const rawScope = (() => {
+    if (!item.repairScope) return null;
+    try {
+      return JSON.parse(item.repairScope) as { preset?: string; depts?: string[] };
+    } catch {
+      return null;
+    }
+  })();
+  const scopePresetValue = rawScope?.preset ?? "FULL";
+  const scopeCustomDepts: string[] = Array.isArray(rawScope?.depts) ? rawScope.depts : [];
+  const parsedScope = parseRepairScope(item.repairScope ?? null);
+
+  const handleScopePresetChange = (v: string) => {
+    if (v === "FABRIC" || v === "FRAME" || v === "FOAM") {
+      onUpdate(idx, {
+        repairScope: serializeRepairScope({
+          preset: v,
+          depts: [...REPAIR_SCOPE_PRESET_DEPTS[v]],
+        }),
+      });
+    } else if (v === "CUSTOM") {
+      // Start with no depts ticked — Save is blocked by the shared
+      // validator until at least one is chosen.
+      onUpdate(idx, { repairScope: JSON.stringify({ preset: "CUSTOM", depts: [] }) });
+    } else {
+      onUpdate(idx, { repairScope: null });
+    }
+  };
+
+  const toggleScopeDept = (code: RepairDeptCode) => {
+    const next = scopeCustomDepts.includes(code)
+      ? scopeCustomDepts.filter((d) => d !== code)
+      : [...scopeCustomDepts, code];
+    // Keep canonical chain order regardless of tick order.
+    const ordered = REPAIR_DEPT_CODES.filter((d) => next.includes(d));
+    onUpdate(idx, {
+      repairScope: JSON.stringify({ preset: "CUSTOM", depts: ordered }),
+    });
+  };
+
   return (
     <div className="rounded-md border border-[#E2DDD8] p-4 space-y-3">
       {/* Header */}
@@ -2915,6 +2985,11 @@ function LineItemCard({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-[#6B5C32]">Line {idx + 1}</span>
           {item.itemCategory && <Badge>{item.itemCategory}</Badge>}
+          {isServiceOrderMode && parsedScope && (
+            <Badge className="bg-[#E0EDF0] text-[#3E6570]">
+              {repairScopeBadgeLabel(parsedScope)}
+            </Badge>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className="text-sm font-bold amount">{formatCurrency(lineTotal)}</span>
@@ -3359,6 +3434,50 @@ function LineItemCard({
         <label className="block text-xs text-[#9CA3AF] mb-1">Line Notes</label>
         <Input value={item.notes} onChange={(e) => onUpdate(idx, { notes: e.target.value })} placeholder="Optional notes for this line..." className="h-8" />
       </div>
+
+      {/* Repair Scope (0160) — service-order mode only. Full remake keeps
+          today's behaviour (every department, full materials); the other
+          presets build job cards only for their departments and consume
+          only that class of material. Custom reveals dept checkboxes. */}
+      {isServiceOrderMode && (
+        <div>
+          <label className="block text-xs text-[#9CA3AF] mb-1">Repair Scope</label>
+          <select
+            value={scopePresetValue}
+            onChange={(e) => handleScopePresetChange(e.target.value)}
+            className={selectClass}
+          >
+            <option value="FULL">{REPAIR_SCOPE_PRESET_LABELS.FULL}</option>
+            <option value="FABRIC">{REPAIR_SCOPE_PRESET_LABELS.FABRIC}</option>
+            <option value="FRAME">{REPAIR_SCOPE_PRESET_LABELS.FRAME}</option>
+            <option value="FOAM">{REPAIR_SCOPE_PRESET_LABELS.FOAM}</option>
+            <option value="CUSTOM">{REPAIR_SCOPE_PRESET_LABELS.CUSTOM}…</option>
+          </select>
+          {scopePresetValue === "CUSTOM" && (
+            <div className="mt-2 grid grid-cols-2 gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2">
+              {REPAIR_DEPT_CODES.map((code) => (
+                <label
+                  key={code}
+                  className="flex items-center gap-2 text-xs text-[#374151] cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={scopeCustomDepts.includes(code)}
+                    onChange={() => toggleScopeDept(code)}
+                    className="h-3.5 w-3.5 accent-[#6B5C32]"
+                  />
+                  {REPAIR_DEPT_LABELS[code]}
+                </label>
+              ))}
+              {scopeCustomDepts.length === 0 && (
+                <div className="col-span-2 text-[11px] text-[#9A3A2D]">
+                  Pick at least one department, or switch back to Full remake.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* WIP Preview (Bedframe) */}
       {item.itemCategory === "BEDFRAME" && item.productCode && (() => {

@@ -61,6 +61,11 @@ type LineItem = {
   specialOrderPriceSen: number;
   customSpecials: CustomSpecial[];
   notes: string;
+  // Service-order Repair Scope (0160). The edit page has no scope picker —
+  // it just round-trips the stored value through the PUT payload so an SO
+  // edit can't silently wipe a line's scope. Picker lives on the create
+  // page (service-order mode).
+  repairScope?: string | null;
 };
 
 const EMPTY_LINE: LineItem = {
@@ -71,6 +76,7 @@ const EMPTY_LINE: LineItem = {
   legHeightInches: null, legPriceSen: 0,
   specialOrders: [], specialOrder: "", specialOrderPriceSen: 0,
   customSpecials: [], notes: "",
+  repairScope: null,
 };
 
 /** Parse inches from a height string like '14"', '10.5"', or 'No Leg'.
@@ -630,6 +636,13 @@ export default function EditSalesOrderPage() {
                     }))
                 : [],
               notes: (item.notes as string) || "",
+              // Repair Scope (0160) — pass-through only; preserved into the
+              // PUT payload so editing a service order keeps each line's
+              // scope intact.
+              repairScope:
+                typeof item.repairScope === "string" && item.repairScope
+                  ? item.repairScope
+                  : null,
             };
           }));
         }

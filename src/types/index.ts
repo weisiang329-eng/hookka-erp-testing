@@ -224,6 +224,10 @@ export type SalesOrderItem = {
   unitPriceSen: number;
   lineTotalSen: number;
   notes: string;
+  // Service-order Repair Scope (0160). Canonical JSON string
+  // {"preset":...,"depts":[...]} or null (= Full remake). Always null on
+  // normal sales orders. See src/lib/repair-scope.ts.
+  repairScope?: string | null;
 };
 
 export type SalesOrder = {

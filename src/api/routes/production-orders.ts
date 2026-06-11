@@ -284,6 +284,11 @@ export type ProductionOrderRow = {
   stockedIn: number;
   createdAt: string | null;
   updatedAt: string | null;
+  // Service-order Repair Scope snapshot (0160), stamped at PO creation by
+  // the production builder. Runtime-added column → SELECT * rows carry the
+  // folded-lowercase key (BUG-2026-06-11-007); read dual-key.
+  repairScope?: string | null;
+  repairscope?: string | null;
 };
 
 export type JobCardRow = {
@@ -524,6 +529,9 @@ type MinimalPOOut = {
   divanHeightInches: number | null;
   legHeightInches: number | null;
   specialOrder: string;
+  // Service-order Repair Scope snapshot (0160) — JSON string or null.
+  // The delivery pipeline keys its no-UPHOLSTERY readiness fallback on it.
+  repairScope: string | null;
   status: string;
   currentDepartment: string;
   // Piece-level completion % (computed by recomputePoStatusAndProgress).
@@ -802,6 +810,9 @@ export function rowToMinimalPO(
     divanHeightInches: row.divanHeightInches,
     legHeightInches: row.legHeightInches,
     specialOrder: row.specialOrder ?? "",
+    // Repair Scope (0160) — dual-key: runtime-added column comes back under
+    // the folded-lowercase key on SELECT * rows.
+    repairScope: row.repairScope ?? row.repairscope ?? null,
     status: row.status,
     currentDepartment: row.currentDepartment ?? "",
     progress: row.progress ?? 0,
@@ -867,6 +878,9 @@ function rowToPO(
     divanHeightInches: row.divanHeightInches,
     legHeightInches: row.legHeightInches,
     specialOrder: row.specialOrder ?? "",
+    // Repair Scope (0160) — dual-key: runtime-added column comes back under
+    // the folded-lowercase key on SELECT * rows.
+    repairScope: row.repairScope ?? row.repairscope ?? null,
     notes: row.notes ?? "",
     status: row.status,
     currentDepartment: row.currentDepartment ?? "",
@@ -996,6 +1010,8 @@ function rowsToPOsBatch(
       divanHeightInches: row.divanHeightInches,
       legHeightInches: row.legHeightInches,
       specialOrder: row.specialOrder ?? "",
+      // Repair Scope (0160) — dual-key (see rowToPO; identical shape).
+      repairScope: row.repairScope ?? row.repairscope ?? null,
       notes: row.notes ?? "",
       status: row.status,
       currentDepartment: row.currentDepartment ?? "",

@@ -36,7 +36,7 @@ Entries themselves stay newest-first.
 
 ## BUG-2026-06-11-009 — Service orders carried NO delivery hub, so service DOs printed blank addresses (DO-2606-030)
 
-**Status:** 🟡 Fix on branch `fix/do-hub-integrity`, tests green, awaiting merge.
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, merged 453d758e, deploy green). 703/703 tests; hub flows verified by structural suite; first real service order will exercise the stamp end-to-end.
 **Category:** delivery-orders
 
 PL-2606-010's DROP 1 (DO-2606-030, from service order SV-2606-001) printed "Deliver to: -". Root cause was structural, not one bad row: the service chain never carried a hub. `service_orders` had no hub column; the repair POs it spawns have `salesOrderId NULL`; so the DO create path had no SO to pull a hub/address from and fell back to the customer's *default* hub (wrong branch) — and the blank-address quirk (BUG-008 below) then discarded even that address. Owner: "我们的 service 单也是要选什么顾客、什么 hub 的…它就是 sales order 来的".
@@ -53,7 +53,7 @@ Existing DO-2606-030 left as-is per owner ("不需要清").
 
 ## BUG-2026-06-11-008 — DO edit "Add Items" bypassed ALL composition guards → mixed-hub DO printed wrong address (DO-2606-029)
 
-**Status:** 🟡 Fix on branch `fix/do-hub-integrity`, tests green, awaiting merge.
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, merged 453d758e, deploy green; live-verified: PL Delivery chips + DO-030 red address warning + Delivery State render on prod). 703/703 tests.
 **Category:** delivery-orders
 
 Printed PL-2606-010 DROP 2 (DO-2606-029) was labeled "Houzs KL" but carried a Penang delivery address. The DO genuinely mixed hubs: 4 SOs → hub-h2 (Houzs PG) + 1 SO → hub-h1 (Houzs KL) in one DO. Owner: "不同 State、不同 Hub 是不能开在同一张 DO 上的,为什么他可以开出来?"

@@ -4831,9 +4831,10 @@ function DepartmentLaborTab({
       const cards = await Promise.all(
         wanted.map(async (cdef) => ({
           ...cdef,
+          // 1000px → crisp at the full-page 130mm print size.
           qr: await getQRCodeDataURL(
             `${origin}/worker/scan?deptscan=${encodeURIComponent(cdef.code)}${cdef.cat ? `&deptcat=${encodeURIComponent(cdef.cat)}` : ""}`,
-            600,
+            1000,
           ),
         })),
       );
@@ -4853,23 +4854,27 @@ function DepartmentLaborTab({
         .join("");
       const w = window.open("", "_blank");
       if (!w) return;
+      // One card per FULL A4 page (owner 2026-06-12: "每一个都是 A4 size") —
+      // poster-sized name + ~13cm QR, scannable from arm's length on the wall.
       w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Department QR Codes - Hookka</title>
         <style>
           @page { size: A4 portrait; margin: 10mm; }
           * { box-sizing: border-box; margin: 0; padding: 0; }
           body { font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color: #1F1D1B; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; }
-          .card { border: 1.5px solid #1F1D1B; border-radius: 4mm; padding: 6mm; text-align: center; page-break-inside: avoid; }
-          .dept { font-size: 22pt; font-weight: 800; }
-          .cat { display: inline-block; margin-top: 1mm; padding: 1mm 5mm; border: 1.2px solid #1F1D1B; border-radius: 6mm; font-size: 14pt; font-weight: 800; letter-spacing: 1px; }
+          .card { border: 2px solid #1F1D1B; border-radius: 6mm; padding: 12mm; text-align: center;
+                  min-height: 270mm; display: flex; flex-direction: column; align-items: center;
+                  justify-content: center; gap: 6mm; page-break-after: always; }
+          .card:last-child { page-break-after: auto; }
+          .dept { font-size: 48pt; font-weight: 800; line-height: 1.1; }
+          .cat { display: inline-block; padding: 2mm 10mm; border: 2px solid #1F1D1B; border-radius: 10mm; font-size: 26pt; font-weight: 800; letter-spacing: 2px; }
           .cat-sofa { background: #E8EEF0; }
           .cat-bedframe { background: #F0EAE0; }
           .cat-accessory { background: #ECECEC; }
-          .code { font-size: 10pt; color: #6B7280; margin-bottom: 3mm; letter-spacing: 1px; }
-          img { width: 62mm; height: 62mm; }
-          .hint { margin-top: 3mm; font-size: 8.5pt; color: #4B5563; line-height: 1.35; }
+          .code { font-size: 14pt; color: #6B7280; letter-spacing: 2px; }
+          img { width: 130mm; height: 130mm; }
+          .hint { font-size: 13pt; color: #4B5563; line-height: 1.5; max-width: 150mm; }
         </style></head><body>
-        <div class="grid">${cardsHtml}</div>
+        ${cardsHtml}
         <script>window.onload = () => setTimeout(() => window.print(), 250);</script>
         </body></html>`);
       w.document.close();

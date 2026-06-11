@@ -235,8 +235,12 @@ export default function WorkerHomePage() {
   // Inline punch feedback (e.g. "take a photo first"). Cleared on next attempt.
   const [clockErr, setClockErr] = useState<string | null>(null);
 
-  // Dashboard date range — default to last 7 days
-  const [from, setFrom] = useState<string>(() => ymd(addDays(new Date(), -6)));
+  // Dashboard date range — defaults to THIS MONTH (owner 2026-06-12), so the
+  // stat cards read as the month-to-date the worker's pay estimate covers.
+  const [from, setFrom] = useState<string>(() => {
+    const n = new Date();
+    return ymd(new Date(n.getFullYear(), n.getMonth(), 1));
+  });
   const [to, setTo] = useState<string>(() => ymd(new Date()));
   const [hist, setHist] = useState<HistoryData | null>(null);
   // Tap-to-expand share roster on Completed Products.
@@ -589,13 +593,18 @@ export default function WorkerHomePage() {
           />
           <Kpi
             label={t("home.efficiencyPct")}
-            value={`${hist.totals.efficiencyPct}%`}
+            // Under 30 logged minutes the ratio is meaningless noise (a 1-min
+            // test punch against real production minutes printed 16000%) —
+            // show a dash until there's a real base.
+            value={hist.totals.workedMinutes < 30 ? "—" : `${hist.totals.efficiencyPct}%`}
             tone={
-              hist.totals.efficiencyPct >= 80
-                ? "good"
-                : hist.totals.efficiencyPct >= 60
-                  ? "warn"
-                  : "bad"
+              hist.totals.workedMinutes < 30
+                ? "warn"
+                : hist.totals.efficiencyPct >= 80
+                  ? "good"
+                  : hist.totals.efficiencyPct >= 60
+                    ? "warn"
+                    : "bad"
             }
           />
         </div>

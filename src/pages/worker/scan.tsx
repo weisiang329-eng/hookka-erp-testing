@@ -645,7 +645,10 @@ export default function WorkerScanPage() {
   // this, only `op` was handled, so a Fabric Sewing wk sticker opened by URL did
   // nothing at all ("完全没有反应").
   useEffect(() => {
-    if (params.get("op") || params.get("wk")) {
+    // deptscan: a department/line QR scanned with the phone's NATIVE camera
+    // (not the in-app scanner) also lands here as a URL — without this gate
+    // entry the wall poster would open the page and silently do nothing.
+    if (params.get("op") || params.get("wk") || params.get("deptscan")) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot deep-link hydrate on mount; handleDecoded sets state synchronously
       void handleDecoded(window.location.href);
     }

@@ -11,9 +11,10 @@
 // day.
 //
 // NOT configurable here (structural, by the owner's own specs):
-//   • the absence / part-month ÷calendar-days divisor
-//   • the OT ÷26 base days (that's the per-worker workingDaysPerMonth in
-//     Employee Master) and the per-worker weekday OT multiplier
+//   • the UNIFIED ÷26 day-rate divisor (per-worker workingDaysPerMonth in
+//     Employee Master) — absences, late/short docks and the OT base all
+//     dock/pay salary ÷ 26 (÷ rateHoursPerDay for the hourly rates)
+//   • the per-worker weekday OT multiplier (also Employee Master)
 //
 // Shared by frontend AND backend so the grid, the engine, the auto-dock and
 // the reconciliation can never disagree. DEFAULT_PAY_RULES reproduces the

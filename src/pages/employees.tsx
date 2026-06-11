@@ -4439,53 +4439,16 @@ function DepartmentLaborTab({
         const reconCode = p.departmentCode || "UNASSIGNED";
         if (gross > 0 && factoryCodes.has(reconCode)) {
           const absent = Number(p.absentDays) || 0;
-          // Part-month — same personalised window rate as the Labor Cost tab
-          // (owner spec): absence docks ÷calendar; cost loses the window rate.
-          const ww = workerById.get(wid) as
-            | { joinDate?: string | null; resignedAt?: string | null; status?: string }
-            | undefined;
-          const partMonth =
-            !!ww &&
-            !!p.period &&
-            ((typeof ww.joinDate === "string" && ww.joinDate.startsWith(p.period)) ||
-              (ww.status === "RESIGNED" &&
-                typeof ww.resignedAt === "string" &&
-                ww.resignedAt.startsWith(p.period)));
-          let costEquivalent = 0;
-          if (absent > 0) {
-            if (partMonth) {
-              const [dY2, dM2] = deptPayslipPeriod.split("-").map(Number);
-              const mLast = dY2 && dM2 ? new Date(dY2, dM2, 0).getDate() : 30;
-              const jd =
-                typeof ww!.joinDate === "string" && ww!.joinDate.startsWith(p.period)
-                  ? Number(ww!.joinDate.slice(8, 10)) || 1
-                  : 1;
-              const rd =
-                ww!.status === "RESIGNED" &&
-                typeof ww!.resignedAt === "string" &&
-                ww!.resignedAt.startsWith(p.period)
-                  ? Number(ww!.resignedAt.slice(8, 10)) || mLast
-                  : mLast;
-              const start = Math.max(1, jd);
-              const end = Math.min(mLast, rd);
-              const winCal = Math.max(0, end - start + 1);
-              const winWD = Math.max(
-                1,
-                countElapsedWorkingDays(dY2, dM2, end, holidayList) -
-                  countElapsedWorkingDays(dY2, dM2, start - 1, holidayList),
-              );
-              const winSalary = ((Number(p.basicSalary) || 0) * winCal) / mLast;
-              costEquivalent = Math.round((absent * winSalary) / winWD);
-            } else {
-              costEquivalent = Math.round(
-                (absent * (Number(p.basicSalary) || 0)) / actualWorkingDays,
-              );
-            }
-          }
-          const leniency = Math.max(
-            0,
-            costEquivalent - (Number(p.absenceDeductionSen) || 0),
-          );
+          // UNIFIED ÷26 model (owner 2026-06-11) — same signed bridge as the
+          // Labor Cost tab: absence docks ÷26 (the stored deduction), cost
+          // loses ÷working-days; the difference goes to the dept line.
+          const costEquivalent =
+            absent > 0
+              ? Math.round(
+                  (absent * (Number(p.basicSalary) || 0)) / actualWorkingDays,
+                )
+              : 0;
+          const leniency = costEquivalent - (Number(p.absenceDeductionSen) || 0);
           // OT pay-vs-cost adjustment (same as the Labor Cost tab): OT is COSTED at
           // ÷26÷9 but PAID at the stored payslip OT (÷10). Remove that difference
           // from the gap so it stays pure under-recorded hours. (The dept TOTAL
@@ -4517,19 +4480,18 @@ function DepartmentLaborTab({
           // the Labor Cost tab — so per-dept rows add up to the same grand total
           // both tabs show (no per-department rounding drift).
           // Late/short dock bridge — mirrors the Labor Cost tab: a docked hour
-          // shrinks gross at the spec rate (S ÷ calendar ÷ 10) while the gap
+          // shrinks gross at the UNIFIED pay rate (S ÷ 26 ÷ 10) while the gap
           // measures it at the costing rate (S ÷ working days ÷ std); without
           // the bridge a Deduct leaves ~RM5/h flagged as under-recorded.
           const dockH = deptDockHoursByWorker.get(wid) ?? 0;
           let lateAdj = 0;
           if (dockH > 0) {
-            const [dY, dM] = deptPayslipPeriod.split("-").map(Number);
-            const dCal = dY && dM ? new Date(dY, dM, 0).getDate() : 30;
             const S = Number(p.basicSalary) || 0;
             lateAdj = Math.max(
               0,
               Math.round((dockH * S) / actualWorkingDays / owStd) -
-                Math.round((dockH * S) / dCal / Math.max(1, cfgDeptEnd.rateHoursPerDay)),
+                // UNIFIED ÷26 dock rate (owner 2026-06-11), same as the engine.
+                Math.round((dockH * S) / owDays / Math.max(1, cfgDeptEnd.rateHoursPerDay)),
             );
           }
           // Exclude the efficiency allowance (a flat bonus, not logged hours) so
@@ -6324,18 +6286,20 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     return totals.grossPay + totals.epfEmployer + totals.socsoEmployer + totals.eisEmployer;
   }, [totals]);
 
-  // Part-month proration, surfaced so the Payroll columns reconcile by eye. A
-  // mid-month joiner/resigner is paid (days served × daily rate), so not all of
-  // their full Basic is earned — and that shortfall is NOT charged as absence.
-  // This column is the gap between full Basic and basic-earned that isn't
-  // absence: proration = Basic − Absence − (Gross − OT − allowances). Zero for a
-  // full-month worker. With it, every row reads Basic − Absence − Part-month +
-  // OT = Gross, and the totals tie out exactly (display only — no pay math here).
+  // "Part-month" column — LEGACY display reconciliation. Under the UNIFIED ÷26
+  // model (owner 2026-06-11) the engine never prorates: join/resign months are
+  // plain absences, so for newly generated payslips this derives to RM0 and the
+  // column shows "-". Payslips STORED under the old window model still carry a
+  // proration baked into their gross; this surfaces it so those historical rows
+  // keep reading Basic − Absence − Part-month − Late/short + OT = Gross.
+  // proration = Basic − Absence − short-hour dock − (Gross − OT − allowances).
+  // Display only — no pay math here.
   const prorationSenOf = useCallback(
     (r: PayslipData) =>
       Math.max(
         0,
-        r.basicSalary - (r.absenceDeductionSen || 0) - (r.grossPay - r.totalOT - (r.allowances || 0)),
+        r.basicSalary - (r.absenceDeductionSen || 0) - (r.shortHourDeductionSen || 0) -
+          (r.grossPay - r.totalOT - (r.allowances || 0)),
       ),
     [],
   );
@@ -6346,7 +6310,8 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
           s +
           Math.max(
             0,
-            r.basicSalary - (r.absenceDeductionSen || 0) - (r.grossPay - r.totalOT - (r.allowances || 0)),
+            r.basicSalary - (r.absenceDeductionSen || 0) - (r.shortHourDeductionSen || 0) -
+              (r.grossPay - r.totalOT - (r.allowances || 0)),
           ),
         0,
       ),
@@ -6476,20 +6441,19 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     printReport({
       title: "Salary Calculation Guide",
       filterSummary:
-        "Worked example: RM2,050/month · June 2026 (30 calendar days, 25 working days, 1 public holiday) · Shift 08:00-18:00, 1h unpaid lunch = 9h standard day",
+        "Worked example: RM2,050/month · every pay rate uses the fixed 26-day month · June 2026 (25 working days, 1 public holiday) · Shift 08:00-18:00, 1h unpaid lunch = 9h standard day",
       orientation: "landscape",
       cards: [
         { label: "Example salary", value: "RM2,050 / month" },
-        { label: "Example month", value: "June 2026 · 30 days · 25 working" },
+        { label: "Day rate", value: "2,050 ÷ 26 = RM78.85" },
         { label: "Standard day", value: "08:00-18:00 · 1h lunch = 9h" },
         { label: "OT rates", value: "Weekday 1.5x · Sunday 2x · Holiday 3x" },
       ],
       sections: [
-        s("1. Daily & hourly rates", [
-          { item: "Absence day rate", rule: "Monthly salary ÷ calendar days of the month", example: "2,050 ÷ 30 = RM68.33 / day" },
-          { item: "Late / short-hour rate", rule: "Monthly salary ÷ calendar days ÷ 10", example: "RM6.83 / hour" },
-          { item: "Overtime base rate", rule: "Monthly salary ÷ 26 ÷ 10", example: "RM7.88 / hour (before multiplier)" },
-          { item: "Production cost day rate", rule: "Monthly salary ÷ working days of the month", example: "2,050 ÷ 25 = RM82.00 / day" },
+        s("1. Daily & hourly rates (one fixed divisor: 26)", [
+          { item: "Day rate", rule: "Monthly salary ÷ 26 — the same divisor every month, used for absences", example: "2,050 ÷ 26 = RM78.85 / day" },
+          { item: "Hour rate", rule: "Day rate ÷ 10 — used for lateness, short hours AND the overtime base", example: "78.85 ÷ 10 = RM7.88 / hour" },
+          { item: "Production cost day rate", rule: "Monthly salary ÷ working days of the month (internal costing only — never changes pay)", example: "2,050 ÷ 25 = RM82.00 / day" },
         ]),
         s("2. Working hours from the punch clock", [
           { item: "Standard day", rule: "Punch in to punch out, minus the 1h unpaid lunch", example: "08:00-18:00 = 10h − 1h = 9.0h" },
@@ -6498,7 +6462,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
           { item: "Overtime counting", rule: "Only after 18:00, in 15-min blocks (a block must be filled)", example: "18:16-18:29 → 15 min; 18:14 → 0" },
         ]),
         s("3. Lateness / short hours deduction", [
-          { item: "Deduction", rule: "Short hours × the late rate (RM6.83/h)", example: "30 min late, no OT → 0.5h × 6.83 = −RM3.42" },
+          { item: "Deduction", rule: "Short hours × the hour rate (RM7.88/h)", example: "30 min late, no OT → 0.5h × 7.88 = −RM3.94" },
           { item: "Same-day OT offsets first", rule: "Evening OT covers the morning gap 1:1; only the remainder is deducted", example: "08:30 in + 2h OT → deduction RM0, paid OT 1.5h" },
           { item: "Review", rule: "The office can Keep pay (no deduction) or Deduct each short day; every deduction can be undone", example: "Shown in the worker app under 'Late / short hours'" },
         ]),
@@ -6508,14 +6472,14 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
           { item: "Public holiday work", rule: "EVERY hour that day × base rate × 3", example: "8h holiday → RM189.23" },
         ]),
         s("5. Absence", [
-          { item: "Absent working day", rule: "Each confirmed absent day deducts the absence day rate", example: "1 day → −RM68.33" },
+          { item: "Absent working day", rule: "Each confirmed absent day deducts the day rate (÷26)", example: "1 day → −RM78.85" },
           { item: "Grace before confirming", rule: "A blank day only becomes an absence after 2 working days (it may just not be keyed yet)", example: "Shown as 'Pending' until confirmed" },
           { item: "Backfilling hours", rule: "Keying the hours later removes the absence automatically", example: "No button needed; regenerate if the month was finalised" },
         ]),
         s("6. Joining / resigning mid-month", [
-          { item: "Part-month salary", rule: "Salary ÷ calendar days × employed calendar days", example: "Join 5 June → 2,050 ÷ 30 × 26 = RM1,776.67" },
-          { item: "Absence inside the window", rule: "Still deducts the absence day rate per missed working day", example: "−RM68.33 each" },
-          { item: "Last day", rule: "Resignation date = last employed day; days after are simply unpaid", example: "Resign 5 June → paid 1-5 June" },
+          { item: "One rule for everyone", rule: "No separate part-month formula — every working day of the month not worked counts as an absent day at the day rate (÷26)", example: "Same −RM78.85 per day" },
+          { item: "Join mid-month", rule: "Full salary − the working days before the join date (they count as absences)", example: "Join 5 June → 2-4 June = 3 working days (1 June is a holiday) → 2,050 − 3 × 78.85 = RM1,813.46" },
+          { item: "Resign mid-month", rule: "Working days after the last day also count as absent days", example: "Resign 5 June → every later working day deducts RM78.85" },
         ]),
         s("7. Allowance, statutory & net pay", [
           { item: "Efficiency allowance", rule: "Flat bonus when the month's cumulative efficiency reaches the worker's target, else RM0 (no proration)", example: "RM150 at 100%" },
@@ -6709,7 +6673,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                             ? <span>−{formatCurrency(r.absenceDeductionSen)}<span className="text-[10px] text-[#9CA3AF]"> ({r.absentDays}d)</span></span>
                             : "-"}
                         </td>
-                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]" title="Part-month: joined / resigned mid-month, paid for days served">
+                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#9A3A2D]" title="Part-month (legacy months only): payslips stored before the unified rule, paid for days served">
                           {prorationSenOf(r) > 1 ? `−${formatCurrency(prorationSenOf(r))}` : "-"}
                         </td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otWeekdayHours}h</td>
@@ -6974,15 +6938,15 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Lateness</p>
-                <p>≤{payRulesToday.lateGraceMin} min forgiven · beyond that, lateness rounds <b>UP</b> in {payRulesToday.lateBlockMin}-min blocks · deducted at salary ÷ calendar days ÷ {payRulesToday.rateHoursPerDay} · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
+                <p>≤{payRulesToday.lateGraceMin} min forgiven · beyond that, lateness rounds <b>UP</b> in {payRulesToday.lateBlockMin}-min blocks · deducted at salary ÷ 26 ÷ {payRulesToday.rateHoursPerDay} · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Overtime</p>
                 <p>After {minToHhmm(payRulesToday.shiftEndMin)} only, 15-min blocks (floors) · base = salary ÷ 26 ÷ {payRulesToday.rateHoursPerDay} · <b>Weekday ×worker&rsquo;s multiplier</b> (Employee Master) · <b>Sunday {payRulesToday.sundayOtMultiplier}×</b> / <b>Public Holiday {payRulesToday.holidayOtMultiplier}×</b> on every hour of the day.</p>
               </div>
               <div>
-                <p className="font-semibold text-[#1F1D1B] mb-1">Absence & part-month</p>
-                <p>Absent working day = − salary ÷ calendar days · confirmed after a {payRulesToday.absenceGraceWorkingDays}-working-day grace (backfilling hours removes it) · join/resign: salary ÷ calendar days × employed days.</p>
+                <p className="font-semibold text-[#1F1D1B] mb-1">Absence & join/resign</p>
+                <p>Absent working day = − salary ÷ 26 · confirmed after a {payRulesToday.absenceGraceWorkingDays}-working-day grace (backfilling hours removes it) · join/resign: no proration — unworked working days simply count as absences.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Allowance & statutory</p>
@@ -7934,53 +7898,16 @@ function LaborCostTab({
     for (const p of reconPayslips) {
       const absent = Number(p.absentDays) || 0;
       if (absent <= 0) continue;
-      // PART-MONTH workers (owner spec 2026-06-11): payroll docks their absence
-      // at the ÷calendar-day rate, but their production-cost day rate is
-      // PERSONALISED — part-month salary ÷ working days in their employment
-      // window — so the leniency bridge uses that window rate.
-      const ww = (p.employeeId ? workersById.get(p.employeeId) : undefined) as
-        | { joinDate?: string | null; resignedAt?: string | null; status?: string }
-        | undefined;
-      const partMonth =
-        !!ww &&
-        !!p.period &&
-        ((typeof ww.joinDate === "string" && ww.joinDate.startsWith(p.period)) ||
-          (ww.status === "RESIGNED" &&
-            typeof ww.resignedAt === "string" &&
-            ww.resignedAt.startsWith(p.period)));
-      let costEquivalentSen: number;
-      if (partMonth) {
-        const mLast = new Date(hY, hM, 0).getDate();
-        const jd =
-          typeof ww!.joinDate === "string" && ww!.joinDate.startsWith(p.period)
-            ? Number(ww!.joinDate.slice(8, 10)) || 1
-            : 1;
-        const rd =
-          ww!.status === "RESIGNED" &&
-          typeof ww!.resignedAt === "string" &&
-          ww!.resignedAt.startsWith(p.period)
-            ? Number(ww!.resignedAt.slice(8, 10)) || mLast
-            : mLast;
-        const start = Math.max(1, jd);
-        const end = Math.min(mLast, rd);
-        const winCal = Math.max(0, end - start + 1);
-        const winWD = Math.max(
-          1,
-          countElapsedWorkingDays(hY, hM, end, holidayList) -
-            countElapsedWorkingDays(hY, hM, start - 1, holidayList),
-        );
-        const winSalary = ((Number(p.basicSalary) || 0) * winCal) / mLast;
-        costEquivalentSen = Math.round((absent * winSalary) / winWD);
-      } else {
-        costEquivalentSen = Math.round(
-          (absent * (Number(p.basicSalary) || 0)) / actualWorkingDays,
-        );
-      }
-      const leniency = Math.max(
-        0,
-        costEquivalentSen - (Number(p.absenceDeductionSen) || 0),
+      // UNIFIED ÷26 model (owner 2026-06-11): everyone — full-month, joiner,
+      // resigner — docks absence at ÷26 (the stored deduction); production
+      // loses the ÷working-days rate. The bridge is the SIGNED difference (a
+      // month with 27+ working days makes it negative — still attributed to
+      // the dept line, not lost in the plug).
+      const costEquivalentSen = Math.round(
+        (absent * (Number(p.basicSalary) || 0)) / actualWorkingDays,
       );
-      if (leniency > 0) m.set(p.id, leniency);
+      const leniency = costEquivalentSen - (Number(p.absenceDeductionSen) || 0);
+      if (leniency !== 0) m.set(p.id, leniency);
     }
     return m;
   }, [reconPayslips, period, from, holidayList, workersById]);
@@ -8029,13 +7956,14 @@ function LaborCostTab({
     return m;
   }, [reconPayslips, workersById, payRuleVersions]);
   // Late/short-hour dock bridge — same idea as the absence leniency, for the
-  // Deduct action (and AUTO punch docks). The dock reduces gross at the spec
-  // rate (salary ÷ calendar days ÷ 10 — the owner's RM6.83/h) but the
+  // Deduct action (and AUTO punch docks). The dock reduces gross at the
+  // UNIFIED pay rate (salary ÷ 26 ÷ 10 — RM7.88/h on RM2,050) but the
   // under-recorded gap measures the missing hours at the costing rate
   // (salary ÷ working days ÷ std hours). Bridge = docked hours ×
   // (costing hourly − dock hourly), folded onto the worker's department like
   // the absence bridge — so after a Deduct the worker's gap closes to RM0
-  // ("选择扣除 → 账目就能对上") instead of leaving a ~RM5/h residual flagged.
+  // (owner: "choose Deduct and the books tie") instead of leaving a ~RM5/h
+  // residual flagged.
   const lateDockAdjByPayslip = useMemo(() => {
     const m = new Map<string, number>();
     const rows = deductionsResp?.data ?? [];
@@ -8063,13 +7991,14 @@ function LaborCostTab({
       const std = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const S = Number(p.basicSalary) || 0;
       const costEquivalentSen = Math.round((h * S) / aWD / std);
-      // Same formula the engine docks with: (salary ÷ calendar days) ÷ the
-      // effective-dated hour divisor (rules as of the period's last day).
+      // Same formula the engine docks with — UNIFIED ÷26 (owner 2026-06-11):
+      // (salary ÷ workingDaysPerMonth) ÷ the effective-dated hour divisor.
+      const wDays = w && w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const cfgDock = resolvePayRulesAsOf(
         payRuleVersions,
         `${(period || from).slice(0, 7)}-${String(calDays).padStart(2, "0")}`,
       );
-      const dockSen = Math.round((h * S) / calDays / Math.max(1, cfgDock.rateHoursPerDay));
+      const dockSen = Math.round((h * S) / wDays / Math.max(1, cfgDock.rateHoursPerDay));
       const adj = Math.max(0, costEquivalentSen - dockSen);
       if (adj > 0) m.set(p.id, adj);
     }

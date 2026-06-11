@@ -35,7 +35,7 @@ Workers log in with their employee PIN at `/worker`. Pages:
   - **Full salary** — the worker's monthly salary (effective-dated if a raise
     happened mid-month).
   - **Absent · Nd** — tap to see WHICH days; each confirmed absent working
-    day deducts salary ÷ calendar days.
+    day deducts salary ÷ 26.
   - **Late / short hours** — tap to see which days and how many hours were
     docked (after the same-day OT offset).
   - **Basic** — full salary minus absence and late/short.
@@ -55,13 +55,14 @@ Workers log in with their employee PIN at `/worker`. Pages:
 | Shift | 08:00–18:00, 1 h unpaid lunch = **9 h standard day**, Mon–Sat |
 | Late grace | First 10 minutes forgiven |
 | Lateness rounding | Rounds **UP** in 15-min blocks (08:11 → 15 min late) |
-| Late/short rate | Salary ÷ calendar days ÷ 10 |
+| Day rate (unified) | Salary ÷ **26** — the same fixed divisor every month, for every money rule below |
+| Late/short rate | Salary ÷ 26 ÷ 10 (= the OT base rate — one hourly rate) |
 | OT window | After 18:00 only, 15-min blocks (must fill a block: 16–29 → 15) |
 | OT base rate | Salary ÷ 26 ÷ 10 |
 | OT multipliers | Weekday 1.5× (per-worker) · **Sunday 2×** · **Public holiday 3×** (whole day counts as OT on Sun/PH) |
 | OT offsets lateness | Same-day OT covers the late/short gap 1:1 first; only the remainder is docked |
-| Absence | − salary ÷ calendar days per confirmed absent working day; a blank day is "Pending" for 2 working days before it becomes an absence; backfilling the hours removes it automatically |
-| Join / resign mid-month | Salary ÷ calendar days × employed calendar days (e.g. RM4,000 ÷ 31 × 10 days = RM1,290.32); the resignation date is the last paid day |
+| Absence | − salary ÷ 26 per confirmed absent working day; a blank day is "Pending" for 2 working days before it becomes an absence; backfilling the hours removes it automatically |
+| Join / resign mid-month | No proration — working days not worked (before joining or after the last day) simply count as absences at the ÷26 day rate (e.g. RM4,000: each missed working day deducts RM153.85) |
 | Efficiency allowance | Flat per-worker amount, paid only when monthly cumulative efficiency ≥ the worker's target; no proration |
 | Statutory | EPF 11% / 13%, SOCSO ~RM7.45 / 26.15, EIS ~RM3.90 / 3.90 — per-worker toggle |
 
@@ -70,8 +71,13 @@ Maintained where:
   working-day counts).
 - **Salary (with effective date), OT multiplier, hours/day, statutory
   toggles, efficiency allowance** → Employee Master.
-- Everything else is engine-locked (tested) — request a change if policy
-  changes.
+- **Shift times, lunch, late grace/blocks, the ÷10 hour divisor, Sunday /
+  holiday multipliers, absence grace, statutory rates** → the **Pay Rules
+  panel** on the Payroll tab. Changes are scheduled with an effective date
+  (history is kept; past months keep the rules that were in force).
+- The ÷26 day-rate divisor itself is per-worker (Employee Master,
+  "working days per month") and the weekday OT multiplier is per-worker —
+  everything else above is engine-locked (tested).
 
 ---
 

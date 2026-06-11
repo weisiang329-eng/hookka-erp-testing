@@ -34,6 +34,19 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-011 — Pay maths used THREE day-divisors (÷26, ÷calendar 30/31, ÷actual-working-days); owner unified everything payroll-side on ÷26
+
+**Status:** 🟢 Shipped + verified live (2026-06-11). Owner directive: "缺席、OT 和迟到,统统都用一个月 26 天来计算…新入职/离职:没来上班的日子就当作缺席处理" + "/26 /10 來計算 hourly rate 和 daily rate". 709/710 tests (1 pre-existing skip); typecheck green.
+**Category:** ui-frontend
+
+Before: absence and part-month proration docked salary ÷ **calendar** days (RM68.33/day on RM2,050 in a 30-day month — a different rate every month), late/short docks used ÷calendar÷10 (RM6.83/h), while the OT base paid ÷**26**÷10 (RM7.88/h). Three prices for "one day of salary", plus a join/resign window model (`prorateToService`: pay = window salary − window absences) that needed its own recon bridge.
+
+The unified rule: **daily rate = salary ÷ 26** (per-worker `workingDaysPerMonth`), **hourly = ÷26 ÷ 10** (`rateHoursPerDay`) — for absences, late/short docks AND the OT base. Join/resign months are NOT prorated: working days not worked — including days before joining and after the last day — simply count as absences and dock ÷26 (RM4,000 joining 22 May → 17 unworked working days × RM153.85; previously ÷31 × employed days). Production COSTING keeps ÷actual-working-days (internal valuation only, never changes pay); the payroll-vs-cost absence gap stays folded per department, now as a SIGNED bridge (÷26 dock can exceed the ÷working-days cost).
+
+Fix: `src/lib/labor-engine.ts` (one `payrollDailyRateSen = S ÷ workingDaysPerMonth` for all money; `lateHourlyRateSen` = the OT base; employment window removed from `computeMonthlyLabor` + `computeAttendanceDayDetail` — `employmentStartDay`/`prorateToService` accepted as back-compat no-ops), `src/pages/employees.tsx` (Labor Cost + Dept Labor absence/late bridges signed ÷26; Calculation Guide print + Pay Rules panel reworded — RM78.85/day, RM7.88/h on the RM2,050 example), `docs/PAYROLL-AND-WORKER-PORTAL-GUIDE.md`. Also caught while re-deriving: the Payroll "Part-month" display column didn't subtract `shortHourDeductionSen`, so under the unified engine every late/short dock would have shown up mislabelled as "Part-month" — it now subtracts the dock and serves as legacy display for payslips stored under the old window model (new ones derive to RM0). Tests re-pinned: `labor-engine.test.mjs` (7 superseded tests), `pay-rules.test.mjs`. Finalised (stored) months keep their stored numbers by design; estimates and future Generates use the unified rule.
+
+---
+
 ## BUG-2026-06-11-010 — Late + same-day OT was double-penalised: engine already netted the paid OT via logged hours, but the punch auto-dock STILL took the shortfall
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green). 28/28 attendance-rules + auto-dock tests (2 new cases pin the spec); typecheck + build + full suite green.

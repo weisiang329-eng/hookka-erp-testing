@@ -273,7 +273,7 @@ test("computeMonthlyLabor: full attendance — payroll gross equals production c
 
 // ── computeMonthlyLabor: ANN, absent 2 days ─────────────────────────────────
 
-test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷calendar-days; gap vs cost = non-productive paid", () => {
+test("computeMonthlyLabor: ANN absent 2 days — UNIFIED ÷26 dock; signed gap vs cost", () => {
   // Drop the first two 8 h days → 22 days present, still 15 h OT.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
@@ -285,24 +285,21 @@ test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷calendar-days; 
   });
   assert.equal(r.daysWorked, 22);
   assert.equal(r.payroll.absentDays, 2);
-  // Absence is docked at the CALENDAR-day rate (salary ÷ days-in-month), per the
-  // owner spec: 2 × 265000/31 = 17096.8 → 17097 sen (May has 31 days).
-  assert.equal(r.payroll.absenceDeductionSen, 17_097);
-  assert.equal(r.payroll.basicEarnedSen, 247_903); // 265000 − 17097 → RM2,479.03
-  assert.equal(r.payroll.grossSen, 270_836); // 247903 + 22933 (OT ÷26÷10) → RM2,708.36
-  // Cost removes the 2 unworked days at the higher ÷working-days rate, so basic
-  // earned is HIGHER than production-cost regular. That gap (paid above
-  // production value on absent days) is the "non-productive paid (absence)"
-  // reconciliation line — wider now that absence docks ÷31: 247903 − 242917 = 4986 sen.
+  // UNIFIED ÷26 (owner 2026-06-11): absence docks the SAME ÷26 day rate OT
+  // uses: 2 × 265000/26 = 20384.6 → 20385 sen.
+  assert.equal(r.payroll.absenceDeductionSen, 20_385);
+  assert.equal(r.payroll.basicEarnedSen, 244_615); // 265000 − 20385
+  assert.equal(r.payroll.grossSen, 267_548); // 244615 + 22933 (OT ÷26÷10)
+  // Cost removes the 2 unworked days at the ÷working-days rate (÷24 in May);
+  // the dock(÷26)-vs-cost(÷24) difference per absent day is the signed
+  // absence bridge on the Labor Cost screen: 244615 − 242917 = 1698 sen.
   assert.equal(r.cost.regularCostSen, 242_917);
-  assert.equal(r.payroll.basicEarnedSen - r.cost.regularCostSen, 4_986);
+  assert.equal(r.payroll.basicEarnedSen - r.cost.regularCostSen, 1_698);
 });
 
-test("part-month (owner spec 2026-06-11): salary = employed CALENDAR days x (S / calendar days); absences dock at the calendar rate", () => {
-  // ANN joined 18 May. Window = 14 calendar days (18..31) -> window salary =
-  // round(265000 x 14/31). Window working days = 11; worked 5 -> 6 absences
-  // docked at the calendar rate (265000/31). Cost uses the PERSONALISED day
-  // rate = window salary / 11.
+test("join mid-month (UNIFIED ÷26, owner 2026-06-11): unworked working days — including pre-join — count as absences", () => {
+  // ANN joined 18 May and worked 5 days. May has 24 working days; the 19 not
+  // worked (including every working day before the join date) all dock ÷26.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -317,37 +314,43 @@ test("part-month (owner spec 2026-06-11): salary = employed CALENDAR days x (S /
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
     employmentStartDay: 18,
-    prorateToService: true,
+    prorateToService: true, // accepted for back-compat; no longer changes the maths
   });
   assert.equal(r.daysWorked, 5);
-  const windowSalary = Math.round((265_000 * 14) / 31);
-  const ded = Math.round(6 * (265_000 / 31));
-  assert.equal(r.payroll.absentDays, 6);
-  assert.equal(r.payroll.basicEarnedSen, Math.max(0, windowSalary - ded));
-  assert.ok(Math.abs(r.costingDailyRateSen - windowSalary / 11) < 1e-6);
-  assert.equal(r.cost.regularCostSen, Math.round(5 * (windowSalary / 11)));
+  const ded = Math.round(19 * (265_000 / 26));
+  assert.equal(r.payroll.absentDays, 19);
+  assert.equal(r.payroll.absenceDeductionSen, ded);
+  assert.equal(r.payroll.basicEarnedSen, Math.max(0, 265_000 - ded));
+  // Costing rate is the uniform ÷working-days rate (no personal window rate).
+  assert.ok(Math.abs(r.costingDailyRateSen - 265_000 / 24) < 1e-6);
+  assert.equal(r.cost.regularCostSen, Math.round(5 * (265_000 / 24)));
 });
 
-test("part-month owner worked example: RM4,000, 31-day month, 10 employed days -> RM1,290.32", () => {
-  // Owner's exact example: daily rate = 4000/31 = 129.0323; 10 employed
-  // calendar days -> basic 1,290.32 (full attendance in the window).
+test("join mid-month worked example (UNIFIED ÷26): RM4,000, joins 22 May, works every remaining working day", () => {
+  // UNIFIED rule (owner 2026-06-11, supersedes the ÷calendar proration):
+  // daily rate = 4000/26 = RM153.85. May has 24 working days; he worked the 7
+  // from 22 May on → 17 unworked working days dock ÷26.
   const W = { basicSalarySen: 400_000, workingDaysPerMonth: 26, workingHoursPerDay: 8, otMultiplier: 1.5 };
   const days = ["2026-05-22", "2026-05-23", "2026-05-25", "2026-05-26", "2026-05-28", "2026-05-29", "2026-05-30"]
     .map((date) => ({ date, hours: 8 })); // every working day from 22 May (27th is a holiday)
   const r = labor.computeMonthlyLabor({
     worker: W, year: 2026, month: 5, days,
     publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
-    employmentStartDay: 22, prorateToService: true,
+    employmentStartDay: 22, prorateToService: true, // back-compat inputs, ignored
   });
-  assert.equal(r.payroll.absentDays, 0);
-  assert.equal(r.payroll.basicEarnedSen, Math.round((400_000 * 10) / 31)); // 129,032 sen = RM1,290.32
-  // Fully-worked window -> production cost equals the part-month salary (to the sen).
-  assert.equal(r.cost.regularCostSen, Math.round(7 * (Math.round((400_000 * 10) / 31) / 7)));
+  assert.equal(r.daysWorked, 7);
+  assert.equal(r.payroll.absentDays, 17);
+  const ded = Math.round(17 * (400_000 / 26));
+  assert.equal(r.payroll.absenceDeductionSen, ded);
+  assert.equal(r.payroll.basicEarnedSen, 400_000 - ded); // RM1,384.62
+  // Production cost: uniform ÷working-days rate.
+  assert.equal(r.cost.regularCostSen, Math.round(7 * (400_000 / 24)));
 });
 
-test("computeMonthlyLabor: short-hour deduction docks ÷working-days hourly from earned", () => {
+test("computeMonthlyLabor: short-hour deduction docks the UNIFIED ÷26÷10 hourly rate", () => {
   // ANN full attendance, but the owner docks 5 unworked hours (under-recorded
-  // review). Spec unpaid-hour rate = (265000/31)/10 = 854.84 sen; 5h → 4274 sen.
+  // review). UNIFIED rate = (265000/26)/10 = 1019.23 sen/h — the SAME base the
+  // OT rate uses; 5h → 5096 sen.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -357,9 +360,9 @@ test("computeMonthlyLabor: short-hour deduction docks ÷working-days hourly from
     absenceThroughDay: 31,
     shortHourDeductionHours: 5,
   });
-  assert.equal(r.payroll.shortHourDeductionSen, 4_274); // 5 × (265000/31)/10
-  assert.equal(r.payroll.basicEarnedSen, 265_000 - 4_274); // full salary − dock
-  assert.equal(r.payroll.grossSen, 265_000 - 4_274 + 22_933); // OT now ÷26÷10
+  assert.equal(r.payroll.shortHourDeductionSen, 5_096); // 5 × (265000/26)/10
+  assert.equal(r.payroll.basicEarnedSen, 265_000 - 5_096); // full salary − dock
+  assert.equal(r.payroll.grossSen, 265_000 - 5_096 + 22_933); // + OT (÷26÷10)
   // The dock does not touch production cost — that stays hours/day based.
   assert.equal(r.cost.regularCostSen, 265_000);
 });
@@ -754,26 +757,32 @@ test("computeAttendanceDayDetail: grace cutoff stops the absent list early", () 
   );
 });
 
-test("computeAttendanceDayDetail: part-month worker — days before joining are not absences", () => {
-  // Joined 18 May, logged the 5 working days served. No absences for the days
-  // before joining; no OT.
+test("computeAttendanceDayDetail: UNIFIED ÷26 — days before joining ARE absences", () => {
+  // Joined 18 May, logged the 5 working days served. Owner 2026-06-11: no
+  // employment window — every unworked working day of the month (including
+  // the days before joining and after the last day) lists as an absence,
+  // matching the pay maths. employmentStartDay/EndDay no longer narrow it.
+  const served = [
+    "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21", "2026-05-22",
+  ];
   const detail = labor.computeAttendanceDayDetail({
     worker: ANN,
     year: 2026,
     month: 5,
-    days: [
-      { date: "2026-05-18", hours: 8 },
-      { date: "2026-05-19", hours: 8 },
-      { date: "2026-05-20", hours: 8 },
-      { date: "2026-05-21", hours: 8 },
-      { date: "2026-05-22", hours: 8 },
-    ],
+    days: served.map((date) => ({ date, hours: 8 })),
     publicHolidays: MAY_HOLIDAYS,
     absenceThroughDay: 31,
     employmentStartDay: 18,
     employmentEndDay: 22,
   });
-  assert.deepEqual(detail.absentDates, []);
+  // 24 working days − 5 served = 19 absences, pre-join days included.
+  assert.deepEqual(
+    detail.absentDates,
+    MAY_WORKDAYS.filter((d) => !served.includes(d)),
+  );
+  assert.equal(detail.absentDates.length, 19);
+  assert.ok(detail.absentDates.includes("2026-05-02")); // pre-join
+  assert.ok(detail.absentDates.includes("2026-05-30")); // post-last-day
   assert.deepEqual(detail.otDays, []);
 });
 
@@ -794,7 +803,10 @@ test("computeAttendanceDayDetail: several rows on one date aggregate before the 
 });
 
 // -- mid-month estimate parity for part-month workers ------------------------
-test("prorateToService mid-month estimate: window salary minus CONFIRMED absences only (optimistic like full-month workers)", () => {
+test("prorateToService is IGNORED (UNIFIED ÷26): full salary minus confirmed absences ÷26", () => {
+  // Owner 2026-06-11: join/resign is not a proration — unworked working days
+  // (pre-join included) are plain absences at the ÷26 day rate, and the
+  // mid-month estimate stays optimistic (future days assumed worked).
   const base = {
     worker: ANN, year: 2026, month: 5,
     days: [{ date: "2026-05-04", hours: 8 }, { date: "2026-05-05", hours: 8 }],
@@ -802,16 +814,17 @@ test("prorateToService mid-month estimate: window salary minus CONFIRMED absence
     employmentStartDay: 4,
     prorateToService: true,
   };
-  const windowSalary = Math.round((265_000 * 28) / 31); // joined day 4 -> 28 employed calendar days
-  const calRate = 265_000 / 31;
-  // Mid-month (cutoff day 9): window working days elapsed 4..9 = 6, worked 2
-  // -> 4 confirmed absences; future days assumed worked.
+  const dayRate = 265_000 / 26;
+  // Mid-month (cutoff day 9): elapsed working days 1..9 = 7 (May 1 holiday,
+  // May 3 Sunday), worked 2 -> 5 confirmed absences; future days assumed
+  // worked. Pre-join days 1-3 count like any other unworked day.
   const mid = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 9 });
-  assert.equal(mid.payroll.basicEarnedSen, Math.max(0, windowSalary - Math.round(4 * calRate)));
-  // Month-end: 23 window working days, 2 worked -> 21 absences, all docked.
+  assert.equal(mid.payroll.absentDays, 5);
+  assert.equal(mid.payroll.basicEarnedSen, Math.max(0, 265_000 - Math.round(5 * dayRate)));
+  // Month-end: 24 working days, 2 worked -> 22 absences, all docked ÷26.
   const fin = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 31 });
-  assert.equal(fin.payroll.absentDays, 21);
-  assert.equal(fin.payroll.basicEarnedSen, Math.max(0, windowSalary - Math.round(21 * calRate)));
+  assert.equal(fin.payroll.absentDays, 22);
+  assert.equal(fin.payroll.basicEarnedSen, Math.max(0, 265_000 - Math.round(22 * dayRate)));
 });
 
 // -- Sunday work must not mask a weekday absence ------------------------------
@@ -827,7 +840,7 @@ test("Sunday work does NOT mask a weekday absence (pure 2x OT; absence still doc
   });
   assert.equal(r.daysWorked, 23); // 24 working days - 1 absent; Sunday NOT counted
   assert.equal(r.payroll.absentDays, 1);
-  assert.equal(r.payroll.absenceDeductionSen, Math.round(265000 / 31));
+  assert.equal(r.payroll.absenceDeductionSen, Math.round(265000 / 26));
   assert.equal(r.otSundayHours, 8);
   const otBase = 265000 / 26 / 10;
   assert.equal(r.payroll.otPaySen, Math.round(8 * otBase * 2));

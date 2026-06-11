@@ -203,7 +203,7 @@ export function absenceCutoffDay(
 //
 // computeMonthlyLabor returns the COUNT of absent days and the TOTAL overtime
 // hours, but not WHICH days. This helper enumerates the specific dates from the
-// SAME inputs, using the IDENTICAL absence-window + grace-cutoff + per-date OT
+// SAME inputs, using the IDENTICAL absence + grace-cutoff + per-date OT
 // logic, so the Payroll screen can show "Absent: 03 Jun, 04 Jun" and
 // "OT: 05 Jun — 2h" beneath a row. It computes NO amounts and changes nothing
 // about the pay calculation — it is purely additive and safe to call alongside
@@ -212,10 +212,10 @@ export function absenceCutoffDay(
 /** Day-level breakdown of a worker's month: which days were absent, and which
  *  had overtime (with the OT hours). All money lives in computeMonthlyLabor. */
 export type AttendanceDayDetail = {
-  /** ISO dates (YYYY-MM-DD) the worker was ABSENT — an elapsed working day,
-   *  inside their employment window and within the grace cutoff, with no hours
-   *  logged. The list length equals computeMonthlyLabor's payroll.absentDays for
-   *  the normal case (no logged hours fall outside the absence window). */
+  /** ISO dates (YYYY-MM-DD) the worker was ABSENT — an elapsed working day
+   *  within the grace cutoff with no hours logged (UNIFIED ÷26: pre-join /
+   *  post-resign working days included). The list length equals
+   *  computeMonthlyLabor's payroll.absentDays for the normal case. */
   absentDates: string[];
   /** Days with overtime: the date plus the OT hours on that date (hours above
    *  the worker's standard working day). Mirrors how computeMonthlyLabor sums
@@ -237,9 +237,9 @@ export type AttendanceDayDetailInput = {
   publicHolidays: Iterable<string>;
   /** Count absences only through this day-of-month (the grace cutoff). */
   absenceThroughDay: number;
-  /** First employed day-of-month (inclusive). Default 1. */
+  /** Back-compat only (UNIFIED ÷26) — accepted, no longer narrows the walk. */
   employmentStartDay?: number;
-  /** Last employed day-of-month (inclusive). Default month's last day. */
+  /** Back-compat only (UNIFIED ÷26) — accepted, no longer narrows the walk. */
   employmentEndDay?: number;
 };
 
@@ -290,13 +290,15 @@ export function computeAttendanceDayDetail(
   }
   otDays.sort((a, b) => a.date.localeCompare(b.date));
 
-  // Absent dates: working days (Mon–Sat minus public holidays) inside the
-  // employment window [employmentStartDay..min(absenceThroughDay, end)] that
-  // have no logged hours. Same window + cutoff computeMonthlyLabor counts.
+  // Absent dates: working days (Mon–Sat minus public holidays) with no logged
+  // hours, through the grace cutoff. UNIFIED ÷26 model (owner 2026-06-11):
+  // there is no employment window any more — days before a mid-month join or
+  // after a resignation simply count (and dock) as absences, exactly like the
+  // pay maths in computeMonthlyLabor. (employmentStartDay/EndDay are accepted
+  // for back-compat but no longer narrow the walk.)
   const monthLastDay = new Date(year, month, 0).getDate();
-  const startDay = Math.max(1, input.employmentStartDay ?? 1);
-  const endDay = input.employmentEndDay ?? monthLastDay;
-  const throughDay = Math.min(absenceThroughDay, endDay, monthLastDay);
+  const startDay = 1;
+  const throughDay = Math.min(absenceThroughDay, monthLastDay);
   const mm = String(month).padStart(2, "0");
   const absentDates: string[] = [];
   for (let d = startDay; d <= throughDay; d++) {
@@ -411,19 +413,17 @@ export type MonthlyLaborInput = {
   employmentEndDay?: number;
   /**
    * First day-of-month the worker was employed (their join date's day),
-   * INCLUSIVE. Days BEFORE this are neither worked nor absent — the person had
-   * not joined yet. Omit (undefined / 1) for anyone employed from the start of
-   * the month. A worker whose join date is in a LATER month should be excluded
-   * from this period's payroll entirely by the caller, not handled here.
+   * INCLUSIVE. UNIFIED ÷26 model (owner 2026-06-11): this no longer narrows
+   * the pay maths — working days before the join date count and dock as plain
+   * absences, like any other unworked day. Accepted for back-compat with
+   * existing callers. A worker whose join date is in a LATER month should be
+   * excluded from this period's payroll entirely by the caller.
    */
   employmentStartDay?: number;
   /**
-   * When true the worker was employed for only PART of the month — they joined
-   * and/or resigned mid-month — so they are entitled only to the days actually
-   * served: pay = days worked × daily rate (not full salary − absences). Days
-   * outside the [employmentStartDay, employmentEndDay] window are excluded
-   * entirely (not charged as absence). Default false = the normal full-salary
-   * worker employed the whole month.
+   * LEGACY (pre-2026-06-11 window proration). Accepted for back-compat but
+   * IGNORED: under the unified ÷26 model every worker is full salary −
+   * absences(÷26) − docks, join/resign months included.
    */
   prorateToService?: boolean;
   /**
@@ -436,7 +436,7 @@ export type MonthlyLaborInput = {
    * Hours the owner has explicitly docked from this worker this month, set per
    * day from the Labor Cost "Under-recorded hours" review when the short time is
    * NOT to be paid (it was neither a data-entry miss to backfill nor idle-but-
-   * paid standby). Valued at the worker's ÷working-days hourly rate and
+   * paid standby). Valued at the UNIFIED ÷26÷rateHoursPerDay hourly rate and
    * subtracted from basic earned, so the under-recorded gap closes and Payroll
    * reconciles with Labor Cost. Default 0.
    */
@@ -579,31 +579,28 @@ export function computeMonthlyLabor(
     month,
     publicHolidays,
   );
-  // Two divisors, on purpose:
-  //   • PAYROLL absence + all OT → ÷ nominal workingDaysPerMonth (26): a missed
-  //     day is docked the contractual ÷26 "ordinary rate of pay".
-  //   • PRODUCTION COST + part-month proration → ÷ the ACTUAL working days in
-  //     THIS calendar month = Mon–Sat days minus public holidays. This varies by
-  //     month (24 in a 26-Mon–Sat month with 2 holidays; 27 in a 4-Sunday month;
-  //     ~24 in February) — it is NOT the fixed nominal 26. A logged day of output,
-  //     or a part-month day served, is valued at this ÷working-days rate.
-  // They differ only on absent days — payroll docks ÷26, production loses
-  // ÷working-days. That gap is folded into the Labor Cost department buckets, so
-  // Payroll and Labor Cost still tie out. [2026-06-06: absence ÷26, prorate
-  // ÷working-days. 2026-06-07: working days = actual per-month count, not fixed 26.]
+  // Two divisors, on purpose — UNIFIED ÷26 model (owner 2026-06-11):
+  //   • PAYROLL (absence, late/short docks, the OT base) → ÷ the nominal
+  //     workingDaysPerMonth (26, per-worker): ONE contractual day rate for
+  //     everything money-side. Hourly rates divide it again by rateHoursPerDay
+  //     (10, the 08:00–18:00 shift span) — RM78.85/day, RM7.88/h on RM2,050.
+  //     Join/resign is NOT a proration: unworked working days (pre-join and
+  //     post-resign included) just count and dock as absences.
+  //   • PRODUCTION COST → ÷ the ACTUAL working days in THIS calendar month
+  //     = Mon–Sat days minus public holidays (24 in a 26-Mon–Sat month with
+  //     2 holidays; varies by month). A logged day of output is valued at
+  //     this ÷working-days rate. Internal costing only — never changes pay.
+  // They differ on absent days — payroll docks ÷26, production loses
+  // ÷working-days. That SIGNED gap is folded into the Labor Cost department
+  // buckets, so Payroll and Labor Cost still tie out.
   // Clamped to ≥1 so it never divides by 0.
   const costingDivisor = Math.max(
     1,
     countElapsedWorkingDays(year, month, new Date(year, month, 0).getDate(), publicHolidays),
   );
 
-  // Rates per the owner's salary spec (HOOKKA MANUFACTURING CALCULATION SALARY):
-  //   • Absence (unpaid day)  → salary ÷ CALENDAR days this month (30/31/28/29).
-  //   • OT pay /hour          → (salary ÷ 26 work days) ÷ 10 × multiplier = 7.88×mult.
-  //   • Unpaid hours (lateness / short of a full day) → (salary ÷ calendar days) ÷ 10 = 6.83.
-  // The ÷10 is the 08:00–18:00 shift span; the 9 PAYABLE hours (workingHoursPerDay)
-  // stays the OT THRESHOLD only. costingDailyRate (÷ working-days) is UNCHANGED —
-  // it remains the production-cost rate + the part-month proration base.
+  // The 9 PAYABLE hours (workingHoursPerDay) stays the OT THRESHOLD only —
+  // it never enters a pay rate.
   const daysInMonth = new Date(year, month, 0).getDate();
   // Effective-dated pay rules (owner 2026-06-11): day-level maths resolve the
   // rules in force ON each date; month-level rates (the display OT rate + the
@@ -614,13 +611,13 @@ export function computeMonthlyLabor(
   const rulesAt = (date: string) =>
     resolvePayRulesAsOf(input.payRuleVersions, date);
   const cfgMonthEnd = rulesAt(monthEndYmd);
-  const calendarDailyRateSen = basicSalarySen / daysInMonth; // absence /day (÷30/31)
-  const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — the OT daily base
+  const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — THE unified payroll day rate
   const otBaseHourlyRateSen =
     payrollDailyRateSen / Math.max(1, cfgMonthEnd.rateHoursPerDay); // ÷26÷10, before the day multiplier
   const otHourlyRateSen = otBaseHourlyRateSen * otMultiplier; // weekday OT rate (÷26÷10×mult) — back-compat
-  const lateHourlyRateSen =
-    calendarDailyRateSen / Math.max(1, cfgMonthEnd.rateHoursPerDay); // unpaid hour / lateness (÷calendar÷10)
+  // Unified ÷26 (owner 2026-06-11): the late/short hourly rate uses the SAME
+  // ÷26 base as OT (was ÷calendar÷10).
+  const lateHourlyRateSen = otBaseHourlyRateSen;
   const costingDailyRateSen = basicSalarySen / costingDivisor;
 
   // Per-date OT MONEY — each date's hours are paid with the multipliers and
@@ -645,62 +642,34 @@ export function computeMonthlyLabor(
     }
   }
 
-  // ── Payroll side (÷26).
-  // Employment window: a worker is only "expected to work" between their join
-  // day (employmentStartDay, inclusive) and their last day (employmentEndDay,
-  // inclusive). Days BEFORE they joined or AFTER they left are neither worked
-  // nor absent. The absence window is the working days inside that span, also
-  // capped at the data-entry grace cutoff.
+  // ── Payroll side — UNIFIED ÷26 (owner 2026-06-11, "use 26 days for all"):
+  // absence, OT and late/short all use the SAME contractual rate, salary ÷
+  // workingDaysPerMonth (26 by default, per-worker in Employee Master).
+  // Join / resign mid-month is NOT a proration any more: working days in the
+  // month the worker did not work — INCLUDING days before their join date and
+  // after their last day — simply count as ABSENT days and dock ÷26. One
+  // formula for everyone: full salary − absences(÷26) − docks.
   const monthLastDay = new Date(year, month, 0).getDate();
-  const employmentStartDay = Math.max(1, input.employmentStartDay ?? 1);
-  const employmentEndDay = input.employmentEndDay ?? monthLastDay;
-  const throughDay = Math.min(absenceThroughDay, employmentEndDay);
-  // Working days from employmentStartDay..throughDay = (1..throughDay) minus
-  // (1..startDay-1). Never negative.
+  const throughDay = Math.min(absenceThroughDay, monthLastDay);
   const elapsedWorkingDays = Math.max(
     0,
-    countElapsedWorkingDays(year, month, throughDay, publicHolidays) -
-      countElapsedWorkingDays(year, month, employmentStartDay - 1, publicHolidays),
+    countElapsedWorkingDays(year, month, throughDay, publicHolidays),
   );
-  // Clamp days-worked to the employed window so a stray post-resignation log
-  // can't make absences negative or inflate prorated pay.
+  // Clamp days-worked to the elapsed window so a stray future-dated log can't
+  // make absences negative.
   const workedWithinWindow = Math.min(daysWorked, elapsedWorkingDays);
   const absentDays = Math.max(0, elapsedWorkingDays - workedWithinWindow);
-  // Absence docks the CALENDAR-day rate (salary ÷ days-in-month = RM68.33 on a
-  // 30-day month), per the owner's spec. This is LESS than the ÷working-days rate
-  // production loses for that unworked day; the difference is reconciled as
-  // "non-productive paid (absence)" on the Labor Cost screen (the absence-leniency
-  // line), not left in the under-recorded residual.
-  const absenceDeductionSen = Math.round(absentDays * calendarDailyRateSen);
-  // Owner-flagged / punch-derived unworked hours (lateness or short of a full day,
-  // from the under-recorded review or an auto punch dock) are docked at the spec's
-  // unpaid-hour rate = (salary ÷ calendar days) ÷ 10 = RM6.83, subtracted from
-  // basic earned. Same hours figure as before (payroll_hour_deductions); only the
-  // per-hour VALUE changed to match the salary spec.
+  // Absence docks the ÷26 contractual day rate (RM78.85 on RM2,050) — the
+  // same divisor as OT. The ÷26-vs-÷working-days difference per absent day is
+  // bridged on the Labor Cost screen (the absence-leniency line).
+  const absenceDeductionSen = Math.round(absentDays * payrollDailyRateSen);
+  // Owner-flagged / punch-derived unworked hours dock at (salary ÷ 26) ÷ the
+  // effective-dated hour divisor — the same RM7.88/h base the OT rate uses.
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
   const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
-  // Full-month worker → entitled to the FULL monthly salary, minus absences.
-  // Partial-month worker (joined and/or resigned mid-month) → owner's spec
-  // (2026-06-11, "Calculation for New Staff"):
-  //   daily rate = monthly salary ÷ CALENDAR days of the month (28/30/31)
-  //   part-month salary = employed calendar days × that rate
-  //   (e.g. RM4,000 ÷ 31 × 10 employed days = RM1,290.32)
-  // Absences inside the employment window then dock at the SAME calendar-day
-  // rate (the company-wide absence rule), so the mid-month estimate is
-  // naturally optimistic (full window salary − confirmed absences — the same
-  // optimism a full-month worker gets) and the month-end figure is exact.
-  const windowCalendarDays = Math.max(
-    0,
-    Math.min(employmentEndDay, monthLastDay) - employmentStartDay + 1,
-  );
-  const windowSalarySen = Math.round(
-    (basicSalarySen * windowCalendarDays) / monthLastDay,
-  );
   const basicEarnedSen = Math.max(
     0,
-    (input.prorateToService
-      ? Math.max(0, windowSalarySen - absenceDeductionSen)
-      : Math.max(0, basicSalarySen - absenceDeductionSen)) - shortHourDeductionSen,
+    Math.max(0, basicSalarySen - absenceDeductionSen) - shortHourDeductionSen,
   );
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
   // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
@@ -712,26 +681,10 @@ export function computeMonthlyLabor(
   const grossSen = basicEarnedSen + otPaySen;
 
   // ── Production labor cost side. Regular = days actually worked × the
-  //    holiday-adjusted day rate. OT cost equals OT pay exactly (÷26).
-  //    Part-month workers (owner spec 2026-06-11): their day rate = their
-  //    part-month salary ÷ the WORKING days inside their employment window
-  //    ("拿这个薪水除以他实际可以工作的天数") — a fully-worked window then
-  //    costs exactly what payroll pays, so it ties by construction.
-  const windowWorkingDays = Math.max(
-    0,
-    countElapsedWorkingDays(
-      year,
-      month,
-      Math.min(employmentEndDay, monthLastDay),
-      publicHolidays,
-    ) -
-      countElapsedWorkingDays(year, month, employmentStartDay - 1, publicHolidays),
-  );
-  const effectiveCostingDailyRateSen =
-    input.prorateToService && windowWorkingDays > 0
-      ? windowSalarySen / windowWorkingDays
-      : costingDailyRateSen;
-  const regularCostSen = Math.round(daysWorked * effectiveCostingDailyRateSen);
+  //    holiday-adjusted ÷working-days rate (everyone alike — the unified ÷26
+  //    payroll model removed the part-month personal rate). OT cost equals OT
+  //    pay exactly.
+  const regularCostSen = Math.round(daysWorked * costingDailyRateSen);
   const otCostSen = otPaySen;
   const totalCostSen = regularCostSen + otCostSen;
 
@@ -744,9 +697,7 @@ export function computeMonthlyLabor(
     otHolidayHours,
     payrollDailyRateSen,
     otHourlyRateSen,
-    // Part-month workers report their PERSONALISED window rate (owner spec) so
-    // every consumer costs their days at the rate that ties to their payroll.
-    costingDailyRateSen: effectiveCostingDailyRateSen,
+    costingDailyRateSen,
     payroll: {
       fullSalarySen: basicSalarySen,
       absentDays,

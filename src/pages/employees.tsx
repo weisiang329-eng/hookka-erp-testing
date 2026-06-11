@@ -4409,9 +4409,8 @@ function DepartmentLaborTab({
         const reconCode = p.departmentCode || "UNASSIGNED";
         if (gross > 0 && factoryCodes.has(reconCode)) {
           const absent = Number(p.absentDays) || 0;
-          // Part-month skip — same rule as the Labor Cost tab's leniency memo:
-          // a joined/resigned-this-month worker is paid days-served, the stored
-          // absence deduction was never applied, so no leniency exists.
+          // Part-month — same personalised window rate as the Labor Cost tab
+          // (owner spec): absence docks ÷calendar; cost loses the window rate.
           const ww = workerById.get(wid) as
             | { joinDate?: string | null; resignedAt?: string | null; status?: string }
             | undefined;
@@ -4422,11 +4421,37 @@ function DepartmentLaborTab({
               (ww.status === "RESIGNED" &&
                 typeof ww.resignedAt === "string" &&
                 ww.resignedAt.startsWith(p.period)));
-          const costingDivisor = actualWorkingDays;
-          const costEquivalent =
-            absent > 0 && !partMonth
-              ? Math.round((absent * (Number(p.basicSalary) || 0)) / costingDivisor)
-              : 0;
+          let costEquivalent = 0;
+          if (absent > 0) {
+            if (partMonth) {
+              const [dY2, dM2] = deptPayslipPeriod.split("-").map(Number);
+              const mLast = dY2 && dM2 ? new Date(dY2, dM2, 0).getDate() : 30;
+              const jd =
+                typeof ww!.joinDate === "string" && ww!.joinDate.startsWith(p.period)
+                  ? Number(ww!.joinDate.slice(8, 10)) || 1
+                  : 1;
+              const rd =
+                ww!.status === "RESIGNED" &&
+                typeof ww!.resignedAt === "string" &&
+                ww!.resignedAt.startsWith(p.period)
+                  ? Number(ww!.resignedAt.slice(8, 10)) || mLast
+                  : mLast;
+              const start = Math.max(1, jd);
+              const end = Math.min(mLast, rd);
+              const winCal = Math.max(0, end - start + 1);
+              const winWD = Math.max(
+                1,
+                countElapsedWorkingDays(dY2, dM2, end, holidayList) -
+                  countElapsedWorkingDays(dY2, dM2, start - 1, holidayList),
+              );
+              const winSalary = ((Number(p.basicSalary) || 0) * winCal) / mLast;
+              costEquivalent = Math.round((absent * winSalary) / winWD);
+            } else {
+              costEquivalent = Math.round(
+                (absent * (Number(p.basicSalary) || 0)) / actualWorkingDays,
+              );
+            }
+          }
           const leniency = Math.max(
             0,
             costEquivalent - (Number(p.absenceDeductionSen) || 0),
@@ -7581,12 +7606,10 @@ function LaborCostTab({
     for (const p of reconPayslips) {
       const absent = Number(p.absentDays) || 0;
       if (absent <= 0) continue;
-      // PART-MONTH workers (joined / resigned inside this period) are paid
-      // days-served × costing rate — the engine never applies the stored
-      // absence deduction, so there is NO ÷calendar-vs-÷working-days gap to
-      // bridge. Without this skip the recon manufactured a phantom leniency
-      // (~RM25/absent-day) onto the dept, offset by a hidden negative in the
-      // Overhead plug.
+      // PART-MONTH workers (owner spec 2026-06-11): payroll docks their absence
+      // at the ÷calendar-day rate, but their production-cost day rate is
+      // PERSONALISED — part-month salary ÷ working days in their employment
+      // window — so the leniency bridge uses that window rate.
       const ww = (p.employeeId ? workersById.get(p.employeeId) : undefined) as
         | { joinDate?: string | null; resignedAt?: string | null; status?: string }
         | undefined;
@@ -7597,11 +7620,34 @@ function LaborCostTab({
           (ww.status === "RESIGNED" &&
             typeof ww.resignedAt === "string" &&
             ww.resignedAt.startsWith(p.period)));
-      if (partMonth) continue;
-      const costingDivisor = actualWorkingDays;
-      const costEquivalentSen = Math.round(
-        (absent * (Number(p.basicSalary) || 0)) / costingDivisor,
-      );
+      let costEquivalentSen: number;
+      if (partMonth) {
+        const mLast = new Date(hY, hM, 0).getDate();
+        const jd =
+          typeof ww!.joinDate === "string" && ww!.joinDate.startsWith(p.period)
+            ? Number(ww!.joinDate.slice(8, 10)) || 1
+            : 1;
+        const rd =
+          ww!.status === "RESIGNED" &&
+          typeof ww!.resignedAt === "string" &&
+          ww!.resignedAt.startsWith(p.period)
+            ? Number(ww!.resignedAt.slice(8, 10)) || mLast
+            : mLast;
+        const start = Math.max(1, jd);
+        const end = Math.min(mLast, rd);
+        const winCal = Math.max(0, end - start + 1);
+        const winWD = Math.max(
+          1,
+          countElapsedWorkingDays(hY, hM, end, holidayList) -
+            countElapsedWorkingDays(hY, hM, start - 1, holidayList),
+        );
+        const winSalary = ((Number(p.basicSalary) || 0) * winCal) / mLast;
+        costEquivalentSen = Math.round((absent * winSalary) / winWD);
+      } else {
+        costEquivalentSen = Math.round(
+          (absent * (Number(p.basicSalary) || 0)) / actualWorkingDays,
+        );
+      }
       const leniency = Math.max(
         0,
         costEquivalentSen - (Number(p.absenceDeductionSen) || 0),
@@ -7989,6 +8035,7 @@ function LaborCostTab({
       deptName: string;
       expectedHours: number;
       loggedHours: number;
+      absentDays: number;
       shortHours: number;
       shortValueSen: number;
     }> = [];
@@ -8029,15 +8076,27 @@ function LaborCostTab({
       // drivers / QC) logs none by design and is not a data gap.
       if (!factoryDeptCodes.has(w.departmentCode)) continue;
       const stdHours = w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
+      // Classify each confirmed day the way the per-day drill-in does:
+      //   0 logged  → ABSENT — the salary deduction already settled it in
+      //               Payroll, so it carries NO "short value" here.
+      //   partially logged → UNDER-RECORDED — these are the only hours that
+      //               genuinely need filling (or Keep/Deduct), so only they
+      //               are valued. (Owner 2026-06-11: "明明只是 short 36.44,
+      //               为什么显示 short 了 58 小时那么多钱".)
       let expectedHours = 0;
       let loggedHours = 0;
+      let absentDays = 0;
+      let underHours = 0;
       for (const date of periodWorkingDays) {
         if (date > cutoffIso) continue; // future / within-grace → not yet "short"
+        const lg = loggedHoursByWorkerDate.get(`${w.id}|${date}`) ?? 0;
         expectedHours += stdHours;
-        loggedHours += loggedHoursByWorkerDate.get(`${w.id}|${date}`) ?? 0;
+        loggedHours += lg;
+        if (lg <= 0) absentDays++;
+        else if (lg < stdHours) underHours += stdHours - lg;
       }
-      const shortHours = Math.max(0, expectedHours - loggedHours);
-      if (shortHours <= 0.0001) continue;
+      const shortHours = Math.round(underHours * 100) / 100;
+      if (absentDays === 0 && shortHours <= 0.0001) continue;
       // Indicative value of the missing hours at the worker's regular rate.
       const regularDays = actualWorkingDays;
       const effSalarySen = effSalaryOf(w);
@@ -8053,6 +8112,7 @@ function LaborCostTab({
         deptName: dept?.name ?? w.departmentCode,
         expectedHours,
         loggedHours,
+        absentDays,
         shortHours,
         shortValueSen: Math.round(shortHours * regularRateSen),
       });
@@ -8861,11 +8921,12 @@ function LaborCostTab({
             {showRangeGapTbl && (
             <>
             <p className="text-xs text-[#6B7280] leading-relaxed mb-3">
-              For this custom range, this is the unlogged-hours data gap for the selected dates —
-              each active factory worker&rsquo;s expected hours (standard daily hours × working days
-              in range) versus the hours actually logged. Payroll reconciliation is monthly and is
-              shown only when a full calendar month is selected. Click a worker to see which days are
-              short. Working days are Mon–Sat, excluding Sundays and declared public holidays.
+              For this range, days with NOTHING logged are <span className="font-medium">Absent</span> —
+              the salary deduction already settles them in Payroll, so they carry no value here. Only
+              <span className="font-medium"> To-fill hours</span> (days the worker DID work but logged
+              less than a full day) genuinely need action: key the missing hours, or Keep/Deduct in the
+              drill-down. Payroll reconciliation is monthly and shows once a full calendar month is
+              selected. Working days are Mon–Sat, excluding Sundays and declared public holidays.
             </p>
 
             <div className="overflow-x-auto rounded-md border border-[#E7C9C1] bg-[#FCF4F2]">
@@ -8876,8 +8937,9 @@ function LaborCostTab({
                     <th className="py-1.5 px-3 text-left font-medium">Department</th>
                     <th className="py-1.5 px-3 text-right font-medium">Expected hrs</th>
                     <th className="py-1.5 px-3 text-right font-medium">Logged hrs</th>
-                    <th className="py-1.5 px-3 text-right font-medium">Short hrs</th>
-                    <th className="py-1.5 px-3 text-right font-medium">Short value</th>
+                    <th className="py-1.5 px-3 text-right font-medium" title="Days with NOTHING logged — the salary deduction already settles these in Payroll, so they carry no value here">Absent (settled)</th>
+                    <th className="py-1.5 px-3 text-right font-medium" title="Hours short on days the worker DID work — these are the only hours that genuinely need filling (or Keep/Deduct)">To-fill hrs</th>
+                    <th className="py-1.5 px-3 text-right font-medium">To-fill value</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -8904,12 +8966,13 @@ function LaborCostTab({
                           <td className="py-1.5 px-3 text-[#6B7280]">{e.deptName}</td>
                           <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{e.expectedHours.toFixed(1)}</td>
                           <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{e.loggedHours.toFixed(1)}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#9A3A2D]">{e.shortHours.toFixed(1)}</td>
-                          <td className="py-1.5 px-3 text-right tabular-nums text-[#9A3A2D]">{formatCurrency(e.shortValueSen)}</td>
+                          <td className="py-1.5 px-3 text-right tabular-nums text-[#6B7280]">{e.absentDays > 0 ? `${e.absentDays}d` : "-"}</td>
+                          <td className="py-1.5 px-3 text-right tabular-nums font-semibold text-[#B45309]">{e.shortHours > 0 ? e.shortHours.toFixed(1) : "-"}</td>
+                          <td className="py-1.5 px-3 text-right tabular-nums text-[#B45309]">{e.shortValueSen > 0 ? formatCurrency(e.shortValueSen) : "-"}</td>
                         </tr>
                         {isOpen && breakdown && (
                           <tr className="border-b border-[#F1DDD7] bg-white">
-                            <td colSpan={6} className="px-3 py-2">
+                            <td colSpan={7} className="px-3 py-2">
                               <WorkerDayDrillIn
                                 name={e.name}
                                 idPrefix={`range-gap-day-${e.id}`}
@@ -8927,7 +8990,7 @@ function LaborCostTab({
                   })}
                   {rangeHoursGap.rows.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="py-3 px-3 text-center text-xs text-[#4F7C3A]">
+                      <td colSpan={7} className="py-3 px-3 text-center text-xs text-[#4F7C3A]">
                         {periodWorkingDays.length === 0
                           ? "No working days in this range"
                           : "All factory workers fully logged for this range — no unlogged hours"}
@@ -8937,7 +9000,7 @@ function LaborCostTab({
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-[#E7C9C1]">
-                    <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={4}>Total</td>
+                    <td className="py-1.5 px-3 font-semibold text-[#1F1D1B]" colSpan={5}>Total</td>
                     <td className="py-1.5 px-3 text-right tabular-nums font-bold text-[#9A3A2D]">
                       {rangeHoursGap.totalShortHours.toFixed(1)}
                     </td>

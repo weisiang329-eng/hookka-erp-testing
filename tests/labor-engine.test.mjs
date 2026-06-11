@@ -298,11 +298,11 @@ test("computeMonthlyLabor: ANN absent 2 days — payroll docks ÷calendar-days; 
   assert.equal(r.payroll.basicEarnedSen - r.cost.regularCostSen, 4_986);
 });
 
-test("computeMonthlyLabor: part-month prorate uses ÷working-days (matches cost), not ÷26", () => {
-  // Joined mid-May (day 18). prorateToService pays days SERVED × the
-  // ÷working-days rate — the SAME rate production cost uses — so a part-month
-  // worker's basic earned equals production-cost regular exactly (no leniency
-  // gap; the ÷26 absence rule does not apply to days outside employment).
+test("part-month (owner spec 2026-06-11): salary = employed CALENDAR days x (S / calendar days); absences dock at the calendar rate", () => {
+  // ANN joined 18 May. Window = 14 calendar days (18..31) -> window salary =
+  // round(265000 x 14/31). Window working days = 11; worked 5 -> 6 absences
+  // docked at the calendar rate (265000/31). Cost uses the PERSONALISED day
+  // rate = window salary / 11.
   const r = labor.computeMonthlyLabor({
     worker: ANN,
     year: 2026,
@@ -320,8 +320,29 @@ test("computeMonthlyLabor: part-month prorate uses ÷working-days (matches cost)
     prorateToService: true,
   });
   assert.equal(r.daysWorked, 5);
-  assert.equal(r.payroll.basicEarnedSen, 55_208); // 5 × 265000/24 = 55208.33 → 55208
-  assert.equal(r.payroll.basicEarnedSen, r.cost.regularCostSen);
+  const windowSalary = Math.round((265_000 * 14) / 31);
+  const ded = Math.round(6 * (265_000 / 31));
+  assert.equal(r.payroll.absentDays, 6);
+  assert.equal(r.payroll.basicEarnedSen, Math.max(0, windowSalary - ded));
+  assert.ok(Math.abs(r.costingDailyRateSen - windowSalary / 11) < 1e-6);
+  assert.equal(r.cost.regularCostSen, Math.round(5 * (windowSalary / 11)));
+});
+
+test("part-month owner worked example: RM4,000, 31-day month, 10 employed days -> RM1,290.32", () => {
+  // Owner's exact example: daily rate = 4000/31 = 129.0323; 10 employed
+  // calendar days -> basic 1,290.32 (full attendance in the window).
+  const W = { basicSalarySen: 400_000, workingDaysPerMonth: 26, workingHoursPerDay: 8, otMultiplier: 1.5 };
+  const days = ["2026-05-22", "2026-05-23", "2026-05-25", "2026-05-26", "2026-05-28", "2026-05-29", "2026-05-30"]
+    .map((date) => ({ date, hours: 8 })); // every working day from 22 May (27th is a holiday)
+  const r = labor.computeMonthlyLabor({
+    worker: W, year: 2026, month: 5, days,
+    publicHolidays: MAY_HOLIDAYS, absenceThroughDay: 31,
+    employmentStartDay: 22, prorateToService: true,
+  });
+  assert.equal(r.payroll.absentDays, 0);
+  assert.equal(r.payroll.basicEarnedSen, Math.round((400_000 * 10) / 31)); // 129,032 sen = RM1,290.32
+  // Fully-worked window -> production cost equals the part-month salary (to the sen).
+  assert.equal(r.cost.regularCostSen, Math.round(7 * (Math.round((400_000 * 10) / 31) / 7)));
 });
 
 test("computeMonthlyLabor: short-hour deduction docks ÷working-days hourly from earned", () => {
@@ -773,7 +794,7 @@ test("computeAttendanceDayDetail: several rows on one date aggregate before the 
 });
 
 // -- mid-month estimate parity for part-month workers ------------------------
-test("prorateToService mid-month: future window days count as will-be-worked (estimate parity); month-end unchanged", () => {
+test("prorateToService mid-month estimate: window salary minus CONFIRMED absences only (optimistic like full-month workers)", () => {
   const base = {
     worker: ANN, year: 2026, month: 5,
     days: [{ date: "2026-05-04", hours: 8 }, { date: "2026-05-05", hours: 8 }],
@@ -781,14 +802,16 @@ test("prorateToService mid-month: future window days count as will-be-worked (es
     employmentStartDay: 4,
     prorateToService: true,
   };
-  // Mid-month (cutoff day 9): worked 2 + future working days 10..31 in window.
+  const windowSalary = Math.round((265_000 * 28) / 31); // joined day 4 -> 28 employed calendar days
+  const calRate = 265_000 / 31;
+  // Mid-month (cutoff day 9): window working days elapsed 4..9 = 6, worked 2
+  // -> 4 confirmed absences; future days assumed worked.
   const mid = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 9 });
-  // May 2026 working days 10..31 = 24 total - 7 elapsed through day 9 = 17.
-  const rate = 265000 / 24;
-  assert.equal(mid.payroll.basicEarnedSen, Math.round((2 + 17) * rate));
-  // Month-end (cutoff = last day): future term is 0 -> days-served only.
+  assert.equal(mid.payroll.basicEarnedSen, Math.max(0, windowSalary - Math.round(4 * calRate)));
+  // Month-end: 23 window working days, 2 worked -> 21 absences, all docked.
   const fin = labor.computeMonthlyLabor({ ...base, absenceThroughDay: 31 });
-  assert.equal(fin.payroll.basicEarnedSen, Math.round(2 * rate));
+  assert.equal(fin.payroll.absentDays, 21);
+  assert.equal(fin.payroll.basicEarnedSen, Math.max(0, windowSalary - Math.round(21 * calRate)));
 });
 
 // -- Sunday work must not mask a weekday absence ------------------------------

@@ -651,29 +651,26 @@ export function computeMonthlyLabor(
   const shortHourDeductionHours = Math.max(0, input.shortHourDeductionHours || 0);
   const shortHourDeductionSen = Math.round(shortHourDeductionHours * lateHourlyRateSen);
   // Full-month worker → entitled to the FULL monthly salary, minus absences.
-  // Partial-month worker (joined and/or resigned mid-month) → entitled only to
-  // the days actually served (days worked × daily rate); days outside their
-  // employment window are simply unpaid, NOT charged as absence.
-  // prorateToService selects between the two; either way the owner's explicit
-  // short-hour dock is then subtracted.
-  //
-  // Mid-month ESTIMATE parity: a full-month worker's estimate assumes future
-  // days will be worked (full salary − confirmed absences). Give part-month
-  // workers the same optimism — working days in their window AFTER the grace
-  // cutoff count as "will be worked", so a new joiner's mid-month estimate
-  // isn't a scary near-zero. At month-end (cutoff = last day) this term is 0,
-  // so FINAL pay is unchanged: still exactly days-served × daily rate.
-  const futureWorkingDaysInWindow = Math.max(
+  // Partial-month worker (joined and/or resigned mid-month) → owner's spec
+  // (2026-06-11, "Calculation for New Staff"):
+  //   daily rate = monthly salary ÷ CALENDAR days of the month (28/30/31)
+  //   part-month salary = employed calendar days × that rate
+  //   (e.g. RM4,000 ÷ 31 × 10 employed days = RM1,290.32)
+  // Absences inside the employment window then dock at the SAME calendar-day
+  // rate (the company-wide absence rule), so the mid-month estimate is
+  // naturally optimistic (full window salary − confirmed absences — the same
+  // optimism a full-month worker gets) and the month-end figure is exact.
+  const windowCalendarDays = Math.max(
     0,
-    countElapsedWorkingDays(year, month, employmentEndDay, publicHolidays) -
-      countElapsedWorkingDays(year, month, throughDay, publicHolidays),
+    Math.min(employmentEndDay, monthLastDay) - employmentStartDay + 1,
+  );
+  const windowSalarySen = Math.round(
+    (basicSalarySen * windowCalendarDays) / monthLastDay,
   );
   const basicEarnedSen = Math.max(
     0,
     (input.prorateToService
-      ? Math.round(
-          (workedWithinWindow + futureWorkingDaysInWindow) * costingDailyRateSen,
-        )
+      ? Math.max(0, windowSalarySen - absenceDeductionSen)
       : Math.max(0, basicSalarySen - absenceDeductionSen)) - shortHourDeductionSen,
   );
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
@@ -691,7 +688,25 @@ export function computeMonthlyLabor(
 
   // ── Production labor cost side. Regular = days actually worked × the
   //    holiday-adjusted day rate. OT cost equals OT pay exactly (÷26).
-  const regularCostSen = Math.round(daysWorked * costingDailyRateSen);
+  //    Part-month workers (owner spec 2026-06-11): their day rate = their
+  //    part-month salary ÷ the WORKING days inside their employment window
+  //    ("拿这个薪水除以他实际可以工作的天数") — a fully-worked window then
+  //    costs exactly what payroll pays, so it ties by construction.
+  const windowWorkingDays = Math.max(
+    0,
+    countElapsedWorkingDays(
+      year,
+      month,
+      Math.min(employmentEndDay, monthLastDay),
+      publicHolidays,
+    ) -
+      countElapsedWorkingDays(year, month, employmentStartDay - 1, publicHolidays),
+  );
+  const effectiveCostingDailyRateSen =
+    input.prorateToService && windowWorkingDays > 0
+      ? windowSalarySen / windowWorkingDays
+      : costingDailyRateSen;
+  const regularCostSen = Math.round(daysWorked * effectiveCostingDailyRateSen);
   const otCostSen = otPaySen;
   const totalCostSen = regularCostSen + otCostSen;
 
@@ -704,7 +719,9 @@ export function computeMonthlyLabor(
     otHolidayHours,
     payrollDailyRateSen,
     otHourlyRateSen,
-    costingDailyRateSen,
+    // Part-month workers report their PERSONALISED window rate (owner spec) so
+    // every consumer costs their days at the rate that ties to their payroll.
+    costingDailyRateSen: effectiveCostingDailyRateSen,
     payroll: {
       fullSalarySen: basicSalarySen,
       absentDays,

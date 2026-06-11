@@ -42,6 +42,7 @@ const {
   resolveInvoiceRecipient,
   dispatchNoticeTemplate,
   invoiceNoticeTemplate,
+  cnDispatchNoticeTemplate,
   fmtEmailDate,
   fmtEmailRM,
 } = notify;
@@ -226,6 +227,100 @@ test("templates: no bank details, no unsubscribe footer, English only", () => {
     totalSen: 100,
   });
   for (const out of [d.html, d.text, i.html, i.text]) {
+    assert.doesNotMatch(out, /bank|account no/i, "no bank details");
+    assert.doesNotMatch(out, /unsubscribe/i, "no unsubscribe footer");
+    assert.doesNotMatch(
+      out,
+      /[\u4E00-\u9FFF]/,
+      "UI/email content must be 100% English",
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CN dispatch notice — the CN twin (2026-06-11). DISPATCH ONLY: consignment
+// notes never have invoices, so there is no CN invoice template to test.
+// ---------------------------------------------------------------------------
+
+test("CN dispatch template: subject + body carry cnNo, items, deliver-to, Malaysia time", () => {
+  const tpl = cnDispatchNoticeTemplate({
+    cnNo: "CGN-2606-001",
+    customerName: "Houzs Century Sdn Bhd",
+    dispatchedAt: "2026-06-11T03:30:00.000Z", // = 11:30 AM in Malaysia (UTC+8)
+    deliverTo: "Houzs KL, 12 Jalan Example, 47000 Sungai Buloh",
+    itemsSummary: "3 × HB Alpha King, 2 × Stool",
+    hasAttachment: true,
+    driverName: "Ah Seng",
+    driverContact: "012-3456789",
+    lorryPlate: "BHM9130",
+  });
+  assert.equal(
+    tpl.subject,
+    "Goods Dispatched — Consignment Note CGN-2606-001 | HOOKKA INDUSTRIES",
+  );
+  for (const out of [tpl.html, tpl.text]) {
+    assert.match(out, /CGN-2606-001/);
+    assert.match(out, /Dear Houzs Century Sdn Bhd/);
+    assert.match(out, /3 × HB Alpha King, 2 × Stool/);
+    assert.match(out, /Houzs KL/);
+    assert.match(out, /Ah Seng/);
+    assert.match(out, /012-3456789/);
+    assert.match(out, /BHM9130/);
+    // Dispatch Date carries the TIME, rendered in Asia/Kuala_Lumpur, not UTC.
+    assert.match(out, /11:30\s*AM/i);
+    assert.match(out, /Please find the Consignment Note attached/);
+    assert.match(out, /HOOKKA INDUSTRIES SDN BHD/);
+  }
+  // Receiving-team instruction references the Consignment Note, not the DO.
+  assert.match(
+    tpl.text,
+    /check the goods against the Consignment Note upon arrival/,
+  );
+  assert.doesNotMatch(tpl.text, /Delivery Order/);
+});
+
+test("CN dispatch template: carrier rows omitted when blank (CNs often have no 3PL)", () => {
+  const bare = cnDispatchNoticeTemplate({
+    cnNo: "CGN-2606-002",
+    customerName: "Carress",
+    dispatchedAt: null,
+    deliverTo: "Carress PG",
+    itemsSummary: "",
+    hasAttachment: false,
+  });
+  for (const out of [bare.html, bare.text]) {
+    assert.doesNotMatch(out, /Driver/);
+    assert.doesNotMatch(out, /Contact No\./);
+    assert.doesNotMatch(out, /Lorry Plate/);
+    assert.doesNotMatch(out, /Items/);
+  }
+  // The fully-empty carrier block renders cleanly — the core rows survive.
+  assert.match(bare.text, /Consignment Note No\. : CGN-2606-002/);
+  assert.match(bare.text, /Deliver To           : Carress PG/);
+});
+
+test("CN dispatch template: 'attached' line dropped when no PDF made it", () => {
+  const tpl = cnDispatchNoticeTemplate({
+    cnNo: "CGN-2606-003",
+    customerName: "Carress",
+    dispatchedAt: null,
+    deliverTo: "Carress PG",
+    hasAttachment: false,
+  });
+  assert.doesNotMatch(tpl.html, /Please find the Consignment Note attached/);
+  // The receiving-team check instruction stays either way.
+  assert.match(tpl.text, /check the goods against the Consignment Note/);
+});
+
+test("CN dispatch template: no bank details, no unsubscribe, English only", () => {
+  const tpl = cnDispatchNoticeTemplate({
+    cnNo: "CGN-1",
+    customerName: "C",
+    dispatchedAt: null,
+    deliverTo: "X",
+    hasAttachment: true,
+  });
+  for (const out of [tpl.html, tpl.text]) {
     assert.doesNotMatch(out, /bank|account no/i, "no bank details");
     assert.doesNotMatch(out, /unsubscribe/i, "no unsubscribe footer");
     assert.doesNotMatch(
@@ -541,4 +636,138 @@ test("frontend: bulk + single transition paths fire the notify flow", () => {
   // Summary toast shape from the spec.
   assert.match(pageSrc, /Dispatch notice emailed for \$\{queued\} DO\(s\)/);
   assert.match(pageSrc, /Invoice notice emailed for \$\{queued\} DO\(s\)/);
+});
+
+// ---------------------------------------------------------------------------
+// CN twin — structural pins (2026-06-11). Same source-text style as the DO
+// pins above so a refactor can't silently drop a link of the CN chain.
+// ---------------------------------------------------------------------------
+
+const cnRouteSrc = readFileSync(
+  new URL("../src/api/routes/consignment-notes.ts", import.meta.url),
+  "utf8",
+);
+const cnPageSrc = readFileSync(
+  new URL("../src/pages/consignment/note.tsx", import.meta.url),
+  "utf8",
+);
+const cnPdfSrc = readFileSync(
+  new URL("../src/lib/generate-cn-pdf.ts", import.meta.url),
+  "utf8",
+);
+
+test("CN notify endpoint: RBAC, dispatch-only kind, status guard, no-recipient skip", () => {
+  assert.match(
+    cnRouteSrc,
+    /app\.post\("\/:id\/notify-customer", async \(c\) => \{\s*\/\/[^\n]*\n\s*const denied = await requirePermission\(c, "consignment-notes", "update"\);/,
+    "endpoint must gate on consignment-notes:update",
+  );
+  // Any kind other than "dispatch" is a 400 — CNs never have invoice emails.
+  assert.match(cnRouteSrc, /if \(body\.kind !== "dispatch"\) \{/);
+  assert.match(
+    cnRouteSrc,
+    /consignment notes have no invoice emails/,
+    "400 message must say CNs have no invoice emails",
+  );
+  // 409 guard for stray calls (dispatched CN states only).
+  assert.match(
+    cnRouteSrc,
+    /Dispatch notice requires a dispatched CN \(PARTIALLY_SOLD\/IN_TRANSIT\)/,
+  );
+  // Both-blank recipients → skip without recording anything (DO parity).
+  assert.match(cnRouteSrc, /resolveDispatchRecipient\(hubEmail, customer\?\.email\)/);
+  assert.match(cnRouteSrc, /skipped: true, reason: "no recipient"/);
+  // No invoice / delivered email anywhere on the CN notify path.
+  assert.doesNotMatch(cnRouteSrc, /invoiceNoticeTemplate/);
+  assert.doesNotMatch(cnRouteSrc, /deliveredEmailAt|deliveredemailat/);
+});
+
+test("CN notify idempotency: folded-lowercase runtime column, dual-key read, atomic claim", () => {
+  // Self-applied stamp column, spelled folded-lowercase in the DDL.
+  assert.match(
+    cnRouteSrc,
+    /ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS dispatchemailat TEXT/,
+  );
+  // Dual-key read per BUG-2026-06-11-007 (runtime columns live folded).
+  assert.match(cnRouteSrc, /cn\.dispatchEmailAt \?\? cn\.dispatchemailat/);
+  // Atomic claim so a double-click can't double-send.
+  assert.match(
+    cnRouteSrc,
+    /UPDATE consignment_notes SET dispatchemailat = \? WHERE id = \? AND dispatchemailat IS NULL/,
+  );
+  assert.match(cnRouteSrc, /skipped: true, reason: "already sent"/);
+  // Enqueue failure releases the claim (transition itself is never touched).
+  assert.match(
+    cnRouteSrc,
+    /UPDATE consignment_notes SET dispatchemailat = NULL WHERE id = \?/,
+  );
+});
+
+test("CN notify: 5 MB pre-check runs BEFORE templating; hasAttachment never lies", () => {
+  const capIdx = cnRouteSrc.indexOf(
+    "const PDF_ATTACH_CAP_BYTES = 5 * 1024 * 1024;",
+  );
+  const tplIdx = cnRouteSrc.indexOf("cnDispatchNoticeTemplate({");
+  assert.ok(capIdx > 0, "5 MB cap must exist on the CN notify path");
+  assert.ok(tplIdx > capIdx, "5 MB cap must be computed before templating");
+  // Same decoded-size math as the DO endpoint.
+  assert.match(
+    cnRouteSrc,
+    /Math\.floor\(pdfBase64\.length \* 0\.75\) > PDF_ATTACH_CAP_BYTES/,
+  );
+  // The template's "attached" line follows the actual attachments value.
+  assert.match(cnRouteSrc, /hasAttachment: !!attachments/);
+});
+
+test("CN PDF: base64 export reuses the shared render/stamp path (no layout fork)", () => {
+  assert.match(
+    cnPdfSrc,
+    /export function generateCnPdfBase64\(data: CNPdfData\): string \{\s*\n\s*const doc = new jsPDF\(\{ orientation: "portrait", unit: "mm", format: "a4", compress: true \}\);\s*\n\s*renderCnInto\(doc, data\);\s*\n\s*stampCnFooters\(doc\);/,
+    "base64 export must render via renderCnInto + stampCnFooters",
+  );
+});
+
+test("CN page: single + bulk dispatch paths fire the notify flow (dispatch only)", () => {
+  // The fire-and-forget sender posts kind "dispatch" with the PDF from the
+  // SAME buildCnPdfData payload the Print buttons use.
+  assert.match(cnPageSrc, /\/notify-customer`,/);
+  assert.match(
+    cnPageSrc,
+    /JSON\.stringify\(\{ kind: "dispatch", pdfBase64, pdfFilename \}\)/,
+  );
+  assert.match(cnPageSrc, /generateCnPdfBase64\(buildCnPdfData\(row\)\)/);
+  // Single path: the Mark Dispatched dialog confirm notifies after success.
+  assert.equal(
+    count(cnPageSrc, /notifyCnCustomersAfterDispatch\(\[\s*\n?\s*\{\s*\n?\s*\.\.\.dispatchDialog,/g),
+    1,
+    "dialog confirm (single Mark Dispatched) must notify",
+  );
+  // Bulk path: runBulkCnTransition notifies every CN that actually moved
+  // into PARTIALLY_SOLD — and ONLY on the dispatch transition.
+  assert.match(
+    cnPageSrc,
+    /if \(nextStatus === "PARTIALLY_SOLD"\) \{\s*\n\s*notifyCnCustomersAfterDispatch\(\s*\n\s*cnList\.filter\(\(c\) => succeededIds\.includes\(c\.id\)\),\s*\n\s*\);/,
+    "bulk Mark Dispatched must notify the succeeded rows only",
+  );
+  // Summary toast shape mirrors the DO side.
+  assert.match(cnPageSrc, /Dispatch notice emailed for \$\{queued\} CN\(s\)/);
+  // No invoice/delivered notice anywhere on the CN page.
+  assert.doesNotMatch(cnPageSrc, /Invoice notice emailed/);
+});
+
+test("migration 0163 exists and is additive (folded-lowercase column)", () => {
+  const sql = readFileSync(
+    new URL(
+      "../migrations-postgres/0163_consignment_notes_dispatch_email.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(
+    sql,
+    /ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS dispatchemailat TEXT;/,
+  );
+  // The folded-lowercase spelling, never camelCase, in the migration SQL
+  // statement itself (the header comment may reference the dual-key read).
+  assert.match(sql, /dispatchemailat TEXT;/);
 });

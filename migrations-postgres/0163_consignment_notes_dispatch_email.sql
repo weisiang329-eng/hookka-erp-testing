@@ -1,0 +1,24 @@
+-- ---------------------------------------------------------------------------
+-- 0163_consignment_notes_dispatch_email.sql — idempotency stamp for the CN
+-- customer dispatch notice.
+--
+-- Why: POST /api/consignment-notes/:id/notify-customer (the CN twin of the
+-- DO dispatch email, 2026-06-11) stamps consignment_notes.dispatchemailat
+-- when the notice is queued, claimed atomically
+-- (UPDATE ... WHERE dispatchemailat IS NULL) so a double-click or a
+-- re-dispatch can never email the customer twice. Consignment notes have NO
+-- invoice email (owner ruling: CNs never carry invoices), so there is no
+-- deliveredemailat twin here — dispatch is the only CN notice.
+--
+-- The column name is deliberately folded-lowercase (dispatchemailat):
+-- unquoted camelCase DDL folds to lowercase on Postgres anyway
+-- (BUG-2026-06-11-007), so spelling it folded keeps SQL, runtime ensure, and
+-- this migration byte-identical. Reads stay dual-key
+-- (row.dispatchEmailAt ?? row.dispatchemailat) for safety.
+--
+-- The same ALTER also self-applies at runtime (ensureCnNotifyEmailColumn in
+-- src/api/routes/consignment-notes.ts) so deploy ordering can't break the
+-- endpoint. Rows without a value behave exactly as before.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS dispatchemailat TEXT;

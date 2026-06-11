@@ -348,6 +348,22 @@ export function generateCNPdf(
   doc.save(fileName);
 }
 
+// Same branded single-CN document as generateCNPdf, returned as a base64
+// string instead of saved/opened — feeds the customer dispatch notice
+// attachment (POST /api/consignment-notes/:id/notify-customer). Renders via
+// the EXACT renderCnInto + stampCnFooters path the print flows use, so the
+// emailed PDF is byte-for-byte the printed one. Mirrors generateDoPdfBase64
+// in generate-do-pdf.ts.
+export function generateCnPdfBase64(data: CNPdfData): string {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
+  renderCnInto(doc, data);
+  stampCnFooters(doc);
+  // datauristring = "data:application/pdf;filename=…;base64,<payload>".
+  const uri = String(doc.output("datauristring"));
+  const at = uri.indexOf("base64,");
+  return at >= 0 ? uri.slice(at + "base64,".length) : "";
+}
+
 // ---------------------------------------------------------------------------
 // Consolidated CN packing list (owner decision "2B", 2026-06-11): pure
 // print, CN-side twin of generateConsolidatedDoPdf. ONE document = a cover

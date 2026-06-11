@@ -1175,6 +1175,129 @@ export default function ConsignmentNotePage() {
     toast,
   ]);
 
+  // buildCnPdfData is the SINGLE print-payload assembler — the single-CN
+  // print, the consolidated packing-list print AND the emailed dispatch-
+  // notice PDF all go through it so the hub address/contact/state/
+  // transport resolution can never drift between the documents. Declared
+  // here (above the dispatch-notice sender) because the sender closes
+  // over it; the Print handlers further down reuse it.
+  const buildCnPdfData = useCallback(
+    (row: ConsignmentNoteRow): CNPdfData => {
+      const cust = customersData.find((c) => c.id === row.customerId);
+      const hub = cust?.deliveryHubs?.find((h) => h.id === row.hubId);
+      // Resolve the destination state to its full label — hub state wins,
+      // else the CN's free-text branch label. Same resolveStateCode chain
+      // the DO detail uses for its Delivery State line.
+      const rawState = hub?.state || row.branchName || "";
+      const code = resolveStateCode(rawState);
+      const stateLabel =
+        MALAYSIA_STATES.find((s) => s.code === code)?.label ?? rawState;
+      const transportCompany =
+        providers.find((p) => p.id === row.driverId)?.name ||
+        row.driverCompany ||
+        "";
+      return {
+        cnNo: row.cnNo,
+        customerName: row.customerName,
+        deliverTo: hub?.shortName || row.branchName || "",
+        deliveryAddress: hub?.address || "",
+        stateLabel,
+        contactPerson: hub?.contactName || "",
+        contactPhone: hub?.phone || "",
+        dispatchDate: row.dispatchDate,
+        transportCompany,
+        driverName: row.driverName,
+        driverPhone: row.driverPhone,
+        vehicleNo: row.vehicleNo,
+        vehicleType: row.vehicleType,
+        items: row.items.map((it) => ({
+          productCode: it.productCode,
+          productName: it.productName,
+          sizeLabel: it.sizeLabel,
+          fabricCode: it.fabricCode,
+          quantity: it.quantity,
+          itemM3: it.itemM3,
+          consignmentOrderNo: it.consignmentOrderNo,
+        })),
+      };
+    },
+    [customersData, providers],
+  );
+
+  // ---------------------------------------------------------------------
+  // Customer dispatch notice (2026-06-11) — CN twin of the DO page's
+  // notifyCustomersAfterTransition. After a SUCCESSFUL transition into
+  // PARTIALLY_SOLD ("Mark Dispatched"), fire POST
+  // /api/consignment-notes/:id/notify-customer with the branded CN PDF
+  // (the same buildCnPdfData payload the Print buttons use) attached as
+  // base64. Strictly fire-and-forget: every failure is console.warn'd and
+  // swallowed — an email must NEVER block, fail, or toast-error the
+  // dispatch itself. The backend owns the recipient chain (hub →
+  // customer → silent skip), the idempotency stamp
+  // (consignment_notes.dispatchemailat) and every number; this side only
+  // contributes the PDF. DISPATCH ONLY — consignment notes never have
+  // invoices, so there is no delivered/invoice notice for CNs.
+  // ---------------------------------------------------------------------
+  const notifyCnCustomersAfterDispatch = useCallback(
+    (rows: ConsignmentNoteRow[]) => {
+      if (rows.length === 0) return;
+      void (async () => {
+        let queued = 0;
+        for (const row of rows) {
+          try {
+            let pdfBase64: string | undefined;
+            let pdfFilename: string | undefined;
+            try {
+              const { generateCnPdfBase64 } = await import(
+                "@/lib/generate-cn-pdf"
+              );
+              pdfBase64 = generateCnPdfBase64(buildCnPdfData(row));
+              // Same filename rule as printCNPdf — cnNo already carries the
+              // CGN-/legacy CON- prefix.
+              pdfFilename = `${
+                row.cnNo.startsWith("CGN-") || row.cnNo.startsWith("CON-")
+                  ? row.cnNo
+                  : `CGN-${row.cnNo}`
+              }.pdf`;
+            } catch (pdfErr) {
+              // Graceful — the backend sends the notice without the PDF.
+              console.warn(
+                `[consignment] CN PDF for ${row.cnNo} dispatch notice failed`,
+                pdfErr,
+              );
+            }
+            const r = await fetch(
+              `/api/consignment-notes/${encodeURIComponent(row.id)}/notify-customer`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ kind: "dispatch", pdfBase64, pdfFilename }),
+              },
+            );
+            const j = (await r.json().catch(() => ({}))) as {
+              queued?: boolean;
+            };
+            if (r.ok && j?.queued) queued++;
+            else if (!r.ok) {
+              console.warn(
+                `[consignment] dispatch notice for ${row.cnNo} failed: HTTP ${r.status}`,
+              );
+            }
+          } catch (err) {
+            console.warn(
+              `[consignment] dispatch notice for ${row.cnNo} failed`,
+              err,
+            );
+          }
+        }
+        if (queued > 0) {
+          toast.success(`Dispatch notice emailed for ${queued} CN(s)`);
+        }
+      })();
+    },
+    [buildCnPdfData, toast],
+  );
+
   // ---------- Mark Dispatched — confirm handler ----------
   // Wired to the Mark Dispatched dialog's Confirm button. PUT-by-id with
   // the picked transport ids + status:'PARTIALLY_SOLD'. Backend
@@ -1204,7 +1327,40 @@ export default function ConsignmentNotePage() {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         toast.error(body.error || "Failed to mark dispatched");
       } else {
+        // Read the updated CN off the PUT response: it carries the
+        // backend-resolved transport + the fresh dispatchedAt stamp, so the
+        // emailed PDF shows what the operator JUST picked instead of the
+        // stale pre-dispatch row still sitting in state.
+        const j = (await res.json().catch(() => null)) as {
+          data?: {
+            driverId?: string | null;
+            vehicleId?: string | null;
+            driverName?: string;
+            driverPhone?: string;
+            driverContactPerson?: string;
+            vehicleNo?: string;
+            vehicleType?: string;
+            dispatchedAt?: string | null;
+          };
+        } | null;
+        const updated = j?.data;
         toast.success(`${dispatchDialog.cnNo} dispatched`);
+        // Customer dispatch notice — fire-and-forget AFTER the successful
+        // transition; never blocks or fails the dispatch itself.
+        notifyCnCustomersAfterDispatch([
+          {
+            ...dispatchDialog,
+            driverId: updated?.driverId ?? dispatchDialog.driverId,
+            vehicleId: updated?.vehicleId ?? dispatchDialog.vehicleId,
+            driverName: updated?.driverName || dispatchDialog.driverName,
+            driverPhone: updated?.driverPhone || dispatchDialog.driverPhone,
+            driverCompany:
+              updated?.driverContactPerson || dispatchDialog.driverCompany,
+            vehicleNo: updated?.vehicleNo || dispatchDialog.vehicleNo,
+            vehicleType: updated?.vehicleType || dispatchDialog.vehicleType,
+            dispatchDate: updated?.dispatchedAt || dispatchDialog.dispatchDate,
+          },
+        ]);
         setDispatchDialog(null);
         setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
         // Clear pending name resolution so the next dispatch dialog open
@@ -1217,7 +1373,7 @@ export default function ConsignmentNotePage() {
     } finally {
       setDispatchSaving(false);
     }
-  }, [dispatchDialog, dispatchForm, fetchData, toast]);
+  }, [dispatchDialog, dispatchForm, fetchData, toast, notifyCnCustomersAfterDispatch]);
 
   // ---------- Bulk status transitions (mirrors DO's bulk buttons) ----------
   // Copied from runBulkDoTransition (src/pages/delivery/index.tsx) with the
@@ -1242,6 +1398,7 @@ export default function ConsignmentNotePage() {
     const skippedNote =
       skipped > 0 ? ` (${skipped} skipped — status doesn't allow it)` : "";
     const failures: string[] = [];
+    const succeededIds: string[] = [];
     for (const id of cnIds) {
       try {
         const r = await fetch(`/api/consignment-notes/${id}`, {
@@ -1252,6 +1409,8 @@ export default function ConsignmentNotePage() {
         if (!r.ok) {
           const body = (await r.json().catch(() => ({}))) as { error?: string };
           failures.push(body?.error || `HTTP ${r.status}`);
+        } else {
+          succeededIds.push(id);
         }
       } catch (e) {
         failures.push(e instanceof Error ? e.message : String(e));
@@ -1272,6 +1431,16 @@ export default function ConsignmentNotePage() {
     // refresh, and staying selected lets the operator chain transitions
     // (Mark Dispatched → Mark Delivered) without re-ticking.
     fetchData();
+    // Customer dispatch notices for every CN that actually moved into
+    // PARTIALLY_SOLD ("Mark Dispatched"). Fire-and-forget — the
+    // transitions above are already committed. Delivered/Acknowledged
+    // transitions send nothing: consignment notes never have invoices
+    // (owner ruling), so the dispatch notice is the only CN email.
+    if (nextStatus === "PARTIALLY_SOLD") {
+      notifyCnCustomersAfterDispatch(
+        cnList.filter((c) => succeededIds.includes(c.id)),
+      );
+    }
   };
 
   // Bulk Mark Dispatched — PENDING (ACTIVE) rows only. Uses the stored
@@ -1613,53 +1782,9 @@ export default function ConsignmentNotePage() {
   // ("download") or open on screen ("view"). Replaces the old "Print CN —
   // coming soon" toast (owner 2026-06-11: CN documents must match DO).
   //
-  // buildCnPdfData is the SINGLE payload assembler — the single-CN print
-  // and the consolidated packing-list print both go through it so the hub
-  // address/contact/state/transport resolution can never drift between
-  // the two documents.
-  const buildCnPdfData = useCallback(
-    (row: ConsignmentNoteRow): CNPdfData => {
-      const cust = customersData.find((c) => c.id === row.customerId);
-      const hub = cust?.deliveryHubs?.find((h) => h.id === row.hubId);
-      // Resolve the destination state to its full label — hub state wins,
-      // else the CN's free-text branch label. Same resolveStateCode chain
-      // the DO detail uses for its Delivery State line.
-      const rawState = hub?.state || row.branchName || "";
-      const code = resolveStateCode(rawState);
-      const stateLabel =
-        MALAYSIA_STATES.find((s) => s.code === code)?.label ?? rawState;
-      const transportCompany =
-        providers.find((p) => p.id === row.driverId)?.name ||
-        row.driverCompany ||
-        "";
-      return {
-        cnNo: row.cnNo,
-        customerName: row.customerName,
-        deliverTo: hub?.shortName || row.branchName || "",
-        deliveryAddress: hub?.address || "",
-        stateLabel,
-        contactPerson: hub?.contactName || "",
-        contactPhone: hub?.phone || "",
-        dispatchDate: row.dispatchDate,
-        transportCompany,
-        driverName: row.driverName,
-        driverPhone: row.driverPhone,
-        vehicleNo: row.vehicleNo,
-        vehicleType: row.vehicleType,
-        items: row.items.map((it) => ({
-          productCode: it.productCode,
-          productName: it.productName,
-          sizeLabel: it.sizeLabel,
-          fabricCode: it.fabricCode,
-          quantity: it.quantity,
-          itemM3: it.itemM3,
-          consignmentOrderNo: it.consignmentOrderNo,
-        })),
-      };
-    },
-    [customersData, providers],
-  );
-
+  // The payload assembler (buildCnPdfData) is declared further up, before
+  // the customer dispatch-notice sender — the emailed CN PDF goes through
+  // the SAME assembler so email and print can never drift.
   const printCNPdf = useCallback(
     async (
       row: ConsignmentNoteRow,

@@ -6,6 +6,10 @@
 //     PDF attached.
 //   * DELIVERED  (DO status → DELIVERED): invoice notice with the Invoice
 //     PDF attached (an invoice is auto-created by the DELIVERED cascade).
+// And by POST /api/consignment-notes/:id/notify-customer (consignment-notes.ts):
+//   * dispatch (CN status → PARTIALLY_SOLD, "Mark Dispatched"): CN dispatch
+//     notice with the branded CN PDF attached. DISPATCH ONLY — consignment
+//     notes never have invoices, so there is no delivered/invoice variant.
 //
 // Recipient rules (owner-confirmed 2026-06-11):
 //   * Dispatch email: the DO's delivery hub email first; blank → the
@@ -265,6 +269,111 @@ export function dispatchNoticeTemplate(args: DispatchNoticeArgs): EmailTemplate 
     html: wrapHtml({
       headerKicker: "Dispatch Notice",
       headerTitle: `Delivery Order ${args.doNo}`,
+      bodyHtml,
+    }),
+    text: textLines.join("\n"),
+  };
+}
+
+export interface CnDispatchNoticeArgs {
+  /** consignment_notes.noteNumber, e.g. "CGN-2606-001". */
+  cnNo: string;
+  customerName: string;
+  /** consignment_notes.dispatchedAt (ISO). */
+  dispatchedAt: string | null;
+  /** Hub shortName + address joined by the caller; falls back to branchName. */
+  deliverTo: string;
+  /** Per-product qty summary, e.g. "3 × HB Alpha King, 2 × Stool". */
+  itemsSummary?: string;
+  /** Whether the CN PDF is actually attached (drives the "attached" line). */
+  hasAttachment: boolean;
+  /**
+   * CN carrier fields (consignment_notes.driverName / driverPhone /
+   * vehicleNo). Each row is OMITTED when blank — CNs often carry no 3PL
+   * at all (the owner keys transport on the DO side), and a fully-empty
+   * carrier block must render cleanly with no orphan rows.
+   */
+  driverName?: string | null;
+  driverContact?: string | null;
+  lorryPlate?: string | null;
+}
+
+/**
+ * Dispatch notice for a Consignment Note — the CN twin of
+ * dispatchNoticeTemplate above (same tone/structure, consignment wording).
+ * Fires on the CN's "Mark Dispatched" transition ONLY: consignment notes
+ * never have invoices, so there is no delivered/invoice variant for CNs.
+ */
+export function cnDispatchNoticeTemplate(
+  args: CnDispatchNoticeArgs,
+): EmailTemplate {
+  const subject = `Goods Dispatched — Consignment Note ${args.cnNo} | ${COMPANY_SHORT}`;
+  // Date AND time (Malaysia) — same owner rule as the DO dispatch notice:
+  // the customer must know what time the truck left, not just the day.
+  const dispatchDate = fmtEmailDateTime(args.dispatchedAt);
+  const summary = (args.itemsSummary ?? "").trim();
+  const driverName = (args.driverName ?? "").trim();
+  const driverContact = (args.driverContact ?? "").trim();
+  const lorryPlate = (args.lorryPlate ?? "").trim();
+
+  const rows: string[] = [
+    tableRow("Consignment Note No.", escapeHtml(args.cnNo)),
+    tableRow("Dispatch Date", escapeHtml(dispatchDate)),
+    tableRow("Deliver To", escapeHtml(args.deliverTo || "-")),
+  ];
+  if (driverName) rows.push(tableRow("Driver", escapeHtml(driverName)));
+  if (driverContact) rows.push(tableRow("Contact No.", escapeHtml(driverContact)));
+  if (lorryPlate) rows.push(tableRow("Lorry Plate", escapeHtml(lorryPlate)));
+  if (summary) rows.push(tableRow("Items", escapeHtml(summary)));
+
+  const attachedLine = args.hasAttachment
+    ? "Please find the Consignment Note attached for your records. Kindly have your receiving team check the goods against the Consignment Note upon arrival and note any discrepancy on the delivery copy at the point of receipt."
+    : "Kindly have your receiving team check the goods against the Consignment Note upon arrival and note any discrepancy on the delivery copy at the point of receipt.";
+
+  const bodyHtml = [
+    p(`Dear ${escapeHtml(args.customerName)},`),
+    p(
+      "We are pleased to inform you that the consignment goods under the following note have been dispatched and are on their way to your premises:",
+    ),
+    detailsTable(rows),
+    p(escapeHtml(attachedLine)),
+    p(
+      "Should you have any questions regarding this consignment, please do not hesitate to contact us.",
+    ),
+    p("Thank you for your business."),
+    p(
+      `Best regards,<br /><strong>${escapeHtml(COMPANY_NAME)}</strong>`,
+    ),
+  ].join("\n");
+
+  const textLines = [
+    `Dear ${args.customerName},`,
+    "",
+    "We are pleased to inform you that the consignment goods under the following note have been dispatched and are on their way to your premises:",
+    "",
+    `  Consignment Note No. : ${args.cnNo}`,
+    `  Dispatch Date        : ${dispatchDate}`,
+    `  Deliver To           : ${args.deliverTo || "-"}`,
+    ...(driverName ? [`  Driver               : ${driverName}`] : []),
+    ...(driverContact ? [`  Contact No.          : ${driverContact}`] : []),
+    ...(lorryPlate ? [`  Lorry Plate          : ${lorryPlate}`] : []),
+    ...(summary ? [`  Items                : ${summary}`] : []),
+    "",
+    attachedLine,
+    "",
+    "Should you have any questions regarding this consignment, please do not hesitate to contact us.",
+    "",
+    "Thank you for your business.",
+    "",
+    "Best regards,",
+    COMPANY_NAME,
+  ];
+
+  return {
+    subject,
+    html: wrapHtml({
+      headerKicker: "Dispatch Notice",
+      headerTitle: `Consignment Note ${args.cnNo}`,
       bodyHtml,
     }),
     text: textLines.join("\n"),

@@ -30,6 +30,11 @@ import { nextInvoiceNo } from "./invoices";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
+import { enqueueEmail } from "../lib/email-outbox";
+import {
+  cnDispatchNoticeTemplate,
+  resolveDispatchRecipient,
+} from "../lib/customer-notify";
 
 const app = new Hono<Env>();
 
@@ -1065,6 +1070,272 @@ app.post("/:id/convert-to-invoice", async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/consignment-notes/:id/convert-to-invoice] failed:", msg);
     return c.json({ success: false, error: msg || "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/consignment-notes/:id/notify-customer — customer dispatch notice
+// (2026-06-11, the CN twin of delivery-orders' notify-customer endpoint).
+//
+// kind "dispatch" ONLY: dispatch notice with the branded CN PDF attached.
+// Owner ruling: consignment notes NEVER have invoices, so there is no
+// delivered/FULLY_SOLD email and no invoice notice here — any other kind is
+// rejected with 400.
+//
+// The frontend (src/pages/consignment/note.tsx) calls this fire-and-forget
+// AFTER a successful "Mark Dispatched" transition (ACTIVE → PARTIALLY_SOLD);
+// an email failure must NEVER block, slow, or roll back the transition, so
+// this endpoint only ever enqueues into the durable outbox (outbox_emails —
+// drained by the cron at /api/internal/process-email-outbox) and answers
+// 200 for every skip case.
+//
+// Recipient chain (same owner rule as the DO dispatch notice): the CN's
+// delivery hub email first, blank → the customer's email, both blank →
+// silent skip (console.log only, nothing recorded).
+//
+// Numbers come from the DB row (noteNumber, dispatchedAt, carrier fields,
+// items) — the caller supplies only the client-rendered CN PDF, the same
+// buildCnPdfData payload the Print buttons use.
+//
+// Idempotency: a dispatchemailat stamp on consignment_notes, claimed
+// atomically (UPDATE … WHERE dispatchemailat IS NULL) so a double-click or
+// a re-dispatch can't spam the customer. The column is runtime self-applied
+// below AND shipped as migration 0163; the name is deliberately
+// folded-lowercase (unquoted camelCase DDL folds to lowercase anyway —
+// BUG-2026-06-11-007), so reads are dual-key.
+// ---------------------------------------------------------------------------
+let cnNotifyEmailColumn: Promise<void> | null = null;
+function ensureCnNotifyEmailColumn(db: D1Database): Promise<void> {
+  if (cnNotifyEmailColumn) return cnNotifyEmailColumn;
+  cnNotifyEmailColumn = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE consignment_notes ADD COLUMN IF NOT EXISTS dispatchemailat TEXT",
+        )
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+  })();
+  return cnNotifyEmailColumn;
+}
+
+app.post("/:id/notify-customer", async (c) => {
+  // Same RBAC gate as the status transition that triggers it (PUT /:id).
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  try {
+    await ensureCnNotifyEmailColumn(c.var.DB);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      kind?: string;
+      pdfBase64?: string;
+      pdfFilename?: string;
+    };
+    if (body.kind !== "dispatch") {
+      return c.json(
+        {
+          success: false,
+          error:
+            'kind must be "dispatch" — consignment notes have no invoice emails, only the dispatch notice',
+        },
+        400,
+      );
+    }
+
+    // SELECT * so the runtime-added stamp column comes back too (it lives
+    // folded-lowercase; never use an explicit camelCase projection for it).
+    const cn = await c.var.DB.prepare(
+      "SELECT * FROM consignment_notes WHERE id = ?",
+    )
+      .bind(id)
+      .first<
+        ConsignmentNoteRow & {
+          dispatchEmailAt?: string | null;
+          dispatchemailat?: string | null;
+        }
+      >();
+    if (!cn) {
+      return c.json(
+        { success: false, error: "Consignment note not found" },
+        404,
+      );
+    }
+
+    // Status guard — a dispatch notice for a CN that isn't dispatched is a
+    // stray call. PARTIALLY_SOLD/IN_TRANSIT are CN's "goods left the
+    // warehouse" states (mirrors the DO guard on LOADED/IN_TRANSIT).
+    if (cn.status !== "PARTIALLY_SOLD" && cn.status !== "IN_TRANSIT") {
+      return c.json(
+        {
+          success: false,
+          error: `Dispatch notice requires a dispatched CN (PARTIALLY_SOLD/IN_TRANSIT); ${cn.noteNumber} is ${cn.status}`,
+        },
+        409,
+      );
+    }
+
+    // Idempotency pre-check (dual-key read — runtime column is folded).
+    const alreadySentAt = cn.dispatchEmailAt ?? cn.dispatchemailat ?? null;
+    if (alreadySentAt) {
+      return c.json({ success: true, skipped: true, reason: "already sent" });
+    }
+
+    // Recipient chain — hub email + customer email straight from the DB.
+    let hubEmail: string | null = null;
+    let hubShortName = "";
+    let hubAddress = "";
+    if (cn.hubId) {
+      const hub = await c.var.DB.prepare(
+        "SELECT shortName, address, email FROM delivery_hubs WHERE id = ?",
+      )
+        .bind(cn.hubId)
+        .first<{
+          shortName: string | null;
+          address: string | null;
+          email: string | null;
+        }>();
+      if (hub) {
+        hubEmail = hub.email;
+        hubShortName = hub.shortName ?? "";
+        hubAddress = hub.address ?? "";
+      }
+    }
+    const customer = await c.var.DB.prepare(
+      "SELECT email FROM customers WHERE id = ?",
+    )
+      .bind(cn.customerId)
+      .first<{ email: string | null }>();
+    const to = resolveDispatchRecipient(hubEmail, customer?.email);
+    if (!to) {
+      // Owner rule: both blank → don't send, don't record anything.
+      console.log(
+        `[consignment-notes] ${cn.noteNumber}: dispatch notice skipped — no hub or customer email on file`,
+      );
+      return c.json({ success: true, skipped: true, reason: "no recipient" });
+    }
+
+    // Items summary — server-owned per-product tally from consignment_items
+    // (the CN equivalent of the DO's component breakdown; CN lines carry no
+    // BOM pieces, so the summary is qty × product, aggregated by product).
+    const itemsRes = await c.var.DB.prepare(
+      "SELECT productCode, productName, quantity FROM consignment_items WHERE consignmentNoteId = ?",
+    )
+      .bind(id)
+      .all<{
+        productCode: string | null;
+        productName: string | null;
+        quantity: number;
+      }>();
+    const tally = new Map<string, number>();
+    for (const it of itemsRes.results ?? []) {
+      const label =
+        (it.productName || it.productCode || "").trim() || "Item";
+      const qty = Number(it.quantity) || 0;
+      if (qty <= 0) continue;
+      tally.set(label, (tally.get(label) || 0) + qty);
+    }
+    const itemsSummary = Array.from(tally.entries())
+      .map(([label, qty]) => `${qty} × ${label}`)
+      .join(", ");
+
+    const pdfBase64 =
+      typeof body.pdfBase64 === "string" && body.pdfBase64.trim()
+        ? body.pdfBase64.trim()
+        : null;
+
+    // Honesty guard — same rule as the DO endpoint: the outbox drops
+    // attachments over its 5 MB decoded cap AFTER templating, so decide
+    // "attached or not" with the SAME size rule up front, or the email
+    // claims an attachment it doesn't carry.
+    const PDF_ATTACH_CAP_BYTES = 5 * 1024 * 1024;
+    const pdfTooBig =
+      !!pdfBase64 && Math.floor(pdfBase64.length * 0.75) > PDF_ATTACH_CAP_BYTES;
+    if (pdfTooBig) {
+      console.warn(
+        `[consignment-notes] ${cn.noteNumber}: CN PDF exceeds the 5 MB attachment cap — sending the notice without it`,
+      );
+    }
+    const attachablePdf = pdfTooBig ? null : pdfBase64;
+    let attachments:
+      | Array<{ filename: string; contentBase64: string }>
+      | undefined;
+    if (attachablePdf) {
+      attachments = [
+        {
+          filename:
+            String(body.pdfFilename ?? "").trim() || `${cn.noteNumber}.pdf`,
+          contentBase64: attachablePdf,
+        },
+      ];
+    }
+
+    const deliverTo =
+      [hubShortName, hubAddress].filter(Boolean).join(", ") ||
+      cn.branchName ||
+      "";
+    const tpl = cnDispatchNoticeTemplate({
+      cnNo: cn.noteNumber,
+      customerName: (cn.customerName ?? "").trim() || "Customer",
+      dispatchedAt: cn.dispatchedAt ?? null,
+      deliverTo,
+      itemsSummary,
+      hasAttachment: !!attachments,
+      // Carrier rows from the CN's own fields — each one is omitted by the
+      // template when blank (CNs often have no 3PL on file).
+      driverName: cn.driverName ?? null,
+      driverContact: cn.driverPhone ?? null,
+      lorryPlate: cn.vehicleNo ?? null,
+    });
+
+    // Atomic idempotency claim BEFORE the enqueue — two racing calls both
+    // pass the pre-check above, but only one wins this UPDATE.
+    const nowIso = new Date().toISOString();
+    const claim = await c.var.DB.prepare(
+      "UPDATE consignment_notes SET dispatchemailat = ? WHERE id = ? AND dispatchemailat IS NULL",
+    )
+      .bind(nowIso, id)
+      .run();
+    if ((claim.meta?.changes ?? 0) === 0) {
+      return c.json({ success: true, skipped: true, reason: "already sent" });
+    }
+
+    try {
+      await enqueueEmail(c, {
+        to,
+        subject: tpl.subject,
+        html: tpl.html,
+        text: tpl.text,
+        attachments,
+      });
+    } catch (enqErr) {
+      // Release the claim so the operator can retry; the transition itself
+      // is long done and stays untouched.
+      try {
+        await c.var.DB.prepare(
+          "UPDATE consignment_notes SET dispatchemailat = NULL WHERE id = ?",
+        )
+          .bind(id)
+          .run();
+      } catch {
+        /* best-effort release */
+      }
+      throw enqErr;
+    }
+
+    return c.json({ success: true, queued: true, to });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[POST /api/consignment-notes/${id}/notify-customer] failed:`,
+      msg,
+    );
+    return c.json(
+      { success: false, error: msg || "Failed to queue customer notice" },
+      500,
+    );
   }
 });
 

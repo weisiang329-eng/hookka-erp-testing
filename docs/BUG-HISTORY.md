@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-014 — Worker phone showed no per-day punch facts (in/out time, OT, how late) — column was dropped when punch was hidden, never restored for rollout
+
+**Status:** 🟢 Shipped (2026-06-11). 710/711 tests; typecheck green.
+**Category:** ui-frontend
+
+Owner (punch rollout): the worker's phone must show, per day, (1) clock-in time, (2) clock-out time, (3) hours worked, (4) OT hours, (5) how late they were. The Home "Daily attendance" table only had Date / Work / Production / Eff% — the Clock In/Out column was deliberately dropped on 2026-05-10 when the punch flow was hidden, and "how late" was never computed anywhere worker-visible.
+
+Fix: `GET /api/worker/history` (worker.ts) now returns `lateMinutes` per attendance day — computed from the stored clock-in via the SAME effective-dated rules + grace the auto-dock uses (`computeAttendanceDay` with `resolvePayRulesAsOf` per date; no clock-out yet → lateness judged alone; resilient to a missing rules table). The phone's daily table (worker/index.tsx) renders a small punch line under any day that has a punch: `08:02 → 18:31 · OT 1.5h · Late 15m` (OT shown only when > 0, Late only when > 0, in red). `home.lateBy` added in en/ms/zh/my. clockIn/clockOut/overtimeMinutes were already in the payload — display only; no pay maths touched.
+
+---
+
 ## BUG-2026-06-11-013 — Camera permission denied = worker stuck punching/scanning with no way out shown
 
 **Status:** 🟢 Shipped + verified live (2026-06-11). 710/711 tests; typecheck green.

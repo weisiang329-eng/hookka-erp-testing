@@ -93,6 +93,10 @@ type AttendanceRow = {
   productionTimeMinutes: number;
   efficiencyPct: number;
   overtimeMinutes: number;
+  /** Raw lateness past the grace, minutes (server-computed with the
+   *  effective-dated rules — same figure the office sees). Optional so an
+   *  older cached payload without it still renders. */
+  lateMinutes?: number;
   status: string;
 };
 type HistoryData = {
@@ -626,23 +630,43 @@ export default function WorkerHomePage() {
                     : eff >= 60
                       ? "text-[#9C6F1E]"
                       : "text-[#9A3A2D]";
+              // Punch facts for the date (owner rollout 2026-06-11): the
+              // worker must see their own clock-in/out, OT and how late —
+              // shown as a small line under the day once a punch exists.
+              const att = hist.attendance.find(
+                (a) => a.date === r.date && (a.clockIn || a.clockOut),
+              );
               return (
-                <div
-                  key={r.date}
-                  className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 py-2.5 text-sm border-t border-[#F0ECE9] items-center"
-                >
-                  <span className="text-[#1F1D1B] font-medium">
-                    {fmtDay(r.date)}
-                  </span>
-                  <span className="tabular-nums text-right font-semibold">
-                    {mins2hrs(r.workingMinutes)}
-                  </span>
-                  <span className="tabular-nums text-right font-semibold text-[#3E6570]">
-                    {mins2hrs(r.productionMinutes)}
-                  </span>
-                  <span className={`tabular-nums text-right font-semibold ${effTone}`}>
-                    {eff == null ? "—" : `${eff}%`}
-                  </span>
+                <div key={r.date} className="py-2.5 border-t border-[#F0ECE9]">
+                  <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 text-sm items-center">
+                    <span className="text-[#1F1D1B] font-medium">
+                      {fmtDay(r.date)}
+                    </span>
+                    <span className="tabular-nums text-right font-semibold">
+                      {mins2hrs(r.workingMinutes)}
+                    </span>
+                    <span className="tabular-nums text-right font-semibold text-[#3E6570]">
+                      {mins2hrs(r.productionMinutes)}
+                    </span>
+                    <span className={`tabular-nums text-right font-semibold ${effTone}`}>
+                      {eff == null ? "—" : `${eff}%`}
+                    </span>
+                  </div>
+                  {att && (
+                    <p className="mt-1 text-xs text-[#8A8680] tabular-nums">
+                      {att.clockIn ?? "—"} → {att.clockOut ?? "—"}
+                      {att.overtimeMinutes > 0 && (
+                        <span className="text-[#3E6570] font-medium">
+                          {" "}· OT {mins2hrs(att.overtimeMinutes)}
+                        </span>
+                      )}
+                      {(att.lateMinutes ?? 0) > 0 && (
+                        <span className="text-[#9A3A2D] font-medium">
+                          {" "}· {t("home.lateBy")} {att.lateMinutes}m
+                        </span>
+                      )}
+                    </p>
+                  )}
                 </div>
               );
             })

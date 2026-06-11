@@ -174,6 +174,12 @@ const dict: Dict = {
     zh: '请拍照后才能打卡',
     my: 'ဓာတ်ပုံ ဦးစွာရိုက်ပါ',
   },
+  'home.lateBy': {
+    en: 'Late',
+    ms: 'Lewat',
+    zh: '迟到',
+    my: 'နောက်ကျ',
+  },
   'home.cameraBlockedHint': {
     en: "Camera didn't open? Allow Camera for your browser in the phone's Settings (Apps → browser → Permissions → Camera), then tap the button again.",
     ms: 'Kamera tidak terbuka? Benarkan Kamera untuk pelayar dalam Tetapan telefon (Apl → pelayar → Kebenaran → Kamera), kemudian tekan butang sekali lagi.',

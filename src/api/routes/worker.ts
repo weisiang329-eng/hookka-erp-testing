@@ -27,7 +27,8 @@ import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
 import { loadPayRuleVersions } from "../lib/pay-rules-store";
-import { resolvePayRulesAsOf } from "../../lib/pay-rules";
+import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
+import { computeAttendanceDay, hhmmToMinutes } from "../../lib/attendance-rules";
 import {
   rowToMinimalPO,
   // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
@@ -844,6 +845,17 @@ app.get("/history", async (c) => {
   }
 
   const standardMins = hoursPerDay * 60;
+  // Late minutes per punch day (owner 2026-06-11: the phone must show "how
+  // late that day"). Same effective-dated rules + ceiling the auto-dock uses
+  // (raw lateness past grace, ceiled to 15-min blocks via penal handling in
+  // computeAttendanceDay — we surface its lateMin, the RAW figure shown
+  // everywhere else). Resilient: no versions table → defaults.
+  let histPayRules: Awaited<ReturnType<typeof loadPayRuleVersions>> = [];
+  try {
+    histPayRules = await loadPayRuleVersions(c.var.DB);
+  } catch {
+    histPayRules = [];
+  }
   const attendance = (attRes.results ?? []).map((r) => {
     const wheMins = wheMinutesByDate.get(r.date);
     // When working_hour_entries has data for the date, split into regular
@@ -857,6 +869,19 @@ app.get("/history", async (c) => {
       workingMinutes = Math.min(wheMins, standardMins);
       overtimeMinutes = Math.max(0, wheMins - standardMins);
     }
+    let lateMinutes = 0;
+    if (r.clockIn) {
+      const inMin = hhmmToMinutes(r.clockIn);
+      if (inMin != null) {
+        const rules = toAttendanceRules(
+          resolvePayRulesAsOf(histPayRules, (r.date || "").slice(0, 10)),
+        );
+        const outMin = r.clockOut ? hhmmToMinutes(r.clockOut) : null;
+        // No clock-out yet → judge lateness alone against the shift start.
+        const day = computeAttendanceDay(inMin, outMin ?? rules.endMin, rules);
+        lateMinutes = day.lateMin;
+      }
+    }
     return {
       date: r.date,
       clockIn: r.clockIn,
@@ -865,6 +890,7 @@ app.get("/history", async (c) => {
       productionTimeMinutes: r.productionTimeMinutes,
       efficiencyPct: r.efficiencyPct,
       overtimeMinutes,
+      lateMinutes,
       status: r.status,
     };
   });

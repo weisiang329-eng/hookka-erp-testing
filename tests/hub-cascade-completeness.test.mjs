@@ -83,6 +83,7 @@ const EXCLUDED_TABLES = new Map([
   ["drivers", "`contact_person` is the driver's emergency contact, NOT customer hub."],
   ["customer_hubs", "Hub master table — `delivery_address` is the hub's own address, the SOURCE of all downstream hub denormalizations."],
   ["three_pl_providers", "3PL provider master — `contact_person` is the carrier's contact, not a customer hub field."],
+  ["other_parties", "Finance Phase 1 — non-trade debtor/creditor registry; `contact_person` is the party's own contact, never derived from a customer hub."],
 ]);
 
 // camelCase form of the column names — the route source uses these in the

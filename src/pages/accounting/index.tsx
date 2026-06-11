@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "gl" | "ar" | "ap" | "pl" | "bs";
+type TabKey = "overview" | "coa" | "journals" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -79,6 +79,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" /> },
   { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
   { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
+  { key: "odc", label: "Other D/C", icon: <Users className="h-4 w-4" /> },
 ];
 
 // =============== MAIN PAGE ===============
@@ -152,6 +153,7 @@ export default function AccountingPage() {
           {tab === "gl" && <GeneralLedgerTab />}
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
+          {tab === "odc" && <OtherPartiesTab />}
         </>
       )}
     </div>
@@ -2168,6 +2170,214 @@ function PLReportTab() {
         )}
       </div>
 
+    </div>
+  );
+}
+
+// =============== TAB: OTHER DEBTORS / CREDITORS (Phase 1, 2026-06) ===============
+//
+// Registry of non-trade counterparties (transporters, deposit holders,
+// staff advances, misc payables) — separate from the operational customer/
+// supplier masters so they never appear in SO/PO pickers. Control accounts
+// 305-0000 (Other Debtor, asset) and 405-0000 (Other Creditors,
+// liability); per-party balances arrive with the Phase-3 vouchers.
+
+type OtherParty = {
+  id: string;
+  type: "DEBTOR" | "CREDITOR";
+  name: string;
+  contactPerson: string;
+  phone: string;
+  email: string;
+  notes: string;
+  isActive: boolean;
+};
+
+function OtherPartiesTab() {
+  const { toast } = useToast();
+  const [parties, setParties] = useState<OtherParty[] | null>(null);
+  const [filter, setFilter] = useState<"ALL" | "DEBTOR" | "CREDITOR">("ALL");
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({
+    type: "CREDITOR" as "DEBTOR" | "CREDITOR",
+    name: "",
+    contactPerson: "",
+    phone: "",
+    email: "",
+    notes: "",
+  });
+  const [controls, setControls] = useState<{ od: number; oc: number } | null>(null);
+
+  const load = () => {
+    fetch("/api/accounting/other-parties")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: OtherParty[] }>)
+      .then((j) => { if (j?.success) setParties(j.data ?? []); })
+      .catch(() => {});
+    fetch("/api/accounting/trial-balance")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { rows: { accountCode: string; debitSen: number; creditSen: number }[] } }>)
+      .then((j) => {
+        if (!j?.success || !j.data) return;
+        const find = (code: string) => j.data!.rows.find((r) => r.accountCode === code);
+        const od = find("305-0000");
+        const oc = find("405-0000");
+        setControls({
+          od: (od?.debitSen ?? 0) - (od?.creditSen ?? 0),
+          oc: (oc?.creditSen ?? 0) - (oc?.debitSen ?? 0),
+        });
+      })
+      .catch(() => {});
+  };
+  useEffect(load, []);
+
+  const add = async () => {
+    if (!form.name.trim()) { toast.error("Name is required"); return; }
+    const res = await fetch("/api/accounting/other-parties", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      setShowForm(false);
+      setForm({ type: "CREDITOR", name: "", contactPerson: "", phone: "", email: "", notes: "" });
+      load();
+    } else toast.error(j?.error || "Failed to create party");
+  };
+
+  const setActive = async (id: string, isActive: boolean) => {
+    const res = await fetch(`/api/accounting/other-parties/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isActive }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Failed to update party");
+  };
+
+  const visible = (parties ?? []).filter((p) => filter === "ALL" || p.type === filter);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2">
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-[#6B7280]">305-0000 OTHER DEBTOR — control balance</p>
+            <p className="text-xl font-bold text-[#3E6570]">{controls ? formatCurrency(controls.od) : "—"}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-[#6B7280]">405-0000 OTHER CREDITORS — control balance</p>
+            <p className="text-xl font-bold text-[#9A3A2D]">{controls ? formatCurrency(controls.oc) : "—"}</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1">
+          {(["ALL", "DEBTOR", "CREDITOR"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium border ${filter === f ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}
+            >
+              {f === "ALL" ? "All" : f === "DEBTOR" ? "Other Debtors" : "Other Creditors"}
+            </button>
+          ))}
+        </div>
+        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+          <Plus className="h-4 w-4" /> Add Party
+        </Button>
+      </div>
+
+      {showForm && (
+        <Card>
+          <CardContent className="p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Type</label>
+              <select
+                value={form.type}
+                onChange={(e) => setForm({ ...form, type: e.target.value as "DEBTOR" | "CREDITOR" })}
+                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              >
+                <option value="CREDITOR">Other Creditor (we owe them)</option>
+                <option value="DEBTOR">Other Debtor (they owe us)</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Name</label>
+              <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. ABC Transport Sdn Bhd" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Contact Person</label>
+              <input type="text" value={form.contactPerson} onChange={(e) => setForm({ ...form, contactPerson: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Phone</label>
+              <input type="text" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Email</label>
+              <input type="text" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Notes</label>
+              <input type="text" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div className="flex gap-2">
+              <Button variant="primary" size="sm" onClick={add}>Save</Button>
+              <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {parties === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : visible.length === 0 ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">No parties yet — add transporters, deposit holders, staff advances…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-4 py-2 text-left">Type</th>
+                  <th className="px-4 py-2 text-left">Name</th>
+                  <th className="px-4 py-2 text-left">Contact</th>
+                  <th className="px-4 py-2 text-left">Phone</th>
+                  <th className="px-4 py-2 text-left">Notes</th>
+                  <th className="px-4 py-2 text-right">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((p) => (
+                  <tr key={p.id} className={`border-b border-[#F0ECE9] ${p.isActive ? "" : "opacity-50"}`}>
+                    <td className="px-4 py-1.5">
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${p.type === "DEBTOR" ? "bg-[#E6F1FB] text-[#0C447C] border-[#B5D4F4]" : "bg-[#FAEEDA] text-[#633806] border-[#FAC775]"}`}>
+                        {p.type === "DEBTOR" ? "Other Debtor" : "Other Creditor"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 text-[#1F1D1B] font-medium">{p.name}</td>
+                    <td className="px-4 py-1.5 text-[#6B7280]">{p.contactPerson}</td>
+                    <td className="px-4 py-1.5 text-[#6B7280]">{p.phone}</td>
+                    <td className="px-4 py-1.5 text-[#6B7280] text-xs">{p.notes}</td>
+                    <td className="px-4 py-1.5 text-right">
+                      <button
+                        onClick={() => setActive(p.id, !p.isActive)}
+                        className={`text-xs underline decoration-dotted cursor-pointer ${p.isActive ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}
+                      >
+                        {p.isActive ? "Deactivate" : "Reactivate"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

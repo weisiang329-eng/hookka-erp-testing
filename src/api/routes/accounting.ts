@@ -957,6 +957,183 @@ app.delete("/journals/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// OTHER DEBTOR / OTHER CREDITOR REGISTRY (Phase 1, 2026-06)
+//
+// Non-trade counterparties (transporters, deposit holders, staff advances,
+// misc payables) — a registry SEPARATE from the operational customers/
+// suppliers tables per owner decision, so they never appear in SO/PO
+// pickers. Control accounts 305-0000 / 405-0000. Phase 3's Payment &
+// Official Receipt vouchers reference these parties.
+// ---------------------------------------------------------------------------
+type OtherPartyRow = {
+  id: string;
+  type: "DEBTOR" | "CREDITOR";
+  name: string;
+  contactPerson: string | null;
+  phone: string | null;
+  email: string | null;
+  notes: string | null;
+  isActive: number;
+};
+
+function rowToOtherParty(r: OtherPartyRow) {
+  return {
+    id: r.id,
+    type: r.type,
+    name: r.name,
+    contactPerson: r.contactPerson ?? "",
+    phone: r.phone ?? "",
+    email: r.email ?? "",
+    notes: r.notes ?? "",
+    isActive: r.isActive === 1,
+  };
+}
+
+app.get("/other-parties", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const type = c.req.query("type");
+  const rows =
+    type === "DEBTOR" || type === "CREDITOR"
+      ? await c.var.DB.prepare(
+          "SELECT * FROM other_parties WHERE orgId = ? AND type = ? ORDER BY name",
+        )
+          .bind(orgId, type)
+          .all<OtherPartyRow>()
+      : await c.var.DB.prepare(
+          "SELECT * FROM other_parties WHERE orgId = ? ORDER BY type, name",
+        )
+          .bind(orgId)
+          .all<OtherPartyRow>();
+  const data = (rows.results ?? []).map(rowToOtherParty);
+  return c.json({ success: true, data, total: data.length });
+});
+
+app.post("/other-parties", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as {
+      type?: string;
+      name?: string;
+      contactPerson?: string;
+      phone?: string;
+      email?: string;
+      notes?: string;
+    };
+    if (body.type !== "DEBTOR" && body.type !== "CREDITOR") {
+      return c.json(
+        { success: false, error: "type must be DEBTOR or CREDITOR" },
+        400,
+      );
+    }
+    const name = String(body.name ?? "").trim();
+    if (!name) {
+      return c.json({ success: false, error: "name is required" }, 400);
+    }
+    const orgId = getOrgId(c);
+    const id = `op-${crypto.randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+    await c.var.DB.prepare(
+      `INSERT INTO other_parties
+         (id, type, name, contactPerson, phone, email, notes, isActive, orgId, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    )
+      .bind(
+        id,
+        body.type,
+        name,
+        body.contactPerson ?? null,
+        body.phone ?? null,
+        body.email ?? null,
+        body.notes ?? null,
+        orgId,
+        now,
+      )
+      .run();
+    const created = await c.var.DB.prepare(
+      "SELECT * FROM other_parties WHERE id = ?",
+    )
+      .bind(id)
+      .first<OtherPartyRow>();
+    return c.json({ success: true, data: rowToOtherParty(created!) }, 201);
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.put("/other-parties/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const id = c.req.param("id");
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM other_parties WHERE id = ?",
+    )
+      .bind(id)
+      .first<OtherPartyRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "Party not found" }, 404);
+    }
+    const body = (await c.req.json()) as Partial<{
+      name: string;
+      contactPerson: string;
+      phone: string;
+      email: string;
+      notes: string;
+      isActive: boolean;
+      type: string;
+    }>;
+    if (body.type !== undefined && body.type !== existing.type) {
+      // Switching DEBTOR↔CREDITOR retroactively moves the party between
+      // control accounts — disallowed; create a new party instead.
+      return c.json(
+        { success: false, error: "type cannot be changed — create a new party instead" },
+        400,
+      );
+    }
+    const merged = {
+      name: body.name !== undefined ? String(body.name).trim() : existing.name,
+      contactPerson:
+        body.contactPerson !== undefined ? body.contactPerson : existing.contactPerson,
+      phone: body.phone !== undefined ? body.phone : existing.phone,
+      email: body.email !== undefined ? body.email : existing.email,
+      notes: body.notes !== undefined ? body.notes : existing.notes,
+      isActive:
+        body.isActive === undefined ? existing.isActive : body.isActive ? 1 : 0,
+    };
+    if (!merged.name) {
+      return c.json({ success: false, error: "name cannot be empty" }, 400);
+    }
+    await c.var.DB.prepare(
+      `UPDATE other_parties
+          SET name = ?, contactPerson = ?, phone = ?, email = ?, notes = ?, isActive = ?, updatedAt = ?
+        WHERE id = ?`,
+    )
+      .bind(
+        merged.name,
+        merged.contactPerson,
+        merged.phone,
+        merged.email,
+        merged.notes,
+        merged.isActive,
+        new Date().toISOString(),
+        id,
+      )
+      .run();
+    const updated = await c.var.DB.prepare(
+      "SELECT * FROM other_parties WHERE id = ?",
+    )
+      .bind(id)
+      .first<OtherPartyRow>();
+    return c.json({ success: true, data: rowToOtherParty(updated!) });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // TRIAL BALANCE + GL INQUIRY (Phase 1, 2026-06)
 //
 // The immutable ledger previously had NO read surface beyond the P&L/BS

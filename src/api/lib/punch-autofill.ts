@@ -52,6 +52,14 @@ export function ensureDeptScanEvents(db: D1Database): Promise<void> {
          )`,
       )
       .run();
+    // v2 (owner 2026-06-11): production QRs carry the CATEGORY (Sofa /
+    // Bedframe / Accessory line) — per-person line attribution, not the
+    // department average. Nullable: dept-only scans + non-production depts.
+    await db
+      .prepare(
+        "ALTER TABLE dept_scan_events ADD COLUMN IF NOT EXISTS category TEXT",
+      )
+      .run();
     await db
       .prepare(
         "CREATE INDEX IF NOT EXISTS idx_dept_scan_events_worker_date ON dept_scan_events (workerid, date)",
@@ -61,22 +69,29 @@ export function ensureDeptScanEvents(db: D1Database): Promise<void> {
   return _deptScanMig;
 }
 
-/** Record one "I am now working in <dept>" scan. */
+/** Record one "I am now working in <dept> (on <category> line)" scan. */
 export async function recordDeptScan(
   db: D1Database,
-  args: { workerId: string; date: string; departmentCode: string; atMin: number },
+  args: {
+    workerId: string;
+    date: string;
+    departmentCode: string;
+    category?: string | null;
+    atMin: number;
+  },
 ): Promise<void> {
   await ensureDeptScanEvents(db);
   await db
     .prepare(
-      `INSERT INTO dept_scan_events (id, workerid, date, departmentcode, atmin, createdat)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO dept_scan_events (id, workerid, date, departmentcode, category, atmin, createdat)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       `dse-${crypto.randomUUID().slice(0, 8)}`,
       args.workerId,
       args.date,
       args.departmentCode,
+      args.category ?? null,
       Math.round(args.atMin),
       new Date().toISOString(),
     )
@@ -174,12 +189,13 @@ export async function autofillWorkingHoursFromPunch(
   await ensureDeptScanEvents(db);
   const evRes = await db
     .prepare(
-      "SELECT departmentcode, atmin FROM dept_scan_events WHERE workerid = ? AND date = ? ORDER BY atmin",
+      "SELECT departmentcode, category, atmin FROM dept_scan_events WHERE workerid = ? AND date = ? ORDER BY atmin",
     )
     .bind(args.workerId, args.date)
-    .all<{ departmentcode: string; atmin: number }>();
+    .all<{ departmentcode: string; category: string | null; atmin: number }>();
   const events: DeptScanEvent[] = (evRes.results ?? []).map((r) => ({
     departmentCode: String(r.departmentcode ?? ""),
+    category: r.category ?? null,
     atMin: Number(r.atmin) || 0,
   }));
 
@@ -189,35 +205,55 @@ export async function autofillWorkingHoursFromPunch(
 
   const deptRows = prorateHours(
     totalHours,
-    buckets.map((b) => ({ departmentCode: b.departmentCode, weight: b.minutes })),
+    buckets.map((b) => ({
+      departmentCode: b.departmentCode,
+      category: b.category,
+      weight: b.minutes,
+    })),
   );
 
   const scanned = events.length > 0;
   let created = 0;
+  type Row = { departmentCode: string; category: string; hours: number; notes: string };
+  const allRows: Row[] = [];
   for (const d of deptRows) {
-    type Row = { departmentCode: string; category: string; hours: number; notes: string };
     let rows: Row[];
     if (PRODUCTION_DEPTS.has(d.departmentCode)) {
-      const weights = await categoryWeightsFor(db, d.departmentCode, args.date);
-      const split = prorateHours(d.hours, weights);
-      rows =
-        split.length > 0
-          ? split.map((s) => ({
-              departmentCode: d.departmentCode,
-              category: s.category,
-              hours: s.hours,
-              notes: scanned ? "Auto from punch + dept scan" : "Auto from punch",
-            }))
-          : [
-              {
+      if (d.category && VALID_CATEGORIES.has(d.category)) {
+        // The worker SCANNED the line (owner v2): per-person truth — use it
+        // directly, no job-card derivation.
+        rows = [
+          {
+            departmentCode: d.departmentCode,
+            category: d.category,
+            hours: d.hours,
+            notes: "Auto from punch + line scan",
+          },
+        ];
+      } else {
+        // No scanned category (home-default or dept-only QR) — mode A
+        // fallback: the dept's actual job-card mix that day.
+        const weights = await categoryWeightsFor(db, d.departmentCode, args.date);
+        const split = prorateHours(d.hours, weights);
+        rows =
+          split.length > 0
+            ? split.map((s) => ({
                 departmentCode: d.departmentCode,
-                // No job-card signal at all for this dept — flag for the
-                // office instead of inventing a category silently.
-                category: "SOFA",
-                hours: d.hours,
-                notes: "Auto from punch — category unknown, please check",
-              },
-            ];
+                category: s.category,
+                hours: s.hours,
+                notes: scanned ? "Auto from punch + dept scan" : "Auto from punch",
+              }))
+            : [
+                {
+                  departmentCode: d.departmentCode,
+                  // No job-card signal at all for this dept — flag for the
+                  // office instead of inventing a category silently.
+                  category: "SOFA",
+                  hours: d.hours,
+                  notes: "Auto from punch — category unknown, please check",
+                },
+              ];
+      }
     } else {
       rows = [
         {
@@ -228,25 +264,44 @@ export async function autofillWorkingHoursFromPunch(
         },
       ];
     }
-    for (const r of rows) {
-      await db
-        .prepare(
-          `INSERT INTO working_hour_entries (id, attendanceId, workerId, date, departmentCode, category, hours, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(
-          `whe-${crypto.randomUUID().slice(0, 8)}`,
-          args.attendanceId,
-          args.workerId,
-          args.date,
-          r.departmentCode,
-          r.category,
-          r.hours,
-          r.notes,
-        )
-        .run();
-      created++;
+    allRows.push(...rows);
+  }
+
+  // Merge rows that land on the same (department × category) — e.g. a
+  // scanned Sofa stretch plus a home-default stretch whose job-card mix also
+  // resolved to Sofa. One Working Hours row each, hours summed (2-dp safe:
+  // every part came out of prorateHours' cent arithmetic).
+  const merged = new Map<string, { departmentCode: string; category: string; hours: number; notes: string }>();
+  for (const r of allRows) {
+    const key = `${r.departmentCode}|${r.category}`;
+    const cur = merged.get(key);
+    if (cur) {
+      cur.hours = Math.round((cur.hours + r.hours) * 100) / 100;
+      // Keep the flagged note if either part carried it.
+      if (r.notes.includes("please check")) cur.notes = r.notes;
+    } else {
+      merged.set(key, { ...r });
     }
+  }
+
+  for (const r of merged.values()) {
+    await db
+      .prepare(
+        `INSERT INTO working_hour_entries (id, attendanceId, workerId, date, departmentCode, category, hours, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        `whe-${crypto.randomUUID().slice(0, 8)}`,
+        args.attendanceId,
+        args.workerId,
+        args.date,
+        r.departmentCode,
+        r.category,
+        r.hours,
+        r.notes,
+      )
+      .run();
+    created++;
   }
   return { created };
 }

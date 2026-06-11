@@ -838,6 +838,15 @@ app.post("/dept-scan", async (c) => {
   if (!code) {
     return c.json({ success: false, error: "departmentCode required" }, 400);
   }
+  // Optional line category (owner v2): production QRs are per-line — Fab
+  // Sew·Sofa vs Fab Sew·Bedframe. Anything not in the catalog is dropped to
+  // null (dept-only) rather than stored — reject-don't-normalize spirit.
+  const rawCat = String((body as { category?: unknown }).category ?? "")
+    .trim()
+    .toUpperCase();
+  const category = ["SOFA", "BEDFRAME", "ACCESSORY"].includes(rawCat)
+    ? rawCat
+    : null;
   const dept = await c.var.DB.prepare(
     "SELECT code, shortName, name FROM departments WHERE code = ?",
   )
@@ -866,6 +875,7 @@ app.post("/dept-scan", async (c) => {
     workerId: worker.id,
     date,
     departmentCode: dept.code,
+    category,
     atMin: hh * 60 + mm,
   });
   return c.json({
@@ -873,6 +883,7 @@ app.post("/dept-scan", async (c) => {
     data: {
       departmentCode: dept.code,
       departmentName: dept.shortName || dept.name || dept.code,
+      category,
       time,
     },
   });

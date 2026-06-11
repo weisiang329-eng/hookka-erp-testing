@@ -34,6 +34,21 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-020 — Dept QR v2: scans capture the LINE (Sofa/Bedframe) too — per-person attribution, not the department average
+
+**Status:** 🟢 Shipped (2026-06-11). 726 tests green; typecheck green.
+**Category:** ui-frontend
+
+Owner (revising -017's mode-A-only category): "我要他们自己 scan 他们在哪一个部门…需要清楚地分出来他们到底是在哪一个部门,是在 Sofa 还是在 Bedframe" — a worker can be slow on one line and fast on another, so labor cost and department cost must attribute the LINE per person, not pro-rate the department's mix onto everyone.
+
+Changes:
+- **Per-line QR cards**: the "Dept QR Codes" poster now prints one card per line for production departments (Fab Sew·Sofa / Fab Sew·Bedframe / Fab Sew·Accessory — QR carries `&deptcat=`), single card for non-production depts. Workers scan when they start work and whenever they switch line or department.
+- **A line switch inside one department is a scan boundary** (`dept-scan-split.ts`: buckets are (dept × category); same-station re-scan still ignored). Scanned stretches write their category DIRECTLY ("Auto from punch + line scan"); un-scanned stretches (home-default) still fall back to mode A (the dept's job-card mix); same-(dept × category) parts merge into one Working Hours row.
+- `dept_scan_events.category` (lowercase, runtime-ensured + migration 0163); `/api/worker/dept-scan` validates the category against SOFA/BEDFRAME/ACCESSORY (anything else → null, dept-only); phone confirmation shows "Fab Sew · Sofa · 10:32".
+- Forgot-to-scan safety net unchanged: home dept + job-card mix + office-editable rows.
+
+---
+
 ## BUG-2026-06-11-019 — DataGrid cell content stayed clamped at the DECLARED column width — stretched columns were half dead space, grid never "fit" the page
 
 **Status:** 🟢 Fixed (2026-06-11). New tests/data-grid-fill.test.mjs structural pin + full suite green; CSS mechanism verified in headless Chrome against a structural replica of the grid markup. Real-page Chrome-MCP verify owed post-deploy.

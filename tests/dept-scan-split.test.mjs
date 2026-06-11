@@ -26,9 +26,9 @@ const lib = await import(
 const IN = 8 * 60; // 08:00
 const OUT = 18 * 60; // 18:00
 
-test("no scans → one bucket: the home department, full window", () => {
+test("no scans → one bucket: the home department, full window, category null", () => {
   const b = lib.buildDeptBuckets(IN, OUT, "FAB_SEW", []);
-  assert.deepEqual(b, [{ departmentCode: "FAB_SEW", minutes: 600 }]);
+  assert.deepEqual(b, [{ departmentCode: "FAB_SEW", category: null, minutes: 600 }]);
 });
 
 test("no scans AND no home dept → nothing attributable", () => {
@@ -37,34 +37,48 @@ test("no scans AND no home dept → nothing attributable", () => {
 
 test("one scan: before = home, after = scanned dept", () => {
   const b = lib.buildDeptBuckets(IN, OUT, "FAB_SEW", [
-    { departmentCode: "PACKING", atMin: 14 * 60 }, // 14:00
+    { departmentCode: "PACKING", category: "SOFA", atMin: 14 * 60 }, // 14:00
   ]);
   assert.deepEqual(b, [
-    { departmentCode: "FAB_SEW", minutes: 360 },
-    { departmentCode: "PACKING", minutes: 240 },
+    { departmentCode: "FAB_SEW", category: null, minutes: 360 },
+    { departmentCode: "PACKING", category: "SOFA", minutes: 240 },
   ]);
 });
 
-test("multiple scans + return to home: minutes SUM per department", () => {
-  // 08:00 home FAB_SEW → 10:00 WAREHOUSING → 12:00 back to FAB_SEW → 18:00.
+test("LINE switch inside ONE department is a boundary (owner v2: Sofa vs Bedframe per person)", () => {
+  // 08:00 scans Fab Sew·Sofa at punch-in → 13:00 scans Fab Sew·Bedframe.
   const b = lib.buildDeptBuckets(IN, OUT, "FAB_SEW", [
+    { departmentCode: "FAB_SEW", category: "SOFA", atMin: IN },
+    { departmentCode: "FAB_SEW", category: "BEDFRAME", atMin: 13 * 60 },
+  ]);
+  assert.deepEqual(b, [
+    { departmentCode: "FAB_SEW", category: "SOFA", minutes: 300 },
+    { departmentCode: "FAB_SEW", category: "BEDFRAME", minutes: 300 },
+  ]);
+});
+
+test("multiple scans + return: minutes SUM per (dept × category)", () => {
+  // 08:00 Sofa line (scanned) → 10:00 WAREHOUSING → 12:00 back to Sofa line.
+  const b = lib.buildDeptBuckets(IN, OUT, "FAB_SEW", [
+    { departmentCode: "FAB_SEW", category: "SOFA", atMin: IN },
     { departmentCode: "WAREHOUSING", atMin: 10 * 60 },
-    { departmentCode: "FAB_SEW", atMin: 12 * 60 },
+    { departmentCode: "FAB_SEW", category: "SOFA", atMin: 12 * 60 },
   ]);
   assert.deepEqual(b, [
-    { departmentCode: "FAB_SEW", minutes: 120 + 360 },
-    { departmentCode: "WAREHOUSING", minutes: 120 },
+    { departmentCode: "FAB_SEW", category: "SOFA", minutes: 120 + 360 },
+    { departmentCode: "WAREHOUSING", category: null, minutes: 120 },
   ]);
 });
 
-test("re-scanning the CURRENT department is not a boundary", () => {
+test("re-scanning the CURRENT dept+line is not a boundary", () => {
   const b = lib.buildDeptBuckets(IN, OUT, "FAB_SEW", [
-    { departmentCode: "FAB_SEW", atMin: 9 * 60 }, // worker scans own dept — harmless
+    { departmentCode: "FAB_SEW", category: "SOFA", atMin: IN },
+    { departmentCode: "FAB_SEW", category: "SOFA", atMin: 9 * 60 }, // same station again
     { departmentCode: "REPAIR", atMin: 15 * 60 },
   ]);
   assert.deepEqual(b, [
-    { departmentCode: "FAB_SEW", minutes: 420 },
-    { departmentCode: "REPAIR", minutes: 180 },
+    { departmentCode: "FAB_SEW", category: "SOFA", minutes: 420 },
+    { departmentCode: "REPAIR", category: null, minutes: 180 },
   ]);
 });
 
@@ -72,17 +86,19 @@ test("scans outside the punch window clamp to it", () => {
   // A scan at 07:30 (before punch-in) starts at 08:00; one at 19:00 clamps to
   // 18:00 → zero-length → dropped.
   const b = lib.buildDeptBuckets(IN, OUT, "FAB_SEW", [
-    { departmentCode: "WOOD_CUT", atMin: 7 * 60 + 30 },
+    { departmentCode: "WOOD_CUT", category: "BEDFRAME", atMin: 7 * 60 + 30 },
     { departmentCode: "FOAM", atMin: 19 * 60 },
   ]);
-  assert.deepEqual(b, [{ departmentCode: "WOOD_CUT", minutes: 600 }]);
+  assert.deepEqual(b, [
+    { departmentCode: "WOOD_CUT", category: "BEDFRAME", minutes: 600 },
+  ]);
 });
 
 test("scan at punch-in with no home dept still attributes the whole day", () => {
   const b = lib.buildDeptBuckets(IN, OUT, "", [
     { departmentCode: "REPAIR", atMin: IN },
   ]);
-  assert.deepEqual(b, [{ departmentCode: "REPAIR", minutes: 600 }]);
+  assert.deepEqual(b, [{ departmentCode: "REPAIR", category: null, minutes: 600 }]);
 });
 
 test("empty / inverted punch window → no buckets", () => {

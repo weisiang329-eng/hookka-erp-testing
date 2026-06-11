@@ -4800,40 +4800,54 @@ function DepartmentLaborTab({
     });
   }, [rows, printRows, splitVisible, categoryFilter, dateFrom, dateTo]);
 
-  // Printable department QR poster (owner 2026-06-11): one big QR per
-  // department — a worker scans it on their phone when they START working
-  // there (borrowed workers only; a normal day needs no scan). ALL real
-  // departments get one, incl. Repair / Warehousing; PRODUCTION_SHORTFALL is
-  // a virtual bucket, not a place, so it's skipped.
+  // Printable department QR poster (owner 2026-06-11 v2): production
+  // departments get ONE CARD PER LINE (Sofa / Bedframe / Accessory) so the
+  // scan captures the line, not just the department — per-person labor and
+  // efficiency attribution. Non-production departments (Warehousing / Repair
+  // / Maintenance / R&D) get a single card. Workers scan when they start
+  // work and whenever they switch line or department; punch-out ends it.
+  // PRODUCTION_SHORTFALL is a virtual bucket, not a place, so it's skipped.
   const printDeptQrPoster = useCallback(async () => {
     try {
       const res = await fetch("/api/departments");
       const j = (await res.json().catch(() => ({}))) as {
-        data?: Array<{ code?: string; name?: string; shortName?: string }>;
+        data?: Array<{ code?: string; name?: string; shortName?: string; isProduction?: boolean | number }>;
       };
       const depts = (j?.data ?? []).filter(
         (d) => d.code && d.code !== "PRODUCTION_SHORTFALL",
       );
       if (depts.length === 0) return;
       const origin = window.location.origin;
+      const CATS = ["SOFA", "BEDFRAME", "ACCESSORY"] as const;
+      const wanted: Array<{ code: string; label: string; cat: string | null }> = [];
+      for (const d of depts) {
+        const base = { code: d.code as string, label: d.shortName || d.name || (d.code as string) };
+        if (d.isProduction) {
+          for (const cat of CATS) wanted.push({ ...base, cat });
+        } else {
+          wanted.push({ ...base, cat: null });
+        }
+      }
       const cards = await Promise.all(
-        depts.map(async (d) => ({
-          code: d.code as string,
-          label: d.shortName || d.name || (d.code as string),
+        wanted.map(async (cdef) => ({
+          ...cdef,
           qr: await getQRCodeDataURL(
-            `${origin}/worker/scan?deptscan=${encodeURIComponent(d.code as string)}`,
+            `${origin}/worker/scan?deptscan=${encodeURIComponent(cdef.code)}${cdef.cat ? `&deptcat=${encodeURIComponent(cdef.cat)}` : ""}`,
             600,
           ),
         })),
       );
+      const catLabel = (cat: string | null) =>
+        cat ? cat.charAt(0) + cat.slice(1).toLowerCase() : "";
       const cardsHtml = cards
         .map(
           (cd) => `
         <div class="card">
           <div class="dept">${cd.label}</div>
-          <div class="code">${cd.code}</div>
-          <img src="${cd.qr}" alt="${cd.code}" />
-          <div class="hint">Scan with the Worker Portal when you START working in this department.<br/>Scan another department when you move · punching out ends it.</div>
+          ${cd.cat ? `<div class="cat cat-${cd.cat.toLowerCase()}">${catLabel(cd.cat)}</div>` : ""}
+          <div class="code">${cd.code}${cd.cat ? ` · ${cd.cat}` : ""}</div>
+          <img src="${cd.qr}" alt="${cd.code}${cd.cat ? "-" + cd.cat : ""}" />
+          <div class="hint">Scan with the Worker Portal when you START working ${cd.cat ? `on the <b>${catLabel(cd.cat)}</b> line here` : "in this department"}.<br/>Scan again when you switch line or department · punching out ends it.</div>
         </div>`,
         )
         .join("");
@@ -4847,6 +4861,10 @@ function DepartmentLaborTab({
           .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; }
           .card { border: 1.5px solid #1F1D1B; border-radius: 4mm; padding: 6mm; text-align: center; page-break-inside: avoid; }
           .dept { font-size: 22pt; font-weight: 800; }
+          .cat { display: inline-block; margin-top: 1mm; padding: 1mm 5mm; border: 1.2px solid #1F1D1B; border-radius: 6mm; font-size: 14pt; font-weight: 800; letter-spacing: 1px; }
+          .cat-sofa { background: #E8EEF0; }
+          .cat-bedframe { background: #F0EAE0; }
+          .cat-accessory { background: #ECECEC; }
           .code { font-size: 10pt; color: #6B7280; margin-bottom: 3mm; letter-spacing: 1px; }
           img { width: 62mm; height: 62mm; }
           .hint { margin-top: 3mm; font-size: 8.5pt; color: #4B5563; line-height: 1.35; }

@@ -209,9 +209,9 @@ type Result =
     }
   | { kind: "error"; message: string; decoded?: string }
   // Department QR (owner 2026-06-11): "I am now working in <dept>" — the
-  // day's hours re-route to this department from `time` until the next scan
-  // or punch-out. No job card involved.
-  | { kind: "deptscan"; deptName: string; time: string };
+  // day's hours re-route to this department (and, for per-line QRs, this
+  // Sofa/Bedframe line) from `time` until the next scan or punch-out.
+  | { kind: "deptscan"; deptName: string; category: string | null; time: string };
 
 // Shape of /api/worker/history — we pass from=today&to=today so we
 // only get today's slice. Fields unused on this page are elided from
@@ -466,22 +466,27 @@ export default function WorkerScanPage() {
       const deptScan = /[?&]deptscan=([A-Za-z_]+)/.exec(raw);
       if (deptScan) {
         const code = decodeURIComponent(deptScan[1]).toUpperCase();
+        // Per-line QR (owner v2): deptcat=SOFA / BEDFRAME / ACCESSORY tells
+        // payroll WHICH line, not just which department.
+        const catMatch = /[?&]deptcat=([A-Za-z_]+)/.exec(raw);
+        const cat = catMatch ? decodeURIComponent(catMatch[1]).toUpperCase() : null;
         setLoading(true);
         setResult({ kind: "idle" });
         try {
           const res = await workerFetch("/api/worker/dept-scan", {
             method: "POST",
-            body: JSON.stringify({ departmentCode: code }),
+            body: JSON.stringify({ departmentCode: code, category: cat }),
           });
           const j = (await res.json().catch(() => ({}))) as {
             success?: boolean;
             error?: string;
-            data?: { departmentName?: string; time?: string };
+            data?: { departmentName?: string; category?: string | null; time?: string };
           };
           if (j?.success && j.data) {
             setResult({
               kind: "deptscan",
               deptName: j.data.departmentName || code,
+              category: j.data.category ?? null,
               time: j.data.time || "",
             });
           } else {
@@ -1553,6 +1558,9 @@ export default function WorkerScanPage() {
           <div className="min-w-0 flex-1">
             <p className="font-semibold">
               {t("scan.deptScanOk")}: {result.deptName}
+              {result.category
+                ? ` · ${result.category.charAt(0)}${result.category.slice(1).toLowerCase()}`
+                : ""}
               {result.time ? ` · ${result.time}` : ""}
             </p>
             <p className="text-sm mt-0.5">{t("scan.deptScanHint")}</p>

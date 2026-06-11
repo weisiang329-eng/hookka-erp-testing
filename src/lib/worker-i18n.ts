@@ -286,10 +286,10 @@ const dict: Dict = {
     my: 'ယခု အလုပ်လုပ်နေသည့်ဌာန',
   },
   'scan.deptScanHint': {
-    en: 'Your hours count to this department from now. Scan another department code when you move; punching out ends it.',
-    ms: 'Jam kerja anda dikira untuk jabatan ini mulai sekarang. Imbas kod jabatan lain bila berpindah; daftar keluar menamatkannya.',
-    zh: '从现在起你的工时算给这个部门。换部门时再扫那个部门的码；打卡下班自动结束。',
-    my: 'ယခုမှစ၍ သင့်အလုပ်ချိန်ကို ဤဌာနသို့ တွက်သည်။ ဌာနပြောင်းလျှင် ထိုဌာန၏ကုဒ်ကို ထပ်စကင်န်ပါ၊ အလုပ်ထွက်ကတ်နှိပ်လျှင် ပြီးဆုံးသည်။',
+    en: 'Your hours count here from now. Scan again when you switch line or department; punching out ends it.',
+    ms: 'Jam kerja anda dikira di sini mulai sekarang. Imbas semula bila bertukar barisan atau jabatan; daftar keluar menamatkannya.',
+    zh: '从现在起你的工时算在这里。换线或换部门时再扫一次；打卡下班自动结束。',
+    my: 'ယခုမှစ၍ သင့်အလုပ်ချိန်ကို ဤနေရာသို့ တွက်သည်။ လိုင်း သို့ ဌာနပြောင်းလျှင် ထပ်စကင်န်ပါ၊ အလုပ်ထွက်ကတ်နှိပ်လျှင် ပြီးဆုံးသည်။',
   },
   'scan.deptNeedPunchIn': {
     en: 'Please punch in first, then scan the department code.',

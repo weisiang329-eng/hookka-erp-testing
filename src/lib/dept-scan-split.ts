@@ -3,31 +3,47 @@
 // QR when they START working there; punch-out ends the last stretch; the day's
 // hours auto-fill into Working Hours split per department).
 //
+// 2026-06-11 v2 (owner: "需要清楚地分出来他们到底是在哪一个部门,是在 Sofa 还是
+// Bedframe"): production-department QRs carry the CATEGORY too (Fab Sew·Sofa
+// vs Fab Sew·Bedframe are separate codes on the wall). A scan boundary is any
+// change of department OR category, so one worker's sofa-line hours and
+// bedframe-line hours land in separate rows — per PERSON, not the department
+// average.
+//
 // Design rule: scans decide the SPLIT RATIO only — they never recompute pay.
 // The day's paid hours come from the punch via the attendance rules engine
-// exactly as before; these helpers carve that one total into department (and
-// category) buckets that sum back to it TO THE CENT (largest-remainder).
+// exactly as before; these helpers carve that one total into buckets that sum
+// back to it TO THE CENT (largest-remainder).
 //
 // Pure functions — no DB, no Date.now — so the maths is unit-testable.
 // ---------------------------------------------------------------------------
 
 export type DeptScanEvent = {
   departmentCode: string;
+  /** SOFA / BEDFRAME / ACCESSORY from a category QR; null = dept-only scan. */
+  category?: string | null;
   /** Minutes since midnight (Malaysia wall clock), like clockIn/clockOut. */
   atMin: number;
 };
 
-export type DeptBucket = { departmentCode: string; minutes: number };
+export type DeptBucket = {
+  departmentCode: string;
+  /** Scanned category, or null when unknown (home-default / dept-only scan) —
+   *  the caller falls back to the dept's job-card mix for null. */
+  category: string | null;
+  minutes: number;
+};
 
 /**
- * Carve the punch window into per-department minute buckets.
- * - No scans → the whole window belongs to the worker's HOME department.
- * - Time from clock-in to the FIRST scan belongs to the home department
- *   (the worker started at their own station, then walked over and scanned).
- * - Each scan starts its department until the next scan; the last runs to
- *   clock-out. Scans outside the punch window clamp to it.
- * - A worker can return to a department — minutes are SUMMED per department
- *   (Working Hours keeps one row per department × category).
+ * Carve the punch window into per-(department × category) minute buckets.
+ * - No scans → the whole window belongs to the worker's HOME department
+ *   (category null → caller derives it from the dept's job cards).
+ * - Time from clock-in to the FIRST scan belongs to the home department.
+ * - Each scan starts its (dept, category) until the next scan; the last runs
+ *   to clock-out. Scans outside the punch window clamp to it.
+ * - Re-scanning the SAME dept+category is not a boundary; switching category
+ *   within one department IS (sofa line → bedframe line).
+ * - Minutes are SUMMED per (dept, category) — one Working Hours row each.
  */
 export function buildDeptBuckets(
   clockInMin: number,
@@ -37,35 +53,42 @@ export function buildDeptBuckets(
 ): DeptBucket[] {
   const out = Math.max(clockInMin, clockOutMin);
   if (out <= clockInMin) return [];
+  const norm = (v: string | null | undefined) => {
+    const s = (v ?? "").trim().toUpperCase();
+    return s === "" ? null : s;
+  };
   const cleaned = (events ?? [])
     .filter((e) => e && typeof e.departmentCode === "string" && e.departmentCode.trim() !== "")
     .map((e) => ({
       departmentCode: e.departmentCode.trim().toUpperCase(),
+      category: norm(e.category),
       atMin: Math.min(Math.max(Math.round(e.atMin), clockInMin), out),
     }))
     .sort((a, b) => a.atMin - b.atMin);
 
-  const perDept = new Map<string, number>();
-  const add = (dept: string, minutes: number) => {
+  const perKey = new Map<string, DeptBucket>();
+  const add = (dept: string, category: string | null, minutes: number) => {
     if (minutes <= 0 || !dept) return;
-    perDept.set(dept, (perDept.get(dept) ?? 0) + minutes);
+    const key = `${dept}|${category ?? ""}`;
+    const cur = perKey.get(key);
+    if (cur) cur.minutes += minutes;
+    else perKey.set(key, { departmentCode: dept, category, minutes });
   };
 
   let cursor = clockInMin;
-  let currentDept = (homeDeptCode || "").trim().toUpperCase();
+  let curDept = (homeDeptCode || "").trim().toUpperCase();
+  let curCat: string | null = null;
   for (const e of cleaned) {
-    if (e.departmentCode === currentDept) continue; // re-scan of the same dept — no boundary
-    add(currentDept, e.atMin - cursor);
+    if (e.departmentCode === curDept && e.category === curCat) continue; // same station re-scan
+    add(curDept, curCat, e.atMin - cursor);
     cursor = e.atMin;
-    currentDept = e.departmentCode;
+    curDept = e.departmentCode;
+    curCat = e.category;
   }
-  add(currentDept, out - cursor);
+  add(curDept, curCat, out - cursor);
 
   // No home dept and no scans → nothing attributable (caller skips autofill).
-  return [...perDept.entries()].map(([departmentCode, minutes]) => ({
-    departmentCode,
-    minutes,
-  }));
+  return [...perKey.values()];
 }
 
 /**

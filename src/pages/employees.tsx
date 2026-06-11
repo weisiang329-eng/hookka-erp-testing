@@ -6279,6 +6279,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
       { header: "OT Sun", align: "right", value: (r) => { const h = (r as PayslipData).otSundayHours; return h > 0 ? `${h}h` : "-"; } },
       { header: "OT PH", align: "right", value: (r) => { const h = (r as PayslipData).otPHHours; return h > 0 ? `${h}h` : "-"; } },
       { header: "OT Amt", align: "right", value: (r) => formatCurrency((r as PayslipData).totalOT) },
+      { header: "Allowance", align: "right", value: (r) => { const v = (r as PayslipData).allowances || 0; return v > 0 ? formatCurrency(v) : "-"; } },
       { header: "Gross", align: "right", value: (r) => formatCurrency((r as PayslipData).grossPay) },
       { header: "EPF EE", align: "right", value: (r) => formatCurrency((r as PayslipData).epfEmployee) },
       { header: "EPF ER", align: "right", value: (r) => formatCurrency((r as PayslipData).epfEmployer) },
@@ -6446,6 +6447,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT Sun</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">OT PH</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">OT Amt</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap" title="Efficiency allowance — paid when the worker hits their monthly efficiency target">Allowance</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151] whitespace-nowrap">Gross</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EPF EE</th>
                     <th className="h-10 px-2 text-right font-medium text-[#374151] whitespace-nowrap">EPF ER</th>
@@ -6485,6 +6487,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otSundayHours > 0 ? `${r.otSundayHours}h` : "-"}</td>
                         <td className="h-10 px-2 text-right whitespace-nowrap">{r.otPHHours > 0 ? `${r.otPHHours}h` : "-"}</td>
                         <td className="h-10 px-3 text-right font-medium text-[#6B5C32] whitespace-nowrap">{formatCurrency(r.totalOT)}</td>
+                        <td className="h-10 px-3 text-right whitespace-nowrap text-[#4F7C3A]">{r.allowances > 0 ? formatCurrency(r.allowances) : "-"}</td>
                         <td className="h-10 px-3 text-right font-semibold whitespace-nowrap">{formatCurrency(r.grossPay)}</td>
                         <td className="h-10 px-2 text-right text-[#9A3A2D] text-xs whitespace-nowrap">{formatCurrency(r.epfEmployee)}</td>
                         <td className="h-10 px-2 text-right text-[#3E6570] text-xs whitespace-nowrap">{formatCurrency(r.epfEmployer)}</td>
@@ -6510,7 +6513,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
                       {/* Expanded Detail Row */}
                       {expandedRow === r.id && (
                         <tr className="bg-[#FDFCFB]">
-                          <td colSpan={19} className="px-6 py-4">
+                          <td colSpan={20} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                               {/* OT Calculation Breakdown */}
                               <div className="space-y-2">

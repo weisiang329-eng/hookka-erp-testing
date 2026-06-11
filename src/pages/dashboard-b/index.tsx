@@ -860,7 +860,9 @@ export default function DashboardBPage() {
       ? ov.stateSnapshot?.asOf
       : null;
 
-  const aovAll = ov.aovByCustomer ?? [];
+  const [custCat, setCustCat] = useState<"all" | "bedframe" | "sofa">("all");
+
+  const aovAll = useMemo(() => ov.aovByCustomer ?? [], [ov.aovByCustomer]);
   const topBed = ov.topSellers?.BEDFRAME ?? [];
   const topSofa = ov.topSellers?.SOFA ?? [];
 
@@ -878,18 +880,42 @@ export default function DashboardBPage() {
 
   // Customer revenue concentration — top 6 + "Others" (financial-
   // report style: who is our revenue actually coming from?).
-  const totalCustRev = aovAll.reduce((s, a) => s + a.totalSen, 0);
-  const pieTop = aovAll.slice(0, 6).map((a) => ({
-    name: a.customerName,
-    value: a.totalSen,
-  }));
-  const othersRev = aovAll
-    .slice(6)
-    .reduce((s, a) => s + a.totalSen, 0);
-  const pieData =
-    othersRev > 0
-      ? [...pieTop, { name: "Others", value: othersRev }]
-      : pieTop;
+  // custCat toggle re-derives revenue per customer for bedframe/sofa slices.
+  // Each item carries _catRev (category-scoped revenue in sen) for sorting,
+  // donut, and Total column — always 0 when category has no activity.
+  type AovWithCatRev = NonNullable<Overview["aovByCustomer"]>[number] & {
+    _catRev: number;
+  };
+  const aovFiltered = useMemo<AovWithCatRev[]>(() => {
+    return aovAll
+      .map((a) => {
+        const catRev =
+          custCat === "bedframe"
+            ? a.bedframeAvgSen * a.bedframeUnits
+            : custCat === "sofa"
+              ? a.sofaAvgSen * a.sofaSets
+              : a.totalSen;
+        return { ...a, _catRev: catRev };
+      })
+      .sort((a, b) =>
+        custCat === "all" ? 0 : b._catRev - a._catRev,
+      );
+  }, [aovAll, custCat]);
+
+  const totalCustRev = useMemo(
+    () => aovFiltered.reduce((s, a) => s + a._catRev, 0),
+    [aovFiltered],
+  );
+
+  const pieData = useMemo(() => {
+    const src = (custCat === "all" ? aovFiltered : aovFiltered.filter((a) => a._catRev > 0))
+      .map((a) => ({ name: a.customerName, value: a._catRev }));
+    const top6 = src.slice(0, 6);
+    const othersRev = src.slice(6).reduce((s, a) => s + a.value, 0);
+    return othersRev > 0
+      ? [...top6, { name: "Others", value: othersRev }]
+      : top6;
+  }, [aovFiltered, custCat]);
 
   // Pipeline conversion rate — follows the same period-scoped values as the
   // Order Pipeline widget (month figures for a month, all-time otherwise).
@@ -1553,14 +1579,44 @@ export default function DashboardBPage() {
         <CardContent className="p-5">
           <SectionTitle
             title="Sales by Customer & Month"
-            sub="avg order value — bedframe (per unit) vs sofa (per set) · click a customer for the monthly breakdown"
+            sub={
+              custCat === "all"
+                ? "avg order value — bedframe (per unit) vs sofa (per set) · click a customer for the monthly breakdown"
+                : custCat === "bedframe"
+                  ? "bedframe only — avg per unit · click a customer for the monthly breakdown"
+                  : "sofa only — avg per set · click a customer for the monthly breakdown"
+            }
             right={
-              <span className="text-[11px] text-[#9CA3AF]">
-                Total customer revenue{" "}
-                <span className="font-semibold text-[#1F1D1B]">
-                  {rm(totalCustRev)}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      ["all", "All"],
+                      ["bedframe", "Bedframe"],
+                      ["sofa", "Sofa"],
+                    ] as const
+                  ).map(([v, label]) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => setCustCat(v)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                        custCat === v
+                          ? "bg-[#6B5C32] text-white"
+                          : "bg-[#F5F2ED] text-[#5A5550] hover:bg-[#EAE5DC]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[11px] text-[#9CA3AF]">
+                  Total{" "}
+                  <span className="font-semibold text-[#1F1D1B]">
+                    {rm(totalCustRev)}
+                  </span>
                 </span>
-              </span>
+              </div>
             }
           />
           {pieData.length === 0 ? (
@@ -1593,9 +1649,10 @@ export default function DashboardBPage() {
                     </span>
                     <span className="text-3xl font-[800] text-[#1F1D1B]">
                       {(
-                        (aovAll
+                        (aovFiltered
+                          .filter((a) => custCat === "all" || a._catRev > 0)
                           .slice(0, 3)
-                          .reduce((s, a) => s + a.totalSen, 0) /
+                          .reduce((s, a) => s + a._catRev, 0) /
                           Math.max(1, totalCustRev)) *
                         100
                       ).toFixed(0)}
@@ -1608,18 +1665,26 @@ export default function DashboardBPage() {
                     <thead>
                       <tr className="text-left text-[11px] text-[#9CA3AF] border-b border-[#E2DDD8]">
                         <th className="py-1.5 font-medium">Customer</th>
-                        <th className="py-1.5 font-medium text-right">
-                          Bedframe AOV
-                        </th>
-                        <th className="py-1.5 font-medium text-right">
-                          Units
-                        </th>
-                        <th className="py-1.5 font-medium text-right">
-                          Sofa AOV
-                        </th>
-                        <th className="py-1.5 font-medium text-right">
-                          Sets
-                        </th>
+                        {custCat !== "sofa" && (
+                          <>
+                            <th className="py-1.5 font-medium text-right">
+                              Bedframe AOV
+                            </th>
+                            <th className="py-1.5 font-medium text-right">
+                              Units
+                            </th>
+                          </>
+                        )}
+                        {custCat !== "bedframe" && (
+                          <>
+                            <th className="py-1.5 font-medium text-right">
+                              Sofa AOV
+                            </th>
+                            <th className="py-1.5 font-medium text-right">
+                              Sets
+                            </th>
+                          </>
+                        )}
                         <th className="py-1.5 font-medium text-right">
                           Total
                         </th>
@@ -1631,36 +1696,60 @@ export default function DashboardBPage() {
                           <td className="py-1.5 font-bold text-[#1F1D1B]">
                             All customers
                           </td>
-                          <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
-                            {ov.aovCompany.bedframeUnits
-                              ? rm(ov.aovCompany.bedframeAvgSen)
-                              : "—"}
-                          </td>
-                          <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
-                            {ov.aovCompany.bedframeUnits
-                              ? ov.aovCompany.bedframeUnits.toLocaleString()
-                              : "—"}
-                          </td>
-                          <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
-                            {ov.aovCompany.sofaSets
-                              ? rm(ov.aovCompany.sofaAvgSen)
-                              : "—"}
-                          </td>
-                          <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
-                            {ov.aovCompany.sofaSets
-                              ? ov.aovCompany.sofaSets.toLocaleString()
-                              : "—"}
-                          </td>
+                          {custCat !== "sofa" && (
+                            <>
+                              <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
+                                {ov.aovCompany.bedframeUnits
+                                  ? rm(ov.aovCompany.bedframeAvgSen)
+                                  : "—"}
+                              </td>
+                              <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                                {ov.aovCompany.bedframeUnits
+                                  ? ov.aovCompany.bedframeUnits.toLocaleString()
+                                  : "—"}
+                              </td>
+                            </>
+                          )}
+                          {custCat !== "bedframe" && (
+                            <>
+                              <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
+                                {ov.aovCompany.sofaSets
+                                  ? rm(ov.aovCompany.sofaAvgSen)
+                                  : "—"}
+                              </td>
+                              <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                                {ov.aovCompany.sofaSets
+                                  ? ov.aovCompany.sofaSets.toLocaleString()
+                                  : "—"}
+                              </td>
+                            </>
+                          )}
                           <td className="py-1.5 text-right font-bold text-[#1F1D1B] tabular-nums">
-                            {rm(ov.aovCompany.totalSen)}
+                            {custCat === "all"
+                              ? rm(ov.aovCompany.totalSen)
+                              : custCat === "bedframe"
+                                ? rm(
+                                    ov.aovCompany.bedframeAvgSen *
+                                      ov.aovCompany.bedframeUnits,
+                                  )
+                                : rm(
+                                    ov.aovCompany.sofaAvgSen *
+                                      ov.aovCompany.sofaSets,
+                                  )}
                           </td>
                         </tr>
                       )}
-                      {aovAll.slice(0, 10).map((a, i) => {
+                      {aovFiltered.slice(0, 10).map((a, i) => {
                         const monthly = aovMonthly[a.customerName];
                         const hasMonthly = !!(
                           monthly && monthly.length > 0
                         );
+                        // Monthly drill-down: aovMonthlyByCustomer has
+                        // per-category fields so we can filter them. The
+                        // "Total" column in the drill modal always shows the
+                        // blended monthly total because the monthly payload
+                        // does not include a totalSen field — only
+                        // bedframeAvgSen*units and sofaAvgSen*sets.
                         const drillRows =
                           hasMonthly && monthly
                             ? monthly.map((m) => [
@@ -1683,6 +1772,9 @@ export default function DashboardBPage() {
                                   a.sofaSets || "—",
                                 ],
                               ];
+                        // Row total follows the selected category (_catRev
+                        // equals totalSen when custCat === "all").
+                        const rowTotal = a._catRev;
                         return (
                           <tr
                             key={a.customerName}
@@ -1723,24 +1815,34 @@ export default function DashboardBPage() {
                               </span>
                               <span className="text-[#C2BBAE]"> ›</span>
                             </td>
-                            <td className="py-1.5 text-right text-[#1F1D1B] tabular-nums">
-                              {a.bedframeUnits ? rm(a.bedframeAvgSen) : "—"}
-                            </td>
-                            <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
-                              {a.bedframeUnits
-                                ? a.bedframeUnits.toLocaleString()
-                                : "—"}
-                            </td>
-                            <td className="py-1.5 text-right text-[#1F1D1B] tabular-nums">
-                              {a.sofaSets ? rm(a.sofaAvgSen) : "—"}
-                            </td>
-                            <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
-                              {a.sofaSets
-                                ? a.sofaSets.toLocaleString()
-                                : "—"}
-                            </td>
+                            {custCat !== "sofa" && (
+                              <>
+                                <td className="py-1.5 text-right text-[#1F1D1B] tabular-nums">
+                                  {a.bedframeUnits
+                                    ? rm(a.bedframeAvgSen)
+                                    : "—"}
+                                </td>
+                                <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                                  {a.bedframeUnits
+                                    ? a.bedframeUnits.toLocaleString()
+                                    : "—"}
+                                </td>
+                              </>
+                            )}
+                            {custCat !== "bedframe" && (
+                              <>
+                                <td className="py-1.5 text-right text-[#1F1D1B] tabular-nums">
+                                  {a.sofaSets ? rm(a.sofaAvgSen) : "—"}
+                                </td>
+                                <td className="py-1.5 text-right text-[#9CA3AF] tabular-nums">
+                                  {a.sofaSets
+                                    ? a.sofaSets.toLocaleString()
+                                    : "—"}
+                                </td>
+                              </>
+                            )}
                             <td className="py-1.5 text-right font-semibold text-[#1F1D1B] tabular-nums">
-                              {rm(a.totalSen)}
+                              {rm(rowTotal)}
                             </td>
                           </tr>
                         );
@@ -1757,7 +1859,10 @@ export default function DashboardBPage() {
                 <span className="font-semibold text-[#1F1D1B]">
                   Top 3 ={" "}
                   {(
-                    (aovAll.slice(0, 3).reduce((s, a) => s + a.totalSen, 0) /
+                    (aovFiltered
+                      .filter((a) => custCat === "all" || a._catRev > 0)
+                      .slice(0, 3)
+                      .reduce((s, a) => s + a._catRev, 0) /
                       Math.max(1, totalCustRev)) *
                     100
                   ).toFixed(0)}
@@ -1767,13 +1872,18 @@ export default function DashboardBPage() {
                 <span className="font-semibold text-[#1F1D1B]">
                   Top 5 ={" "}
                   {(
-                    (aovAll.slice(0, 5).reduce((s, a) => s + a.totalSen, 0) /
+                    (aovFiltered
+                      .filter((a) => custCat === "all" || a._catRev > 0)
+                      .slice(0, 5)
+                      .reduce((s, a) => s + a._catRev, 0) /
                       Math.max(1, totalCustRev)) *
                     100
                   ).toFixed(0)}
                   %
                 </span>{" "}
-                of total customer revenue ({rm(totalCustRev)}).
+                of total{" "}
+                {custCat !== "all" ? `${custCat} ` : ""}
+                customer revenue ({rm(totalCustRev)}).
               </p>
             </>
           )}

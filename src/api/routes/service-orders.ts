@@ -243,6 +243,11 @@ type SourceOrderSummary = {
   status: string;
   companyOrderId: string;
   customerState: string | null;
+  // Delivery hub of the source order — copied onto the service order at
+  // creation so a service PO dispatched to a DO resolves the SAME
+  // hub/address/state a normal sales order would (DO-2606-030 printed a blank
+  // Deliver-To because the service chain carried no hub at all).
+  hubId: string | null;
 };
 
 async function loadSourceOrder(
@@ -253,7 +258,7 @@ async function loadSourceOrder(
   if (sourceType === "SO") {
     const row = await db
       .prepare(
-        `SELECT id, customerId, customerName, status, companySOId, customerState
+        `SELECT id, customerId, customerName, status, companySOId, customerState, hubId
          FROM sales_orders WHERE id = ?`,
       )
       .bind(sourceId)
@@ -264,6 +269,7 @@ async function loadSourceOrder(
         status: string;
         companySOId: string | null;
         customerState: string | null;
+        hubId: string | null;
       }>();
     if (!row) return null;
     return {
@@ -273,11 +279,12 @@ async function loadSourceOrder(
       status: row.status,
       companyOrderId: row.companySOId ?? "",
       customerState: row.customerState,
+      hubId: row.hubId,
     };
   }
   const row = await db
     .prepare(
-      `SELECT id, customerId, customerName, status, companyCOId, customerState
+      `SELECT id, customerId, customerName, status, companyCOId, customerState, hubId
        FROM consignment_orders WHERE id = ?`,
     )
     .bind(sourceId)
@@ -288,6 +295,7 @@ async function loadSourceOrder(
       status: string;
       companyCOId: string | null;
       customerState: string | null;
+      hubId: string | null;
     }>();
   if (!row) return null;
   return {
@@ -297,6 +305,7 @@ async function loadSourceOrder(
     status: row.status,
     companyOrderId: row.companyCOId ?? "",
     customerState: row.customerState,
+    hubId: row.hubId,
   };
 }
 
@@ -397,9 +406,34 @@ app.get("/:id", async (c) => {
 //   null       — "Decide later"; no side effects, status stays OPEN.
 //                Pick mode later via PUT /:id/mode.
 // ---------------------------------------------------------------------------
+
+// Self-applying migration (same pattern as sales-orders.ts): hubId lands on
+// service_orders at first POST per isolate, so prod keeps working before
+// migrations-postgres/0158 replays. Module-level promise = one ALTER per boot.
+let pendingServiceOrderMigrations: Promise<void> | null = null;
+function ensureServiceOrderMigrations(db: D1Database): Promise<void> {
+  if (pendingServiceOrderMigrations) return pendingServiceOrderMigrations;
+  pendingServiceOrderMigrations = (async () => {
+    try {
+      // 0158 — delivery hub inherited from the source SO/CO so service POs
+      // dispatch with a real address/state (DO-2606-030 root cause).
+      await db
+        .prepare(
+          "ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS hubId TEXT",
+        )
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected; the
+      // INSERT below surfaces a real schema error with a clearer message.
+    }
+  })();
+  return pendingServiceOrderMigrations;
+}
+
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "service-orders", "create");
   if (denied) return denied;
+  await ensureServiceOrderMigrations(c.var.DB);
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
 
@@ -453,6 +487,7 @@ app.post("/", async (c) => {
       customerState: string | null;
       companyOrderId: string | null;
       status: string;
+      hubId: string | null;
       items: Array<{ id: string; productId: string | null; productCode: string | null; productName: string | null; quantity: number }>;
     };
     let source: Source;
@@ -464,6 +499,11 @@ app.post("/", async (c) => {
         customerState: caseRow.customerState,
         companyOrderId: null,
         status: "EXTERNAL",
+        // EXTERNAL cases have no source order to inherit a hub from — the DO
+        // create path falls back to the customer's default hub and (since
+        // 2026-06-11) flags a still-blank address in red instead of silently
+        // printing "-".
+        hubId: null,
         items: [],
       };
     } else {
@@ -635,9 +675,9 @@ app.post("/", async (c) => {
     stmts.push(
       c.var.DB.prepare(
         `INSERT INTO service_orders (id, serviceOrderNo, caseId, sourceType, sourceId,
-           sourceNo, customerId, customerName, mode, status,
+           sourceNo, customerId, customerName, hubId, mode, status,
            createdBy, createdByName, created_at, closedAt, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       ).bind(
         id,
         serviceOrderNo,
@@ -647,6 +687,9 @@ app.post("/", async (c) => {
         source.companyOrderId,
         source.customerId,
         source.customerName,
+        // Hub inherited from the source SO/CO — the missing link that made
+        // service DOs print blank addresses (DO-2606-030). NULL for EXTERNAL.
+        source.hubId,
         mode,
         initialStatus,
         (body.createdBy as string) ?? null,

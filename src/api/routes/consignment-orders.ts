@@ -2249,6 +2249,38 @@ app.patch("/:id/hub", async (c) => {
       if (a) stmts.push(a);
     }
 
+    // service_orders — destination inherited from this CO at service-order
+    // creation (service-orders.ts, 2026-06-11). Same rule as the SO cascade:
+    // the service order follows its source. try/catch: the hubId column
+    // self-applies on first service-order POST; an isolate without it has no
+    // stored hubs to go stale (the DO path live-derives those from this CO).
+    try {
+      const svcRes = await c.var.DB
+        .prepare(
+          `SELECT id, hubId FROM service_orders
+            WHERE sourceType = 'CO' AND sourceId = ?`,
+        )
+        .bind(co.id)
+        .all<{ id: string; hubId: string | null }>();
+      for (const svc of svcRes.results ?? []) {
+        stmts.push(
+          c.var.DB
+            .prepare(`UPDATE service_orders SET hubId = ? WHERE id = ?`)
+            .bind(hub.id, svc.id),
+        );
+        const a = await buildAuditStatement(c, {
+          resource: "service-orders",
+          resourceId: svc.id,
+          action: "hub-cascade-from-co",
+          before: { hubId: svc.hubId },
+          after: auditAfter,
+        });
+        if (a) stmts.push(a);
+      }
+    } catch {
+      // hubId column not present on this isolate yet — nothing stored, skip.
+    }
+
     // 6c. fg_units — packing-sticker branch. Propagate the new hub to this
     //     CO's in-stock FG units so their packing stickers follow the hub
     //     change. Hub change is blocked once goods leave (guard above), so

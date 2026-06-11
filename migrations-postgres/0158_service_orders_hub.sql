@@ -1,0 +1,16 @@
+-- 0158_service_orders_hub.sql
+-- Delivery hub for service orders, inherited from the source SO/CO at
+-- creation. Service orders previously carried NO hub anywhere on their chain
+-- (service_orders had no column; their repair POs have salesOrderId NULL), so
+-- dispatching a service PO to a Delivery Order fell back to the customer's
+-- default hub — wrong branch — and could print a blank Deliver-To
+-- (DO-2606-030, 2026-06-11). With the hub stored here, a service DO resolves
+-- the SAME hub/address/state a normal sales order would.
+--
+-- Column is snake_case (the d1-compat adapter translates the camelCase the
+-- app writes — hubId — to hub_id). The service-orders POST route ALSO
+-- self-applies this at runtime via ensureServiceOrderMigrations, so a re-run
+-- here is a harmless no-op. Additive + nullable: EXTERNAL-source service
+-- orders (no source order) and legacy rows stay NULL — the DO create path
+-- live-derives legacy rows' hub from their source order instead.
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS hub_id TEXT;

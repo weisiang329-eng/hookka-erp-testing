@@ -2339,6 +2339,97 @@ type DoCreateOutcome =
     }
   | { ok: false; status: 400 | 409 | 500; body: Record<string, unknown> };
 
+// Service-PO destination metadata. Service POs (production_orders.
+// serviceOrderId set, salesOrderId NULL) carry their delivery hub on the
+// SERVICE order: service_orders.hubId is stamped at creation from the source
+// SO/CO (2026-06-11). Legacy service orders predate that column, so fall back
+// to live-deriving the hub from the source order. The hubId SELECT is
+// try/catch'd because the column self-applies on first service-order POST —
+// DO creation must keep working on isolates where it hasn't landed yet.
+async function loadServiceOrderHubMeta(
+  db: D1Database,
+  serviceOrderIds: string[],
+): Promise<
+  Map<
+    string,
+    { hubId: string | null; customerId: string | null; customerName: string | null }
+  >
+> {
+  const out = new Map<
+    string,
+    { hubId: string | null; customerId: string | null; customerName: string | null }
+  >();
+  const ids = [...new Set(serviceOrderIds.filter((x) => x))];
+  if (ids.length === 0) return out;
+  const ph = ids.map(() => "?").join(",");
+  type SvcRow = {
+    id: string;
+    hubId?: string | null;
+    sourceType: string | null;
+    sourceId: string | null;
+    customerId: string | null;
+    customerName: string | null;
+  };
+  let rows: SvcRow[] = [];
+  try {
+    const res = await db
+      .prepare(
+        `SELECT id, hubId, sourceType, sourceId, customerId, customerName
+           FROM service_orders WHERE id IN (${ph})`,
+      )
+      .bind(...ids)
+      .all<SvcRow>();
+    rows = res.results ?? [];
+  } catch {
+    const res = await db
+      .prepare(
+        `SELECT id, sourceType, sourceId, customerId, customerName
+           FROM service_orders WHERE id IN (${ph})`,
+      )
+      .bind(...ids)
+      .all<SvcRow>();
+    rows = res.results ?? [];
+  }
+
+  // Legacy rows (no stored hub): derive from the source order live.
+  const soNeed = rows.filter((r) => !r.hubId && r.sourceType === "SO" && r.sourceId);
+  const coNeed = rows.filter((r) => !r.hubId && r.sourceType === "CO" && r.sourceId);
+  const soHub = new Map<string, string | null>();
+  if (soNeed.length > 0) {
+    const p2 = soNeed.map(() => "?").join(",");
+    const res = await db
+      .prepare(`SELECT id, hubId FROM sales_orders WHERE id IN (${p2})`)
+      .bind(...soNeed.map((r) => r.sourceId))
+      .all<{ id: string; hubId: string | null }>();
+    for (const r of res.results ?? []) soHub.set(r.id, r.hubId);
+  }
+  const coHub = new Map<string, string | null>();
+  if (coNeed.length > 0) {
+    const p2 = coNeed.map(() => "?").join(",");
+    const res = await db
+      .prepare(`SELECT id, hubId FROM consignment_orders WHERE id IN (${p2})`)
+      .bind(...coNeed.map((r) => r.sourceId))
+      .all<{ id: string; hubId: string | null }>();
+    for (const r of res.results ?? []) coHub.set(r.id, r.hubId);
+  }
+
+  for (const r of rows) {
+    const derived =
+      r.hubId ??
+      (r.sourceType === "SO"
+        ? soHub.get(r.sourceId ?? "") ?? null
+        : r.sourceType === "CO"
+          ? coHub.get(r.sourceId ?? "") ?? null
+          : null);
+    out.set(r.id, {
+      hubId: derived,
+      customerId: r.customerId,
+      customerName: r.customerName,
+    });
+  }
+  return out;
+}
+
 // Shared DO composition guard — the three integrity rules that keep a DO
 // physically deliverable:
 //   (1) a production order can be delivered only ONCE,
@@ -2363,13 +2454,19 @@ async function validateDoComposition(
   if (poIds.length === 0) return { ok: true };
   const placeholders = poIds.map(() => "?").join(",");
 
-  // PO rows — poNo for messages, salesOrderId for the customer/hub lookup.
+  // PO rows — poNo for messages, salesOrderId / serviceOrderId for the
+  // customer/hub lookup.
   const poRes = await db
     .prepare(
-      `SELECT id, poNo, salesOrderId FROM production_orders WHERE id IN (${placeholders})`,
+      `SELECT id, poNo, salesOrderId, serviceOrderId FROM production_orders WHERE id IN (${placeholders})`,
     )
     .bind(...poIds)
-    .all<{ id: string; poNo: string; salesOrderId: string | null }>();
+    .all<{
+      id: string;
+      poNo: string;
+      salesOrderId: string | null;
+      serviceOrderId: string | null;
+    }>();
   const poRows = poRes.results ?? [];
   const poNoById = new Map(poRows.map((r) => [r.id, r.poNo]));
 
@@ -2398,10 +2495,14 @@ async function validateDoComposition(
     };
   }
 
-  // (2)+(3) customer + hub consistency — derived from the parent SOs. Service
-  // / ad-hoc POs with no salesOrderId contribute nothing here (same as the
-  // original create-path guard); the service-hub chain tightens that
-  // separately.
+  // (2)+(3) customer + hub consistency — derived from the parent SOs PLUS the
+  // service orders (service POs have no SO; their destination lives on
+  // service_orders, stamped from the source order). Both dimensions fold into
+  // the SAME maps so a service PO can't smuggle a second customer/destination
+  // into a DO.
+  const custMap = new Map<string, string>();
+  const hubMap = new Map<string, string>();
+
   const soIds = [...new Set(poRows.map((r) => r.salesOrderId ?? "").filter((x) => x))];
   if (soIds.length > 0) {
     const ph = soIds.map(() => "?").join(",");
@@ -2418,35 +2519,57 @@ async function validateDoComposition(
         customerId: string | null;
         customerName: string | null;
       }>();
-    const soMeta = soRes.results ?? [];
-
-    // CUSTOMER-CONSISTENCY (Wei Siang 2026-05-28): a DO is keyed to ONE
-    // customer.
-    const custMap = new Map<string, string>();
-    for (const r of soMeta) {
+    for (const r of soRes.results ?? []) {
       if (r.customerId) custMap.set(r.customerId, r.customerName || r.customerId);
-    }
-    if (custMap.size > 1) {
-      return {
-        ok: false,
-        status: 400,
-        error: `This delivery order mixes ${custMap.size} customers (${[...custMap.values()].join(", ")}). A DO can only deliver for one customer — split into separate DOs, one per customer.`,
-      };
-    }
-
-    // HUB-CONSISTENCY (Wei Siang 2026-05-28): a single DO must deliver to ONE
-    // hub. Different hubs = different physical drop-off addresses.
-    const hubMap = new Map<string, string>();
-    for (const r of soMeta) {
       if (r.hubId && r.hubId !== "") hubMap.set(r.hubId, r.hubName || r.hubId);
     }
-    if (hubMap.size > 1) {
-      return {
-        ok: false,
-        status: 400,
-        error: `This delivery order mixes ${hubMap.size} delivery hubs (${[...hubMap.values()].join(", ")}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
-      };
+  }
+
+  const svcIds = [
+    ...new Set(poRows.map((r) => r.serviceOrderId ?? "").filter((x) => x)),
+  ];
+  if (svcIds.length > 0) {
+    const svcMeta = await loadServiceOrderHubMeta(db, svcIds);
+    const unnamedHubIds = new Set<string>();
+    for (const m of svcMeta.values()) {
+      if (m.customerId && !custMap.has(m.customerId)) {
+        custMap.set(m.customerId, m.customerName || m.customerId);
+      }
+      if (m.hubId && !hubMap.has(m.hubId)) unnamedHubIds.add(m.hubId);
     }
+    if (unnamedHubIds.size > 0) {
+      // Name the service hubs so a mix rejection reads like the SO one
+      // ("Houzs KL, Houzs PG") instead of raw ids.
+      const ph = [...unnamedHubIds].map(() => "?").join(",");
+      const hubRes = await db
+        .prepare(`SELECT id, shortName FROM delivery_hubs WHERE id IN (${ph})`)
+        .bind(...unnamedHubIds)
+        .all<{ id: string; shortName: string | null }>();
+      const nameById = new Map(
+        (hubRes.results ?? []).map((h) => [h.id, h.shortName]),
+      );
+      for (const h of unnamedHubIds) hubMap.set(h, nameById.get(h) || h);
+    }
+  }
+
+  // CUSTOMER-CONSISTENCY (Wei Siang 2026-05-28): a DO is keyed to ONE
+  // customer.
+  if (custMap.size > 1) {
+    return {
+      ok: false,
+      status: 400,
+      error: `This delivery order mixes ${custMap.size} customers (${[...custMap.values()].join(", ")}). A DO can only deliver for one customer — split into separate DOs, one per customer.`,
+    };
+  }
+
+  // HUB-CONSISTENCY (Wei Siang 2026-05-28): a single DO must deliver to ONE
+  // hub. Different hubs = different physical drop-off addresses.
+  if (hubMap.size > 1) {
+    return {
+      ok: false,
+      status: 400,
+      error: `This delivery order mixes ${hubMap.size} delivery hubs (${[...hubMap.values()].join(", ")}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
+    };
   }
   return { ok: true };
 }
@@ -2477,6 +2600,7 @@ async function createDeliveryOrderForPOs(
       rackingNumber: string | null;
       customerName: string | null;
       customerState: string | null;
+      serviceOrderId: string | null;
     };
     const productionOrderIds: string[] = Array.isArray(body.productionOrderIds)
       ? (body.productionOrderIds as unknown[]).filter(
@@ -2489,7 +2613,7 @@ async function createDeliveryOrderForPOs(
       const placeholders = productionOrderIds.map(() => "?").join(",");
       const poRes = await c.var.DB.prepare(
         `SELECT id, poNo, salesOrderId, consignmentOrderId, companySOId,
-                productCode, productName,
+                serviceOrderId, productCode, productName,
                 sizeLabel, fabricCode, quantity, rackingNumber,
                 customerName, customerState
            FROM production_orders WHERE id IN (${placeholders})`,
@@ -2650,7 +2774,29 @@ async function createDeliveryOrderForPOs(
       shortName: string | null;
       address: string | null;
     } | null = null;
-    const hubTarget = body.hubId ?? salesOrderRow?.hubId ?? null;
+    let hubTarget = body.hubId ?? salesOrderRow?.hubId ?? null;
+    // Service POs: the destination lives on the SERVICE order (stamped from
+    // the source SO/CO at creation; legacy rows live-derive inside the
+    // helper). Without this, a service DO fell back to the customer's default
+    // hub — wrong branch — and could even print a blank Deliver-To
+    // (DO-2606-030). The composition guard above already ensures the
+    // selection spans at most ONE distinct service hub.
+    if (!hubTarget && poRowsForItems.length > 0) {
+      const svcIds = [
+        ...new Set(
+          poRowsForItems.map((r) => r.serviceOrderId ?? "").filter((x) => x),
+        ),
+      ];
+      if (svcIds.length > 0) {
+        const svcMeta = await loadServiceOrderHubMeta(c.var.DB, svcIds);
+        for (const m of svcMeta.values()) {
+          if (m.hubId) {
+            hubTarget = m.hubId;
+            break;
+          }
+        }
+      }
+    }
     if (hubTarget) {
       defaultHub = await c.var.DB.prepare(
         "SELECT id, shortName, address FROM delivery_hubs WHERE id = ?",
@@ -3179,6 +3325,7 @@ app.post("/packing-list-first", async (c) => {
       poNo: string | null;
       salesOrderId: string | null;
       consignmentOrderId: string | null;
+      serviceOrderId: string | null;
       productCode: string | null;
       quantity: number | null;
       customerName: string | null;
@@ -3186,7 +3333,7 @@ app.post("/packing-list-first", async (c) => {
     };
     const placeholders = productionOrderIds.map(() => "?").join(",");
     const poRes = await c.var.DB.prepare(
-      `SELECT id, poNo, salesOrderId, consignmentOrderId,
+      `SELECT id, poNo, salesOrderId, consignmentOrderId, serviceOrderId,
               productCode, quantity, customerName, customerState
          FROM production_orders WHERE id IN (${placeholders})`,
     )
@@ -3268,6 +3415,17 @@ app.post("/packing-list-first", async (c) => {
       for (const r of soMetaRes.results ?? []) soMetaById.set(r.id, r);
     }
 
+    // Service POs have no parent SO — their destination lives on the service
+    // order (stamped at creation; legacy rows live-derive from the source
+    // order inside the helper). Same hub source the DO-create core uses, so
+    // grouping and the created DOs can't disagree.
+    const svcIdsForHub = [
+      ...new Set(
+        poRows.map((r) => r.serviceOrderId ?? "").filter((x) => x !== ""),
+      ),
+    ];
+    const svcHubMeta = await loadServiceOrderHubMeta(c.var.DB, svcIdsForHub);
+
     // Customer fallback by PO.customerName — the same chain the DO-create
     // core uses for POs whose parent SO carries no customer.
     const nameToCustomerId = new Map<string, string>();
@@ -3290,8 +3448,12 @@ app.post("/packing-list-first", async (c) => {
       const po = poById.get(poId);
       if (!po) continue; // unreachable — missing ids rejected above
       const so = po.salesOrderId ? soMetaById.get(po.salesOrderId) : undefined;
+      const svc = po.serviceOrderId
+        ? svcHubMeta.get(po.serviceOrderId)
+        : undefined;
       const customerId =
         so?.customerId ??
+        svc?.customerId ??
         (po.customerName ? nameToCustomerId.get(po.customerName) : undefined);
       if (!customerId) {
         return c.json(
@@ -3302,7 +3464,11 @@ app.post("/packing-list-first", async (c) => {
           400,
         );
       }
-      groupInputs.push({ poId, customerId, hubId: so?.hubId ?? "" });
+      groupInputs.push({
+        poId,
+        customerId,
+        hubId: so?.hubId ?? svc?.hubId ?? "",
+      });
     }
     const groups = groupPosByCustomerHub(groupInputs);
 

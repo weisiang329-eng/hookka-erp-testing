@@ -236,6 +236,30 @@ test("structural: every original DO-create guard still exists exactly once (insi
   }
 });
 
+test("structural: create AND edit both enforce composition via ONE shared guard", () => {
+  // The duplicate / one-customer / one-hub rules now live in a single helper
+  // so the create path and the edit / Add-Items path can never drift (root
+  // cause of DO-2606-029: a DO mixed two hubs because Add Items on the edit
+  // screen bypassed the create-only guards).
+  assert.equal(
+    count(doSrc, /async function validateDoComposition\(/g),
+    1,
+    "validateDoComposition must be defined exactly once",
+  );
+  // Called from BOTH the create core and the edit (PUT) path.
+  assert.ok(
+    count(doSrc, /await validateDoComposition\(/g) >= 2,
+    "validateDoComposition must be called from create + edit (>= 2 call sites)",
+  );
+  // The edit path scopes the duplicate-delivery check to THIS DO
+  // (excludeDoId = id) so a DO's own existing POs don't trip the rule.
+  assert.match(
+    doSrc,
+    /validateDoComposition\(c\.var\.DB, editPoIds, id\)/,
+    "PUT /:id must validate the replacement item set, excluding this DO",
+  );
+});
+
 test("structural: packing-list-first endpoint registered + RBAC-gated", () => {
   assert.match(
     doSrc,

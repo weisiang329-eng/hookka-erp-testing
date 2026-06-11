@@ -2339,6 +2339,118 @@ type DoCreateOutcome =
     }
   | { ok: false; status: 400 | 409 | 500; body: Record<string, unknown> };
 
+// Shared DO composition guard — the three integrity rules that keep a DO
+// physically deliverable:
+//   (1) a production order can be delivered only ONCE,
+//   (2) one DO = one customer,
+//   (3) one DO = one delivery hub (one physical drop-off address).
+// This lives in ONE place so the create path (POST) and the edit / Add-Items
+// path (PUT) enforce IDENTICAL rules and can never drift. Root cause of
+// DO-2606-029 (Wei Siang 2026-06-11): a DO mixed two hubs because the three
+// guards lived ONLY in the create path — "Add Items" on the edit screen
+// replaced the item set with zero validation, so a Penang order slipped into
+// a KL DO.
+//
+// excludeDoId — on edit, the DO being saved already legitimately holds these
+// POs; pass its id so the duplicate-delivery check skips itself (a PO already
+// on THIS DO is fine; only a PO on ANOTHER live DO is the problem).
+async function validateDoComposition(
+  db: D1Database,
+  productionOrderIds: string[],
+  excludeDoId: string | null,
+): Promise<{ ok: true } | { ok: false; status: 400 | 409; error: string }> {
+  const poIds = [...new Set(productionOrderIds.filter((x) => x))];
+  if (poIds.length === 0) return { ok: true };
+  const placeholders = poIds.map(() => "?").join(",");
+
+  // PO rows — poNo for messages, salesOrderId for the customer/hub lookup.
+  const poRes = await db
+    .prepare(
+      `SELECT id, poNo, salesOrderId FROM production_orders WHERE id IN (${placeholders})`,
+    )
+    .bind(...poIds)
+    .all<{ id: string; poNo: string; salesOrderId: string | null }>();
+  const poRows = poRes.results ?? [];
+  const poNoById = new Map(poRows.map((r) => [r.id, r.poNo]));
+
+  // (1) duplicate-delivery guard — reject any PO already on another
+  // non-cancelled DO. ROOT-CAUSE GUARD (Wei Siang 2026-05-16): a PO can only
+  // be delivered once (re-delivery double-consumes FG via FIFO COGS).
+  const dupRes = await db
+    .prepare(
+      `SELECT DISTINCT di.productionOrderId AS poId, d.doNo AS doNo, d.status AS status
+         FROM delivery_order_items di
+         JOIN delivery_orders d ON d.id = di.deliveryOrderId
+        WHERE di.productionOrderId IN (${placeholders})
+          AND d.status != 'CANCELLED'${excludeDoId ? "\n          AND d.id != ?" : ""}`,
+    )
+    .bind(...poIds, ...(excludeDoId ? [excludeDoId] : []))
+    .all<{ poId: string; doNo: string; status: string }>();
+  const alreadyLinked = dupRes.results ?? [];
+  if (alreadyLinked.length > 0) {
+    const lines = alreadyLinked
+      .map((r) => `${poNoById.get(r.poId) ?? r.poId} → ${r.doNo} (${r.status})`)
+      .join(", ");
+    return {
+      ok: false,
+      status: 409,
+      error: `These production orders are already on a delivery order (a PO can only be delivered once): ${lines}. Remove them from the selection.`,
+    };
+  }
+
+  // (2)+(3) customer + hub consistency — derived from the parent SOs. Service
+  // / ad-hoc POs with no salesOrderId contribute nothing here (same as the
+  // original create-path guard); the service-hub chain tightens that
+  // separately.
+  const soIds = [...new Set(poRows.map((r) => r.salesOrderId ?? "").filter((x) => x))];
+  if (soIds.length > 0) {
+    const ph = soIds.map(() => "?").join(",");
+    const soRes = await db
+      .prepare(
+        `SELECT id, hubId, hubName, customerId, customerName
+           FROM sales_orders WHERE id IN (${ph})`,
+      )
+      .bind(...soIds)
+      .all<{
+        id: string;
+        hubId: string | null;
+        hubName: string | null;
+        customerId: string | null;
+        customerName: string | null;
+      }>();
+    const soMeta = soRes.results ?? [];
+
+    // CUSTOMER-CONSISTENCY (Wei Siang 2026-05-28): a DO is keyed to ONE
+    // customer.
+    const custMap = new Map<string, string>();
+    for (const r of soMeta) {
+      if (r.customerId) custMap.set(r.customerId, r.customerName || r.customerId);
+    }
+    if (custMap.size > 1) {
+      return {
+        ok: false,
+        status: 400,
+        error: `This delivery order mixes ${custMap.size} customers (${[...custMap.values()].join(", ")}). A DO can only deliver for one customer — split into separate DOs, one per customer.`,
+      };
+    }
+
+    // HUB-CONSISTENCY (Wei Siang 2026-05-28): a single DO must deliver to ONE
+    // hub. Different hubs = different physical drop-off addresses.
+    const hubMap = new Map<string, string>();
+    for (const r of soMeta) {
+      if (r.hubId && r.hubId !== "") hubMap.set(r.hubId, r.hubName || r.hubId);
+    }
+    if (hubMap.size > 1) {
+      return {
+        ok: false,
+        status: 400,
+        error: `This delivery order mixes ${hubMap.size} delivery hubs (${[...hubMap.values()].join(", ")}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 async function createDeliveryOrderForPOs(
   c: Context<Env>,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2421,104 +2533,20 @@ async function createDeliveryOrderForPOs(
       // (BUG-2026-05-16: 13 duplicate DOs, 200 units & RM 24,647 of FG
       // double-consumed). Frontend hides already-linked POs, but that's
       // display-only — this is the authoritative backend block.
-      const dupLinkRes = await c.var.DB.prepare(
-        `SELECT DISTINCT di.productionOrderId AS poId, d.doNo AS doNo, d.status AS status
-           FROM delivery_order_items di
-           JOIN delivery_orders d ON d.id = di.deliveryOrderId
-          WHERE di.productionOrderId IN (${placeholders})
-            AND d.status != 'CANCELLED'`,
-      )
-        .bind(...productionOrderIds)
-        .all<{ poId: string; doNo: string; status: string }>();
-      const alreadyLinked = dupLinkRes.results ?? [];
-      if (alreadyLinked.length > 0) {
-        const poNoById = new Map(poRowsForItems.map((r) => [r.id, r.poNo]));
-        const lines = alreadyLinked
-          .map(
-            (r) =>
-              `${poNoById.get(r.poId) ?? r.poId} → ${r.doNo} (${r.status})`,
-          )
-          .join(", ");
+      // Duplicate-delivery + customer + hub consistency — the three DO
+      // composition rules, now enforced from ONE shared helper so the create
+      // and edit paths can never drift (see validateDoComposition).
+      const composition = await validateDoComposition(
+        c.var.DB,
+        productionOrderIds,
+        null,
+      );
+      if (!composition.ok) {
         return {
           ok: false,
-          status: 409,
-          body: {
-            success: false,
-            error: `These production orders are already on a delivery order (a PO can only be delivered once): ${lines}. Remove them from the selection.`,
-          },
+          status: composition.status,
+          body: { success: false, error: composition.error },
         };
-      }
-      // Multi-SO is still allowed ONLY within the same customer + same hub
-      // (operators consolidate several SOs of one customer going to one
-      // destination onto one truck). The two guards below reverse both
-      // dimensions of the 2026-04-27 free-mix allowance: a DO can no longer
-      // mix customers (CUSTOMER-CONSISTENCY) or hubs (HUB-CONSISTENCY).
-      const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
-      soIds.delete("");
-
-      if (soIds.size > 0) {
-        const soIdArr = [...soIds];
-        const ph = soIdArr.map(() => "?").join(",");
-        // One lookup feeds both guards — the parent SOs' customer + hub.
-        const soMetaRes = await c.var.DB.prepare(
-          `SELECT id, hubId, hubName, customerId, customerName
-             FROM sales_orders WHERE id IN (${ph})`,
-        )
-          .bind(...soIdArr)
-          .all<{
-            id: string;
-            hubId: string | null;
-            hubName: string | null;
-            customerId: string | null;
-            customerName: string | null;
-          }>();
-        const soMeta = soMetaRes.results ?? [];
-
-        // CUSTOMER-CONSISTENCY GUARD (Wei Siang 2026-05-28): a DO is keyed to
-        // ONE customer ("我们的 DO 是对标顾客的"). Reject a selection whose
-        // parent SOs span 2+ distinct customers — the operator must build one
-        // DO per customer (Quick Dispatch already auto-splits this way).
-        const custMap = new Map<string, string>();
-        for (const r of soMeta) {
-          if (r.customerId) {
-            custMap.set(r.customerId, r.customerName || r.customerId);
-          }
-        }
-        if (custMap.size > 1) {
-          const names = [...custMap.values()].join(", ");
-          return {
-            ok: false,
-            status: 400,
-            body: {
-              success: false,
-              error: `This delivery order mixes ${custMap.size} customers (${names}). A DO can only deliver for one customer — split into separate DOs, one per customer.`,
-            },
-          };
-        }
-
-        // HUB-CONSISTENCY GUARD (Wei Siang 2026-05-28): a single DO must
-        // deliver to ONE hub. Different hubs = physically different drop-off
-        // addresses, so they can't share one DO (the printed DO carries a
-        // single Deliver-To address — mixing hubs would ship some branches'
-        // goods to the wrong address). Reject when the selection spans 2+
-        // distinct non-empty hubs.
-        const hubMap = new Map<string, string>();
-        for (const r of soMeta) {
-          if (r.hubId && r.hubId !== "") {
-            hubMap.set(r.hubId, r.hubName || r.hubId);
-          }
-        }
-        if (hubMap.size > 1) {
-          const names = [...hubMap.values()].join(", ");
-          return {
-            ok: false,
-            status: 400,
-            body: {
-              success: false,
-              error: `This delivery order mixes ${hubMap.size} delivery hubs (${names}). A DO can only deliver to one hub — split into separate DOs, one per hub.`,
-            },
-          };
-        }
       }
 
       // Pick a representative salesOrderId for the legacy single-SO
@@ -2526,6 +2554,8 @@ async function createDeliveryOrderForPOs(
       // DO genuinely spans multiple SOs, leave salesOrderId NULL — the
       // DELIVERED cascade walks fg_units → poId to find every SO and
       // updates each (added below).
+      const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
+      soIds.delete("");
       if (!resolvedSalesOrderId && soIds.size === 1) {
         resolvedSalesOrderId = [...soIds][0];
       }
@@ -2943,7 +2973,14 @@ async function createDeliveryOrderForPOs(
         salesOrderRow?.customerState ?? body.customerState ?? null,
         defaultHub?.id ?? null,
         defaultHub?.shortName ?? null,
-        body.deliveryAddress ?? defaultHub?.address ?? "",
+        // An explicit blank / whitespace deliveryAddress from the caller must
+        // NOT discard the hub's real address. `??` only falls through on
+        // null/undefined, so a "" used to win and printed a blank Deliver-To
+        // (root cause of DO-2606-030's missing address). Fall through to the
+        // resolved hub address whenever the caller's value is blank.
+        typeof body.deliveryAddress === "string" && body.deliveryAddress.trim()
+          ? body.deliveryAddress
+          : defaultHub?.address ?? "",
         body.contactPerson ?? customerRow.contactName ?? "",
         body.contactPhone ?? customerRow.phone ?? "",
         body.deliveryDate ?? "",
@@ -4563,6 +4600,22 @@ app.put("/:id", async (c) => {
     let nextTotalItems = existing.totalItems;
     if (Array.isArray(body.items)) {
       newItems = (body.items as Array<Record<string, unknown>>).map(itemFromBody);
+      // Edit / Add-Items must obey the SAME three composition rules as create
+      // (Wei Siang 2026-06-11). Before this guard, "Add Items" on the edit
+      // screen replaced the item set with zero validation, so a PO from
+      // another customer/hub could be merged into this DO and silently split
+      // the destination (root cause of DO-2606-029). excludeDoId = this DO so
+      // its own existing POs don't trip the duplicate-delivery check.
+      const editPoIds = newItems
+        .map((i) => i.productionOrderId)
+        .filter((x): x is string => !!x);
+      const composition = await validateDoComposition(c.var.DB, editPoIds, id);
+      if (!composition.ok) {
+        return c.json(
+          { success: false, error: composition.error },
+          composition.status,
+        );
+      }
       nextTotalM3 =
         Math.round(
           newItems.reduce((s, i) => s + i.itemM3 * i.quantity, 0) * 100,

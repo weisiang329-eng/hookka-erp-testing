@@ -45,7 +45,7 @@ import {
   poReadyForDelivery,
   buildLinkedPOIds,
 } from "@/lib/delivery-pipeline";
-import { MALAYSIA_STATES } from "@/lib/malaysia-states";
+import { MALAYSIA_STATES, resolveStateCode } from "@/lib/malaysia-states";
 
 const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 const SOMutationSchema = mutationWithData(SalesOrderSchema);
@@ -2507,9 +2507,27 @@ export default function DeliveryPage() {
 
   // Available POs that can be added (not already in editItems)
   const addablePOs = useMemo(() => {
-    if (!showAddItemPanel) return [];
+    if (!showAddItemPanel || !detailDO) return [];
     const existingPOIds = new Set(editItems.map((i) => i.productionOrderId));
-    let filtered = readyPOs.filter((po) => !existingPOIds.has(po.id));
+    // A DO delivers to ONE customer and ONE place. Only offer ready POs going
+    // to the SAME customer AND the SAME state as this DO, so a wrong-state
+    // order (e.g. Penang into a KL DO) never even appears in the picker
+    // (Wei Siang 2026-06-11). The backend hub guard is the exact safety net;
+    // this is the can't-even-click filter. resolveStateCode lets legacy
+    // shorthand (KL/PG…) and canonical codes compare equal. When the DO has
+    // no resolvable state yet (e.g. a hub-less service DO), fall back to
+    // customer-only so the picker isn't empty.
+    const doState = resolveStateCode(detailDO.hubState || detailDO.hubBranch);
+    const sameCustomer = (po: ReadyPORow) =>
+      detailDO.customerId
+        ? po.customerId === detailDO.customerId
+        : (po.customerName || "") === (detailDO.customerName || "");
+    let filtered = readyPOs.filter(
+      (po) =>
+        !existingPOIds.has(po.id) &&
+        sameCustomer(po) &&
+        (doState === null || resolveStateCode(po.customerState) === doState),
+    );
     if (addItemSearch) {
       const q = addItemSearch.toLowerCase();
       filtered = filtered.filter(
@@ -2529,7 +2547,7 @@ export default function DeliveryPage() {
       );
     }
     return filtered;
-  }, [showAddItemPanel, editItems, readyPOs, addItemSearch]);
+  }, [showAddItemPanel, editItems, readyPOs, addItemSearch, detailDO]);
 
   const saveEditDO = async () => {
     if (!detailDO) return;
@@ -5154,11 +5172,44 @@ export default function DeliveryPage() {
                               </div>
                             );
                           }
+                          // A blank Deliver-To is a data fault (the hub/
+                          // address never resolved) — flag it red instead of a
+                          // silent "-" so the operator fixes it before the
+                          // truck rolls (Wei Siang 2026-06-11).
+                          if (!addr.trim()) {
+                            return (
+                              <p className="font-medium text-xs text-[#DC2626]">
+                                ⚠ No delivery address — check the delivery hub
+                              </p>
+                            );
+                          }
                           return (
-                            <p className="font-medium text-xs">{addr || "-"}</p>
+                            <p className="font-medium text-xs">{addr}</p>
                           );
                         })()}
                       </div>
+                      {(() => {
+                        // Delivery State — sourced from the hub (set when the
+                        // Sales Order was created), the reliable signal for
+                        // where this DO goes. Shown on Pending / Dispatch so the
+                        // 3PL state matches (Wei Siang 2026-06-11).
+                        const raw = detailDO.hubState || detailDO.hubBranch || "";
+                        const code = resolveStateCode(raw);
+                        const label =
+                          MALAYSIA_STATES.find((s) => s.code === code)?.label ?? raw;
+                        return (
+                          <div>
+                            <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery State</p>
+                            {label ? (
+                              <p className="font-medium text-xs">{label}</p>
+                            ) : (
+                              <p className="font-medium text-xs text-[#DC2626]">
+                                ⚠ No state — check the delivery hub
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Contact</p>

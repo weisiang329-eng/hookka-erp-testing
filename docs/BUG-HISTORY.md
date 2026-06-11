@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-11-010 — Late + same-day OT was double-penalised: engine already netted the paid OT via logged hours, but the punch auto-dock STILL took the shortfall
+
+**Status:** 🟢 Fixed + LIVE on prod (2026-06-11, deploy green). 28/28 attendance-rules + auto-dock tests (2 new cases pin the spec); typecheck + build + full suite green.
+**Category:** ui-frontend
+
+Symptom/spec (owner): a worker 30 min late (08:30) who works 2 h past 18:00 should end up with **1.5 h paid OT and no separate late deduction** — the evening covers the morning at 1:1 plain time ("要不然 OT 是乘 1.5 的嘛…不划算"). The system instead paid 1.5 h OT (the grid logs regular+OT as one Hours figure — 10.5 h — and the engine pays only hours above the 9 h standard, a natural netting) **AND ALSO auto-docked the 0.5 h shortfall** at the plain rate — a double penalty.
+
+Fix: `src/lib/attendance-rules.ts` `computeAttendanceDay` — `shortfallMin` is now netted by the same day's `otMin` (`max(0, standard − regular − ot)`); only a remainder gets docked (e.g. 08:30→18:20: 15 min OT offsets, 15 min docked). `otMin` itself stays UN-netted on purpose so the grid Hours and the engine's hours-above-standard OT keep working unchanged — netting both would double-net. Single edit point covers both dock paths (worker clock-out + office grid save) since both go through `maybeApplyAutoPunchDock` → `computeAttendanceDay`.
+
+---
+
 ## BUG-2026-06-11-009 — Service orders carried NO delivery hub, so service DOs printed blank addresses (DO-2606-030)
 
 **Status:** 🟢 Fixed + LIVE on prod (2026-06-11, merged 453d758e, deploy green). 703/703 tests; hub flows verified by structural suite; first real service order will exercise the stamp end-to-end.

@@ -615,6 +615,7 @@ app.put("/:id", async (c) => {
           ? normalizedItems.rows.map((r) => ({
               mc: r.materialCode,
               amt: r.lineTotalSen,
+              lt: r.lineType,
             }))
           : (
               (
@@ -630,6 +631,7 @@ app.put("/:id", async (c) => {
                 | string
                 | null,
               amt: Number(r.line_total_sen ?? r.lineTotalSen ?? 0),
+              lt: String(r.line_type ?? r.lineType ?? "STOCKED"),
             }));
         const rmRes = await db
           .prepare("SELECT * FROM raw_materials")
@@ -660,6 +662,16 @@ app.put("/:id", async (c) => {
         }
         const bucket: Record<string, number> = {};
         for (const ln of lines) {
+          // Phase 2 (2026-06) — input SST. Malaysian SST is single-stage
+          // with NO input credit: tax a supplier bills us is a COST, not a
+          // recoverable asset. A PI line typed 'TAX' therefore posts to
+          // 706-0000 SST CHARGES (inside manufacturing cost — exactly the
+          // owner's P&L sample), instead of being lumped into the default
+          // purchase account like before.
+          if (ln.lt === "TAX") {
+            bucket["706-0000"] = (bucket["706-0000"] ?? 0) + (Number(ln.amt) || 0);
+            continue;
+          }
           const grp = ln.mc ? grpByCode.get(ln.mc) ?? "" : "";
           const acct =
             (grp && (pmap[grp] ?? DEFAULT_PURCHASE_MAP[grp])) || pdefault;

@@ -26,6 +26,8 @@ import { computeMonthlyLabor, computeAttendanceDayDetail, absenceCutoffDay, effe
 import { jcMinutesTotal } from "../../lib/job-card-minutes";
 import { computeMonthlyEfficiencyByWorker, resolveEfficiencyAllowanceSen, monthBounds } from "../lib/efficiency-allowance";
 import { maybeApplyAutoPunchDock } from "../lib/attendance-deduct";
+import { loadPayRuleVersions } from "../lib/pay-rules-store";
+import { resolvePayRulesAsOf } from "../../lib/pay-rules";
 import {
   rowToMinimalPO,
   // Aliased: worker.ts already has its own slimmer local ProductionOrderRow /
@@ -1315,11 +1317,14 @@ app.get("/payslips", async (c) => {
   // Current month — count absences only through the data-entry grace cutoff
   // (2 working days back), so days that haven't happened yet AND the most
   // recent not-yet-keyed days aren't charged as absences. Matches payroll.
+  // Effective-dated grace — same source the office payroll uses.
+  const workerPayRules = await loadPayRuleVersions(c.var.DB);
   const absenceThroughDay = absenceCutoffDay(
     now.getFullYear(),
     now.getMonth() + 1,
     now,
-    2,
+    resolvePayRulesAsOf(workerPayRules, now.toISOString().slice(0, 10))
+      .absenceGraceWorkingDays,
     publicHolidays,
   );
 
@@ -1361,6 +1366,9 @@ app.get("/payslips", async (c) => {
     publicHolidays,
     absenceThroughDay,
     shortHourDeductionHours,
+    // Effective-dated pay rules — same source the office payroll uses, so the
+    // phone estimate can never disagree with the payslip.
+    payRuleVersions: workerPayRules,
   });
 
   // WHICH days were absent / had OT — derived from the SAME inputs the engine

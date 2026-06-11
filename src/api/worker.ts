@@ -706,6 +706,7 @@ import maintenanceLogs from "./routes/maintenance-logs";
 import mrp from "./routes/mrp";
 import notifications from "./routes/notifications";
 import payroll from "./routes/payroll";
+import payRules from "./routes/pay-rules";
 import payslips from "./routes/payslips";
 import productionLeadtimes from "./routes/production-leadtimes";
 import jobcardSync from "./routes/jobcard-sync";
@@ -878,6 +879,7 @@ app.route("/api/maintenance-logs", maintenanceLogs);
 app.route("/api/mrp", mrp);
 app.route("/api/notifications", notifications);
 app.route("/api/payroll", payroll);
+app.route("/api/pay-rules", payRules);
 app.route("/api/payslips", payslips);
 // productionLeadtimes handles GET / PUT / POST /recalc-all. Mounted at
 // both the legacy hyphen path (external consumers may have cached it) and

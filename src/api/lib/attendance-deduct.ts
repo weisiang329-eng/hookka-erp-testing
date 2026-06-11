@@ -29,6 +29,8 @@ import {
   HOOKKA_ATTENDANCE,
   type AttendanceRules,
 } from "../../lib/attendance-rules";
+import { resolvePayRulesAsOf, toAttendanceRules } from "../../lib/pay-rules";
+import { loadPayRuleVersions } from "./pay-rules-store";
 
 // D1-compat shape (the SupabaseAdapter installed as c.var.DB). Declared locally
 // so this stays pure + unit-testable with a mock DB.
@@ -143,7 +145,17 @@ export async function maybeApplyAutoPunchDock(
   },
 ): Promise<AutoDockResult> {
   const { workerId, date } = input;
-  const sf = computePunchShortfallHours(input.clockIn, input.clockOut);
+  // Effective-dated rules: the shift/grace/blocks in force ON the punch date.
+  // Best-effort — any load failure falls back to the built-in defaults so a
+  // config hiccup can never block or mis-dock a punch.
+  let rules: AttendanceRules = HOOKKA_ATTENDANCE;
+  try {
+    const versions = await loadPayRuleVersions(db as unknown as D1Database);
+    rules = toAttendanceRules(resolvePayRulesAsOf(versions, date));
+  } catch {
+    rules = HOOKKA_ATTENDANCE;
+  }
+  const sf = computePunchShortfallHours(input.clockIn, input.clockOut, rules);
 
   // Guard 1: a clock-out is REQUIRED. No clock-out → never dock a full day on a
   // guess. (Checked first, before any DB work.)

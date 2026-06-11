@@ -4,7 +4,15 @@ import { humanizeError } from "@/lib/humanize-error";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { countElapsedWorkingDays } from "@/lib/labor-engine";
-import { computeAttendanceDay, hhmmToMinutes } from "@/lib/attendance-rules";
+import { computeAttendanceDay, hhmmToMinutes, type AttendanceRules } from "@/lib/attendance-rules";
+import {
+  resolvePayRulesAsOf,
+  toAttendanceRules,
+  DEFAULT_PAY_RULES,
+  minToHhmm,
+  type PayRuleVersion,
+  type PayRulesConfig,
+} from "@/lib/pay-rules";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -105,30 +113,37 @@ type Worker = {
   efficiencyThresholdPct?: number;
 };
 
-// Day-typed OT multipliers (owner spec 2026-06-10) for the COST side — mirror
-// SUNDAY_OT_MULTIPLIER / HOLIDAY_OT_MULTIPLIER in labor-engine.ts so the logged
-// labor cost values Sunday / public-holiday OT the SAME way payroll pays it.
-const OT_SUNDAY_MULTIPLIER = 2;
-const OT_HOLIDAY_MULTIPLIER = 3;
+// Day-typed OT for the COST side — mirrors the engine so logged labor cost
+// values Sunday / public-holiday OT the SAME way payroll pays it. Multipliers
+// come from the EFFECTIVE-DATED pay rules (owner 2026-06-11): the rules in
+// force ON the logged date; no versions → defaults (2× / 3×).
 // Classify a logged day → its OT hours + multiplier:
-//   • Sunday         → every logged hour is OT at 2× (rest-day premium).
-//   • public holiday → every logged hour is OT at 3×.
+//   • Sunday         → every logged hour is OT (rest-day premium).
+//   • public holiday → every logged hour is OT.
 //   • weekday        → only hours above the standard day, at the worker's mult.
 // A holiday that falls on a Sunday is treated as a Sunday (Sunday checked first).
-// Date is parsed from its y/m/d ints (timezone-agnostic), matching the engine.
 function dayTypedOt(
   date: string,
   holidays: readonly string[],
   totalH: number,
   stdHours: number,
   weekdayMult: number,
+  payRuleVersions?: PayRuleVersion[],
 ): { otHours: number; mult: number } {
   const [yy, mm, dd] = date.split("-").map(Number);
   const dow = new Date(yy, (mm || 1) - 1, dd || 1).getDay();
-  if (dow === 0) return { otHours: totalH, mult: OT_SUNDAY_MULTIPLIER };
+  const cfg = resolvePayRulesAsOf(payRuleVersions, date);
+  if (dow === 0) return { otHours: totalH, mult: cfg.sundayOtMultiplier };
   if (holidays.includes(date))
-    return { otHours: totalH, mult: OT_HOLIDAY_MULTIPLIER };
+    return { otHours: totalH, mult: cfg.holidayOtMultiplier };
   return { otHours: Math.max(0, totalH - stdHours), mult: weekdayMult };
+}
+// Shared fetch of the effective-dated pay-rule versions (cached).
+function usePayRuleVersions(): PayRuleVersion[] {
+  const { data } = useCachedJson<{ data?: { versions?: PayRuleVersion[] } }>(
+    "/api/pay-rules",
+  );
+  return useMemo(() => data?.data?.versions ?? [], [data]);
 }
 type PayslipData = {
   id: string;
@@ -574,11 +589,17 @@ type EntryDraft = {
 // hand-typed Hours value). The late/short SHORTFALL from these same punch times
 // is auto-docked on save (saveRow → /auto-from-punch), guarded server-side; the
 // owner can still Undo any AUTO dock in the under-recorded review.
-function hoursFromPunch(clockIn?: string, clockOut?: string): number | null {
+function hoursFromPunch(
+  clockIn?: string,
+  clockOut?: string,
+  rules?: AttendanceRules,
+): number | null {
   const inM = hhmmToMinutes(clockIn ?? null);
   const outM = hhmmToMinutes(clockOut ?? null);
   if (inM === null || outM === null || outM <= inM) return null;
-  const d = computeAttendanceDay(inM, outM);
+  const d = rules
+    ? computeAttendanceDay(inM, outM, rules)
+    : computeAttendanceDay(inM, outM);
   return Math.round(((d.regularWorkMin + d.otMin) / 60) * 100) / 100;
 }
 
@@ -607,6 +628,13 @@ function WorkingHoursTab({
   // dept added via the Manage Departments UI on Labor Cost shows up here too.
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
+  // Effective-dated pay rules — punch→Hours uses the shift/grace/blocks in
+  // force ON each row's date (no versions → built-in defaults).
+  const payRuleVersions = usePayRuleVersions();
+  const attRulesFor = useCallback(
+    (d: string) => toAttendanceRules(resolvePayRulesAsOf(payRuleVersions, d)),
+    [payRuleVersions],
+  );
   // Date range — both default to today, so the page opens in single-day
   // mode (same view as before the range refactor). When dateFrom < dateTo
   // the table fetches every entry in the range, the table grows a Date
@@ -706,7 +734,7 @@ function WorkingHoursTab({
         const sep = key.lastIndexOf("|");
         const wid = key.slice(0, sep);
         const date = key.slice(sep + 1);
-        const h = hoursFromPunch(punch.clockIn, punch.clockOut);
+        const h = hoursFromPunch(punch.clockIn, punch.clockOut, attRulesFor(date));
         drafts.push({
           workerId: wid,
           date,
@@ -725,7 +753,7 @@ function WorkingHoursTab({
     } finally {
       setLoading(false);
     }
-  }, [dateFrom, dateTo]);
+  }, [dateFrom, dateTo, attRulesFor]);
 
   // One-shot sync of server entries into local EntryDraft rows on date
   // change. setState here is intentional — the source is external (fetch).
@@ -1481,7 +1509,7 @@ function WorkingHoursTab({
                             onChange={(e) => {
                               const v = e.target.value;
                               const single = group.items.length === 1;
-                              const h = single ? hoursFromPunch(v, first.row.clockOut) : null;
+                              const h = single ? hoursFromPunch(v, first.row.clockOut, attRulesFor(first.row.date)) : null;
                               group.items.forEach((it) =>
                                 updateField(
                                   it.originalIdx,
@@ -1499,7 +1527,7 @@ function WorkingHoursTab({
                             onChange={(e) => {
                               const v = e.target.value;
                               const single = group.items.length === 1;
-                              const h = single ? hoursFromPunch(first.row.clockIn, v) : null;
+                              const h = single ? hoursFromPunch(first.row.clockIn, v, attRulesFor(first.row.date)) : null;
                               group.items.forEach((it) =>
                                 updateField(
                                   it.originalIdx,
@@ -4261,6 +4289,8 @@ function DepartmentLaborTab({
     }
     return m;
   }, [deptDeductionsResp]);
+  // Effective-dated pay rules (multipliers / hour divisor per date).
+  const payRuleVersions = usePayRuleVersions();
   const deptFullMonth = isFullSingleMonth(dateFrom, dateTo);
   // Only fully-load (add statutory + under-recorded to tie to full payroll) once
   // the month is OVER. An in-progress month is still being logged, so it shows
@@ -4331,7 +4361,7 @@ function DepartmentLaborTab({
       // Day-typed OT (owner spec 2026-06-10): Sunday → all hours at 2×, public
       // holiday → all hours at 3×, weekday → hours above the standard day at the
       // worker's multiplier — mirrors labor-engine.ts so cost ties to paid OT.
-      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult);
+      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult, payRuleVersions);
       const otShare = totalH > 0 ? otDay.otHours / totalH : 0;
 
       for (const e of segs) {
@@ -4467,10 +4497,19 @@ function DepartmentLaborTab({
           const owMult = ow && ow.otMultiplier && ow.otMultiplier > 0 ? ow.otMultiplier : 1.5;
           const owStd = ow && ow.workingHoursPerDay > 0 ? ow.workingHoursPerDay : 9;
           const owDays = ow && ow.workingDaysPerMonth > 0 ? ow.workingDaysPerMonth : 26;
+          // Effective-dated Sunday/holiday multipliers — as of this payslip's
+          // period end (the rules that produced the stored OT).
+          const [bdY, bdM] = (p.period || "").split("-").map(Number);
+          const cfgDeptEnd = resolvePayRulesAsOf(
+            payRuleVersions,
+            bdY && bdM
+              ? `${p.period}-${String(new Date(bdY, bdM, 0).getDate()).padStart(2, "0")}`
+              : "9999-12-31",
+          );
           const otCostSen = Math.round(
             ((Number(p.otWeekdayHours) || 0) * owMult +
-              (Number(p.otSundayHours) || 0) * OT_SUNDAY_MULTIPLIER +
-              (Number(p.otPHHours) || 0) * OT_HOLIDAY_MULTIPLIER) *
+              (Number(p.otSundayHours) || 0) * cfgDeptEnd.sundayOtMultiplier +
+              (Number(p.otPHHours) || 0) * cfgDeptEnd.holidayOtMultiplier) *
               ((Number(p.basicSalary) || 0) / owDays / owStd),
           );
           const otAdj = (Number(p.totalOT) || 0) - otCostSen;
@@ -4490,7 +4529,7 @@ function DepartmentLaborTab({
             lateAdj = Math.max(
               0,
               Math.round((dockH * S) / actualWorkingDays / owStd) -
-                Math.round((dockH * S) / dCal / 10),
+                Math.round((dockH * S) / dCal / Math.max(1, cfgDeptEnd.rateHoursPerDay)),
             );
           }
           // Exclude the efficiency allowance (a flat bonus, not logged hours) so
@@ -4581,7 +4620,7 @@ function DepartmentLaborTab({
       });
     }
     return allRows;
-  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished, deptDockHoursByWorker, deptPayslipPeriod]);
+  }, [entries, workerById, orderedDepts, allDepts, period, dateFrom, dateTo, categoryFilter, holidayList, effSalaryOf, deptPayslips, deptFullMonth, deptMonthFinished, deptDockHoursByWorker, deptPayslipPeriod, payRuleVersions]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -6048,8 +6087,99 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const [generating, setGenerating] = useState(false);
   const [approving, setApproving] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  // Pay Rules maintenance panel (collapsed by default).
+  // Pay Rules maintenance panel (collapsed by default) — effective-dated
+  // rule versions (owner 2026-06-11): the panel shows the rules in force
+  // TODAY and lets the admin schedule a change from a chosen date.
   const [showPayRules, setShowPayRules] = useState(false);
+  const { data: payRulesResp, refresh: refreshPayRules } = useCachedJson<{
+    data?: { versions?: PayRuleVersion[]; effectiveToday?: PayRulesConfig };
+  }>("/api/pay-rules");
+  const payRulesToday: PayRulesConfig =
+    payRulesResp?.data?.effectiveToday ?? DEFAULT_PAY_RULES;
+  const payRuleVersionList: PayRuleVersion[] = useMemo(
+    () => payRulesResp?.data?.versions ?? [],
+    [payRulesResp],
+  );
+  const [ruleDraftOpen, setRuleDraftOpen] = useState(false);
+  const [savingRules, setSavingRules] = useState(false);
+  const [ruleDraft, setRuleDraft] = useState<Record<string, string>>({});
+  const openRuleDraft = () => {
+    const c = payRulesToday;
+    setRuleDraft({
+      effectiveFrom: "",
+      shiftStart: minToHhmm(c.shiftStartMin),
+      shiftEnd: minToHhmm(c.shiftEndMin),
+      lunchMin: String(c.lunchMin),
+      lateGraceMin: String(c.lateGraceMin),
+      lateBlockMin: String(c.lateBlockMin),
+      rateHoursPerDay: String(c.rateHoursPerDay),
+      sundayOtMultiplier: String(c.sundayOtMultiplier),
+      holidayOtMultiplier: String(c.holidayOtMultiplier),
+      absenceGraceWorkingDays: String(c.absenceGraceWorkingDays),
+      epfEmployeePct: String(c.epfEmployeePct),
+      epfEmployerPct: String(c.epfEmployerPct),
+      socsoEmployee: (c.socsoEmployeeSen / 100).toFixed(2),
+      socsoEmployer: (c.socsoEmployerSen / 100).toFixed(2),
+      eisEmployee: (c.eisEmployeeSen / 100).toFixed(2),
+      eisEmployer: (c.eisEmployerSen / 100).toFixed(2),
+      note: "",
+    });
+    setRuleDraftOpen(true);
+  };
+  const ruleDraftField = (k: string, v: string) =>
+    setRuleDraft((d) => ({ ...d, [k]: v }));
+  const hhmmToMinLocal = (s: string): number => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
+    return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
+  };
+  const ruleDraftValid =
+    /^\d{4}-\d{2}-\d{2}$/.test(ruleDraft.effectiveFrom || "") &&
+    Number.isFinite(hhmmToMinLocal(ruleDraft.shiftStart || "")) &&
+    Number.isFinite(hhmmToMinLocal(ruleDraft.shiftEnd || ""));
+  const saveRuleDraft = async () => {
+    if (!ruleDraftValid) return;
+    setSavingRules(true);
+    try {
+      const d = ruleDraft;
+      const r = await fetch("/api/pay-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          effectiveFrom: d.effectiveFrom,
+          note: d.note || undefined,
+          rules: {
+            shiftStartMin: hhmmToMinLocal(d.shiftStart),
+            shiftEndMin: hhmmToMinLocal(d.shiftEnd),
+            lunchMin: Number(d.lunchMin),
+            lateGraceMin: Number(d.lateGraceMin),
+            lateBlockMin: Number(d.lateBlockMin),
+            rateHoursPerDay: Number(d.rateHoursPerDay),
+            sundayOtMultiplier: Number(d.sundayOtMultiplier),
+            holidayOtMultiplier: Number(d.holidayOtMultiplier),
+            absenceGraceWorkingDays: Number(d.absenceGraceWorkingDays),
+            epfEmployeePct: Number(d.epfEmployeePct),
+            epfEmployerPct: Number(d.epfEmployerPct),
+            socsoEmployeeSen: Math.round(Number(d.socsoEmployee) * 100),
+            socsoEmployerSen: Math.round(Number(d.socsoEmployer) * 100),
+            eisEmployeeSen: Math.round(Number(d.eisEmployee) * 100),
+            eisEmployerSen: Math.round(Number(d.eisEmployer) * 100),
+          },
+        }),
+      });
+      if (r.ok) {
+        setRuleDraftOpen(false);
+        invalidateCachePrefix("/api/pay-rules");
+        refreshPayRules?.();
+      }
+    } finally {
+      setSavingRules(false);
+    }
+  };
+  const deleteRuleVersion = async (id: string) => {
+    await fetch(`/api/pay-rules/${id}`, { method: "DELETE" });
+    invalidateCachePrefix("/api/pay-rules");
+    refreshPayRules?.();
+  };
 
   const period = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}`;
 
@@ -6836,31 +6966,121 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
               <span className="text-xs font-normal text-[#6B7280]">— every rule the payroll engine applies · use the Calculation Guide button above to print a worked example for workers</span>
             </button>
             {showPayRules && (
-            <div className="grid grid-cols-1 gap-3 px-3 pb-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
+            <div className="px-3 pb-3">
+            <div className="grid grid-cols-1 gap-3 text-xs text-[#4B5563] md:grid-cols-2 lg:grid-cols-3">
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Shift & working hours</p>
-                <p>Shift 08:00–18:00 · 1h unpaid lunch = <b>9h standard day</b> · Working days Mon–Sat (excluding public holidays). Hours auto-fill from the punch clock.</p>
+                <p>Shift {minToHhmm(payRulesToday.shiftStartMin)}–{minToHhmm(payRulesToday.shiftEndMin)} · {payRulesToday.lunchMin} min unpaid lunch = <b>{((payRulesToday.shiftEndMin - payRulesToday.shiftStartMin - payRulesToday.lunchMin) / 60).toFixed(1)}h standard day</b> · Working days Mon–Sat (excluding public holidays). Hours auto-fill from the punch clock.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Lateness</p>
-                <p>≤10 min forgiven · beyond that, lateness rounds <b>UP</b> in 15-min blocks (08:11 → 15 min) · deducted at salary ÷ calendar days ÷ 10 · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
+                <p>≤{payRulesToday.lateGraceMin} min forgiven · beyond that, lateness rounds <b>UP</b> in {payRulesToday.lateBlockMin}-min blocks · deducted at salary ÷ calendar days ÷ {payRulesToday.rateHoursPerDay} · <b>same-day OT offsets the gap first</b>, only the remainder is deducted.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Overtime</p>
-                <p>After 18:00 only, 15-min blocks (floors: 16–29 → 15) · base = salary ÷ 26 ÷ 10 · <b>Weekday 1.5×</b> (per-worker, Employee Master) · <b>Sunday 2×</b> / <b>Public Holiday 3×</b> on every hour of the day.</p>
+                <p>After {minToHhmm(payRulesToday.shiftEndMin)} only, 15-min blocks (floors) · base = salary ÷ 26 ÷ {payRulesToday.rateHoursPerDay} · <b>Weekday ×worker&rsquo;s multiplier</b> (Employee Master) · <b>Sunday {payRulesToday.sundayOtMultiplier}×</b> / <b>Public Holiday {payRulesToday.holidayOtMultiplier}×</b> on every hour of the day.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Absence & part-month</p>
-                <p>Absent working day = − salary ÷ calendar days · confirmed after a 2-working-day grace (backfilling hours removes it) · join/resign: salary ÷ calendar days × employed days.</p>
+                <p>Absent working day = − salary ÷ calendar days · confirmed after a {payRulesToday.absenceGraceWorkingDays}-working-day grace (backfilling hours removes it) · join/resign: salary ÷ calendar days × employed days.</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Allowance & statutory</p>
-                <p>Efficiency allowance: flat amount when monthly efficiency hits the worker&rsquo;s target (set per worker in Employee Master) · EPF 11%/13% · SOCSO ~RM7.45/26.15 · EIS ~RM3.90/3.90 (per-worker toggle).</p>
+                <p>Efficiency allowance: flat amount on target (per worker, Employee Master) · EPF {payRulesToday.epfEmployeePct}%/{payRulesToday.epfEmployerPct}% · SOCSO RM{(payRulesToday.socsoEmployeeSen / 100).toFixed(2)}/{(payRulesToday.socsoEmployerSen / 100).toFixed(2)} · EIS RM{(payRulesToday.eisEmployeeSen / 100).toFixed(2)}/{(payRulesToday.eisEmployerSen / 100).toFixed(2)} (per-worker toggle).</p>
               </div>
               <div>
                 <p className="font-semibold text-[#1F1D1B] mb-1">Where to maintain</p>
-                <p><b>Public holidays</b>: the Public Holidays panel (drives 3× OT + working-day counts) · <b>Salary (effective-dated), OT multiplier, hours/day, statutory toggles, allowance</b>: Employee Master · <b>Fixed rules above</b> (shift, grace, blocks, divisors): engine-locked — ask to change.</p>
+                <p><b>Public holidays</b>: the Public Holidays panel · <b>Salary (effective-dated), OT multiplier, hours/day, statutory toggles, allowance</b>: Employee Master · <b>Everything shown here</b>: schedule a change below — it takes effect ON its date.</p>
               </div>
+            </div>
+            <div className="mt-3 border-t border-[#E2DDD8] pt-2 text-xs text-[#4B5563]">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <p className="font-semibold text-[#1F1D1B]">Scheduled rule changes (effective-dated)</p>
+                {!ruleDraftOpen && (
+                  <Button variant="outline" size="sm" onClick={openRuleDraft}>
+                    Schedule a change
+                  </Button>
+                )}
+              </div>
+              {payRuleVersionList.length === 0 && !ruleDraftOpen && (
+                <p className="mt-1 text-[#9CA3AF]">No changes scheduled — the built-in defaults above apply.</p>
+              )}
+              {payRuleVersionList.length > 0 && (
+                <div className="mt-1 space-y-1">
+                  {payRuleVersionList.map((v) => (
+                    <div key={v.id} className="flex items-center justify-between gap-2 rounded bg-white px-2 py-1">
+                      <span>
+                        <b>From {v.effectiveFrom}</b> — Sun {v.rules.sundayOtMultiplier}× · PH {v.rules.holidayOtMultiplier}× · grace {v.rules.lateGraceMin}m · block {v.rules.lateBlockMin}m · ÷{v.rules.rateHoursPerDay} · lunch {v.rules.lunchMin}m · {minToHhmm(v.rules.shiftStartMin)}–{minToHhmm(v.rules.shiftEndMin)}
+                        {v.note ? <span className="text-[#9CA3AF]"> · {v.note}</span> : null}
+                      </span>
+                      {v.effectiveFrom > new Date().toISOString().slice(0, 10) && (
+                        <button
+                          type="button"
+                          onClick={() => deleteRuleVersion(v.id)}
+                          className="rounded border border-[#E2B8AE] px-1.5 py-0.5 text-[10px] text-[#9A3A2D] hover:bg-[#FBEAE6]"
+                          title="Remove this future-dated change (history in force cannot be deleted)"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {ruleDraftOpen && (
+                <div className="mt-2 rounded-md border border-[#E2DDD8] bg-white p-3">
+                  <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                    {([
+                      ["effectiveFrom", "Effective from (YYYY-MM-DD)", "date"],
+                      ["shiftStart", "Shift start (HH:MM)", "text"],
+                      ["shiftEnd", "Shift end (HH:MM)", "text"],
+                      ["lunchMin", "Lunch (min)", "number"],
+                      ["lateGraceMin", "Late grace (min)", "number"],
+                      ["lateBlockMin", "Late block (min)", "number"],
+                      ["rateHoursPerDay", "Hour divisor (÷)", "number"],
+                      ["sundayOtMultiplier", "Sunday OT ×", "number"],
+                      ["holidayOtMultiplier", "Holiday OT ×", "number"],
+                      ["absenceGraceWorkingDays", "Absence grace (working days)", "number"],
+                      ["epfEmployeePct", "EPF employee %", "number"],
+                      ["epfEmployerPct", "EPF employer %", "number"],
+                      ["socsoEmployee", "SOCSO employee (RM)", "number"],
+                      ["socsoEmployer", "SOCSO employer (RM)", "number"],
+                      ["eisEmployee", "EIS employee (RM)", "number"],
+                      ["eisEmployer", "EIS employer (RM)", "number"],
+                    ] as Array<[string, string, string]>).map(([k, label, type]) => (
+                      <label key={k} className="text-[11px] text-[#6B7280]">
+                        {label}
+                        <Input
+                          type={type}
+                          value={ruleDraft[k] ?? ""}
+                          onChange={(e) => ruleDraftField(k, e.target.value)}
+                          className="mt-0.5 h-8 text-xs"
+                        />
+                      </label>
+                    ))}
+                    <label className="col-span-2 text-[11px] text-[#6B7280]">
+                      Note (optional)
+                      <Input
+                        value={ruleDraft.note ?? ""}
+                        onChange={(e) => ruleDraftField("note", e.target.value)}
+                        className="mt-0.5 h-8 text-xs"
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" onClick={saveRuleDraft} disabled={!ruleDraftValid || savingRules}>
+                      {savingRules ? "Saving…" : "Save scheduled change"}
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => setRuleDraftOpen(false)} disabled={savingRules}>
+                      Cancel
+                    </Button>
+                  </div>
+                  <p className="mt-1 text-[10px] text-[#9CA3AF]">
+                    Takes effect ON the chosen date: punches, payroll, labor cost and the worker app all switch that day. Months already finalised are untouched (regenerate to re-price a draft month).
+                  </p>
+                </div>
+              )}
+            </div>
             </div>
             )}
           </div>
@@ -7418,6 +7638,8 @@ function LaborCostTab({
     // punch). Older rows omit it → treated as MANUAL.
     data?: Array<{ id: string; workerId: string; date: string; hours: number; source?: string }>;
   }>(payrollPeriod ? `/api/payroll-hour-deductions?period=${payrollPeriod}` : null);
+  // Effective-dated pay rules (multipliers / hour divisor / grace per date).
+  const payRuleVersions = usePayRuleVersions();
   // Which "workerId|date|action" write is mid-flight, so its button disables.
   const [underActionBusy, setUnderActionBusy] = useState<string | null>(null);
 
@@ -7579,7 +7801,7 @@ function LaborCostTab({
       // Day-typed OT (owner spec 2026-06-10): Sunday → all hours at 2×, public
       // holiday → all hours at 3×, weekday → hours above the standard day at the
       // worker's multiplier — mirrors labor-engine.ts so cost ties to paid OT.
-      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult);
+      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult, payRuleVersions);
       const otShare = totalH > 0 ? otDay.otHours / totalH : 0;
 
       for (const e of segs) {
@@ -7635,7 +7857,7 @@ function LaborCostTab({
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter, holidayList, effSalaryOf]);
+  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter, holidayList, effSalaryOf, payRuleVersions]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
@@ -7787,8 +8009,17 @@ function LaborCostTab({
       const stdHours = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const monthDays = w && w.workingDaysPerMonth > 0 ? w.workingDaysPerMonth : 26;
       const otBaseSen = (Number(p.basicSalary) || 0) / monthDays / stdHours;
+      // Effective-dated Sunday/holiday multipliers — as of this payslip's
+      // period end (the rules that produced the stored OT).
+      const [bY, bM] = (p.period || "").split("-").map(Number);
+      const cfgEnd = resolvePayRulesAsOf(
+        payRuleVersions,
+        bY && bM
+          ? `${p.period}-${String(new Date(bY, bM, 0).getDate()).padStart(2, "0")}`
+          : "9999-12-31",
+      );
       const costOtSen = Math.round(
-        (wkH * mult + sunH * OT_SUNDAY_MULTIPLIER + phH * OT_HOLIDAY_MULTIPLIER) *
+        (wkH * mult + sunH * cfgEnd.sundayOtMultiplier + phH * cfgEnd.holidayOtMultiplier) *
           otBaseSen,
       );
       const paidOtSen = Number(p.totalOT) || 0;
@@ -7796,7 +8027,7 @@ function LaborCostTab({
       if (adj !== 0) m.set(p.id, adj);
     }
     return m;
-  }, [reconPayslips, workersById]);
+  }, [reconPayslips, workersById, payRuleVersions]);
   // Late/short-hour dock bridge — same idea as the absence leniency, for the
   // Deduct action (and AUTO punch docks). The dock reduces gross at the spec
   // rate (salary ÷ calendar days ÷ 10 — the owner's RM6.83/h) but the
@@ -7832,13 +8063,18 @@ function LaborCostTab({
       const std = w && w.workingHoursPerDay > 0 ? w.workingHoursPerDay : 9;
       const S = Number(p.basicSalary) || 0;
       const costEquivalentSen = Math.round((h * S) / aWD / std);
-      // Same formula the engine docks with: (salary ÷ calendar days) ÷ 10.
-      const dockSen = Math.round((h * S) / calDays / 10);
+      // Same formula the engine docks with: (salary ÷ calendar days) ÷ the
+      // effective-dated hour divisor (rules as of the period's last day).
+      const cfgDock = resolvePayRulesAsOf(
+        payRuleVersions,
+        `${(period || from).slice(0, 7)}-${String(calDays).padStart(2, "0")}`,
+      );
+      const dockSen = Math.round((h * S) / calDays / Math.max(1, cfgDock.rateHoursPerDay));
       const adj = Math.max(0, costEquivalentSen - dockSen);
       if (adj > 0) m.set(p.id, adj);
     }
     return m;
-  }, [deductionsResp, reconPayslips, period, from, holidayList, workersById]);
+  }, [deductionsResp, reconPayslips, period, from, holidayList, workersById, payRuleVersions]);
   // We only have payroll figures once payslips exist for the period. Hide the
   // reconciliation panel (rather than show a misleading negative residual)
   // when there are none or when a category filter is narrowing the buckets.
@@ -7927,7 +8163,7 @@ function LaborCostTab({
       // Day-typed OT (owner spec 2026-06-10): Sunday → all hours at 2×, public
       // holiday → all hours at 3×, weekday → hours above the standard day at the
       // worker's multiplier — mirrors labor-engine.ts so cost ties to paid OT.
-      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult);
+      const otDay = dayTypedOt(k.split("|")[1], holidayList, totalH, stdHours, otMult, payRuleVersions);
       const otShare = totalH > 0 ? otDay.otHours / totalH : 0;
       let dayValue = 0;
       for (const e of segs) {
@@ -7939,7 +8175,7 @@ function LaborCostTab({
       out.set(workerId, (out.get(workerId) ?? 0) + dayValue);
     }
     return out;
-  }, [entriesResp, workersById, period, from, holidayList, effSalaryOf]);
+  }, [entriesResp, workersById, period, from, holidayList, effSalaryOf, payRuleVersions]);
 
   // Per-(worker, date) logged HOURS — used by the per-worker drill-in so the
   // owner can see which DAY each worker's hours weren't recorded. This is a
@@ -8043,7 +8279,13 @@ function LaborCostTab({
         const holidaySet = new Set(holidayList);
         const d = new Date();
         d.setHours(0, 0, 0, 0);
-        let remaining = 2;
+        let remaining = Math.max(
+          0,
+          Math.round(
+            resolvePayRulesAsOf(payRuleVersions, new Date().toISOString().slice(0, 10))
+              .absenceGraceWorkingDays,
+          ),
+        );
         while (remaining > 0) {
           d.setDate(d.getDate() - 1);
           const dow = d.getDay();
@@ -8107,7 +8349,7 @@ function LaborCostTab({
         perDayDeductionSen,
       };
     },
-    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf],
+    [workersById, periodWorkingDays, loggedHoursByWorkerDate, holidayList, period, from, effSalaryOf, payRuleVersions],
   );
 
   // Set of department codes the labor buckets cover (the 8 production depts +
@@ -8166,7 +8408,13 @@ function LaborCostTab({
       const holidaySet = new Set(holidayList);
       const d = new Date();
       d.setHours(0, 0, 0, 0);
-      let remaining = 2;
+      let remaining = Math.max(
+        0,
+        Math.round(
+          resolvePayRulesAsOf(payRuleVersions, new Date().toISOString().slice(0, 10))
+            .absenceGraceWorkingDays,
+        ),
+      );
       while (remaining > 0) {
         d.setDate(d.getDate() - 1);
         if (d.getDay() === 0) continue; // Sunday — non-working
@@ -8238,6 +8486,7 @@ function LaborCostTab({
     from,
     holidayList,
     effSalaryOf,
+    payRuleVersions,
   ]);
 
   // Classify every active worker with a payslip into one of the two lists.

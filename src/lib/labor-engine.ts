@@ -39,30 +39,20 @@
 // Full attendance + 15 h OT → payroll gross = production cost = RM2,936.66.
 // ---------------------------------------------------------------------------
 
+import { resolvePayRulesAsOf, type PayRuleVersion } from "./pay-rules";
+
 /** Monday(1)..Saturday(6) are working weekdays; Sunday(0) is off. */
 const WORKING_DOW: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 6]);
 
 /** Fallbacks used only to avoid divide-by-zero on a half-set-up worker. */
 const FALLBACK_WORKING_DAYS_PER_MONTH = 26;
 
-/**
- * Hourly-rate divisor from the owner's salary spec (HOOKKA MANUFACTURING
- * CALCULATION SALARY): the shift is 08:00–18:00 = 10 hours, and the hourly rate
- * = daily rate ÷ 10. DISTINCT from `workingHoursPerDay` (the 9 PAYABLE hours,
- * which stays the OT THRESHOLD only). Used for OT pay rate and the unpaid-hours
- * (lateness / short-of-a-day) deduction rate:
- *   OT/hr            = (salary ÷ 26 work days) ÷ 10 × multiplier   (RM7.88 ×mult)
- *   unpaid-hour/late = (salary ÷ calendar days) ÷ 10               (RM6.83)
- */
-const RATE_HOURS_PER_DAY = 10;
-
-// Day-typed OT premium (owner spec 2026-06-10): a worker who comes in on a rest
-// day (Sunday) or a public holiday is paid the premium on EVERY hour from the
-// first — not just hours above the standard day. Weekday OT keeps the per-worker
-// otMultiplier (default 1.5). A public holiday that falls on a Sunday is treated
-// as a Sunday (2×), per the owner.
-const SUNDAY_OT_MULTIPLIER = 2;
-const HOLIDAY_OT_MULTIPLIER = 3;
+// Hourly-rate divisor (÷10), Sunday 2× and public-holiday 3× now live in the
+// EFFECTIVE-DATED pay rules (src/lib/pay-rules.ts DEFAULT_PAY_RULES, owner
+// 2026-06-11) and are resolved per date inside computeMonthlyLabor. Day-typed
+// OT semantics are unchanged: Sunday/holiday pay the premium on EVERY hour
+// (holiday-on-Sunday counts as Sunday); weekday OT keeps the per-worker
+// otMultiplier above the standard day.
 
 /**
  * A worker's maintained Employee Master figures. Everything the engine
@@ -437,6 +427,12 @@ export type MonthlyLaborInput = {
    */
   prorateToService?: boolean;
   /**
+   * Effective-dated pay-rule versions (owner 2026-06-11). Day-level maths use
+   * the rules in force on each date; omitted/empty → DEFAULT_PAY_RULES, which
+   * reproduces the previously-hardcoded behaviour exactly.
+   */
+  payRuleVersions?: PayRuleVersion[];
+  /**
    * Hours the owner has explicitly docked from this worker this month, set per
    * day from the Labor Cost "Under-recorded hours" review when the short time is
    * NOT to be paid (it was neither a data-entry miss to backfill nor idle-but-
@@ -609,12 +605,45 @@ export function computeMonthlyLabor(
   // stays the OT THRESHOLD only. costingDailyRate (÷ working-days) is UNCHANGED —
   // it remains the production-cost rate + the part-month proration base.
   const daysInMonth = new Date(year, month, 0).getDate();
+  // Effective-dated pay rules (owner 2026-06-11): day-level maths resolve the
+  // rules in force ON each date; month-level rates (the display OT rate + the
+  // late/short hourly rate, whose dock hours arrive as a month total) use the
+  // rules as of the month's LAST day. No versions supplied → DEFAULT_PAY_RULES
+  // → byte-identical to the previously-hardcoded behaviour.
+  const monthEndYmd = `${year}-${String(month).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
+  const rulesAt = (date: string) =>
+    resolvePayRulesAsOf(input.payRuleVersions, date);
+  const cfgMonthEnd = rulesAt(monthEndYmd);
   const calendarDailyRateSen = basicSalarySen / daysInMonth; // absence /day (÷30/31)
   const payrollDailyRateSen = basicSalarySen / workingDaysPerMonth; // ÷26 — the OT daily base
-  const otBaseHourlyRateSen = payrollDailyRateSen / RATE_HOURS_PER_DAY; // ÷26÷10, before the day multiplier
+  const otBaseHourlyRateSen =
+    payrollDailyRateSen / Math.max(1, cfgMonthEnd.rateHoursPerDay); // ÷26÷10, before the day multiplier
   const otHourlyRateSen = otBaseHourlyRateSen * otMultiplier; // weekday OT rate (÷26÷10×mult) — back-compat
-  const lateHourlyRateSen = calendarDailyRateSen / RATE_HOURS_PER_DAY; // unpaid hour / lateness (÷calendar÷10)
+  const lateHourlyRateSen =
+    calendarDailyRateSen / Math.max(1, cfgMonthEnd.rateHoursPerDay); // unpaid hour / lateness (÷calendar÷10)
   const costingDailyRateSen = basicSalarySen / costingDivisor;
+
+  // Per-date OT MONEY — each date's hours are paid with the multipliers and
+  // hour-divisor in force ON that date (a mid-month rule change applies from
+  // its exact effective day). With constant rules this sums to exactly the
+  // old hours×rate figures.
+  let otWeekdayPayExact = 0;
+  let otSundayPayExact = 0;
+  let otHolidayPayExact = 0;
+  for (const [date, h] of hoursByDate) {
+    if (h <= 0) continue;
+    const [py, pm, pd] = date.split("-").map(Number);
+    const pdow = new Date(py, (pm || 1) - 1, pd || 1).getDay();
+    const cfg = rulesAt(date);
+    const base = payrollDailyRateSen / Math.max(1, cfg.rateHoursPerDay);
+    if (pdow === 0) {
+      otSundayPayExact += h * base * cfg.sundayOtMultiplier;
+    } else if (holidaySet.has(date)) {
+      otHolidayPayExact += h * base * cfg.holidayOtMultiplier;
+    } else if (workingHoursPerDay > 0 && h > workingHoursPerDay) {
+      otWeekdayPayExact += (h - workingHoursPerDay) * base * otMultiplier;
+    }
+  }
 
   // ── Payroll side (÷26).
   // Employment window: a worker is only "expected to work" between their join
@@ -676,13 +705,9 @@ export function computeMonthlyLabor(
   // Day-typed OT pay. Weekday uses the per-worker rate (base × otMultiplier) so a
   // weekday-only worker is byte-identical to before; Sunday/holiday use the fixed
   // 2×/3× on the base rate. Each bucket is rounded, then summed → otPaySen.
-  const otWeekdayPaySen = Math.round(otWeekdayHours * otHourlyRateSen);
-  const otSundayPaySen = Math.round(
-    otSundayHours * otBaseHourlyRateSen * SUNDAY_OT_MULTIPLIER,
-  );
-  const otHolidayPaySen = Math.round(
-    otHolidayHours * otBaseHourlyRateSen * HOLIDAY_OT_MULTIPLIER,
-  );
+  const otWeekdayPaySen = Math.round(otWeekdayPayExact);
+  const otSundayPaySen = Math.round(otSundayPayExact);
+  const otHolidayPaySen = Math.round(otHolidayPayExact);
   const otPaySen = otWeekdayPaySen + otSundayPaySen + otHolidayPaySen;
   const grossSen = basicEarnedSen + otPaySen;
 

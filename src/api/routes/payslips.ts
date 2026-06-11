@@ -26,13 +26,20 @@ import {
   resolveEfficiencyAllowanceSen,
   monthBounds,
 } from "../lib/efficiency-allowance";
+import {
+  DEFAULT_PAY_RULES,
+  resolvePayRulesAsOf,
+  type PayRulesConfig,
+} from "../../lib/pay-rules";
+import { loadPayRuleVersions } from "../lib/pay-rules-store";
 
 // Data-entry grace before an unrecorded working day is treated as a confirmed
 // absence. Spec (Wei Siang, 2026-06-02): the office keys Working Hours a few
 // days late, so the most recent working days with no hours are "maybe just not
 // entered yet" — only count a day as absent once it is this many working days
 // in the past. Finished months are unaffected (the whole month is past grace).
-const ABSENCE_GRACE_WORKING_DAYS = 2;
+// (The 2-working-day absence grace now lives in the effective-dated pay rules
+// — absenceGraceWorkingDays — resolved per period below.)
 
 const app = new Hono<Env>();
 
@@ -168,18 +175,24 @@ type StatutoryFlags = {
   pcbEnabled?: boolean | null;
 };
 
-function calcStatutory(basicSalarySen: number, flags: StatutoryFlags = {}) {
+function calcStatutory(
+  basicSalarySen: number,
+  flags: StatutoryFlags = {},
+  // Effective-dated statutory rates (owner 2026-06-11) — resolved as of the
+  // period's last day; defaults reproduce the previously-hardcoded figures.
+  rates: PayRulesConfig = DEFAULT_PAY_RULES,
+) {
   const epfOn = flags.epfEnabled !== false;
   const socsoOn = flags.socsoEnabled !== false;
   const eisOn = flags.eisEnabled !== false;
   const pcbOn = flags.pcbEnabled !== false;
   return {
-    epfEmployee: epfOn ? Math.round(basicSalarySen * 0.11) : 0,
-    epfEmployer: epfOn ? Math.round(basicSalarySen * 0.13) : 0,
-    socsoEmployee: socsoOn ? 745 : 0,
-    socsoEmployer: socsoOn ? 2615 : 0,
-    eisEmployee: eisOn ? 390 : 0,
-    eisEmployer: eisOn ? 390 : 0,
+    epfEmployee: epfOn ? Math.round((basicSalarySen * rates.epfEmployeePct) / 100) : 0,
+    epfEmployer: epfOn ? Math.round((basicSalarySen * rates.epfEmployerPct) / 100) : 0,
+    socsoEmployee: socsoOn ? rates.socsoEmployeeSen : 0,
+    socsoEmployer: socsoOn ? rates.socsoEmployerSen : 0,
+    eisEmployee: eisOn ? rates.eisEmployeeSen : 0,
+    eisEmployer: eisOn ? rates.eisEmployerSen : 0,
     pcb: pcbOn ? 0 : 0, // PCB still 0 baseline; flag is forward-compat for when PCB calc lands.
   };
 }
@@ -277,11 +290,17 @@ async function buildDayDetailForPeriod(
     daysByWorker.set(r.workerId, arr);
   }
 
+  // Effective-dated grace — resolved as of the period's last day so the
+  // day-detail chips match the engine paths exactly.
+  const dayDetailGrace = resolvePayRulesAsOf(
+    await loadPayRuleVersions(db),
+    `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`,
+  ).absenceGraceWorkingDays;
   const absenceThroughDay = absenceCutoffDay(
     pYear,
     pMonth,
     new Date(),
-    ABSENCE_GRACE_WORKING_DAYS,
+    dayDetailGrace,
     publicHolidays,
   );
 
@@ -444,6 +463,13 @@ app.get("/projected", async (c) => {
     console.warn("[payslips/projected] payroll_hour_deductions read skipped:", e);
   }
 
+  // Effective-dated pay rules — day-level maths inside the engine resolve per
+  // date; statutory uses the rules as of the period's last day.
+  const [prY, prM] = period.split("-").map(Number);
+  const periodEndYmd = `${period}-${String(new Date(prY, prM, 0).getDate()).padStart(2, "0")}`;
+  const payRuleVersions = await loadPayRuleVersions(c.var.DB);
+  const statutoryRules = resolvePayRulesAsOf(payRuleVersions, periodEndYmd);
+
   const salaryHistoryByWorker = new Map<string, Array<{ effectiveFrom: string; basicSalarySen: number }>>();
   try {
     const wshRes = await c.var.DB.prepare(
@@ -460,7 +486,7 @@ app.get("/projected", async (c) => {
 
   const [pYear, pMonth] = period.split("-").map(Number);
   const today = new Date();
-  const absenceThroughDay = absenceCutoffDay(pYear, pMonth, today, ABSENCE_GRACE_WORKING_DAYS, publicHolidays);
+  const absenceThroughDay = absenceCutoffDay(pYear, pMonth, today, statutoryRules.absenceGraceWorkingDays, publicHolidays);
   const periodLastIso = `${period}-${String(new Date(pYear, pMonth, 0).getDate()).padStart(2, "0")}`;
 
   // Month-cumulative efficiency per worker (job_cards production minutes ÷
@@ -518,6 +544,7 @@ app.get("/projected", async (c) => {
       employmentEndDay: resignedDay,
       prorateToService: joinedDay !== undefined || resignedDay !== undefined,
       shortHourDeductionHours: deductionHoursByWorker.get(worker.id) ?? 0,
+      payRuleVersions,
     });
     // Per-day absence/OT dates from the SAME inputs the engine just used — a
     // display-only enrichment (no amounts). Lets the Payroll row's expanded
@@ -542,7 +569,7 @@ app.get("/projected", async (c) => {
       socsoEnabled: worker.socsoEnabled,
       eisEnabled: worker.eisEnabled,
       pcbEnabled: worker.pcbEnabled,
-    });
+    }, statutoryRules);
     const grossPay = labor.payroll.grossSen + allowances;
     const totalDeductions = stat.epfEmployee + stat.socsoEmployee + stat.eisEmployee + stat.pcb;
     const hourlyRate =
@@ -714,6 +741,12 @@ app.post("/", async (c) => {
       daysByWorker.set(r.workerId, arr);
     }
 
+    // Effective-dated pay rules (same as the projected path).
+    const [prY, prM] = period.split("-").map(Number);
+    const periodEndYmd = `${period}-${String(new Date(prY, prM, 0).getDate()).padStart(2, "0")}`;
+    const payRuleVersions = await loadPayRuleVersions(c.var.DB);
+    const statutoryRules = resolvePayRulesAsOf(payRuleVersions, periodEndYmd);
+
     // Owner-flagged unworked-hour docks for the period (Labor Cost under-recorded
     // review), summed per worker. The engine values them at the worker's
     // ÷working-days hourly rate and subtracts from basic earned.
@@ -771,7 +804,7 @@ app.post("/", async (c) => {
       pYear,
       pMonth,
       today,
-      ABSENCE_GRACE_WORKING_DAYS,
+      statutoryRules.absenceGraceWorkingDays,
       publicHolidays,
     );
 
@@ -851,6 +884,7 @@ app.post("/", async (c) => {
         prorateToService: joinedDay !== undefined || resignedDay !== undefined,
         // Owner-flagged unworked hours docked from this worker this period.
         shortHourDeductionHours: deductionHoursByWorker.get(worker.id) ?? 0,
+      payRuleVersions,
       });
 
       const allowances = resolveEfficiencyAllowanceSen(
@@ -865,7 +899,7 @@ app.post("/", async (c) => {
         socsoEnabled: worker.socsoEnabled,
         eisEnabled: worker.eisEnabled,
         pcbEnabled: worker.pcbEnabled,
-      });
+      }, statutoryRules);
       // Gross = basic earned (full salary − absences) + OT + allowances.
       const grossPay = labor.payroll.grossSen + allowances;
       const totalDeductions =

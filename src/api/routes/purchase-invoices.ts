@@ -769,7 +769,20 @@ app.put("/:id", async (c) => {
         }
       }
     } catch (e) {
-      console.warn(`[ledger] failed to BUILD PI ${id} posting:`, e);
+      // Phase 1 (2026-06) — previously this catch only console.warn'd and
+      // let the PI flip to APPROVED/PAID anyway, leaving the GL with NO AP
+      // entry (trial balance silently out of sync, discoverable only via
+      // logs). A status transition must never apply without its GL legs:
+      // abort the whole request so the operator retries explicitly.
+      console.error(`[ledger] failed to BUILD PI ${id} posting — aborting:`, e);
+      return c.json(
+        {
+          success: false,
+          error:
+            "Failed to build the GL posting for this purchase invoice — the status change was NOT saved. Retry, and report if it persists.",
+        },
+        500,
+      );
     }
   }
 

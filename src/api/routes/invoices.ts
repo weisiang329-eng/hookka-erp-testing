@@ -1822,9 +1822,20 @@ app.put("/:id", async (c) => {
               if (auditStmt) statements.push(auditStmt);
             }
           } catch (e) {
-            console.warn(
-              `[ledger] failed to BUILD restatement for invoice ${id} price edit:`,
+            // Phase 1 (2026-06) — abort instead of silently saving a price
+            // edit whose GL restatement failed to build (ledger would keep
+            // the OLD amounts while the invoice shows the new ones).
+            console.error(
+              `[ledger] failed to BUILD restatement for invoice ${id} price edit — aborting:`,
               e,
+            );
+            return c.json(
+              {
+                success: false,
+                error:
+                  "Failed to build the GL restatement for this price edit — nothing was saved. Retry, and report if it persists.",
+              },
+              500,
             );
           }
         }
@@ -1968,9 +1979,19 @@ app.put("/:id", async (c) => {
           );
         }
       } catch (e) {
-        console.warn(
-          `[ledger] failed to BUILD statements for invoice ${id} post:`,
+        // Phase 1 (2026-06) — abort: an invoice must never flip to SENT
+        // without its DR debtor / CR sales / CR tax legs in the ledger.
+        console.error(
+          `[ledger] failed to BUILD statements for invoice ${id} post — aborting:`,
           e,
+        );
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the GL posting for this invoice — the status change was NOT saved. Retry, and report if it persists.",
+          },
+          500,
         );
       }
     } else if (isVoidTransition && afterSnapshot) {
@@ -2022,9 +2043,19 @@ app.put("/:id", async (c) => {
           statements.push(...ledgerStmts);
         }
       } catch (e) {
-        console.warn(
-          `[ledger] failed to BUILD reversal for invoice ${id} void:`,
+        // Phase 1 (2026-06) — abort: a void must reverse the original
+        // posting or the ledger keeps revenue/AR for a cancelled invoice.
+        console.error(
+          `[ledger] failed to BUILD reversal for invoice ${id} void — aborting:`,
           e,
+        );
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the GL reversal for this void — the status change was NOT saved. Retry, and report if it persists.",
+          },
+          500,
         );
       }
 

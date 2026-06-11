@@ -517,7 +517,20 @@ app.post("/", async (c) => {
         statements.push(...ledgerStmts);
       }
     } catch (e) {
-      console.warn(`[ledger] failed to BUILD payment ${id} post:`, e);
+      // Phase 1 (2026-06) — abort: a receipt must never apply its
+      // paidAmount/outstanding cascade without DR bank / CR debtor legs.
+      console.error(
+        `[ledger] failed to BUILD payment ${id} post — aborting:`,
+        e,
+      );
+      return c.json(
+        {
+          success: false,
+          error:
+            "Failed to build the GL posting for this payment — nothing was saved. Retry, and report if it persists.",
+        },
+        500,
+      );
     }
 
     await c.var.DB.batch(statements);
@@ -733,7 +746,20 @@ app.put("/:id", async (c) => {
           statements.push(...revStmts);
         }
       } catch (e) {
-        console.warn(`[ledger] failed to BUILD payment ${id} bounce:`, e);
+        // Phase 1 (2026-06) — abort: a bounce must reverse both the
+        // subledger AND the GL or the bank/debtor accounts go stale.
+        console.error(
+          `[ledger] failed to BUILD payment ${id} bounce — aborting:`,
+          e,
+        );
+        return c.json(
+          {
+            success: false,
+            error:
+              "Failed to build the GL reversal for this bounce — nothing was saved. Retry, and report if it persists.",
+          },
+          500,
+        );
       }
     }
 

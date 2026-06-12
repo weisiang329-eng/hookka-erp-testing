@@ -50,17 +50,6 @@ const ROOT_CAUSE_COLOR: Record<string, string> = {
   OTHER: "bg-[#F0ECE9] text-[#5A5550]",
 };
 
-// Responsible Unit — set from the case detail's Root Cause & Prevention
-// card (service_cases.responsibleunit, migration 0166). Shown here as a
-// small muted badge next to the root-cause badge when assigned.
-const RESPONSIBLE_UNIT_LABELS: Record<string, string> = {
-  PRODUCTION: "Production",
-  QC: "QC",
-  R_AND_D: "R&D",
-  OFFICE: "Office — order entry",
-  TRANSPORT: "Transport / 3PL",
-};
-
 // Service CASES can be opened against any source order status — a customer
 // might complain about an order that hasn't shipped yet ("where is it?",
 // "I want to change colour before it ships", "cancel my order"). Only
@@ -117,7 +106,6 @@ function daysSince(iso: string, until?: string): number {
 type CaseRow = ServiceCaseListItem & {
   source: string; // "SO-2605-198" / "EXTERNAL"
   rootCause: string; // rootCauseCategory or "" (badge text)
-  unitLabel: string; // responsible-unit human label or ""
   issueFirstLine: string; // whitespace-flattened, 50-char truncated
   affectedCount: number;
   daysOpen: number | null; // null = CANCELLED (no meaningful age)
@@ -175,9 +163,6 @@ export default function ServiceCasesListPage() {
           // alone for SO/CO; EXTERNAL has no number → show the type word.
           source: c.sourceNo || (c.sourceType === "EXTERNAL" ? "EXTERNAL" : c.sourceType),
           rootCause: c.rootCauseCategory ?? "",
-          unitLabel: c.responsibleUnit
-            ? (RESPONSIBLE_UNIT_LABELS[c.responsibleUnit] ?? c.responsibleUnit)
-            : "",
           issueFirstLine: flat.length > 50 ? `${flat.slice(0, 50)}…` : flat,
           affectedCount: c.affectedProducts?.length ?? 0,
           daysOpen:
@@ -235,21 +220,6 @@ export default function ServiceCasesListPage() {
               className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[row.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
             >
               {row.rootCauseCategory}
-            </span>
-          ) : (
-            <span className="text-[#9CA3AF]">—</span>
-          ),
-      },
-      {
-        key: "unitLabel",
-        label: "Unit",
-        width: "130px",
-        sortable: true,
-        filterAccessor: (row) => row.unitLabel || "—",
-        render: (_value, row) =>
-          row.unitLabel ? (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B7280]">
-              {row.unitLabel}
             </span>
           ) : (
             <span className="text-[#9CA3AF]">—</span>
@@ -341,7 +311,6 @@ export default function ServiceCasesListPage() {
         { header: "Customer", accessor: (r) => r.customerName },
         { header: "Source", accessor: (r) => r.source },
         { header: "Root Cause", accessor: (r) => r.rootCause },
-        { header: "Unit", accessor: (r) => r.unitLabel },
         { header: "Issue", accessor: (r) => r.issueFirstLine },
         {
           header: "Affected",

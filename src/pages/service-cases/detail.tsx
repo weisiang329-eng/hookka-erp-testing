@@ -52,17 +52,6 @@ const ROOT_CAUSE_LABELS: Record<string, string> = {
   OTHER: "Other",
 };
 
-// Responsible Unit — which business unit caused the issue (owner-level
-// attribution, coarser than the root-cause category). Stored on the
-// runtime-added lowercase column service_cases.responsibleunit (migration
-// 0166); the PUT validator accepts exactly these 5 values or null.
-const RESPONSIBLE_UNIT_LABELS: Record<string, string> = {
-  PRODUCTION: "Production",
-  QC: "QC",
-  R_AND_D: "R&D",
-  OFFICE: "Office — order entry",
-  TRANSPORT: "Transport / 3PL",
-};
 
 // 8 production-line departments (from src/lib/mock-data.ts seed). Hardcoded
 // here because the dept master is mock-data, not a /api/* endpoint, and
@@ -694,7 +683,6 @@ function RootCausePanel({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const [responsibleUnit, setResponsibleUnit] = useState(caseDetail.responsibleUnit ?? "");
   const [category, setCategory] = useState(caseDetail.rootCauseCategory ?? "");
   const [details, setDetails] = useState<RootCauseDetails>(caseDetail.rootCauseDetails ?? {});
   const [action, setAction] = useState(caseDetail.preventionAction);
@@ -726,27 +714,9 @@ function RootCausePanel({
         <CardTitle className="text-sm">Root Cause &amp; Prevention</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Responsible Unit — owner-level attribution of which business
-            unit caused the issue. Coarser than the category below; saves
-            on change like the neighbouring fields. */}
-        <div>
-          <label className="block text-xs text-[#6B7280] mb-1">Responsible Unit</label>
-          <select
-            value={responsibleUnit}
-            onChange={(e) => {
-              const next = e.target.value;
-              setResponsibleUnit(next);
-              save({ responsibleUnit: next || null });
-            }}
-            disabled={saving}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
-          >
-            <option value="">— not set —</option>
-            {Object.entries(RESPONSIBLE_UNIT_LABELS).map(([v, t]) => (
-              <option key={v} value={v}>{t}</option>
-            ))}
-          </select>
-        </div>
+        {/* Responsible Unit dropdown removed (owner 2026-06-12) — the
+            per-category department picker covers the responsible department
+            in finer detail. */}
 
         {/* Category — drives reporting / categorisation of recurrence.
             Changing the category resets the details JSON since the per-
@@ -1215,8 +1185,25 @@ function CategoryDetailsForm({
               )}
             </div>
           )}
-          {/* Department sub-picker removed (owner 2026-06-12) — the
-              case-level Responsible Unit now covers "who is responsible". */}
+          {/* Department — which dept can't fulfill this design (so R&D
+              knows who to talk to about the spec change). */}
+          <select
+            value={(value.designDeptCode as string) ?? ""}
+            onChange={(e) => {
+              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
+              patch({
+                designDeptCode: e.target.value || null,
+                designDeptName: dept?.name ?? null,
+              });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Which department can't follow the design? — pick one</option>
+            {ALL_DEPTS.map((d) => (
+              <option key={d.code} value={d.code}>{d.name}</option>
+            ))}
+          </select>
           <textarea
             value={(value.notes as string) ?? ""}
             onChange={(e) => patchOnly({ notes: e.target.value })}

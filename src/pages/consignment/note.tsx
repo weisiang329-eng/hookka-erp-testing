@@ -86,6 +86,16 @@ type ConsignmentNoteRow = {
   totalQty: number;
   totalM3: number;          // sum of items[].itemM3 * items[].quantity — DO equivalent: row.totalM3
   totalValueSen: number;
+  // valueSen = Σ(item.qty × parent-CO line unitPriceSen) — the CN twin of
+  // DO's row.valueSen. totalValueSen above is the unreliable legacy header
+  // figure (CN items carry unitPrice 0); valueSen is resolved server-side
+  // from the consignment ORDER prices (api/lib/cn-value.ts).
+  valueSen: number;
+  // Parent-CO customer references — consignment-side equivalent of DO's
+  // customerPOId / customerRef. Empty string when the CN has no parent CO.
+  customerPOId: string;
+  customerCO: string;
+  reference: string;
   dispatchDate: string | null;
   // inTransitAt — ISO timestamp stamped on PARTIALLY_SOLD → IN_TRANSIT
   // ("Mark In Transit"). Drives the In Transit step in the Detail
@@ -355,6 +365,12 @@ function mapCNToRow(
     totalQty,
     totalM3,
     totalValueSen: cn.totalValue,
+    // valueSen + parent-CO customer refs (api/lib/cn-value.ts) — the CN twin
+    // of DO's row.valueSen / customerPOId / customerRef.
+    valueSen: cn.valueSen ?? 0,
+    customerPOId: cn.customerPOId || "",
+    customerCO: cn.customerCO || "",
+    reference: cn.reference || "",
     // dispatchDate prefers the dispatchedAt timestamp (when status moved
     // to PARTIALLY_SOLD); falls back to sentDate (the CN creation date)
     // for legacy rows where the timestamp is null.
@@ -2272,6 +2288,52 @@ export default function ConsignmentNotePage() {
             </button>
           );
         },
+      },
+      // Customer-side references mirrored from DO (operator wants the CN list
+      // to match the DO list — the customer's own paperwork at dispatch).
+      // Resolved server-side from the parent CO (api/lib/cn-value.ts →
+      // loadCnCustomerRefMap): customerPOId from the CO's customerCOId,
+      // reference straight through. "—" when the CN has no parent CO / blank.
+      {
+        key: "customerPOId",
+        label: "Customer PO",
+        type: "text",
+        width: "150px",
+        sortable: true,
+        render: (_value, row) =>
+          row.customerPOId ? (
+            <span className="text-[#1F1D1B]">{row.customerPOId}</span>
+          ) : (
+            <span className="text-[#9CA3AF]">{"—"}</span>
+          ),
+      },
+      {
+        key: "reference",
+        label: "Customer Ref",
+        type: "text",
+        width: "130px",
+        sortable: true,
+        render: (_value, row) =>
+          row.reference ? (
+            <span className="text-[#1F1D1B]">{row.reference}</span>
+          ) : (
+            <span className="text-[#9CA3AF]">{"—"}</span>
+          ),
+      },
+      // Amount — Σ(item qty × parent-CO line unit price), the CN twin of DO's
+      // Amount column. Server-derived (api/lib/cn-value.ts → loadCnValueMap)
+      // because CN items carry unitPrice 0 (pricing lives on the CO line).
+      {
+        key: "valueSen",
+        label: "Amount",
+        type: "text",
+        width: "120px",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="font-medium text-[#1F1D1B] tabular-nums">
+            {formatCurrency(row.valueSen ?? 0)}
+          </span>
+        ),
       },
       // Product Code — first item's code, with "+N more" badge when the CN
       // spans multiple lines. Mirrors DO's per-row product info treatment

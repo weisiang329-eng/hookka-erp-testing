@@ -962,6 +962,14 @@ export type ConsignmentNote = {
   // Linkage (migration 0066).
   consignmentOrderId?: string | null;
   hubId?: string | null;
+  // CN→DO parity fields the list endpoint derives server-side
+  // (api/lib/cn-value.ts) — the consignment twins of the DeliveryOrder row's
+  // valueSen / customerPOId / customerRef. valueSen = Σ(item.qty × parent-CO
+  // line unitPriceSen); the customer refs come off the parent CO header.
+  valueSen?: number;
+  customerPOId?: string;
+  customerCO?: string;
+  reference?: string;
 };
 
 // --- Consignment Order (parallel to SalesOrder) ---

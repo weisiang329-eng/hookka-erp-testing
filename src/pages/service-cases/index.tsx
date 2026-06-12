@@ -115,7 +115,7 @@ function daysSince(iso: string, until?: string): number {
 // for those features to see what the cell shows. Same shape feeds the CSV
 // export so the download matches the grid exactly.
 type CaseRow = ServiceCaseListItem & {
-  source: string; // "SO SO-2605-198" / "EXTERNAL"
+  source: string; // "SO-2605-198" / "EXTERNAL"
   rootCause: string; // rootCauseCategory or "" (badge text)
   unitLabel: string; // responsible-unit human label or ""
   issueFirstLine: string; // whitespace-flattened, 50-char truncated
@@ -171,7 +171,9 @@ export default function ServiceCasesListPage() {
         const flat = (c.issueDescription ?? "").replace(/\s+/g, " ").trim();
         return {
           ...c,
-          source: [c.sourceType, c.sourceNo].filter(Boolean).join(" "),
+          // sourceNo already carries its own prefix (SO-…, CO-…), so show it
+          // alone for SO/CO; EXTERNAL has no number → show the type word.
+          source: c.sourceNo || (c.sourceType === "EXTERNAL" ? "EXTERNAL" : c.sourceType),
           rootCause: c.rootCauseCategory ?? "",
           unitLabel: c.responsibleUnit
             ? (RESPONSIBLE_UNIT_LABELS[c.responsibleUnit] ?? c.responsibleUnit)

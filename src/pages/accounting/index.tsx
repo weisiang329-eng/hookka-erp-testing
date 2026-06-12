@@ -413,40 +413,54 @@ function FyeCard() {
   );
 }
 
-// Operator-editable inventory → stock/opening/closing account mapping
-// (kv_config key `coa_stock_map`). Drives the detailed closing-stock
-// breakdown in the Manufacturing Account. Empty = built-in default.
+// Maintenance — AutoCount-style stock-group account grid (owner request
+// 2026-06-12: the raw JSON textarea was unusable). One row per raw-material
+// stock group with editable Purchase / Balance Stock / Opening / Closing
+// account cells, plus Default / WIP / FG rows. Loads the EFFECTIVE mapping
+// (kv overrides over built-in defaults) and saves the full grid back to
+// the same kv key the posting + manufacturing reports already read.
 function StockMapCard() {
   const { toast } = useToast();
-  const [text, setText] = useState("");
-  const [loaded, setLoaded] = useState(false);
+  type Entry = { stock: string; opening: string; closing: string; purchase?: string };
+  type GridRow = Entry & { group: string };
+  const [rows, setRows] = useState<GridRow[] | null>(null);
+  const [rmDefault, setRmDefault] = useState<Entry & { purchase: string }>({ stock: "", opening: "", closing: "", purchase: "" });
+  const [wip, setWip] = useState<Entry>({ stock: "", opening: "", closing: "" });
+  const [fg, setFg] = useState<Entry>({ stock: "", opening: "", closing: "" });
   const [saving, setSaving] = useState(false);
+
   useEffect(() => {
-    fetch("/api/kv-config/coa_stock_map")
-      .then((r) => r.json() as Promise<{ data?: unknown }>)
+    let stale = false;
+    fetch("/api/accounting/stock-map/effective")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { groups: GridRow[]; rmDefault: Entry & { purchase: string }; wip: Entry; fg: Entry } }>)
       .then((j) => {
-        if (j?.data) setText(JSON.stringify(j.data, null, 2));
+        if (stale || !j?.success || !j.data) return;
+        setRows(j.data.groups);
+        setRmDefault(j.data.rmDefault);
+        setWip(j.data.wip);
+        setFg(j.data.fg);
       })
-      .catch(() => {})
-      .finally(() => setLoaded(true));
+      .catch(() => {});
+    return () => { stale = true; };
   }, []);
+
+  const setCell = (i: number, field: keyof Entry, v: string) =>
+    setRows((prev) => (prev ? prev.map((r, x) => (x === i ? { ...r, [field]: v } : r)) : prev));
+
   const save = async () => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      toast.error("Mapping must be valid JSON");
-      return;
-    }
+    if (!rows) return;
     setSaving(true);
     try {
+      const rm: Record<string, Entry> = {};
+      for (const r of rows)
+        rm[r.group] = { stock: r.stock, opening: r.opening, closing: r.closing, purchase: r.purchase };
       const res = await fetch("/api/kv-config/coa_stock_map", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed),
+        body: JSON.stringify({ rmDefault, rm, wip, fg }),
       });
       const j = (await res.json()) as { success?: boolean; error?: string };
-      if (j?.success) toast.success("Stock account mapping saved");
+      if (j?.success) toast.success("Stock-group account mapping saved");
       else toast.error(j?.error || "Failed to save mapping");
     } catch {
       toast.error("Failed to save mapping");
@@ -454,38 +468,82 @@ function StockMapCard() {
       setSaving(false);
     }
   };
+
+  const cell = (value: string, onChange: (v: string) => void) => (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-24 rounded border border-[#E2DDD8] px-2 py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+    />
+  );
+
   return (
     <Card className="mb-4">
-      <CardContent className="p-4">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-medium text-[#1F1D1B]">
-            Inventory → Stock Account Mapping
-          </p>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={save}
-            disabled={saving || !loaded}
-          >
+      <CardContent className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold text-[#1F1D1B]">Stock Group → Account Mapping</h3>
+            <p className="text-xs text-[#6B7280] max-w-3xl">
+              One row per raw-material stock group: which PURCHASE account a
+              purchase-invoice line posts to, and which BALANCE STOCK /
+              OPENING / CLOSING accounts the manufacturing report uses.
+              Values shown are the ones currently in effect.
+            </p>
+          </div>
+          <Button variant="primary" size="sm" onClick={save} disabled={saving || !rows}>
             {saving ? "Saving…" : "Save"}
           </Button>
         </div>
-        <p className="text-[11px] text-[#9CA3AF] mb-2">
-          Maps each raw-material item_group (+ WIP, FG) to its stock /
-          opening / closing accounts for the detailed Manufacturing-account
-          breakdown AND the purchase account a purchase-invoice line posts
-          to (per material item_group). Leave blank for the built-in
-          default. Shape:{" "}
-          <code>{`{ "rmDefault": {...}, "rm": { "FABRIC": {"stock":"330-0001","opening":"701-0001","closing":"701-9991","purchase":"701-0010"} }, "wip": {...}, "fg": {...} }`}</code>
-        </p>
-        <textarea
-          value={text}
-          disabled={!loaded}
-          onChange={(e) => setText(e.target.value)}
-          rows={6}
-          placeholder="(empty — built-in default mapping in effect)"
-          className="w-full tabular-nums text-xs rounded-md border border-[#E2DDD8] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-        />
+        {!rows ? (
+          <div className="py-8 text-center text-[#6B7280] text-sm">Loading mapping…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Stock Group</th>
+                  <th className="px-3 py-2 text-left">Purchase Code</th>
+                  <th className="px-3 py-2 text-left">Balance Stock Code</th>
+                  <th className="px-3 py-2 text-left">Opening Code</th>
+                  <th className="px-3 py-2 text-left">Closing Code</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={r.group} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5 font-medium text-[#1F1D1B] whitespace-nowrap">{r.group}</td>
+                    <td className="px-3 py-1">{cell(r.purchase ?? "", (v) => setCell(i, "purchase", v))}</td>
+                    <td className="px-3 py-1">{cell(r.stock, (v) => setCell(i, "stock", v))}</td>
+                    <td className="px-3 py-1">{cell(r.opening, (v) => setCell(i, "opening", v))}</td>
+                    <td className="px-3 py-1">{cell(r.closing, (v) => setCell(i, "closing", v))}</td>
+                  </tr>
+                ))}
+                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5 font-medium text-[#6B7280] whitespace-nowrap">(Default — unmapped groups)</td>
+                  <td className="px-3 py-1">{cell(rmDefault.purchase, (v) => setRmDefault({ ...rmDefault, purchase: v }))}</td>
+                  <td className="px-3 py-1">{cell(rmDefault.stock, (v) => setRmDefault({ ...rmDefault, stock: v }))}</td>
+                  <td className="px-3 py-1">{cell(rmDefault.opening, (v) => setRmDefault({ ...rmDefault, opening: v }))}</td>
+                  <td className="px-3 py-1">{cell(rmDefault.closing, (v) => setRmDefault({ ...rmDefault, closing: v }))}</td>
+                </tr>
+                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5 font-medium text-[#6B7280]">WORK IN PROGRESS</td>
+                  <td className="px-3 py-1 text-xs text-[#9CA3AF]">—</td>
+                  <td className="px-3 py-1">{cell(wip.stock, (v) => setWip({ ...wip, stock: v }))}</td>
+                  <td className="px-3 py-1">{cell(wip.opening, (v) => setWip({ ...wip, opening: v }))}</td>
+                  <td className="px-3 py-1">{cell(wip.closing, (v) => setWip({ ...wip, closing: v }))}</td>
+                </tr>
+                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5 font-medium text-[#6B7280]">FINISHED GOODS</td>
+                  <td className="px-3 py-1 text-xs text-[#9CA3AF]">—</td>
+                  <td className="px-3 py-1">{cell(fg.stock, (v) => setFg({ ...fg, stock: v }))}</td>
+                  <td className="px-3 py-1">{cell(fg.opening, (v) => setFg({ ...fg, opening: v }))}</td>
+                  <td className="px-3 py-1">{cell(fg.closing, (v) => setFg({ ...fg, closing: v }))}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

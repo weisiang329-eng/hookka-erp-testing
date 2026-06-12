@@ -20,12 +20,13 @@ import {
 import { nextMonthDueDate } from "../../lib/terms";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
-const DEFAULT_PURCHASE_ACCT = "704-0010";
+export const DEFAULT_PURCHASE_ACCT = "704-0010";
 // Fallback raw-material item_group → purchase account. The owner's
 // editable kv_config `coa_stock_map` (rm[<group>].purchase /
 // rmDefault.purchase) overrides this — purchase account is decided by
-// the material bought, per the owner.
-const DEFAULT_PURCHASE_MAP: Record<string, string> = {
+// the material bought, per the owner. Exported for the Maintenance
+// stock-group grid (effective-mapping view).
+export const DEFAULT_PURCHASE_MAP: Record<string, string> = {
   FABRIC: "701-0010",
   FABRIC_SEWING: "701-0020",
   PLYWOOD: "702-0010",

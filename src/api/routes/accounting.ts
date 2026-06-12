@@ -2123,6 +2123,74 @@ app.put("/other-parties/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// STOCK-GROUP ACCOUNT GRID (Maintenance tab, owner request 2026-06-12)
+//
+// AutoCount-style maintenance: one row per raw-material stock group with
+// its purchase / balance-stock / opening / closing accounts. Returns the
+// EFFECTIVE mapping (owner's kv coa_stock_map overlaid on the built-in
+// defaults) plus the live group list from raw_materials, so the UI can
+// render an editable grid instead of raw JSON. Saving still writes the
+// same kv key the posting/reports already read.
+// ---------------------------------------------------------------------------
+app.get("/stock-map/effective", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const { DEFAULT_PURCHASE_MAP, DEFAULT_PURCHASE_ACCT } = await import(
+    "./purchase-invoices"
+  );
+  const [grpRes, kvRow] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT DISTINCT itemGroup FROM raw_materials WHERE itemGroup IS NOT NULL AND itemGroup <> '' ORDER BY itemGroup",
+    ).all<{ itemGroup: string }>(),
+    c.var.DB.prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind("coa_stock_map")
+      .first<{ value: string }>(),
+  ]);
+  type Entry = { stock?: string; opening?: string; closing?: string; purchase?: string };
+  let kv: { rmDefault?: Entry; rm?: Record<string, Entry>; wip?: Entry; fg?: Entry } = {};
+  try {
+    kv = JSON.parse(kvRow?.value ?? "null") ?? {};
+  } catch {
+    kv = {};
+  }
+  const def = DEFAULT_STOCK_MAP;
+  const eff = (g: string): Entry & { group: string } => {
+    const dStock = def.rm[g] ?? def.rmDefault;
+    const o = kv.rm?.[g] ?? {};
+    return {
+      group: g,
+      stock: o.stock ?? dStock.stock,
+      opening: o.opening ?? dStock.opening,
+      closing: o.closing ?? dStock.closing,
+      purchase: o.purchase ?? DEFAULT_PURCHASE_MAP[g] ?? DEFAULT_PURCHASE_ACCT,
+    };
+  };
+  const groups = (grpRes.results ?? []).map((r) => eff(r.itemGroup));
+  return c.json({
+    success: true,
+    data: {
+      groups,
+      rmDefault: {
+        stock: kv.rmDefault?.stock ?? def.rmDefault.stock,
+        opening: kv.rmDefault?.opening ?? def.rmDefault.opening,
+        closing: kv.rmDefault?.closing ?? def.rmDefault.closing,
+        purchase: kv.rmDefault?.purchase ?? DEFAULT_PURCHASE_ACCT,
+      },
+      wip: {
+        stock: kv.wip?.stock ?? def.wip.stock,
+        opening: kv.wip?.opening ?? def.wip.opening,
+        closing: kv.wip?.closing ?? def.wip.closing,
+      },
+      fg: {
+        stock: kv.fg?.stock ?? def.fg.stock,
+        opening: kv.fg?.opening ?? def.fg.opening,
+        closing: kv.fg?.closing ?? def.fg.closing,
+      },
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TRIAL BALANCE + GL INQUIRY (Phase 1, 2026-06)
 //
 // The immutable ledger previously had NO read surface beyond the P&L/BS

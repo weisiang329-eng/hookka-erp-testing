@@ -522,31 +522,38 @@ export default function ServiceCaseDetailPage() {
 // ===========================================================================
 // CasePipeline — auto-computed, display-only progress stepper.
 // ===========================================================================
-// Seven fixed steps: Opened → Investigating → Service Order → Repair done →
-// Delivery arranged → Delivered → Closed. Completion is DERIVED from data
-// already on the page plus one cached fetch of /api/delivery-orders (matched
-// by salesOrderId against the case's SV order ids) — no new endpoints, no
-// writes, no stored step state.
+// Eight fixed steps: Opened → Investigating → Service Order → Repair in
+// progress → Repair done → Delivery arranged → Delivered → Closed.
+// Completion is DERIVED from data already on the page plus cached fetches of
+// /api/delivery-orders and /api/production-orders (matched by salesOrderId
+// against the case's SV order ids) — no new endpoints, no writes, no stored
+// step state. Only Investigating (Mark In Progress) and Closed (Close Case)
+// are manual clicks; everything else lights itself (owner 2026-06-12).
 //
 // Status sets (from the authoritative route enums):
 // • SV orders are sales_orders rows (src/api/routes/sales-orders.ts):
 //   READY_TO_SHIP and beyond = production finished (repair done);
 //   SHIPPED and beyond = delivery arranged; DELIVERED/INVOICED/CLOSED =
 //   delivered. Their DOs (delivery_orders DRAFT→LOADED→IN_TRANSIT→
-//   DELIVERED→INVOICED) refine that: any DO = arranged, DO
-//   DELIVERED/INVOICED = delivered.
+//   DELIVERED→INVOICED) refine that: any DO = arranged (the Pending
+//   Dispatch stage on the Delivery page), DO DELIVERED/INVOICED = delivered.
+// • Repair in progress (owner rule 2026-06-12): the moment ANY department's
+//   job card on the SV order's production orders carries a completedDate —
+//   "只要任何一个部门已经有 Completion Date 就代表在生产中". Legacy
+//   service_orders: status IN_PRODUCTION/RESERVED/IN_REPAIR.
 // • Legacy service_orders (src/api/routes/service-orders.ts lifecycle
 //   OPEN→IN_PRODUCTION/RESERVED/IN_REPAIR→READY_TO_SHIP→DELIVERED→CLOSED):
 //   READY_TO_SHIP+ = repair done, DELIVERED/CLOSED = delivered (they have
 //   no delivery_orders rows).
 // Later steps imply earlier ones along the fulfilment chain (delivered ⇒
-// arranged ⇒ repair done), and Investigating lights up once the case left
-// OPEN or any later step completed.
+// arranged ⇒ repair done ⇒ in progress), and Investigating lights up once
+// the case left OPEN or any later step completed.
 const SV_REPAIR_DONE_STATUSES = new Set([
   "READY_TO_SHIP", "SHIPPED", "DELIVERED", "INVOICED", "CLOSED",
 ]);
 const SV_DISPATCHED_STATUSES = new Set(["SHIPPED", "DELIVERED", "INVOICED", "CLOSED"]);
 const SV_DELIVERED_STATUSES = new Set(["DELIVERED", "INVOICED", "CLOSED"]);
+const LEGACY_IN_PROGRESS_STATUSES = new Set(["IN_PRODUCTION", "RESERVED", "IN_REPAIR"]);
 const LEGACY_REPAIR_DONE_STATUSES = new Set(["READY_TO_SHIP", "DELIVERED", "CLOSED"]);
 const LEGACY_DELIVERED_STATUSES = new Set(["DELIVERED", "CLOSED"]);
 const DO_DELIVERED_STATUSES = new Set(["DELIVERED", "INVOICED"]);
@@ -555,6 +562,7 @@ const PIPELINE_STEPS = [
   "Opened",
   "Investigating",
   "Service Order",
+  "Repair in progress",
   "Repair done",
   "Delivery arranged",
   "Delivered",
@@ -567,17 +575,27 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
     [caseDetail.orders],
   );
 
-  // One extra fetch (cached) — only when the case actually has SV orders;
+  // Two extra fetches (cached) — only when the case actually has SV orders;
   // legacy-only cases derive everything from the statuses already loaded.
   const { data: doResp } = useCachedJson<{
     data?: Array<{ id: string; salesOrderId?: string; status?: string }>;
   }>(svOrderIds.size > 0 ? "/api/delivery-orders" : null);
+  const { data: poResp } = useCachedJson<{
+    data?: Array<{
+      id: string;
+      salesOrderId?: string | null;
+      jobCards?: Array<{ completedDate?: string | null }>;
+    }>;
+  }>(svOrderIds.size > 0 ? "/api/production-orders?fields=minimal&include=jobCards" : null);
 
   const stepsDone = useMemo(() => {
     const svOrders = caseDetail.orders.filter((o) => o.isSv);
     const legacyOrders = caseDetail.orders.filter((o) => !o.isSv);
     const caseDos = (doResp?.data ?? []).filter(
       (d) => !!d.salesOrderId && svOrderIds.has(d.salesOrderId),
+    );
+    const casePos = (poResp?.data ?? []).filter(
+      (p) => !!p.salesOrderId && svOrderIds.has(p.salesOrderId),
     );
 
     const delivered =
@@ -592,16 +610,22 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
       arranged ||
       svOrders.some((o) => SV_REPAIR_DONE_STATUSES.has(o.status)) ||
       legacyOrders.some((o) => LEGACY_REPAIR_DONE_STATUSES.has(o.status));
+    // Owner rule: any department's job card with a completedDate = the
+    // repair is physically moving through production.
+    const inProgress =
+      repairDone ||
+      casePos.some((p) => (p.jobCards ?? []).some((j) => !!j.completedDate)) ||
+      legacyOrders.some((o) => LEGACY_IN_PROGRESS_STATUSES.has(o.status));
     const hasOrder = caseDetail.orders.length > 0;
     const closed = caseDetail.status === "CLOSED";
     const investigating =
       caseDetail.status !== "OPEN" || hasOrder || repairDone || closed;
 
-    return [true, investigating, hasOrder, repairDone, arranged, delivered, closed];
-  }, [caseDetail.orders, caseDetail.status, doResp, svOrderIds]);
+    return [true, investigating, hasOrder, inProgress, repairDone, arranged, delivered, closed];
+  }, [caseDetail.orders, caseDetail.status, doResp, poResp, svOrderIds]);
 
   // "Current" = the first step not yet done (outlined dot); everything
-  // after it renders muted. -1 = all seven done.
+  // after it renders muted. -1 = all eight done.
   const currentIdx = stepsDone.findIndex((d) => !d);
 
   return (

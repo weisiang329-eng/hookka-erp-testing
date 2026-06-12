@@ -267,9 +267,21 @@ export async function verifiedBulkSave<TItem>(
 // inconsistently (some return "", some null) and we don't want a mismatch
 // toast triggered by that. Operator-visible meaning is the same: "the
 // field is empty".
+//
+// Zero money is folded into the same "empty" bucket (BUG-2026-06-12): a
+// 0-amount field (e.g. an invoice line/total zeroed for a free service
+// order) comes back from the backend as null/"" sometimes and 0 other
+// times, which would false-trip the guard ("Save did NOT take effect —
+// tried 0, system has (empty)") even though the write succeeded. 0 and
+// empty mean the same to the operator: "no amount". A real mismatch (tried
+// 0, got a non-zero value, or vice-versa) is still caught, because only the
+// zero/empty pair collapses.
 // ---------------------------------------------------------------------------
 function equalLoose(a: unknown, b: unknown): boolean {
-  const norm = (v: unknown) => (v === null || v === undefined || v === "" ? null : v);
+  const isZeroish = (v: unknown) =>
+    v === 0 || (typeof v === "string" && /^0+(\.0+)?$/.test(v.trim()));
+  const norm = (v: unknown) =>
+    v === null || v === undefined || v === "" || isZeroish(v) ? null : v;
   const na = norm(a);
   const nb = norm(b);
   if (na === nb) return true;

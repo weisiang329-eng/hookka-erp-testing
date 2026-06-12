@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-006 — verified-save false alarm: zeroing a money field showed "Save did NOT take effect — tried 0, system has (empty)" though the write succeeded
+
+**Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green. Owner hit it right after BUG-005 zeroing INV-2606-084.
+**Category:** ui-frontend
+
+After the `MAX`→`GREATEST` fix (BUG-005) let the invoice price-save run, zeroing the service-order invoice to RM 0 still showed a red toast: **"Save did NOT take effect — totalAmount: tried 0, system has (empty). Please try again."** — but the DB was correct (`subtotal_sen = 0, total_sen = 0`). Root cause: the shared write-then-read guard `equalLoose` (`src/lib/verified-save.ts`) folded `null`/`undefined`/`""` into one "empty" bucket but NOT `0`. The backend returns a zeroed money field as null/"" sometimes and `0` other times; the read-back came back empty, so `norm(0)=0 ≠ norm("")=null` → false mismatch.
+
+Fix: `equalLoose` now also folds zero-ish values (`0`, `"0"`, `"0.00"`, etc. via `/^0+(\.0+)?$/`) into the empty bucket — 0 and empty mean the same to the operator ("no amount"). A real mismatch (tried 0 → got non-zero, or tried 5 → got 0) is still caught because only the zero↔empty pair collapses. Shared helper, so this also de-noises any other verified save that zeroes a field.
+
+---
+
 ## BUG-2026-06-12-005 — SQL `MAX(0, x)` (SQLite-style 2-arg) reached Postgres untranslated → "function max(integer, integer) does not exist" broke invoice price-edit (and 5 sibling write paths)
 
 **Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green. Owner hit it live editing a service-order invoice to RM 0.

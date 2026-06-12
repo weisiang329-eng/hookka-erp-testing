@@ -253,7 +253,7 @@ export default function AccountingPage() {
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
               <GstRateCard />
               <FyeCard />
-              <StockMapCard />
+              <StockMapCard accounts={accounts} />
             </div>
           )}
         </>
@@ -419,7 +419,7 @@ function FyeCard() {
 // account cells, plus Default / WIP / FG rows. Loads the EFFECTIVE mapping
 // (kv overrides over built-in defaults) and saves the full grid back to
 // the same kv key the posting + manufacturing reports already read.
-function StockMapCard() {
+function StockMapCard({ accounts }: { accounts: ChartOfAccount[] }) {
   const { toast } = useToast();
   type Entry = { stock: string; opening: string; closing: string; purchase?: string };
   type GridRow = Entry & { group: string; description?: string };
@@ -469,13 +469,18 @@ function StockMapCard() {
     }
   };
 
+  // Owner request 2026-06-12: cells are COA pickers, not blind number
+  // boxes — the selected account shows as "code - name" and typing a
+  // keyword searches the chart.
   const cell = (value: string, onChange: (v: string) => void) => (
-    <input
-      type="text"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-24 rounded border border-[#E2DDD8] px-2 py-1 text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
-    />
+    <div className="w-56">
+      <AccountPicker
+        accounts={accounts}
+        value={value}
+        onChange={onChange}
+        placeholder="Type code or name…"
+      />
+    </div>
   );
 
   return (

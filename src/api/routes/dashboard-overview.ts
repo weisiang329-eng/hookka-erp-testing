@@ -137,7 +137,7 @@ app.get("/", async (c) => {
     }
   }
 
-  const data = await cached(c, `dashboard:overview:${orgId}:v20:${period}`, 60, async () => {
+  const data = await cached(c, `dashboard:overview:${orgId}:v21:${period}`, 60, async () => {
     const db = c.var.DB;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -1204,6 +1204,14 @@ app.get("/", async (c) => {
     for (const r of invMonthRes.results ?? []) {
       if (r.ym) invRevMap.set(r.ym, Number(r.revenueSen) || 0);
     }
+    // Invoices KPI = Σ invoice total (excl CANCELLED) for the selected month,
+    // by invoice date, or the cumulative all-month total for All-time. Same
+    // source + month basis as the Invoices line of the Revenue chart, so the
+    // Command Center "This Month Invoices" card reconciles with that line.
+    // Mirrors thisMonthSalesSen (built from soRevMap) above.
+    const invoicesThisMonthSen = kpiAllTime
+      ? [...invRevMap.values()].reduce((a, b) => a + b, 0)
+      : (invRevMap.get(period) ?? 0);
     const prodRevMap = new Map<string, number>();
     for (const r of prodRevRes.results ?? []) {
       if (r.ym) prodRevMap.set(r.ym, Number(r.revenueSen) || 0);
@@ -1926,6 +1934,7 @@ app.get("/", async (c) => {
     return {
       salesThisMonthSen: thisMonthSalesSen,
       deliveredThisMonthSen: thisMonthDeliveredSen,
+      invoicesThisMonthSen,
       deliveredOfMonthOrdersSen,
       production: stateProduction,
       stateSnapshot,

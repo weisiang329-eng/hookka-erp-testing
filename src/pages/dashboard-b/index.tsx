@@ -29,7 +29,7 @@ const CustomerPieChart = lazy(() =>
 );
 import {
   DollarSign,
-  Truck,
+  FileText,
   Clock,
   Package,
   Factory,
@@ -60,6 +60,7 @@ type Overview = {
   salesMonths?: string[];
   salesThisMonthSen?: number;
   deliveredThisMonthSen?: number;
+  invoicesThisMonthSen?: number;
   deliveredOfMonthOrdersSen?: number;
   production?: {
     dailyCapacityMin: number;
@@ -831,8 +832,11 @@ export default function DashboardBPage() {
       })),
     [weekRev],
   );
+  // Sparkline for the Sales card — the monthly confirmed-SO trend.
   const soSpark = useMemo(() => rev.map((r) => r.salesOrderSen), [rev]);
-  const delSpark = useMemo(() => rev.map((r) => r.productionSen), [rev]);
+  // Sparkline for the Invoices card — the monthly invoiced trend (same
+  // invoice-date source as the card's headline value).
+  const invSpark = useMemo(() => rev.map((r) => r.invoiceSen), [rev]);
 
   const delivered = so.deliveredItemsSen ?? 0;
   const outstanding = so.outstandingItemsSen ?? 0;
@@ -891,7 +895,8 @@ export default function DashboardBPage() {
   const topBed = ov.topSellers?.BEDFRAME ?? [];
   const topSofa = ov.topSellers?.SOFA ?? [];
 
-  // Period-over-period deltas (last vs previous month in the series).
+  // Period-over-period deltas (last vs previous month in the series) for the
+  // Sales + Invoices cards — month-over-month, shown only on the All-time view.
   const pctDelta = (cur: number, prev: number): number | null =>
     prev > 0 ? ((cur - prev) / prev) * 100 : null;
   const lastR = rev[rev.length - 1];
@@ -899,8 +904,8 @@ export default function DashboardBPage() {
   const salesDelta = lastR
     ? pctDelta(lastR.salesOrderSen, prevR?.salesOrderSen ?? 0)
     : null;
-  const prodDelta = lastR
-    ? pctDelta(lastR.productionSen, prevR?.productionSen ?? 0)
+  const invoiceDelta = lastR
+    ? pctDelta(lastR.invoiceSen, prevR?.invoiceSen ?? 0)
     : null;
 
   // Customer revenue concentration — top 6 + "Others" (financial-
@@ -964,33 +969,36 @@ export default function DashboardBPage() {
   }
 
   // Flow-KPI labels follow the selected period: All-time → cumulative total,
-  // current month → "This-Month", a past month → that month. The state KPIs
+  // current month → "This Month", a past month → that month. The state KPIs
   // (Outstanding / Pending Delivery) are point-in-time and carry a "live" tag.
   const isAllTime = period === "all";
   const isCurrentMonth = period === CUR_YM;
-  // Past-month views are reconstructed snapshots — live dispatch-chain money
-  // (in-transit) must NOT fold into them.
-  const isPastMonth = !isAllTime && !isCurrentMonth;
+  // This Month Sales — confirmed-SO value for the selected month (all-time =
+  // cumulative). Owner 2026-06-12 kept this card alongside Invoices.
   const salesLabel = isAllTime
     ? "Total Sales"
     : isCurrentMonth
-      ? "This-Month Sales"
+      ? "This Month Sales"
       : `Sales · ${period}`;
-  const deliveredLabel = isAllTime
-    ? "Total Delivered"
-    : isCurrentMonth
-      ? "This-Month Delivered"
-      : `Delivered · ${period}`;
   const salesSub = isAllTime
     ? "all-time · confirmed SO"
     : isCurrentMonth
       ? "confirmed SO · current month"
       : `${period} · confirmed SO`;
-  const deliveredSub = isAllTime
-    ? "all-time · shipped (by dispatch)"
+  // This Month Invoices — invoice-sourced (Σ invoice totals by invoice date),
+  // not DO/shipped-value. Owner 2026-06-12: "it captures straight from
+  // Invoices — when I deliver, the invoice is issued." Replaces the old
+  // delivered/shipped-value card.
+  const invoicesLabel = isAllTime
+    ? "Total Invoices"
     : isCurrentMonth
-      ? "shipped value · current month"
-      : `${period} · shipped (by dispatch)`;
+      ? "This Month Invoices"
+      : `Invoices · ${period}`;
+  const invoicesSub = isAllTime
+    ? "all-time · issued (by invoice date)"
+    : isCurrentMonth
+      ? "issued this month"
+      : `${period} · issued (by invoice date)`;
 
   // Labels for the month-aware ROLLING widgets (Revenue, Daily Capacity,
   // Completed, Worker Efficiency). All-time keeps each widget's original
@@ -1054,8 +1062,15 @@ export default function DashboardBPage() {
         </select>
       </div>
 
-      {/* KPI rail */}
+      {/* KPI rail — four cards: This Month Sales · This Month Invoices ·
+          Pending Delivery (consolidated) · Outstanding. Sales = confirmed-SO
+          value; Invoices = invoice-sourced (owner 2026-06-12: "it captures
+          straight from Invoices — when I deliver, the invoice is issued"), which
+          replaced the old shipped-value Delivered card. */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+        {/* This Month Sales — confirmed-SO value for the selected month
+            (all-time = cumulative). Owner 2026-06-12 kept this alongside the
+            Invoices card. */}
         <KTile
           label={salesLabel}
           value={rm(ov.salesThisMonthSen)}
@@ -1065,25 +1080,36 @@ export default function DashboardBPage() {
           spark={soSpark}
           delta={isMonthScoped ? null : salesDelta}
         />
-        {/* Owner 2026-06-11: goods already ON THE TRUCK count toward the
-            delivered side. Folded for the live views only (current month /
-            all-time) — a past month's in-transit state is unknowable. */}
+        {/* This Month Invoices — Σ invoice totals (excl. cancelled) by invoice
+            date for the selected month (all-time = cumulative). Invoice-sourced,
+            not DO/shipped-value. Responds to the month selector like the rest. */}
         <KTile
-          label={deliveredLabel}
-          value={rm(
-            (ov.deliveredThisMonthSen ?? 0) +
-              (isPastMonth ? 0 : dispatchChain.inTransitSen),
-          )}
-          sub={
-            !isPastMonth && dispatchChain.inTransitSen > 0
-              ? `${deliveredSub} + in transit ${rm(dispatchChain.inTransitSen)}`
-              : deliveredSub
-          }
-          icon={Truck}
+          label={invoicesLabel}
+          value={rm(ov.invoicesThisMonthSen)}
+          sub={invoicesSub}
+          icon={FileText}
           accent={C_PROD}
-          spark={delSpark}
-          delta={isMonthScoped ? null : prodDelta}
-          loading={isPastMonth ? false : doL}
+          spark={invSpark}
+          delta={isMonthScoped ? null : invoiceDelta}
+        />
+        {/* Pending Delivery (consolidated) — one card for everything made but
+            not yet delivered: pending delivery (made, not on a dispatched DO)
+            + pending dispatch (DRAFT DOs) + dispatched / in-transit (on the
+            road). A live as-of-now figure (the DO fetch is not period-scoped),
+            so it folds the live dispatch-chain money for every selected period.
+            Owner 2026-06-12. */}
+        <KTile
+          label="Pending Delivery"
+          value={rm(
+            pendingDeliveryValueSen +
+              dispatchChain.pendingDispatchSen +
+              dispatchChain.inTransitSen,
+          )}
+          sub="made / on DO, not yet delivered"
+          icon={Package}
+          accent={C_GREEN}
+          loading={pendingL}
+          tag="live"
         />
         <KTile
           label="Outstanding"
@@ -1092,18 +1118,6 @@ export default function DashboardBPage() {
           icon={Clock}
           accent={C_INV}
           loading={soL}
-          tag="live"
-        />
-        {/* Owner 2026-06-11: DOs waiting to leave (Pending Dispatch) belong
-            with the pending-delivery money — one card for everything made
-            but not yet on the road. */}
-        <KTile
-          label="Pending Delivery"
-          value={rm(pendingDeliveryValueSen + dispatchChain.pendingDispatchSen)}
-          sub="made + on DO, not yet dispatched"
-          icon={Package}
-          accent={C_GREEN}
-          loading={pendingL}
           tag="live"
         />
       </div>

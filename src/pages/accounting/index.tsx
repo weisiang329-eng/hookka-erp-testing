@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -176,6 +176,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
   { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
   { key: "odc", label: "Other D/C", icon: <Users className="h-4 w-4" /> },
+  { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
 
 // =============== MAIN PAGE ===============
@@ -227,10 +228,6 @@ export default function AccountingPage() {
         ))}
       </div>
 
-      <GstRateCard />
-      <FyeCard />
-      <StockMapCard />
-
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="text-[#6B7280]">Loading accounting data...</div>
@@ -251,6 +248,14 @@ export default function AccountingPage() {
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
           {tab === "odc" && <OtherPartiesTab />}
+          {tab === "maint" && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
+              <GstRateCard />
+              <FyeCard />
+              <StockMapCard />
+            </div>
+          )}
         </>
       )}
     </div>
@@ -1360,7 +1365,9 @@ function JournalEntryForm({
   // Editor rows carry a client-only `_uid` so React keys stay stable as rows
   // are added / removed / reordered. The uid is stripped before POST in
   // handleSave().  See sprint 7 — replacing key={idx} on mutable rows.
-  type JournalLineRow = JournalLine & { _uid: string };
+  // debitStr/creditStr keep the raw text being typed so the controlled
+  // inputs never reformat mid-entry (owner bug 2026-06-12).
+  type JournalLineRow = JournalLine & { _uid: string; debitStr?: string; creditStr?: string };
   const newRow = (): JournalLineRow => ({
     _uid: crypto.randomUUID(),
     accountCode: "",
@@ -1506,7 +1513,7 @@ function JournalEntryForm({
                         min="0"
                         step="0.01"
                         placeholder="0.00"
-                        value={line.debitSen ? (line.debitSen / 100).toFixed(2) : ""}
+                        value={line.debitStr ?? (line.debitSen ? (line.debitSen / 100).toFixed(2) : "")}
                         onChange={(e) => updateLine(idx, "debitSen", e.target.value)}
                         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
                       />
@@ -1517,7 +1524,7 @@ function JournalEntryForm({
                         min="0"
                         step="0.01"
                         placeholder="0.00"
-                        value={line.creditSen ? (line.creditSen / 100).toFixed(2) : ""}
+                        value={line.creditStr ?? (line.creditSen ? (line.creditSen / 100).toFixed(2) : "")}
                         onChange={(e) => updateLine(idx, "creditSen", e.target.value)}
                         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
                       />

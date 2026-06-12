@@ -35,7 +35,9 @@ export default function DebitNotesPage() {
   const [reasonDetail, setReasonDetail] = useState("");
   // Editor rows carry a client-only `_uid` so React keys stay stable across
   // add / remove / reorder. The uid is stripped before POST in handleCreate().
-  type DebitNoteItemRow = { _uid: string; description: string; quantity: number; unitPriceSen: number };
+  // priceStr keeps the raw text being typed so the controlled input never
+  // reformats mid-entry (owner bug 2026-06-12); unitPriceSen derives from it.
+  type DebitNoteItemRow = { _uid: string; description: string; quantity: number; unitPriceSen: number; priceStr?: string };
   const newDNItem = (): DebitNoteItemRow => ({
     _uid: crypto.randomUUID(),
     description: "",

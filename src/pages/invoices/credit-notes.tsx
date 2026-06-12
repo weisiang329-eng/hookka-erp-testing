@@ -38,7 +38,9 @@ export default function CreditNotesPage() {
   // PR 0 (2026-05-20) — field renamed from `unitPrice` to `unitPriceSen` so
   // the unit is explicit at the contract surface. Value is integer sen
   // (RM × 100), matching the backend after the rename in credit-notes.ts.
-  type CreditNoteItemRow = { _uid: string; description: string; quantity: number; unitPriceSen: number };
+  // priceStr keeps the raw text being typed so the controlled input never
+  // reformats mid-entry (owner bug 2026-06-12); unitPriceSen derives from it.
+  type CreditNoteItemRow = { _uid: string; description: string; quantity: number; unitPriceSen: number; priceStr?: string };
   const newCNItem = (): CreditNoteItemRow => ({
     _uid: crypto.randomUUID(),
     description: "",
@@ -347,11 +349,16 @@ export default function CreditNotesPage() {
                         step="0.01"
                         inputMode="decimal"
                         placeholder="Unit Price (RM)"
-                        value={item.unitPriceSen ? (item.unitPriceSen / 100).toFixed(2) : ""}
+                        // Owner bug 2026-06-12: this was a controlled input
+                        // re-formatted with toFixed(2) on EVERY keystroke, so
+                        // typing "127" got mangled mid-entry. Keep the raw
+                        // text the user types; derive sen from it on change.
+                        value={item.priceStr ?? (item.unitPriceSen ? (item.unitPriceSen / 100).toFixed(2) : "")}
                         onChange={(e) => {
-                          const rm = parseFloat(e.target.value);
+                          const txt = e.target.value;
+                          const rm = parseFloat(txt);
                           const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
-                          updateItem(idx, "unitPriceSen", sen);
+                          setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, priceStr: txt, unitPriceSen: sen } : it)));
                         }}
                       />
                       <span className="text-sm text-gray-500 py-2 w-28 text-right">

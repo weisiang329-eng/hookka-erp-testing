@@ -783,7 +783,9 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
   const [formData, setFormData] = useState({
     code: "",
     name: "",
-    type: "ASSET" as ChartOfAccount["type"],
+    // Owner: the create form offers the same NINE sections as the tree —
+    // the section maps onto a DB type + code band on submit (handleAdd).
+    section: "NCA",
     parentCode: "",
     cashFlowCategory: "" as "" | "O" | "I" | "F",
     specialAccountType: "",
@@ -825,6 +827,19 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       default:
         return "EXP";
     }
+  };
+  // Code bands per section (mirrors sectionOf) — placeholder example +
+  // the rejection hint when a new account's code lands outside its section.
+  const SECTION_CODE_BAND: Record<string, { example: string; hint: string }> = {
+    NCA: { example: "200-1000", hint: "below 300" },
+    CA: { example: "330-5000", hint: "300 and above" },
+    CL: { example: "440-0000", hint: "outside 480–489" },
+    NCL: { example: "480-0050", hint: "480–489" },
+    EQ: { example: "100-0005", hint: "any band" },
+    REV: { example: "500-0040", hint: "below 530" },
+    OI: { example: "530-0010", hint: "530 and above" },
+    COGS: { example: "701-0040", hint: "any band" },
+    EXP: { example: "900-A001", hint: "any band" },
   };
   const [expanded, setExpanded] = useState<Record<string, boolean>>(
     Object.fromEntries(SECTIONS.map((s) => [s.key, true])),
@@ -895,15 +910,6 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
     } else toast.error(j?.error || "Rename failed");
   };
 
-  const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "COST", "EXPENSE"];
-  const typeLabels: Record<string, string> = {
-    ASSET: "Assets",
-    LIABILITY: "Liabilities",
-    EQUITY: "Equity",
-    REVENUE: "Revenue",
-    COST: "Cost of Production",
-    EXPENSE: "Expenses",
-  };
   // Use the canonical COA type palette from design-tokens.
   // Colour meaning (accounting convention):
   //   ASSET=info, LIABILITY=danger, EQUITY=plum, REVENUE=success, EXPENSE=warning.
@@ -917,10 +923,30 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
   };
 
   const handleAdd = async () => {
+    const sec = SECTIONS.find((s) => s.key === formData.section);
+    if (!sec) return;
+    const code = formData.code.trim();
+    if (!code || !formData.name.trim()) {
+      toast.error("Code and name are required");
+      return;
+    }
+    // The nine sections map onto six DB types + a code band (sectionOf) —
+    // refuse a code outside the chosen section's band, or the new account
+    // would silently render under a different section of the tree.
+    const landing = sectionOf({ code, type: sec.type } as ChartOfAccount);
+    if (landing !== sec.key) {
+      const other = SECTIONS.find((s) => s.key === landing);
+      toast.error(
+        `Code ${code} lands in ${other?.label ?? landing} — ${sec.label} uses codes ${SECTION_CODE_BAND[sec.key].hint}`,
+      );
+      return;
+    }
+    const { section: _section, ...rest } = formData;
+    void _section;
     const res = await fetch("/api/accounting/coa", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(formData),
+      body: JSON.stringify({ ...rest, code, name: formData.name.trim(), type: sec.type }),
     });
     const data = asMutationResponse(await res.json());
     if (data?.success) {
@@ -928,7 +954,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       setFormData({
         code: "",
         name: "",
-        type: "ASSET",
+        section: "NCA",
         parentCode: "",
         cashFlowCategory: "",
         specialAccountType: "",
@@ -993,7 +1019,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Code</label>
                 <input
                   type="text"
-                  placeholder="100-0003"
+                  placeholder={`e.g. ${SECTION_CODE_BAND[formData.section].example}`}
                   value={formData.code}
                   onChange={(e) => setFormData({ ...formData, code: e.target.value })}
                   className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
@@ -1010,14 +1036,14 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                 />
               </div>
               <div>
-                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Type</label>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Section</label>
                 <select
-                  value={formData.type}
-                  onChange={(e) => setFormData({ ...formData, type: e.target.value as ChartOfAccount["type"] })}
+                  value={formData.section}
+                  onChange={(e) => setFormData({ ...formData, section: e.target.value, parentCode: "" })}
                   className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                 >
-                  {typeOrder.map((t) => (
-                    <option key={t} value={t}>{typeLabels[t]}</option>
+                  {SECTIONS.map((s) => (
+                    <option key={s.key} value={s.key}>{s.label}</option>
                   ))}
                 </select>
               </div>
@@ -1030,7 +1056,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                 >
                   <option value="">(None - Top Level)</option>
                   {accounts
-                    .filter((a) => a.type === formData.type)
+                    .filter((a) => sectionOf(a) === formData.section)
                     .map((a) => (
                       <option key={a.code} value={a.code}>
                         {a.code} - {a.name}
@@ -1058,15 +1084,24 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Special Type</label>
-                <input
-                  type="text"
-                  placeholder="e.g. SDC, SBK (optional)"
+                {/* Only the values the posting/report code actually consumes:
+                    SDC drives AR Control + customer control-account checks,
+                    SCC drives AP Control, SOS/SCS feed the Manufacturing
+                    P&L opening/closing stock lines. Anything else is inert,
+                    so free text only invited typos. */}
+                <select
                   value={formData.specialAccountType}
                   onChange={(e) =>
                     setFormData({ ...formData, specialAccountType: e.target.value })
                   }
                   className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                />
+                >
+                  <option value="">(None)</option>
+                  <option value="SDC">SDC — Debtor Control (AR)</option>
+                  <option value="SCC">SCC — Creditor Control (AP)</option>
+                  <option value="SOS">SOS — Opening Stock (Mfg P&L)</option>
+                  <option value="SCS">SCS — Closing Stock (Mfg P&L)</option>
+                </select>
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">P&L Category</label>

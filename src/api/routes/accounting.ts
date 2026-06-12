@@ -231,6 +231,43 @@ async function accountHasPostings(
   return false;
 }
 
+// Gate before an account gains its FIRST child — via drag re-parenting or
+// a new account created under it. A leaf may only become a parent while it
+// carries no amount, and it flips non-postable on promotion (AutoCount
+// convention) so it can never accumulate its own amount later. Returns the
+// rejection message, or null when the parent is fine (already a parent, or
+// clean and now promoted). Unknown parent codes keep legacy behaviour.
+async function promoteLeafParent(
+  db: Env["Variables"]["DB"],
+  parentCode: string,
+): Promise<string | null> {
+  const parent = await db
+    .prepare(
+      "SELECT balanceSen, isPostable FROM chart_of_accounts WHERE code = ?",
+    )
+    .bind(parentCode)
+    .first<{ balanceSen: number | null; isPostable: number | null }>();
+  if (!parent) return null;
+  const kidCount = await db
+    .prepare("SELECT COUNT(*) AS c FROM chart_of_accounts WHERE parentCode = ?")
+    .bind(parentCode)
+    .first<{ c: number }>();
+  if ((kidCount?.c ?? 0) > 0) return null;
+  if (
+    (parent.balanceSen ?? 0) !== 0 ||
+    (await accountHasPostings(db, parentCode))
+  ) {
+    return `${parentCode} already has an amount — an account can only become a parent while its balance is zero and it has no transactions`;
+  }
+  if ((parent.isPostable ?? 1) === 1) {
+    await db
+      .prepare("UPDATE chart_of_accounts SET isPostable = 0 WHERE code = ?")
+      .bind(parentCode)
+      .run();
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // AGING
 // ---------------------------------------------------------------------------
@@ -511,6 +548,14 @@ app.post("/coa", async (c) => {
     if (dup) {
       return c.json({ success: false, error: "Account code already exists" }, 400);
     }
+    // Creating under a LEAF parent promotes that parent — same no-amount
+    // gate as drag re-parenting, or the rule could be bypassed from here.
+    if (parentCode) {
+      const promoErr = await promoteLeafParent(c.var.DB, parentCode);
+      if (promoErr) {
+        return c.json({ success: false, error: promoErr }, 400);
+      }
+    }
 
     await c.var.DB.prepare(
       `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive, cashFlowCategory, specialAccountType, pnlCategory, isPostable)
@@ -626,44 +671,10 @@ app.put("/coa", async (c) => {
         cur = p?.parentCode ?? null;
       }
       // Owner (2026-06): dropping onto a LEAF account promotes it into a
-      // parent — allowed only when that account carries NO amount (zero
-      // running balance and no postings, renamed codes resolved). The
-      // promoted parent flips non-postable (AutoCount convention) so it
-      // can never accumulate its own amount later. Accounts that already
-      // have children (incl. postable parents like 410-0000 ACCRUALS)
-      // keep today's behaviour.
-      const newParent = await c.var.DB.prepare(
-        "SELECT balanceSen, isPostable FROM chart_of_accounts WHERE code = ?",
-      )
-        .bind(merged.parentCode)
-        .first<{ balanceSen: number | null; isPostable: number | null }>();
-      if (newParent) {
-        const kidCount = await c.var.DB.prepare(
-          "SELECT COUNT(*) AS c FROM chart_of_accounts WHERE parentCode = ?",
-        )
-          .bind(merged.parentCode)
-          .first<{ c: number }>();
-        if ((kidCount?.c ?? 0) === 0) {
-          if (
-            (newParent.balanceSen ?? 0) !== 0 ||
-            (await accountHasPostings(c.var.DB, merged.parentCode))
-          ) {
-            return c.json(
-              {
-                success: false,
-                error: `${merged.parentCode} already has an amount — an account can only become a parent while its balance is zero and it has no transactions`,
-              },
-              400,
-            );
-          }
-          if ((newParent.isPostable ?? 1) === 1) {
-            await c.var.DB.prepare(
-              "UPDATE chart_of_accounts SET isPostable = 0 WHERE code = ?",
-            )
-              .bind(merged.parentCode)
-              .run();
-          }
-        }
+      // parent — allowed only when that account carries NO amount.
+      const promoErr = await promoteLeafParent(c.var.DB, merged.parentCode);
+      if (promoErr) {
+        return c.json({ success: false, error: promoErr }, 400);
       }
     }
     await c.var.DB.prepare(

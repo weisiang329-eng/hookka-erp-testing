@@ -20,6 +20,7 @@ import {
 import { nextMonthDueDate } from "../../lib/terms";
 
 const AP_CONTROL = "400-0000"; // Trade Creditors
+const FX_GAIN_ACCT = "530-0000"; // GAIN ON FOREIGN EXCHANGE (realised; debit = loss)
 export const DEFAULT_PURCHASE_ACCT = "704-0010";
 // Fallback raw-material item_group → purchase account. The owner's
 // editable kv_config `coa_stock_map` (rm[<group>].purchase /
@@ -203,6 +204,14 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 };
 
 function rowToPI(r: PurchaseInvoiceRow) {
+  // Multi-currency fields read defensively — rows predating migration 0162
+  // simply have no columns and fall back to home-currency MYR.
+  const fx = r as unknown as {
+    currency?: string | null;
+    fxRate?: number | null;
+    foreignAmountSen?: number | null;
+    payFxRate?: number | null;
+  };
   return {
     id: r.id,
     piNo: r.piNo,
@@ -216,6 +225,10 @@ function rowToPI(r: PurchaseInvoiceRow) {
     amountSen: r.amountSen,
     status: r.status,
     remarks: r.remarks ?? "",
+    currency: fx.currency ?? "MYR",
+    fxRate: fx.fxRate ?? null,
+    foreignAmountSen: fx.foreignAmountSen ?? null,
+    payFxRate: fx.payFxRate ?? null,
     created_at: r.created_at ?? "",
     updated_at: r.updated_at ?? "",
   };
@@ -429,6 +442,8 @@ app.post("/", async (c) => {
     remarks?: string;
     status?: string;
     items?: PurchaseInvoiceItemInput[];
+    currency?: string;
+    fxRate?: number;
   };
 
   if (!body.supplierId || !body.supplierName) {
@@ -437,6 +452,22 @@ app.post("/", async (c) => {
       400,
     );
   }
+  // Phase 3.6 multi-currency (owner: rate keyed PER DOCUMENT). A foreign
+  // PI is entered entirely in its currency; we convert to HOME MYR at the
+  // booking rate right here, so amountSen / line totals / stock-map
+  // buckets / AP control all stay MYR and nothing downstream changes.
+  // Currency and rate are fixed at creation — re-keying a wrong rate means
+  // cancelling and re-raising the PI, same as the SST snapshot rule.
+  const currency = String(body.currency || "MYR").toUpperCase();
+  const fxRate = Number(body.fxRate) || 0;
+  const isForeign = currency !== "MYR";
+  if (isForeign && !(fxRate > 0)) {
+    return c.json(
+      { success: false, error: `A ${currency} invoice needs a positive exchange rate (MYR per 1 ${currency})` },
+      400,
+    );
+  }
+  const toHome = (sen: number) => (isForeign ? Math.round(sen * fxRate) : sen);
   const status = body.status || "DRAFT";
   if (!VALID_TRANSITIONS[status] && status !== "DRAFT") {
     return c.json({ success: false, error: `Invalid initial status: ${status}` }, 400);
@@ -472,9 +503,13 @@ app.post("/", async (c) => {
   // When items[] is provided, the PI's amountSen is the sum of line totals
   // (overrides any explicit body.amountSen). When omitted, fall back to
   // body.amountSen for backward compat with the header-only API shape.
-  const amountSen = normalizedItems && normalizedItems.ok
+  // Foreign PIs: incoming amounts are in the document currency — the
+  // FOREIGN total is preserved in foreignAmountSen, everything stored is
+  // converted to home MYR at the booking rate.
+  const foreignTotalSen = normalizedItems && normalizedItems.ok
     ? normalizedItems.rows.reduce((s, r) => s + r.lineTotalSen, 0)
     : body.amountSen ?? 0;
+  const amountSen = toHome(foreignTotalSen);
 
   const statements: D1PreparedStatement[] = [
     db
@@ -482,8 +517,9 @@ app.post("/", async (c) => {
         `INSERT INTO purchase_invoices (
            id, piNo, purchaseOrderId, poRef, supplierId, supplierName,
            invoiceDate, dueDate, amountSen, status, remarks,
+           currency, fxRate, foreignAmountSen,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -497,6 +533,9 @@ app.post("/", async (c) => {
         amountSen,
         status,
         body.remarks ?? null,
+        currency,
+        isForeign ? fxRate : null,
+        isForeign ? foreignTotalSen : null,
         now,
         now,
       ),
@@ -520,8 +559,8 @@ app.post("/", async (c) => {
             r.materialName,
             r.supplierSku,
             r.qty,
-            r.unitPriceSen,
-            r.lineTotalSen,
+            toHome(r.unitPriceSen),
+            toHome(r.lineTotalSen),
             r.lineType,
             r.notes,
             now,
@@ -531,7 +570,34 @@ app.post("/", async (c) => {
     }
   }
 
-  await db.batch(statements);
+  try {
+    await db.batch(statements);
+  } catch (e) {
+    // Pre-migration-0162 DB (currency columns absent): a plain MYR PI must
+    // still save — retry with the legacy column list. A FOREIGN PI cannot
+    // be stored truthfully without the columns, so that one fails loudly.
+    if (isForeign) {
+      console.error(`[pi] foreign PI ${id} insert failed:`, e);
+      return c.json(
+        { success: false, error: "Foreign-currency PIs need migration 0162 (currency columns) — run the paste-version SQL first." },
+        400,
+      );
+    }
+    statements[0] = db
+      .prepare(
+        `INSERT INTO purchase_invoices (
+           id, piNo, purchaseOrderId, poRef, supplierId, supplierName,
+           invoiceDate, dueDate, amountSen, status, remarks,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id, piNo, body.purchaseOrderId ?? null, poRef, body.supplierId,
+        body.supplierName, piInvoiceDate, piDueDate, amountSen, status,
+        body.remarks ?? null, now, now,
+      );
+    await db.batch(statements);
+  }
 
   await emitAudit(c, {
     resource: "purchase-invoices",
@@ -541,6 +607,7 @@ app.post("/", async (c) => {
       piNo,
       status,
       amountSen,
+      currency,
       itemCount: normalizedItems && normalizedItems.ok ? normalizedItems.rows.length : 0,
     },
   });
@@ -755,7 +822,30 @@ app.put("/:id", async (c) => {
         merged.status === "PAID" &&
         !(await ledgerHasSource(db, orgId, "supplier_payment", id))
       ) {
-        const amtSen = Math.round(Number(merged.amountSen) || 0);
+        const bookedSen = Math.round(Number(merged.amountSen) || 0);
+        // Phase 3.6 — realised FX on settling a FOREIGN PI: the payment-day
+        // rate may differ from the booking rate. AP is cleared at the
+        // BOOKED MYR, the bank pays the ACTUAL MYR, and the difference
+        // posts to 530-0000 GAIN ON FOREIGN EXCHANGE (debit when a loss).
+        const piCurrency = String(
+          (existing as unknown as { currency?: string | null }).currency ?? "MYR",
+        ).toUpperCase();
+        const foreignSen =
+          Number((existing as unknown as { foreignAmountSen?: number | null }).foreignAmountSen) || 0;
+        let paidSen = bookedSen;
+        if (piCurrency !== "MYR" && foreignSen > 0) {
+          const payRate = Number((body as { payFxRate?: number }).payFxRate) || 0;
+          if (!(payRate > 0)) {
+            return c.json(
+              { success: false, error: `This is a ${piCurrency} invoice — provide payFxRate (MYR per 1 ${piCurrency}, the payment-day rate) when marking it PAID` },
+              400,
+            );
+          }
+          paidSen = Math.round(foreignSen * payRate);
+          statements.push(
+            db.prepare("UPDATE purchase_invoices SET payFxRate = ? WHERE id = ?").bind(payRate, id),
+          );
+        }
         const spId = `sp-${crypto.randomUUID().slice(0, 8)}`;
         const payNo = `SP-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
         const today = new Date().toISOString().slice(0, 10);
@@ -774,43 +864,59 @@ app.put("/:id", async (c) => {
               existing.supplierName ?? "",
               id,
               today,
-              amtSen,
+              paidSen,
               "BANK_TRANSFER",
               piNo,
               `Auto on PI ${piNo} PAID`,
               orgId,
             ),
         );
-        if (amtSen > 0) {
+        if (bookedSen > 0) {
+          const legs: Parameters<typeof buildJournalEntryStatements>[2] = [
+            {
+              id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+              sourceType: "supplier_payment",
+              sourceId: id,
+              legNo: 1,
+              accountCode: AP_CONTROL,
+              debitSen: bookedSen,
+              creditSen: 0,
+              description: `AP settle · PI ${piNo}`,
+              actorUserId,
+              orgId,
+            },
+            {
+              id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+              sourceType: "supplier_payment",
+              sourceId: id,
+              legNo: 2,
+              accountCode: apBankAcct("BANK_TRANSFER"),
+              debitSen: 0,
+              creditSen: paidSen,
+              description: `AP settle · PI ${piNo}${paidSen !== bookedSen ? ` · paid ${piCurrency} at payment-day rate` : ""}`,
+              actorUserId,
+              orgId,
+            },
+          ];
+          const fxDiff = bookedSen - paidSen; // +ve → paid less → GAIN
+          if (fxDiff !== 0) {
+            legs.push({
+              id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+              sourceType: "supplier_payment",
+              sourceId: id,
+              legNo: 3,
+              accountCode: FX_GAIN_ACCT,
+              debitSen: fxDiff < 0 ? -fxDiff : 0,
+              creditSen: fxDiff > 0 ? fxDiff : 0,
+              description: `Realised FX ${fxDiff > 0 ? "gain" : "loss"} · PI ${piNo}`,
+              actorUserId,
+              orgId,
+            });
+          }
           const { statements: ls } = await buildJournalEntryStatements(
             db,
             orgId,
-            [
-              {
-                id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-                sourceType: "supplier_payment",
-                sourceId: id,
-                legNo: 1,
-                accountCode: AP_CONTROL,
-                debitSen: amtSen,
-                creditSen: 0,
-                description: `AP settle · PI ${piNo}`,
-                actorUserId,
-                orgId,
-              },
-              {
-                id: `lje-${crypto.randomUUID().slice(0, 12)}`,
-                sourceType: "supplier_payment",
-                sourceId: id,
-                legNo: 2,
-                accountCode: apBankAcct("BANK_TRANSFER"),
-                debitSen: 0,
-                creditSen: amtSen,
-                description: `AP settle · PI ${piNo}`,
-                actorUserId,
-                orgId,
-              },
-            ],
+            legs,
           );
           statements.push(...ls);
         }

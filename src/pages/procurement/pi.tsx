@@ -81,12 +81,12 @@ export default function PurchaseInvoicesPage() {
   );
 
   const updateStatus = useCallback(
-    async (id: string, nextStatus: PIStatus) => {
+    async (id: string, nextStatus: PIStatus, extra?: Record<string, unknown>) => {
       try {
         const res = await fetch(`/api/purchase-invoices/${id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: nextStatus }),
+          body: JSON.stringify({ ...extra, status: nextStatus }),
         });
         const j = (await res.json().catch(() => null)) as
           | { success?: boolean; error?: string }
@@ -216,7 +216,21 @@ export default function PurchaseInvoicesPage() {
       {
         label: "Mark Paid",
         icon: <DollarSign className="h-3.5 w-3.5" />,
-        action: () => updateStatus(row.id, "PAID"),
+        action: () => {
+          // Phase 3.6 — a foreign PI settles at the PAYMENT-DAY rate; the
+          // realised difference vs the booking rate posts to 530-0000.
+          const fx = row as unknown as { currency?: string; fxRate?: number | null };
+          if (fx.currency && fx.currency !== "MYR") {
+            const r = parseFloat(window.prompt(
+              `${fx.currency} invoice — payment-day rate (MYR per 1 ${fx.currency}; booked at ${fx.fxRate ?? "?"}):`,
+              String(fx.fxRate ?? ""),
+            ) || "");
+            if (!Number.isFinite(r) || r <= 0) return;
+            updateStatus(row.id, "PAID", { payFxRate: r });
+          } else {
+            updateStatus(row.id, "PAID");
+          }
+        },
         disabled: row.status !== "APPROVED",
       },
       { label: "", separator: true, action: () => {} },

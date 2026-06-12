@@ -449,9 +449,26 @@ export default function GRNPage() {
         action: async () => {
           const grnTotalRM = (row.totalAmount / 100).toFixed(2);
           const ok = window.confirm(
-            `Create Purchase Invoice from GRN ${row.grnNumber}? Total: RM ${grnTotalRM}`,
+            `Create Purchase Invoice from GRN ${row.grnNumber}? Total: ${grnTotalRM}`,
           );
           if (!ok) return;
+          // Phase 3.6 multi-currency (rate keyed per document): an import
+          // supplier's GRN was keyed in the supplier's currency — declare
+          // it here and the PI books everything in MYR at this rate.
+          const currency = (window.prompt(
+            "Invoice currency — keep MYR, or type USD / CNY for a foreign supplier invoice:",
+            "MYR",
+          ) || "").trim().toUpperCase();
+          if (!currency) return;
+          let fxRate: number | undefined;
+          if (currency !== "MYR") {
+            const r = parseFloat(window.prompt(`Booking exchange rate — MYR per 1 ${currency} (invoice-date rate):`, "") || "");
+            if (!Number.isFinite(r) || r <= 0) {
+              toast.error("A positive exchange rate is required for a foreign invoice");
+              return;
+            }
+            fxRate = r;
+          }
           try {
             const today = new Date().toISOString().split("T")[0];
             const items = row.items
@@ -474,6 +491,8 @@ export default function GRNPage() {
                 amountSen: row.totalAmount,
                 remarks: `Auto-created from GRN ${row.grnNumber}`,
                 items,
+                currency,
+                fxRate,
               }),
             });
             const j = (await res.json().catch(() => null)) as

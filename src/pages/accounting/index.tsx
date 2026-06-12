@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -176,6 +176,8 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
   { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
   { key: "odc", label: "Other D/C", icon: <Users className="h-4 w-4" /> },
+  { key: "payments", label: "Payments", icon: <BookOpen className="h-4 w-4" /> },
+  { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" /> },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
@@ -249,6 +251,8 @@ export default function AccountingPage() {
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
           {tab === "odc" && <OtherPartiesTab />}
+          {tab === "payments" && <PaymentsTab accounts={accounts} />}
+          {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "opening" && <OpeningBalanceTab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "maint" && (
             <div className="space-y-4">
@@ -3679,6 +3683,509 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
               </tbody>
             </table>
           ) : null}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// =============== TAB: PAYMENT / EXPENSE (Phase 3.2) ===============
+//
+// PV pays an expense: DR lines, CR bank/cash (SBK/SCH). 「先挂账」 credits
+// an accrual account (410-x / 405-0000) instead and clears it on Settle.
+// Optional SOFA/BEDFRAME tag overrides the split-P&L allocation later.
+
+type PvRow = {
+  id: string; pvNo: string; date: string; payee: string | null;
+  description: string | null; payFrom: string | null; accrued: number;
+  accrualAccount: string | null; settledAt: string | null;
+  productLine: string | null; totalSen: number; status: string;
+  lines: { accountCode: string; description: string | null; amountSen: number }[];
+};
+
+function PaymentsTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<PvRow[] | null>(null);
+  const [migrationMissing, setMigrationMissing] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    payee: "",
+    description: "",
+    accrued: false,
+    payFrom: "",
+    accrualAccount: "",
+    productLine: "",
+  });
+  const [lines, setLines] = useState<{ accountCode: string; description: string; amount: string }[]>([
+    { accountCode: "", description: "", amount: "" },
+  ]);
+
+  const bankCash = accounts.filter(
+    (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
+  );
+  const accrualOpts = accounts.filter(
+    (a) =>
+      a.type === "LIABILITY" &&
+      a.isPostable !== false &&
+      (a.code.startsWith("410") || a.code.startsWith("405")),
+  );
+  const lineAccounts = accounts.filter(
+    (a) =>
+      a.isPostable !== false &&
+      a.specialAccountType !== "SDC" &&
+      a.specialAccountType !== "SBK" &&
+      a.specialAccountType !== "SCH",
+  );
+
+  const load = useCallback(() => {
+    fetch("/api/accounting/payment-vouchers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: PvRow[]; migrationMissing?: boolean }>)
+      .then((j) => {
+        if (j?.success) {
+          setRows(j.data ?? []);
+          setMigrationMissing(!!j.migrationMissing);
+        }
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const toSen = (s: string) => {
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? Math.round(v * 100) : 0;
+  };
+  const totalSen = lines.reduce((s, l) => s + toSen(l.amount), 0);
+
+  const handleSave = async () => {
+    const body = {
+      date: form.date,
+      payee: form.payee,
+      description: form.description,
+      accrued: form.accrued,
+      payFrom: form.accrued ? undefined : form.payFrom,
+      accrualAccount: form.accrued ? form.accrualAccount : undefined,
+      productLine: form.productLine || undefined,
+      lines: lines
+        .filter((l) => l.accountCode && toSen(l.amount) > 0)
+        .map((l) => ({ accountCode: l.accountCode, description: l.description, amountSen: toSen(l.amount) })),
+    };
+    if (body.lines.length === 0) {
+      toast.error("Add at least one line with an account and a positive amount");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/payment-vouchers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success("Payment posted");
+        setShowForm(false);
+        setForm({ date: new Date().toISOString().slice(0, 10), payee: "", description: "", accrued: false, payFrom: "", accrualAccount: "", productLine: "" });
+        setLines([{ accountCode: "", description: "", amount: "" }]);
+        load();
+      } else toast.error(j?.error || "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSettle = async (row: PvRow) => {
+    const payFrom = window.prompt(
+      `Settle ${row.pvNo} (${formatCurrency(row.totalSen)}) — pay from which account?\n\n${bankCash.map((a) => `${a.code}  ${a.name}`).join("\n")}\n\nEnter account code:`,
+      bankCash[0]?.code ?? "",
+    );
+    if (!payFrom) return;
+    const res = await fetch(`/api/accounting/payment-vouchers/${row.id}/settle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payFrom: payFrom.trim() }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { toast.success(`${row.pvNo} settled`); load(); }
+    else toast.error(j?.error || "Settle failed");
+  };
+
+  const handleVoid = async (row: PvRow) => {
+    if (!window.confirm(`Void ${row.pvNo}? A reversal entry will be posted (nothing is deleted).`)) return;
+    const res = await fetch(`/api/accounting/payment-vouchers/${row.id}/void`, { method: "POST" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { toast.success(`${row.pvNo} voided`); load(); }
+    else toast.error(j?.error || "Void failed");
+  };
+
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Payment / Expense</h2>
+        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+          <Plus className="h-4 w-4" /> New Payment
+        </Button>
+      </div>
+      {migrationMissing && (
+        <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0159 not applied yet — run the paste-version SQL first.</CardContent></Card>
+      )}
+
+      {showForm && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
+                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className={selCls} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Payee</label>
+                <input type="text" placeholder="Who was paid" value={form.payee} onChange={(e) => setForm({ ...form, payee: e.target.value })} className={`${selCls} w-48`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
+                <input type="text" placeholder="e.g. Factory rent June" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={`${selCls} w-64`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Product line (optional)</label>
+                <select value={form.productLine} onChange={(e) => setForm({ ...form, productLine: e.target.value })} className={selCls}>
+                  <option value="">(shared — allocate by sales ratio)</option>
+                  <option value="SOFA">Sofa</option>
+                  <option value="BEDFRAME">Bedframe</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex items-center gap-2 text-sm text-[#1F1D1B] cursor-pointer pb-2">
+                <input
+                  type="checkbox"
+                  checked={form.accrued}
+                  onChange={(e) => setForm({ ...form, accrued: e.target.checked })}
+                  className="h-4 w-4 accent-[#6B5C32]"
+                />
+                先挂账 (accrue now, pay later)
+              </label>
+              {form.accrued ? (
+                <div>
+                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Accrual account (CR)</label>
+                  <select value={form.accrualAccount} onChange={(e) => setForm({ ...form, accrualAccount: e.target.value })} className={`${selCls} w-72`}>
+                    <option value="">— pick 410-x / 405-0000 —</option>
+                    {accrualOpts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">Pay From (CR bank/cash)</label>
+                  <select value={form.payFrom} onChange={(e) => setForm({ ...form, payFrom: e.target.value })} className={`${selCls} w-72`}>
+                    <option value="">— pick bank/cash —</option>
+                    {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-[#6B7280] block">Expense lines (DR)</label>
+              {lines.map((l, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2">
+                  <div className="w-80">
+                    <AccountPicker
+                      accounts={lineAccounts}
+                      value={l.accountCode}
+                      onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))}
+                      placeholder="Account…"
+                    />
+                  </div>
+                  <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className={`${selCls} w-56`} />
+                  <input type="text" placeholder="Amount (RM)" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className={`${selCls} w-32 text-right tabular-nums`} />
+                  {lines.length > 1 && (
+                    <button onClick={() => setLines(lines.filter((_, j) => j !== i))} className="text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">remove</button>
+                  )}
+                </div>
+              ))}
+              <Button variant="outline" size="sm" onClick={() => setLines([...lines, { accountCode: "", description: "", amount: "" }])}>
+                <Plus className="h-4 w-4" /> Line
+              </Button>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="text-sm text-[#6B7280]">Total <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || (form.accrued ? !form.accrualAccount : !form.payFrom)} onClick={handleSave}>
+                {saving ? "Posting…" : form.accrued ? "Post (accrued)" : "Post payment"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {rows === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">PV No</th>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Payee / Description</th>
+                  <th className="px-3 py-2 text-left">Paid From / Accrual</th>
+                  <th className="px-3 py-2 text-left">Line</th>
+                  <th className="px-3 py-2 text-right">Total</th>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.status === "VOID" ? "opacity-50" : ""}`}>
+                    <td className="px-3 py-1.5 tabular-nums text-xs">{r.pvNo}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
+                    <td className="px-3 py-1.5">{[r.payee, r.description].filter(Boolean).join(" · ")}</td>
+                    <td className="px-3 py-1.5 text-xs">
+                      {r.accrued === 1 && !r.settledAt
+                        ? <span className="text-[#9A3A2D]">accrued → {r.accrualAccount}</span>
+                        : (r.payFrom ?? "")}
+                    </td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.productLine ?? "shared"}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.totalSen)}</td>
+                    <td className="px-3 py-1.5 text-xs">
+                      {r.status === "VOID" ? "VOID" : r.accrued === 1 && !r.settledAt ? "UNPAID (accrued)" : "PAID"}
+                    </td>
+                    <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                      {r.status === "POSTED" && r.accrued === 1 && !r.settledAt && (
+                        <button onClick={() => handleSettle(r)} className="text-[#6B5C32] hover:text-[#1F1D1B] text-xs underline decoration-dotted cursor-pointer mr-3">settle</button>
+                      )}
+                      {r.status === "POSTED" && (
+                        <button onClick={() => handleVoid(r)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">void</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payments yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// =============== TAB: OFFICIAL RECEIPT (Phase 3.3) ===============
+//
+// Money in that is NOT a trade-invoice payment: DR bank/cash, CR each
+// line (sundry income / other-debtor recovery via 305-0000).
+
+type OrRow = {
+  id: string; orNo: string; date: string; receivedFrom: string | null;
+  description: string | null; payTo: string; totalSen: number; status: string;
+  lines: { accountCode: string; description: string | null; amountSen: number }[];
+};
+
+function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<OrRow[] | null>(null);
+  const [migrationMissing, setMigrationMissing] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    receivedFrom: "",
+    description: "",
+    payTo: "",
+  });
+  const [lines, setLines] = useState<{ accountCode: string; description: string; amount: string }[]>([
+    { accountCode: "", description: "", amount: "" },
+  ]);
+
+  const bankCash = accounts.filter(
+    (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
+  );
+  const lineAccounts = accounts.filter(
+    (a) =>
+      a.isPostable !== false &&
+      a.specialAccountType !== "SDC" &&
+      a.specialAccountType !== "SBK" &&
+      a.specialAccountType !== "SCH",
+  );
+
+  const load = useCallback(() => {
+    fetch("/api/accounting/official-receipts")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: OrRow[]; migrationMissing?: boolean }>)
+      .then((j) => {
+        if (j?.success) {
+          setRows(j.data ?? []);
+          setMigrationMissing(!!j.migrationMissing);
+        }
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const toSen = (s: string) => {
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? Math.round(v * 100) : 0;
+  };
+  const totalSen = lines.reduce((s, l) => s + toSen(l.amount), 0);
+
+  const handleSave = async () => {
+    const body = {
+      date: form.date,
+      receivedFrom: form.receivedFrom,
+      description: form.description,
+      payTo: form.payTo,
+      lines: lines
+        .filter((l) => l.accountCode && toSen(l.amount) > 0)
+        .map((l) => ({ accountCode: l.accountCode, description: l.description, amountSen: toSen(l.amount) })),
+    };
+    if (body.lines.length === 0) {
+      toast.error("Add at least one line with an account and a positive amount");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/official-receipts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success("Receipt posted");
+        setShowForm(false);
+        setForm({ date: new Date().toISOString().slice(0, 10), receivedFrom: "", description: "", payTo: "" });
+        setLines([{ accountCode: "", description: "", amount: "" }]);
+        load();
+      } else toast.error(j?.error || "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleVoid = async (row: OrRow) => {
+    if (!window.confirm(`Void ${row.orNo}? A reversal entry will be posted (nothing is deleted).`)) return;
+    const res = await fetch(`/api/accounting/official-receipts/${row.id}/void`, { method: "POST" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { toast.success(`${row.orNo} voided`); load(); }
+    else toast.error(j?.error || "Void failed");
+  };
+
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Official Receipt</h2>
+        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+          <Plus className="h-4 w-4" /> New Receipt
+        </Button>
+      </div>
+      {migrationMissing && (
+        <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0159 not applied yet — run the paste-version SQL first.</CardContent></Card>
+      )}
+
+      {showForm && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date</label>
+                <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className={selCls} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Received from</label>
+                <input type="text" placeholder="Who paid us" value={form.receivedFrom} onChange={(e) => setForm({ ...form, receivedFrom: e.target.value })} className={`${selCls} w-48`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Description</label>
+                <input type="text" placeholder="e.g. Scrap sale" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={`${selCls} w-64`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Deposit To (DR bank/cash)</label>
+                <select value={form.payTo} onChange={(e) => setForm({ ...form, payTo: e.target.value })} className={`${selCls} w-72`}>
+                  <option value="">— pick bank/cash —</option>
+                  {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-[#6B7280] block">Receipt lines (CR — income account or 305-0000 recovery)</label>
+              {lines.map((l, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2">
+                  <div className="w-80">
+                    <AccountPicker
+                      accounts={lineAccounts}
+                      value={l.accountCode}
+                      onChange={(code) => setLines(lines.map((x, j) => (j === i ? { ...x, accountCode: code } : x)))}
+                      placeholder="Account…"
+                    />
+                  </div>
+                  <input type="text" placeholder="Line description" value={l.description} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, description: e.target.value } : x)))} className={`${selCls} w-56`} />
+                  <input type="text" placeholder="Amount (RM)" value={l.amount} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, amount: e.target.value } : x)))} className={`${selCls} w-32 text-right tabular-nums`} />
+                  {lines.length > 1 && (
+                    <button onClick={() => setLines(lines.filter((_, j) => j !== i))} className="text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">remove</button>
+                  )}
+                </div>
+              ))}
+              <Button variant="outline" size="sm" onClick={() => setLines([...lines, { accountCode: "", description: "", amount: "" }])}>
+                <Plus className="h-4 w-4" /> Line
+              </Button>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="text-sm text-[#6B7280]">Total <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(totalSen)}</span></span>
+              <Button variant="primary" size="sm" disabled={saving || totalSen <= 0 || !form.payTo} onClick={handleSave}>
+                {saving ? "Posting…" : "Post receipt"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {rows === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">OR No</th>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">From / Description</th>
+                  <th className="px-3 py-2 text-left">Deposit To</th>
+                  <th className="px-3 py-2 text-right">Total</th>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.status === "VOID" ? "opacity-50" : ""}`}>
+                    <td className="px-3 py-1.5 tabular-nums text-xs">{r.orNo}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.date}</td>
+                    <td className="px-3 py-1.5">{[r.receivedFrom, r.description].filter(Boolean).join(" · ")}</td>
+                    <td className="px-3 py-1.5 text-xs">{r.payTo}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.totalSen)}</td>
+                    <td className="px-3 py-1.5 text-xs">{r.status}</td>
+                    <td className="px-3 py-1.5 text-right">
+                      {r.status === "POSTED" && (
+                        <button onClick={() => handleVoid(r)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">void</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr><td colSpan={7} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No receipts yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          )}
         </CardContent>
       </Card>
     </div>

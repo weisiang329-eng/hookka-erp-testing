@@ -3414,6 +3414,483 @@ app.get("/pl", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// PAYMENT / EXPENSE VOUCHERS + OFFICIAL RECEIPTS (Phase 3.2/3.3, 2026-06)
+//
+// PV pays an expense: DR each line account, CR the SBK/SCH bank/cash
+// account. The 「先挂账」 switch instead credits an accrual account
+// (410-x / 405-0000) now and clears it against the bank on settle.
+// OR is money in that is NOT a trade-invoice payment: DR bank/cash,
+// CR each line (sundry income / other-debtor recovery). Both post to
+// the immutable ledger immediately; void posts a reversal.
+// ---------------------------------------------------------------------------
+
+async function nextDocNo(
+  db: Env["Variables"]["DB"],
+  table: string,
+  column: string,
+  prefix: string,
+): Promise<string> {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const res = await db
+    .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE ${column} LIKE ?`)
+    .bind(`${prefix}-${yymm}-%`)
+    .first<{ c: number }>();
+  return `${prefix}-${yymm}-${String((res?.c ?? 0) + 1).padStart(4, "0")}`;
+}
+
+type VoucherLineIn = { accountCode: string; description?: string; amountSen: number };
+
+// Shared line validation for PV/OR: postable, real, no debtor controls,
+// no bank/cash (a bank-to-bank move is a Cash Book transfer, not this).
+function validateDocLines(
+  coa: Map<string, { type: CoaRow["type"]; specialAccountType: string | null; isPostable: number | null }>,
+  linesIn: unknown,
+): { ok: true; lines: { accountCode: string; description: string; amountSen: number }[]; totalSen: number } | { ok: false; error: string } {
+  if (!Array.isArray(linesIn) || linesIn.length === 0) {
+    return { ok: false, error: "At least one line is required" };
+  }
+  const lines: { accountCode: string; description: string; amountSen: number }[] = [];
+  let totalSen = 0;
+  for (const raw of linesIn as VoucherLineIn[]) {
+    const amountSen = Math.round(Number(raw.amountSen) || 0);
+    if (amountSen <= 0) return { ok: false, error: "Every line needs a positive amount" };
+    const acct = coa.get(raw.accountCode);
+    if (!acct) return { ok: false, error: `Account ${raw.accountCode} not found` };
+    if ((acct.isPostable ?? 1) !== 1) {
+      return { ok: false, error: `${raw.accountCode} is a non-postable header account` };
+    }
+    if (acct.specialAccountType === "SDC") {
+      return { ok: false, error: `${raw.accountCode} is a debtor control — trade receipts go through invoice payments, other-debtor recovery uses 305-0000 via Other D/C` };
+    }
+    if (acct.specialAccountType === "SBK" || acct.specialAccountType === "SCH") {
+      return { ok: false, error: `${raw.accountCode} is a bank/cash account — pick it as the paying/receiving account, not a line` };
+    }
+    lines.push({ accountCode: raw.accountCode, description: String(raw.description ?? ""), amountSen });
+    totalSen += amountSen;
+  }
+  return { ok: true, lines, totalSen };
+}
+
+app.get("/payment-vouchers", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  try {
+    const [pvRes, lineRes] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT * FROM payment_vouchers ORDER BY date DESC, pvNo DESC LIMIT 500`,
+      ).all(),
+      c.var.DB.prepare(
+        `SELECT * FROM payment_voucher_lines ORDER BY lineOrder`,
+      ).all(),
+    ]);
+    const lines = (lineRes.results ?? []) as { voucherId: string }[];
+    const data = (pvRes.results ?? []).map((v) => ({
+      ...(v as object),
+      lines: lines.filter((l) => l.voucherId === (v as { id: string }).id),
+    }));
+    return c.json({ success: true, data });
+  } catch {
+    return c.json({ success: true, data: [], migrationMissing: true });
+  }
+});
+
+app.post("/payment-vouchers", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const date = String(body.date || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
+    }
+    const accrued = body.accrued === true || body.accrued === 1;
+    const productLine =
+      body.productLine === "SOFA" || body.productLine === "BEDFRAME"
+        ? body.productLine
+        : null;
+    const coaRes = await c.var.DB.prepare(
+      "SELECT code, type, specialAccountType, isPostable FROM chart_of_accounts",
+    ).all<{ code: string; type: CoaRow["type"]; specialAccountType: string | null; isPostable: number | null }>();
+    const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+    const v = validateDocLines(coa, body.lines);
+    if (!v.ok) return c.json({ success: false, error: v.error }, 400);
+
+    let payFrom: string | null = null;
+    let accrualAccount: string | null = null;
+    if (accrued) {
+      accrualAccount = String(body.accrualAccount || "");
+      const acct = coa.get(accrualAccount);
+      if (!acct || acct.type !== "LIABILITY" || (acct.isPostable ?? 1) !== 1) {
+        return c.json(
+          { success: false, error: "Pick a postable LIABILITY accrual account (410-x or 405-0000)" },
+          400,
+        );
+      }
+    } else {
+      payFrom = String(body.payFrom || "");
+      const acct = coa.get(payFrom);
+      if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
+        return c.json(
+          { success: false, error: "Pay From must be a bank (SBK) or cash (SCH) account" },
+          400,
+        );
+      }
+    }
+    const id = `pv-${crypto.randomUUID().slice(0, 8)}`;
+    const pvNo = await nextDocNo(c.var.DB, "payment_vouchers", "pvNo", "PV");
+    const now = new Date().toISOString();
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const creditAccount = accrued ? accrualAccount! : payFrom!;
+    const legs: LedgerEntryInput[] = v.lines.map((l, idx) => ({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "payment_voucher",
+      sourceId: id,
+      legNo: idx + 1,
+      accountCode: l.accountCode,
+      debitSen: l.amountSen,
+      creditSen: 0,
+      description: `${pvNo} · ${l.description || body.description || "Payment"}${accrued ? " (accrued)" : ""}`,
+      actorUserId,
+      orgId,
+    }));
+    legs.push({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "payment_voucher",
+      sourceId: id,
+      legNo: legs.length + 1,
+      accountCode: creditAccount,
+      debitSen: 0,
+      creditSen: v.totalSen,
+      description: `${pvNo} · ${body.payee ? `to ${body.payee}` : "Payment"}${accrued ? " (accrued)" : ""}`,
+      actorUserId,
+      orgId,
+    });
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(
+      c.var.DB,
+      orgId,
+      legs,
+    );
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        `INSERT INTO payment_vouchers (
+           id, pvNo, date, payee, description, payFrom, accrued,
+           accrualAccount, settledAt, productLine, totalSen, status,
+           createdBy, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'POSTED', ?, ?, ?)`,
+      ).bind(
+        id, pvNo, date,
+        String(body.payee ?? ""), String(body.description ?? ""),
+        payFrom, accrued ? 1 : 0, accrualAccount, productLine,
+        v.totalSen, actorUserId, now, now,
+      ),
+      ...v.lines.map((l, idx) =>
+        c.var.DB.prepare(
+          `INSERT INTO payment_voucher_lines (id, voucherId, accountCode, description, amountSen, lineOrder)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).bind(`pvl-${crypto.randomUUID().slice(0, 8)}`, id, l.accountCode, l.description, l.amountSen, idx),
+      ),
+      ...ledgerStmts,
+    ];
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { id, pvNo } }, 201);
+  } catch (e) {
+    console.error("[pv] create failed:", e);
+    return c.json(
+      { success: false, error: "Failed to save the payment — is migration 0159 applied?" },
+      400,
+    );
+  }
+});
+
+// Clear an accrued voucher against the bank: DR accrual, CR bank/cash.
+app.post("/payment-vouchers/:id/settle", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const id = c.req.param("id");
+    const body = await c.req.json();
+    const pv = await c.var.DB.prepare(
+      "SELECT * FROM payment_vouchers WHERE id = ?",
+    )
+      .bind(id)
+      .first<{ id: string; pvNo: string; accrued: number; accrualAccount: string | null; settledAt: string | null; status: string; totalSen: number; payee: string | null }>();
+    if (!pv) return c.json({ success: false, error: "Voucher not found" }, 404);
+    if (pv.status !== "POSTED" || pv.accrued !== 1 || pv.settledAt) {
+      return c.json(
+        { success: false, error: "Only an unsettled accrued voucher can be settled" },
+        400,
+      );
+    }
+    const payFrom = String(body.payFrom || "");
+    const acct = await c.var.DB.prepare(
+      "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+    )
+      .bind(payFrom)
+      .first<{ specialAccountType: string | null }>();
+    if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
+      return c.json(
+        { success: false, error: "Pay From must be a bank (SBK) or cash (SCH) account" },
+        400,
+      );
+    }
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const legs: LedgerEntryInput[] = [
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "payment_voucher_settle",
+        sourceId: id,
+        legNo: 1,
+        accountCode: pv.accrualAccount!,
+        debitSen: pv.totalSen,
+        creditSen: 0,
+        description: `${pv.pvNo} · accrual cleared`,
+        actorUserId,
+        orgId,
+      },
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "payment_voucher_settle",
+        sourceId: id,
+        legNo: 2,
+        accountCode: payFrom,
+        debitSen: 0,
+        creditSen: pv.totalSen,
+        description: `${pv.pvNo} · paid${pv.payee ? ` to ${pv.payee}` : ""}`,
+        actorUserId,
+        orgId,
+      },
+    ];
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(
+      c.var.DB,
+      orgId,
+      legs,
+    );
+    await c.var.DB.batch([
+      c.var.DB.prepare(
+        "UPDATE payment_vouchers SET payFrom = ?, settledAt = ?, updated_at = ? WHERE id = ?",
+      ).bind(payFrom, new Date().toISOString(), new Date().toISOString(), id),
+      ...ledgerStmts,
+    ]);
+    return c.json({ success: true });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.post("/payment-vouchers/:id/void", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const pv = await c.var.DB.prepare(
+    "SELECT id, pvNo, status FROM payment_vouchers WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; pvNo: string; status: string }>();
+  if (!pv) return c.json({ success: false, error: "Voucher not found" }, 404);
+  if (pv.status !== "POSTED") {
+    return c.json({ success: false, error: "Already void" }, 400);
+  }
+  const orgId = getOrgId(c);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const prior = await c.var.DB.prepare(
+    `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+      WHERE sourceType IN ('payment_voucher','payment_voucher_settle') AND sourceId = ? AND orgId = ?`,
+  )
+    .bind(id, orgId)
+    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+  const legs: LedgerEntryInput[] = (prior.results ?? []).map((l, idx) => ({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType: "payment_voucher_void",
+    sourceId: id,
+    legNo: idx + 1,
+    accountCode: l.accountCode,
+    debitSen: Number(l.creditSen) || 0,
+    creditSen: Number(l.debitSen) || 0,
+    description: `VOID · ${pv.pvNo}`,
+    actorUserId,
+    orgId,
+  }));
+  const { statements: ledgerStmts } = await buildJournalEntryStatements(
+    c.var.DB,
+    orgId,
+    legs,
+  );
+  await c.var.DB.batch([
+    c.var.DB.prepare(
+      "UPDATE payment_vouchers SET status = 'VOID', updated_at = ? WHERE id = ?",
+    ).bind(new Date().toISOString(), id),
+    ...ledgerStmts,
+  ]);
+  return c.json({ success: true });
+});
+
+app.get("/official-receipts", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  try {
+    const [orRes, lineRes] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT * FROM official_receipts ORDER BY date DESC, orNo DESC LIMIT 500`,
+      ).all(),
+      c.var.DB.prepare(
+        `SELECT * FROM official_receipt_lines ORDER BY lineOrder`,
+      ).all(),
+    ]);
+    const lines = (lineRes.results ?? []) as { receiptId: string }[];
+    const data = (orRes.results ?? []).map((r) => ({
+      ...(r as object),
+      lines: lines.filter((l) => l.receiptId === (r as { id: string }).id),
+    }));
+    return c.json({ success: true, data });
+  } catch {
+    return c.json({ success: true, data: [], migrationMissing: true });
+  }
+});
+
+app.post("/official-receipts", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const date = String(body.date || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return c.json({ success: false, error: "date must be YYYY-MM-DD" }, 400);
+    }
+    const coaRes = await c.var.DB.prepare(
+      "SELECT code, type, specialAccountType, isPostable FROM chart_of_accounts",
+    ).all<{ code: string; type: CoaRow["type"]; specialAccountType: string | null; isPostable: number | null }>();
+    const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+    const v = validateDocLines(coa, body.lines);
+    if (!v.ok) return c.json({ success: false, error: v.error }, 400);
+    const payTo = String(body.payTo || "");
+    const payToAcct = coa.get(payTo);
+    if (!payToAcct || (payToAcct.specialAccountType !== "SBK" && payToAcct.specialAccountType !== "SCH")) {
+      return c.json(
+        { success: false, error: "Deposit To must be a bank (SBK) or cash (SCH) account" },
+        400,
+      );
+    }
+    const id = `or-${crypto.randomUUID().slice(0, 8)}`;
+    const orNo = await nextDocNo(c.var.DB, "official_receipts", "orNo", "OR");
+    const now = new Date().toISOString();
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const legs: LedgerEntryInput[] = [
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "official_receipt",
+        sourceId: id,
+        legNo: 1,
+        accountCode: payTo,
+        debitSen: v.totalSen,
+        creditSen: 0,
+        description: `${orNo} · ${body.receivedFrom ? `from ${body.receivedFrom}` : "Receipt"}`,
+        actorUserId,
+        orgId,
+      },
+      ...v.lines.map((l, idx) => ({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "official_receipt",
+        sourceId: id,
+        legNo: idx + 2,
+        accountCode: l.accountCode,
+        debitSen: 0,
+        creditSen: l.amountSen,
+        description: `${orNo} · ${l.description || body.description || "Receipt"}`,
+        actorUserId,
+        orgId,
+      })),
+    ];
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(
+      c.var.DB,
+      orgId,
+      legs,
+    );
+    await c.var.DB.batch([
+      c.var.DB.prepare(
+        `INSERT INTO official_receipts (
+           id, orNo, date, receivedFrom, description, payTo, totalSen,
+           status, createdBy, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'POSTED', ?, ?, ?)`,
+      ).bind(
+        id, orNo, date,
+        String(body.receivedFrom ?? ""), String(body.description ?? ""),
+        payTo, v.totalSen, actorUserId, now, now,
+      ),
+      ...v.lines.map((l, idx) =>
+        c.var.DB.prepare(
+          `INSERT INTO official_receipt_lines (id, receiptId, accountCode, description, amountSen, lineOrder)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).bind(`orl-${crypto.randomUUID().slice(0, 8)}`, id, l.accountCode, l.description, l.amountSen, idx),
+      ),
+      ...ledgerStmts,
+    ]);
+    return c.json({ success: true, data: { id, orNo } }, 201);
+  } catch (e) {
+    console.error("[or] create failed:", e);
+    return c.json(
+      { success: false, error: "Failed to save the receipt — is migration 0159 applied?" },
+      400,
+    );
+  }
+});
+
+app.post("/official-receipts/:id/void", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const orRow = await c.var.DB.prepare(
+    "SELECT id, orNo, status FROM official_receipts WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; orNo: string; status: string }>();
+  if (!orRow) return c.json({ success: false, error: "Receipt not found" }, 404);
+  if (orRow.status !== "POSTED") {
+    return c.json({ success: false, error: "Already void" }, 400);
+  }
+  const orgId = getOrgId(c);
+  const actorUserId =
+    (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+  const prior = await c.var.DB.prepare(
+    `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+      WHERE sourceType = 'official_receipt' AND sourceId = ? AND orgId = ?`,
+  )
+    .bind(id, orgId)
+    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+  const legs: LedgerEntryInput[] = (prior.results ?? []).map((l, idx) => ({
+    id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+    sourceType: "official_receipt_void",
+    sourceId: id,
+    legNo: idx + 1,
+    accountCode: l.accountCode,
+    debitSen: Number(l.creditSen) || 0,
+    creditSen: Number(l.debitSen) || 0,
+    description: `VOID · ${orRow.orNo}`,
+    actorUserId,
+    orgId,
+  }));
+  const { statements: ledgerStmts } = await buildJournalEntryStatements(
+    c.var.DB,
+    orgId,
+    legs,
+  );
+  await c.var.DB.batch([
+    c.var.DB.prepare(
+      "UPDATE official_receipts SET status = 'VOID', updated_at = ? WHERE id = ?",
+    ).bind(new Date().toISOString(), id),
+    ...ledgerStmts,
+  ]);
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
 // OPENING BALANCE (Phase-5 prerequisite, 2026-06 — owner enters it himself)
 //
 // AutoCount-style split:

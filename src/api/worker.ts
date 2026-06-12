@@ -695,6 +695,7 @@ import payrollHourDeductions from "./routes/payroll-hour-deductions";
 import cashFlow from "./routes/cash-flow";
 import consignments from "./routes/consignments";
 import consignmentNotes from "./routes/consignment-notes";
+import cnPackingLists from "./routes/cn-packing-lists";
 import consignmentOrders from "./routes/consignment-orders";
 import stockAdjustments from "./routes/stock-adjustments";
 import drivers from "./routes/drivers";
@@ -873,6 +874,8 @@ app.route("/api/payroll-hour-deductions", payrollHourDeductions);
 app.route("/api/cash-flow", cashFlow);
 app.route("/api/consignments", consignments);
 app.route("/api/consignment-notes", consignmentNotes);
+// CN truck-run packing lists — the consignment twin of /api/packing-lists.
+app.route("/api/cn-packing-lists", cnPackingLists);
 app.route("/api/consignment-orders", consignmentOrders);
 app.route("/api/stock-adjustments", stockAdjustments);
 app.route("/api/drivers", drivers);

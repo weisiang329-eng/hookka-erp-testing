@@ -176,6 +176,41 @@ type ConsignmentNoteRow = {
   }>;
 };
 
+// /api/cn-packing-lists response shape — the CN twin of DO's
+// PackingListRecord. A saved truck-run record grouping several CNs. Differs
+// from the DO record in two ways: cnIds (not doIds), and NO costSen — the CN
+// packing list never carries a 3PL transport cost (DO-side only, per the
+// project ruling). Revenue + units + M³ + stops + states are computed live by
+// the GET /api/cn-packing-lists list endpoint.
+type CnPackingListRecord = {
+  id: string;
+  packingNo: string;             // CPL-YYMM-NNN
+  status: string;
+  cnIds: string[];
+  stopCount: number;
+  totalUnits: number;
+  totalM3: number;
+  remarks: string;
+  createdAt: string | null;
+  createdBy: string | null;
+  // revenueSen = Σ goods value of the PL's CNs (priced off the parent CO line).
+  revenueSen: number;
+  // Live: how many CNs the PL carries, and how many DISTINCT destination
+  // addresses (= real truck stops). null when not computed — fall back to the
+  // stored stopCount.
+  cnCount: number | null;
+  stops: number | null;
+  // Distinct destination states across the PL's CNs; null when not computed.
+  states: string[] | null;
+  // Live per-status CN tally (pending = ACTIVE, dispatched = PARTIALLY_SOLD +
+  // IN_TRANSIT, delivered = FULLY_SOLD + CLOSED; RETURNED counts toward none).
+  cnStatusCounts: {
+    pending: number;
+    dispatched: number;
+    delivered: number;
+  } | null;
+};
+
 // CN status mapping. See note on CNStatus above for why we re-skin the
 // legacy status enum into a DO-shaped lifecycle.
 //
@@ -217,6 +252,7 @@ const STATUS_LABEL: Record<CNStatus, string> = {
 //   Dispatched         — CN dispatched, in transit
 //   Delivered          — CN delivered to branch
 //   Acknowledged       — branch confirmed receipt (DO equiv: Invoice — but CN doesn't generate invoices on dispatch)
+//   Packing List       — saved truck-run records grouping CNs (DO equiv: same name)
 const ALL_TABS = [
   { key: "planning", label: "Planning" },
   { key: "pending_cn", label: "Pending CN" },
@@ -224,6 +260,7 @@ const ALL_TABS = [
   { key: "dispatched", label: "Dispatched" },
   { key: "delivered", label: "Delivered" },
   { key: "acknowledged", label: "Acknowledged" },
+  { key: "packing_list", label: "Packing List" },
 ] as const;
 
 // Which CN statuses map to which CN-list tab. Planning + Pending CN are
@@ -494,6 +531,14 @@ export default function ConsignmentNotePage() {
   // would leave ticked rows with a hidden toolbar).
   const [selectedCNIds, setSelectedCNIds] = useState<Set<string>>(new Set());
 
+  // ----- Create Packing List dialog (mirrors DO's printDialog) -----
+  // Holds the CN rows the operator ticked to group into one truck-run record.
+  // Non-null = the confirm dialog is open. plCreating gates the POST.
+  const [createPLDialog, setCreatePLDialog] =
+    useState<ConsignmentNoteRow[] | null>(null);
+  const [plRemarks, setPlRemarks] = useState("");
+  const [plCreating, setPlCreating] = useState(false);
+
   // ----- Inline Expected DD editing on Planning / Pending CN -----
   const [editingDDId, setEditingDDId] = useState<string | null>(null);
   const [editingDDValue, setEditingDDValue] = useState("");
@@ -649,6 +694,27 @@ export default function ConsignmentNotePage() {
       success?: boolean;
       data?: { code: string; unitM3: number; sizeLabel?: string }[];
     }>("/api/products");
+
+  // Saved CN packing lists for the "Packing List" tab (mirrors the DO page's
+  // /api/packing-lists fetch). Defaults to empty if the endpoint/table isn't
+  // there yet (backend returns {data:[]} when unmigrated).
+  const { data: plRaw, refresh: refreshPLs } =
+    useCachedJson<{ success?: boolean; data?: CnPackingListRecord[] }>(
+      "/api/cn-packing-lists",
+    );
+  const packingLists: CnPackingListRecord[] = useMemo(
+    () => (Array.isArray(plRaw?.data) ? plRaw!.data : []),
+    [plRaw],
+  );
+  // cnId → packingNo, so the create flow can skip CNs already on a list (a CN
+  // belongs to at most one). Mirrors DO's doPackingMap.
+  const cnPackingMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const pl of packingLists) {
+      for (const cid of pl.cnIds) m.set(cid, pl.packingNo);
+    }
+    return m;
+  }, [packingLists]);
 
   // 3PL providers — same /api/drivers endpoint DO uses to resolve the
   // Transport Co. column from driverId. Loaded once and cached so the
@@ -2054,6 +2120,147 @@ export default function ConsignmentNotePage() {
     printCnPackingList(selected.map(buildCnPdfData));
   };
 
+  // ---------- Create Packing List (saved truck-run record) ----------
+  // The CN twin of DO's Create-as-Packing-List flow. The consolidated print
+  // above is a throwaway PDF; THIS persists a cn_packing_lists row the
+  // operator can re-print from the Packing List tab. Opens the confirm dialog
+  // from the ticked CNs, skipping any already on another list (a CN belongs to
+  // at most one).
+  const handleOpenCreatePackingList = () => {
+    if (selectedCNIds.size === 0) return;
+    const all = cnList.filter((c) => selectedCNIds.has(c.id));
+    const fresh = all.filter((c) => !cnPackingMap.has(c.id));
+    if (fresh.length === 0) {
+      toast.error("All selected consignment notes are already in a packing list.");
+      return;
+    }
+    setPlRemarks("");
+    setCreatePLDialog(fresh.sort((a, b) => a.cnNo.localeCompare(b.cnNo)));
+  };
+
+  // Saves the selected CNs as a new cn_packing_lists record (POST), then jumps
+  // to the Packing List tab where the operator prints it. Mirrors DO's
+  // handleConfirmCreatePackingList (minus the per-DO truck-assignment write —
+  // the CN packing list has no 3PL cost/truck step, DO-side only).
+  const handleConfirmCreatePackingList = async () => {
+    const cns = createPLDialog;
+    if (!cns || cns.length === 0) {
+      setCreatePLDialog(null);
+      return;
+    }
+    setPlCreating(true);
+    try {
+      const r = await fetch("/api/cn-packing-lists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cnIds: cns.map((c) => c.id),
+          remarks: plRemarks.trim() || undefined,
+        }),
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: CnPackingListRecord;
+        error?: string;
+      };
+      if (!r.ok || !j.success) {
+        toast.error(j.error || "Failed to create packing list");
+        return;
+      }
+      toast.success(`Packing list ${j.data?.packingNo ?? ""} created`);
+      setCreatePLDialog(null);
+      setPlRemarks("");
+      setSelectedCNIds(new Set());
+      invalidateCachePrefix("/api/cn-packing-lists");
+      refreshPLs();
+      setActiveTab("packing_list");
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Failed to create packing list",
+      );
+    } finally {
+      setPlCreating(false);
+    }
+  };
+
+  // Re-print a saved CN packing list. Loads the record's member cn ids from the
+  // backend (so it works regardless of which CNs are on the current page),
+  // maps them back to the CN rows the page already holds, pre-fetches each
+  // CN's print-extras, and renders through the SAME printCnPackingList the
+  // consolidated print uses (one PDF: cover summary + every CN's full
+  // document). mode is accepted for signature parity with the DO record print;
+  // printCnPackingList always opens the document for the operator to print.
+  const handlePrintPackingListRecord = async (
+    pl: CnPackingListRecord,
+    _mode: "download" | "view" = "view",
+  ) => {
+    try {
+      const r = await fetch(`/api/cn-packing-lists/${pl.id}`);
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: { cnIds?: string[] };
+        error?: string;
+      };
+      if (!r.ok || !j.success || !j.data) {
+        toast.error(j.error || "Failed to load packing list");
+        return;
+      }
+      const ids = j.data.cnIds ?? [];
+      // Preserve the saved selection order; resolve each id to its CN row.
+      const orderIndex = new Map(ids.map((id, i) => [id, i]));
+      const rows = cnList
+        .filter((c) => orderIndex.has(c.id))
+        .sort(
+          (a, b) =>
+            (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0),
+        );
+      if (rows.length === 0) {
+        toast.error("This packing list has no consignment notes on this page.");
+        return;
+      }
+      await ensureCnExtras(rows.map((c) => c.id));
+      const { printCnPackingList } = await import("@/lib/generate-cn-pdf");
+      printCnPackingList(rows.map(buildCnPdfData));
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Failed to generate packing list",
+      );
+    }
+  };
+
+  // Delete a saved CN packing list (frees its CNs to be grouped again).
+  const handleDeletePackingList = async (pl: CnPackingListRecord) => {
+    if (
+      !confirm(
+        `Delete packing list ${pl.packingNo}? Its ${
+          pl.cnCount ?? pl.stopCount
+        } consignment note(s) will be freed to add to another list. This does not delete the CNs.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const r = await fetch(`/api/cn-packing-lists/${pl.id}`, {
+        method: "DELETE",
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+      };
+      if (!r.ok || !j.success) {
+        toast.error(j.error || "Failed to delete packing list");
+        return;
+      }
+      toast.success(`Packing list ${pl.packingNo} deleted`);
+      invalidateCachePrefix("/api/cn-packing-lists");
+      refreshPLs();
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Failed to delete packing list",
+      );
+    }
+  };
+
   // ---------- Inline Expected DD update on the CO ----------
   // DO updates SO.hookkaExpectedDD via PUT /api/sales-orders/:id; same
   // pattern here against /api/consignment-orders/:id.
@@ -2728,6 +2935,7 @@ export default function ConsignmentNotePage() {
     dispatched: dispatchedCount + inTransitCount,
     delivered: deliveredCount,
     acknowledged: acknowledgedCount,
+    packing_list: packingLists.length,
   };
 
   // ---------- Pagination derivations ----------
@@ -3070,7 +3278,7 @@ export default function ConsignmentNotePage() {
       )}
 
       {/* ---- CN-list tabs: Pending Dispatch / Dispatched / Delivered / Acknowledged ---- */}
-      {!PO_TABS.has(activeTab) && (
+      {!PO_TABS.has(activeTab) && activeTab !== "packing_list" && (
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
@@ -3103,6 +3311,17 @@ export default function ConsignmentNotePage() {
                     onClick={() => void handlePrintPackingList()}
                   >
                     <Printer className="h-3.5 w-3.5" /> Print Packing List
+                  </Button>
+                  {/* Create as Packing List — persists a cn_packing_lists
+                      record (the saved truck-run), distinct from the throwaway
+                      Print Packing List above. Mirrors DO's grid-header
+                      "Create as Packing List" button. */}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleOpenCreatePackingList}
+                  >
+                    <ClipboardList className="h-3.5 w-3.5" /> Create Packing List
                   </Button>
                 </div>
               )}
@@ -3156,6 +3375,238 @@ export default function ConsignmentNotePage() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* ---- Packing List Tab ---- */}
+      {activeTab === "packing_list" && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <ClipboardList className="h-5 w-5 text-[#6B5C32]" /> Packing Lists
+              </CardTitle>
+              <span className="text-xs text-[#6B7280]">
+                One saved sheet per truck run, grouped by branch. Print to load the truck.
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {packingLists.length === 0 ? (
+              <div className="py-12 text-center text-sm text-[#6B7280]">
+                No packing lists yet. Go to{" "}
+                <span className="font-medium">Pending Dispatch</span>, tick the CNs
+                going on one truck, then click{" "}
+                <span className="font-medium">Create Packing List</span>.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                {/* whitespace-nowrap inherits to every th/td so the run-sheet
+                    columns never mid-word-wrap (same fix as the DO Packing
+                    List table). Remarks is the one free-text cell, clipped
+                    with truncate + hover title. No Cost column — the CN
+                    packing list carries no 3PL transport cost (DO-side only). */}
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] text-left text-xs text-[#6B7280] whitespace-nowrap">
+                      <th className="py-2 px-3 font-medium">Packing No</th>
+                      <th className="py-2 px-3 font-medium text-center">CNs</th>
+                      <th className="py-2 px-3 font-medium text-center">Stops</th>
+                      <th className="py-2 px-3 font-medium text-center">State</th>
+                      <th className="py-2 px-3 font-medium text-center">Units</th>
+                      <th className="py-2 px-3 font-medium text-right">Total M³</th>
+                      <th className="py-2 px-3 font-medium text-right">Revenue</th>
+                      <th className="py-2 px-3 font-medium text-center">Delivery</th>
+                      <th className="py-2 px-3 font-medium">Created</th>
+                      <th className="py-2 px-3 font-medium">Remarks</th>
+                      <th className="py-2 px-3 font-medium text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {packingLists.map((pl) => (
+                      <tr
+                        key={pl.id}
+                        className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]"
+                      >
+                        <td className="py-2.5 px-3 font-medium text-[#1F1D1B] whitespace-nowrap">
+                          {pl.packingNo}
+                        </td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">
+                          {pl.cnCount ?? pl.stopCount}
+                        </td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">
+                          {pl.stops ?? "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                          {pl.states && pl.states.length > 0
+                            ? pl.states.join(", ")
+                            : "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-center tabular-nums">
+                          {pl.totalUnits}
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">
+                          {pl.totalM3.toFixed(2)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums whitespace-nowrap">
+                          {formatCurrency(pl.revenueSen ?? 0)}
+                        </td>
+                        <td className="py-2.5 px-3 text-center">
+                          {(() => {
+                            // Live rollup of the member CNs' statuses — the PL
+                            // mirrors the CNs, so a status change shows here on
+                            // the next load.
+                            const cnt = pl.cnStatusCounts;
+                            const total = cnt
+                              ? cnt.pending + cnt.dispatched + cnt.delivered
+                              : 0;
+                            if (!cnt || total === 0)
+                              return <span className="text-[#9CA3AF]">—</span>;
+                            if (cnt.delivered === total)
+                              return (
+                                <span className="inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-[#E3EBE6] text-[#2F5D3F]">
+                                  Delivered {total}/{total}
+                                </span>
+                              );
+                            if (cnt.dispatched + cnt.delivered > 0)
+                              return (
+                                <span className="inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-[#E0EDF0] text-[#3E6570]">
+                                  Dispatched {cnt.dispatched + cnt.delivered}/{total}
+                                </span>
+                              );
+                            return (
+                              <span className="inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium bg-[#F5EDDC] text-[#9C6F1E]">
+                                Pending {total}
+                              </span>
+                            );
+                          })()}
+                        </td>
+                        <td className="py-2.5 px-3 text-[#6B7280] whitespace-nowrap">
+                          {pl.createdAt ? formatDate(pl.createdAt) : "-"}
+                        </td>
+                        <td
+                          className="py-2.5 px-3 text-[#6B7280] max-w-[180px] truncate"
+                          title={pl.remarks || undefined}
+                        >
+                          {pl.remarks || "-"}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <div className="flex items-center justify-end gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="View / Print"
+                              onClick={() =>
+                                void handlePrintPackingListRecord(pl, "view")
+                              }
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="Print"
+                              onClick={() =>
+                                void handlePrintPackingListRecord(pl, "download")
+                              }
+                            >
+                              <Printer className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="Delete"
+                              onClick={() => void handleDeletePackingList(pl)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ---------- Create Packing List Dialog ---------- */}
+      {createPLDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => {
+              if (!plCreating) setCreatePLDialog(null);
+            }}
+          />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-[#E2DDD8]">
+            <div className="px-6 py-4 border-b border-[#E2DDD8]">
+              <h2 className="text-lg font-bold text-[#1F1D1B]">
+                Create Packing List
+              </h2>
+              <p className="text-xs text-[#6B7280]">
+                Groups these {createPLDialog.length} consignment note
+                {createPLDialog.length === 1 ? "" : "s"} into one saved packing
+                list. Print it from the Packing List tab.
+              </p>
+            </div>
+            <div className="px-6 py-5 space-y-3">
+              <div className="space-y-1 max-h-40 overflow-y-auto">
+                {createPLDialog.map((c) => (
+                  <div
+                    key={c.id}
+                    className="flex items-center justify-between text-sm bg-[#FAF9F7] rounded-lg px-3 py-2"
+                  >
+                    <span className="font-mono font-medium text-[#1F1D1B]">
+                      {c.cnNo}
+                    </span>
+                    <span className="text-[#6B7280]">
+                      {c.customerName}
+                      {c.branchName ? ` · ${c.branchName}` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">
+                  Remarks (optional)
+                </label>
+                <input
+                  type="text"
+                  value={plRemarks}
+                  onChange={(e) => setPlRemarks(e.target.value)}
+                  placeholder="e.g. Lorry A — morning run"
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                />
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setCreatePLDialog(null)}
+                disabled={plCreating}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleConfirmCreatePackingList}
+                disabled={plCreating}
+              >
+                {plCreating ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Creating...
+                  </>
+                ) : (
+                  <>
+                    <ClipboardList className="h-4 w-4" /> Create Packing List
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ---------- Detail Dialog (DO-parity rebuild 2026-04-28) ----------

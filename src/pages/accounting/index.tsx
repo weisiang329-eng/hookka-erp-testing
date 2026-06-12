@@ -263,6 +263,7 @@ export default function AccountingPage() {
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
               <GstRateCard />
               <FyeCard />
+              <LandedCostCard />
               <StockMapCard accounts={accounts} />
             </div>
           )}
@@ -273,6 +274,119 @@ export default function AccountingPage() {
 }
 
 // =============== TAB 1: OVERVIEW ===============
+
+// Phase 3.7 — landed cost: spread import charges (freight/duty/clearance)
+// onto a GRN's stock batches proportional to value. No GL legs here: the
+// charge PI already debits 700-1015 into the Manufacturing Account, and
+// closing stock valued off the higher batch costs credits the unused part
+// back out. Server refuses once any batch has been issued from.
+function LandedCostCard() {
+  const { toast } = useToast();
+  const [grn, setGrn] = useState("");
+  const [amount, setAmount] = useState("");
+  const [ref, setRef] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{
+    grnId: string; grnNumber: string; eligible: boolean;
+    batches: { id: string; itemCode: string | null; name: string | null; originalQty: number; remainingQty: number; unitCostSen: number; valueSen: number; allocSen: number; newUnitCostSen: number }[];
+  } | null>(null);
+  const toSen = (s: string) => {
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? Math.round(v * 100) : 0;
+  };
+  const amountSen = toSen(amount);
+
+  const handlePreview = async () => {
+    setPreview(null);
+    const p = new URLSearchParams({ grn: grn.trim() });
+    if (amountSen > 0) p.set("amountSen", String(amountSen));
+    const res = await fetch(`/api/accounting/landed-cost/preview?${p.toString()}`);
+    const j = await res.json() as { success?: boolean; data?: NonNullable<typeof preview>; error?: string };
+    if (j?.success && j.data) setPreview(j.data);
+    else toast.error(j?.error || "Preview failed");
+  };
+
+  const handleAllocate = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/accounting/landed-cost", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grnId: preview!.grnId, amountSen, ref }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { grnNumber: string; batches: number }; error?: string };
+      if (j?.success && j.data) {
+        toast.success(`${formatCurrency(amountSen)} spread over ${j.data.batches} batches of ${j.data.grnNumber}`);
+        setPreview(null);
+        setGrn(""); setAmount(""); setRef("");
+      } else toast.error(j?.error || "Allocation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-[#1F1D1B]">
+          Landed Cost <span className="font-normal text-[#6B7280]">— spread import charges (freight/duty/clearance) onto a GRN's batch costs</span>
+        </h3>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">GRN number</label>
+            <input type="text" placeholder="GRN-…" value={grn} onChange={(e) => { setGrn(e.target.value); setPreview(null); }} className={`${inCls} w-44`} />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Charges (RM)</label>
+            <input type="text" value={amount} onChange={(e) => { setAmount(e.target.value); setPreview(null); }} className={`${inCls} w-28 text-right tabular-nums`} />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Ref (forwarder PI no, optional)</label>
+            <input type="text" value={ref} onChange={(e) => setRef(e.target.value)} className={`${inCls} w-40`} />
+          </div>
+          <Button variant="outline" size="sm" disabled={!grn.trim() || amountSen <= 0} onClick={handlePreview}>Preview</Button>
+          {preview && preview.eligible && (
+            <Button variant="primary" size="sm" disabled={busy} onClick={handleAllocate}>
+              {busy ? "Allocating…" : `Allocate ${formatCurrency(amountSen)}`}
+            </Button>
+          )}
+        </div>
+        {preview && !preview.eligible && (
+          <p className="text-xs text-[#9A3A2D]">
+            Some batches of {preview.grnNumber} are already partly issued — the charge stays in 700-1015 (Manufacturing Account still absorbs it) or adjust by JV.
+          </p>
+        )}
+        {preview && (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                <th className="px-2 py-1.5 text-left">Material</th>
+                <th className="px-2 py-1.5 text-right">Qty</th>
+                <th className="px-2 py-1.5 text-right">Unit cost</th>
+                <th className="px-2 py-1.5 text-right">Batch value</th>
+                <th className="px-2 py-1.5 text-right">Share</th>
+                <th className="px-2 py-1.5 text-right">New unit cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.batches.map((b) => (
+                <tr key={b.id} className="border-b border-[#F0ECE9]">
+                  <td className="px-2 py-1"><span className="tabular-nums text-xs text-[#6B7280] mr-1">{b.itemCode ?? ""}</span>{b.name ?? ""}</td>
+                  <td className="px-2 py-1 text-right tabular-nums">{b.originalQty}</td>
+                  <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.unitCostSen)}</td>
+                  <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.valueSen)}</td>
+                  <td className="px-2 py-1 text-right tabular-nums font-medium">{formatCurrency(b.allocSen)}</td>
+                  <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(b.newUnitCostSen)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 // Operator-configurable GST/SST rate (kv_config key `gst_rate_pct`).
 // Applied automatically when a sales invoice is posted (Phase 4).

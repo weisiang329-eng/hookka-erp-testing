@@ -3891,6 +3891,182 @@ app.post("/official-receipts/:id/void", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// LANDED COST (Phase 3.7, 2026-06) — allocate import charges (freight /
+// duty / clearance; the owner gets BOTH separate forwarder PIs and FEE
+// lines on the goods PI) onto a GRN's rm_batches, proportional to batch
+// value. GL needs NO extra legs: the charge PI already debits 700-1015
+// CARRIAGE INWARDS into the Manufacturing Account, and closing stock —
+// valued off the now-higher batch costs — credits the unused portion
+// back out, so the cost "follows the material" exactly as the owner's
+// workbook says. Only UNTOUCHED batches (remaining == original) accept
+// an allocation; once issues started, the adjustment would silently
+// rewrite already-consumed cost history.
+// ---------------------------------------------------------------------------
+
+type LandedBatchRow = {
+  id: string; rmId: string; originalQty: number; remainingQty: number;
+  unitCostSen: number; itemCode: string | null; rmName: string | null;
+};
+
+async function landedBatchesForGrn(
+  db: Env["Variables"]["DB"],
+  grnKey: string,
+): Promise<{ grnId: string; grnNumber: string; batches: LandedBatchRow[] } | null> {
+  const grn = await db
+    .prepare("SELECT id, grnNumber FROM grns WHERE id = ? OR grnNumber = ?")
+    .bind(grnKey, grnKey)
+    .first<{ id: string; grnNumber: string }>();
+  if (!grn) return null;
+  const res = await db
+    .prepare(
+      `SELECT b.id, b.rmId, b.originalQty, b.remainingQty, b.unitCostSen,
+              r.itemCode, r.name AS rmName
+         FROM rm_batches b LEFT JOIN raw_materials r ON r.id = b.rmId
+        WHERE b.source = 'GRN' AND b.sourceRefId = ?
+        ORDER BY b.id`,
+    )
+    .bind(grn.id)
+    .all<LandedBatchRow>();
+  return { grnId: grn.id, grnNumber: grn.grnNumber, batches: res.results ?? [] };
+}
+
+function allocateLanded(
+  batches: LandedBatchRow[],
+  amountSen: number,
+): { batch: LandedBatchRow; allocSen: number; newUnitCostSen: number }[] {
+  const values = batches.map((b) => Math.max(0, Math.round(b.originalQty * b.unitCostSen)));
+  const totalValue = values.reduce((s, v) => s + v, 0);
+  if (totalValue <= 0) return [];
+  // Largest-remainder so the allocations sum EXACTLY to amountSen.
+  const raw = values.map((v) => (amountSen * v) / totalValue);
+  const base = raw.map((r) => Math.floor(r));
+  let left = amountSen - base.reduce((s, v) => s + v, 0);
+  const order = raw
+    .map((r, i) => ({ i, frac: r - Math.floor(r) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (const o of order) {
+    if (left <= 0) break;
+    base[o.i] += 1;
+    left--;
+  }
+  return batches.map((b, i) => ({
+    batch: b,
+    allocSen: base[i],
+    newUnitCostSen:
+      b.originalQty > 0
+        ? Math.round((values[i] + base[i]) / b.originalQty)
+        : b.unitCostSen,
+  }));
+}
+
+app.get("/landed-cost/preview", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const grnKey = (c.req.query("grn") || "").trim();
+  const amountSen = Math.round(Number(c.req.query("amountSen")) || 0);
+  if (!grnKey) return c.json({ success: false, error: "grn is required" }, 400);
+  const found = await landedBatchesForGrn(c.var.DB, grnKey);
+  if (!found) return c.json({ success: false, error: `GRN ${grnKey} not found` }, 404);
+  if (found.batches.length === 0) {
+    return c.json({ success: false, error: `GRN ${found.grnNumber} has no stock batches (not posted yet?)` }, 400);
+  }
+  const untouched = found.batches.every((b) => Number(b.remainingQty) === Number(b.originalQty));
+  const allocs = amountSen > 0 ? allocateLanded(found.batches, amountSen) : [];
+  return c.json({
+    success: true,
+    data: {
+      grnId: found.grnId,
+      grnNumber: found.grnNumber,
+      eligible: untouched,
+      batches: found.batches.map((b, i) => ({
+        id: b.id,
+        itemCode: b.itemCode,
+        name: b.rmName,
+        originalQty: b.originalQty,
+        remainingQty: b.remainingQty,
+        unitCostSen: b.unitCostSen,
+        valueSen: Math.round(b.originalQty * b.unitCostSen),
+        allocSen: allocs[i]?.allocSen ?? 0,
+        newUnitCostSen: allocs[i]?.newUnitCostSen ?? b.unitCostSen,
+      })),
+    },
+  });
+});
+
+app.post("/landed-cost", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const grnKey = String(body.grnId || body.grn || "").trim();
+    const amountSen = Math.round(Number(body.amountSen) || 0);
+    const ref = String(body.ref ?? "").trim();
+    if (!grnKey || amountSen <= 0) {
+      return c.json({ success: false, error: "grn and a positive amountSen are required" }, 400);
+    }
+    const found = await landedBatchesForGrn(c.var.DB, grnKey);
+    if (!found) return c.json({ success: false, error: `GRN ${grnKey} not found` }, 404);
+    if (found.batches.length === 0) {
+      return c.json({ success: false, error: `GRN ${found.grnNumber} has no stock batches` }, 400);
+    }
+    const touched = found.batches.filter(
+      (b) => Number(b.remainingQty) !== Number(b.originalQty),
+    );
+    if (touched.length > 0) {
+      return c.json(
+        {
+          success: false,
+          error: `GRN ${found.grnNumber} already has ${touched.length} batch(es) partly issued — landed cost can only spread onto untouched batches. Book the charge to 700-1015 and leave it (the Manufacturing Account still absorbs it), or adjust by JV.`,
+        },
+        400,
+      );
+    }
+    const allocs = allocateLanded(found.batches, amountSen);
+    if (allocs.length === 0) {
+      return c.json({ success: false, error: "Batches carry zero value — nothing to allocate against" }, 400);
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const statements: D1PreparedStatement[] = [];
+    for (const a of allocs) {
+      if (a.allocSen === 0) continue;
+      statements.push(
+        c.var.DB.prepare(
+          "UPDATE rm_batches SET unitCostSen = ? WHERE id = ?",
+        ).bind(a.newUnitCostSen, a.batch.id),
+      );
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+             qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
+           VALUES (?, ?, 'ADJUSTMENT', 'RM', ?, ?, 0, 'IN', 0, ?, 'LANDED_COST', ?, ?)`,
+        ).bind(
+          `cl-${crypto.randomUUID().slice(0, 10)}`,
+          today,
+          a.batch.rmId,
+          a.batch.id,
+          a.allocSen,
+          ref || found.grnNumber,
+          `Landed cost ${ref ? `(${ref}) ` : ""}onto GRN ${found.grnNumber}`,
+        ),
+      );
+    }
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: found.grnId,
+      action: "update",
+      after: { landedCostSen: amountSen, grn: found.grnNumber, ref },
+    });
+    return c.json({
+      success: true,
+      data: { grnNumber: found.grnNumber, batches: allocs.filter((a) => a.allocSen > 0).length, amountSen },
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // LEDGER REPORT (owner screenshot, AutoCount style) — one section per
 // account: B/F opening as at `from`, chronological rows with running
 // balance and the DOUBLE-ENTRY counter account, per-account DR/CR totals

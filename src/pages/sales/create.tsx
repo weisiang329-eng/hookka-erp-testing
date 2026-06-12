@@ -2350,12 +2350,13 @@ function CopyFromSourceModal({
   >([]);
 
   // Step 1 → Step 2: look up the typed order number, then fetch its lines.
-  // The SO lookup accepts THREE document numbers (Wei Siang 2026-06-11:
+  // The SO lookup accepts FOUR document numbers (Wei Siang 2026-06-11/12:
   // customers report aftersales issues quoting THEIR paperwork, not ours):
   //   1. our company SO id  (companySOId, SO-YYMM-NNN)
   //   2. the customer's PO number (customerPOId)
   //   3. the customer's own SO number (customerSO / customerSOId)
-  // CO lookups stay company-CO-id only.
+  //   4. the order's reference field
+  // CO lookups match company CO id or reference.
   async function handleResolveSource() {
     if (!sourceLookup.trim()) {
       setError("Enter a source order number");
@@ -2381,6 +2382,7 @@ function CopyFromSourceModal({
           customerPOId?: string;
           customerSO?: string;
           customerSOId?: string;
+          reference?: string;
           customerName?: string;
         }>;
       };
@@ -2388,12 +2390,16 @@ function CopyFromSourceModal({
       const norm = (s?: string | null) => (s ?? "").trim().toUpperCase();
       const target = norm(sourceLookup);
       const matchedField = (r: (typeof candidates)[number]): string | null => {
-        if (sourceType === "CO")
-          return norm(r.companyCOId) === target ? "our CO" : null;
+        if (sourceType === "CO") {
+          if (norm(r.companyCOId) === target) return "our CO";
+          if (norm(r.reference) === target) return "reference";
+          return null;
+        }
         if (norm(r.companySOId) === target) return "our SO";
         if (norm(r.customerPOId) === target) return "customer PO";
         if (norm(r.customerSO) === target || norm(r.customerSOId) === target)
           return "customer SO";
+        if (norm(r.reference) === target) return "reference";
         return null;
       };
       const matches = candidates
@@ -2402,8 +2408,8 @@ function CopyFromSourceModal({
       if (matches.length === 0) {
         setError(
           sourceType === "SO"
-            ? `No order found matching ${target} — tried our SO, customer PO, and customer SO numbers.`
-            : `No CO found with id ${target}`,
+            ? `No order found matching ${target} — tried our SO, customer PO, customer SO, and reference.`
+            : `No CO found matching ${target} — tried our CO id and reference.`,
         );
         setBusy(false);
         return;
@@ -2687,8 +2693,8 @@ function CopyFromSourceModal({
               }}
               placeholder={
                 sourceType === "SO"
-                  ? "SO-YYMM-NNN / customer PO / customer SO"
-                  : "CO-YYMM-NNN"
+                  ? "SO-YYMM-NNN / customer PO / customer SO / reference"
+                  : "CO-YYMM-NNN / reference"
               }
             />
 

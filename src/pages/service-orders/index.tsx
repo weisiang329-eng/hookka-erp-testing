@@ -57,6 +57,11 @@ type SourceOrderOption = {
   customerName: string;
   status: string;
   companyOrderId: string;
+  // Customer-side document numbers (owner 2026-06-12: aftersales issues are
+  // reported quoting THEIR paperwork) — all searchable in the picker.
+  customerPO: string;
+  customerSO: string;
+  reference: string;
   items: Array<{
     id: string;
     productId: string;
@@ -71,6 +76,11 @@ type SalesOrderApi = {
   customerName: string;
   status: string;
   companySOId?: string;
+  customerPOId?: string;
+  customerPO?: string;
+  customerSOId?: string;
+  customerSO?: string;
+  reference?: string;
   items?: Array<{ id: string; productId: string; productCode: string; productName: string; quantity: number }>;
 };
 type ConsignmentOrderApi = {
@@ -78,6 +88,9 @@ type ConsignmentOrderApi = {
   customerName: string;
   status: string;
   companyCOId?: string;
+  customerCOId?: string;
+  customerCO?: string;
+  reference?: string;
   items?: Array<{ id: string; productId: string; productCode: string; productName: string; quantity: number }>;
 };
 
@@ -382,6 +395,9 @@ function CreateServiceOrderModal({
           customerName: s.customerName,
           status: s.status,
           companyOrderId: s.companySOId ?? "",
+          customerPO: s.customerPOId ?? s.customerPO ?? "",
+          customerSO: s.customerSOId ?? s.customerSO ?? "",
+          reference: s.reference ?? "",
           items: s.items ?? [],
         }));
     }
@@ -392,6 +408,9 @@ function CreateServiceOrderModal({
         customerName: s.customerName,
         status: s.status,
         companyOrderId: s.companyCOId ?? "",
+        customerPO: s.customerCOId ?? s.customerCO ?? "",
+        customerSO: "",
+        reference: s.reference ?? "",
         items: s.items ?? [],
       }));
   }, [sourceType, soResp, coResp]);
@@ -666,7 +685,7 @@ function CreateServiceOrderModal({
             </div>
             <div>
               <label className="block text-xs text-[#6B7280] mb-1">
-                Source Order {selectedSource ? "" : "(search by SO# / customer)"}
+                Source Order {selectedSource ? "" : "(search by SO# / customer / customer PO / reference)"}
               </label>
               {selectedSource ? (
                 // Already picked — show a compact summary + "Change" button.
@@ -1139,7 +1158,10 @@ function SourceSearchPicker({
     const matches = options.filter(
       (o) =>
         o.companyOrderId.toLowerCase().includes(q) ||
-        o.customerName.toLowerCase().includes(q),
+        o.customerName.toLowerCase().includes(q) ||
+        o.customerPO.toLowerCase().includes(q) ||
+        o.customerSO.toLowerCase().includes(q) ||
+        o.reference.toLowerCase().includes(q),
     );
     return matches.slice(0, 15);
   }, [options, q]);
@@ -1150,7 +1172,7 @@ function SourceSearchPicker({
         type="text"
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
-        placeholder={`Type SO# or customer name… (${options.length} shipped)`}
+        placeholder={`Type SO# / customer / customer PO / reference… (${options.length} shipped)`}
         className="h-8 text-sm"
       />
       {q && (
@@ -1170,6 +1192,17 @@ function SourceSearchPicker({
                 <span className="font-mono">{s.companyOrderId}</span>
                 <span className="text-[#6B7280]"> — {s.customerName}</span>
                 <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
+                {(s.customerPO || s.customerSO || s.reference) && (
+                  <span className="block text-[10px] text-[#9CA3AF]">
+                    {[
+                      s.customerPO ? `PO ${s.customerPO}` : "",
+                      s.customerSO ? `SO ${s.customerSO}` : "",
+                      s.reference ? `Ref ${s.reference}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                )}
               </button>
             ))
           )}

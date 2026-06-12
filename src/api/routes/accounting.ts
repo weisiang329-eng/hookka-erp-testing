@@ -23,6 +23,7 @@ import {
   type LedgerEntryInput,
 } from "../lib/journal-hash";
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -144,6 +145,55 @@ async function nextJeNo(db: D1Database): Promise<string> {
   const seq = (res?.c ?? 0) + 1;
   return `JE-${yymm}-${String(seq).padStart(4, "0")}`;
 }
+
+// ---------------------------------------------------------------------------
+// Account-code rename aliases (migration 0157). The immutable ledger
+// hash-chains accountCode into every row, so a rename can never rewrite
+// history — instead old→new mappings live in account_aliases and EVERY
+// read surface resolves through this (transitively, for chained renames).
+// Identity fallback when the table hasn't been migrated yet.
+// ---------------------------------------------------------------------------
+async function loadAccountResolver(
+  db: Env["Variables"]["DB"],
+): Promise<(code: string) => string> {
+  try {
+    const res = await db
+      .prepare("SELECT oldCode, newCode FROM account_aliases")
+      .all<{ oldCode: string; newCode: string }>();
+    const m = new Map(
+      (res.results ?? []).map((r) => [r.oldCode, r.newCode] as const),
+    );
+    if (m.size === 0) return (c) => c;
+    return (code) => {
+      let c = code;
+      for (let i = 0; i < 10 && m.has(c); i++) c = m.get(c)!;
+      return c;
+    };
+  } catch {
+    return (c) => c;
+  }
+}
+
+// Accounts the POSTING CODE references directly (control accounts, tax,
+// sales split, default purchase/stock maps, bank/cash, retained earnings,
+// payroll accruals…). Renaming one of these would silently break auto-
+// posting, so /coa/rename refuses them.
+const PROTECTED_ACCOUNTS = new Set([
+  "100-0000", "150-0000",
+  "300-0000", "305-0000", "310-0010", "320-0000", "350-0000",
+  "400-0000", "405-0000", "410-0000", "410-0010", "410-0020", "410-0030", "410-0040",
+  "490-0000",
+  "500-0000", "500-0020", "500-0030", "510-0000", "520-0000",
+  "600-0000", "620-0000", "700-1015", "700-9005", "700-9010", "706-0000",
+  "701-0001", "701-0002", "701-0003", "701-0010", "701-0020", "701-0030",
+  "701-9991", "701-9992", "701-9993",
+  "702-0001", "702-0002", "702-0010", "702-0030", "702-9991", "702-9992",
+  "703-0001", "703-0010", "703-9999",
+  "704-0005", "704-0010", "704-0020", "704-0040", "704-0050", "704-9995",
+  "705-0001", "705-0020", "705-9999",
+  "330-0001", "330-0002", "330-0003", "330-1001", "330-1002", "330-2001",
+  "330-3005", "330-4000", "330-8000", "330-9000",
+]);
 
 // ---------------------------------------------------------------------------
 // AGING
@@ -517,6 +567,29 @@ app.put("/coa", async (c) => {
         400,
       );
     }
+    // Re-parenting (drag & drop) must not create a cycle: walk the new
+    // parent's ancestry — hitting the account itself means the drop would
+    // put a node inside its own subtree.
+    if (merged.parentCode && merged.parentCode !== existing.parentCode) {
+      if (merged.parentCode === code) {
+        return c.json({ success: false, error: "An account cannot be its own parent" }, 400);
+      }
+      let cur: string | null = merged.parentCode;
+      for (let hops = 0; cur && hops < 20; hops++) {
+        if (cur === code) {
+          return c.json(
+            { success: false, error: "Cannot move an account inside its own sub-accounts" },
+            400,
+          );
+        }
+        const p: { parentCode: string | null } | null = await c.var.DB.prepare(
+          "SELECT parentCode FROM chart_of_accounts WHERE code = ?",
+        )
+          .bind(cur)
+          .first<{ parentCode: string | null }>();
+        cur = p?.parentCode ?? null;
+      }
+    }
     await c.var.DB.prepare(
       `UPDATE chart_of_accounts SET name = ?, parentCode = ?, isActive = ?, cashFlowCategory = ?, specialAccountType = ?, pnlCategory = ?, isPostable = ? WHERE code = ?`,
     )
@@ -539,6 +612,121 @@ app.put("/coa", async (c) => {
     return c.json({ success: true, data: rowToCoa(updated!) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// POST /api/accounting/coa/rename — change an account's CODE with history
+// following (owner request). Ledger legs are hash-protected and never
+// rewritten; instead the COA row moves to the new code, children re-parent,
+// legacy journal_lines update directly (not hash-protected), and an
+// old→new alias makes every report resolve prior transactions to the new
+// code. System-posted accounts are refused (PROTECTED_ACCOUNTS).
+app.post("/coa/rename", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as { oldCode?: string; newCode?: string };
+    const oldCode = String(body.oldCode ?? "").trim();
+    const newCode = String(body.newCode ?? "").trim();
+    if (!oldCode || !newCode) {
+      return c.json({ success: false, error: "oldCode and newCode are required" }, 400);
+    }
+    if (oldCode === newCode) {
+      return c.json({ success: false, error: "New code is the same as the old code" }, 400);
+    }
+    if (!/^[0-9A-Za-z][0-9A-Za-z-]{2,19}$/.test(newCode)) {
+      return c.json({ success: false, error: "New code format invalid (letters, digits, dashes; 3-20 chars)" }, 400);
+    }
+    if (PROTECTED_ACCOUNTS.has(oldCode)) {
+      return c.json(
+        {
+          success: false,
+          error: `${oldCode} is a system-posted account (auto-posting references it directly) — its code cannot be changed.`,
+        },
+        400,
+      );
+    }
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM chart_of_accounts WHERE code = ?",
+    )
+      .bind(oldCode)
+      .first<CoaRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "Account not found" }, 404);
+    }
+    const clash = await c.var.DB.prepare(
+      "SELECT code FROM chart_of_accounts WHERE code = ?",
+    )
+      .bind(newCode)
+      .first();
+    if (clash) {
+      return c.json({ success: false, error: `${newCode} already exists` }, 400);
+    }
+    try {
+      const aliasClash = await c.var.DB.prepare(
+        "SELECT oldCode FROM account_aliases WHERE oldCode = ?",
+      )
+        .bind(newCode)
+        .first();
+      if (aliasClash) {
+        return c.json(
+          { success: false, error: `${newCode} was previously renamed away — pick a different code` },
+          400,
+        );
+      }
+    } catch {
+      return c.json(
+        { success: false, error: "account_aliases table missing — run migration 0157 first" },
+        500,
+      );
+    }
+    const now = new Date().toISOString();
+    await c.var.DB.batch([
+      c.var.DB.prepare(
+        `INSERT INTO chart_of_accounts
+           (code, name, type, parentCode, balanceSen, isActive, cashFlowCategory, specialAccountType, pnlCategory, isPostable)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        newCode,
+        existing.name,
+        existing.type,
+        existing.parentCode,
+        existing.balanceSen,
+        existing.isActive,
+        existing.cashFlowCategory,
+        existing.specialAccountType,
+        existing.pnlCategory,
+        existing.isPostable ?? 1,
+      ),
+      c.var.DB.prepare(
+        "UPDATE chart_of_accounts SET parentCode = ? WHERE parentCode = ?",
+      ).bind(newCode, oldCode),
+      c.var.DB.prepare(
+        "UPDATE journal_lines SET accountCode = ? WHERE accountCode = ?",
+      ).bind(newCode, oldCode),
+      // Collapse chains: anything previously renamed TO oldCode now points
+      // straight at newCode (keeps resolution single-hop in practice).
+      c.var.DB.prepare(
+        "UPDATE account_aliases SET newCode = ? WHERE newCode = ?",
+      ).bind(newCode, oldCode),
+      c.var.DB.prepare(
+        "INSERT INTO account_aliases (oldCode, newCode, renamedAt) VALUES (?, ?, ?)",
+      ).bind(oldCode, newCode, now),
+      c.var.DB.prepare("DELETE FROM chart_of_accounts WHERE code = ?").bind(
+        oldCode,
+      ),
+    ]);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: newCode,
+      action: "update",
+      before: { code: oldCode },
+      after: { code: newCode, renamedFrom: oldCode },
+    });
+    return c.json({ success: true, data: { oldCode, newCode } });
+  } catch (e) {
+    console.error("[coa/rename] failed:", e);
+    return c.json({ success: false, error: "Rename failed — nothing was changed" }, 500);
   }
 });
 
@@ -997,9 +1185,11 @@ app.get("/ar-control", async (c) => {
   ]);
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
+  const resolveCtl = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
-    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
-    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+    const code = resolveCtl(l.accountCode);
+    dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
   }
   const controls = (coaRes.results ?? [])
     .map((a) => ({
@@ -1572,9 +1762,11 @@ app.get("/ap-control", async (c) => {
   const pcnPostedSen = Number(pcnRes?.s) || 0;
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
+  const resolveCtl = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
-    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
-    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+    const code = resolveCtl(l.accountCode);
+    dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
   }
   const controls = (coaRes.results ?? [])
     .map((a) => ({
@@ -1962,10 +2154,12 @@ app.get("/trial-balance", async (c) => {
   const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
+  const resolveTb = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
     if (String(l.postedAt ?? "").slice(0, 10) > asOf) continue;
-    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
-    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+    const code = resolveTb(l.accountCode);
+    dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
   }
   const rows: {
     accountCode: string;
@@ -2040,24 +2234,28 @@ app.get("/gl", async (c) => {
     const names = new Map(
       (coaRes.results ?? []).map((a) => [a.code, a.name] as const),
     );
+    const resolveGl = await loadAccountResolver(c.var.DB);
     const all = (legRes.results ?? []).filter((l) => {
       const d10 = String(l.postedAt ?? "").slice(0, 10);
       if (d10 < from || d10 > to) return false;
-      if (accountSet && !accountSet.has(l.accountCode)) return false;
+      if (accountSet && !accountSet.has(resolveGl(l.accountCode))) return false;
       return true;
     });
     const CAP = 1000;
-    const rows = all.slice(0, CAP).map((l) => ({
-      id: l.id,
-      postedAt: l.postedAt,
-      accountCode: l.accountCode,
-      accountName: names.get(l.accountCode) ?? "",
-      description: l.description ?? "",
-      sourceType: l.sourceType,
-      sourceId: l.sourceId,
-      debitSen: Number(l.debitSen) || 0,
-      creditSen: Number(l.creditSen) || 0,
-    }));
+    const rows = all.slice(0, CAP).map((l) => {
+      const code = resolveGl(l.accountCode);
+      return {
+        id: l.id,
+        postedAt: l.postedAt,
+        accountCode: code,
+        accountName: names.get(code) ?? "",
+        description: l.description ?? "",
+        sourceType: l.sourceType,
+        sourceId: l.sourceId,
+        debitSen: Number(l.debitSen) || 0,
+        creditSen: Number(l.creditSen) || 0,
+      };
+    });
     return c.json({
       success: true,
       data: {
@@ -2078,14 +2276,29 @@ app.get("/gl", async (c) => {
   if (!acct) {
     return c.json({ success: false, error: "Account not found" }, 404);
   }
+  // Old codes renamed INTO this account must show in its flow: query the
+  // account plus every alias that resolves to it.
+  const resolveOne = await loadAccountResolver(c.var.DB);
+  let equivalents = [account];
+  try {
+    const aliasRows = await c.var.DB.prepare(
+      "SELECT oldCode FROM account_aliases",
+    ).all<{ oldCode: string }>();
+    for (const a of aliasRows.results ?? []) {
+      if (resolveOne(a.oldCode) === account) equivalents.push(a.oldCode);
+    }
+  } catch {
+    equivalents = [account];
+  }
+  const placeholders = equivalents.map(() => "?").join(",");
   const legRes = await c.var.DB.prepare(
     `SELECT id, sourceType, sourceId, debitSen, creditSen, description,
             postedAt
        FROM ledger_journal_entries
-      WHERE accountCode = ?
+      WHERE accountCode IN (${placeholders})
       ORDER BY postedAt ASC, id ASC`,
   )
-    .bind(account)
+    .bind(...equivalents)
     .all<{
       id: string;
       sourceType: string;
@@ -2202,11 +2415,13 @@ async function computeUnclosedAsOf(
   );
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
+  const resolveYc = await loadAccountResolver(db);
   for (const l of legRes.results ?? []) {
     const d10 = String(l.postedAt ?? "").slice(0, 10);
     if (d10 > endIso) continue;
-    dr.set(l.accountCode, (dr.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0));
-    cr.set(l.accountCode, (cr.get(l.accountCode) ?? 0) + (Number(l.creditSen) || 0));
+    const code = resolveYc(l.accountCode);
+    dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
+    cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
   }
   const accounts: {
     code: string;
@@ -2599,17 +2814,19 @@ app.get("/pl", async (c) => {
   const plCr = new Map<string, number>();
   const bsDr = new Map<string, number>();
   const bsCr = new Map<string, number>();
+  const resolveAcct = await loadAccountResolver(c.var.DB);
   for (const l of legRes.results ?? []) {
     const ym = String(l.postedAt ?? "").slice(0, 7);
     const d = Number(l.debitSen) || 0;
     const cr = Number(l.creditSen) || 0;
+    const code = resolveAcct(l.accountCode);
     if (l.sourceType !== "year_close" && ymInPeriod(ym, period)) {
-      plDr.set(l.accountCode, (plDr.get(l.accountCode) ?? 0) + d);
-      plCr.set(l.accountCode, (plCr.get(l.accountCode) ?? 0) + cr);
+      plDr.set(code, (plDr.get(code) ?? 0) + d);
+      plCr.set(code, (plCr.get(code) ?? 0) + cr);
     }
     if (!endYm || ym <= endYm) {
-      bsDr.set(l.accountCode, (bsDr.get(l.accountCode) ?? 0) + d);
-      bsCr.set(l.accountCode, (bsCr.get(l.accountCode) ?? 0) + cr);
+      bsDr.set(code, (bsDr.get(code) ?? 0) + d);
+      bsCr.set(code, (bsCr.get(code) ?? 0) + cr);
     }
   }
 

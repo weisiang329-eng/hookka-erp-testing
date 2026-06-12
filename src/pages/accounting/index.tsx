@@ -152,7 +152,7 @@ function AccountPicker({
               }}
               className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[#F0ECE9] cursor-pointer"
             >
-              <span className="font-mono text-xs text-[#6B7280] mr-2">{a.code}</span>
+              <span className="tabular-nums text-xs text-[#6B7280] mr-2">{a.code}</span>
               {a.name}
             </button>
           ))}
@@ -479,7 +479,7 @@ function StockMapCard() {
           onChange={(e) => setText(e.target.value)}
           rows={6}
           placeholder="(empty — built-in default mapping in effect)"
-          className="w-full font-mono text-xs rounded-md border border-[#E2DDD8] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+          className="w-full tabular-nums text-xs rounded-md border border-[#E2DDD8] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
         />
       </CardContent>
     </Card>
@@ -759,6 +759,61 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
   // Per-parent expand/collapse (owner request) — default expanded;
   // a missing key means expanded.
   const [collapsedParents, setCollapsedParents] = useState<Record<string, boolean>>({});
+  // Drag & drop re-parenting (owner: "按着就能移动").
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
+
+  // Drop a dragged account onto a new parent. Same-section only (a
+  // Current-Asset child can't live under a COGS parent), no self/descendant
+  // drops (server re-validates the cycle).
+  const handleMove = async (srcCode: string, dstCode: string) => {
+    if (!srcCode || srcCode === dstCode) return;
+    const src = accounts.find((a) => a.code === srcCode);
+    const dst = accounts.find((a) => a.code === dstCode);
+    if (!src || !dst) return;
+    if (sectionOf(src) !== sectionOf(dst)) {
+      toast.error("Cannot move across sections — the account stays within its own section");
+      return;
+    }
+    let cur: string | undefined = dst.parentCode;
+    for (let hops = 0; cur && hops < 20; hops++) {
+      if (cur === srcCode) {
+        toast.error("Cannot move an account inside its own sub-accounts");
+        return;
+      }
+      cur = accounts.find((a) => a.code === cur)?.parentCode;
+    }
+    const res = await fetch("/api/accounting/coa", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: srcCode, parentCode: dstCode }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      toast.success(`${srcCode} moved under ${dstCode}`);
+      onRefresh();
+    } else toast.error(j?.error || "Move failed");
+  };
+
+  // Change an account's CODE — history follows via the alias layer (the
+  // server refuses system-posted accounts).
+  const handleRenameCode = async (node: ChartOfAccount) => {
+    const nc = window.prompt(
+      `Change account code for ${node.code} - ${node.name}\n\nAll past transactions on ${node.code} will follow to the new code on every report (trial balance, GL, P&L, statements).\n\nNew code:`,
+      node.code,
+    );
+    if (!nc || nc.trim() === "" || nc.trim() === node.code) return;
+    const res = await fetch("/api/accounting/coa/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ oldCode: node.code, newCode: nc.trim() }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      toast.success(`${node.code} → ${nc.trim()} (history follows)`);
+      onRefresh();
+    } else toast.error(j?.error || "Rename failed");
+  };
 
   const typeOrder: ChartOfAccount["type"][] = ["ASSET", "LIABILITY", "EQUITY", "REVENUE", "COST", "EXPENSE"];
   const typeLabels: Record<string, string> = {
@@ -992,8 +1047,33 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
           return (
             <div key={node.code}>
               <div
-                className={`flex items-center justify-between py-2 pr-2 text-sm border-b ${isHeader ? "bg-[#F0ECE9]/60 border-[#E2DDD8] font-semibold text-[#1F1D1B]" : "border-[#F0ECE9] hover:bg-[#F0ECE9]/30"} ${hasKids ? "cursor-pointer" : ""} group`}
+                className={`flex items-center justify-between py-2 pr-2 text-sm border-b ${isHeader ? "bg-[#F0ECE9]/60 border-[#E2DDD8] font-semibold text-[#1F1D1B]" : "border-[#F0ECE9] hover:bg-[#F0ECE9]/30"} ${hasKids ? "cursor-pointer" : ""} ${dragOver === node.code ? "ring-2 ring-inset ring-[#6B5C32]" : ""} ${dragging === node.code ? "opacity-40" : ""} group`}
                 style={{ paddingLeft: `${8 + depth * 22}px` }}
+                draggable
+                onDragStart={(e) => {
+                  e.stopPropagation();
+                  setDragging(node.code);
+                  e.dataTransfer.setData("text/plain", node.code);
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragEnd={() => { setDragging(null); setDragOver(null); }}
+                onDragOver={
+                  (isHeader || hasKids) && dragging && dragging !== node.code
+                    ? (e) => { e.preventDefault(); setDragOver(node.code); }
+                    : undefined
+                }
+                onDragLeave={() => { if (dragOver === node.code) setDragOver(null); }}
+                onDrop={
+                  (isHeader || hasKids)
+                    ? (e) => {
+                        e.preventDefault();
+                        const src = e.dataTransfer.getData("text/plain");
+                        setDragOver(null);
+                        setDragging(null);
+                        handleMove(src, node.code);
+                      }
+                    : undefined
+                }
                 onClick={
                   hasKids
                     ? () =>
@@ -1014,7 +1094,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                   ) : (
                     <span className="w-3.5 shrink-0" />
                   )}
-                  <span className="text-[#6B7280] font-mono text-xs">{node.code}</span>
+                  <span className="text-[#6B7280] tabular-nums text-xs">{node.code}</span>
                   {editCode === node.code ? (
                     <input
                       type="text"
@@ -1031,8 +1111,15 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                 </div>
                 <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
                   {isHeader ? (
-                    <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">
+                    <span className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-[#9CA3AF]">
                       {kids.length} sub-accounts
+                      <button
+                        onClick={() => handleRenameCode(node)}
+                        className="normal-case tracking-normal text-[#6B7280] hover:text-[#6B5C32] underline decoration-dotted cursor-pointer"
+                        title="Change account code (history follows)"
+                      >
+                        code
+                      </button>
                     </span>
                   ) : (
                     <>
@@ -1062,9 +1149,16 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                         ) : (
                           <>
                             <button
+                              onClick={() => handleRenameCode(node)}
+                              className="text-[#6B7280] hover:text-[#6B5C32] px-1 text-[11px] underline decoration-dotted cursor-pointer"
+                              title="Change account code (history follows)"
+                            >
+                              code
+                            </button>
+                            <button
                               onClick={() => { setEditCode(node.code); setEditName(node.name); }}
                               className="text-[#6B7280] hover:text-[#6B5C32] p-1 cursor-pointer"
-                              title="Edit"
+                              title="Edit name"
                             >
                               <FileText className="h-3.5 w-3.5" />
                             </button>
@@ -2062,7 +2156,7 @@ function APControlPanel() {
               <tbody>
                 {pcns.map((n) => (
                   <tr key={n.id} className="border-b border-[#F0ECE9]">
-                    <td className="px-3 py-1.5 font-mono text-xs">{n.noteNumber}</td>
+                    <td className="px-3 py-1.5 tabular-nums text-xs">{n.noteNumber}</td>
                     <td className="px-3 py-1.5">{n.supplierName}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.date}</td>
                     <td className="px-3 py-1.5 text-xs text-[#6B7280]">{n.reason}</td>
@@ -3090,7 +3184,7 @@ function TrialBalanceTab() {
                     className="border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30"
                   >
                     <td className="px-4 py-1.5">
-                      <span className="font-mono text-xs text-[#6B7280] mr-2">{r.accountCode}</span>
+                      <span className="tabular-nums text-xs text-[#6B7280] mr-2">{r.accountCode}</span>
                       <span className="text-[#1F1D1B]">{r.accountName}</span>
                     </td>
                     <td className="px-4 py-1.5 text-xs text-[#6B7280]">{r.type}</td>
@@ -3219,7 +3313,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
             <div className="flex flex-wrap gap-2">
               {picked.map((code) => (
                 <span key={code} className="inline-flex items-center gap-1.5 rounded-full border border-[#6B5C32] bg-white px-3 py-1 text-xs font-medium text-[#6B5C32]">
-                  <span className="font-mono">{code}</span> {nameOf(code)}
+                  <span className="tabular-nums">{code}</span> {nameOf(code)}
                   <button onClick={() => removeAccount(code)} className="ml-1 text-[#9A3A2D] hover:text-[#791F1F] cursor-pointer" title="Remove">✕</button>
                 </span>
               ))}
@@ -3233,7 +3327,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
 
       {account && gl && (
         <p className="text-sm text-[#6B7280]">
-          <span className="font-mono text-xs mr-1">{gl.account.code}</span>
+          <span className="tabular-nums text-xs mr-1">{gl.account.code}</span>
           <span className="font-medium text-[#1F1D1B]">{gl.account.name}</span>
           {" · "}Opening {formatCurrency(gl.openingSen)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
         </p>
@@ -3312,7 +3406,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                           className="text-left cursor-pointer hover:underline"
                           title="Filter to this account"
                         >
-                          <span className="font-mono text-xs text-[#6B7280] mr-1">{r.accountCode}</span>
+                          <span className="tabular-nums text-xs text-[#6B7280] mr-1">{r.accountCode}</span>
                           <span className="text-[#1F1D1B]">{r.accountName}</span>
                         </button>
                       </td>

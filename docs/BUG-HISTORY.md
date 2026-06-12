@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-004 — QR dispatch/deliver: every DO + Packing List gets a scannable code; drivers advance status from their own phone, no login
+
+**Status:** 🟢 Shipped (2026-06-12). 845 tests green (14 new structural pins); typecheck + build:strict green. Agent-built, security-reviewed line-by-line.
+**Category:** delivery-orders
+
+Owner flow: loading crew scans the PL after loading → taps Mark Dispatched (whole batch flips, no office clicking); driver at the customer scans again → Mark Delivered → the existing delivered cascade fires (auto-DRAFT invoice + invoice email). QR must work from a NORMAL camera with no login.
+
+- **Tokens are the credential**: lowercase `qrtoken` on delivery_orders + packing_lists (runtime ensure + migration 0167), 64 random hex, minted ONLY by authed `GET /:id/qr-token` endpoints (RBAC delivery-orders:read).
+- **Public surface** (`/api/public/do-qr/:token`, PUBLIC_PREFIXES + tightened IP rate limit 30/min): GET = minimal summary (doNo, customer, area, status, item count, first 3 product names — NO prices/addresses/contacts); POST advance = FORWARD-ONLY (DISPATCH: DRAFT→LOADED; DELIVER: LOADED/IN_TRANSIT→DELIVERED), idempotent re-scans ("already delivered"), per-DO sequential for PL batches (same deadlock rule as the office bulk buttons).
+- **Zero cascade duplication**: the office `PUT /api/delivery-orders/:id` handler and `POST /:id/notify-customer` were wrapped IN PLACE into exported `applyDeliveryOrderUpdate` / `queueDoCustomerNotice` (+111/−12 — bodies untouched); the public route calls those, so fg_units stamping, STOCK_OUT, SO cascade, FIFO COGS, auto-invoice with collision retry, audit, and the idempotent dispatch/invoice emails behave identically to an office click. Per-DO orgId is stashed from the resolved row itself (no cross-tenant reach).
+- **Driver page** `/d/:token` mounts outside the authed shell (like /track): mobile card, one amber/green action button with tap-again confirm, big-check success, "already done" state, "Open in Hookka ERP" link for staff edits (overload remove / add line stays a logged-in operation by design).
+- **QR surfaces**: QR button on DO detail, QR icon per PL row + DO context menu (print sheet with 90mm code), QR embedded in the DO PDF (above the signature strip) and the PL manifest print. DELIBERATE security call: customer-emailed PDFs do NOT carry the QR (the token grants status-advance power — customers must not be able to mark their own deliveries).
+- Tokens mint lazily on first authed QR open/print — existing documents get one the first time someone uses the QR button.
+
+---
+
 ## BUG-2026-06-12-003 — Service Case chain: narrow source search, no damaged-part layer, Spawn forced re-picking everything, no stock-only top-up path
 
 **Status:** 🟢 Shipped (2026-06-12). 831 tests green; typecheck + build:strict green. Agent-built, diff fully reviewed line-by-line before ship.

@@ -55,6 +55,12 @@ const OVERRIDES: Array<{ prefix: string; limits: RateLimitConfig; reason: string
   // a handful per minute, but each upload may stream — give it headroom.
   { prefix: "/api/upload", limits: { perMinute: 60, perHour: 1000 }, reason: "uploads are slower" },
   { prefix: "/api/files", limits: { perMinute: 60, perHour: 1000 }, reason: "file asset uploads" },
+
+  // Public QR dispatch/deliver scan flow (no session — limiter keys by IP).
+  // A driver scans one code and taps one button; even a whole crew behind
+  // one mobile-carrier NAT stays far below this. Tightened vs DEFAULT
+  // because the endpoint is reachable without login.
+  { prefix: "/api/public/do-qr", limits: { perMinute: 30, perHour: 300 }, reason: "public QR scan surface" },
 ];
 
 /**

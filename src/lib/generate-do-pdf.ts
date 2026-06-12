@@ -13,6 +13,11 @@ import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
 export type DOPrintExtras = {
   customerSO?: string;
   customerRef?: string;
+  // Delivery-status QR (data URL, rendered client-side from the DO's public
+  // scan token — see src/lib/do-qr.ts). PRINT FLOWS ONLY: the QR can advance
+  // the DO's status without login, so the customer-email PDF path
+  // (sendCustomerNotice → generateDoPdfBase64) must never set this.
+  qrDataUrl?: string;
   // Deliver-To resolved from the DO's hub (a customer can have many hubs,
   // each with its own address — the printed address must follow the hub).
   deliverTo?: string;
@@ -582,8 +587,34 @@ export function renderDoInto(
     (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable
       ?.finalY ?? HEADER_BOTTOM;
 
-  // Signature strip on the last page.
+  // Optional delivery-status QR (extras.qrDataUrl, print flows only — the
+  // customer-email path never passes it; the advance token must not leave
+  // the company). Drawn right-aligned between the items table and the
+  // signature strip, pushing the strip down; the existing page-break guard
+  // below still applies.
   let sy = afterY + 16;
+  if (extras?.qrDataUrl) {
+    const qrSize = 22;
+    let qy = afterY + 8;
+    if (qy + qrSize > pageH - 36) {
+      doc.addPage();
+      qy = 36;
+    }
+    doc.addImage(extras.qrDataUrl, "PNG", pageW - m - qrSize, qy, qrSize, qrSize);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6.8);
+    doc.setTextColor(...INK);
+    doc.text("SCAN TO UPDATE DELIVERY STATUS", pageW - m - qrSize - 3, qy + 9, {
+      align: "right",
+    });
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.2);
+    doc.setTextColor(...FAINT);
+    doc.text("Any phone camera · no login", pageW - m - qrSize - 3, qy + 12.5, {
+      align: "right",
+    });
+    sy = qy + qrSize + 10;
+  }
   if (sy > pageH - 34) {
     doc.addPage();
     sy = 36;
@@ -693,6 +724,9 @@ function renderPackingSummary(
   orders: DeliveryOrder[],
   packingNo?: string,
   extrasById?: Record<string, DOPrintExtras>,
+  // Delivery-status QR for the WHOLE run (the PL's public scan token) —
+  // one scan marks every member DO Dispatched / Delivered. Print-only.
+  qrDataUrl?: string,
 ) {
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -1060,6 +1094,32 @@ function renderPackingSummary(
     y += 11;
   });
 
+  // Delivery-status QR for the whole run — bottom-left after the drop
+  // sections (~32mm; the header corners are owned by the title block, so
+  // the QR closes the manifest instead). One scan transitions every member
+  // DO together via the public /d/<token> page.
+  if (qrDataUrl) {
+    const qrSize = 32;
+    if (y + qrSize + 6 > pageH - 14) {
+      doc.addPage();
+      y = 18;
+    }
+    doc.addImage(qrDataUrl, "PNG", m, y + 2, qrSize, qrSize);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(...INK);
+    doc.text("SCAN TO UPDATE DELIVERY STATUS", m + qrSize + 4, y + 12);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(6.8);
+    doc.setTextColor(...FAINT);
+    doc.text(
+      "Any phone camera · no login · one tap marks every DO on this run Dispatched / Delivered.",
+      m + qrSize + 4,
+      y + 16.5,
+    );
+    y += qrSize + 8;
+  }
+
   if (y < pageH - 12) {
     doc.setFont("helvetica", "italic");
     doc.setFontSize(7);
@@ -1087,10 +1147,13 @@ export function generateConsolidatedDoPdf(
   // per-DO delivery-order forms that normally follow it. The packing list
   // is a standalone driver manifest; the DOs print separately.
   includeDoPages = true,
+  // Optional delivery-status QR for the run (the PL's public scan token,
+  // pre-rendered to a data URL via src/lib/do-qr.ts). Print flows only.
+  plQrDataUrl?: string,
 ) {
   if (!orders || orders.length === 0) return;
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4", compress: true });
-  renderPackingSummary(doc, orders, packingNo, extrasById);
+  renderPackingSummary(doc, orders, packingNo, extrasById, plQrDataUrl);
   if (includeDoPages) {
     orders.forEach((o, i) => {
       doc.addPage();

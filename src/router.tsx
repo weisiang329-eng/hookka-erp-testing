@@ -11,6 +11,10 @@ import { PageSkeleton } from './components/ui/skeleton'
 // Public tracking (standalone, no auth)
 const Track = lazy(() => import('./pages/track'))
 
+// Public QR dispatch/deliver page (standalone, no auth — the unguessable
+// token in /d/:token is the credential; see routes/public-do-qr.ts)
+const DoScan = lazy(() => import('./pages/do-scan'))
+
 // Auth
 const Login = lazy(() => import('./pages/login'))
 const InviteAccept = lazy(() => import('./pages/InviteAccept'))
@@ -70,6 +74,10 @@ export const router = createBrowserRouter([
 
   // Public FG unit tracking (standalone, no auth, mobile-friendly)
   { path: '/track', element: <S><Track /></S> },
+
+  // Public DO/PL QR scan page (standalone, no auth, mobile-friendly —
+  // drivers mark Dispatched/Delivered here; token is the credential)
+  { path: '/d/:token', element: <S><DoScan /></S> },
 
   // Dashboard layout — gated behind RequireAuth. All dashboard routes share
   // the one `TabbedOutlet` inside DashboardLayout, which renders its own

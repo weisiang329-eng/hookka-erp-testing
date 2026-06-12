@@ -22,10 +22,13 @@ import {
   MapPinned,
   AlertTriangle,
   Box,
+  QrCode,
 } from "lucide-react";
 // PDF generators are dynamic-imported in the click handlers so the 1MB
 // jspdf vendor chunk only ships when the user actually downloads a PDF.
 import PODDialog from "@/components/delivery/POD-dialog";
+import DoQrDialog from "@/components/delivery/do-qr-dialog";
+import { fetchDoQrDataUrl } from "@/lib/do-qr";
 import type { ProofOfDelivery } from "@/types";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
@@ -145,6 +148,9 @@ export default function DeliveryDetailPage() {
   const loading = doLoading || lorryLoading;
   const [updating, setUpdating] = useState(false);
   const [podOpen, setPodOpen] = useState(false);
+  // Delivery-status QR modal — drivers scan it to Mark Dispatched/Delivered
+  // from their own phones (no login; see /d/:token + routes/public-do-qr.ts).
+  const [qrOpen, setQrOpen] = useState(false);
   const setOrder = setOrderOverride;
 
   const advanceStatus = async (nextStatus?: string) => {
@@ -376,6 +382,9 @@ export default function DeliveryDetailPage() {
         }
         actions={
           <>
+            <Button variant="outline" size="sm" onClick={() => setQrOpen(true)}>
+              <QrCode className="h-4 w-4" /> QR
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -398,6 +407,9 @@ export default function DeliveryDetailPage() {
                 } catch {
                   /* graceful — PDF still renders without extras */
                 }
+                // Delivery-status QR onto the printed DO (best-effort, print
+                // flow only — never on the customer-email PDF).
+                extras.qrDataUrl = await fetchDoQrDataUrl("DO", order.id);
                 generateDOPdf(
                   order as unknown as import("@/types").DeliveryOrder,
                   extras,
@@ -855,6 +867,15 @@ export default function DeliveryDetailPage() {
         customerName={order.customerName}
         onClose={() => setPodOpen(false)}
         onSubmit={handleSubmitPOD}
+      />
+
+      {/* Delivery-status QR (driver scan → /d/<token>, no login) */}
+      <DoQrDialog
+        open={qrOpen}
+        kind="DO"
+        recordId={order.id}
+        docNo={order.doNo}
+        onClose={() => setQrOpen(false)}
       />
     </div>
   );

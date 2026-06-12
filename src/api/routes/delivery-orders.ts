@@ -51,6 +51,7 @@ import {
   fmtEmailDate,
 } from "../lib/customer-notify";
 import { buildSimpleTablePdf } from "../lib/assistant-exports";
+import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 // Company office number — the driver-contact fallback on dispatch notices
 // (owner rule: no driver phone on file → give the company's number).
 
@@ -4517,15 +4518,39 @@ app.post("/:id/notify-customer", async (c) => {
   if (denied) return denied;
 
   const id = c.req.param("id");
+  const body = (await c.req.json().catch(() => ({}))) as {
+    kind?: string;
+    pdfBase64?: string;
+    pdfFilename?: string;
+    itemsBreakdown?: string;
+    customerPOIds?: string[];
+  };
+  return queueDoCustomerNotice(c, id, body);
+});
+
+// ---------------------------------------------------------------------------
+// queueDoCustomerNotice — the FULL body of POST /:id/notify-customer above,
+// extracted verbatim so the public QR scan flow (routes/public-do-qr.ts)
+// can queue the SAME customer notice the office click queues after a
+// transition — recipient chain, idempotency stamps and the server-rendered
+// invoice-PDF fallback all behave identically. The public caller passes
+// only { kind } (no client-rendered PDF), which this path already supports:
+// dispatch notices go out without an attachment and invoice notices fall
+// back to buildSimpleTablePdf.
+// ---------------------------------------------------------------------------
+export async function queueDoCustomerNotice(
+  c: Context<Env>,
+  id: string,
+  body: {
+    kind?: string;
+    pdfBase64?: string;
+    pdfFilename?: string;
+    itemsBreakdown?: string;
+    customerPOIds?: string[];
+  },
+): Promise<Response> {
   try {
     await ensureNotifyEmailColumns(c.var.DB);
-    const body = (await c.req.json().catch(() => ({}))) as {
-      kind?: string;
-      pdfBase64?: string;
-      pdfFilename?: string;
-      itemsBreakdown?: string;
-      customerPOIds?: string[];
-    };
     const kind =
       body.kind === "DISPATCHED" || body.kind === "DELIVERED"
         ? body.kind
@@ -4850,6 +4875,43 @@ app.post("/:id/notify-customer", async (c) => {
       500,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/delivery-orders/:id/qr-token — authed QR endpoint for the driver
+// scan flow. Lazily mints the DO's unguessable qrtoken (migration 0167,
+// runtime self-applied) on first use and returns the public scan URL.
+// Scanning the QR with a normal phone camera opens /d/<token> — no login —
+// where the crew/driver can Mark Dispatched / Mark Delivered through the
+// SAME transition path as the office buttons (routes/public-do-qr.ts).
+// ---------------------------------------------------------------------------
+app.get("/:id/qr-token", async (c) => {
+  // Read-level gate — the QR is printed by whoever can view/print the DO
+  // (same gate as /print-extras above). Minting the token is an idempotent
+  // internal detail of "show me the QR".
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const exists = await c.var.DB.prepare(
+    "SELECT id, doNo FROM delivery_orders WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; doNo: string }>();
+  if (!exists) {
+    return c.json({ success: false, error: "Delivery order not found" }, 404);
+  }
+  const token = await getOrCreateQrToken(c.var.DB, "delivery_orders", id);
+  if (!token) {
+    return c.json({ success: false, error: "Failed to generate QR token" }, 500);
+  }
+  return c.json({
+    success: true,
+    data: {
+      token,
+      url: qrScanUrl(new URL(c.req.url).origin, token),
+      doNo: exists.doNo,
+    },
+  });
 });
 
 // GET /api/delivery-orders/:id — single
@@ -4879,6 +4941,38 @@ app.put("/:id", async (c) => {
   if (denied) return denied;
 
   const id = c.req.param("id");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let body: Record<string, any>;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+  }
+  return applyDeliveryOrderUpdate(c, id, body);
+});
+
+// ---------------------------------------------------------------------------
+// applyDeliveryOrderUpdate — the FULL body of PUT /api/delivery-orders/:id
+// above, extracted verbatim so the public QR scan flow (routes/public-do-qr.ts
+// POST /api/public/do-qr/:token/advance) transitions a DO through the EXACT
+// same path as an office click — every guard + cascade (status-transition
+// validation, fg_units stamping + STOCK_OUT on dispatch, SO SHIPPED cascade,
+// fg_units DELIVERED + FIFO COGS + SO/auto-invoice cascade with the
+// invoice-number collision retry, audit emit) runs once here and only here.
+// There is deliberately NO second write path to drift (same rule as
+// createPackingListCore in packing-lists.ts).
+//
+// Auth/orgId contract: the office route gates with requirePermission before
+// calling. The public route validates the unguessable qrtoken instead and
+// stashes the DO row's own orgId on the context (the DELIVERED cascade reads
+// getOrgId(c) for the invoice ledger legs) — see public-do-qr.ts.
+// ---------------------------------------------------------------------------
+export async function applyDeliveryOrderUpdate(
+  c: Context<Env>,
+  id: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  body: Record<string, any>,
+): Promise<Response> {
   try {
     const existing = await c.var.DB.prepare(
       "SELECT * FROM delivery_orders WHERE id = ?",
@@ -4897,7 +4991,6 @@ app.put("/:id", async (c) => {
     // those are gated by other guards below; the lock only fires for
     // edits that touch items / quantities / customer / driver.
     const lockMsg = await checkDeliveryOrderLocked(c.var.DB, id);
-    const body = await c.req.json();
     const isStatusOnly =
       body.status &&
       !body.items &&
@@ -5711,7 +5804,7 @@ app.put("/:id", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error updating delivery order" }, 500);
   }
-});
+}
 
 // DELETE /api/delivery-orders/:id — only DRAFT rows are deletable.
 app.delete("/:id", async (c) => {

@@ -75,6 +75,13 @@ const PUBLIC_PREFIXES = [
   // own CRON_SECRET HMAC check (constant-time SHA-256) before doing any
   // work. No session — external cron services can't carry one anyway.
   "/api/internal/reports/",
+  // 2026-06-12 — QR dispatch/deliver scan flow. Drivers scan the QR printed
+  // on a DO / Packing List with a normal phone camera — no session exists.
+  // The handler's gate is the unguessable 64-hex qrtoken (migration 0167):
+  // GET returns a minimal no-price summary; POST /advance only performs the
+  // forward DO transitions (DRAFT→LOADED, LOADED/IN_TRANSIT→DELIVERED)
+  // through the SAME office PUT path. See routes/public-do-qr.ts.
+  "/api/public/do-qr/",
 ];
 
 // Customer QR tracking lookup: only the single-unit GET is public. The list

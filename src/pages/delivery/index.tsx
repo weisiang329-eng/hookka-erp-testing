@@ -27,9 +27,12 @@ import {
   X,
   Users,
   Save,
+  QrCode,
 } from "lucide-react";
 import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/types";
 import PODDialog from "@/components/delivery/POD-dialog";
+import DoQrDialog from "@/components/delivery/do-qr-dialog";
+import { fetchDoQrDataUrl } from "@/lib/do-qr";
 import PrintDO from "@/components/delivery/print-do";
 import type { PrintDOData, PrintMode } from "@/components/delivery/print-do";
 import { compareDoLinesByCustomerPO } from "@/lib/do-item-order";
@@ -2318,6 +2321,9 @@ export default function DeliveryPage() {
         }),
       );
       const { generateConsolidatedDoPdf } = await import("@/lib/generate-do-pdf");
+      // Delivery-status QR for the whole run (best-effort) — one scan on the
+      // printed manifest marks every member DO Dispatched / Delivered.
+      const plQrDataUrl = await fetchDoQrDataUrl("PL", pl.id);
       // Packing list prints as a standalone driver manifest only — no DO forms
       // bundled behind it (operator request 2026-06-02).
       generateConsolidatedDoPdf(
@@ -2326,6 +2332,7 @@ export default function DeliveryPage() {
         mode,
         pl.packingNo,
         false,
+        plQrDataUrl,
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to generate packing list");
@@ -2557,6 +2564,14 @@ export default function DeliveryPage() {
   // auto-invoice, SO status) runs once per DO exactly as if the operator
   // clicked each DO — no second write path to drift.
   const [plBulkBusy, setPlBulkBusy] = useState<string | null>(null);
+  // Delivery-status QR modal (DO or PL) — drivers scan the printed QR to
+  // Mark Dispatched / Delivered from their own phones, no login
+  // (/d/<token> + routes/public-do-qr.ts).
+  const [qrDialog, setQrDialog] = useState<{
+    kind: "DO" | "PL";
+    id: string;
+    docNo: string;
+  } | null>(null);
   const runPlBulkTransition = async (
     pl: PackingListRecord,
     nextStatus: "LOADED" | "DELIVERED",
@@ -3064,6 +3079,9 @@ export default function DeliveryPage() {
     } catch {
       /* graceful — PDF still renders without extras */
     }
+    // Delivery-status QR onto the printed DO (best-effort, print flow only —
+    // never on the customer-email PDF).
+    extras.qrDataUrl = await fetchDoQrDataUrl("DO", row.id);
     const { generateDOPdf } = await import("@/lib/generate-do-pdf");
     generateDOPdf(
       row as unknown as import("@/types").DeliveryOrder,
@@ -3780,6 +3798,11 @@ export default function DeliveryPage() {
         icon: <FileText className="h-3.5 w-3.5" />,
         action: () => triggerPrint(row, "packing-list"),
       },
+      {
+        label: "QR — Driver Scan",
+        icon: <QrCode className="h-3.5 w-3.5" />,
+        action: () => setQrDialog({ kind: "DO", id: row.id, docNo: row.doNo }),
+      },
       { label: "", separator: true, action: () => {} },
       {
         label: "Mark Dispatched",
@@ -4413,6 +4436,20 @@ export default function DeliveryPage() {
                                 Dispatch / Delivered keep their labels above:
                                 they change real order status and must read
                                 unambiguously. */}
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="QR — drivers scan to mark Dispatched / Delivered"
+                              onClick={() =>
+                                setQrDialog({
+                                  kind: "PL",
+                                  id: pl.id,
+                                  docNo: pl.packingNo,
+                                })
+                              }
+                            >
+                              <QrCode className="h-3.5 w-3.5" />
+                            </Button>
                             <Button
                               variant="outline"
                               size="sm"
@@ -6594,6 +6631,17 @@ export default function DeliveryPage() {
           `hidden print:block` pattern; this brings PrintDO in line. */}
       {printData && (
         <PrintDO ref={printRef} data={printData.data} mode={printData.mode} />
+      )}
+
+      {/* Delivery-status QR (DO or PL — driver scan → /d/<token>, no login) */}
+      {qrDialog && (
+        <DoQrDialog
+          open
+          kind={qrDialog.kind}
+          recordId={qrDialog.id}
+          docNo={qrDialog.docNo}
+          onClose={() => setQrDialog(null)}
+        />
       )}
     </div>
   );

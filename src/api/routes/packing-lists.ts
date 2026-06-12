@@ -18,6 +18,7 @@ import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { loadDoValueMap } from "../lib/do-value";
+import { getOrCreateQrToken, qrScanUrl } from "../lib/do-qr-token";
 
 const app = new Hono<Env>();
 
@@ -438,6 +439,52 @@ app.get("/", async (c) => {
   } catch (e) {
     // Table not migrated yet — don't break the delivery page; return empty.
     if (isMissingTable(e)) return c.json({ success: true, data: [], total: 0 });
+    throw e;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/packing-lists/:id/qr-token — authed QR endpoint for the driver
+// scan flow. Lazily mints the PL's unguessable qrtoken (migration 0167,
+// runtime self-applied) and returns the public scan URL. Scanning the PL QR
+// opens /d/<token> — no login — where ONE tap transitions ALL the list's
+// member DOs together, through the same per-DO path as the office PL-level
+// Dispatch/Delivered buttons (routes/public-do-qr.ts).
+// ---------------------------------------------------------------------------
+app.get("/:id/qr-token", async (c) => {
+  // Read-level gate — the QR is printed by whoever can view/print the PL
+  // (mirrors GET /api/delivery-orders/:id/qr-token).
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  try {
+    const exists = await c.var.DB.prepare(
+      "SELECT id, packing_no FROM packing_lists WHERE id = ? AND org_id = ?",
+    )
+      .bind(id, orgId)
+      .first<{ id: string; packingNo: string }>();
+    if (!exists) {
+      return c.json({ success: false, error: "Packing list not found." }, 404);
+    }
+    const token = await getOrCreateQrToken(c.var.DB, "packing_lists", id);
+    if (!token) {
+      return c.json({ success: false, error: "Failed to generate QR token" }, 500);
+    }
+    return c.json({
+      success: true,
+      data: {
+        token,
+        url: qrScanUrl(new URL(c.req.url).origin, token),
+        packingNo: exists.packingNo,
+      },
+    });
+  } catch (e) {
+    if (isMissingTable(e))
+      return c.json(
+        { success: false, error: "Packing list storage is not set up yet." },
+        503,
+      );
     throw e;
   }
 });

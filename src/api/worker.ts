@@ -619,6 +619,10 @@ import eInvoices from "./routes/e-invoices";
 import threeWayMatch from "./routes/three-way-match";
 import deliveryOrders from "./routes/delivery-orders";
 import packingLists from "./routes/packing-lists";
+// Public QR dispatch/deliver flow (no login — the unguessable qrtoken IS the
+// credential; auth bypass via PUBLIC_PREFIXES in lib/auth-middleware.ts).
+// Transitions reuse applyDeliveryOrderUpdate, the exact office PUT path.
+import publicDoQr from "./routes/public-do-qr";
 import cncTemplates from "./routes/cnc-templates";
 import invoices from "./routes/invoices";
 import payments from "./routes/payments";
@@ -766,6 +770,11 @@ app.route("/api/e-invoices", eInvoices);
 app.route("/api/three-way-match", threeWayMatch);
 app.route("/api/delivery-orders", deliveryOrders);
 app.route("/api/packing-lists", packingLists);
+// Public QR scan flow for DOs/PLs. Registered like any other subapp — the
+// auth bypass happens in authMiddleware (PUBLIC_PREFIXES "/api/public/do-qr/"),
+// so the request still flows through tenant + rate-limit middleware (the
+// limiter keys by client IP when there is no session).
+app.route("/api/public/do-qr", publicDoQr);
 app.route("/api/cnc-templates", cncTemplates);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);

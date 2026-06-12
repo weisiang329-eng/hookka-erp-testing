@@ -2368,6 +2368,11 @@ app.get("/gl", async (c) => {
           .filter(Boolean),
       )
     : null;
+  // AutoCount-style ledger scope (owner): sales = every SDC debtor control
+  // (300-x trade + 305-0000 other debtor), purchase = every SCC creditor
+  // control (400-0000 + 405-0000 other creditors), general = everything
+  // that is neither, all = no scope.
+  const ledgerScope = (c.req.query("ledger") || "all").toLowerCase();
   if (!account) {
     const legRes = await c.var.DB.prepare(
       `SELECT id, accountCode, sourceType, sourceId, debitSen, creditSen,
@@ -2385,16 +2390,36 @@ app.get("/gl", async (c) => {
       postedAt: string;
     }>();
     const coaRes = await c.var.DB.prepare(
-      "SELECT code, name FROM chart_of_accounts",
-    ).all<{ code: string; name: string }>();
+      "SELECT code, name, specialAccountType FROM chart_of_accounts",
+    ).all<{ code: string; name: string; specialAccountType: string | null }>();
     const names = new Map(
       (coaRes.results ?? []).map((a) => [a.code, a.name] as const),
     );
+    const sdcSet = new Set<string>();
+    const sccSet = new Set<string>();
+    for (const a of coaRes.results ?? []) {
+      if (a.specialAccountType === "SDC") sdcSet.add(a.code);
+      else if (a.specialAccountType === "SCC") sccSet.add(a.code);
+    }
+    const inScope = (code: string): boolean => {
+      switch (ledgerScope) {
+        case "sales":
+          return sdcSet.has(code);
+        case "purchase":
+          return sccSet.has(code);
+        case "general":
+          return !sdcSet.has(code) && !sccSet.has(code);
+        default:
+          return true;
+      }
+    };
     const resolveGl = await loadAccountResolver(c.var.DB);
     const all = (legRes.results ?? []).filter((l) => {
       const d10 = String(l.postedAt ?? "").slice(0, 10);
       if (d10 < from || d10 > to) return false;
-      if (accountSet && !accountSet.has(resolveGl(l.accountCode))) return false;
+      const code = resolveGl(l.accountCode);
+      if (accountSet && !accountSet.has(code)) return false;
+      if (!inScope(code)) return false;
       return true;
     });
     const CAP = 1000;

@@ -3368,15 +3368,33 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
     totalCreditSen?: number;
     rows: GlRow[];
   } | null>(null);
+  // AutoCount-style ledger scope (owner): sales = SDC debtor controls
+  // (300-x trade + 305-0000 Other Debtor), purchase = SCC creditor
+  // controls (400-0000 + 405-0000 Other Creditors), general = everything
+  // that is neither.
+  const [ledger, setLedger] = useState<"all" | "general" | "sales" | "purchase">("all");
   const account = picked.length === 1 ? picked[0] : "";
   const loading = account ? gl === null : all === null;
   const nameOf = (code: string) => accounts.find((a) => a.code === code)?.name ?? "";
+  const inLedgerScope = (a: ChartOfAccount): boolean => {
+    switch (ledger) {
+      case "sales":
+        return a.specialAccountType === "SDC";
+      case "purchase":
+        return a.specialAccountType === "SCC";
+      case "general":
+        return a.specialAccountType !== "SDC" && a.specialAccountType !== "SCC";
+      default:
+        return true;
+    }
+  };
 
   useEffect(() => {
     let stale = false;
     const params = new URLSearchParams();
     if (picked.length === 1) params.set("account", picked[0]);
     else if (picked.length > 1) params.set("accounts", picked.join(","));
+    if (ledger !== "all") params.set("ledger", ledger);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     fetch(`/api/accounting/gl?${params.toString()}`)
@@ -3389,7 +3407,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
       .catch(() => {});
     return () => { stale = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picked.join(","), from, to]);
+  }, [picked.join(","), ledger, from, to]);
 
   const reset = () => {
     setAll(null);
@@ -3413,12 +3431,31 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
       <Card>
         <CardContent className="p-4 space-y-3 bg-[#F7F4EF] rounded-lg">
           <div className="flex flex-wrap items-end gap-4">
+            <div>
+              <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Ledger</label>
+              <select
+                value={ledger}
+                onChange={(e) => {
+                  setLedger(e.target.value as typeof ledger);
+                  // Scope change clears the picked set — keeping accounts
+                  // outside the new scope would just intersect to nothing.
+                  setPicked([]);
+                  reset();
+                }}
+                className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
+              >
+                <option value="all">All Ledgers</option>
+                <option value="general">General Ledger</option>
+                <option value="sales">Sales Ledger (Debtors)</option>
+                <option value="purchase">Purchase Ledger (Creditors)</option>
+              </select>
+            </div>
             <div className="w-80">
               <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">
                 Account filter <span className="font-normal text-[#6B7280]">(type keyword, pick one or MORE)</span>
               </label>
               <AccountPicker
-                accounts={accounts.filter((a) => !picked.includes(a.code))}
+                accounts={accounts.filter((a) => !picked.includes(a.code) && inLedgerScope(a))}
                 value=""
                 onChange={addAccount}
                 placeholder="Type code or name to add an account…"
@@ -3432,8 +3469,8 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
               <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">To</label>
               <input type="date" value={to} onChange={(e) => { setTo(e.target.value); reset(); }} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm" />
             </div>
-            {(picked.length > 0 || from || to) && (
-              <Button variant="outline" size="sm" onClick={() => { setPicked([]); setFrom(""); setTo(""); reset(); }}>
+            {(picked.length > 0 || ledger !== "all" || from || to) && (
+              <Button variant="outline" size="sm" onClick={() => { setPicked([]); setLedger("all"); setFrom(""); setTo(""); reset(); }}>
                 Clear all
               </Button>
             )}
@@ -3449,7 +3486,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
             </div>
           )}
           <p className="text-[11px] text-[#9CA3AF]">
-            No account picked = full ledger · pick ONE for running balances · pick SEVERAL to review them together
+            Ledger scope first (AutoCount-style: Sales = debtor controls, Purchase = creditor controls, General = the rest) · no account picked = whole scope · pick ONE for running balances · pick SEVERAL to review together
           </p>
         </CardContent>
       </Card>

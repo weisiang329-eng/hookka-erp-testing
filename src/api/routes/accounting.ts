@@ -195,6 +195,42 @@ const PROTECTED_ACCOUNTS = new Set([
   "330-3005", "330-4000", "330-8000", "330-9000",
 ]);
 
+// "Does this account carry any amount?" — gate before promoting a leaf
+// account into a parent (drag & drop). Checks the immutable ledger plus
+// legacy journal_lines, resolving renamed codes so history posted under
+// an old code still counts. A missing table reads as "no postings".
+async function accountHasPostings(
+  db: Env["Variables"]["DB"],
+  code: string,
+): Promise<boolean> {
+  const resolve = await loadAccountResolver(db);
+  const codes = new Set([code]);
+  try {
+    const res = await db
+      .prepare("SELECT oldCode FROM account_aliases")
+      .all<{ oldCode: string }>();
+    for (const r of res.results ?? []) {
+      if (resolve(r.oldCode) === code) codes.add(r.oldCode);
+    }
+  } catch {
+    /* alias table absent — identity resolution only */
+  }
+  const list = [...codes];
+  const marks = list.map(() => "?").join(",");
+  for (const table of ["ledger_journal_entries", "journal_lines"]) {
+    try {
+      const hit = await db
+        .prepare(`SELECT 1 AS x FROM ${table} WHERE accountCode IN (${marks}) LIMIT 1`)
+        .bind(...list)
+        .first<{ x: number }>();
+      if (hit) return true;
+    } catch {
+      /* table absent on pre-migration DBs */
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // AGING
 // ---------------------------------------------------------------------------
@@ -588,6 +624,46 @@ app.put("/coa", async (c) => {
           .bind(cur)
           .first<{ parentCode: string | null }>();
         cur = p?.parentCode ?? null;
+      }
+      // Owner (2026-06): dropping onto a LEAF account promotes it into a
+      // parent — allowed only when that account carries NO amount (zero
+      // running balance and no postings, renamed codes resolved). The
+      // promoted parent flips non-postable (AutoCount convention) so it
+      // can never accumulate its own amount later. Accounts that already
+      // have children (incl. postable parents like 410-0000 ACCRUALS)
+      // keep today's behaviour.
+      const newParent = await c.var.DB.prepare(
+        "SELECT balanceSen, isPostable FROM chart_of_accounts WHERE code = ?",
+      )
+        .bind(merged.parentCode)
+        .first<{ balanceSen: number | null; isPostable: number | null }>();
+      if (newParent) {
+        const kidCount = await c.var.DB.prepare(
+          "SELECT COUNT(*) AS c FROM chart_of_accounts WHERE parentCode = ?",
+        )
+          .bind(merged.parentCode)
+          .first<{ c: number }>();
+        if ((kidCount?.c ?? 0) === 0) {
+          if (
+            (newParent.balanceSen ?? 0) !== 0 ||
+            (await accountHasPostings(c.var.DB, merged.parentCode))
+          ) {
+            return c.json(
+              {
+                success: false,
+                error: `${merged.parentCode} already has an amount — an account can only become a parent while its balance is zero and it has no transactions`,
+              },
+              400,
+            );
+          }
+          if ((newParent.isPostable ?? 1) === 1) {
+            await c.var.DB.prepare(
+              "UPDATE chart_of_accounts SET isPostable = 0 WHERE code = ?",
+            )
+              .bind(merged.parentCode)
+              .run();
+          }
+        }
       }
     }
     await c.var.DB.prepare(

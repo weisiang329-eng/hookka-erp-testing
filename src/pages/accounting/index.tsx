@@ -838,7 +838,9 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
 
   // Drop a dragged account onto a new parent. Same-section only (a
   // Current-Asset child can't live under a COGS parent), no self/descendant
-  // drops (server re-validates the cycle).
+  // drops (server re-validates the cycle). Dropping onto a LEAF account
+  // promotes it into a parent — only while it carries no amount (the
+  // server re-checks the ledger and flips it non-postable on promotion).
   const handleMove = async (srcCode: string, dstCode: string) => {
     if (!srcCode || srcCode === dstCode) return;
     const src = accounts.find((a) => a.code === srcCode);
@@ -855,6 +857,11 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
         return;
       }
       cur = accounts.find((a) => a.code === cur)?.parentCode;
+    }
+    const dstHasKids = accounts.some((a) => a.parentCode === dstCode);
+    if (!dstHasKids && (dst.balance ?? 0) !== 0) {
+      toast.error(`${dstCode} already has an amount — it can only become a parent while its balance is zero`);
+      return;
     }
     const res = await fetch("/api/accounting/coa", {
       method: "PUT",
@@ -1131,22 +1138,20 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                 }}
                 onDragEnd={() => { setDragging(null); setDragOver(null); }}
                 onDragOver={
-                  (isHeader || hasKids) && dragging && dragging !== node.code
+                  // Any node can receive a drop — a leaf target gets
+                  // promoted into a parent (handleMove gates on amount).
+                  dragging && dragging !== node.code
                     ? (e) => { e.preventDefault(); setDragOver(node.code); }
                     : undefined
                 }
                 onDragLeave={() => { if (dragOver === node.code) setDragOver(null); }}
-                onDrop={
-                  (isHeader || hasKids)
-                    ? (e) => {
-                        e.preventDefault();
-                        const src = e.dataTransfer.getData("text/plain");
-                        setDragOver(null);
-                        setDragging(null);
-                        handleMove(src, node.code);
-                      }
-                    : undefined
-                }
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const src = e.dataTransfer.getData("text/plain");
+                  setDragOver(null);
+                  setDragging(null);
+                  handleMove(src, node.code);
+                }}
                 onClick={
                   hasKids
                     ? () =>

@@ -51,6 +51,8 @@ Shipped in the same commit (feature, not a bug): the Affected-Products panel can
 
 **Defense-in-depth note:** this is belt-and-suspenders — `requireSuperAdmin` is independent of the permission set, so even if a future role edit hands someone `*:*`, the user-management routes stay Super-Admin-only.
 
+**Follow-up (same day) — per-row "Change role" editor.** The Admin role could only be set at INVITE time; there was no way to re-role an existing user (owner: "我要怎樣edit他們的role 沒有edit button"), making the new role unusable on the 6 existing Super Admins. Added a pencil "Change role" button per user row (Super-Admin-only, hidden for Admins like the other controls) → modal role picker. Backend already supported it: `PUT /api/users/:id` accepts `role`, gated by `users:role-change` + the new `requireSuperAdmin`, and purges sessions on a role flip so access updates immediately. Save uses `verifiedSave` (read-back confirms the role actually changed, same as the enable/disable toggle); confirm dialog warns about session-end + self-demotion. `ROLE_OPTIONS` is now one shared constant feeding both the invite dropdown and the edit modal so they can't drift. `src/pages/settings/Users.tsx`; tsc 0, build:strict 0, suite green; deployed + verified live.
+
 ---
 
 ## BUG-2026-06-12-009 — Scan-PO OCR modal: a stray backdrop click wiped the whole scan/preview, and a wedged extract froze the modal at "0 of N done" forever

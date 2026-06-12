@@ -82,6 +82,10 @@ type ServiceCaseRow = {
   // read dual-key like sales_orders.caseid below.
   responsibleUnit?: ResponsibleUnit | null;
   responsibleunit?: ResponsibleUnit | null;
+  // investigatingat is a runtime-added lowercase column (migration 0168) —
+  // read dual-key. ISO timestamp the case first hit IN_PROGRESS.
+  investigatingAt?: string | null;
+  investigatingat?: string | null;
   affectedProductIds: string | null;
   preventionAction: string | null;
   preventionStatus: PreventionStatus | null;
@@ -175,6 +179,16 @@ function ensureCaseLinkColumns(db: D1Database): Promise<void> {
     try {
       await db
         .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS responsibleunit TEXT")
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+    try {
+      // investigatingat (migration 0168) — set the first time the case is
+      // marked IN_PROGRESS, so the Case Pipeline can date the Investigating
+      // stage (the only stage without another native timestamp).
+      await db
+        .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS investigatingat TEXT")
         .run();
     } catch {
       // ignore — column may already exist or DDL transiently rejected
@@ -309,6 +323,9 @@ function rowToApi(
     createdByName: row.createdByName ?? "",
     createdAt: row.createdAt ?? "",
     closedAt: row.closedAt ?? "",
+    // Dual-key read — runtime-added lowercase column (migration 0168). Drives
+    // the Case Pipeline's Investigating-stage date + per-stage durations.
+    investigatingAt: row.investigatingAt ?? row.investigatingat ?? null,
     notes: row.notes ?? "",
     orders: [
       ...orders
@@ -638,6 +655,16 @@ app.put("/:id", async (c) => {
         ? existing.affectedProductIds
         : sanitizeAffectedProductsJson(body.affectedProducts);
 
+    // investigatingat (migration 0168) — stamp the FIRST time a PUT moves the
+    // case to IN_PROGRESS, only when not already set (COALESCE keeps the
+    // earliest entry). PUT /:id doesn't write status itself, but this records
+    // the Investigating timestamp on any path that signals IN_PROGRESS.
+    const investigatingAt =
+      body.status === "IN_PROGRESS" &&
+      !(existing.investigatingAt ?? existing.investigatingat)
+        ? new Date().toISOString()
+        : null;
+
     await c.var.DB
       .prepare(
         `UPDATE service_cases SET
@@ -645,7 +672,8 @@ app.put("/:id", async (c) => {
            rootCauseCategory = ?, responsibleunit = ?, rootCauseNotes = ?, rootCauseDetails = ?,
            affectedProductIds = ?,
            preventionAction = ?, preventionStatus = ?, preventionOwner = ?,
-           externalRef = ?, actionLog = ?
+           externalRef = ?, actionLog = ?,
+           investigatingat = COALESCE(?, investigatingat)
          WHERE id = ?`,
       )
       .bind(
@@ -674,6 +702,7 @@ app.put("/:id", async (c) => {
           ? ((body.externalRef as string) ?? null)
           : existing.externalRef,
         actionLogJson,
+        investigatingAt,
         id,
       )
       .run();
@@ -709,15 +738,17 @@ app.put("/:id/status", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   try {
+    // investigatingat (migration 0168) is referenced in the UPDATE below.
+    await ensureCaseLinkColumns(c.var.DB);
     const body = (await c.req.json()) as { status?: string };
     const next = body.status as CaseStatus;
     if (!VALID_STATUSES.includes(next)) {
       return c.json({ success: false, error: "status invalid" }, 400);
     }
     const existing = await c.var.DB
-      .prepare("SELECT status FROM service_cases WHERE id = ?")
+      .prepare("SELECT status, investigatingat FROM service_cases WHERE id = ?")
       .bind(id)
-      .first<{ status: CaseStatus }>();
+      .first<{ status: CaseStatus; investigatingat: string | null }>();
     if (!existing) {
       return c.json({ success: false, error: "Service case not found" }, 404);
     }
@@ -731,12 +762,18 @@ app.put("/:id/status", async (c) => {
         409,
       );
     }
-    const closedAt = next === "CLOSED" || next === "CANCELLED" ? new Date().toISOString() : null;
+    const nowIso = new Date().toISOString();
+    const closedAt = next === "CLOSED" || next === "CANCELLED" ? nowIso : null;
+    // Stamp the Investigating timestamp the FIRST time the case is marked
+    // IN_PROGRESS (COALESCE keeps any earlier value, so it records the first
+    // entry only). NULL for every other transition → COALESCE keeps existing.
+    const investigatingAt =
+      next === "IN_PROGRESS" && !existing.investigatingat ? nowIso : null;
     await c.var.DB
       .prepare(
-        "UPDATE service_cases SET status = ?, closedAt = COALESCE(?, closedAt) WHERE id = ?",
+        "UPDATE service_cases SET status = ?, closedAt = COALESCE(?, closedAt), investigatingat = COALESCE(?, investigatingat) WHERE id = ?",
       )
-      .bind(next, closedAt, id)
+      .bind(next, closedAt, investigatingAt, id)
       .run();
     return c.json({ success: true, data: { id, status: next } });
   } catch (err) {

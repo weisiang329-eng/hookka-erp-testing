@@ -1,0 +1,21 @@
+-- ============================================================================
+-- 0168 — Investigating timestamp on Service Cases.
+--
+-- service_cases.investigatingat:
+--   ISO timestamp the case FIRST transitioned to IN_PROGRESS ("Investigating"
+--   in the Case Pipeline). Every other pipeline stage has a native timestamp
+--   (created_at, the spawned orders' created_at, job-card completedDate, the
+--   delivery orders' dates, closedAt) — IN_PROGRESS was the only one without,
+--   so per-stage duration tracking (the "Status Days" column on the list)
+--   needs it. Written once (only when currently NULL) by
+--   src/api/routes/service-cases.ts: PUT /:id/status (the Mark In Progress
+--   path) and PUT /:id when it moves status to IN_PROGRESS. NULL until the
+--   case is first marked In Progress.
+--
+-- ⚠ ADAPTER RULE: also self-applied at runtime (service-cases.ts
+-- ensureCaseLinkColumns) with the lowercase name, so a tool apply is a no-op
+-- on databases where the runtime already created it. Reads are dual-key
+-- (row.investigatingAt ?? row.investigatingat).
+-- ============================================================================
+
+ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS investigatingat TEXT;

@@ -9,6 +9,7 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { computeCasePipeline, CASE_PIPELINE_STEPS } from "@/lib/case-pipeline";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -124,6 +125,9 @@ type ServiceCaseDetail = {
   createdByName: string;
   createdAt: string;
   closedAt: string;
+  // ISO timestamp the case first hit IN_PROGRESS (migration 0168). Dates the
+  // Investigating stage of the Case Pipeline. "" / null until first marked.
+  investigatingAt?: string | null;
   notes: string;
   orders: Array<{
     id: string;
@@ -519,103 +523,68 @@ export default function ServiceCaseDetailPage() {
 // step state. Only Investigating (Mark In Progress) and Closed (Close Case)
 // are manual clicks; everything else lights itself (owner 2026-06-12).
 //
-// Status sets (from the authoritative route enums):
-// • SV orders are sales_orders rows (src/api/routes/sales-orders.ts):
-//   READY_TO_SHIP and beyond = production finished (repair done);
-//   SHIPPED and beyond = delivery arranged; DELIVERED/INVOICED/CLOSED =
-//   delivered. Their DOs (delivery_orders DRAFT→LOADED→IN_TRANSIT→
-//   DELIVERED→INVOICED) refine that: any DO = arranged (the Pending
-//   Dispatch stage on the Delivery page), DO DELIVERED/INVOICED = delivered.
-// • Repair in progress (owner rule 2026-06-12): the moment ANY department's
-//   job card on the SV order's production orders carries a completedDate —
-//   "只要任何一个部门已经有 Completion Date 就代表在生产中". Legacy
-//   service_orders: status IN_PRODUCTION/RESERVED/IN_REPAIR.
-// • Legacy service_orders (src/api/routes/service-orders.ts lifecycle
-//   OPEN→IN_PRODUCTION/RESERVED/IN_REPAIR→READY_TO_SHIP→DELIVERED→CLOSED):
-//   READY_TO_SHIP+ = repair done, DELIVERED/CLOSED = delivered (they have
-//   no delivery_orders rows).
-// Later steps imply earlier ones along the fulfilment chain (delivered ⇒
-// arranged ⇒ repair done ⇒ in progress), and Investigating lights up once
-// the case left OPEN or any later step completed.
-const SV_REPAIR_DONE_STATUSES = new Set([
-  "READY_TO_SHIP", "SHIPPED", "DELIVERED", "INVOICED", "CLOSED",
-]);
-const SV_DISPATCHED_STATUSES = new Set(["SHIPPED", "DELIVERED", "INVOICED", "CLOSED"]);
-const SV_DELIVERED_STATUSES = new Set(["DELIVERED", "INVOICED", "CLOSED"]);
-const LEGACY_IN_PROGRESS_STATUSES = new Set(["IN_PRODUCTION", "RESERVED", "IN_REPAIR"]);
-const LEGACY_REPAIR_DONE_STATUSES = new Set(["READY_TO_SHIP", "DELIVERED", "CLOSED"]);
-const LEGACY_DELIVERED_STATUSES = new Set(["DELIVERED", "CLOSED"]);
-const DO_DELIVERED_STATUSES = new Set(["DELIVERED", "INVOICED"]);
-
-const PIPELINE_STEPS = [
-  "Opened",
-  "Investigating",
-  "Service Order",
-  "Repair in progress",
-  "Repair done",
-  "Delivery arranged",
-  "Delivered",
-  "Closed",
-] as const;
-
+// The derivation itself lives in the shared, pure src/lib/case-pipeline.ts
+// (computeCasePipeline) so the list page and this stepper never drift. This
+// component only fetches the bulk DO / PO lists, shapes the input, and
+// renders the doneFlags exactly as before.
 function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
   const svOrderIds = useMemo(
-    () => new Set(caseDetail.orders.filter((o) => o.isSv).map((o) => o.id)),
+    () => caseDetail.orders.filter((o) => o.isSv).map((o) => o.id),
     [caseDetail.orders],
   );
 
   // Two extra fetches (cached) — only when the case actually has SV orders;
   // legacy-only cases derive everything from the statuses already loaded.
   const { data: doResp } = useCachedJson<{
-    data?: Array<{ id: string; salesOrderId?: string; status?: string }>;
-  }>(svOrderIds.size > 0 ? "/api/delivery-orders" : null);
+    data?: Array<{
+      id: string;
+      salesOrderId?: string;
+      status?: string;
+      createdAt?: string | null;
+      dispatchedAt?: string | null;
+      deliveredAt?: string | null;
+    }>;
+  }>(svOrderIds.length > 0 ? "/api/delivery-orders" : null);
   const { data: poResp } = useCachedJson<{
     data?: Array<{
       id: string;
       salesOrderId?: string | null;
       jobCards?: Array<{ completedDate?: string | null }>;
     }>;
-  }>(svOrderIds.size > 0 ? "/api/production-orders?fields=minimal&include=jobCards" : null);
+  }>(svOrderIds.length > 0 ? "/api/production-orders?fields=minimal&include=jobCards" : null);
 
-  const stepsDone = useMemo(() => {
-    const svOrders = caseDetail.orders.filter((o) => o.isSv);
-    const legacyOrders = caseDetail.orders.filter((o) => !o.isSv);
-    const caseDos = (doResp?.data ?? []).filter(
-      (d) => !!d.salesOrderId && svOrderIds.has(d.salesOrderId),
-    );
-    const casePos = (poResp?.data ?? []).filter(
-      (p) => !!p.salesOrderId && svOrderIds.has(p.salesOrderId),
-    );
+  const pipe = useMemo(
+    () =>
+      computeCasePipeline({
+        caseStatus: caseDetail.status,
+        createdAt: caseDetail.createdAt,
+        investigatingAt: caseDetail.investigatingAt ?? null,
+        closedAt: caseDetail.closedAt || null,
+        orders: caseDetail.orders.map((o) => ({
+          isSv: o.isSv,
+          status: o.status,
+          createdAt: o.createdAt,
+        })),
+        dos: doResp?.data ?? [],
+        pos: poResp?.data ?? [],
+        svOrderIds,
+      }),
+    [
+      caseDetail.status,
+      caseDetail.createdAt,
+      caseDetail.investigatingAt,
+      caseDetail.closedAt,
+      caseDetail.orders,
+      doResp,
+      poResp,
+      svOrderIds,
+    ],
+  );
+  const stepsDone = pipe.doneFlags;
 
-    const delivered =
-      caseDos.some((d) => DO_DELIVERED_STATUSES.has(d.status ?? "")) ||
-      svOrders.some((o) => SV_DELIVERED_STATUSES.has(o.status)) ||
-      legacyOrders.some((o) => LEGACY_DELIVERED_STATUSES.has(o.status));
-    const arranged =
-      delivered ||
-      caseDos.length > 0 ||
-      svOrders.some((o) => SV_DISPATCHED_STATUSES.has(o.status));
-    const repairDone =
-      arranged ||
-      svOrders.some((o) => SV_REPAIR_DONE_STATUSES.has(o.status)) ||
-      legacyOrders.some((o) => LEGACY_REPAIR_DONE_STATUSES.has(o.status));
-    // Owner rule: any department's job card with a completedDate = the
-    // repair is physically moving through production.
-    const inProgress =
-      repairDone ||
-      casePos.some((p) => (p.jobCards ?? []).some((j) => !!j.completedDate)) ||
-      legacyOrders.some((o) => LEGACY_IN_PROGRESS_STATUSES.has(o.status));
-    const hasOrder = caseDetail.orders.length > 0;
-    const closed = caseDetail.status === "CLOSED";
-    const investigating =
-      caseDetail.status !== "OPEN" || hasOrder || repairDone || closed;
-
-    return [true, investigating, hasOrder, inProgress, repairDone, arranged, delivered, closed];
-  }, [caseDetail.orders, caseDetail.status, doResp, poResp, svOrderIds]);
-
-  // "Current" = the first step not yet done (outlined dot); everything
-  // after it renders muted. -1 = all eight done.
-  const currentIdx = stepsDone.findIndex((d) => !d);
+  // "Current" = the step right after the last done one (outlined dot);
+  // everything after it renders muted. index+1 past the end = all eight done.
+  const currentIdx = pipe.index + 1;
 
   return (
     <Card>
@@ -626,7 +595,7 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
         {/* Full-width stepper: each step is an equal flex-1 column, the
             connector lines stretch to fill the row left-to-right. */}
         <div className="flex w-full items-start">
-          {PIPELINE_STEPS.map((label, i) => {
+          {CASE_PIPELINE_STEPS.map((label, i) => {
             const done = stepsDone[i];
             const current = i === currentIdx;
             const prevDone = i > 0 && stepsDone[i - 1];
@@ -649,7 +618,7 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
                     {done ? "✓" : i + 1}
                   </span>
                   <span
-                    className={`h-0.5 flex-1 ${i === PIPELINE_STEPS.length - 1 ? "bg-transparent" : done ? "bg-[#6B5C32]" : "bg-[#E2DDD8]"}`}
+                    className={`h-0.5 flex-1 ${i === CASE_PIPELINE_STEPS.length - 1 ? "bg-transparent" : done ? "bg-[#6B5C32]" : "bg-[#E2DDD8]"}`}
                   />
                 </div>
                 <span
@@ -858,8 +827,8 @@ function IssueDescriptionPanel({
 // ===========================================================================
 // Renders different fields based on the selected root_cause_category.
 //
-// Design principle (2026-04-29 operator feedback): "种类太多了" — instead
-// of forcing every variant into a rigid enum, each category has a small
+// Design principle (2026-04-29 operator feedback: "too many variants") —
+// instead of forcing every variant into a rigid enum, each category has a small
 // number of structured dropdowns (dept / product / supplier / 3PL — things
 // that map to other masters) plus a free-text **issue notes** field with
 // example placeholders. The placeholder lists examples in light grey so

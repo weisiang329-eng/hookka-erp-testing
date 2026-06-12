@@ -19,6 +19,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import {
+  computeCasePipeline,
+  caseDaysOpen,
+  caseStageDays,
+} from "@/lib/case-pipeline";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,12 +38,9 @@ import { Plus, X, AlertCircle, Loader2, Download } from "lucide-react";
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type SourceType = "SO" | "CO" | "EXTERNAL";
 
-const STATUS_COLOR: Record<CaseStatus, string> = {
-  OPEN: "bg-[#F4EFE3] text-[#6B5C32]",
-  IN_PROGRESS: "bg-[#E0EAF4] text-[#3A5670]",
-  CLOSED: "bg-[#E2DDD8] text-[#5A5550]",
-  CANCELLED: "bg-[#F5DCDC] text-[#7A2E24]",
-};
+// STATUS_COLOR removed — the raw OPEN/IN_PROGRESS/CLOSED/CANCELLED status
+// column is gone (the pipeline Stage is the owner's real status now). The
+// status filter chips above the grid style themselves inline.
 
 const ROOT_CAUSE_COLOR: Record<string, string> = {
   PRODUCTION: "bg-[#F4EFE3] text-[#6B5C32]",
@@ -48,6 +50,20 @@ const ROOT_CAUSE_COLOR: Record<string, string> = {
   CUSTOMER: "bg-[#F5DCDC] text-[#7A2E24]",
   TRANSPORT: "bg-[#FAF7F0] text-[#6B5C32]",
   OTHER: "bg-[#F0ECE9] text-[#5A5550]",
+};
+
+// Stage chip tint, indexed by Case Pipeline stage. Early stages are warm/
+// neutral, the in-production stretch is blue, Delivered/Closed go green/grey
+// — a coarse at-a-glance read of where the case sits. Falls back by index.
+const STAGE_COLOR: Record<string, string> = {
+  Opened: "bg-[#F4EFE3] text-[#6B5C32]",
+  Investigating: "bg-[#E8D8B2] text-[#6B5C32]",
+  "Service Order": "bg-[#E0EAF4] text-[#3A5670]",
+  "Repair in progress": "bg-[#E0EAF4] text-[#3A5670]",
+  "Repair done": "bg-[#E0EAF4] text-[#3A5670]",
+  "Delivery arranged": "bg-[#DCEBDC] text-[#3A6B3A]",
+  Delivered: "bg-[#DCEBDC] text-[#3A6B3A]",
+  Closed: "bg-[#E2DDD8] text-[#5A5550]",
 };
 
 // Service CASES can be opened against any source order status — a customer
@@ -69,11 +85,20 @@ type ServiceCaseListItem = {
   status: CaseStatus;
   createdAt: string;
   closedAt: string;
+  // First-IN_PROGRESS timestamp (migration 0168) — dates the Investigating
+  // pipeline stage. "" / null until the case is first marked In Progress.
+  investigatingAt?: string | null;
   rootCauseCategory: string | null;
+  // Per-category structured RCA fields (JSON). The Department column reads
+  // whichever dept-name field the active category stored (see deptForCase).
+  rootCauseDetails?: Record<string, unknown> | null;
   responsibleUnit: string | null;
   issueDescription: string;
   affectedProducts: Array<{ productId: string; code: string; name: string; qty?: number | null }>;
-  orders: { id: string; serviceOrderNo: string; status: string; mode: string | null }[];
+  // orders carry isSv + createdAt (rowToApi returns them) so the pipeline
+  // derivation can tell SV (sales_orders) from legacy service_orders and
+  // date the Service Order stage.
+  orders: { id: string; serviceOrderNo: string; status: string; mode: string | null; isSv?: boolean; createdAt?: string }[];
 };
 
 type SourceOrderOption = {
@@ -89,13 +114,35 @@ type SourceOrderOption = {
   reference: string;
 };
 
-function daysSince(iso: string, until?: string): number {
-  if (!iso) return 0;
-  const start = new Date(iso).getTime();
-  if (isNaN(start)) return 0;
-  const endMs = until ? new Date(until).getTime() : Date.now();
-  const end = isNaN(endMs) ? Date.now() : endMs;
-  return Math.floor((end - start) / 86400000);
+// Minimal shapes off the two bulk lists the pipeline derivation needs. One
+// fetch each (cached) feeds every row — never per-row.
+type DeliveryOrderApi = {
+  id: string;
+  salesOrderId?: string | null;
+  status?: string;
+  createdAt?: string | null;
+  dispatchedAt?: string | null;
+  deliveredAt?: string | null;
+};
+type ProductionOrderApi = {
+  id: string;
+  salesOrderId?: string | null;
+  jobCards?: Array<{ completedDate?: string | null }>;
+};
+
+// Department responsible for the issue — read from the per-category RCA
+// detail JSON. Each category's picker writes a different dept-name field
+// (detail.tsx CategoryDetailsForm): PRODUCTION / PROCESS / PICKING write
+// `departmentName`; DESIGN writes `designDeptName`. MATERIAL / TRANSPORT /
+// SALES / CUSTOMER / OTHER have no department. Returns the first non-empty
+// dept name found, else "" (rendered as "—").
+function deptForCase(details: Record<string, unknown> | null | undefined): string {
+  if (!details || typeof details !== "object") return "";
+  for (const key of ["departmentName", "designDeptName"]) {
+    const v = details[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
 }
 
 // Grid row = the API case + flat precomputed fields. DataGrid resolves
@@ -106,9 +153,12 @@ function daysSince(iso: string, until?: string): number {
 type CaseRow = ServiceCaseListItem & {
   source: string; // "SO-2605-198" / "EXTERNAL"
   rootCause: string; // rootCauseCategory or "" (badge text)
-  issueFirstLine: string; // whitespace-flattened, 50-char truncated
+  department: string; // responsible dept name or "" (— )
+  stageLabel: string; // Case Pipeline stage label (the owner's "status")
+  stageIndex: number; // 0..7 — sort key so Stage sorts in pipeline order
   affectedCount: number;
   daysOpen: number | null; // null = CANCELLED (no meaningful age)
+  stageDays: number; // whole days in the CURRENT stage (frozen at close)
   ordersCount: number;
 };
 
@@ -121,9 +171,12 @@ function daysOpenLabel(row: CaseRow): string {
   return `${row.daysOpen}d`;
 }
 
-function affectedLabel(row: CaseRow): string {
-  if (row.affectedCount <= 0) return "—";
-  return `${row.affectedCount} SKU${row.affectedCount === 1 ? "" : "s"}`;
+// "Status Days" label — days in the current pipeline stage. Cancelled cases
+// have no meaningful stage age. Shared by the cell render, the column value
+// filter, and the CSV export.
+function stageDaysLabel(row: CaseRow): string {
+  if (row.status === "CANCELLED") return "—";
+  return `${row.stageDays}d`;
 }
 
 function ordersLabel(row: CaseRow): string {
@@ -138,6 +191,14 @@ export default function ServiceCasesListPage() {
     "/api/service-cases",
   );
   const cases = useMemo(() => resp?.data ?? [], [resp]);
+  // Two bulk lists (cached, one fetch each — already used across the app)
+  // feed the Case Pipeline derivation for EVERY row; never fetched per-row.
+  // The Stage / Status Days columns need delivery + production dates matched
+  // by salesOrderId against each case's SV order ids.
+  const { data: doResp } = useCachedJson<{ data?: DeliveryOrderApi[] }>("/api/delivery-orders");
+  const { data: poResp } = useCachedJson<{ data?: ProductionOrderApi[] }>(
+    "/api/production-orders?fields=minimal&include=jobCards",
+  );
   const [createOpen, setCreateOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<CaseStatus | "ALL">("ALL");
   // Rows currently visible in the grid (post search / column filters /
@@ -153,30 +214,75 @@ export default function ServiceCasesListPage() {
     [cases, statusFilter],
   );
 
-  const rows = useMemo<CaseRow[]>(
-    () =>
-      filtered.map((c) => {
-        const flat = (c.issueDescription ?? "").replace(/\s+/g, " ").trim();
-        return {
-          ...c,
-          // sourceNo already carries its own prefix (SO-…, CO-…), so show it
-          // alone for SO/CO; EXTERNAL has no number → show the type word.
-          source: c.sourceNo || (c.sourceType === "EXTERNAL" ? "EXTERNAL" : c.sourceType),
-          rootCause: c.rootCauseCategory ?? "",
-          issueFirstLine: flat.length > 50 ? `${flat.slice(0, 50)}…` : flat,
-          affectedCount: c.affectedProducts?.length ?? 0,
-          daysOpen:
-            c.status === "CANCELLED"
-              ? null
-              : daysSince(
-                  c.createdAt,
-                  c.status === "CLOSED" ? c.closedAt || undefined : undefined,
-                ),
-          ordersCount: c.orders.length,
-        };
-      }),
-    [filtered],
-  );
+  // Index DOs / POs by salesOrderId once, so each row is an O(1) lookup
+  // rather than scanning the full lists per case.
+  const dosBySo = useMemo(() => {
+    const m = new Map<string, DeliveryOrderApi[]>();
+    for (const d of doResp?.data ?? []) {
+      const so = d.salesOrderId;
+      if (!so) continue;
+      const arr = m.get(so);
+      if (arr) arr.push(d);
+      else m.set(so, [d]);
+    }
+    return m;
+  }, [doResp]);
+  const posBySo = useMemo(() => {
+    const m = new Map<string, ProductionOrderApi[]>();
+    for (const p of poResp?.data ?? []) {
+      const so = p.salesOrderId;
+      if (!so) continue;
+      const arr = m.get(so);
+      if (arr) arr.push(p);
+      else m.set(so, [p]);
+    }
+    return m;
+  }, [poResp]);
+
+  // One clock captured once at mount (a state initializer is allowed to call
+  // Date.now — calling it during render is not). Every row's Days Open /
+  // Status Days computes against this same instant.
+  const [nowMs] = useState(() => Date.now());
+
+  const rows = useMemo<CaseRow[]>(() => {
+    return filtered.map((c) => {
+      const svOrderIds = c.orders.filter((o) => o.isSv).map((o) => o.id);
+      const caseDos = svOrderIds.flatMap((so) => dosBySo.get(so) ?? []);
+      const casePos = svOrderIds.flatMap((so) => posBySo.get(so) ?? []);
+      const pipe = computeCasePipeline({
+        caseStatus: c.status,
+        createdAt: c.createdAt,
+        investigatingAt: c.investigatingAt ?? null,
+        closedAt: c.closedAt || null,
+        orders: c.orders.map((o) => ({
+          isSv: o.isSv,
+          status: o.status,
+          createdAt: o.createdAt,
+        })),
+        dos: caseDos,
+        pos: casePos,
+        svOrderIds,
+      });
+      // closedAt freezes both durations for closed / cancelled cases.
+      const frozenClose =
+        c.status === "CLOSED" || c.status === "CANCELLED" ? c.closedAt || null : null;
+      return {
+        ...c,
+        // sourceNo already carries its own prefix (SO-…, CO-…), so show it
+        // alone for SO/CO; EXTERNAL has no number → show the type word.
+        source: c.sourceNo || (c.sourceType === "EXTERNAL" ? "EXTERNAL" : c.sourceType),
+        rootCause: c.rootCauseCategory ?? "",
+        department: deptForCase(c.rootCauseDetails),
+        stageLabel: pipe.label,
+        stageIndex: pipe.index,
+        affectedCount: c.affectedProducts?.length ?? 0,
+        daysOpen:
+          c.status === "CANCELLED" ? null : caseDaysOpen(c.createdAt, frozenClose, nowMs),
+        stageDays: caseStageDays(pipe.enteredAt, frozenClose, nowMs),
+        ordersCount: c.orders.length,
+      };
+    });
+  }, [filtered, dosBySo, posBySo, nowMs]);
 
   const columns = useMemo<Column<CaseRow>[]>(
     () => [
@@ -209,8 +315,10 @@ export default function ServiceCasesListPage() {
         ),
       },
       {
+        // Root Cause category, relabelled "Category" (owner: the category is
+        // the root cause). Same badge as before.
         key: "rootCause",
-        label: "Root Cause",
+        label: "Category",
         width: "120px",
         sortable: true,
         filterAccessor: (row) => row.rootCause || "—",
@@ -226,29 +334,37 @@ export default function ServiceCasesListPage() {
           ),
       },
       {
-        key: "issueFirstLine",
-        label: "Issue",
-        width: "240px",
+        // Responsible department — parsed from the per-category RCA detail
+        // JSON (deptForCase). Many categories have no department → "—".
+        key: "department",
+        label: "Department",
+        width: "140px",
         sortable: true,
+        filterAccessor: (row) => row.department || "—",
         render: (value) =>
           value ? (
-            <span>{String(value)}</span>
+            <span className="text-[#6B7280]">{String(value)}</span>
           ) : (
             <span className="text-[#9CA3AF]">—</span>
           ),
       },
       {
-        key: "affectedCount",
-        label: "Affected",
-        width: "90px",
+        // Case Pipeline stage = the owner's real "status". Sorts in pipeline
+        // order via sortAccessor=stageIndex (not alphabetical); the value
+        // filter still lists the human labels (filterAccessor).
+        key: "stageLabel",
+        label: "Stage",
+        width: "150px",
         sortable: true,
-        filterAccessor: (row) => affectedLabel(row),
-        render: (_value, row) =>
-          row.affectedCount > 0 ? (
-            <span className="text-[#6B5C32]">{affectedLabel(row)}</span>
-          ) : (
-            <span className="text-[#9CA3AF]">—</span>
-          ),
+        sortAccessor: (row) => row.stageIndex,
+        filterAccessor: (row) => row.stageLabel,
+        render: (_value, row) => (
+          <span
+            className={`text-[10px] px-2 py-0.5 rounded ${STAGE_COLOR[row.stageLabel] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
+          >
+            {row.stageLabel}
+          </span>
+        ),
       },
       {
         key: "daysOpen",
@@ -271,6 +387,27 @@ export default function ServiceCasesListPage() {
         },
       },
       {
+        // Days the case has spent in its CURRENT pipeline stage (frozen at
+        // close for closed / cancelled cases). Sorts numerically on stageDays.
+        key: "stageDays",
+        label: "Status Days",
+        width: "100px",
+        sortable: true,
+        filterAccessor: (row) => stageDaysLabel(row),
+        render: (_value, row) => {
+          // No meaningful "current stage age" for a cancelled case.
+          if (row.status === "CANCELLED") {
+            return <span className="text-[#9CA3AF]">—</span>;
+          }
+          if (row.status === "CLOSED") {
+            return <span className="text-[#9CA3AF]">{row.stageDays}d</span>;
+          }
+          // Stuck-in-stage flag mirrors Days Open: ≥ 7 days = red.
+          const color = row.stageDays >= 7 ? "text-[#9A3A2D]" : "text-[#6B7280]";
+          return <span className={color}>{row.stageDays}d</span>;
+        },
+      },
+      {
         key: "ordersCount",
         label: "Orders",
         width: "90px",
@@ -283,19 +420,6 @@ export default function ServiceCasesListPage() {
             <span className="text-[#9CA3AF]">none</span>
           ),
       },
-      {
-        key: "status",
-        label: "Status",
-        width: "110px",
-        sortable: true,
-        render: (_value, row) => (
-          <span
-            className={`text-[10px] uppercase px-2 py-0.5 rounded ${STATUS_COLOR[row.status] ?? "bg-[#F4EFE3]"}`}
-          >
-            {row.status}
-          </span>
-        ),
-      },
       { key: "createdAt", label: "Created", type: "date", width: "100px", sortable: true },
     ],
     [],
@@ -306,20 +430,21 @@ export default function ServiceCasesListPage() {
   function handleExportCsv() {
     exportToCsv<CaseRow>({
       filename: `service-cases-${new Date().toISOString().slice(0, 10)}`,
+      // Mirrors the grid columns one-for-one so the download reads like the
+      // screen. Plain values: Stage label, Department string, Days Open /
+      // Status Days as numbers the spreadsheet can sort / average.
       columns: [
         { header: "Case No", accessor: (r) => r.caseNo },
         { header: "Customer", accessor: (r) => r.customerName },
         { header: "Source", accessor: (r) => r.source },
-        { header: "Root Cause", accessor: (r) => r.rootCause },
-        { header: "Issue", accessor: (r) => r.issueFirstLine },
-        {
-          header: "Affected",
-          accessor: (r) => (r.affectedCount > 0 ? affectedLabel(r) : ""),
-        },
+        { header: "Category", accessor: (r) => r.rootCause },
+        { header: "Department", accessor: (r) => r.department },
+        { header: "Stage", accessor: (r) => r.stageLabel },
         // Numeric so the spreadsheet can sort / average; blank = cancelled.
         { header: "Days Open", accessor: (r) => r.daysOpen ?? "" },
+        // Numeric days-in-current-stage; blank = cancelled (no stage age).
+        { header: "Status Days", accessor: (r) => (r.status === "CANCELLED" ? "" : r.stageDays) },
         { header: "Orders", accessor: (r) => ordersLabel(r) },
-        { header: "Status", accessor: (r) => r.status },
         { header: "Created", accessor: (r) => formatDateDMY(r.createdAt) },
       ],
       rows: exportRows,

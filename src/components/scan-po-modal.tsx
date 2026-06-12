@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useId } from "react";
+import { createPortal } from "react-dom";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -124,14 +125,29 @@ type CreateSOResponse = {
   data?: { companySOId?: string };
 };
 
+// An uploaded PDF paired with a stable unique id. Two files can share a
+// name (e.g. both "PO.pdf" dragged from different folders), which used to
+// collide in the name-keyed progress / page-accounting maps — one file's
+// status would overwrite the other's. Keying every per-file map by `id`
+// instead of `file.name` keeps them independent. Display still uses
+// `file.name`.
+type UploadedFile = { id: string; file: File };
+
+let uploadSeq = 0;
+function makeUploadId(): string {
+  uploadSeq += 1;
+  return `upload-${Date.now().toString(36)}-${uploadSeq}`;
+}
+
 export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [step, setStep] = useState<StepState>("upload");
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<UploadedFile[]>([]);
   const [parsing, setParsing] = useState(false);
-  // Per-file OCR status, keyed by file name. Lets the operator see each
-  // PDF advance through queued → scanning → done/failed during a batch
-  // instead of one generic "Parsing..." spinner. Display-only — does not
-  // affect the upload/queue/OCR logic.
+  // Per-file OCR status, keyed by the file's stable upload id (NOT name —
+  // two uploads can share a name). Lets the operator see each PDF advance
+  // through queued → scanning → done/failed during a batch instead of one
+  // generic "Parsing..." spinner. Display-only — does not affect the
+  // upload/queue/OCR logic.
   const [fileProgress, setFileProgress] = useState<Record<string, "queued" | "scanning" | "done" | "failed">>({});
   const [parseResult, setParseResult] = useState<POParseResult | null>(null);
   const [claudeRows, setClaudeRows] = useState<ClaudeScanRow[]>([]);
@@ -184,6 +200,34 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     onClose();
   };
 
+  // True while a scan/parse is running or SOs are being created — in-flight
+  // work that an accidental click would silently throw away.
+  const isBusy = parsing || step === "creating";
+
+  // Close requested via an EXPLICIT control (header ✕ / a Cancel button).
+  // When busy, confirm first so the operator can't lose a scan/parse in
+  // progress with one stray click; otherwise close immediately.
+  const requestClose = () => {
+    if (
+      isBusy &&
+      !window.confirm(
+        "A scan is still in progress. Close and discard the work in progress?",
+      )
+    ) {
+      return;
+    }
+    handleClose();
+  };
+
+  // Click on the dimmed overlay margin. While busy this is almost always
+  // accidental, so do nothing rather than wipe in-flight work — the
+  // operator must use the explicit ✕ (which confirms) to bail out. When
+  // idle, a margin click closes normally.
+  const handleOverlayClick = () => {
+    if (isBusy) return;
+    handleClose();
+  };
+
   const handleFiles = useCallback(async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
 
@@ -200,12 +244,15 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       return;
     }
 
-    setFiles(pdfFiles);
+    // Tag each upload with a stable unique id so same-named files don't
+    // collide in the progress / page-accounting maps below.
+    const uploaded: UploadedFile[] = pdfFiles.map((f) => ({ id: makeUploadId(), file: f }));
+    setFiles(uploaded);
     setParsing(true);
     setErrors([]);
     // Seed every file as "queued" so the UploadStep list renders a row per
-    // PDF the moment processing starts. Status keyed by file name.
-    setFileProgress(Object.fromEntries(pdfFiles.map((f) => [f.name, "queued" as const])));
+    // PDF the moment processing starts. Status keyed by stable upload id.
+    setFileProgress(Object.fromEntries(uploaded.map((u) => [u.id, "queued" as const])));
 
     // --- Pass 1: try Claude OCR (per-page parallel) -------------------
     // Phase 4: each multi-page PDF is split client-side into one PDF per
@@ -217,21 +264,21 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     //     juggling 16. Anthropic prompt caching shares the catalog
     //     across requests, so calls 2..N pay ~10% on the cached prefix.
     const claudeSuccesses: ClaudeScanRow[] = [];
-    const claudeFailures: File[] = [];
+    const claudeFailures: UploadedFile[] = [];
     const claudeWarnings: string[] = [];
 
-    type PageJob = { file: File; pageNo: number; pageFile: File };
+    type PageJob = { uf: UploadedFile; pageNo: number; pageFile: File };
     const allJobs: PageJob[] = [];
-    for (const file of pdfFiles) {
+    for (const uf of uploaded) {
       try {
-        const pages = await splitPdfIntoPages(file);
-        for (const p of pages) allJobs.push({ file, pageNo: p.pageNo, pageFile: p.file });
+        const pages = await splitPdfIntoPages(uf.file);
+        for (const p of pages) allJobs.push({ uf, pageNo: p.pageNo, pageFile: p.file });
       } catch (err) {
-        claudeFailures.push(file);
+        claudeFailures.push(uf);
         claudeWarnings.push(
-          `${file.name}: failed to split PDF — ${err instanceof Error ? err.message : "unknown"}`,
+          `${uf.file.name}: failed to split PDF — ${err instanceof Error ? err.message : "unknown"}`,
         );
-        setFileProgress((prev) => ({ ...prev, [file.name]: "failed" }));
+        setFileProgress((prev) => ({ ...prev, [uf.id]: "failed" }));
       }
     }
 
@@ -320,7 +367,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     const remainingPages: Record<string, number> = {};
     const fileHadFailure: Record<string, boolean> = {};
     for (const job of allJobs) {
-      remainingPages[job.file.name] = (remainingPages[job.file.name] ?? 0) + 1;
+      remainingPages[job.uf.id] = (remainingPages[job.uf.id] ?? 0) + 1;
     }
     for (let i = 0; i < allJobs.length; i += CONCURRENCY) {
       const batch = allJobs.slice(i, i + CONCURRENCY);
@@ -328,7 +375,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       setFileProgress((prev) => {
         const next = { ...prev };
         for (const job of batch) {
-          if (next[job.file.name] === "queued") next[job.file.name] = "scanning";
+          if (next[job.uf.id] === "queued") next[job.uf.id] = "scanning";
         }
         return next;
       });
@@ -337,22 +384,22 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       // After the batch settles, decrement each file's outstanding page
       // count and flip it to done/failed once all its pages are accounted
       // for. A rejected promise counts as a failure for its file.
-      const completedFiles: { name: string; failed: boolean }[] = [];
+      const completedFiles: { id: string; failed: boolean }[] = [];
       for (let b = 0; b < batch.length; b++) {
         const job = batch[b];
         const s = settled[b];
         const pageFailed = s.status === "rejected" || s.value.kind === "fail";
-        if (pageFailed) fileHadFailure[job.file.name] = true;
-        remainingPages[job.file.name] -= 1;
-        if (remainingPages[job.file.name] === 0) {
-          completedFiles.push({ name: job.file.name, failed: !!fileHadFailure[job.file.name] });
+        if (pageFailed) fileHadFailure[job.uf.id] = true;
+        remainingPages[job.uf.id] -= 1;
+        if (remainingPages[job.uf.id] === 0) {
+          completedFiles.push({ id: job.uf.id, failed: !!fileHadFailure[job.uf.id] });
         }
       }
       if (completedFiles.length > 0) {
         setFileProgress((prev) => {
           const next = { ...prev };
           for (const cf of completedFiles) {
-            next[cf.name] = cf.failed ? "failed" : "done";
+            next[cf.id] = cf.failed ? "failed" : "done";
           }
           return next;
         });
@@ -395,14 +442,14 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             // Deep clone for diff comparison. Cheap (PO is small).
             original: JSON.parse(JSON.stringify(extracted)) as ClaudeExtractedPO,
             warnings: s.warnings ?? [],
-            file: v.job.file,
+            file: v.job.uf.file,
             pageImageB64: null,
             markedGold: false,
           });
         }
       } else {
-        if (!claudeFailures.includes(v.job.file)) claudeFailures.push(v.job.file);
-        claudeWarnings.push(`${v.job.file.name} page ${v.job.pageNo}: ${v.error}`);
+        if (!claudeFailures.some((cf) => cf.id === v.job.uf.id)) claudeFailures.push(v.job.uf);
+        claudeWarnings.push(`${v.job.uf.file.name} page ${v.job.pageNo}: ${v.error}`);
       }
     }
 
@@ -413,12 +460,12 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         const allPOs: ParsedPO[] = [];
         const allErrors: string[] = [...claudeWarnings];
 
-        for (const file of claudeFailures) {
-          const text = await extractPdfText(file);
+        for (const uf of claudeFailures) {
+          const text = await extractPdfText(uf.file);
           const result = parsePOText(text);
           if (result.success) allPOs.push(...result.purchaseOrders);
           if (result.errors.length > 0) {
-            allErrors.push(`${file.name}: ${result.errors.join(", ")}`);
+            allErrors.push(`${uf.file.name}: ${result.errors.join(", ")}`);
           }
         }
 
@@ -752,7 +799,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={handleClose}>
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={handleOverlayClick}>
       <div
         className="bg-white rounded-xl shadow-2xl w-full max-w-6xl max-h-[90vh] overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
@@ -768,7 +815,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               <p className="text-sm text-[#6B7280]">Upload customer PO PDFs to auto-create Sales Orders</p>
             </div>
           </div>
-          <Button variant="ghost" size="sm" onClick={handleClose}>
+          <Button variant="ghost" size="sm" onClick={requestClose}>
             <X className="h-5 w-5" />
           </Button>
         </div>
@@ -854,7 +901,7 @@ function StepDot({ active, done, label }: { active: boolean; done: boolean; labe
 function UploadStep({
   files, parsing, fileProgress, errors, fileInputRef, onFiles, onDrop,
 }: {
-  files: File[];
+  files: UploadedFile[];
   parsing: boolean;
   fileProgress: Record<string, "queued" | "scanning" | "done" | "failed">;
   errors: string[];
@@ -862,8 +909,8 @@ function UploadStep({
   onFiles: (files: FileList | null) => void;
   onDrop: (e: React.DragEvent) => void;
 }) {
-  const doneCount = files.filter(f => {
-    const s = fileProgress[f.name];
+  const doneCount = files.filter((u) => {
+    const s = fileProgress[u.id];
     return s === "done" || s === "failed";
   }).length;
   return (
@@ -908,13 +955,13 @@ function UploadStep({
       {/* Per-file progress list — one row per PDF while a batch scans */}
       {parsing && files.length > 0 && (
         <div className="border border-[#E2DDD8] rounded-lg divide-y divide-[#E2DDD8]">
-          {files.map((f, i) => {
-            const status = fileProgress[f.name] ?? "queued";
+          {files.map((u) => {
+            const status = fileProgress[u.id] ?? "queued";
             return (
-              <div key={`${f.name}-${i}`} className="flex items-center justify-between gap-3 px-4 py-2.5">
+              <div key={u.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <FileText className="h-4 w-4 text-[#9CA3AF] flex-shrink-0" />
-                  <span className="text-sm text-[#1F1D1B] truncate">{f.name}</span>
+                  <span className="text-sm text-[#1F1D1B] truncate">{u.file.name}</span>
                 </div>
                 <FileStatusBadge status={status} />
               </div>
@@ -1410,7 +1457,7 @@ function ClaudePOCard({
                           </td>
                           <td className="px-1.5 py-1">
                             <select
-                              className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent"
+                              className="w-full px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded bg-transparent"
                               value={item.category}
                               onChange={(e) => onUpdateItem(i, { category: e.target.value as ClaudeExtractedItem["category"] })}
                             >
@@ -1446,7 +1493,7 @@ function ClaudePOCard({
                             <input
                               type="number"
                               onFocus={(e) => e.currentTarget.select()}
-                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              className="w-14 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-center"
                               value={item.quantity}
                               onChange={(e) => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
                             />
@@ -1454,7 +1501,7 @@ function ClaudePOCard({
                           {!isTablet && (
                             <td className="px-1.5 py-1">
                               <input
-                                className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                                className="w-16 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded"
                                 value={item.sizeLabel ?? ""}
                                 onChange={(e) => onUpdateItem(i, { sizeLabel: e.target.value || null })}
                               />
@@ -1466,7 +1513,7 @@ function ClaudePOCard({
                               options={fabricList}
                               onChange={(v) => onUpdateItem(i, { fabricCode: v || null })}
                               placeholder="Search fabric…"
-                              widthClass="w-32"
+                              widthClass="w-36"
                               warning={!!isUnknownFabric}
                             />
                           </td>
@@ -1477,7 +1524,7 @@ function ClaudePOCard({
                                 type="number"
                                 step="0.5"
                                 onFocus={(e) => e.currentTarget.select()}
-                                className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                className="w-16 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                                 value={item.divanHeightInches ?? ""}
                                 onChange={(e) => {
                                   const v = e.target.value === "" ? null : Number(e.target.value);
@@ -1496,7 +1543,7 @@ function ClaudePOCard({
                                   pattern: "No Leg" + numeric options. The current
                                   value renders as either "No Leg" or e.g. '4"'. */}
                               <select
-                                className="w-20 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent disabled:opacity-50"
+                                className="w-20 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded bg-transparent disabled:opacity-50"
                                 value={item.noLeg ? "__NOLEG__" : (item.legHeightInches != null ? String(item.legHeightInches) : "")}
                                 onChange={(e) => {
                                   const v = e.target.value;
@@ -1525,7 +1572,7 @@ function ClaudePOCard({
                                 type="number"
                                 step="0.5"
                                 onFocus={(e) => e.currentTarget.select()}
-                                className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                                className="w-16 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                                 value={item.gapInches ?? ""}
                                 onChange={(e) => {
                                   const v = e.target.value === "" ? null : Number(e.target.value);
@@ -1559,9 +1606,9 @@ function ClaudePOCard({
                                     { description: "", surchargeSen: 0 },
                                   ],
                                 })}
-                                className="text-[10px] text-[#6B5C32] hover:text-[#4A3F22] flex items-center gap-0.5"
+                                className="text-xs text-[#6B5C32] hover:text-[#4A3F22] flex items-center gap-0.5"
                               >
-                                <Plus className="h-2.5 w-2.5" />
+                                <Plus className="h-3 w-3" />
                                 Custom
                                 {item.customSpecials?.length > 0 && (
                                   <span className="text-[#9CA3AF]">({item.customSpecials.length})</span>
@@ -1578,7 +1625,7 @@ function ClaudePOCard({
                                       onUpdateItem(i, { customSpecials: next });
                                     }}
                                     placeholder="e.g. Custom Foam 35D"
-                                    className="flex-1 px-1 py-0.5 text-[10px] border border-[#E2DDD8] rounded"
+                                    className="flex-1 px-1.5 py-1 text-xs border border-[#E2DDD8] rounded"
                                   />
                                   <input
                                     type="number"
@@ -1593,7 +1640,7 @@ function ClaudePOCard({
                                       };
                                       onUpdateItem(i, { customSpecials: next });
                                     }}
-                                    className="w-12 px-1 py-0.5 text-[10px] border border-[#E2DDD8] rounded text-right"
+                                    className="w-16 px-1.5 py-1 text-xs border border-[#E2DDD8] rounded text-right"
                                     title="RM"
                                   />
                                   <button
@@ -1615,7 +1662,7 @@ function ClaudePOCard({
                               type="number"
                               step="0.01"
                               onFocus={(e) => e.currentTarget.select()}
-                              className="w-20 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-right"
+                              className="w-20 px-1.5 py-1 text-sm border border-transparent hover:border-[#E2DDD8] rounded text-right"
                               value={item.unitPrice ?? ""}
                               onChange={(e) => {
                                 const v = e.target.value === "" ? null : Number(e.target.value);
@@ -1850,6 +1897,83 @@ async function extractPdfText(file: File): Promise<string> {
   return textParts.join("\n\n--- PAGE BREAK ---\n\n");
 }
 
+// ─── Inline-edit dropdown coordination ──────────────────────────────────
+// Only one inline-edit dropdown (SKU / Fabric SearchableSelect or the
+// Special chip picker) may be open at a time across the whole preview —
+// otherwise two panels stack and cover each other. Each editor, when it
+// opens, fires a document-level custom event tagged with its own instance
+// id; every other editor listens and closes itself when the event's id
+// isn't its own. Cheaper than threading shared state through PreviewStep →
+// every card → every row, and works uniformly across all editor types and
+// across rows/cards.
+const OPEN_EDITOR_EVENT = "scanpo:inline-editor-open";
+
+function broadcastEditorOpen(id: string) {
+  document.dispatchEvent(
+    new CustomEvent(OPEN_EDITOR_EVENT, { detail: id }),
+  );
+}
+
+// Subscribe `close` to fire whenever a DIFFERENT editor opens. Pass the
+// editor's own instance id so it ignores its own open broadcast.
+function useCloseOnOtherEditorOpen(
+  selfId: string,
+  isOpen: boolean,
+  close: () => void,
+) {
+  useEffect(() => {
+    if (!isOpen) return;
+    const onOther = (e: Event) => {
+      const openedId = (e as CustomEvent<string>).detail;
+      if (openedId !== selfId) close();
+    };
+    document.addEventListener(OPEN_EDITOR_EVENT, onOther);
+    return () => document.removeEventListener(OPEN_EDITOR_EVENT, onOther);
+  }, [selfId, isOpen, close]);
+}
+
+// Fire `close` on a mousedown that lands outside EVERY supplied ref. Pass
+// both the trigger root and the (portaled) panel so a click inside either
+// is treated as inside. mousedown rather than click so switching cells is
+// a single press.
+function useOutsideClick(
+  refs: React.RefObject<HTMLElement | null>[],
+  isOpen: boolean,
+  close: () => void,
+) {
+  useEffect(() => {
+    if (!isOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const inside = refs.some((r) => r.current?.contains(target));
+      if (!inside) close();
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+    // refs identities are stable across renders (useRef); intentionally not
+    // in deps so the listener isn't torn down/re-added every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, close]);
+}
+
+// Compute fixed-position coords for a panel anchored under a trigger rect.
+// The preview table lives inside nested overflow boxes (modal scroller →
+// max-h card list → the table's own overflow-x-auto), every one of which
+// clips an in-flow absolute panel. Portaling to <body> with these coords
+// sidesteps all three. Clamps to the viewport so wide panels never run off
+// screen on narrow widths.
+function anchorPanelPos(
+  rect: DOMRect,
+  panelWidth: number,
+): { top: number; left: number; width: number } {
+  const width = Math.min(panelWidth, window.innerWidth - 16);
+  const left = Math.max(
+    8,
+    Math.min(rect.left, window.innerWidth - width - 8),
+  );
+  return { top: rect.bottom + 4, left, width };
+}
+
 // Searchable single-value combobox — replaces the browser-native
 // <input list="…"> + <datalist> combo, which had two annoying quirks:
 //   1. On click, browsers usually show the WHOLE list — not filtered.
@@ -1881,18 +2005,43 @@ function SearchableSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const selfId = useId();
 
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+  const close = useCallback(() => setOpen(false), []);
+  // Single-open: close this editor when any other one opens.
+  useCloseOnOtherEditorOpen(selfId, open, close);
+  // Outside-click closes. Checks BOTH the in-table trigger root AND the
+  // portaled panel (the panel lives on <body>, so the trigger ref alone
+  // wouldn't contain it — a click on an option would otherwise read as
+  // "outside" and dismiss before the option's onClick fires). mousedown
+  // (not click) lets a click on another cell's trigger close this one and
+  // open that one in a single press.
+  useOutsideClick([ref, panelRef], open, close);
+
+  // Anchor the portaled panel under the trigger and keep it tracking on
+  // scroll/resize, since the panel lives on <body> not next to the cell.
+  /* eslint-disable react-hooks/set-state-in-effect -- measure-then-position a
+     portaled panel; synchronous setState in useLayoutEffect is the intended
+     pattern for anchoring to a measured DOM rect. */
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const place = () => {
+      const r = triggerRef.current?.getBoundingClientRect();
+      if (r) setPos(anchorPanelPos(r, 288)); // 288px = w-72
     };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const q = query.trim().toLowerCase();
   const filtered = q
@@ -1905,12 +2054,17 @@ function SearchableSelect({
   return (
     <div ref={ref} className={`relative inline-block ${widthClass ?? "w-40"}`}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => {
-          setOpen((o) => !o);
+          setOpen((o) => {
+            const next = !o;
+            if (next) broadcastEditorOpen(selfId);
+            return next;
+          });
           setQuery("");
         }}
-        className={`w-full text-left px-1.5 py-0.5 text-xs border rounded truncate ${
+        className={`w-full text-left px-2 py-1 text-sm border rounded truncate ${
           warning
             ? "border-amber-400 bg-amber-50 text-[#9C6F1E]"
             : "border-[#E2DDD8] hover:border-[#9CA3AF] bg-white"
@@ -1920,26 +2074,33 @@ function SearchableSelect({
         {value || <span className="text-[#9CA3AF]">{placeholder ?? "Select…"}</span>}
         <span className="float-right text-[#9CA3AF]">▾</span>
       </button>
-      {open && (
-        <div className="absolute z-30 mt-1 left-0 w-64 bg-white border border-[#E2DDD8] rounded-md shadow-lg">
+      {open && pos && createPortal(
+        // Portaled to <body> so the nested overflow boxes around the table
+        // (modal scroller → max-h card list → table overflow-x-auto) can't
+        // clip it. Fixed-positioned under the trigger via getBoundingClientRect.
+        <div
+          ref={panelRef}
+          className="fixed z-[61] bg-white border border-[#E2DDD8] rounded-md shadow-lg"
+          style={{ top: pos.top, left: pos.left, width: pos.width }}
+        >
           <input
             autoFocus
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setOpen(false);
+              if (e.key === "Escape") close();
               if (e.key === "Enter" && filtered[0]) {
                 onChange(filtered[0]);
-                setOpen(false);
+                close();
               }
             }}
             placeholder="Type to search…"
-            className="w-full px-2 py-1 text-xs border-b border-[#E2DDD8] focus:outline-none"
+            className="w-full px-3 py-2 text-sm border-b border-[#E2DDD8] focus:outline-none"
           />
-          <div className="max-h-60 overflow-y-auto">
+          <div className="max-h-72 overflow-y-auto">
             {filtered.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-[#9CA3AF]">No matches</div>
+              <div className="px-3 py-2 text-sm text-[#9CA3AF]">No matches</div>
             ) : (
               filtered.slice(0, 100).map((opt) => (
                 <button
@@ -1947,9 +2108,9 @@ function SearchableSelect({
                   type="button"
                   onClick={() => {
                     onChange(opt);
-                    setOpen(false);
+                    close();
                   }}
-                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-[#FAF9F7] ${
+                  className={`block w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] ${
                     opt === value ? "bg-[#F5F0EB] font-medium" : ""
                   }`}
                 >
@@ -1963,7 +2124,8 @@ function SearchableSelect({
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -1984,23 +2146,55 @@ function SpecialMultiSelect({
   onChange: (next: string) => void;
 }) {
   const [picking, setPicking] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const addBtnRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const selfId = useId();
   const selected = value
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
   const remaining = options.filter((o) => !selected.includes(o));
 
+  const close = useCallback(() => setPicking(false), []);
+  // Single-open: close this picker when any other inline editor opens. The
+  // missing outside-click handler here was the main "covered/overlapping"
+  // bug — the panel stayed open while the operator clicked other cells.
+  useCloseOnOtherEditorOpen(selfId, picking, close);
+  // Outside-click closes — checks the chip/+Add root AND the portaled panel.
+  useOutsideClick([rootRef, panelRef], picking, close);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- measure-then-position a
+     portaled panel; synchronous setState in useLayoutEffect is the intended
+     pattern for anchoring to a measured DOM rect. */
+  useLayoutEffect(() => {
+    if (!picking) { setPos(null); return; }
+    const place = () => {
+      const r = addBtnRef.current?.getBoundingClientRect();
+      if (r) setPos(anchorPanelPos(r, 288)); // 288px = w-72
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [picking]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   const add = (opt: string) => {
     const next = [...selected, opt].join(", ");
     onChange(next);
-    setPicking(false);
+    close();
   };
   const remove = (opt: string) => {
     onChange(selected.filter((s) => s !== opt).join(", "));
   };
 
   return (
-    <div className="relative min-w-[18rem] max-w-[22rem]">
+    <div ref={rootRef} className="relative min-w-[18rem] max-w-[22rem]">
       {/* Chips wrap to multiple lines so every label is readable in full. */}
       {/* No horizontal scroll — operator can see the whole chip text at once, */}
       {/* row just gets taller when there are many specials. */}
@@ -2008,7 +2202,7 @@ function SpecialMultiSelect({
         {selected.map((s) => (
           <span
             key={s}
-            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8] whitespace-nowrap"
+            className="inline-flex items-center gap-0.5 px-2 py-0.5 text-xs rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8] whitespace-nowrap"
           >
             {s}
             <button
@@ -2017,36 +2211,50 @@ function SpecialMultiSelect({
               className="text-[#9CA3AF] hover:text-red-600"
               title="Remove"
             >
-              <X className="h-2.5 w-2.5" />
+              <X className="h-3 w-3" />
             </button>
           </span>
         ))}
         {selected.length === 0 && (
-          <span className="text-[10px] text-[#9CA3AF] italic">none</span>
+          <span className="text-xs text-[#9CA3AF] italic">none</span>
         )}
         {remaining.length > 0 && (
           <button
+            ref={addBtnRef}
             type="button"
-            onClick={() => setPicking((p) => !p)}
-            className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32] whitespace-nowrap"
+            onClick={() =>
+              setPicking((p) => {
+                const next = !p;
+                if (next) broadcastEditorOpen(selfId);
+                return next;
+              })
+            }
+            className="text-xs px-2 py-1 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32] whitespace-nowrap"
           >
             + Add
           </button>
         )}
       </div>
-      {picking && remaining.length > 0 && (
-        <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-60 overflow-y-auto min-w-[16rem]">
+      {picking && pos && remaining.length > 0 && createPortal(
+        // Portaled to <body> so the nested overflow boxes around the table
+        // can't clip it. Fixed-positioned under the + Add button.
+        <div
+          ref={panelRef}
+          className="fixed z-[61] bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-72 overflow-y-auto"
+          style={{ top: pos.top, left: pos.left, width: pos.width }}
+        >
           {remaining.map((opt) => (
             <button
               key={opt}
               type="button"
               onClick={() => add(opt)}
-              className="block w-full text-left px-3 py-1.5 text-xs hover:bg-[#FAF9F7]"
+              className="block w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7]"
             >
               {opt}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

@@ -10,18 +10,25 @@
 //   Sidebar "Service Cases" → this page → click row → /service-cases/:id
 //   On the detail page, you see the case info + any spawned orders, and
 //   can spawn more orders or close the case.
+//
+// The list renders through the shared DataGrid (2026-06-12) — same sort /
+// per-column filter / Columns picker / resize behaviour and typography as
+// every other module's list. Status chips above the grid pre-scope the
+// rows; Export CSV downloads whatever the grid currently shows.
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useState, useRef } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
+import { DataGrid, type Column } from "@/components/ui/data-grid";
 import { getCurrentUser } from "@/lib/auth";
 import { compressImage } from "@/lib/image-compress";
-import { Plus, X, AlertCircle, Loader2 } from "lucide-react";
+import { exportToCsv } from "@/lib/export-csv";
+import { formatDateDMY } from "@/lib/utils";
+import { Plus, X, AlertCircle, Loader2, Download } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type SourceType = "SO" | "CO" | "EXTERNAL";
@@ -93,13 +100,6 @@ type SourceOrderOption = {
   reference: string;
 };
 
-function dateLabel(iso: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("en-MY", { year: "numeric", month: "short", day: "2-digit" });
-}
-
 function daysSince(iso: string, until?: string): number {
   if (!iso) return 0;
   const start = new Date(iso).getTime();
@@ -109,29 +109,251 @@ function daysSince(iso: string, until?: string): number {
   return Math.floor((end - start) / 86400000);
 }
 
+// Grid row = the API case + flat precomputed fields. DataGrid resolves
+// sort / per-column filter / global-search values by column key, so every
+// displayed value needs to live ON the row (not be derived inside render)
+// for those features to see what the cell shows. Same shape feeds the CSV
+// export so the download matches the grid exactly.
+type CaseRow = ServiceCaseListItem & {
+  source: string; // "SO SO-2605-198" / "EXTERNAL"
+  rootCause: string; // rootCauseCategory or "" (badge text)
+  unitLabel: string; // responsible-unit human label or ""
+  issueFirstLine: string; // whitespace-flattened, 50-char truncated
+  affectedCount: number;
+  daysOpen: number | null; // null = CANCELLED (no meaningful age)
+  ordersCount: number;
+};
+
+// Display labels shared by the cell render, the column's value-filter
+// dropdown (filterAccessor) and the CSV export — one formula each so the
+// filter list always reads exactly like the grid.
+function daysOpenLabel(row: CaseRow): string {
+  if (row.status === "CANCELLED" || row.daysOpen == null) return "—";
+  if (row.status !== "CLOSED" && row.daysOpen < 1) return "today";
+  return `${row.daysOpen}d`;
+}
+
+function affectedLabel(row: CaseRow): string {
+  if (row.affectedCount <= 0) return "—";
+  return `${row.affectedCount} SKU${row.affectedCount === 1 ? "" : "s"}`;
+}
+
+function ordersLabel(row: CaseRow): string {
+  if (row.ordersCount <= 0) return "none";
+  return `${row.ordersCount} order${row.ordersCount === 1 ? "" : "s"}`;
+}
+
 export default function ServiceCasesListPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { data: resp, refresh } = useCachedJson<{ data?: ServiceCaseListItem[] }>(
+  const { data: resp, loading, refresh } = useCachedJson<{ data?: ServiceCaseListItem[] }>(
     "/api/service-cases",
   );
   const cases = useMemo(() => resp?.data ?? [], [resp]);
   const [createOpen, setCreateOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<CaseStatus | "ALL">("ALL");
+  // Rows currently visible in the grid (post search / column filters /
+  // sort), mirrored back via onFilteredDataChange — Export CSV downloads
+  // exactly what the operator sees. Same pattern as the Employees print
+  // flow's onFilteredDataChange={setPrintRows}.
+  const [exportRows, setExportRows] = useState<CaseRow[]>([]);
 
+  // Status chips pre-filter the rows fed to the grid; the grid's own
+  // search / per-column filters then narrow further.
   const filtered = useMemo(
     () => (statusFilter === "ALL" ? cases : cases.filter((c) => c.status === statusFilter)),
     [cases, statusFilter],
   );
 
-  // Window the case list so a long history doesn't mount every row.
-  const caseScrollRef = useRef<HTMLDivElement>(null);
-  const caseRowVirtualizer = useVirtualizer({
-    count: filtered.length,
-    getScrollElement: () => caseScrollRef.current,
-    estimateSize: () => 38,
-    overscan: 12,
-  });
+  const rows = useMemo<CaseRow[]>(
+    () =>
+      filtered.map((c) => {
+        const flat = (c.issueDescription ?? "").replace(/\s+/g, " ").trim();
+        return {
+          ...c,
+          source: [c.sourceType, c.sourceNo].filter(Boolean).join(" "),
+          rootCause: c.rootCauseCategory ?? "",
+          unitLabel: c.responsibleUnit
+            ? (RESPONSIBLE_UNIT_LABELS[c.responsibleUnit] ?? c.responsibleUnit)
+            : "",
+          issueFirstLine: flat.length > 50 ? `${flat.slice(0, 50)}…` : flat,
+          affectedCount: c.affectedProducts?.length ?? 0,
+          daysOpen:
+            c.status === "CANCELLED"
+              ? null
+              : daysSince(
+                  c.createdAt,
+                  c.status === "CLOSED" ? c.closedAt || undefined : undefined,
+                ),
+          ordersCount: c.orders.length,
+        };
+      }),
+    [filtered],
+  );
+
+  const columns = useMemo<Column<CaseRow>[]>(
+    () => [
+      {
+        key: "caseNo",
+        label: "Case No",
+        width: "120px",
+        sortable: true,
+        // Real link (open-in-new-tab works) on top of the row-click
+        // navigation. Normal font — doc numbers in DataGrid cells follow
+        // the delivery grids, which don't use mono.
+        render: (_value, row) => (
+          <Link
+            to={`/service-cases/${row.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="font-medium text-[#6B5C32] hover:underline"
+          >
+            {row.caseNo}
+          </Link>
+        ),
+      },
+      { key: "customerName", label: "Customer", width: "170px", sortable: true },
+      {
+        key: "source",
+        label: "Source",
+        width: "150px",
+        sortable: true,
+        render: (value) => (
+          <span className="text-[#6B7280]">{String(value ?? "")}</span>
+        ),
+      },
+      {
+        key: "rootCause",
+        label: "Root Cause",
+        width: "120px",
+        sortable: true,
+        filterAccessor: (row) => row.rootCause || "—",
+        render: (_value, row) =>
+          row.rootCauseCategory ? (
+            <span
+              className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[row.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
+            >
+              {row.rootCauseCategory}
+            </span>
+          ) : (
+            <span className="text-[#9CA3AF]">—</span>
+          ),
+      },
+      {
+        key: "unitLabel",
+        label: "Unit",
+        width: "130px",
+        sortable: true,
+        filterAccessor: (row) => row.unitLabel || "—",
+        render: (_value, row) =>
+          row.unitLabel ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B7280]">
+              {row.unitLabel}
+            </span>
+          ) : (
+            <span className="text-[#9CA3AF]">—</span>
+          ),
+      },
+      {
+        key: "issueFirstLine",
+        label: "Issue",
+        width: "240px",
+        sortable: true,
+        render: (value) =>
+          value ? (
+            <span>{String(value)}</span>
+          ) : (
+            <span className="text-[#9CA3AF]">—</span>
+          ),
+      },
+      {
+        key: "affectedCount",
+        label: "Affected",
+        width: "90px",
+        sortable: true,
+        filterAccessor: (row) => affectedLabel(row),
+        render: (_value, row) =>
+          row.affectedCount > 0 ? (
+            <span className="text-[#6B5C32]">{affectedLabel(row)}</span>
+          ) : (
+            <span className="text-[#9CA3AF]">—</span>
+          ),
+      },
+      {
+        key: "daysOpen",
+        label: "Days Open",
+        width: "95px",
+        sortable: true,
+        filterAccessor: (row) => daysOpenLabel(row),
+        // Keep the legacy colour semantics: closed = muted with final age,
+        // cancelled = no age, open ≥ 7 days = red flag.
+        render: (_value, row) => {
+          if (row.status === "CANCELLED" || row.daysOpen == null) {
+            return <span className="text-[#9CA3AF]">—</span>;
+          }
+          if (row.status === "CLOSED") {
+            return <span className="text-[#9CA3AF]">{row.daysOpen}d</span>;
+          }
+          if (row.daysOpen < 1) return <span className="text-[#6B7280]">today</span>;
+          const color = row.daysOpen >= 7 ? "text-[#9A3A2D]" : "text-[#6B7280]";
+          return <span className={color}>{row.daysOpen}d</span>;
+        },
+      },
+      {
+        key: "ordersCount",
+        label: "Orders",
+        width: "90px",
+        sortable: true,
+        filterAccessor: (row) => ordersLabel(row),
+        render: (_value, row) =>
+          row.ordersCount > 0 ? (
+            <span className="text-[#6B5C32]">{ordersLabel(row)}</span>
+          ) : (
+            <span className="text-[#9CA3AF]">none</span>
+          ),
+      },
+      {
+        key: "status",
+        label: "Status",
+        width: "110px",
+        sortable: true,
+        render: (_value, row) => (
+          <span
+            className={`text-[10px] uppercase px-2 py-0.5 rounded ${STATUS_COLOR[row.status] ?? "bg-[#F4EFE3]"}`}
+          >
+            {row.status}
+          </span>
+        ),
+      },
+      { key: "createdAt", label: "Created", type: "date", width: "100px", sortable: true },
+    ],
+    [],
+  );
+
+  // Downloads the rows the grid currently shows (chips + search + column
+  // filters + sort all applied) with plain text values for every column.
+  function handleExportCsv() {
+    exportToCsv<CaseRow>({
+      filename: `service-cases-${new Date().toISOString().slice(0, 10)}`,
+      columns: [
+        { header: "Case No", accessor: (r) => r.caseNo },
+        { header: "Customer", accessor: (r) => r.customerName },
+        { header: "Source", accessor: (r) => r.source },
+        { header: "Root Cause", accessor: (r) => r.rootCause },
+        { header: "Unit", accessor: (r) => r.unitLabel },
+        { header: "Issue", accessor: (r) => r.issueFirstLine },
+        {
+          header: "Affected",
+          accessor: (r) => (r.affectedCount > 0 ? affectedLabel(r) : ""),
+        },
+        // Numeric so the spreadsheet can sort / average; blank = cancelled.
+        { header: "Days Open", accessor: (r) => r.daysOpen ?? "" },
+        { header: "Orders", accessor: (r) => ordersLabel(r) },
+        { header: "Status", accessor: (r) => r.status },
+        { header: "Created", accessor: (r) => formatDateDMY(r.createdAt) },
+      ],
+      rows: exportRows,
+    });
+  }
 
   return (
     <div className="space-y-4">
@@ -144,14 +366,25 @@ export default function ServiceCasesListPage() {
             log-only complaints / on-site fixes.
           </p>
         </div>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => setCreateOpen(true)}
-          className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-        >
-          <Plus className="h-4 w-4" /> New Service Case
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportCsv}
+            disabled={exportRows.length === 0}
+            title="Download the rows currently shown in the grid as a CSV file"
+          >
+            <Download className="h-4 w-4" /> Export CSV
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setCreateOpen(true)}
+            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+          >
+            <Plus className="h-4 w-4" /> New Service Case
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2 text-xs">
@@ -171,157 +404,31 @@ export default function ServiceCasesListPage() {
         ))}
       </div>
 
+      {/* Standard DataGrid (same component as Delivery / Sales / Employees)
+          — brings sort, per-column filters, Columns show/hide, drag-resize
+          and the shared look. valueFilterKey scopes the grid's sticky
+          column-filter session per status chip so switching chips never
+          inherits a stale filter that blanks the grid. */}
       <Card>
-        <CardContent className="p-0">
-          <div
-            ref={caseScrollRef}
-            className="overflow-auto"
-            style={{ maxHeight: "calc(100vh - 300px)" }}
-          >
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 z-10">
-                <tr className="border-b border-[#E2DDD8] text-left text-xs uppercase text-[#6B7280] bg-[#FAF9F7]">
-                  <th className="py-2 px-3">Case No</th>
-                  <th className="py-2 px-3">Customer</th>
-                  <th className="py-2 px-3">Source</th>
-                  <th className="py-2 px-3">Root Cause</th>
-                  <th className="py-2 px-3">Issue</th>
-                  <th className="py-2 px-3">Affected</th>
-                  <th className="py-2 px-3">Days Open</th>
-                  <th className="py-2 px-3">Orders</th>
-                  <th className="py-2 px-3">Status</th>
-                  <th className="py-2 px-3">Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.length === 0 ? (
-                  <tr>
-                    <td colSpan={10} className="py-8 px-3 text-center text-[#9CA3AF] text-xs">
-                      {cases.length === 0
-                        ? "No service cases yet — click 'New Service Case' to log the first one."
-                        : "No cases in this status."}
-                    </td>
-                  </tr>
-                ) : (
-                  (() => {
-                    const vItems = caseRowVirtualizer.getVirtualItems();
-                    const padTop = vItems.length > 0 ? vItems[0].start : 0;
-                    const padBottom =
-                      vItems.length > 0
-                        ? caseRowVirtualizer.getTotalSize() -
-                          vItems[vItems.length - 1].end
-                        : 0;
-                    return (
-                      <>
-                        {padTop > 0 && (
-                          <tr aria-hidden="true">
-                            <td colSpan={10} style={{ height: padTop, padding: 0, border: 0 }} />
-                          </tr>
-                        )}
-                        {vItems.map((vi) => {
-                          const c = filtered[vi.index];
-                          if (!c) return null;
-                          return (
-                    <tr
-                      key={c.id}
-                      data-index={vi.index}
-                      ref={caseRowVirtualizer.measureElement}
-                      onClick={() => navigate(`/service-cases/${c.id}`)}
-                      className="border-b border-[#F0ECE9] cursor-pointer hover:bg-[#FAF9F7]"
-                    >
-                      <td className="py-2 px-3 font-mono text-xs font-medium">{c.caseNo}</td>
-                      <td className="py-2 px-3 text-xs">{c.customerName}</td>
-                      <td className="py-2 px-3 text-xs text-[#6B7280]">
-                        {c.sourceType} {c.sourceNo}
-                      </td>
-                      <td className="py-2 px-3">
-                        {c.rootCauseCategory || c.responsibleUnit ? (
-                          <span className="inline-flex flex-wrap items-center gap-1">
-                            {c.rootCauseCategory && (
-                              <span
-                                className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[c.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
-                              >
-                                {c.rootCauseCategory}
-                              </span>
-                            )}
-                            {c.responsibleUnit && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B7280]">
-                                {RESPONSIBLE_UNIT_LABELS[c.responsibleUnit] ?? c.responsibleUnit}
-                              </span>
-                            )}
-                          </span>
-                        ) : (
-                          <span className="text-[#9CA3AF]">—</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-xs max-w-[280px] truncate">
-                        {c.issueDescription ? (
-                          (() => {
-                            const flat = c.issueDescription.replace(/\s+/g, " ").trim();
-                            return flat.length > 50 ? `${flat.slice(0, 50)}…` : flat;
-                          })()
-                        ) : (
-                          <span className="text-[#9CA3AF]">—</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-xs">
-                        {c.affectedProducts && c.affectedProducts.length > 0 ? (
-                          <span className="text-[10px] text-[#6B5C32]">
-                            {c.affectedProducts.length} SKU{c.affectedProducts.length === 1 ? "" : "s"}
-                          </span>
-                        ) : (
-                          <span className="text-[#9CA3AF]">—</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-xs">
-                        {(() => {
-                          if (c.status === "CANCELLED") {
-                            return <span className="text-[#9CA3AF]">—</span>;
-                          }
-                          if (c.status === "CLOSED") {
-                            const d = daysSince(c.createdAt, c.closedAt || undefined);
-                            return <span className="text-[#9CA3AF]">{d}d</span>;
-                          }
-                          const d = daysSince(c.createdAt);
-                          if (d < 1) return <span className="text-[#6B7280]">today</span>;
-                          const color = d >= 7 ? "text-[#9A3A2D]" : "text-[#6B7280]";
-                          return <span className={color}>{d}d</span>;
-                        })()}
-                      </td>
-                      <td className="py-2 px-3 text-xs">
-                        {c.orders.length === 0 ? (
-                          <span className="text-[#9CA3AF]">none</span>
-                        ) : (
-                          <span className="text-[10px] text-[#6B5C32]">
-                            {c.orders.length} order{c.orders.length === 1 ? "" : "s"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 px-3">
-                        <span
-                          className={`text-[10px] uppercase px-2 py-0.5 rounded ${STATUS_COLOR[c.status] ?? "bg-[#F4EFE3]"}`}
-                        >
-                          {c.status}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-xs text-[#6B7280]">
-                        {dateLabel(c.createdAt)}
-                      </td>
-                    </tr>
-                          );
-                        })}
-                        {padBottom > 0 && (
-                          <tr aria-hidden="true">
-                            <td colSpan={10} style={{ height: padBottom, padding: 0, border: 0 }} />
-                          </tr>
-                        )}
-                      </>
-                    );
-                  })()
-                )}
-              </tbody>
-            </table>
-          </div>
+        <CardContent>
+          <DataGrid<CaseRow>
+            columns={columns}
+            data={rows}
+            keyField="id"
+            gridId="service-cases"
+            loading={loading}
+            stickyHeader
+            virtualize
+            maxHeight="calc(100vh - 320px)"
+            emptyMessage={
+              cases.length === 0
+                ? "No service cases yet — click 'New Service Case' to log the first one."
+                : "No cases in this status."
+            }
+            valueFilterKey={statusFilter}
+            onRowClick={(row) => navigate(`/service-cases/${row.id}`)}
+            onFilteredDataChange={setExportRows}
+          />
         </CardContent>
       </Card>
 

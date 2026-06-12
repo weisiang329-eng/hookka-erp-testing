@@ -726,7 +726,7 @@ app.post("/:id/return", async (c) => {
       statements.push(
         c.var.DB.prepare(
           `UPDATE customers
-              SET outstandingSen = MAX(0, COALESCE(outstandingSen, 0) - ?),
+              SET outstandingSen = GREATEST(0, COALESCE(outstandingSen, 0) - ?),
                   updated_at = ?
             WHERE id = ?`,
         ).bind(refundSen, now, cn.customerId),

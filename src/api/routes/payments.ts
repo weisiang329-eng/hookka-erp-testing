@@ -391,14 +391,14 @@ app.post("/", async (c) => {
     }
 
     // E3: decrement the customer's outstanding A/R by the total allocated.
-    // MAX(0, ...) protects against over-allocation (rounding / partial
+    // GREATEST(0, ...) protects against over-allocation (rounding / partial
     // historical state). If the full invoice has just flipped to PAID,
     // cascade the linked SO from DELIVERED/READY_TO_SHIP → INVOICED and
     // append a so_status_changes audit row.
     if (totalAllocatedSen > 0) {
       statements.push(
         c.var.DB.prepare(
-          `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
         ).bind(totalAllocatedSen, customer.id),
       );
     }

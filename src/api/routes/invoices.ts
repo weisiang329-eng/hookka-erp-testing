@@ -1723,7 +1723,7 @@ app.put("/:id", async (c) => {
       if (replDelta !== 0 && replCustId) {
         statements.push(
           c.var.DB.prepare(
-            `UPDATE customers SET outstandingSen = MAX(0, outstandingSen + ?) WHERE id = ?`,
+            `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen + ?) WHERE id = ?`,
           ).bind(replDelta, replCustId),
         );
       }
@@ -1822,7 +1822,7 @@ app.put("/:id", async (c) => {
         if (grossDelta !== 0 && custIdForOutstanding) {
           statements.push(
             c.var.DB.prepare(
-              `UPDATE customers SET outstandingSen = MAX(0, outstandingSen + ?) WHERE id = ?`,
+              `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen + ?) WHERE id = ?`,
             ).bind(grossDelta, custIdForOutstanding),
           );
         }
@@ -2153,7 +2153,7 @@ app.put("/:id", async (c) => {
       // of the reversal — the cash is real, it just needs a refund / CN
       // path which is a separate decision.
       //
-      // MAX(0, ...) clamps in case the original create path didn't bump
+      // GREATEST(0, ...) clamps in case the original create path didn't bump
       // outstandingSen for this invoice (the manual POST /api/invoices
       // path doesn't, only the auto-create-from-DO path does). Matches
       // the guard pattern used in credit-notes.ts:256 and payments.ts:389.
@@ -2161,7 +2161,7 @@ app.put("/:id", async (c) => {
       if (unpaidSen > 0 && existing.customerId) {
         statements.push(
           c.var.DB.prepare(
-            `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+            `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
           ).bind(unpaidSen, existing.customerId),
         );
       }
@@ -2199,7 +2199,7 @@ app.delete("/:id", async (c) => {
   // reverse the customer's outstandingSen if the deleted DRAFT had been
   // bumped on create. (Auto-created DRAFT invoices from delivery-orders.ts
   // bump outstandingSen on create; manual POST invoices.ts does not. The
-  // MAX(0, ...) guard below handles both paths safely.)
+  // GREATEST(0, ...) guard below handles both paths safely.)
   const existing = await c.var.DB.prepare(
     "SELECT id, status, customerId, totalSen, paidAmount FROM invoices WHERE id = ?",
   )
@@ -2230,7 +2230,7 @@ app.delete("/:id", async (c) => {
   if (unpaidSen > 0 && existing.customerId) {
     stmts.push(
       c.var.DB.prepare(
-        `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+        `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
       ).bind(unpaidSen, existing.customerId),
     );
   }

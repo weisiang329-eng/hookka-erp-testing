@@ -34,6 +34,17 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-005 — SQL `MAX(0, x)` (SQLite-style 2-arg) reached Postgres untranslated → "function max(integer, integer) does not exist" broke invoice price-edit (and 5 sibling write paths)
+
+**Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green. Owner hit it live editing a service-order invoice to RM 0.
+**Category:** infrastructure
+
+Owner tried to zero a service-order invoice (INV-2606-084) via the invoice **Edit Prices** UI — Save returned a red toast **"function max(integer, integer) does not exist"**. Root cause: `invoices.ts` used SQLite's 2-argument scalar `MAX(0, outstandingSen ± ?)` in raw `UPDATE customers …` statements. The d1-compat adapter (`translateSql` in supabase-compat.ts) rewrites `IFNULL`→`COALESCE`, `datetime('now')`→`NOW()`, `INSERT OR IGNORE`, etc., but does NOT (and cannot safely, via regex) turn 2-arg `MAX(a,b)` into Postgres `GREATEST(a,b)` — Postgres `MAX` is an aggregate, so the 2-arg form is a missing-function error. The invoice CREATE path doesn't use this clamp (228 invoices created fine), but Edit-Prices and Delete do — so it only surfaced on a price edit, which is rare.
+
+Swept the whole API (fix-one-audit-whole-system): 11 SQL `MAX(0, …)` sites across **6 routes** — invoices.ts (×4), payments.ts (×1, while line 672 of the SAME file already correctly used GREATEST — inconsistent), consignment-notes.ts, credit-notes.ts (×2), accounting.ts, production-orders.ts (×2, stock deduction). All → `GREATEST(0, …)` (the proven Postgres convention already used in payments/po-cost-cascade/job-cards). GREATEST(0,x) is the exact semantic equivalent of the intended MAX(0,x) clamp, so no behaviour change beyond "now actually runs on Postgres." Comments updated to match. These were all latent — any code path hitting them (record payment, void invoice, CN outstanding adjust, credit note, supplier outstanding, FG stock deduct) would have thrown the same error.
+
+---
+
 ## BUG-2026-06-12-004 — QR dispatch/deliver: every DO + Packing List gets a scannable code; drivers advance status from their own phone, no login
 
 **Status:** 🟢 Shipped (2026-06-12). 845 tests green (14 new structural pins); typecheck + build:strict green. Agent-built, security-reviewed line-by-line.

@@ -3062,9 +3062,9 @@ export async function applyWipInventoryChange(
     await db
       .prepare(
         `UPDATE wip_items
-            SET stockQty = MAX(0, stockQty - ?),
+            SET stockQty = GREATEST(0, stockQty - ?),
                 status = CASE
-                  WHEN MAX(0, stockQty - ?) = 0 THEN 'IN_PRODUCTION'
+                  WHEN GREATEST(0, stockQty - ?) = 0 THEN 'IN_PRODUCTION'
                   ELSE 'COMPLETED'
                 END
           WHERE code = ?

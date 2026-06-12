@@ -367,7 +367,7 @@ app.post("/", async (c) => {
       // invoice is pinned, re-evaluate invoice totals + status.
       statements.push(
         c.var.DB.prepare(
-          `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
         ).bind(totalAmount, invoice.customerId),
       );
       const invStmts = await buildInvoiceCascadeForCN(
@@ -537,7 +537,7 @@ app.put("/:id", async (c) => {
       // Customer A/R: a credit note reduces what the customer owes.
       statements.push(
         c.var.DB.prepare(
-          `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+          `UPDATE customers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?`,
         ).bind(existing.totalAmount, existing.customerId),
       );
       // If pinned to a specific invoice, reduce that invoice's totalSen and

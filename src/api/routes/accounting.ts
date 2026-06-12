@@ -1719,7 +1719,7 @@ app.put("/purchase-credit-notes/:id", async (c) => {
         "UPDATE purchase_credit_notes SET status = 'POSTED', updatedAt = ? WHERE id = ?",
       ).bind(new Date().toISOString(), id),
       c.var.DB.prepare(
-        "UPDATE suppliers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?",
+        "UPDATE suppliers SET outstandingSen = GREATEST(0, outstandingSen - ?) WHERE id = ?",
       ).bind(gross, existing.supplierId),
     ];
     try {

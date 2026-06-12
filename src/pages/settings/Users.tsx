@@ -37,9 +37,28 @@ import {
   Clock,
   Send,
   Loader2,
+  Pencil,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { copyText } from "@/lib/copy-text";
+
+// The three assignable roles, shown in BOTH the invite dropdown and the
+// per-row "Change role" dialog. ONE source of truth so the two pickers can
+// never drift apart.
+//  • SUPER_ADMIN — full access + manage user accounts (the ONLY role that can
+//    enable/disable, delete, reset, or invite — see requireSuperAdmin in
+//    src/api/lib/rbac.ts).
+//  • ADMIN       — full operational access but CANNOT manage user accounts.
+//  • READ_ONLY   — Viewer: sees everything, every mutation is blocked 403.
+const ROLE_OPTIONS: { value: string; label: string }[] = [
+  { value: "SUPER_ADMIN", label: "Super Admin (full access + manage users)" },
+  { value: "ADMIN", label: "Admin (full access, cannot manage users)" },
+  { value: "READ_ONLY", label: "Viewer (read-only)" },
+];
+
+function roleLabel(role: string): string {
+  return ROLE_OPTIONS.find((o) => o.value === role)?.label ?? role;
+}
 
 // ---------- Row types ------------------------------------------------------
 
@@ -131,6 +150,14 @@ export default function UsersPage() {
   const [resetPassword, setResetPassword] = useState("");
   const [resetSubmitting, setResetSubmitting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+
+  // Change-role modal (SUPER_ADMIN only). Role drives access, so the save goes
+  // through verifiedSave — the read-back confirms the role actually changed
+  // (a stale-cache 200 that didn't really re-role someone is a security smell).
+  const [editRoleForUser, setEditRoleForUser] = useState<UserRow | null>(null);
+  const [editRole, setEditRole] = useState("");
+  const [editRoleSubmitting, setEditRoleSubmitting] = useState(false);
+  const [editRoleError, setEditRoleError] = useState<string | null>(null);
 
   // Inline flash banner
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
@@ -267,6 +294,73 @@ export default function UsersPage() {
       }
     } finally {
       setResetSubmitting(false);
+    }
+  };
+
+  const submitRoleChange = async () => {
+    if (!editRoleForUser) return;
+    const target = editRoleForUser;
+    setEditRoleError(null);
+    if (editRole === target.role) {
+      setEditRoleForUser(null);
+      return;
+    }
+    // A role change ends their current session (they re-sign-in with the new
+    // access). Spell that out — and flag the self-demotion foot-gun.
+    const selfNote =
+      target.id === currentUser?.id
+        ? "\n\nThis is YOUR OWN account — moving away from Super Admin signs you out and you may lose access to this page."
+        : "";
+    if (
+      !confirm(
+        `Change ${target.email} to ${roleLabel(editRole)}?\n\nTheir current session ends immediately; they sign back in with the new access.${selfNote}`,
+      )
+    )
+      return;
+    setEditRoleSubmitting(true);
+    try {
+      const result = await verifiedSave<UserRow>({
+        endpoint: `/api/users/${target.id}`,
+        method: "PUT",
+        body: { role: editRole },
+        readback: async () => {
+          const r = await fetch(`/api/users?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: UserRow[] };
+          return (j?.data ?? []).find((row) => row.id === target.id) ?? null;
+        },
+        expect: { role: editRole },
+      });
+      if (result.ok) {
+        showFlash("ok", `${target.email} is now ${roleLabel(editRole)}`);
+        setEditRoleForUser(null);
+        fetchUsers();
+      } else if (result.reason === "mismatch") {
+        setEditRoleError(formatMismatchError(result.diffs));
+      } else if (result.reason === "http") {
+        let parsedErr = result.body;
+        try {
+          const j = JSON.parse(result.body) as { error?: string };
+          if (j.error) parsedErr = j.error;
+        } catch {
+          /* keep raw body */
+        }
+        setEditRoleError(
+          humanizeError(
+            { status: result.status, message: parsedErr },
+            "Couldn't change the role. Please try again.",
+          ),
+        );
+      } else {
+        setEditRoleError(
+          humanizeError(result.details, "Couldn't save. Please try again."),
+        );
+      }
+    } finally {
+      setEditRoleSubmitting(false);
     }
   };
 
@@ -517,6 +611,18 @@ export default function UsersPage() {
                             <Button
                               variant="ghost"
                               size="sm"
+                              onClick={() => {
+                                setEditRoleForUser(u);
+                                setEditRole(u.role);
+                                setEditRoleError(null);
+                              }}
+                              title="Change role"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
                               onClick={() => toggleActive(u)}
                               title={u.isActive ? "Disable" : "Enable"}
                             >
@@ -745,18 +851,11 @@ export default function UsersPage() {
                   onChange={(e) => setInviteRole(e.target.value)}
                   className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
                 >
-                  <option value="SUPER_ADMIN">Super Admin (full access + manage users)</option>
-                  {/* Admin (owner 2026-06-12): runs the whole business but
-                      CANNOT manage user accounts — no enable/disable, delete,
-                      role-change, reset-password or invite. Enforced server-
-                      side by requireSuperAdmin on the user-management routes,
-                      so a stray Admin can never disable the owner. */}
-                  <option value="ADMIN">Admin (full access, cannot manage users)</option>
-                  {/* Viewer = the built-in READ_ONLY role (maps to *:read in
-                      rbac.ts LEGACY_ROLE_DEFAULTS): can SEE everything, every
-                      mutation is blocked 403 server-side. For demos / tours.
-                      (Wei Siang 2026-06-04) */}
-                  <option value="READ_ONLY">Viewer (read-only)</option>
+                  {ROLE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -931,6 +1030,83 @@ export default function UsersPage() {
                   <Check className="h-4 w-4" />
                 )}
                 Reset password
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================== */}
+      {/* Change-role modal (SUPER_ADMIN only) */}
+      {/* =========================================================== */}
+      {editRoleForUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => !editRoleSubmitting && setEditRoleForUser(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-[#1F1D1B] flex items-center gap-2">
+              <Pencil className="h-5 w-5 text-[#6B5C32]" />
+              Change role
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Set the role for <strong>{editRoleForUser.email}</strong>. Saving
+              ends their current session — they sign back in with the new
+              access.
+            </p>
+            <div className="mt-4 space-y-2">
+              <label className="block text-xs font-medium text-gray-600 uppercase tracking-wide">
+                Role
+              </label>
+              <select
+                value={editRole}
+                onChange={(e) => setEditRole(e.target.value)}
+                className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+              >
+                {ROLE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+                {/* Preserve any legacy/non-standard role the account already
+                    carries so the picker never silently blanks it. */}
+                {!ROLE_OPTIONS.some((o) => o.value === editRoleForUser.role) && (
+                  <option value={editRoleForUser.role}>
+                    {editRoleForUser.role} (current)
+                  </option>
+                )}
+              </select>
+              <p className="text-xs text-gray-500">
+                {roleLabel(editRole)}
+              </p>
+              {editRoleError && (
+                <p className="text-xs text-red-600">{editRoleError}</p>
+              )}
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setEditRoleForUser(null)}
+                disabled={editRoleSubmitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={submitRoleChange}
+                disabled={
+                  editRoleSubmitting || editRole === editRoleForUser.role
+                }
+              >
+                {editRoleSubmitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                Save role
               </Button>
             </div>
           </div>

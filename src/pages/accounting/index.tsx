@@ -3411,8 +3411,24 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
   // controls (400-0000 + 405-0000 Other Creditors), general = everything
   // that is neither.
   const [ledger, setLedger] = useState<"all" | "general" | "sales" | "purchase">("all");
+  // Owner (2026-06-12, AutoCount Ledger screenshot): the default view
+  // groups the listing PER ACCOUNT — B/F opening, rows with running
+  // balance and the double-entry counter account, per-account DR/CR
+  // totals + closing, grand totals at the bottom.
+  const [view, setView] = useState<"grouped" | "flat">("grouped");
+  const [report, setReport] = useState<{
+    capped: boolean;
+    grandDr: number;
+    grandCr: number;
+    accounts: {
+      code: string; name: string; openingSen: number;
+      totalDr: number; totalCr: number; closingSen: number;
+      rows: { id: string; day: string; description: string; sourceType: string; sourceId: string; deDesc: string; debitSen: number; creditSen: number; runningSen: number }[];
+    }[];
+  } | null>(null);
+  const [collapsedAccts, setCollapsedAccts] = useState<Record<string, boolean>>({});
   const account = picked.length === 1 ? picked[0] : "";
-  const loading = account ? gl === null : all === null;
+  const loading = account ? gl === null : view === "grouped" ? report === null : all === null;
   const nameOf = (code: string) => accounts.find((a) => a.code === code)?.name ?? "";
   const inLedgerScope = (a: ChartOfAccount): boolean => {
     switch (ledger) {
@@ -3430,26 +3446,35 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
   useEffect(() => {
     let stale = false;
     const params = new URLSearchParams();
-    if (picked.length === 1) params.set("account", picked[0]);
-    else if (picked.length > 1) params.set("accounts", picked.join(","));
+    if (picked.length > 1) params.set("accounts", picked.join(","));
     if (ledger !== "all") params.set("ledger", ledger);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
-    fetch(`/api/accounting/gl?${params.toString()}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
-      .then((j) => {
-        if (stale || !j?.success || !j.data) return;
-        if (picked.length === 1) setGl(j.data as NonNullable<typeof gl>);
-        else setAll(j.data as NonNullable<typeof all>);
-      })
-      .catch(() => {});
+    if (picked.length === 1) {
+      params.set("account", picked[0]);
+      fetch(`/api/accounting/gl?${params.toString()}`)
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => { if (!stale && j?.success && j.data) setGl(j.data as NonNullable<typeof gl>); })
+        .catch(() => {});
+    } else if (view === "grouped") {
+      fetch(`/api/accounting/gl-report?${params.toString()}`)
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => { if (!stale && j?.success && j.data) setReport(j.data as NonNullable<typeof report>); })
+        .catch(() => {});
+    } else {
+      fetch(`/api/accounting/gl?${params.toString()}`)
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => { if (!stale && j?.success && j.data) setAll(j.data as NonNullable<typeof all>); })
+        .catch(() => {});
+    }
     return () => { stale = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [picked.join(","), ledger, from, to]);
+  }, [picked.join(","), ledger, from, to, view]);
 
   const reset = () => {
     setAll(null);
     setGl(null);
+    setReport(null);
   };
   const addAccount = (code: string) => {
     if (!code || picked.includes(code)) return;
@@ -3486,6 +3511,17 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 <option value="general">General Ledger</option>
                 <option value="sales">Sales Ledger (Debtors)</option>
                 <option value="purchase">Purchase Ledger (Creditors)</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">View</label>
+              <select
+                value={view}
+                onChange={(e) => { setView(e.target.value as typeof view); reset(); }}
+                className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
+              >
+                <option value="grouped">By Account (AutoCount style)</option>
+                <option value="flat">Flat listing</option>
               </select>
             </div>
             <div className="w-80">
@@ -3536,16 +3572,110 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
           {" · "}Opening {formatCurrency(gl.openingSen)} · Closing {formatCurrency(gl.closingSen)} ({gl.account.type})
         </p>
       )}
-      {!account && all && (
+      {!account && view === "flat" && all && (
         <p className="text-sm text-[#6B7280]">
           {all.totalRows} entries{picked.length > 1 ? ` across ${picked.length} accounts` : ""}{all.capped ? ` — showing latest ${all.rows.length}, narrow the date range to see older ones` : ""}
         </p>
       )}
 
+      {/* AutoCount-style grouped Ledger (owner screenshot): one section per
+          account — B/F, rows with running balance + counter account,
+          per-account totals + closing, grand totals at the bottom. */}
+      {!account && view === "grouped" && (
+        loading ? (
+          <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading ledger…</CardContent></Card>
+        ) : report ? (
+          <div className="space-y-3">
+            {report.capped && (
+              <p className="text-xs text-[#9A3A2D]">Report capped at 4,000 rows — narrow the date range to see every account.</p>
+            )}
+            {report.accounts.map((a) => {
+              const open = !collapsedAccts[a.code];
+              return (
+                <Card key={a.code}>
+                  <CardContent className="p-0 overflow-x-auto">
+                    <button
+                      onClick={() => setCollapsedAccts({ ...collapsedAccts, [a.code]: open })}
+                      className="w-full flex items-center justify-between px-3 py-2 bg-[#F0ECE9]/60 text-left cursor-pointer"
+                    >
+                      <span className="text-sm font-semibold text-[#1F1D1B]">
+                        {open ? "▾" : "▸"} Acc. No.: <span className="tabular-nums">{a.code}</span> {a.name}
+                      </span>
+                      <span className="text-xs text-[#6B7280] tabular-nums">
+                        DR = {formatCurrency(a.totalDr)} · CR = {formatCurrency(a.totalCr)} · Balance = <span className={a.closingSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}>{formatCurrency(a.closingSen)}</span>
+                      </span>
+                    </button>
+                    {open && (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                            <th className="px-3 py-1.5 text-left">Date</th>
+                            <th className="px-3 py-1.5 text-left">Description</th>
+                            <th className="px-3 py-1.5 text-left">DE Account</th>
+                            <th className="px-3 py-1.5 text-left">Source</th>
+                            <th className="px-3 py-1.5 text-right">Debit</th>
+                            <th className="px-3 py-1.5 text-right">Credit</th>
+                            <th className="px-3 py-1.5 text-right">Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                            <td className="px-3 py-1" colSpan={6}>BALANCE B/F</td>
+                            <td className={`px-3 py-1 text-right tabular-nums ${a.openingSen < 0 ? "text-[#9A3A2D]" : ""}`}>{formatCurrency(a.openingSen)}</td>
+                          </tr>
+                          {a.rows.map((r) => {
+                            const href = sourceHref(r.sourceType, r.sourceId);
+                            return (
+                              <tr key={r.id} className="border-b border-[#F0ECE9]">
+                                <td className="px-3 py-1 text-xs text-[#6B7280] whitespace-nowrap">{r.day}</td>
+                                <td className="px-3 py-1 text-[#1F1D1B]">{r.description}</td>
+                                <td className="px-3 py-1 text-xs text-[#6B7280]">{r.deDesc}</td>
+                                <td className="px-3 py-1 text-xs">
+                                  {href ? (
+                                    <a href={href} className="text-[#6B5C32] underline decoration-dotted hover:text-[#1F1D1B]" title={r.sourceId}>{r.sourceType}</a>
+                                  ) : (
+                                    <span className="text-[#6B7280]" title={r.sourceId}>{r.sourceType}</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-1 text-right tabular-nums">{r.debitSen ? formatCurrency(r.debitSen) : ""}</td>
+                                <td className="px-3 py-1 text-right tabular-nums">{r.creditSen ? formatCurrency(r.creditSen) : ""}</td>
+                                <td className={`px-3 py-1 text-right tabular-nums ${r.runningSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>{formatCurrency(r.runningSen)}</td>
+                              </tr>
+                            );
+                          })}
+                          <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
+                            <td className="px-3 py-1.5" colSpan={4} />
+                            <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(a.totalDr)}</td>
+                            <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(a.totalCr)}</td>
+                            <td className={`px-3 py-1.5 text-right tabular-nums ${a.closingSen < 0 ? "text-[#9A3A2D]" : ""} bg-[#EAF3DE]`}>{formatCurrency(a.closingSen)}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+            <Card>
+              <CardContent className="px-3 py-2 flex justify-end gap-8 text-sm font-semibold text-[#1F1D1B] tabular-nums">
+                <span>TOTAL DR {formatCurrency(report.grandDr)}</span>
+                <span>TOTAL CR {formatCurrency(report.grandCr)}</span>
+                <span className={report.grandDr - report.grandCr !== 0 ? "text-[#9A3A2D]" : "text-[#27500A]"}>
+                  {report.grandDr - report.grandCr === 0 ? "Balanced ✓" : `Diff ${formatCurrency(report.grandDr - report.grandCr)}`}
+                </span>
+              </CardContent>
+            </Card>
+            {report.accounts.length === 0 && (
+              <Card><CardContent className="py-12 text-center text-[#9CA3AF] text-sm">No activity in this window</CardContent></Card>
+            )}
+          </div>
+        ) : null
+      )}
+
       {/* Owner: per-account total DR / CR for the filtered window — summed
           server-side over EVERY matching leg, so it stays right even when
           the listing below is capped at 1000 rows. */}
-      {!account && all && (all.accountTotals?.length ?? 0) > 0 && (
+      {!account && view === "flat" && all && (all.accountTotals?.length ?? 0) > 0 && (
         <Card>
           <CardContent className="p-0 overflow-x-auto">
             <table className="w-full text-sm">
@@ -3589,6 +3719,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </Card>
       )}
 
+      {(account || view === "flat") && (
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {loading ? (
@@ -3689,6 +3820,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
           ) : null}
         </CardContent>
       </Card>
+      )}
     </div>
   );
 }

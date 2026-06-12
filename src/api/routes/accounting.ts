@@ -3891,6 +3891,151 @@ app.post("/official-receipts/:id/void", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// LEDGER REPORT (owner screenshot, AutoCount style) — one section per
+// account: B/F opening as at `from`, chronological rows with running
+// balance and the DOUBLE-ENTRY counter account, per-account DR/CR totals
+// + closing, grand totals across the scope. Balance is SIGNED DR−CR for
+// every account (AutoCount "Home Balance" convention: credit-natural
+// accounts show negative). Honours the ledger scope (all/general/sales/
+// purchase), the picked-accounts set, alias resolution and opening-date
+// substitution.
+// ---------------------------------------------------------------------------
+app.get("/gl-report", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const ledgerScope = (c.req.query("ledger") || "all").toLowerCase();
+  const accountsCsv = c.req.query("accounts") || "";
+  const accountSet = accountsCsv
+    ? new Set(accountsCsv.split(",").map((s) => s.trim()).filter(Boolean))
+    : null;
+  const [legRes, coaRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT id, accountCode, sourceType, sourceId, debitSen, creditSen,
+              description, postedAt
+         FROM ledger_journal_entries
+        ORDER BY postedAt ASC, id ASC`,
+    ).all<{
+      id: string; accountCode: string; sourceType: string; sourceId: string;
+      debitSen: number; creditSen: number; description: string; postedAt: string;
+    }>(),
+    c.var.DB.prepare(
+      "SELECT code, name, specialAccountType FROM chart_of_accounts",
+    ).all<{ code: string; name: string; specialAccountType: string | null }>(),
+  ]);
+  const names = new Map((coaRes.results ?? []).map((a) => [a.code, a.name] as const));
+  const sdcSet = new Set<string>();
+  const sccSet = new Set<string>();
+  for (const a of coaRes.results ?? []) {
+    if (a.specialAccountType === "SDC") sdcSet.add(a.code);
+    else if (a.specialAccountType === "SCC") sccSet.add(a.code);
+  }
+  const inScope = (code: string): boolean => {
+    switch (ledgerScope) {
+      case "sales": return sdcSet.has(code);
+      case "purchase": return sccSet.has(code);
+      case "general": return !sdcSet.has(code) && !sccSet.has(code);
+      default: return true;
+    }
+  };
+  const resolveRep = await loadAccountResolver(c.var.DB);
+  const obDateRep = await getOpeningDate(c.var.DB);
+  // Double-entry counter accounts: every leg of the same business event.
+  const eventAccounts = new Map<string, Set<string>>();
+  for (const l of legRes.results ?? []) {
+    const key = `${l.sourceType}|${l.sourceId}`;
+    let set = eventAccounts.get(key);
+    if (!set) { set = new Set(); eventAccounts.set(key, set); }
+    set.add(resolveRep(l.accountCode));
+  }
+  const deDescOf = (code: string, sourceType: string, sourceId: string): string => {
+    const others = [...(eventAccounts.get(`${sourceType}|${sourceId}`) ?? [])].filter((x) => x !== code);
+    if (others.length === 0) return "";
+    const first = names.get(others[0]) ?? others[0];
+    return others.length === 1 ? first : `${first} +${others.length - 1}`;
+  };
+  type RepRow = { id: string; day: string; description: string; sourceType: string; sourceId: string; deDesc: string; debitSen: number; creditSen: number; runningSen: number };
+  const buckets = new Map<string, { openingSen: number; rows: Omit<RepRow, "runningSen" | "deDesc">[] }>();
+  for (const l of legRes.results ?? []) {
+    const code = resolveRep(l.accountCode);
+    if (!inScope(code)) continue;
+    if (accountSet && !accountSet.has(code)) continue;
+    const day =
+      isOpeningSource(l.sourceType) && obDateRep
+        ? obDateRep
+        : String(l.postedAt ?? "").slice(0, 10);
+    if (day > to) continue;
+    let b = buckets.get(code);
+    if (!b) { b = { openingSen: 0, rows: [] }; buckets.set(code, b); }
+    const delta = (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0);
+    if (from && day < from) {
+      b.openingSen += delta;
+      continue;
+    }
+    b.rows.push({
+      id: l.id,
+      day,
+      description: l.description ?? "",
+      sourceType: l.sourceType,
+      sourceId: l.sourceId,
+      debitSen: Number(l.debitSen) || 0,
+      creditSen: Number(l.creditSen) || 0,
+    });
+  }
+  // Cap the WHOLE report so an all-time run can't flatten the browser —
+  // accounts are emitted in code order until the row budget runs out.
+  const ROWS_CAP = 4000;
+  let used = 0;
+  let capped = false;
+  let grandDr = 0;
+  let grandCr = 0;
+  const accounts: {
+    code: string; name: string; openingSen: number;
+    totalDr: number; totalCr: number; closingSen: number; rows: RepRow[];
+  }[] = [];
+  for (const code of [...buckets.keys()].sort()) {
+    const b = buckets.get(code)!;
+    if (b.rows.length === 0 && b.openingSen === 0) continue;
+    b.rows.sort((x, y) => x.day.localeCompare(y.day) || x.id.localeCompare(y.id));
+    let running = b.openingSen;
+    let totalDr = 0;
+    let totalCr = 0;
+    const rows: RepRow[] = [];
+    for (const r of b.rows) {
+      running += r.debitSen - r.creditSen;
+      totalDr += r.debitSen;
+      totalCr += r.creditSen;
+      rows.push({ ...r, deDesc: deDescOf(code, r.sourceType, r.sourceId), runningSen: running });
+    }
+    grandDr += totalDr;
+    grandCr += totalCr;
+    if (used + rows.length > ROWS_CAP) { capped = true; break; }
+    used += rows.length;
+    accounts.push({
+      code,
+      name: names.get(code) ?? "",
+      openingSen: b.openingSen,
+      totalDr,
+      totalCr,
+      closingSen: running,
+      rows,
+    });
+  }
+  return c.json({
+    success: true,
+    data: {
+      from: from || null,
+      to: to === "9999-12-31" ? null : to,
+      capped,
+      accounts,
+      grandDr,
+      grandCr,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FIXED ASSETS + STRAIGHT-LINE DEPRECIATION (Phase 3.5, 2026-06)
 //
 // Register maintained by the owner (asset / accum / expense accounts,

@@ -251,7 +251,12 @@ export default function AccountingPage() {
           {tab === "tb" && <TrialBalanceTab />}
           {tab === "gl" && <GeneralLedgerTab accounts={accounts} />}
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
-          {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
+          {tab === "ap" && (
+            <div className="space-y-4">
+              <ContraCard />
+              <APTab apData={apData} onRefresh={fetchAll} />
+            </div>
+          )}
           {tab === "odc" && <OtherPartiesTab />}
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
@@ -274,6 +279,142 @@ export default function AccountingPage() {
 }
 
 // =============== TAB 1: OVERVIEW ===============
+
+// Phase 3.8 — Contra: a customer who is ALSO a supplier — offset ticked
+// APPROVED PIs against their oldest unpaid invoices via the 490-0000
+// suspense. Both control accounts and both subledgers settle together.
+function ContraCard() {
+  const { toast } = useToast();
+  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
+  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  const [customerId, setCustomerId] = useState("");
+  const [supplierId, setSupplierId] = useState("");
+  const [pis, setPis] = useState<{ id: string; piNo: string; invoiceDate: string | null; amountSen: number }[]>([]);
+  const [arUnpaidSen, setArUnpaidSen] = useState(0);
+  const [ticked, setTicked] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/customers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
+      .then((j) => { if (j?.success) setCustomers((j.data ?? []).map((x) => ({ id: x.id, name: x.name }))); })
+      .catch(() => {});
+    fetch("/api/suppliers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
+      .then((j) => { if (j?.success) setSuppliers((j.data ?? []).map((x) => ({ id: x.id, name: x.name }))); })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!supplierId && !customerId) return;
+    let stale = false;
+    const p = new URLSearchParams();
+    if (supplierId) p.set("supplierId", supplierId);
+    if (customerId) p.set("customerId", customerId);
+    fetch(`/api/accounting/contra/candidates?${p.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { pis?: typeof pis; arUnpaidSen?: number } }>)
+      .then((j) => {
+        if (stale) return;
+        if (j?.success && j.data) {
+          setPis(j.data.pis ?? []);
+          setArUnpaidSen(j.data.arUnpaidSen ?? 0);
+        }
+      })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [supplierId, customerId]);
+
+  const totalSen = pis.filter((p) => ticked[p.id]).reduce((s, p) => s + p.amountSen, 0);
+  const canPost = customerId && totalSen > 0 && totalSen <= arUnpaidSen;
+
+  const handlePost = async () => {
+    if (!window.confirm(`Contra ${formatCurrency(totalSen)} of payables against this customer's oldest unpaid invoices?`)) return;
+    setBusy(true);
+    try {
+      const res = await fetch("/api/accounting/contra", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId, piIds: pis.filter((p) => ticked[p.id]).map((p) => p.id) }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { totalSen: number; pis: number }; error?: string };
+      if (j?.success && j.data) {
+        toast.success(`Contra posted — ${formatCurrency(j.data.totalSen)} across ${j.data.pis} PIs`);
+        setTicked({});
+        setSupplierId("");
+        setCustomerId("");
+      } else toast.error(j?.error || "Contra failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-[#1F1D1B]">
+          Contra (互抵) <span className="font-normal text-[#6B7280]">— customer who is also a supplier: offset payables against receivables via 490-0000</span>
+        </h3>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Supplier (we owe them)</label>
+            <select value={supplierId} onChange={(e) => { setSupplierId(e.target.value); setPis([]); setTicked({}); }} className={`${selCls} w-56`}>
+              <option value="">— supplier —</option>
+              {suppliers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Customer (they owe us)</label>
+            <select value={customerId} onChange={(e) => { setCustomerId(e.target.value); setArUnpaidSen(0); }} className={`${selCls} w-56`}>
+              <option value="">— customer —</option>
+              {customers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </div>
+          {customerId && (
+            <span className="text-sm text-[#6B7280] pb-2">Customer owes <span className="font-medium text-[#1F1D1B] tabular-nums">{formatCurrency(arUnpaidSen)}</span></span>
+          )}
+          <Button variant="primary" size="sm" disabled={!canPost || busy} onClick={handlePost}>
+            {busy ? "Posting…" : `Contra ${formatCurrency(totalSen)}`}
+          </Button>
+          {totalSen > arUnpaidSen && (
+            <span className="text-xs text-[#9A3A2D] pb-2">Selected payables exceed what the customer owes</span>
+          )}
+        </div>
+        {supplierId && (
+          pis.length === 0 ? (
+            <p className="text-xs text-[#9CA3AF]">No APPROVED (unpaid) purchase invoices for this supplier.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-2 py-1.5 w-8" />
+                  <th className="px-2 py-1.5 text-left">PI No</th>
+                  <th className="px-2 py-1.5 text-left">Date</th>
+                  <th className="px-2 py-1.5 text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pis.map((p) => (
+                  <tr key={p.id} className="border-b border-[#F0ECE9]">
+                    <td className="px-2 py-1">
+                      <input type="checkbox" checked={!!ticked[p.id]} onChange={(e) => setTicked({ ...ticked, [p.id]: e.target.checked })} className="h-4 w-4 accent-[#6B5C32]" />
+                    </td>
+                    <td className="px-2 py-1 tabular-nums text-xs">{p.piNo}</td>
+                    <td className="px-2 py-1 text-xs text-[#6B7280]">{p.invoiceDate ?? ""}</td>
+                    <td className="px-2 py-1 text-right tabular-nums">{formatCurrency(p.amountSen)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+        <p className="text-[11px] text-[#9CA3AF]">
+          Whole PIs only; the amount auto-settles the customer's OLDEST unpaid invoices first (FIFO). 490-0000 nets to zero in the same entry.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
 
 // Phase 3.7 — landed cost: spread import charges (freight/duty/clearance)
 // onto a GRN's stock batches proportional to value. No GL legs here: the

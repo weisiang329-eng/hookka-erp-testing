@@ -3891,6 +3891,227 @@ app.post("/official-receipts/:id/void", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// CONTRA (Phase 3.8, 2026-06) — when a customer IS also a supplier,
+// offset what we owe them (whole APPROVED PIs, ticked) against what they
+// owe us (FIFO across their oldest unpaid invoices). Legs run through
+// the 490-0000 contra suspense (DR AP → CR 490, DR 490 → CR debtor
+// control) so both control accounts move and 490 nets to zero, and BOTH
+// subledgers settle: PIs flip PAID (supplier_payments method CONTRA, no
+// bank), invoices take paidAmount and the customer counter drops — the
+// three-card reconciliations stay clean on both sides.
+// ---------------------------------------------------------------------------
+const CONTRA_ACCT = "490-0000";
+
+app.get("/contra/candidates", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const supplierId = c.req.query("supplierId") || "";
+  const customerId = c.req.query("customerId") || "";
+  const out: { pis?: unknown[]; arUnpaidSen?: number; customerControl?: string } = {};
+  if (supplierId) {
+    const pis = await c.var.DB.prepare(
+      `SELECT id, piNo, invoiceDate, amountSen FROM purchase_invoices
+        WHERE supplierId = ? AND status = 'APPROVED'
+        ORDER BY invoiceDate, piNo`,
+    )
+      .bind(supplierId)
+      .all();
+    out.pis = pis.results ?? [];
+  }
+  if (customerId) {
+    const cust = await c.var.DB.prepare(
+      "SELECT id, code FROM customers WHERE id = ?",
+    )
+      .bind(customerId)
+      .first<{ id: string; code: string | null }>();
+    const inv = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalSen - paidAmount), 0) AS s FROM invoices
+        WHERE customerId = ? AND status NOT IN ('DRAFT','CANCELLED')
+          AND totalSen > paidAmount`,
+    )
+      .bind(customerId)
+      .first<{ s: number }>();
+    out.arUnpaidSen = Number(inv?.s) || 0;
+    const parsed = parseDebtorCode(cust?.code);
+    out.customerControl = parsed.ok ? parsed.controlCode : "300-0000";
+  }
+  return c.json({ success: true, data: out });
+});
+
+app.post("/contra", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const customerId = String(body.customerId || "");
+    const piIds: string[] = Array.isArray(body.piIds) ? body.piIds.map(String) : [];
+    if (!customerId || piIds.length === 0) {
+      return c.json({ success: false, error: "customerId and at least one piId are required" }, 400);
+    }
+    const db = c.var.DB;
+    const marks = piIds.map(() => "?").join(",");
+    const piRes = await db
+      .prepare(
+        `SELECT id, piNo, supplierId, supplierName, amountSen, status
+           FROM purchase_invoices WHERE id IN (${marks})`,
+      )
+      .bind(...piIds)
+      .all<{ id: string; piNo: string; supplierId: string; supplierName: string; amountSen: number; status: string }>();
+    const pis = piRes.results ?? [];
+    if (pis.length !== piIds.length) {
+      return c.json({ success: false, error: "Some PIs were not found" }, 400);
+    }
+    if (pis.some((p) => p.status !== "APPROVED")) {
+      return c.json({ success: false, error: "Only APPROVED (unpaid) PIs can be contra'd" }, 400);
+    }
+    const totalSen = pis.reduce((s, p) => s + (Number(p.amountSen) || 0), 0);
+    if (totalSen <= 0) {
+      return c.json({ success: false, error: "Selected PIs carry no amount" }, 400);
+    }
+    const cust = await db
+      .prepare("SELECT id, name, code FROM customers WHERE id = ?")
+      .bind(customerId)
+      .first<{ id: string; name: string; code: string | null }>();
+    if (!cust) return c.json({ success: false, error: "Customer not found" }, 404);
+    const parsed = parseDebtorCode(cust.code);
+    const arControl = parsed.ok ? parsed.controlCode : "300-0000";
+    const invRes = await db
+      .prepare(
+        `SELECT id, invoiceNo, totalSen, paidAmount FROM invoices
+          WHERE customerId = ? AND status NOT IN ('DRAFT','CANCELLED')
+            AND totalSen > paidAmount
+          ORDER BY dueDate, invoiceDate, invoiceNo`,
+      )
+      .bind(customerId)
+      .all<{ id: string; invoiceNo: string; totalSen: number; paidAmount: number }>();
+    const open = invRes.results ?? [];
+    const arUnpaid = open.reduce((s, i) => s + (Number(i.totalSen) || 0) - (Number(i.paidAmount) || 0), 0);
+    if (arUnpaid < totalSen) {
+      return c.json(
+        { success: false, error: `Customer only owes ${arUnpaid} sen — cannot contra ${totalSen} sen of payables against it` },
+        400,
+      );
+    }
+    // FIFO allocation across the customer's oldest open invoices.
+    const statements: D1PreparedStatement[] = [];
+    let remaining = totalSen;
+    const now = new Date().toISOString();
+    for (const inv of open) {
+      if (remaining <= 0) break;
+      const due = (Number(inv.totalSen) || 0) - (Number(inv.paidAmount) || 0);
+      const take = Math.min(due, remaining);
+      remaining -= take;
+      const newPaid = (Number(inv.paidAmount) || 0) + take;
+      statements.push(
+        db
+          .prepare(
+            `UPDATE invoices SET paidAmount = ?, status = CASE WHEN ? >= totalSen THEN 'PAID' ELSE status END, updated_at = ? WHERE id = ?`,
+          )
+          .bind(newPaid, newPaid, now, inv.id),
+      );
+    }
+    statements.push(
+      db
+        .prepare("UPDATE customers SET outstandingSen = outstandingSen - ? WHERE id = ?")
+        .bind(totalSen, customerId),
+    );
+    const today = now.slice(0, 10);
+    for (const p of pis) {
+      statements.push(
+        db.prepare("UPDATE purchase_invoices SET status = 'PAID', updated_at = ? WHERE id = ?").bind(now, p.id),
+      );
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO supplier_payments (
+               id, paymentNo, supplierId, supplierName, purchaseInvoiceId,
+               date, amountSen, method, reference, notes, orgId
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CONTRA', ?, ?, ?)`,
+          )
+          .bind(
+            `sp-${crypto.randomUUID().slice(0, 8)}`,
+            `SP-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
+            p.supplierId,
+            p.supplierName ?? "",
+            p.id,
+            today,
+            Number(p.amountSen) || 0,
+            p.piNo,
+            `Contra vs ${cust.name}`,
+            getOrgId(c),
+          ),
+      );
+    }
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const sourceId = `contra-${Date.now()}`;
+    const legs: LedgerEntryInput[] = [
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "contra",
+        sourceId,
+        legNo: 1,
+        accountCode: "400-0000",
+        debitSen: totalSen,
+        creditSen: 0,
+        description: `Contra · AP ${pis.map((p) => p.piNo).join(", ")}`,
+        actorUserId,
+        orgId,
+      },
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "contra",
+        sourceId,
+        legNo: 2,
+        accountCode: CONTRA_ACCT,
+        debitSen: 0,
+        creditSen: totalSen,
+        description: `Contra suspense · ${cust.name}`,
+        actorUserId,
+        orgId,
+      },
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "contra",
+        sourceId,
+        legNo: 3,
+        accountCode: CONTRA_ACCT,
+        debitSen: totalSen,
+        creditSen: 0,
+        description: `Contra suspense · ${cust.name}`,
+        actorUserId,
+        orgId,
+      },
+      {
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "contra",
+        sourceId,
+        legNo: 4,
+        accountCode: arControl,
+        debitSen: 0,
+        creditSen: totalSen,
+        description: `Contra · AR settled vs payables · ${cust.name}`,
+        actorUserId,
+        orgId,
+      },
+    ];
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(db, orgId, legs);
+    statements.push(...ledgerStmts);
+    await db.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: sourceId,
+      action: "create",
+      after: { contraSen: totalSen, customerId, piIds },
+    });
+    return c.json({ success: true, data: { totalSen, pis: pis.length } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // LANDED COST (Phase 3.7, 2026-06) — allocate import charges (freight /
 // duty / clearance; the owner gets BOTH separate forwarder PIs and FEE
 // lines on the goods PI) onto a GRN's rm_batches, proportional to batch

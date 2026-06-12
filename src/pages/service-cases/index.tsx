@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Service Cases â€” top-level list page (parent of Service Orders).
+// Service Cases — top-level list page (parent of Service Orders).
 //
 // Per design 2026-04-28: every customer-facing service interaction lives
 // here. A Case is just a record (issue + photos + RCA + customer); a Case
@@ -7,11 +7,11 @@
 // (REPRODUCE / STOCK_SWAP / REPAIR).
 //
 // Navigation flow:
-//   Sidebar "Service Cases" â†’ this page â†’ click row â†’ /service-cases/:id
+//   Sidebar "Service Cases" → this page → click row → /service-cases/:id
 //   On the detail page, you see the case info + any spawned orders, and
 //   can spawn more orders or close the case.
 //
-// The list renders through the shared DataGrid (2026-06-12) â€” same sort /
+// The list renders through the shared DataGrid (2026-06-12) — same sort /
 // per-column filter / Columns picker / resize behaviour and typography as
 // every other module's list. Status chips above the grid pre-scope the
 // rows; Export CSV downloads whatever the grid currently shows.
@@ -50,18 +50,18 @@ const ROOT_CAUSE_COLOR: Record<string, string> = {
   OTHER: "bg-[#F0ECE9] text-[#5A5550]",
 };
 
-// Responsible Unit â€” set from the case detail's Root Cause & Prevention
+// Responsible Unit — set from the case detail's Root Cause & Prevention
 // card (service_cases.responsibleunit, migration 0166). Shown here as a
 // small muted badge next to the root-cause badge when assigned.
 const RESPONSIBLE_UNIT_LABELS: Record<string, string> = {
   PRODUCTION: "Production",
   QC: "QC",
   R_AND_D: "R&D",
-  OFFICE: "Office â€” order entry",
+  OFFICE: "Office — order entry",
   TRANSPORT: "Transport / 3PL",
 };
 
-// Service CASES can be opened against any source order status â€” a customer
+// Service CASES can be opened against any source order status — a customer
 // might complain about an order that hasn't shipped yet ("where is it?",
 // "I want to change colour before it ships", "cancel my order"). Only
 // Service ORDERS (rework/swap/repair, spawned later) require shipped
@@ -93,7 +93,7 @@ type SourceOrderOption = {
   status: string;
   companyOrderId: string;
   // Customer-side document numbers the operator may quote instead of our
-  // order id (customers report issues off THEIR paperwork â€” same rationale
+  // order id (customers report issues off THEIR paperwork — same rationale
   // as the service-order Copy-from lookup, 2026-06-11). Empty when unset.
   customerPO: string;
   customerSO: string;
@@ -125,16 +125,16 @@ type CaseRow = ServiceCaseListItem & {
 };
 
 // Display labels shared by the cell render, the column's value-filter
-// dropdown (filterAccessor) and the CSV export â€” one formula each so the
+// dropdown (filterAccessor) and the CSV export — one formula each so the
 // filter list always reads exactly like the grid.
 function daysOpenLabel(row: CaseRow): string {
-  if (row.status === "CANCELLED" || row.daysOpen == null) return "â€”";
+  if (row.status === "CANCELLED" || row.daysOpen == null) return "—";
   if (row.status !== "CLOSED" && row.daysOpen < 1) return "today";
   return `${row.daysOpen}d`;
 }
 
 function affectedLabel(row: CaseRow): string {
-  if (row.affectedCount <= 0) return "â€”";
+  if (row.affectedCount <= 0) return "—";
   return `${row.affectedCount} SKU${row.affectedCount === 1 ? "" : "s"}`;
 }
 
@@ -153,7 +153,7 @@ export default function ServiceCasesListPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<CaseStatus | "ALL">("ALL");
   // Rows currently visible in the grid (post search / column filters /
-  // sort), mirrored back via onFilteredDataChange â€” Export CSV downloads
+  // sort), mirrored back via onFilteredDataChange — Export CSV downloads
   // exactly what the operator sees. Same pattern as the Employees print
   // flow's onFilteredDataChange={setPrintRows}.
   const [exportRows, setExportRows] = useState<CaseRow[]>([]);
@@ -176,7 +176,7 @@ export default function ServiceCasesListPage() {
           unitLabel: c.responsibleUnit
             ? (RESPONSIBLE_UNIT_LABELS[c.responsibleUnit] ?? c.responsibleUnit)
             : "",
-          issueFirstLine: flat.length > 50 ? `${flat.slice(0, 50)}â€¦` : flat,
+          issueFirstLine: flat.length > 50 ? `${flat.slice(0, 50)}…` : flat,
           affectedCount: c.affectedProducts?.length ?? 0,
           daysOpen:
             c.status === "CANCELLED"
@@ -199,7 +199,7 @@ export default function ServiceCasesListPage() {
         width: "120px",
         sortable: true,
         // Real link (open-in-new-tab works) on top of the row-click
-        // navigation. Normal font â€” doc numbers in DataGrid cells follow
+        // navigation. Normal font — doc numbers in DataGrid cells follow
         // the delivery grids, which don't use mono.
         render: (_value, row) => (
           <Link
@@ -226,7 +226,7 @@ export default function ServiceCasesListPage() {
         label: "Root Cause",
         width: "120px",
         sortable: true,
-        filterAccessor: (row) => row.rootCause || "â€”",
+        filterAccessor: (row) => row.rootCause || "—",
         render: (_value, row) =>
           row.rootCauseCategory ? (
             <span
@@ -235,7 +235,7 @@ export default function ServiceCasesListPage() {
               {row.rootCauseCategory}
             </span>
           ) : (
-            <span className="text-[#9CA3AF]">â€”</span>
+            <span className="text-[#9CA3AF]">—</span>
           ),
       },
       {
@@ -243,14 +243,14 @@ export default function ServiceCasesListPage() {
         label: "Unit",
         width: "130px",
         sortable: true,
-        filterAccessor: (row) => row.unitLabel || "â€”",
+        filterAccessor: (row) => row.unitLabel || "—",
         render: (_value, row) =>
           row.unitLabel ? (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B7280]">
               {row.unitLabel}
             </span>
           ) : (
-            <span className="text-[#9CA3AF]">â€”</span>
+            <span className="text-[#9CA3AF]">—</span>
           ),
       },
       {
@@ -262,7 +262,7 @@ export default function ServiceCasesListPage() {
           value ? (
             <span>{String(value)}</span>
           ) : (
-            <span className="text-[#9CA3AF]">â€”</span>
+            <span className="text-[#9CA3AF]">—</span>
           ),
       },
       {
@@ -275,7 +275,7 @@ export default function ServiceCasesListPage() {
           row.affectedCount > 0 ? (
             <span className="text-[#6B5C32]">{affectedLabel(row)}</span>
           ) : (
-            <span className="text-[#9CA3AF]">â€”</span>
+            <span className="text-[#9CA3AF]">—</span>
           ),
       },
       {
@@ -285,10 +285,10 @@ export default function ServiceCasesListPage() {
         sortable: true,
         filterAccessor: (row) => daysOpenLabel(row),
         // Keep the legacy colour semantics: closed = muted with final age,
-        // cancelled = no age, open â‰¥ 7 days = red flag.
+        // cancelled = no age, open ≥ 7 days = red flag.
         render: (_value, row) => {
           if (row.status === "CANCELLED" || row.daysOpen == null) {
-            return <span className="text-[#9CA3AF]">â€”</span>;
+            return <span className="text-[#9CA3AF]">—</span>;
           }
           if (row.status === "CLOSED") {
             return <span className="text-[#9CA3AF]">{row.daysOpen}d</span>;
@@ -405,7 +405,7 @@ export default function ServiceCasesListPage() {
       </div>
 
       {/* Standard DataGrid (same component as Delivery / Sales / Employees)
-          â€” brings sort, per-column filters, Columns show/hide, drag-resize
+          — brings sort, per-column filters, Columns show/hide, drag-resize
           and the shared look. valueFilterKey scopes the grid's sticky
           column-filter session per status chip so switching chips never
           inherits a stale filter that blanks the grid. */}
@@ -422,7 +422,7 @@ export default function ServiceCasesListPage() {
             maxHeight="calc(100vh - 320px)"
             emptyMessage={
               cases.length === 0
-                ? "No service cases yet â€” click 'New Service Case' to log the first one."
+                ? "No service cases yet — click 'New Service Case' to log the first one."
                 : "No cases in this status."
             }
             valueFilterKey={statusFilter}
@@ -449,7 +449,7 @@ export default function ServiceCasesListPage() {
 }
 
 // ===========================================================================
-// CreateServiceCaseModal â€” minimal form to log a new case.
+// CreateServiceCaseModal — minimal form to log a new case.
 // ===========================================================================
 type SalesOrderApi = {
   id: string;
@@ -491,8 +491,8 @@ type SourceOrderItemApi = {
   legHeightInches?: number | null;
 };
 
-// One pickable damaged part â€” a top-level BOM WIP piece as served by
-// GET /api/sales-orders/repair-components (the canonical BOM â†’ WIP
+// One pickable damaged part — a top-level BOM WIP piece as served by
+// GET /api/sales-orders/repair-components (the canonical BOM → WIP
 // breakdown; same options the service-order Repair Scope picker shows).
 type RepairComponentOption = {
   key: string;
@@ -528,7 +528,7 @@ export function CreateServiceCaseModal({
   );
   const [sourceId, setSourceId] = useState<string>(presetSourceId ?? "");
   const [sourceQuery, setSourceQuery] = useState("");
-  // EXTERNAL-source customer picker â€” search the customer master and
+  // EXTERNAL-source customer picker — search the customer master and
   // attach { id, code, name } so the case is properly linked (not just a
   // free-text name like before). 2026-04-29 operator request.
   const [externalCustomerId, setExternalCustomerId] = useState<string>("");
@@ -538,7 +538,7 @@ export function CreateServiceCaseModal({
   const [externalRef, setExternalRef] = useState("");
   const [issueDescription, setIssueDescription] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
-  // Per-batch upload progress for the off-main-thread compressor â€” null when idle.
+  // Per-batch upload progress for the off-main-thread compressor — null when idle.
   const [photoUploadProgress, setPhotoUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [rootCauseCategory, setRootCauseCategory] = useState<string>("");
   // rootCauseNotes removed from create form 2026-04-28 (5W moved to Issue
@@ -550,7 +550,7 @@ export function CreateServiceCaseModal({
   // operators on 2026-04-29 (Bug #13).
   const [formError, setFormError] = useState<string | null>(null);
   // Affected products picked from the source order (for SO/CO sources).
-  // Stored as an array of { productId, code, name, qty?, components? } â€”
+  // Stored as an array of { productId, code, name, qty?, components? } —
   // matches the backend's affected_product_ids JSON shape (migration 0077).
   // components = optional damaged-part picks (absent = all parts).
   const [affectedProducts, setAffectedProducts] = useState<Array<{
@@ -569,7 +569,7 @@ export function CreateServiceCaseModal({
 
   // Once a SO/CO is selected, load its line items so the operator can
   // pick which product the issue is about (Bug #11). EXTERNAL cases don't
-  // have a source order to pick from â€” affected products there are
+  // have a source order to pick from — affected products there are
   // recorded from the case detail page after creation.
   const sourceDetailUrl =
     sourceType === "EXTERNAL" || !sourceId
@@ -583,7 +583,7 @@ export function CreateServiceCaseModal({
     [sourceDetail],
   );
 
-  // Search-then-pick â€” empty query shows nothing (avoids dropdown of all
+  // Search-then-pick — empty query shows nothing (avoids dropdown of all
   // customers). Filtered by code OR name. Results capped at 10.
   const customerMatches = useMemo(() => {
     if (sourceType !== "EXTERNAL") return [];
@@ -608,7 +608,7 @@ export function CreateServiceCaseModal({
           status: s.status,
           companyOrderId: s.companySOId ?? "",
           // The create form writes the *Id variants; OCR fills the plain
-          // ones â€” surface whichever is set so either entry path matches.
+          // ones — surface whichever is set so either entry path matches.
           customerPO: s.customerPOId || s.customerPO || "",
           customerSO: s.customerSOId || s.customerSO || "",
           reference: s.reference ?? "",
@@ -638,7 +638,7 @@ export function CreateServiceCaseModal({
     const productId = item.productId ?? "";
     if (!productId) return;
     setAffectedProducts((prev) => {
-      // Unchecking removes the whole entry â€” its component picks go with it.
+      // Unchecking removes the whole entry — its component picks go with it.
       const has = prev.some((p) => p.productId === productId);
       if (has) return prev.filter((p) => p.productId !== productId);
       return [
@@ -665,7 +665,7 @@ export function CreateServiceCaseModal({
     );
   }
 
-  // ---- Photo helpers (resize â†’ base64) ----
+  // ---- Photo helpers (resize → base64) ----
   // Uses the shared @/lib/image-compress helper which prefers
   // createImageBitmap + OffscreenCanvas (off-main-thread) on modern browsers
   // and falls back to FileReader/canvas on older Safari / WebView.
@@ -693,7 +693,7 @@ export function CreateServiceCaseModal({
   }
 
   async function handleSubmit() {
-    // Inline validation â€” instead of silently disabling the button (Bug #13),
+    // Inline validation — instead of silently disabling the button (Bug #13),
     // surface a clear inline message so the operator knows WHY they can't
     // submit yet. The button's disabled state still prevents submission;
     // we just no-op here when the form isn't ready.
@@ -721,7 +721,7 @@ export function CreateServiceCaseModal({
           sourceType,
           sourceId: sourceType === "EXTERNAL" ? null : sourceId,
           // For EXTERNAL we now require a real customer from /api/customers
-          // â€” backend gets both customerId and customerName (the
+          // — backend gets both customerId and customerName (the
           // snapshot name on the case row). 2026-04-29.
           customerId: sourceType === "EXTERNAL" ? externalCustomerId : undefined,
           customerName: sourceType === "EXTERNAL" ? externalCustomerName : undefined,
@@ -729,7 +729,7 @@ export function CreateServiceCaseModal({
           issueDescription: issueDescription || null,
           issuePhotos: photos,
           // Affected products picked from the source order's line items
-          // (SO/CO sources only). Optional â€” empty array is fine if the
+          // (SO/CO sources only). Optional — empty array is fine if the
           // operator doesn't know the specific product yet; they can attach
           // products from the case detail page after creation.
           affectedProducts: affectedProducts.length > 0 ? affectedProducts : undefined,
@@ -791,8 +791,8 @@ export function CreateServiceCaseModal({
               {selectedSource ? (
                 <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-[#FAF9F7] px-2 py-1.5 text-sm">
                   <div className="truncate">
-                    <span>{selectedSource.companyOrderId}</span>{" "}
-                    <span className="text-[#6B7280]">â€” {selectedSource.customerName}</span>{" "}
+                    <span className="font-medium">{selectedSource.companyOrderId}</span>{" "}
+                    <span className="text-[#6B7280]">— {selectedSource.customerName}</span>{" "}
                     <span className="text-[10px] text-[#9CA3AF]">({selectedSource.status})</span>
                   </div>
                   <button
@@ -812,14 +812,14 @@ export function CreateServiceCaseModal({
                 </div>
               ) : sourceType === "EXTERNAL" ? (
                 <div className="space-y-1">
-                  {/* Customer picker â€” search by code or name from the
+                  {/* Customer picker — search by code or name from the
                       customer master. Once picked, shows as a chip with a
                       Change button to clear the selection. */}
                   {externalCustomerId ? (
                     <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-[#FAF9F7] px-2 py-1.5 text-sm">
                       <div className="truncate">
-                        <span>{externalCustomerCode}</span>
-                        <span className="text-[#9CA3AF]"> â€” </span>
+                        <span className="font-medium">{externalCustomerCode}</span>
+                        <span className="text-[#9CA3AF]"> — </span>
                         <span>{externalCustomerName}</span>
                       </div>
                       <button
@@ -860,7 +860,7 @@ export function CreateServiceCaseModal({
                               className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
                             >
                               <span className="text-[#6B5C32]">{c.code}</span>
-                              <span className="text-[#9CA3AF]"> â€” </span>
+                              <span className="text-[#9CA3AF]"> — </span>
                               <span>{c.name}</span>
                               {c.phone ? (
                                 <span className="text-[#9CA3AF]"> ({c.phone})</span>
@@ -875,7 +875,7 @@ export function CreateServiceCaseModal({
                     type="text"
                     value={externalRef}
                     onChange={(e) => setExternalRef(e.target.value)}
-                    placeholder="External reference (paper SO#, etc. â€” optional)"
+                    placeholder="External reference (paper SO#, etc. — optional)"
                     className="h-8 text-sm"
                   />
                 </div>
@@ -895,22 +895,22 @@ export function CreateServiceCaseModal({
             </div>
           </div>
 
-          {/* Affected products â€” appears once a SO/CO is selected. Optional;
+          {/* Affected products — appears once a SO/CO is selected. Optional;
               the operator can leave it blank if they're not sure which
               product yet (they can attach products from the case detail
               page after the case is opened). One row per line item; click
-              to toggle. EXTERNAL cases skip this â€” there's no source order
-              to derive products from. (Bug #11 â€” 2026-04-29) */}
+              to toggle. EXTERNAL cases skip this — there's no source order
+              to derive products from. (Bug #11 — 2026-04-29) */}
           {sourceType !== "EXTERNAL" && selectedSource ? (
             <div>
               <label className="block text-xs text-[#6B7280] mb-1">
                 Which product has the issue?{" "}
-                <span className="text-[#9CA3AF]">(optional â€” pick one or more lines from this order)</span>
+                <span className="text-[#9CA3AF]">(optional — pick one or more lines from this order)</span>
               </label>
               {sourceItemsLoading ? (
                 <div className="flex items-center gap-2 text-xs text-[#6B7280] py-2">
                   <Loader2 className="h-3 w-3 animate-spin" />
-                  Loading order line itemsâ€¦
+                  Loading order line items…
                 </div>
               ) : sourceItems.length === 0 ? (
                 <div className="text-xs text-[#9CA3AF] py-2">
@@ -939,17 +939,17 @@ export function CreateServiceCaseModal({
                               picked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#9CA3AF]"
                             } flex items-center justify-center text-white text-[10px]`}
                           >
-                            {picked ? "âœ“" : ""}
+                            {picked ? "✓" : ""}
                           </span>
-                          <span className="text-[#6B5C32]">{it.productCode || "â€”"}</span>
-                          <span className="text-[#9CA3AF]"> â€” </span>
+                          <span className="text-[#6B5C32]">{it.productCode || "—"}</span>
+                          <span className="text-[#9CA3AF]"> — </span>
                           <span className="truncate">{it.productName || "(unnamed)"}</span>
                           {it.sizeLabel ? (
-                            <span className="text-[#9CA3AF]"> Â· {it.sizeLabel}</span>
+                            <span className="text-[#9CA3AF]"> · {it.sizeLabel}</span>
                           ) : null}
                           <span className="ml-auto text-[#6B7280]">qty {it.quantity ?? 0}</span>
                         </button>
-                        {/* Damaged-parts narrowing for the checked product â€”
+                        {/* Damaged-parts narrowing for the checked product —
                             renders only when the BOM has pickable top-level
                             pieces (legacy/flat BOM = no component layer). */}
                         {picked && (
@@ -972,13 +972,13 @@ export function CreateServiceCaseModal({
             </div>
           ) : null}
 
-          {/* Issue â€” captures both customer report AND root-cause analysis.
+          {/* Issue — captures both customer report AND root-cause analysis.
               Operators consolidated these in 2026-04-28 per "issue description
               and why did this happen are double". One textarea, 5W template. */}
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">
               Issue Description{" "}
-              <span className="text-[#9CA3AF]">(use the 5W template â€” what happened, when, who, where, result)</span>
+              <span className="text-[#9CA3AF]">(use the 5W template — what happened, when, who, where, result)</span>
             </label>
             <textarea
               rows={6}
@@ -986,11 +986,11 @@ export function CreateServiceCaseModal({
               onChange={(e) => setIssueDescription(e.target.value)}
               placeholder={[
                 "What happened? Use the 5W template:",
-                "  When  â€” date / time of incident (e.g. 2026-04-29 10:30)",
-                "  Who   â€” name (e.g. 3PL driver Ahmad / sales agent Wong)",
-                "  Where â€” location (e.g. customer's living room, KL)",
-                "  What  â€” what they did (e.g. dropped the sofa during unloading)",
-                "  Result â€” what problem was caused (e.g. frame cracked at left armrest)",
+                "  When  — date / time of incident (e.g. 2026-04-29 10:30)",
+                "  Who   — name (e.g. 3PL driver Ahmad / sales agent Wong)",
+                "  Where — location (e.g. customer's living room, KL)",
+                "  What  — what they did (e.g. dropped the sofa during unloading)",
+                "  Result — what problem was caused (e.g. frame cracked at left armrest)",
               ].join("\n")}
               className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
             />
@@ -1055,14 +1055,14 @@ export function CreateServiceCaseModal({
           {/* Optional RCA */}
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">
-              Root Cause <span className="text-[#9CA3AF]">(optional â€” fill later if you're still gathering info)</span>
+              Root Cause <span className="text-[#9CA3AF]">(optional — fill later if you're still gathering info)</span>
             </label>
             <select
               value={rootCauseCategory}
               onChange={(e) => setRootCauseCategory(e.target.value)}
               className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
             >
-              <option value="">Category â€” not yet assigned</option>
+              <option value="">Category — not yet assigned</option>
               <option value="PRODUCTION">Production / workmanship</option>
               <option value="DESIGN">Design / R&amp;D</option>
               <option value="MATERIAL">Material / supplier</option>
@@ -1071,7 +1071,7 @@ export function CreateServiceCaseModal({
               <option value="TRANSPORT">Transport / 3PL</option>
               <option value="OTHER">Other</option>
             </select>
-            {/* rootCauseNotes textarea removed 2026-04-28 â€” operators flagged
+            {/* rootCauseNotes textarea removed 2026-04-28 — operators flagged
                 it was a duplicate of Issue Description. The 5W story lives in
                 the Issue Description field above. The category dropdown
                 tags it for reporting. */}
@@ -1082,12 +1082,12 @@ export function CreateServiceCaseModal({
             <p>
               Opening a case logs the customer issue. If it needs rework / swap / repair, spawn
               a Service Order from the case detail page after this. Cases close on their own
-              timeline â€” you don't need a Service Order for every case.
+              timeline — you don't need a Service Order for every case.
             </p>
           </div>
         </div>
 
-        {/* Inline form error â€” surfaced from client-side validation OR a
+        {/* Inline form error — surfaced from client-side validation OR a
             failed POST. Replaces the silent "button does nothing" failure
             mode reported on 2026-04-29 (Bug #13). The toast still fires for
             API failures so the message is visible even after the modal
@@ -1117,7 +1117,7 @@ export function CreateServiceCaseModal({
             disabled={submitting}
             className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           >
-            {submitting ? "Openingâ€¦" : "Open Case"}
+            {submitting ? "Opening…" : "Open Case"}
           </Button>
         </div>
       </div>
@@ -1138,7 +1138,7 @@ function SourceSearchPicker({
   const filtered = useMemo(() => {
     if (!q) return [];
     // Matches our order id, customer name, AND the customer-side document
-    // numbers (PO / SO / reference) â€” customers quote their own paperwork
+    // numbers (PO / SO / reference) — customers quote their own paperwork
     // when they report an issue (2026-06-12, mirrors the Copy-from lookup).
     return options
       .filter(
@@ -1156,10 +1156,10 @@ function SourceSearchPicker({
   // any non-DRAFT/CANCELLED order, so "shipped" was misleading. Now shows
   // the real count of selectable orders, and a loading state on first
   // mount so operators don't see "(0 ...)" while the list is still
-  // fetching. (Bug #11 â€” 2026-04-29)
+  // fetching. (Bug #11 — 2026-04-29)
   const placeholder = loading
-    ? "Loading ordersâ€¦"
-    : `Type SO# / customer / customer PO / referenceâ€¦ (${options.length} available)`;
+    ? "Loading orders…"
+    : `Type SO# / customer / customer PO / reference… (${options.length} available)`;
 
   return (
     <div className="space-y-1">
@@ -1174,7 +1174,7 @@ function SourceSearchPicker({
         <div className="max-h-48 overflow-y-auto rounded border border-[#E2DDD8] bg-white">
           {loading ? (
             <div className="p-2 text-xs text-[#9CA3AF] flex items-center gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" /> Loading ordersâ€¦
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading orders…
             </div>
           ) : filtered.length === 0 ? (
             <div className="p-2 text-xs text-[#9CA3AF]">No matches for "{q}".</div>
@@ -1194,11 +1194,11 @@ function SourceSearchPicker({
                   onClick={() => onPick(s.id)}
                   className="block w-full text-left px-2 py-1.5 text-xs hover:bg-[#F4EFE3] border-b border-[#F0ECE9] last:border-b-0"
                 >
-                  <span>{s.companyOrderId}</span>
-                  <span className="text-[#6B7280]"> â€” {s.customerName}</span>
+                  <span className="font-medium">{s.companyOrderId}</span>
+                  <span className="text-[#6B7280]"> — {s.customerName}</span>
                   <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
                   {refs.length > 0 && (
-                    <div className="text-[10px] text-[#9CA3AF]">{refs.join(" Â· ")}</div>
+                    <div className="text-[10px] text-[#9CA3AF]">{refs.join(" · ")}</div>
                   )}
                 </button>
               );
@@ -1211,13 +1211,13 @@ function SourceSearchPicker({
 }
 
 // ===========================================================================
-// DamagedPartsPicker â€” compact component-level narrowing under a checked
+// DamagedPartsPicker — compact component-level narrowing under a checked
 // affected product (SO/CO sources only).
 // ===========================================================================
-// Options come from GET /api/sales-orders/repair-components â€” the canonical
-// BOM â†’ WIP breakdown (the same endpoint the service-order create page's
+// Options come from GET /api/sales-orders/repair-components — the canonical
+// BOM → WIP breakdown (the same endpoint the service-order create page's
 // Repair Scope picker consumes); components are NEVER re-derived client-side.
-// Empty result / failed fetch â†’ renders nothing (legacy/flat BOM = no
+// Empty result / failed fetch → renders nothing (legacy/flat BOM = no
 // component layer, identical to before the feature). No pick = all parts.
 function DamagedPartsPicker({
   item,
@@ -1249,7 +1249,7 @@ function DamagedPartsPicker({
         if (data?.success && Array.isArray(data.data)) setOptions(data.data);
       })
       .catch(() => {
-        // Endpoint unreachable â€” keep the picker hidden (= all parts).
+        // Endpoint unreachable — keep the picker hidden (= all parts).
       });
     return () => {
       cancelled = true;
@@ -1287,7 +1287,7 @@ function DamagedPartsPicker({
   return (
     <div className="ml-7 mr-2 mb-1.5 rounded border border-[#E8D8B2] bg-[#FAF7F0] px-2 py-1.5">
       <div className="text-[10px] text-[#6B5C32] mb-1">
-        Damaged parts (optional â€” all if none picked)
+        Damaged parts (optional — all if none picked)
       </div>
       <div className="space-y-1">
         {options.map((opt) => {
@@ -1303,7 +1303,7 @@ function DamagedPartsPicker({
                   className="h-3 w-3"
                 />
                 <span className="truncate">{opt.label}</span>
-                <span className="text-[#9CA3AF]">Ã—{maxQty}</span>
+                <span className="text-[#9CA3AF]">×{maxQty}</span>
               </label>
               {pick ? (
                 <Input

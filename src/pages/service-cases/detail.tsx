@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Service Case detail â€” case info + nested orders + spawn-order modal.
+// Service Case detail — case info + nested orders + spawn-order modal.
 //
 // This is the operator's primary screen for working a service case. It
 // shows the customer issue + photos + RCA at the top; below, the list of
@@ -52,7 +52,7 @@ const ROOT_CAUSE_LABELS: Record<string, string> = {
   OTHER: "Other",
 };
 
-// Responsible Unit â€” which business unit caused the issue (owner-level
+// Responsible Unit — which business unit caused the issue (owner-level
 // attribution, coarser than the root-cause category). Stored on the
 // runtime-added lowercase column service_cases.responsibleunit (migration
 // 0166); the PUT validator accepts exactly these 5 values or null.
@@ -60,7 +60,7 @@ const RESPONSIBLE_UNIT_LABELS: Record<string, string> = {
   PRODUCTION: "Production",
   QC: "QC",
   R_AND_D: "R&D",
-  OFFICE: "Office â€” order entry",
+  OFFICE: "Office — order entry",
   TRANSPORT: "Transport / 3PL",
 };
 
@@ -85,7 +85,7 @@ const ALL_DEPTS = [
   { code: "MAINTENANCE", name: "Maintenance" },
 ];
 
-// Affected product on the case â€” operator can attach 0..N product SKUs.
+// Affected product on the case — operator can attach 0..N product SKUs.
 // Optional: SO/CO-sourced cases pre-fill from order lines; EXTERNAL cases
 // add manually. Stored as JSON on service_cases.affected_product_ids
 // (migration 0077).
@@ -95,7 +95,7 @@ type AffectedProduct = {
   name: string;
   qty?: number | null;
   // Damaged-part picks captured in the create modal (keys from
-  // GET /api/sales-orders/repair-components). Read-only chips here â€”
+  // GET /api/sales-orders/repair-components). Read-only chips here —
   // absent = all parts.
   components?: Array<{ key: string; label: string; qty: number }>;
 };
@@ -115,10 +115,10 @@ type ServiceCaseDetail = {
   issuePhotos: string[];
   affectedProducts: AffectedProduct[];
   // Root cause + prevention. category/action/owner live here; the actual
-  // status tracking moves to a future Prevention Tracker portal â€” the
+  // status tracking moves to a future Prevention Tracker portal — the
   // case detail just OPENS the prevention task.
   rootCauseCategory: RootCauseCategory | null;
-  // Responsible Unit â€” owner-level attribution of which business unit
+  // Responsible Unit — owner-level attribution of which business unit
   // caused the issue. NULL until assigned (migration 0166).
   responsibleUnit: string | null;
   rootCauseNotes: string;
@@ -126,7 +126,7 @@ type ServiceCaseDetail = {
   preventionAction: string;
   preventionStatus: PreventionStatus;
   preventionOwner: string;
-  // Action log â€” chronological entries the agent logs over the case's
+  // Action log — chronological entries the agent logs over the case's
   // lifetime (called the customer, scheduled inspection, sent parts).
   actionLog: ActionLogEntry[];
   status: CaseStatus;
@@ -142,7 +142,7 @@ type ServiceCaseDetail = {
     mode: Mode | null;
     status: string;
     createdAt: string;
-    // true = SV Service Order (sales_orders row linked via caseid) â€”
+    // true = SV Service Order (sales_orders row linked via caseid) —
     // detail lives at /service-order/:id, not /service-orders/:id.
     isSv?: boolean;
   }>;
@@ -164,14 +164,14 @@ const STATUS_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
 
 // ROOT_CAUSE_LABELS now defined at the top of the file (next to the type
 // definitions) since it's referenced by the dynamic CategoryDetailsForm
-// component too â€” keep it co-located with the data sources.
+// component too — keep it co-located with the data sources.
 
-// PREVENTION_STATUS_COLOR removed 2026-04-28 â€” status pill no longer
+// PREVENTION_STATUS_COLOR removed 2026-04-28 — status pill no longer
 // shown on the case detail; tracking moves to a future Prevention Tracker
 // portal. The DB column still defaults to 'PENDING'.
 
 function dateLabel(iso: string): string {
-  if (!iso) return "â€”";
+  if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleString("en-MY", {
@@ -191,7 +191,7 @@ export default function ServiceCaseDetailPage() {
   );
   const caseDetail = resp?.data;
 
-  // Customer lookup â€” surface the actual name + phone from the customer
+  // Customer lookup — surface the actual name + phone from the customer
   // master, so the header doesn't only show the customer code (operators
   // complained the bare code wasn't useful at-a-glance, 2026-04-29).
   const { data: custResp } = useCachedJson<{
@@ -221,7 +221,7 @@ export default function ServiceCaseDetailPage() {
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Service Cases
         </Link>
-        <p className="text-sm text-[#9CA3AF]">Loadingâ€¦</p>
+        <p className="text-sm text-[#9CA3AF]">Loading…</p>
       </div>
     );
   }
@@ -238,7 +238,7 @@ export default function ServiceCaseDetailPage() {
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
       invalidateCachePrefix("/api/service-cases");
       refresh();
-      toast.success(`Status â†’ ${next}`);
+      toast.success(`Status → ${next}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
     } finally {
@@ -275,7 +275,7 @@ export default function ServiceCaseDetailPage() {
               {caseDetail.status}
             </span>
           </div>
-          {/* Header customer row â€” includes name + phone from the customer
+          {/* Header customer row — includes name + phone from the customer
               master if we can match it by id, otherwise just falls back to
               the snapshot name stored on the case (covers older cases and
               EXTERNAL cases keyed by name only). */}
@@ -283,14 +283,14 @@ export default function ServiceCaseDetailPage() {
             Customer:{" "}
             <span className="font-medium">
               {customerRecord?.code ?? ""}
-              {customerRecord?.code && customerRecord?.name ? " â€” " : ""}
+              {customerRecord?.code && customerRecord?.name ? " — " : ""}
               {customerRecord?.name ?? caseDetail.customerName}
             </span>
             {(() => {
               const phone = customerRecord?.phone || customerRecord?.mobile;
               return phone ? <span className="text-[#9CA3AF]"> ({phone})</span> : null;
             })()}
-            {" Â· "}
+            {" · "}
             Source:{" "}
             {sourceHref ? (
               <Link to={sourceHref} className="text-[#6B5C32] hover:underline">
@@ -300,10 +300,10 @@ export default function ServiceCaseDetailPage() {
               <span>
                 EXTERNAL
                 {caseDetail.externalRef ? ` (${caseDetail.externalRef})` : ""}
-                <span className="text-[#9CA3AF]"> â€” customer reported directly</span>
+                <span className="text-[#9CA3AF]"> — customer reported directly</span>
               </span>
             )}
-            {caseDetail.createdAt ? ` Â· Opened ${dateLabel(caseDetail.createdAt)}` : ""}
+            {caseDetail.createdAt ? ` · Opened ${dateLabel(caseDetail.createdAt)}` : ""}
             {caseDetail.createdByName ? ` by ${caseDetail.createdByName}` : ""}
           </p>
         </div>
@@ -343,7 +343,7 @@ export default function ServiceCaseDetailPage() {
         </div>
       </div>
 
-      {/* Case pipeline â€” auto-computed progress stepper, display-only.
+      {/* Case pipeline — auto-computed progress stepper, display-only.
           Derived from the case status + attached orders + their delivery
           orders; nothing here writes. */}
       <CasePipeline caseDetail={caseDetail} />
@@ -368,7 +368,7 @@ export default function ServiceCaseDetailPage() {
         }}
       />
 
-      {/* Affected products â€” operator can attach 0..N SKUs the issue
+      {/* Affected products — operator can attach 0..N SKUs the issue
           relates to. Optional (case might be a service complaint with no
           specific product). For SO/CO-sourced cases the operator can
           quickly add lines that match the source order's products. */}
@@ -394,7 +394,7 @@ export default function ServiceCaseDetailPage() {
                 // SO/CO cases hand off to the service-order create page,
                 // pre-filled from the case (source lines narrowed to the
                 // affected products + their damaged-part picks). EXTERNAL
-                // cases keep the legacy modal â€” no source order to copy.
+                // cases keep the legacy modal — no source order to copy.
                 if (caseDetail.sourceType === "SO" || caseDetail.sourceType === "CO") {
                   navigate(`/service-order/create?fromCase=${caseDetail.id}`);
                 } else {
@@ -428,7 +428,7 @@ export default function ServiceCaseDetailPage() {
                   <tr key={o.id} className="border-b border-[#F0ECE9]">
                     <td className="py-2 px-3 text-xs">
                       {/* SV orders (spawned via the create-page hand-off) are
-                          sales_orders rows â€” their detail lives under
+                          sales_orders rows — their detail lives under
                           /service-order/:id. */}
                       <Link
                         to={o.isSv ? `/service-order/${o.id}` : `/service-orders/${o.id}`}
@@ -452,7 +452,7 @@ export default function ServiceCaseDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Stock top-up â€” short-shipped or missing parts (legs, woven fabric
+      {/* Stock top-up — short-shipped or missing parts (legs, woven fabric
           etc.); deducts stock via the standard stock-adjustments path, no
           production order. */}
       <StockTopUpPanel
@@ -472,7 +472,7 @@ export default function ServiceCaseDetailPage() {
         }}
       />
 
-      {/* Service-agent action log â€” chronological entries the agent logs
+      {/* Service-agent action log — chronological entries the agent logs
           over the case's lifetime (called customer, scheduled inspection,
           sent missing parts, etc.). Keyed by entry count so an append from
           the Stock Top-Up panel re-seeds this panel's local state
@@ -520,33 +520,33 @@ export default function ServiceCaseDetailPage() {
 }
 
 // ===========================================================================
-// CasePipeline â€” auto-computed, display-only progress stepper.
+// CasePipeline — auto-computed, display-only progress stepper.
 // ===========================================================================
-// Eight fixed steps: Opened â†’ Investigating â†’ Service Order â†’ Repair in
-// progress â†’ Repair done â†’ Delivery arranged â†’ Delivered â†’ Closed.
+// Eight fixed steps: Opened → Investigating → Service Order → Repair in
+// progress → Repair done → Delivery arranged → Delivered → Closed.
 // Completion is DERIVED from data already on the page plus cached fetches of
 // /api/delivery-orders and /api/production-orders (matched by salesOrderId
-// against the case's SV order ids) â€” no new endpoints, no writes, no stored
+// against the case's SV order ids) — no new endpoints, no writes, no stored
 // step state. Only Investigating (Mark In Progress) and Closed (Close Case)
 // are manual clicks; everything else lights itself (owner 2026-06-12).
 //
 // Status sets (from the authoritative route enums):
-// â€¢ SV orders are sales_orders rows (src/api/routes/sales-orders.ts):
+// • SV orders are sales_orders rows (src/api/routes/sales-orders.ts):
 //   READY_TO_SHIP and beyond = production finished (repair done);
 //   SHIPPED and beyond = delivery arranged; DELIVERED/INVOICED/CLOSED =
-//   delivered. Their DOs (delivery_orders DRAFTâ†’LOADEDâ†’IN_TRANSITâ†’
-//   DELIVEREDâ†’INVOICED) refine that: any DO = arranged (the Pending
+//   delivered. Their DOs (delivery_orders DRAFT→LOADED→IN_TRANSIT→
+//   DELIVERED→INVOICED) refine that: any DO = arranged (the Pending
 //   Dispatch stage on the Delivery page), DO DELIVERED/INVOICED = delivered.
-// â€¢ Repair in progress (owner rule 2026-06-12): the moment ANY department's
-//   job card on the SV order's production orders carries a completedDate â€”
-//   "åªè¦ä»»ä½•ä¸€ä¸ªéƒ¨é—¨å·²ç»æœ‰ Completion Date å°±ä»£è¡¨åœ¨ç”Ÿäº§ä¸­". Legacy
+// • Repair in progress (owner rule 2026-06-12): the moment ANY department's
+//   job card on the SV order's production orders carries a completedDate —
+//   "只要任何一个部门已经有 Completion Date 就代表在生产中". Legacy
 //   service_orders: status IN_PRODUCTION/RESERVED/IN_REPAIR.
-// â€¢ Legacy service_orders (src/api/routes/service-orders.ts lifecycle
-//   OPENâ†’IN_PRODUCTION/RESERVED/IN_REPAIRâ†’READY_TO_SHIPâ†’DELIVEREDâ†’CLOSED):
+// • Legacy service_orders (src/api/routes/service-orders.ts lifecycle
+//   OPEN→IN_PRODUCTION/RESERVED/IN_REPAIR→READY_TO_SHIP→DELIVERED→CLOSED):
 //   READY_TO_SHIP+ = repair done, DELIVERED/CLOSED = delivered (they have
 //   no delivery_orders rows).
-// Later steps imply earlier ones along the fulfilment chain (delivered â‡’
-// arranged â‡’ repair done â‡’ in progress), and Investigating lights up once
+// Later steps imply earlier ones along the fulfilment chain (delivered ⇒
+// arranged ⇒ repair done ⇒ in progress), and Investigating lights up once
 // the case left OPEN or any later step completed.
 const SV_REPAIR_DONE_STATUSES = new Set([
   "READY_TO_SHIP", "SHIPPED", "DELIVERED", "INVOICED", "CLOSED",
@@ -575,7 +575,7 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
     [caseDetail.orders],
   );
 
-  // Two extra fetches (cached) â€” only when the case actually has SV orders;
+  // Two extra fetches (cached) — only when the case actually has SV orders;
   // legacy-only cases derive everything from the statuses already loaded.
   const { data: doResp } = useCachedJson<{
     data?: Array<{ id: string; salesOrderId?: string; status?: string }>;
@@ -634,39 +634,46 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
         <CardTitle className="text-sm">Case Pipeline</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="flex flex-wrap items-center gap-y-2">
+        {/* Full-width stepper: each step is an equal flex-1 column, the
+            connector lines stretch to fill the row left-to-right. */}
+        <div className="flex w-full items-start">
           {PIPELINE_STEPS.map((label, i) => {
             const done = stepsDone[i];
             const current = i === currentIdx;
+            const prevDone = i > 0 && stepsDone[i - 1];
             return (
-              <div key={label} className="flex items-center">
+              <div key={label} className="flex flex-1 flex-col items-center">
+                {/* dot + the two half-connectors on either side */}
+                <div className="flex w-full items-center">
+                  <span
+                    className={`h-0.5 flex-1 ${i === 0 ? "bg-transparent" : prevDone ? "bg-[#6B5C32]" : "bg-[#E2DDD8]"}`}
+                  />
+                  <span
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold ${
+                      done
+                        ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                        : current
+                          ? "border-[#6B5C32] bg-white text-[#6B5C32]"
+                          : "border-[#E2DDD8] bg-white text-[#9CA3AF]"
+                    }`}
+                  >
+                    {done ? "✓" : i + 1}
+                  </span>
+                  <span
+                    className={`h-0.5 flex-1 ${i === PIPELINE_STEPS.length - 1 ? "bg-transparent" : done ? "bg-[#6B5C32]" : "bg-[#E2DDD8]"}`}
+                  />
+                </div>
                 <span
-                  className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-medium ${
-                    done
-                      ? "border-[#6B5C32] bg-[#6B5C32] text-white"
-                      : current
-                        ? "border-[#6B5C32] bg-white text-[#6B5C32]"
-                        : "border-[#E2DDD8] bg-white text-[#9CA3AF]"
-                  }`}
-                >
-                  {i + 1}
-                </span>
-                <span
-                  className={`ml-1.5 text-xs whitespace-nowrap ${
+                  className={`mt-1.5 px-1 text-center text-[11px] leading-tight ${
                     done
                       ? "text-[#1F1D1B]"
                       : current
-                        ? "text-[#6B5C32] font-medium"
+                        ? "font-semibold text-[#6B5C32]"
                         : "text-[#9CA3AF]"
                   }`}
                 >
                   {label}
                 </span>
-                {i < PIPELINE_STEPS.length - 1 && (
-                  <span
-                    className={`mx-2 h-px w-5 ${done ? "bg-[#6B5C32]" : "bg-[#E2DDD8]"}`}
-                  />
-                )}
               </div>
             );
           })}
@@ -677,7 +684,7 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
 }
 
 // ===========================================================================
-// RootCausePanel â€” inline editor, auto-saves on blur.
+// RootCausePanel — inline editor, auto-saves on blur.
 // ===========================================================================
 function RootCausePanel({
   caseDetail,
@@ -691,7 +698,7 @@ function RootCausePanel({
   const [category, setCategory] = useState(caseDetail.rootCauseCategory ?? "");
   const [details, setDetails] = useState<RootCauseDetails>(caseDetail.rootCauseDetails ?? {});
   const [action, setAction] = useState(caseDetail.preventionAction);
-  // status no longer edited from this panel â€” see Prevention Tracker portal.
+  // status no longer edited from this panel — see Prevention Tracker portal.
   const [owner, setOwner] = useState(caseDetail.preventionOwner);
   const [saving, setSaving] = useState(false);
 
@@ -719,7 +726,7 @@ function RootCausePanel({
         <CardTitle className="text-sm">Root Cause &amp; Prevention</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Responsible Unit â€” owner-level attribution of which business
+        {/* Responsible Unit — owner-level attribution of which business
             unit caused the issue. Coarser than the category below; saves
             on change like the neighbouring fields. */}
         <div>
@@ -734,14 +741,14 @@ function RootCausePanel({
             disabled={saving}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
           >
-            <option value="">â€” not set â€”</option>
+            <option value="">— not set —</option>
             {Object.entries(RESPONSIBLE_UNIT_LABELS).map(([v, t]) => (
               <option key={v} value={v}>{t}</option>
             ))}
           </select>
         </div>
 
-        {/* Category â€” drives reporting / categorisation of recurrence.
+        {/* Category — drives reporting / categorisation of recurrence.
             Changing the category resets the details JSON since the per-
             category fields are different shapes. */}
         <select
@@ -749,21 +756,21 @@ function RootCausePanel({
           onChange={(e) => {
             const next = e.target.value;
             setCategory(next);
-            // Reset details when category changes â€” old fields don't apply.
+            // Reset details when category changes — old fields don't apply.
             setDetails({});
             save({ rootCauseCategory: next || null, rootCauseDetails: {} });
           }}
           disabled={saving}
           className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
         >
-          <option value="">Category â€” not yet assigned</option>
+          <option value="">Category — not yet assigned</option>
           {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
             <option key={v} value={v}>{t}</option>
           ))}
         </select>
 
         {/* Per-category structured detail fields. Renders different inputs
-            based on the category â€” depts for PRODUCTION, supplier+RM for
+            based on the category — depts for PRODUCTION, supplier+RM for
             MATERIAL, 3PL company for TRANSPORT, etc. */}
         {category && (
           <CategoryDetailsForm
@@ -776,7 +783,7 @@ function RootCausePanel({
             disabled={saving}
           />
         )}
-        {/* rootCauseNotes textarea removed 2026-04-28 â€” duplicate of Issue
+        {/* rootCauseNotes textarea removed 2026-04-28 — duplicate of Issue
             Description (the 5W story lives there now). */}
         <textarea
           rows={2}
@@ -808,7 +815,7 @@ function RootCausePanel({
 }
 
 // ===========================================================================
-// IssueDescriptionPanel â€” editable issue description with the 5W template.
+// IssueDescriptionPanel — editable issue description with the 5W template.
 // ===========================================================================
 // Inline edit on the case detail page. Auto-saves on blur. The previous
 // design had this as a read-only display + a separate "Why did this happen?"
@@ -863,11 +870,11 @@ function IssueDescriptionPanel({
           disabled={saving}
           placeholder={[
             "What happened? Use the 5W template:",
-            "  When  â€” date / time of incident (e.g. 2026-04-29 10:30)",
-            "  Who   â€” name (e.g. 3PL driver Ahmad / sales agent Wong)",
-            "  Where â€” location (e.g. customer's living room, KL)",
-            "  What  â€” what they did (e.g. dropped the sofa during unloading)",
-            "  Result â€” what problem was caused (e.g. frame cracked at left armrest)",
+            "  When  — date / time of incident (e.g. 2026-04-29 10:30)",
+            "  Who   — name (e.g. 3PL driver Ahmad / sales agent Wong)",
+            "  Where — location (e.g. customer's living room, KL)",
+            "  What  — what they did (e.g. dropped the sofa during unloading)",
+            "  Result — what problem was caused (e.g. frame cracked at left armrest)",
           ].join("\n")}
           className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
         />
@@ -877,13 +884,13 @@ function IssueDescriptionPanel({
 }
 
 // ===========================================================================
-// CategoryDetailsForm â€” per-category structured second-level inputs.
+// CategoryDetailsForm — per-category structured second-level inputs.
 // ===========================================================================
 // Renders different fields based on the selected root_cause_category.
 //
-// Design principle (2026-04-29 operator feedback): "ç§ç±»å¤ªå¤šäº†" â€” instead
+// Design principle (2026-04-29 operator feedback): "种类太多了" — instead
 // of forcing every variant into a rigid enum, each category has a small
-// number of structured dropdowns (dept / product / supplier / 3PL â€” things
+// number of structured dropdowns (dept / product / supplier / 3PL — things
 // that map to other masters) plus a free-text **issue notes** field with
 // example placeholders. The placeholder lists examples in light grey so
 // the operator sees the kind of detail to capture without being boxed in.
@@ -908,13 +915,13 @@ function CategoryDetailsForm({
   onPersist: (next: RootCauseDetails) => void;
   disabled?: boolean;
 }) {
-  // Currently-selected department. Treated as a non-binding referral â€”
+  // Currently-selected department. Treated as a non-binding referral —
   // workers can move between depts, so the worker picker is NOT scoped to
   // it. Operator picks a dept as context, then independently searches a
   // worker by name/emp #.
   const deptCode = (value.departmentCode as string) ?? "";
 
-  // Lazy fetches â€” only the active category's data source is loaded.
+  // Lazy fetches — only the active category's data source is loaded.
   // Workers: pull the full list (no dept filter) so the typeahead below
   // can find any of the ~100-200 employees by name regardless of which
   // dept they're currently rostered to.
@@ -1000,7 +1007,7 @@ function CategoryDetailsForm({
     return Array.from(new Set(names)).sort();
   }, [providersResp]);
 
-  // Product search box state for DESIGN â€” empty query shows nothing
+  // Product search box state for DESIGN — empty query shows nothing
   // (avoids dumping the full SKU list).
   const [productSearch, setProductSearch] = useState("");
   const productMatches = useMemo(() => {
@@ -1011,7 +1018,7 @@ function CategoryDetailsForm({
       .slice(0, 10);
   }, [productSearch, products]);
 
-  // Worker typeahead â€” empty query shows nothing so the operator gets a
+  // Worker typeahead — empty query shows nothing so the operator gets a
   // clean input rather than a 200-row scroll. Match on name OR empNo so
   // either reading habit works ("EMP-025" or "Aung Thein Win").
   const [workerSearch, setWorkerSearch] = useState("");
@@ -1039,7 +1046,7 @@ function CategoryDetailsForm({
     onPersist(value);
   }
 
-  // Reusable worker picker â€” search-as-you-type across the full worker
+  // Reusable worker picker — search-as-you-type across the full worker
   // list (workers aren't strictly bound to the chosen dept, since people
   // move between lines). Lower-case function returning JSX (called as
   // `{renderWorkerDropdown()}`) instead of a component, to satisfy
@@ -1052,7 +1059,7 @@ function CategoryDetailsForm({
             {value.workerEmpNo ? (
               <>
                 <span className="text-[#6B5C32]">{String(value.workerEmpNo)}</span>
-                <span className="text-[#9CA3AF]"> â€” </span>
+                <span className="text-[#9CA3AF]"> — </span>
               </>
             ) : null}
             <span>{(value.workerName as string) ?? ""}</span>
@@ -1066,7 +1073,7 @@ function CategoryDetailsForm({
             className="text-[#9A3A2D] hover:text-[#7A2E24]"
             title="Clear worker"
           >
-            Ã—
+            ×
           </button>
         </div>
       );
@@ -1078,7 +1085,7 @@ function CategoryDetailsForm({
           value={workerSearch}
           onChange={(e) => setWorkerSearch(e.target.value)}
           disabled={disabled}
-          placeholder="Worker / PIC â€” type name or emp # to search (optional)"
+          placeholder="Worker / PIC — type name or emp # to search (optional)"
           className="h-8 text-xs"
         />
         {workerMatches.length > 0 && (
@@ -1100,12 +1107,12 @@ function CategoryDetailsForm({
                 {w.empNo ? (
                   <>
                     <span className="text-[#6B5C32]">{w.empNo}</span>
-                    <span className="text-[#9CA3AF]"> â€” </span>
+                    <span className="text-[#9CA3AF]"> — </span>
                   </>
                 ) : null}
                 <span>{w.name}</span>
                 {w.departmentCode ? (
-                  <span className="text-[#9CA3AF]"> Â· {w.departmentCode}</span>
+                  <span className="text-[#9CA3AF]"> · {w.departmentCode}</span>
                 ) : null}
               </button>
             ))}
@@ -1131,7 +1138,7 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Department â€” pick one</option>
+            <option value="">Department — pick one</option>
             {PRODUCTION_DEPTS.map((d) => (
               <option key={d.code} value={d.code}>{d.name}</option>
             ))}
@@ -1143,7 +1150,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="Where in the process? e.g. left armrest sewing seam, leg joinery glue gap, foam wrapping uneven, framing nail spacing wrongâ€¦"
+            placeholder="Where in the process? e.g. left armrest sewing seam, leg joinery glue gap, foam wrapping uneven, framing nail spacing wrong…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
@@ -1153,12 +1160,12 @@ function CategoryDetailsForm({
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
           {/* Product search-then-pick. Once picked, shows the chosen
-              product as a chip with Ã— to clear. */}
+              product as a chip with × to clear. */}
           {value.productId ? (
             <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs">
               <span>
                 <span className="text-[#6B5C32]">{(value.productCode as string) ?? ""}</span>
-                <span className="text-[#9CA3AF]"> â€” </span>
+                <span className="text-[#9CA3AF]"> — </span>
                 <span>{(value.productName as string) ?? ""}</span>
               </span>
               <button
@@ -1200,7 +1207,7 @@ function CategoryDetailsForm({
                       className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
                     >
                       <span className="text-[#6B5C32]">{p.code}</span>
-                      <span className="text-[#9CA3AF]"> â€” </span>
+                      <span className="text-[#9CA3AF]"> — </span>
                       <span>{p.name}</span>
                     </button>
                   ))}
@@ -1208,7 +1215,7 @@ function CategoryDetailsForm({
               )}
             </div>
           )}
-          {/* Department â€” which dept can't fulfill this design (so R&D
+          {/* Department — which dept can't fulfill this design (so R&D
               knows who to talk to about the spec change). */}
           <select
             value={(value.designDeptCode as string) ?? ""}
@@ -1222,7 +1229,7 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Which department can't follow the design? â€” pick one</option>
+            <option value="">Which department can't follow the design? — pick one</option>
             {ALL_DEPTS.map((d) => (
               <option key={d.code} value={d.code}>{d.name}</option>
             ))}
@@ -1233,7 +1240,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={3}
-            placeholder="What's wrong with the design? e.g. fabric size off by 2cm, wood template nailed at wrong position, foam density too soft, cardboard too thin, hardware mismatch, dimensions wrong, assembly instructions unclearâ€¦"
+            placeholder="What's wrong with the design? e.g. fabric size off by 2cm, wood template nailed at wrong position, foam density too soft, cardboard too thin, hardware mismatch, dimensions wrong, assembly instructions unclear…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
           <Input
@@ -1251,7 +1258,7 @@ function CategoryDetailsForm({
     case "MATERIAL":
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
-          {/* Cascade: Item group â†’ RM (filtered) â†’ Supplier (filtered) */}
+          {/* Cascade: Item group → RM (filtered) → Supplier (filtered) */}
           <select
             value={selectedGroup}
             onChange={(e) => {
@@ -1268,7 +1275,7 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Item group â€” pick one</option>
+            <option value="">Item group — pick one</option>
             {itemGroups.map((g) => (
               <option key={g} value={g}>{g}</option>
             ))}
@@ -1292,12 +1299,12 @@ function CategoryDetailsForm({
           >
             <option value="">
               {selectedGroup
-                ? `Raw material in ${selectedGroup} â€” pick one`
-                : "Raw material â€” pick one (or pick group above first)"}
+                ? `Raw material in ${selectedGroup} — pick one`
+                : "Raw material — pick one (or pick group above first)"}
             </option>
             {rmsForGroup.map((r) => (
               <option key={r.id} value={r.id}>
-                {r.itemCode}{r.description ? ` â€” ${r.description}` : ""}
+                {r.itemCode}{r.description ? ` — ${r.description}` : ""}
               </option>
             ))}
           </select>
@@ -1312,12 +1319,12 @@ function CategoryDetailsForm({
           >
             <option value="">
               {rmCode
-                ? `Supplier of ${rmCode} â€” pick one`
-                : "Supplier â€” pick one"}
+                ? `Supplier of ${rmCode} — pick one`
+                : "Supplier — pick one"}
             </option>
             {suppliersForRm.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.code ? `${s.code} â€” ` : ""}{s.name}
+                {s.code ? `${s.code} — ` : ""}{s.name}
               </option>
             ))}
           </select>
@@ -1327,7 +1334,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="GRN # / batch / specifics â€” e.g. fabric color faded after wash, foam crumbling within 6 months, wood warped, hardware threads stripped, GRN-2604-013 batch was off-specâ€¦"
+            placeholder="GRN # / batch / specifics — e.g. fabric color faded after wash, foam crumbling within 6 months, wood warped, hardware threads stripped, GRN-2604-013 batch was off-spec…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
@@ -1348,7 +1355,7 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Department â€” pick one</option>
+            <option value="">Department — pick one</option>
             {ALL_DEPTS.map((d) => (
               <option key={d.code} value={d.code}>{d.name}</option>
             ))}
@@ -1369,7 +1376,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="Gap details â€” e.g. SOP missing entirely, outdated wording, skipped under time pressure, worker not trained, jig/tool missing, SOP wording too ambiguous, only senior knows itâ€¦"
+            placeholder="Gap details — e.g. SOP missing entirely, outdated wording, skipped under time pressure, worker not trained, jig/tool missing, SOP wording too ambiguous, only senior knows it…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
@@ -1384,12 +1391,12 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="Sub-reason â€” e.g. misuse, wrong measurement (door / space), pet damage, wrong cleaning chemical, buyer's remorse, wrong setup at homeâ€¦"
+            placeholder="Sub-reason — e.g. misuse, wrong measurement (door / space), pet damage, wrong cleaning chemical, buyer's remorse, wrong setup at home…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
           <p className="text-[10px] text-[#9CA3AF]">
             The 5W story stays in the Issue Description above. This sub-reason is for category
-            roll-ups only â€” keep it short.
+            roll-ups only — keep it short.
           </p>
         </div>
       );
@@ -1403,7 +1410,7 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">3PL Company â€” pick one</option>
+            <option value="">3PL Company — pick one</option>
             {threePlCompanies.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
@@ -1414,7 +1421,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="Issue â€” e.g. dropped during unloading, scraped against wall, water damage from open truck, wrong route / address, late delivery, customer not contacted before arrivalâ€¦"
+            placeholder="Issue — e.g. dropped during unloading, scraped against wall, water damage from open truck, wrong route / address, late delivery, customer not contacted before arrival…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
           <Input
@@ -1456,7 +1463,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="Order error â€” e.g. size wrong, color wrong, fabric spec off, leg / divan height off, price / discount entered wrong, missing add-on, wrong delivery addressâ€¦"
+            placeholder="Order error — e.g. size wrong, color wrong, fabric spec off, leg / divan height off, price / discount entered wrong, missing add-on, wrong delivery address…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
@@ -1477,7 +1484,7 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Department â€” pick one</option>
+            <option value="">Department — pick one</option>
             {ALL_DEPTS.map((d) => (
               <option key={d.code} value={d.code}>{d.name}</option>
             ))}
@@ -1489,7 +1496,7 @@ function CategoryDetailsForm({
             onBlur={persistAll}
             disabled={disabled}
             rows={2}
-            placeholder="Issue â€” e.g. legs missing, hardware bag missing, manual missing, wrong product shipped, manifest says X but actual Y, mislabeled box, packaging damaged before shipment, quantity off, accessory missingâ€¦"
+            placeholder="Issue — e.g. legs missing, hardware bag missing, manual missing, wrong product shipped, manifest says X but actual Y, mislabeled box, packaging damaged before shipment, quantity off, accessory missing…"
             className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
@@ -1508,7 +1515,7 @@ function CategoryDetailsForm({
 }
 
 // ===========================================================================
-// AffectedProductsPanel â€” attach 0..N product SKUs to the case.
+// AffectedProductsPanel — attach 0..N product SKUs to the case.
 // ===========================================================================
 // Optional: a case might be about a single product, a multi-product order,
 // or zero products (a customer service complaint about delivery, billing,
@@ -1599,8 +1606,8 @@ function AffectedProductsPanel({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             disabled={saving}
-            placeholder="Search product by code or name to add (optional â€” leave empty if no specific SKU)"
-            className="h-8 text-xs"
+            placeholder="Search product by code or name to add (optional — leave empty if no specific SKU)"
+            className="h-9 text-sm"
           />
           {matches.length > 0 && (
             <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
@@ -1612,7 +1619,7 @@ function AffectedProductsPanel({
                   className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
                 >
                   <span className="text-[#6B5C32]">{p.code}</span>
-                  <span className="text-[#9CA3AF]"> â€” </span>
+                  <span className="text-[#9CA3AF]"> — </span>
                   <span>{p.name}</span>
                 </button>
               ))}
@@ -1622,37 +1629,40 @@ function AffectedProductsPanel({
 
         {caseDetail.affectedProducts.length === 0 ? (
           <p className="text-[10px] text-[#9CA3AF]">
-            No products attached. Optional â€” only add if the issue is tied to
+            No products attached. Optional — only add if the issue is tied to
             specific SKUs. SO/CO-sourced cases can also reference the source
             order's lines without re-attaching them here.
           </p>
         ) : (
-          <ul className="divide-y divide-[#E2DDD8] border border-[#E2DDD8] rounded">
+          <ul className="space-y-2">
             {caseDetail.affectedProducts.map((p) => (
               <li
                 key={p.productId}
-                className="flex items-center justify-between px-2 py-1.5 text-xs"
+                className="flex items-start justify-between gap-3 rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] px-3 py-2.5"
               >
                 <div className="min-w-0 flex-1">
-                  <span className="text-[#6B5C32]">{p.code}</span>
-                  <span className="text-[#9CA3AF]"> â€” </span>
-                  <span className="text-[#1F1D1B]">{p.name}</span>
-                  {/* Damaged-part picks from the create modal â€” read-only
-                      chips (absent = all parts). */}
+                  <div className="text-sm">
+                    <span className="font-semibold text-[#6B5C32]">{p.code}</span>
+                    <span className="text-[#C9C3BC]"> — </span>
+                    <span className="text-[#1F1D1B]">{p.name}</span>
+                  </div>
+                  {/* Damaged-part picks from the create modal — read-only
+                      tags (absent = all parts). */}
                   {p.components && p.components.length > 0 && (
-                    <div className="mt-1 flex flex-wrap gap-1">
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
                       {p.components.map((cp) => (
                         <span
                           key={cp.key}
-                          className="text-[10px] bg-[#F0ECE9] text-[#5A5550] px-1.5 py-0.5 rounded"
+                          className="inline-flex items-center gap-1 rounded-full border border-[#E2DDD8] bg-white px-2 py-0.5 text-[11px] text-[#5A5550]"
                         >
-                          {cp.label || cp.key} Ã— {cp.qty}
+                          {cp.label || cp.key}
+                          <span className="font-semibold text-[#1F1D1B]">×{cp.qty}</span>
                         </span>
                       ))}
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   <Input
                     type="number" onFocus={(e) => e.currentTarget.select()}
                     min={0}
@@ -1663,7 +1673,7 @@ function AffectedProductsPanel({
                     }}
                     disabled={saving}
                     placeholder="Qty"
-                    className="h-7 w-16 text-xs"
+                    className="h-8 w-16 text-sm"
                   />
                   <button
                     type="button"
@@ -1685,17 +1695,17 @@ function AffectedProductsPanel({
 }
 
 // ===========================================================================
-// StockTopUpPanel â€” stock-only part top-ups recorded against the case.
+// StockTopUpPanel — stock-only part top-ups recorded against the case.
 // ===========================================================================
 // The owner's "stock top-up" concept: short-shipped or missing parts (legs,
 // woven fabric, etc.). Deducts RM / WIP / FG stock through the standard
 // POST /api/stock-adjustments write path (reason SERVICE_REPLACEMENT,
-// tagged with this case's id â€” migration 0164) and lists this case's
+// tagged with this case's id — migration 0164) and lists this case's
 // issues below. No production order, no service order.
 // Item sources mirror the Stock Adjustments page (inventory/adjustments.tsx):
 // RM = /api/raw-materials, WIP = /api/inventory/wip, FG = /api/inventory
 // finishedProducts; unit cost prefill mirrors the same page (RM unitCostSen,
-// FG basePriceSen, WIP unknown â†’ 0).
+// FG basePriceSen, WIP unknown → 0).
 type ReplacementType = "RM" | "WIP" | "FG";
 type ReplacementItemOpt = {
   id: string;
@@ -1771,7 +1781,7 @@ function StockTopUpPanel({
     }));
   }, [type, rmResp, wipResp, invResp]);
 
-  // Search-then-pick â€” empty query shows nothing, results capped at 10
+  // Search-then-pick — empty query shows nothing, results capped at 10
   // (same pattern as every other picker on this page).
   const matches = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1785,7 +1795,7 @@ function StockTopUpPanel({
   const qtyNum = Number(qty);
   const canIssue = !!selected && Number.isFinite(qtyNum) && qtyNum > 0 && !saving;
 
-  // This case's issued parts â€” GET filtered by caseid (migration 0164).
+  // This case's issued parts — GET filtered by caseid (migration 0164).
   const { data: adjResp, refresh: refreshAdj } = useCachedJson<{ data?: ReplacementAdjRow[] }>(
     `/api/stock-adjustments?caseId=${encodeURIComponent(caseDetail.id)}`,
   );
@@ -1804,7 +1814,7 @@ function StockTopUpPanel({
           qtyDelta: -Math.abs(qtyNum),
           unitCostSen: selected.unitCostSen,
           reason: "SERVICE_REPLACEMENT",
-          notes: `${caseDetail.caseNo}${note.trim() ? " â€” " + note.trim() : ""}`,
+          notes: `${caseDetail.caseNo}${note.trim() ? " — " + note.trim() : ""}`,
           caseId: caseDetail.id,
           adjustedBy: user?.id ?? null,
           adjustedByName: user?.displayName ?? user?.email ?? null,
@@ -1814,7 +1824,7 @@ function StockTopUpPanel({
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
       // Append to the case's agent action log (same PUT shape the
       // ActionLogPanel persists) so the timeline shows the part went out.
-      // Best-effort â€” the stock deduction above already committed.
+      // Best-effort — the stock deduction above already committed.
       try {
         await fetch(`/api/service-cases/${caseDetail.id}`, {
           method: "PUT",
@@ -1825,7 +1835,7 @@ function StockTopUpPanel({
               {
                 id: `act-${Math.random().toString(36).slice(2, 8)}`,
                 date: new Date().toISOString().slice(0, 10),
-                description: `Issued replacement part: ${selected.code} Ã— ${Math.abs(qtyNum)} (${type} stock deducted${note.trim() ? " â€” " + note.trim() : ""})`,
+                description: `Issued replacement part: ${selected.code} × ${Math.abs(qtyNum)} (${type} stock deducted${note.trim() ? " — " + note.trim() : ""})`,
                 createdAt: new Date().toISOString(),
                 createdByName: user?.displayName ?? user?.email ?? "",
               },
@@ -1833,9 +1843,9 @@ function StockTopUpPanel({
           }),
         });
       } catch {
-        /* tolerate â€” log entry is a nicety */
+        /* tolerate — log entry is a nicety */
       }
-      toast.success(`Deducted ${Math.abs(qtyNum)} Ã— ${selected.code} from ${type} stock`);
+      toast.success(`Deducted ${Math.abs(qtyNum)} × ${selected.code} from ${type} stock`);
       setItemId("");
       setSearch("");
       setQtyInput("1");
@@ -1865,14 +1875,14 @@ function StockTopUpPanel({
       </CardHeader>
       <CardContent className="space-y-2">
         <p className="text-[10px] text-[#9CA3AF]">
-          Short-shipped or missing parts â€” legs, woven fabric, etc. Deducts stock
+          Short-shipped or missing parts — legs, woven fabric, etc. Deducts stock
           (RM / WIP / FG) and keeps a record; no production order.
         </p>
         <div className="flex flex-wrap items-start gap-2">
           <select
             value={type}
             onChange={(e) => {
-              // Type change invalidates the picked item â€” option lists are
+              // Type change invalidates the picked item — option lists are
               // scoped per type (mirrors the Stock Adjustments page).
               setType(e.target.value as ReplacementType);
               setItemId("");
@@ -1891,9 +1901,9 @@ function StockTopUpPanel({
                 <div className="truncate">
                   <span className="text-[#6B5C32]">{selected.code}</span>
                   {selected.name ? (
-                    <span className="text-[#9CA3AF]"> â€” {selected.name}</span>
+                    <span className="text-[#9CA3AF]"> — {selected.name}</span>
                   ) : null}
-                  <span className="text-[#9CA3AF]"> Â· {selected.onHand} on hand</span>
+                  <span className="text-[#9CA3AF]"> · {selected.onHand} on hand</span>
                 </div>
                 <button
                   type="button"
@@ -1914,7 +1924,7 @@ function StockTopUpPanel({
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   disabled={saving}
-                  placeholder={`Search ${type} item by code or nameâ€¦`}
+                  placeholder={`Search ${type} item by code or name…`}
                   className="h-8 text-xs"
                 />
                 {matches.length > 0 && (
@@ -1930,8 +1940,8 @@ function StockTopUpPanel({
                         className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
                       >
                         <span className="text-[#6B5C32]">{o.code}</span>
-                        {o.name ? <span className="text-[#9CA3AF]"> â€” {o.name}</span> : null}
-                        <span className="text-[#9CA3AF]"> Â· {o.onHand} on hand</span>
+                        {o.name ? <span className="text-[#9CA3AF]"> — {o.name}</span> : null}
+                        <span className="text-[#9CA3AF]"> · {o.onHand} on hand</span>
                       </button>
                     ))}
                   </div>
@@ -1964,7 +1974,7 @@ function StockTopUpPanel({
             disabled={!canIssue}
             className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           >
-            {saving ? "Issuingâ€¦" : "Issue & deduct"}
+            {saving ? "Issuing…" : "Issue & deduct"}
           </Button>
         </div>
 
@@ -1987,12 +1997,12 @@ function StockTopUpPanel({
                   </td>
                   <td className="py-1.5 px-2">
                     <span className="text-[#6B5C32]">{r.itemCode}</span>
-                    {r.itemName ? <span className="text-[#9CA3AF]"> â€” {r.itemName}</span> : null}
+                    {r.itemName ? <span className="text-[#9CA3AF]"> — {r.itemName}</span> : null}
                     <span className="text-[10px] text-[#9CA3AF]"> ({r.type})</span>
                   </td>
                   <td className="py-1.5 px-2 text-right text-[#9A3A2D]">{r.qtyDelta}</td>
-                  <td className="py-1.5 px-2 text-[#6B7280]">{r.adjustedByName || "â€”"}</td>
-                  <td className="py-1.5 px-2 text-[#6B7280]">{r.notes || "â€”"}</td>
+                  <td className="py-1.5 px-2 text-[#6B7280]">{r.adjustedByName || "—"}</td>
+                  <td className="py-1.5 px-2 text-[#6B7280]">{r.notes || "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -2004,7 +2014,7 @@ function StockTopUpPanel({
 }
 
 // ===========================================================================
-// PhotosPanel â€” view + add + remove photos on a case after creation.
+// PhotosPanel — view + add + remove photos on a case after creation.
 // ===========================================================================
 // Always rendered (even when zero photos) so the operator can see where to
 // upload more photos that came in via WhatsApp / customer follow-up. Same
@@ -2018,7 +2028,7 @@ function PhotosPanel({
 }) {
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
-  // Per-batch upload progress for the off-main-thread compressor â€” null when idle.
+  // Per-batch upload progress for the off-main-thread compressor — null when idle.
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
   async function persist(next: string[]) {
@@ -2098,7 +2108,7 @@ function PhotosPanel({
         {caseDetail.issuePhotos.length === 0 ? (
           <p className="text-xs text-[#9CA3AF]">
             No photos yet. Click "Add photos" to attach customer-supplied images
-            of the issue. They'll show as thumbnails â€” click any to open full-size.
+            of the issue. They'll show as thumbnails — click any to open full-size.
           </p>
         ) : (
           <div className="flex flex-wrap gap-2">
@@ -2130,7 +2140,7 @@ function PhotosPanel({
 }
 
 // ===========================================================================
-// ActionLogPanel â€” Service-agent log of actions taken over the case lifetime.
+// ActionLogPanel — Service-agent log of actions taken over the case lifetime.
 // ===========================================================================
 // Stored as JSON array on service_cases.action_log. Each entry: { id, date,
 // description, createdAt, createdByName? }. Auto-saves on blur of any field
@@ -2177,7 +2187,7 @@ function ActionLogPanel({
       },
     ];
     setEntries(next);
-    // Don't persist yet â€” operator will fill in the description first.
+    // Don't persist yet — operator will fill in the description first.
     // Save fires on blur of the description field.
   }
   function patchEntry(id: string, patch: Partial<ActionLogEntry>) {
@@ -2240,7 +2250,7 @@ function ActionLogPanel({
 }
 
 // ===========================================================================
-// SpawnServiceOrderModal â€” small form to spawn an order under this case.
+// SpawnServiceOrderModal — small form to spawn an order under this case.
 // ===========================================================================
 type FgPickerOpt = { id: string; code: string; name: string; stockQty?: number };
 
@@ -2331,7 +2341,7 @@ function SpawnServiceOrderModal({
           if (mode === "STOCK_SWAP" && !pick.fgBatchId) return false;
           return true;
         });
-  // Mode must be picked at spawn time â€” the "Decide later" option was
+  // Mode must be picked at spawn time — the "Decide later" option was
   // dropped from the picker because it doesn't make sense once you've
   // chosen to spawn an order.
   const canSubmit = linesOk && mode !== null;
@@ -2402,7 +2412,7 @@ function SpawnServiceOrderModal({
             and root cause stay on the case (this order is just the resolution work).
           </p>
 
-          {/* Mode â€” required at spawn time. "Decide later" only makes sense
+          {/* Mode — required at spawn time. "Decide later" only makes sense
               at the CASE level (case stays open without an order); by the
               time you're spawning the order itself, you've decided how
               you're going to resolve. */}
@@ -2547,7 +2557,7 @@ function SpawnServiceOrderModal({
                                   disabled={!picked}
                                   className="w-full rounded border border-[#E2DDD8] bg-white px-1.5 py-1 text-[11px]"
                                 >
-                                  <option value="">Select FGâ€¦</option>
+                                  <option value="">Select FG…</option>
                                   {fgList
                                     .filter((f) => f.id === it.productId || !it.productId)
                                     .map((f) => (
@@ -2590,7 +2600,7 @@ function SpawnServiceOrderModal({
             disabled={!canSubmit || submitting}
             className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           >
-            {submitting ? "Spawningâ€¦" : "Spawn Order"}
+            {submitting ? "Spawning…" : "Spawn Order"}
           </Button>
         </div>
       </div>

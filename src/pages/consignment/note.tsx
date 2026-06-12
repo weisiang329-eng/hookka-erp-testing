@@ -3200,9 +3200,11 @@ export default function ConsignmentNotePage() {
             className="absolute inset-0 bg-black/40"
             onClick={() => { if (!editMode) { setDetailCN(null); } }}
           />
-          {/* Panel — widened to max-w-3xl to match DO's panel width since the
-              new sections need the horizontal real estate. */}
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
+          {/* Panel — max-w-5xl to match the DO detail panel exactly (P2): the
+              items table now carries the same 13-column DO layout (refs +
+              Variant) plus the CN's Qty / M³ / Rack, so it needs the same
+              horizontal real estate DO's panel gives its table. */}
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-5xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
             {/* Header — icons row mirrors DO: Edit / Delete (PENDING only) +
                 Print + Document (link to parent CO) + Close. */}
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl z-10">
@@ -3490,7 +3492,13 @@ export default function ConsignmentNotePage() {
                   return (
                     <div className="text-sm">
                       <p className="text-[#9CA3AF] text-xs mb-0.5">Consignment Orders</p>
-                      <p className="font-medium doc-number">{cos.join(", ")}</p>
+                      {/* tabular-nums (NOT doc-number) + break-words so a long
+                          multi-CO list wraps onto further lines instead of
+                          running off the modal — identical to DO's Sales
+                          Orders strip. */}
+                      <p className="font-medium tabular-nums break-words leading-relaxed">
+                        {cos.join(", ")}
+                      </p>
                     </div>
                   );
                 })()}
@@ -3653,17 +3661,30 @@ export default function ConsignmentNotePage() {
               </div>
               )}
 
-              {/* Items Table — column-by-column mirror of DO's items table
-                  with SO→CO swaps:
-                    SO No.       → CO No.       (items[].consignmentOrderNo)
-                    SO ID        → CO ID        (items[].productionOrderId — the PO id)
+              {/* Items Table — column-by-column mirror of the DO detail
+                  items table (src/pages/delivery/index.tsx) with SO→CO
+                  swaps, then the CN's own logistics columns (Qty / M³ /
+                  Rack) appended so the CN detail is a visual superset of DO.
+                  DO column → CN column:
+                    SO ID        → CO No.       (items[].consignmentOrderNo — per-line parent CO No, the consignment analog of DO's per-line SO ID)
+                    Customer PO  → Customer PO  (detailCN.customerPOId — parent-CO customer PO, from the CO's customerCOId; P1)
+                    Customer SO  → Customer CO  (detailCN.customerCO — the customer's own CO number; P1)
+                    Customer Ref → Customer Ref (detailCN.reference — the customer's own ref string; P1)
                     Product Code → Product Code (items[].productCode)
+                    Variant      → Variant      (productCode suffix after the first dash — same derivation DO uses)
                     Product Name → Product Name (items[].productName)
                     Size         → Size         (items[].sizeLabel — joined from products)
                     Fabric       → Fabric       (items[].fabricCode — joined from PO)
-                    Qty          → Qty          (items[].quantity)
-                    M³           → M³           (items[].itemM3 * quantity)
-                    Rack         → Rack         (items[].rackingNumber — joined from PO) */}
+                  Then the CN's logistics columns (kept from before P2 — DO
+                  carries the first two as well, Rack is CN-side):
+                    Qty          (items[].quantity)
+                    M³           (items[].itemM3 * quantity)
+                    Rack         (items[].rackingNumber — joined from PO)
+                  NOTE: the three Customer PO / Customer CO / Customer Ref
+                  values live on the CN ROW (one parent CO per CN), so they
+                  repeat down every line — the consignment data model has one
+                  CO per note, unlike a DO that can consolidate several SOs.
+                  The columns still match DO 1:1 so the layout reads the same. */}
               <div className="border-t border-[#E2DDD8] pt-4">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-[#1F1D1B]">
@@ -3730,39 +3751,53 @@ export default function ConsignmentNotePage() {
                   <table className="w-full text-sm">
                     <thead className="bg-[#FAF9F7] text-[#6B7280]">
                       <tr>
-                        <th className="text-left px-3 py-2 font-medium text-xs">#</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">CO No.</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Product Code</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Product Name</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Size</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Fabric</th>
-                        <th className="text-right px-3 py-2 font-medium text-xs">Qty</th>
-                        <th className="text-right px-3 py-2 font-medium text-xs">M³</th>
-                        <th className="text-left px-3 py-2 font-medium text-xs">Rack</th>
-                        {editMode && <th className="text-center px-3 py-2 font-medium text-xs w-[40px]"></th>}
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">#</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">CO No.</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer PO</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer CO</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Customer Ref</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Product Code</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Variant</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs whitespace-nowrap">Product Name</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Size</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Fabric</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium text-xs">Qty</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium text-xs">M³</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium text-xs">Rack</th>
+                        {editMode && <th className="text-center px-2.5 py-1.5 font-medium text-xs w-[40px]"></th>}
                       </tr>
                     </thead>
                     <tbody>
                       {(editMode ? editItems : detailCN.items).map((item, idx) => (
                         <tr key={item.id} className="border-t border-[#E2DDD8]">
-                          <td className="px-3 py-1.5 text-[#9CA3AF] text-xs">{idx + 1}</td>
-                          {/* Match the DO detail items table: plain system
-                              font (no font-mono), and no internal id column —
-                              "CO No." is the operator-facing reference, the
-                              same role DO's "SO ID" plays. The old "CO ID"
+                          <td className="px-2.5 py-1 text-[#9CA3AF] text-xs whitespace-nowrap">{idx + 1}</td>
+                          {/* CO No. — the per-line parent CO number, the
+                              consignment analog of DO's "SO ID" (DO renders
+                              SO ID in the same muted #6B7280). The old "CO ID"
                               column surfaced the raw productionOrderId
                               ("pord-co-…"), internal noise meaningless to
-                              anyone, so it was dropped (owner 2026-06-12). */}
-                          <td className="px-3 py-1.5 text-xs text-[#6B5C32]">{item.consignmentOrderNo || "-"}</td>
-                          <td className="px-3 py-1.5 text-xs text-[#6B5C32]">{item.productCode}</td>
-                          <td className="px-3 py-1.5">{item.productName}</td>
-                          <td className="px-3 py-1.5 text-[#6B7280]">{item.sizeLabel || "-"}</td>
-                          <td className="px-3 py-1.5 text-[#6B7280]">{item.fabricCode || "-"}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{item.quantity}</td>
-                          <td className="px-3 py-1.5 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
-                          <td className="px-3 py-1.5 text-xs text-[#6B7280]">{item.rackingNumber || "-"}</td>
+                              anyone, so it stays dropped (owner 2026-06-12). */}
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{item.consignmentOrderNo || "—"}</td>
+                          {/* Customer PO / Customer CO / Customer Ref — the
+                              parent-CO customer references (P1). These live on
+                              the CN ROW (one CO per note), so they repeat on
+                              every line; the columns mirror DO's per-line
+                              Customer PO / Customer SO / Customer Ref 1:1. */}
+                          <td className="px-2.5 py-1 text-xs text-[#1F1D1B] whitespace-nowrap">{detailCN.customerPOId || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#1F1D1B] whitespace-nowrap">{detailCN.customerCO || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{detailCN.reference || "—"}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B5C32] whitespace-nowrap">{item.productCode}</td>
+                          {/* Variant — productCode suffix after the first dash,
+                              identical derivation to the DO detail items table. */}
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280] whitespace-nowrap">{(() => { const c = item.productCode || ""; const i = c.indexOf("-"); return i >= 0 ? c.slice(i + 1) : "—"; })()}</td>
+                          <td className="px-2.5 py-1 whitespace-nowrap">{item.productName}</td>
+                          <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.sizeLabel || "—"}</td>
+                          <td className="px-2.5 py-1 text-[#6B7280] whitespace-nowrap">{item.fabricCode || "—"}</td>
+                          <td className="px-2.5 py-1 text-right tabular-nums">{item.quantity}</td>
+                          <td className="px-2.5 py-1 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
+                          <td className="px-2.5 py-1 text-xs text-[#6B7280]">{item.rackingNumber || "—"}</td>
                           {editMode && (
-                            <td className="px-3 py-1.5 text-center">
+                            <td className="px-2.5 py-1 text-center">
                               <button
                                 onClick={() => removeEditItem(item.id)}
                                 className="p-1 rounded hover:bg-[#F9E1DA] text-[#9CA3AF] hover:text-[#7A2E24] transition-colors"
@@ -3777,11 +3812,11 @@ export default function ConsignmentNotePage() {
                     </tbody>
                     <tfoot className="bg-[#FAF9F7]">
                       <tr className="border-t border-[#E2DDD8] font-medium">
-                        <td colSpan={6} className="px-3 py-1.5 text-right text-xs text-[#6B7280]">Total</td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">
+                        <td colSpan={10} className="px-2.5 py-1 text-right text-xs text-[#6B7280]">Total</td>
+                        <td className="px-2.5 py-1 text-right tabular-nums">
                           {(editMode ? editItems : detailCN.items).reduce((s, i) => s + i.quantity, 0)}
                         </td>
-                        <td className="px-3 py-1.5 text-right tabular-nums">
+                        <td className="px-2.5 py-1 text-right tabular-nums">
                           {(editMode ? editItems : detailCN.items).reduce((s, i) => s + i.itemM3 * i.quantity, 0).toFixed(2)}
                         </td>
                         <td></td>

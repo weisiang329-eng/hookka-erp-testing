@@ -34,6 +34,36 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-008 — Production "Overdue" chips miscounted: bedframe counted by SO not piece, and pieces already on a shipped DO still counted overdue
+
+**Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green (+10 new tests, `tests/production-overdue-counts.test.mjs`); deployed to prod + verified live (endpoint 200 → bedframe 39 / sofa 21; chips render; SO-2605-175 — owner's example — correctly flagged).
+**Category:** production-orders
+
+The Production Tracking "Overdue" chips (Bedframe ⚠ N / Sofa ⚠ N) disagreed with the owner's manual filter, two ways (owner-verified):
+1. **Both counted by SO.** Bedframes are sold per SKU/piece, so an SO with N overdue bedframe pieces counted as 1, not N — undercounting bedframe. Sofa is correctly per-SET (= distinct SO; a set's -01/-02/-03 pieces share one SO).
+2. **Shipped pieces weren't excluded, and excluding by SO status would over-exclude.** A partially-invoiced/delivered SO reads INVOICED at SO level while a specific overdue piece is still in the factory — so dropping by SO status would wrongly hide genuinely-overdue pieces.
+
+Fix (`src/api/routes/production-orders.ts`, `GET /overdue-counts`):
+- `bedframeCount` now counts overdue PIECES (`rows.filter(itemCategory==='BEDFRAME' && earliestOverdue && poStatus!=='CANCELLED')`), not SOs. `sofaCount` stays by-SO (= sets).
+- Both SQL branches (Overview + per-dept) gained a PER-PIECE ship-exclusion: `AND NOT EXISTS (SELECT 1 FROM delivery_order_items di JOIN delivery_orders d ON d.id = di.deliveryOrderId WHERE di.productionOrderId = po.id AND d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED'))`. Verified live before merge: `delivery_order_items` columns are snake_case (`production_order_id`/`delivery_order_id`); the camelCase refs resolve through the d1-compat `renameMap` (column-rename-map.json), same as the existing working DO-linkage queries — NOT a silent-empty. DO statuses actually in use = DELIVERED/INVOICED/LOADED/DRAFT, so the whitelist = "dispatched onward", DRAFT correctly left in (still in factory).
+- Snapshot `sourceTables` += delivery_orders, delivery_order_items; `cacheKey` bumped to `v2` so stale by-SO snapshots aren't served.
+- Frontend (`src/pages/production/index.tsx`): chip tooltips + drill-down header state the correct units (Bedframe = piece, Sofa = set).
+
+**Open follow-up (data, not code):** sofa now reads 21 vs the owner's earlier ~13. The SQL faithfully implements the stated rule (Our Expected DD < today + an UPHOLSTERY JC still open + not on a shipped DO + not CANCELLED). The residual gap is most likely sets whose upholstery is physically done but the JC isn't marked COMPLETED/TRANSFERRED — pending owner spot-check against the flagged list.
+
+---
+
+## BUG-2026-06-12-007 — Scan-PO OCR preview: inline-edit dropdowns occluded, panels too small/thin, same-filename uploads collided, accidental outside-click lost edits
+
+**Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green; deployed to prod (scan-po-modal.tsx confirmed in the deployed bundle). Cosmetic/UX — full visual confirmation on the owner's next real PO scan.
+**Category:** ui-frontend
+
+Owner reported the Sales-Order Scan-PO OCR preview was hard to use: inline-edit **dropdowns were occluded** by sibling rows ("drop down 被遮住了"), the edit panels were **too small / text too thin** ("很小、很幼"), uploading two files with the **same filename** collided (one overwrote the other in state), and an **accidental click outside** an open editor discarded the edit.
+
+Fix (`src/components/scan-po-modal.tsx`, frontend-only — backend, the SO POST, the scan-po request shape, and OCR concurrency/retry/split/streaming all untouched): dropdowns portal to `document.body` so they escape the row's overflow/stacking context; a single-open-editor model (`OPEN_EDITOR_EVENT`) so only one inline editor is open at a time; wider/larger panels (w-72, text-sm); same-filename disambiguation via a per-`UploadedFile` id rather than the filename; and an accidental-close guard on the open editor.
+
+---
+
 ## BUG-2026-06-12-006 — verified-save false alarm: zeroing a money field showed "Save did NOT take effect — tried 0, system has (empty)" though the write succeeded
 
 **Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green. Owner hit it right after BUG-005 zeroing INV-2606-084.

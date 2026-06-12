@@ -4576,6 +4576,18 @@ async function applyPoUpdate(
 //                    earliest = MIN(such JC.dueDate).
 //
 // Skips COMPLETED / CANCELLED POs in both modes (matches the predicate).
+//
+// Per-piece ship-exclusion (2026-06-12, owner-verified): in BOTH modes a PO is
+// also excluded when the piece is already on a dispatched/delivered DO — it
+// appears in delivery_order_items joined to a delivery_orders row whose status
+// IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED'). Checked PER PIECE via the
+// PO's own delivery linkage, NOT by SO status: a partially invoiced SO can read
+// INVOICED at SO level while a specific overdue piece is still in the factory,
+// so excluding by SO status would wrongly drop genuinely-overdue pieces.
+//
+// Count units differ (owner rule): BEDFRAME = overdue PIECES (sold per SKU, so
+// each overdue bedframe PO counts 1); SOFA = overdue SETS = distinct SOs with a
+// sofa piece overdue (the -01/-02/-03 pieces of one SO = one set).
 // Server SQL replaces a ~8MB / 800-PO + 12k-JC payload that the page used
 // to mash through in JS — see Phase B notes 2026-05-08. Response is one
 // breakdown row per (companySOId / salesOrderId / companyCOId /
@@ -4624,7 +4636,12 @@ app.get("/overdue-counts", async (c) => {
   // today-relative so the snapshot must roll forward at the day
   // boundary (a PO that became overdue at midnight yesterday should
   // start counting overdue today, even if no source row changed).
-  const cacheKey = `dept=${dept ?? ""}&today=${today}`;
+  // v2 bump (2026-06-12): overdue now means bedframe-by-PIECE + per-piece
+  // ship-exclusion, so the cached payload's SHAPE/MEANING changed. Bumping the
+  // cache_key version sidesteps every pre-existing snapshot row (old
+  // bedframe-by-SO counts) cleanly instead of serving stale numbers until they
+  // expire — the old rows simply go unread and age out via the nightly wipe.
+  const cacheKey = `v2&dept=${dept ?? ""}&today=${today}`;
   const { withSnapshot } = await import("../lib/snapshot");
   const result = await withSnapshot(
     c.var.DB,
@@ -4635,7 +4652,20 @@ app.get("/overdue-counts", async (c) => {
       // Expected DD" must roll this snapshot forward (the freshness probe
       // compares MAX(updated_at) across these tables; the SO PUT bumps
       // sales_orders.updated_at).
-      sourceTables: ["production_orders", "job_cards", "sales_orders"],
+      // delivery_orders + delivery_order_items added 2026-06-12: overdue now
+      // excludes pieces already on a dispatched/delivered DO, so dispatching or
+      // delivering a piece must roll the count forward. delivery_orders carries
+      // updated_at (the status-transition UPDATEs bump it), which drives the
+      // freshness probe; delivery_order_items has no timestamp column so the
+      // probe silently skips it (nightly rebuild covers any item-only edit) —
+      // it's listed for intent/documentation.
+      sourceTables: [
+        "production_orders",
+        "job_cards",
+        "sales_orders",
+        "delivery_orders",
+        "delivery_order_items",
+      ],
     },
     orgId,
     async () => {
@@ -4676,6 +4706,18 @@ app.get("/overdue-counts", async (c) => {
                       AND jc.departmentCode = 'UPHOLSTERY'
                       AND jc.status NOT IN ('COMPLETED','TRANSFERRED')
                   )
+                  -- Per-piece ship-exclusion (2026-06-12): a partially
+                  -- invoiced/delivered SO can have its SO-level status say
+                  -- INVOICED while THIS specific piece is still in the
+                  -- factory. So we exclude by the PO's OWN delivery linkage,
+                  -- not by SO status — only drop the piece when it actually
+                  -- rides a dispatched/delivered DO.
+                  AND NOT EXISTS (
+                    SELECT 1 FROM delivery_order_items di
+                    JOIN delivery_orders d ON d.id = di.deliveryOrderId
+                    WHERE di.productionOrderId = po.id
+                      AND d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+                  )
                 THEN NULLIF((SELECT so.hookkaExpectedDD FROM sales_orders so
                               WHERE so.id = po.salesOrderId), '')
                 ELSE NULL
@@ -4704,7 +4746,17 @@ app.get("/overdue-counts", async (c) => {
                   AND jc.status NOT IN ('COMPLETED','TRANSFERRED')) AS earliest_overdue
          FROM production_orders po
         WHERE po.orgId = ?
-          AND po.status NOT IN ('COMPLETED','CANCELLED')`,
+          AND po.status NOT IN ('COMPLETED','CANCELLED')
+          -- Same per-piece ship-exclusion as the Overview branch (2026-06-12):
+          -- a piece already riding a dispatched/delivered DO is out of the
+          -- factory and must not count overdue, even if its dept JC is still
+          -- open. Checked by the PO's own delivery linkage, not SO status.
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_order_items di
+            JOIN delivery_orders d ON d.id = di.deliveryOrderId
+            WHERE di.productionOrderId = po.id
+              AND d.status IN ('LOADED','IN_TRANSIT','DELIVERED','INVOICED')
+          )`,
     ).bind(dept, today, orgId);
     const res = await stmt.all<OverduePoRow>();
     rows = res.results ?? [];
@@ -4761,8 +4813,19 @@ app.get("/overdue-counts", async (c) => {
       return a.earliest.localeCompare(b.earliest);
     });
 
-  const bedframeCount = breakdown.filter((r) =>
-    r.overdueCategories.includes("BEDFRAME"),
+  // Counts use DIFFERENT units, per the owner's verified rule (2026-06-12):
+  //   • BEDFRAME = overdue PIECES — bedframes are sold per SKU/piece, so each
+  //     overdue bedframe PO counts 1. Taken from the raw per-PO `rows` (an
+  //     overdue PO has `earliestOverdue` set; CANCELLED guarded the same way
+  //     the by-SO grouping skips them).
+  //   • SOFA = overdue SETS = distinct SOs with >=1 overdue sofa piece. A sofa
+  //     set's -01/-02/-03 pieces share one SO, so the existing by-SO count is
+  //     the set count — kept as-is.
+  const bedframeCount = rows.filter(
+    (r) =>
+      r.poStatus !== "CANCELLED" &&
+      r.itemCategory === "BEDFRAME" &&
+      !!r.earliestOverdue,
   ).length;
   const sofaCount = breakdown.filter((r) =>
     r.overdueCategories.includes("SOFA"),

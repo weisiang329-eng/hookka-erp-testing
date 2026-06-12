@@ -6323,14 +6323,15 @@ export default function ProductionPage({
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
           title="To (due date)"
         />
-        {/* Per-category overdue chips — date-filter-INDEPENDENT counts of
-            SOs with at least one overdue PO of that itemCategory. Counts
-            come from /api/production-orders/overdue-counts (server-side
-            GROUP BY), not the date-windowed `filteredOrders`.
-            Click either to drill the panel below into that category; click
-            again to close. An SO with both BEDFRAME + SOFA overdue POs is
-            counted in BOTH cards (no dedup — both signals matter to the
-            operator). Greyed out at zero so "all clear" reads explicit. */}
+        {/* Per-category overdue chips — date-filter-INDEPENDENT. Units DIFFER
+            by category (owner rule 2026-06-12): Bedframe counts overdue
+            PIECES (sold per SKU), Sofa counts overdue SETS (= distinct SOs,
+            since one set's -01/-02/-03 pieces share an SO). Both exclude any
+            piece already on a dispatched/delivered DO. Counts come from
+            /api/production-orders/overdue-counts (server-side), not the
+            date-windowed `filteredOrders`. Click either to drill the panel
+            below into that category (rows are SO-grouped either way); click
+            again to close. Greyed out at zero so "all clear" reads explicit. */}
         <button
           type="button"
           onClick={() =>
@@ -6346,8 +6347,8 @@ export default function ProductionPage({
           disabled={bedframeOverdueCount === 0}
           title={
             bedframeOverdueCount > 0
-              ? `Click to view ${bedframeOverdueCount} SO${bedframeOverdueCount === 1 ? "" : "s"} with overdue BEDFRAME POs (independent of date filter)`
-              : "No overdue Bedframe SOs system-wide"
+              ? `${bedframeOverdueCount} overdue Bedframe piece${bedframeOverdueCount === 1 ? "" : "s"} (counted by piece; independent of date filter). Click to view the affected SOs.`
+              : "No overdue Bedframe pieces system-wide"
           }
         >
           Bedframe ⚠ {bedframeOverdueCount}
@@ -6367,8 +6368,8 @@ export default function ProductionPage({
           disabled={sofaOverdueCount === 0}
           title={
             sofaOverdueCount > 0
-              ? `Click to view ${sofaOverdueCount} SO${sofaOverdueCount === 1 ? "" : "s"} with overdue SOFA POs (independent of date filter)`
-              : "No overdue Sofa SOs system-wide"
+              ? `${sofaOverdueCount} overdue Sofa set${sofaOverdueCount === 1 ? "" : "s"} (counted by set = SO; independent of date filter). Click to view them.`
+              : "No overdue Sofa sets system-wide"
           }
         >
           Sofa ⚠ {sofaOverdueCount}
@@ -6484,10 +6485,16 @@ export default function ProductionPage({
           <div className="flex items-center justify-between px-3 py-2 border-b border-[#F1B5B0] bg-[#FDECEA]">
             <div className="flex items-baseline gap-2">
               <span className="text-sm font-semibold text-[#A12C28]">
-                {label} Overdue ({filteredRows.length})
+                {label} Overdue — {filteredRows.length} SO
+                {filteredRows.length === 1 ? "" : "s"}
               </span>
               <span className="text-[10px] text-[#A12C28]/70">
-                System-wide — independent of the date filter above
+                {/* The chip counts pieces (Bedframe) / sets (Sofa); this list is
+                    SO-grouped, so its count is the affected SOs, not the chip
+                    number. */}
+                {overduePanelMode === "BEDFRAME"
+                  ? "Affected SOs (chip counts pieces) — independent of the date filter"
+                  : "Each row = one set — independent of the date filter"}
               </span>
             </div>
             <button

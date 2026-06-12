@@ -2006,7 +2006,18 @@ app.get("/gl", async (c) => {
   // No account → journal-listing mode (Phase 2 follow-up, owner request):
   // EVERY ledger leg in the date window, newest first, capped at 1000
   // rows so an all-time listing can't flatten the browser. Per-account
-  // running balances only make sense in single-account mode.
+  // running balances only make sense in single-account mode. `accounts`
+  // (comma-separated) narrows the listing to a reviewed SET of accounts
+  // (owner: "可能会选多个 review").
+  const accountsCsv = c.req.query("accounts") || "";
+  const accountSet = accountsCsv
+    ? new Set(
+        accountsCsv
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      )
+    : null;
   if (!account) {
     const legRes = await c.var.DB.prepare(
       `SELECT id, accountCode, sourceType, sourceId, debitSen, creditSen,
@@ -2031,7 +2042,9 @@ app.get("/gl", async (c) => {
     );
     const all = (legRes.results ?? []).filter((l) => {
       const d10 = String(l.postedAt ?? "").slice(0, 10);
-      return d10 >= from && d10 <= to;
+      if (d10 < from || d10 > to) return false;
+      if (accountSet && !accountSet.has(l.accountCode)) return false;
+      return true;
     });
     const CAP = 1000;
     const rows = all.slice(0, CAP).map((l) => ({

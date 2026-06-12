@@ -980,6 +980,14 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
         const standalone = topLevel.filter(
           (a) => a.isPostable !== false && children(a.code).length === 0,
         );
+        // Owner: within a section everything sorts by account code, with
+        // the PARENT's code as the anchor — parents and standalone
+        // accounts interleave in code order, children follow their parent
+        // (also code-sorted).
+        const byCode = (x: ChartOfAccount, y: ChartOfAccount) =>
+          x.code.localeCompare(y.code);
+        const topNodes = [...headers, ...standalone].sort(byCode);
+        const headerSet = new Set(headers.map((h) => h.code));
         const isExpanded = expanded[section.key];
 
         const renderRow = (child: ChartOfAccount, indent: boolean) => (
@@ -1070,13 +1078,21 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
             {isExpanded && (
               <CardContent className="pt-0 pb-2">
                 <div className="border-t border-[#E2DDD8]">
-                  {headers.map((parent) => {
+                  {topNodes.map((node) => {
+                    if (!headerSet.has(node.code)) {
+                      // Standalone postable top-level account — code-sorted
+                      // alongside the parents.
+                      return renderRow(node, false);
+                    }
+                    const parent = node;
                     const open = !collapsedParents[parent.code];
+                    const kids = children(parent.code).sort(byCode);
                     return (
                     <div key={parent.code}>
-                      {/* Header / parent row — click to expand/collapse children */}
+                      {/* PARENT row — visually distinct (tinted, bold),
+                          click to expand/collapse its sub-accounts */}
                       <div
-                        className="flex items-center justify-between py-2 px-2 text-sm font-medium text-[#4B5563] border-b border-[#F0ECE9] cursor-pointer hover:bg-[#F0ECE9]/40"
+                        className="flex items-center justify-between py-2 px-2 text-sm font-semibold text-[#1F1D1B] bg-[#F0ECE9]/60 border-b border-[#E2DDD8] cursor-pointer hover:bg-[#F0ECE9]"
                         onClick={() =>
                           setCollapsedParents({
                             ...collapsedParents,
@@ -1084,23 +1100,27 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                           })
                         }
                       >
-                        <span className="flex items-center gap-1">
-                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 text-[#9CA3AF]" /> : <ChevronRight className="h-3.5 w-3.5 text-[#9CA3AF]" />}
-                          {parent.code} - {parent.name}
+                        <span className="flex items-center gap-1.5">
+                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 text-[#6B5C32]" /> : <ChevronRight className="h-3.5 w-3.5 text-[#6B5C32]" />}
+                          <span className="font-mono text-xs text-[#6B7280]">{parent.code}</span>
+                          {parent.name}
                         </span>
                         <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">
-                          {children(parent.code).length} sub-accounts
+                          {kids.length} sub-accounts
                         </span>
                       </div>
-                      {open && children(parent.code).map((child) => renderRow(child, true))}
+                      {open && (
+                        <div className="border-l-2 border-[#E2DDD8] ml-3">
+                          {kids.map((child) => renderRow(child, true))}
+                        </div>
+                      )}
                     </div>
                     );
                   })}
-                  {/* Standalone postable top-level accounts */}
-                  {standalone.map((a) => renderRow(a, false))}
-                  {/* Orphans — parentCode points outside this type's headers */}
+                  {/* Orphans — parentCode points outside this section's headers */}
                   {typeAccounts
-                    .filter((a) => a.parentCode && !headers.find((p) => p.code === a.parentCode))
+                    .filter((a) => a.parentCode && !headerSet.has(a.parentCode))
+                    .sort(byCode)
                     .map((child) => renderRow(child, false))}
                 </div>
               </CardContent>
@@ -3126,7 +3146,10 @@ type GlAllRow = {
 };
 
 function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
-  const [account, setAccount] = useState("");
+  // Multi-account review (owner): 0 picked = full ledger; 1 picked =
+  // inquiry mode with running balance; 2+ picked = listing filtered to
+  // the picked set.
+  const [picked, setPicked] = useState<string[]>([]);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [all, setAll] = useState<{ rows: GlAllRow[]; totalRows: number; capped: boolean } | null>(null);
@@ -3136,56 +3159,91 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
     closingSen: number;
     rows: GlRow[];
   } | null>(null);
+  const account = picked.length === 1 ? picked[0] : "";
   const loading = account ? gl === null : all === null;
+  const nameOf = (code: string) => accounts.find((a) => a.code === code)?.name ?? "";
 
   useEffect(() => {
     let stale = false;
     const params = new URLSearchParams();
-    if (account) params.set("account", account);
+    if (picked.length === 1) params.set("account", picked[0]);
+    else if (picked.length > 1) params.set("accounts", picked.join(","));
     if (from) params.set("from", from);
     if (to) params.set("to", to);
     fetch(`/api/accounting/gl?${params.toString()}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
       .then((j) => {
         if (stale || !j?.success || !j.data) return;
-        if (account) setGl(j.data as NonNullable<typeof gl>);
+        if (picked.length === 1) setGl(j.data as NonNullable<typeof gl>);
         else setAll(j.data as NonNullable<typeof all>);
       })
       .catch(() => {});
     return () => { stale = true; };
-  }, [account, from, to]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picked.join(","), from, to]);
 
-  const setFilter = (fn: () => void) => {
-    fn();
+  const reset = () => {
     setAll(null);
     setGl(null);
+  };
+  const addAccount = (code: string) => {
+    if (!code || picked.includes(code)) return;
+    setPicked([...picked, code]);
+    reset();
+  };
+  const removeAccount = (code: string) => {
+    setPicked(picked.filter((c) => c !== code));
+    reset();
   };
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h2 className="text-lg font-semibold text-[#1F1D1B]">General Ledger</h2>
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="w-72">
-            <label className="text-xs font-medium text-[#6B7280] mb-1 block">Account</label>
-            <AccountPicker
-              accounts={accounts}
-              value={account}
-              onChange={(code) => setFilter(() => setAccount(code))}
-              placeholder="All accounts — type to search…"
-              allowAll
-            />
+      <h2 className="text-lg font-semibold text-[#1F1D1B]">General Ledger</h2>
+
+      {/* Filter bar — deliberately loud (owner: "不够明显") */}
+      <Card>
+        <CardContent className="p-4 space-y-3 bg-[#F7F4EF] rounded-lg">
+          <div className="flex flex-wrap items-end gap-4">
+            <div className="w-80">
+              <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">
+                Account filter <span className="font-normal text-[#6B7280]">(type keyword, pick one or MORE)</span>
+              </label>
+              <AccountPicker
+                accounts={accounts.filter((a) => !picked.includes(a.code))}
+                value=""
+                onChange={addAccount}
+                placeholder="Type code or name to add an account…"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">From</label>
+              <input type="date" value={from} onChange={(e) => { setFrom(e.target.value); reset(); }} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">To</label>
+              <input type="date" value={to} onChange={(e) => { setTo(e.target.value); reset(); }} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm" />
+            </div>
+            {(picked.length > 0 || from || to) && (
+              <Button variant="outline" size="sm" onClick={() => { setPicked([]); setFrom(""); setTo(""); reset(); }}>
+                Clear all
+              </Button>
+            )}
           </div>
-          <div>
-            <label className="text-xs font-medium text-[#6B7280] mb-1 block">From</label>
-            <input type="date" value={from} onChange={(e) => setFilter(() => setFrom(e.target.value))} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-[#6B7280] mb-1 block">To</label>
-            <input type="date" value={to} onChange={(e) => setFilter(() => setTo(e.target.value))} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
-          </div>
-        </div>
-      </div>
+          {picked.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {picked.map((code) => (
+                <span key={code} className="inline-flex items-center gap-1.5 rounded-full border border-[#6B5C32] bg-white px-3 py-1 text-xs font-medium text-[#6B5C32]">
+                  <span className="font-mono">{code}</span> {nameOf(code)}
+                  <button onClick={() => removeAccount(code)} className="ml-1 text-[#9A3A2D] hover:text-[#791F1F] cursor-pointer" title="Remove">✕</button>
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] text-[#9CA3AF]">
+            No account picked = full ledger · pick ONE for running balances · pick SEVERAL to review them together
+          </p>
+        </CardContent>
+      </Card>
 
       {account && gl && (
         <p className="text-sm text-[#6B7280]">
@@ -3196,7 +3254,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
       )}
       {!account && all && (
         <p className="text-sm text-[#6B7280]">
-          {all.totalRows} entries{all.capped ? ` — showing latest ${all.rows.length}, narrow the date range to see older ones` : ""}
+          {all.totalRows} entries{picked.length > 1 ? ` across ${picked.length} accounts` : ""}{all.capped ? ` — showing latest ${all.rows.length}, narrow the date range to see older ones` : ""}
         </p>
       )}
 
@@ -3264,7 +3322,7 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                       <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{String(r.postedAt).slice(0, 10)}</td>
                       <td className="px-3 py-1.5">
                         <button
-                          onClick={() => setFilter(() => setAccount(r.accountCode))}
+                          onClick={() => { setPicked([r.accountCode]); reset(); }}
                           className="text-left cursor-pointer hover:underline"
                           title="Filter to this account"
                         >

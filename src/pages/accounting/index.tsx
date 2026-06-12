@@ -3354,11 +3354,18 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [all, setAll] = useState<{ rows: GlAllRow[]; totalRows: number; capped: boolean } | null>(null);
+  const [all, setAll] = useState<{
+    rows: GlAllRow[];
+    totalRows: number;
+    capped: boolean;
+    accountTotals?: { accountCode: string; accountName: string; debitSen: number; creditSen: number }[];
+  } | null>(null);
   const [gl, setGl] = useState<{
     account: { code: string; name: string; type: string };
     openingSen: number;
     closingSen: number;
+    totalDebitSen?: number;
+    totalCreditSen?: number;
     rows: GlRow[];
   } | null>(null);
   const account = picked.length === 1 ? picked[0] : "";
@@ -3460,6 +3467,53 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
         </p>
       )}
 
+      {/* Owner: per-account total DR / CR for the filtered window — summed
+          server-side over EVERY matching leg, so it stays right even when
+          the listing below is capped at 1000 rows. */}
+      {!account && all && (all.accountTotals?.length ?? 0) > 0 && (
+        <Card>
+          <CardContent className="p-0 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Account totals{from || to ? " (filtered period)" : ""}</th>
+                  <th className="px-3 py-2 text-right">Total Debit</th>
+                  <th className="px-3 py-2 text-right">Total Credit</th>
+                  <th className="px-3 py-2 text-right">Net (DR−CR)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {all.accountTotals!.map((t) => (
+                  <tr key={t.accountCode} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5">
+                      <button
+                        onClick={() => { setPicked([t.accountCode]); reset(); }}
+                        className="text-left cursor-pointer hover:underline"
+                        title="Open this account's running-balance inquiry"
+                      >
+                        <span className="tabular-nums text-xs text-[#6B7280] mr-1">{t.accountCode}</span>
+                        <span className="text-[#1F1D1B]">{t.accountName}</span>
+                      </button>
+                    </td>
+                    <td className="px-3 py-1.5 text-right">{t.debitSen ? formatCurrency(t.debitSen) : "-"}</td>
+                    <td className="px-3 py-1.5 text-right">{t.creditSen ? formatCurrency(t.creditSen) : "-"}</td>
+                    <td className={`px-3 py-1.5 text-right font-medium ${t.debitSen - t.creditSen < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                      {formatCurrency(t.debitSen - t.creditSen)}
+                    </td>
+                  </tr>
+                ))}
+                <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
+                  <td className="px-3 py-2">TOTAL</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(all.accountTotals!.reduce((s, t) => s + t.debitSen, 0))}</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(all.accountTotals!.reduce((s, t) => s + t.creditSen, 0))}</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(all.accountTotals!.reduce((s, t) => s + t.debitSen - t.creditSen, 0))}</td>
+                </tr>
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           {loading ? (
@@ -3502,6 +3556,14 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
                     </tr>
                   );
                 })}
+                {/* Owner: window totals — total DR / total CR within the
+                    picked date range, with the closing balance alongside. */}
+                <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
+                  <td className="px-3 py-2" colSpan={3}>TOTAL{from || to ? " (filtered period)" : ""}</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(gl.totalDebitSen ?? 0)}</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(gl.totalCreditSen ?? 0)}</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(gl.closingSen)}</td>
+                </tr>
               </tbody>
             </table>
           ) : all ? (

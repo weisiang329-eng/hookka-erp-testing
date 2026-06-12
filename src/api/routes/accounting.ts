@@ -2412,6 +2412,25 @@ app.get("/gl", async (c) => {
         creditSen: Number(l.creditSen) || 0,
       };
     });
+    // Owner: per-account total debit / total credit for the filtered date
+    // window. Summed over EVERY matching leg (not the 1000-row display
+    // cap), so the totals stay right even when the listing is capped.
+    const totalsByAccount = new Map<string, { debitSen: number; creditSen: number }>();
+    for (const l of all) {
+      const code = resolveGl(l.accountCode);
+      const t = totalsByAccount.get(code) ?? { debitSen: 0, creditSen: 0 };
+      t.debitSen += Number(l.debitSen) || 0;
+      t.creditSen += Number(l.creditSen) || 0;
+      totalsByAccount.set(code, t);
+    }
+    const accountTotals = [...totalsByAccount.entries()]
+      .map(([code, t]) => ({
+        accountCode: code,
+        accountName: names.get(code) ?? "",
+        debitSen: t.debitSen,
+        creditSen: t.creditSen,
+      }))
+      .sort((a, b) => a.accountCode.localeCompare(b.accountCode));
     return c.json({
       success: true,
       data: {
@@ -2420,6 +2439,7 @@ app.get("/gl", async (c) => {
         to: to === "9999-12-31" ? null : to,
         totalRows: all.length,
         capped: all.length > CAP,
+        accountTotals,
         rows,
       },
     });
@@ -2471,6 +2491,9 @@ app.get("/gl", async (c) => {
     acct.type === "ASSET" || acct.type === "EXPENSE" || acct.type === "COST";
   let openingSen = 0;
   let running = 0;
+  // Owner: the account's total debit / total credit within the date window.
+  let totalDebitSen = 0;
+  let totalCreditSen = 0;
   const rows: {
     id: string;
     postedAt: string;
@@ -2492,6 +2515,8 @@ app.get("/gl", async (c) => {
     }
     if (d10 > to) continue;
     running = (rows.length === 0 ? openingSen : running) + delta;
+    totalDebitSen += Number(l.debitSen) || 0;
+    totalCreditSen += Number(l.creditSen) || 0;
     rows.push({
       id: l.id,
       postedAt: l.postedAt,
@@ -2512,6 +2537,8 @@ app.get("/gl", async (c) => {
       to: to === "9999-12-31" ? null : to,
       openingSen,
       closingSen: rows.length ? rows[rows.length - 1].runningSen : openingSen,
+      totalDebitSen,
+      totalCreditSen,
       rows,
     },
   });

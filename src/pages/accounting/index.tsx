@@ -1084,11 +1084,13 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
               </div>
               <div>
                 <label className="text-xs font-medium text-[#6B7280] mb-1 block">Special Type</label>
-                {/* Only the values the posting/report code actually consumes:
-                    SDC drives AR Control + customer control-account checks,
-                    SCC drives AP Control, SOS/SCS feed the Manufacturing
-                    P&L opening/closing stock lines. Anything else is inert,
-                    so free text only invited typos. */}
+                {/* Only the values the posting/report code consumes (or is
+                    committed to): SDC drives AR Control + customer
+                    control-account checks, SCC drives AP Control, SOS/SCS
+                    feed the Manufacturing P&L opening/closing stock lines,
+                    SBK/SCA gate the Phase-3 Payment/Expense paying-account
+                    picker. Anything else is inert, so free text only
+                    invited typos. */}
                 <select
                   value={formData.specialAccountType}
                   onChange={(e) =>
@@ -1099,6 +1101,8 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                   <option value="">(None)</option>
                   <option value="SDC">SDC — Debtor Control (AR)</option>
                   <option value="SCC">SCC — Creditor Control (AP)</option>
+                  <option value="SBK">SBK — Bank Account (Payment)</option>
+                  <option value="SCA">SCA — Cash Account (Payment)</option>
                   <option value="SOS">SOS — Opening Stock (Mfg P&L)</option>
                   <option value="SCS">SCS — Closing Stock (Mfg P&L)</option>
                 </select>

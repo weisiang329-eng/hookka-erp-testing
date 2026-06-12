@@ -27,16 +27,36 @@ export const DEFAULT_PURCHASE_ACCT = "704-0010";
 // the material bought, per the owner. Exported for the Maintenance
 // stock-group grid (effective-mapping view).
 export const DEFAULT_PURCHASE_MAP: Record<string, string> = {
-  FABRIC: "701-0010",
-  FABRIC_SEWING: "701-0020",
+  // REAL AutoCount stock-group codes (owner's grid screenshot 2026-06-12).
+  // raw_materials.itemGroup carries these values — the previous keys
+  // (FABRIC/FOAM/MECHANISM…) never matched, so every purchase silently
+  // fell to the default account.
+  "B.M-FABR": "701-0010",
+  "S-FABRIC": "701-0020",
+  "S.M-FABR": "701-0030",
   PLYWOOD: "702-0010",
+  "WD STRIP": "702-0030",
+  "B.FILLER": "703-0010",
+  "S.FILLER": "703-0020",
+  "B.OTHERS": "704-0010",
+  "S.OTHERS": "704-0011",
+  "B.ACCE": "704-0020",
+  "S.ACC": "704-0021",
+  MAINTENA: "704-0030",
+  "B.MECHAN": "704-0040",
+  "S.MECH": "704-0041",
+  "B.WEBB": "704-0050",
+  "S.WEBB": "704-0051",
+  EQUIPMEN: "704-0060",
+  "R&D": "900-R002",
+  PACKING: "705-0020",
+  // Legacy aspirational keys kept harmless for any stragglers.
+  FABRIC: "701-0010",
   WOOD: "702-0010",
-  WD_STRIP: "702-0030",
   FOAM: "703-0010",
   WEBBING: "704-0050",
   MECHANISM: "704-0040",
   ACCESSORY: "704-0020",
-  PACKING: "705-0020",
 };
 function apBankAcct(method: string | null | undefined): string {
   return String(method ?? "").toUpperCase() === "CASH"

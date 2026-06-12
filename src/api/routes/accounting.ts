@@ -2154,11 +2154,12 @@ app.get("/stock-map/effective", async (c) => {
     kv = {};
   }
   const def = DEFAULT_STOCK_MAP;
-  const eff = (g: string): Entry & { group: string } => {
+  const eff = (g: string): Entry & { group: string; description: string } => {
     const dStock = def.rm[g] ?? def.rmDefault;
     const o = kv.rm?.[g] ?? {};
     return {
       group: g,
+      description: GROUP_DESCRIPTIONS[g] ?? g,
       stock: o.stock ?? dStock.stock,
       opening: o.opening ?? dStock.opening,
       closing: o.closing ?? dStock.closing,
@@ -2742,17 +2743,61 @@ const DEFAULT_STOCK_MAP: {
 } = {
   rmDefault: { stock: "330-3001", opening: "704-0001", closing: "704-9991" },
   rm: {
-    FABRIC: { stock: "330-0001", opening: "701-0001", closing: "701-9991" },
-    FABRIC_SEWING: { stock: "330-0002", opening: "701-0002", closing: "701-9992" },
+    // ---- REAL AutoCount stock-group codes (owner's workbook + grid
+    // screenshot, 2026-06-12). raw_materials.itemGroup carries THESE
+    // values — the previous aspirational keys (FABRIC / FOAM / MECHANISM)
+    // never matched, so every group silently fell to rmDefault. ----
+    "B.M-FABR": { stock: "330-0001", opening: "701-0001", closing: "701-9991" },
+    "S-FABRIC": { stock: "330-0002", opening: "701-0002", closing: "701-9992" },
+    "S.M-FABR": { stock: "330-0003", opening: "701-0003", closing: "701-9993" },
     PLYWOOD: { stock: "330-1001", opening: "702-0001", closing: "702-9991" },
+    "WD STRIP": { stock: "330-1002", opening: "702-0002", closing: "702-9992" },
+    "B.FILLER": { stock: "330-2001", opening: "703-0001", closing: "703-9999" },
+    "S.FILLER": { stock: "330-2002", opening: "703-0002", closing: "703-9998" },
+    "B.OTHERS": { stock: "330-3001", opening: "704-0001", closing: "704-9991" },
+    "B.ACCE": { stock: "330-3002", opening: "704-0002", closing: "704-9992" },
+    MAINTENA: { stock: "330-3003", opening: "704-0003", closing: "704-9993" },
+    "B.MECHAN": { stock: "330-3004", opening: "704-0004", closing: "704-9994" },
+    "B.WEBB": { stock: "330-3005", opening: "704-0005", closing: "704-9995" },
+    "S.OTHERS": { stock: "330-3006", opening: "704-0006", closing: "704-9996" },
+    "S.ACC": { stock: "330-3007", opening: "704-0007", closing: "704-9997" },
+    "S.MECH": { stock: "330-3008", opening: "704-0008", closing: "704-9998" },
+    "S.WEBB": { stock: "330-3009", opening: "704-0009", closing: "704-9999" },
+    PACKING: { stock: "330-4000", opening: "705-0001", closing: "705-9999" },
+    EQUIPMEN: { stock: "330-3001", opening: "704-0001", closing: "704-9991" },
+    "R&D": { stock: "330-3001", opening: "704-0001", closing: "704-9991" },
+    // Legacy aspirational keys kept harmless for any stragglers.
+    FABRIC: { stock: "330-0001", opening: "701-0001", closing: "701-9991" },
     WOOD: { stock: "330-1001", opening: "702-0001", closing: "702-9991" },
-    WD_STRIP: { stock: "330-1002", opening: "702-0002", closing: "702-9992" },
     FOAM: { stock: "330-2001", opening: "703-0001", closing: "703-9999" },
     WEBBING: { stock: "330-3005", opening: "704-0005", closing: "704-9995" },
-    PACKING: { stock: "330-4000", opening: "705-0001", closing: "705-9999" },
   },
   wip: { stock: "330-8000", opening: "700-9005", closing: "700-9010" },
   fg: { stock: "330-9000", opening: "600-0000", closing: "620-0000" },
+};
+
+// Stock-group full names for the Maintenance grid (owner's AutoCount
+// "Description" column). Fallback = the code itself.
+const GROUP_DESCRIPTIONS: Record<string, string> = {
+  "B.ACCE": "B.ACCESSORIES",
+  "B.FILLER": "B.FILLER",
+  "B.MECHAN": "B.MECHANISM",
+  "B.M-FABR": "B.M-FABRIC",
+  "B.OTHERS": "B.OTHERS",
+  "B.WEBB": "B.WEBBING",
+  EQUIPMEN: "EQUIPMENT",
+  MAINTENA: "MAINTENANCE",
+  PACKING: "PACKING",
+  PLYWOOD: "PLYWOOD",
+  "R&D": "RESEARCH & DEVELOPMENT",
+  "S.ACC": "SOFA ACCESSORIES",
+  "S.FILLER": "SOFA FILLER",
+  "S.MECH": "SOFA MECHANISM",
+  "S.M-FABR": "SOFA M-FABRIC",
+  "S.OTHERS": "SOFA OTHERS",
+  "S.WEBB": "SOFA WEBBING",
+  "S-FABRIC": "S-FABRIC",
+  "WD STRIP": "WOODEN STRIP",
 };
 
 // Live inventory value from the real-time cost ledger, as of `cutoffYm`

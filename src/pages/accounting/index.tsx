@@ -422,7 +422,7 @@ function FyeCard() {
 function StockMapCard() {
   const { toast } = useToast();
   type Entry = { stock: string; opening: string; closing: string; purchase?: string };
-  type GridRow = Entry & { group: string };
+  type GridRow = Entry & { group: string; description?: string };
   const [rows, setRows] = useState<GridRow[] | null>(null);
   const [rmDefault, setRmDefault] = useState<Entry & { purchase: string }>({ stock: "", opening: "", closing: "", purchase: "" });
   const [wip, setWip] = useState<Entry>({ stock: "", opening: "", closing: "" });
@@ -503,6 +503,7 @@ function StockMapCard() {
               <thead>
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
                   <th className="px-3 py-2 text-left">Stock Group</th>
+                  <th className="px-3 py-2 text-left">Description</th>
                   <th className="px-3 py-2 text-left">Purchase Code</th>
                   <th className="px-3 py-2 text-left">Balance Stock Code</th>
                   <th className="px-3 py-2 text-left">Opening Code</th>
@@ -513,6 +514,7 @@ function StockMapCard() {
                 {rows.map((r, i) => (
                   <tr key={r.group} className="border-b border-[#F0ECE9]">
                     <td className="px-3 py-1.5 font-medium text-[#1F1D1B] whitespace-nowrap">{r.group}</td>
+                    <td className="px-3 py-1.5 text-[#6B7280] whitespace-nowrap">{r.description ?? r.group}</td>
                     <td className="px-3 py-1">{cell(r.purchase ?? "", (v) => setCell(i, "purchase", v))}</td>
                     <td className="px-3 py-1">{cell(r.stock, (v) => setCell(i, "stock", v))}</td>
                     <td className="px-3 py-1">{cell(r.opening, (v) => setCell(i, "opening", v))}</td>
@@ -520,21 +522,24 @@ function StockMapCard() {
                   </tr>
                 ))}
                 <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
-                  <td className="px-3 py-1.5 font-medium text-[#6B7280] whitespace-nowrap">(Default — unmapped groups)</td>
+                  <td className="px-3 py-1.5 font-medium text-[#6B7280] whitespace-nowrap">(Default)</td>
+                  <td className="px-3 py-1.5 text-xs text-[#9CA3AF]">unmapped groups</td>
                   <td className="px-3 py-1">{cell(rmDefault.purchase, (v) => setRmDefault({ ...rmDefault, purchase: v }))}</td>
                   <td className="px-3 py-1">{cell(rmDefault.stock, (v) => setRmDefault({ ...rmDefault, stock: v }))}</td>
                   <td className="px-3 py-1">{cell(rmDefault.opening, (v) => setRmDefault({ ...rmDefault, opening: v }))}</td>
                   <td className="px-3 py-1">{cell(rmDefault.closing, (v) => setRmDefault({ ...rmDefault, closing: v }))}</td>
                 </tr>
                 <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
-                  <td className="px-3 py-1.5 font-medium text-[#6B7280]">WORK IN PROGRESS</td>
+                  <td className="px-3 py-1.5 font-medium text-[#6B7280]">WIP</td>
+                  <td className="px-3 py-1.5 text-xs text-[#9CA3AF]">WORK IN PROGRESS</td>
                   <td className="px-3 py-1 text-xs text-[#9CA3AF]">—</td>
                   <td className="px-3 py-1">{cell(wip.stock, (v) => setWip({ ...wip, stock: v }))}</td>
                   <td className="px-3 py-1">{cell(wip.opening, (v) => setWip({ ...wip, opening: v }))}</td>
                   <td className="px-3 py-1">{cell(wip.closing, (v) => setWip({ ...wip, closing: v }))}</td>
                 </tr>
                 <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
-                  <td className="px-3 py-1.5 font-medium text-[#6B7280]">FINISHED GOODS</td>
+                  <td className="px-3 py-1.5 font-medium text-[#6B7280]">FG</td>
+                  <td className="px-3 py-1.5 text-xs text-[#9CA3AF]">FINISHED GOODS</td>
                   <td className="px-3 py-1 text-xs text-[#9CA3AF]">—</td>
                   <td className="px-3 py-1">{cell(fg.stock, (v) => setFg({ ...fg, stock: v }))}</td>
                   <td className="px-3 py-1">{cell(fg.opening, (v) => setFg({ ...fg, opening: v }))}</td>

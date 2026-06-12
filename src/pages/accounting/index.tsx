@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -178,6 +178,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "odc", label: "Other D/C", icon: <Users className="h-4 w-4" /> },
   { key: "payments", label: "Payments", icon: <BookOpen className="h-4 w-4" /> },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" /> },
+  { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" /> },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
@@ -253,6 +254,7 @@ export default function AccountingPage() {
           {tab === "odc" && <OtherPartiesTab />}
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
+          {tab === "cashbook" && <CashBookTab accounts={accounts} />}
           {tab === "opening" && <OpeningBalanceTab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "maint" && (
             <div className="space-y-4">
@@ -4188,6 +4190,348 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// =============== TAB: CASH BOOK / BANK RECONCILIATION (Phase 3.4) ===============
+//
+// Pick a bank/cash account + month window → statement lines on the left,
+// book legs on the right. CSV paste with column mapping; exact-amount
+// matching (manual pick or unambiguous auto-match); whatever stays
+// unmatched on either side IS the 未达账项 list.
+
+type RecoLeg = { id: string; day: string; description: string; sourceType: string; sourceId: string; amountSen: number; matched: boolean };
+type RecoLine = { id: string; txnDate: string; description: string | null; amountSen: number; matchedLegId: string | null; matchedAt: string | null };
+
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else q = false;
+      } else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function CashBookTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const bankCash = accounts.filter(
+    (a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH",
+  );
+  const [account, setAccount] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [data, setData] = useState<{ migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } | null>(null);
+  const [showImport, setShowImport] = useState(false);
+  const [csv, setCsv] = useState("");
+  const [map, setMap] = useState({ date: "1", desc: "2", out: "3", in: "4", header: true, fmt: "DD/MM/YYYY" });
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    if (!account) return;
+    const p = new URLSearchParams({ account });
+    if (from) p.set("from", from);
+    if (to) p.set("to", to);
+    fetch(`/api/accounting/bank-reco?${p.toString()}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { migrationMissing: boolean; legs: RecoLeg[]; statementLines: RecoLine[] } }>)
+      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+  }, [account, from, to]);
+  useEffect(() => { load(); }, [load]);
+
+  const parseDate = (s: string): string | null => {
+    const v = s.trim();
+    if (map.fmt === "YYYY-MM-DD") {
+      return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+    }
+    const m = v.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (!m) return null;
+    const [, a, b, y] = m;
+    const dd = map.fmt === "DD/MM/YYYY" ? a : b;
+    const mm = map.fmt === "DD/MM/YYYY" ? b : a;
+    return `${y}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+  };
+  const parseAmt = (s: string): number => {
+    let v = s.replace(/[RM,\s]/gi, "").trim();
+    let neg = false;
+    if (/^\(.*\)$/.test(v)) { neg = true; v = v.slice(1, -1); }
+    const n = parseFloat(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.round(n * 100) * (neg ? -1 : 1);
+  };
+
+  const parsedRows = (() => {
+    if (!csv.trim()) return [];
+    const rawLines = csv.trim().split(/\r?\n/);
+    const rows: { date: string; description: string; amountSen: number }[] = [];
+    const di = parseInt(map.date, 10) - 1;
+    const ci = parseInt(map.desc, 10) - 1;
+    const oi = parseInt(map.out, 10) - 1;
+    const ii = parseInt(map.in, 10) - 1;
+    for (let i = map.header ? 1 : 0; i < rawLines.length; i++) {
+      const cells = parseCsvLine(rawLines[i]);
+      const date = parseDate(cells[di] ?? "");
+      if (!date) continue;
+      let amountSen = 0;
+      if (oi === ii) {
+        amountSen = parseAmt(cells[ii] ?? "");
+      } else {
+        const outAmt = Math.abs(parseAmt(cells[oi] ?? ""));
+        const inAmt = Math.abs(parseAmt(cells[ii] ?? ""));
+        amountSen = inAmt - outAmt;
+      }
+      if (amountSen === 0) continue;
+      rows.push({ date, description: (cells[ci] ?? "").trim(), amountSen });
+    }
+    return rows;
+  })();
+
+  const handleImport = async () => {
+    if (!account) { toast.error("Pick an account first"); return; }
+    if (parsedRows.length === 0) { toast.error("No parsable rows — check the column mapping"); return; }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/accounting/bank-reco/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, lines: parsedRows }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success(`${parsedRows.length} statement lines imported`);
+        setCsv("");
+        setShowImport(false);
+        load();
+      } else toast.error(j?.error || "Import failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAutoMatch = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/accounting/bank-reco/automatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountCode: account, from, to }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { matched: number }; error?: string };
+      if (j?.success) {
+        toast.success(`${j.data?.matched ?? 0} lines auto-matched`);
+        load();
+      } else toast.error(j?.error || "Auto-match failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleMatch = async (lineId: string, legId: string) => {
+    if (!legId) return;
+    const res = await fetch("/api/accounting/bank-reco/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ statementLineId: lineId, legId }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Match failed");
+  };
+
+  const handleUnmatch = async (lineId: string) => {
+    const res = await fetch("/api/accounting/bank-reco/unmatch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ statementLineId: lineId }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Unmatch failed");
+  };
+
+  const handleDeleteLine = async (lineId: string) => {
+    const res = await fetch(`/api/accounting/bank-reco/line/${lineId}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Delete failed");
+  };
+
+  const legs = data?.legs ?? [];
+  const stmt = data?.statementLines ?? [];
+  const unmatchedLegs = legs.filter((l) => !l.matched);
+  const unmatchedStmt = stmt.filter((s) => !s.matchedLegId);
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+  const amtCls = (n: number) => `tabular-nums ${n < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Cash Book · Bank Reconciliation</h2>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" disabled={!account} onClick={() => setShowImport(!showImport)}>Import statement</Button>
+          <Button variant="outline" size="sm" disabled={!account || busy || unmatchedStmt.length === 0} onClick={handleAutoMatch}>Auto-match</Button>
+        </div>
+      </div>
+
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-end gap-4 bg-[#F7F4EF] rounded-lg">
+          <div>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Bank / Cash account</label>
+            <select value={account} onChange={(e) => { setAccount(e.target.value); setData(null); }} className={`${selCls} w-72`}>
+              <option value="">— pick account —</option>
+              {bankCash.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">From</label>
+            <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={selCls} />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">To</label>
+            <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={selCls} />
+          </div>
+          {data && !data.migrationMissing && (
+            <div className="text-sm text-[#6B7280] pb-1">
+              Book {legs.length} legs ({unmatchedLegs.length} unmatched) · Statement {stmt.length} lines ({unmatchedStmt.length} unmatched)
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {data?.migrationMissing && (
+        <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0160 not applied yet — run the paste-version SQL first.</CardContent></Card>
+      )}
+
+      {showImport && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <p className="text-xs text-[#6B7280]">
+              Paste the bank statement CSV below, then point each column. Money-out and money-in can be two columns
+              (typical bank export) or the SAME column number for a single signed-amount column.
+            </p>
+            <textarea
+              value={csv}
+              onChange={(e) => setCsv(e.target.value)}
+              rows={6}
+              placeholder={"Date,Description,Withdrawal,Deposit\n02/06/2026,CHEQUE 001234,1500.00,\n05/06/2026,TRANSFER FROM CARRESS,,12500.00"}
+              className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+            />
+            <div className="flex flex-wrap items-end gap-3">
+              {([["date", "Date col #"], ["desc", "Description col #"], ["out", "Money OUT col #"], ["in", "Money IN col #"]] as const).map(([k, label]) => (
+                <div key={k}>
+                  <label className="text-xs font-medium text-[#6B7280] mb-1 block">{label}</label>
+                  <input type="text" value={map[k]} onChange={(e) => setMap({ ...map, [k]: e.target.value })} className={`${selCls} w-16 text-center`} />
+                </div>
+              ))}
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Date format</label>
+                <select value={map.fmt} onChange={(e) => setMap({ ...map, fmt: e.target.value })} className={selCls}>
+                  <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+                  <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+                  <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+                </select>
+              </div>
+              <label className="flex items-center gap-2 text-sm pb-2 cursor-pointer">
+                <input type="checkbox" checked={map.header} onChange={(e) => setMap({ ...map, header: e.target.checked })} className="h-4 w-4 accent-[#6B5C32]" />
+                First row is a header
+              </label>
+              <span className="text-sm text-[#6B7280] pb-2">{parsedRows.length} rows parsed · net {formatCurrency(parsedRows.reduce((s, r) => s + r.amountSen, 0))}</span>
+              <Button variant="primary" size="sm" disabled={busy || parsedRows.length === 0} onClick={handleImport}>Import {parsedRows.length} lines</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {account && data && !data.migrationMissing && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          {/* Statement side */}
+          <Card>
+            <CardContent className="p-0 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left" colSpan={4}>Bank statement ({stmt.length})</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stmt.map((s) => {
+                    const candidates = unmatchedLegs.filter((l) => l.amountSen === s.amountSen);
+                    return (
+                      <tr key={s.id} className={`border-b border-[#F0ECE9] ${s.matchedLegId ? "bg-[#EAF3DE]/40" : ""}`}>
+                        <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{s.txnDate}</td>
+                        <td className="px-3 py-1.5 text-xs">{s.description}</td>
+                        <td className={`px-3 py-1.5 text-right ${amtCls(s.amountSen)}`}>{formatCurrency(s.amountSen)}</td>
+                        <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                          {s.matchedLegId ? (
+                            <button onClick={() => handleUnmatch(s.id)} className="text-[#6B7280] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer" title="Matched — click to unmatch">✓ unmatch</button>
+                          ) : candidates.length > 0 ? (
+                            <select defaultValue="" onChange={(e) => handleMatch(s.id, e.target.value)} className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] max-w-44">
+                              <option value="">match to…</option>
+                              {candidates.map((l) => (
+                                <option key={l.id} value={l.id}>{l.day} {l.description.slice(0, 30)}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <>
+                              <span className="text-[11px] text-[#9A3A2D] mr-2">no book entry</span>
+                              <button onClick={() => handleDeleteLine(s.id)} className="text-[#9CA3AF] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">del</button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {stmt.length === 0 && (
+                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>No statement lines in this window — import one</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+          {/* Book side */}
+          <Card>
+            <CardContent className="p-0 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left" colSpan={4}>Book (ledger {account}) — {legs.length} legs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {legs.map((l) => (
+                    <tr key={l.id} className={`border-b border-[#F0ECE9] ${l.matched ? "bg-[#EAF3DE]/40" : ""}`}>
+                      <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{l.day}</td>
+                      <td className="px-3 py-1.5 text-xs">{l.description}</td>
+                      <td className={`px-3 py-1.5 text-right ${amtCls(l.amountSen)}`}>{formatCurrency(l.amountSen)}</td>
+                      <td className="px-3 py-1.5 text-right text-xs">
+                        {l.matched ? <span className="text-[#27500A]">✓</span> : <span className="text-[#9A3A2D]">not in bank</span>}
+                      </td>
+                    </tr>
+                  ))}
+                  {legs.length === 0 && (
+                    <tr><td className="px-3 py-8 text-center text-sm text-[#9CA3AF]" colSpan={4}>No book entries in this window</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      {account && data && !data.migrationMissing && (
+        <p className="text-[11px] text-[#9CA3AF]">
+          未达账项 = the red rows: "not in bank" (book has it, statement doesn't — uncleared cheques etc.) and
+          "no book entry" (bank has it, book doesn't — record it via Payments / Receipts, then match).
+        </p>
+      )}
     </div>
   );
 }

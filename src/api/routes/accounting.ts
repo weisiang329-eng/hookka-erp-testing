@@ -3891,6 +3891,319 @@ app.post("/official-receipts/:id/void", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// CASH BOOK / BANK RECONCILIATION (Phase 3.4, 2026-06)
+//
+// The owner imports a monthly bank statement (CSV paste, column-mapped
+// client-side) into bank_statement_lines, then ticks lines off against
+// the ledger legs of that SBK/SCH account. amount_sen is SIGNED:
+// + money in (bank credit) / − money out. Matching is 1:1 and amounts
+// must agree — what remains unmatched on either side IS the 未达账项
+// list (in book not bank / in bank not book).
+// ---------------------------------------------------------------------------
+
+async function bankAccountOrError(
+  db: Env["Variables"]["DB"],
+  code: string,
+): Promise<string | null> {
+  const acct = await db
+    .prepare("SELECT specialAccountType FROM chart_of_accounts WHERE code = ?")
+    .bind(code)
+    .first<{ specialAccountType: string | null }>();
+  if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
+    return "Account must be a bank (SBK) or cash (SCH) account";
+  }
+  return null;
+}
+
+app.get("/bank-reco", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const account = c.req.query("account") || "";
+  const from = c.req.query("from") || "";
+  const to = c.req.query("to") || "9999-12-31";
+  const err = await bankAccountOrError(c.var.DB, account);
+  if (err) return c.json({ success: false, error: err }, 400);
+  // Legs of this account (renamed codes included), dated by effective day.
+  const resolveBr = await loadAccountResolver(c.var.DB);
+  let equivalents = [account];
+  try {
+    const aliasRows = await c.var.DB.prepare(
+      "SELECT oldCode FROM account_aliases",
+    ).all<{ oldCode: string }>();
+    for (const a of aliasRows.results ?? []) {
+      if (resolveBr(a.oldCode) === account) equivalents.push(a.oldCode);
+    }
+  } catch {
+    equivalents = [account];
+  }
+  const marks = equivalents.map(() => "?").join(",");
+  const legRes = await c.var.DB.prepare(
+    `SELECT id, sourceType, sourceId, debitSen, creditSen, description, postedAt
+       FROM ledger_journal_entries
+      WHERE accountCode IN (${marks})
+      ORDER BY postedAt ASC, id ASC`,
+  )
+    .bind(...equivalents)
+    .all<{ id: string; sourceType: string; sourceId: string; debitSen: number; creditSen: number; description: string; postedAt: string }>();
+  const obDateBr = await getOpeningDate(c.var.DB);
+  const legs = (legRes.results ?? [])
+    .map((l) => ({
+      id: l.id,
+      day:
+        isOpeningSource(l.sourceType) && obDateBr
+          ? obDateBr
+          : String(l.postedAt ?? "").slice(0, 10),
+      description: l.description ?? "",
+      sourceType: l.sourceType,
+      sourceId: l.sourceId,
+      amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
+    }))
+    .filter((l) => l.day >= from && l.day <= to);
+  let stmtLines: unknown[] = [];
+  let migrationMissing = false;
+  const matchedLegIds = new Set<string>();
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT id, txnDate, description, amountSen, matchedLegId, matchedAt
+         FROM bank_statement_lines
+        WHERE accountCode = ? AND txnDate >= ? AND txnDate <= ?
+        ORDER BY txnDate ASC, id ASC`,
+    )
+      .bind(account, from || "0000-01-01", to)
+      .all<{ id: string; txnDate: string; description: string | null; amountSen: number; matchedLegId: string | null; matchedAt: string | null }>();
+    stmtLines = res.results ?? [];
+    // Matches can point at legs outside the window — collect ALL matched
+    // leg ids for this account so book legs flag correctly.
+    const allMatched = await c.var.DB.prepare(
+      "SELECT matchedLegId FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+    )
+      .bind(account)
+      .all<{ matchedLegId: string }>();
+    for (const r of allMatched.results ?? []) matchedLegIds.add(r.matchedLegId);
+  } catch {
+    migrationMissing = true;
+  }
+  return c.json({
+    success: true,
+    data: {
+      account,
+      from: from || null,
+      to: to === "9999-12-31" ? null : to,
+      migrationMissing,
+      legs: legs.map((l) => ({ ...l, matched: matchedLegIds.has(l.id) })),
+      statementLines: stmtLines,
+    },
+  });
+});
+
+app.post("/bank-reco/import", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const account = String(body.accountCode || "");
+    const err = await bankAccountOrError(c.var.DB, account);
+    if (err) return c.json({ success: false, error: err }, 400);
+    const linesIn: { date: string; description?: string; amountSen: number }[] =
+      Array.isArray(body.lines) ? body.lines : [];
+    if (linesIn.length === 0 || linesIn.length > 2000) {
+      return c.json({ success: false, error: "1–2000 statement lines per import" }, 400);
+    }
+    const now = new Date().toISOString();
+    const statements: D1PreparedStatement[] = [];
+    for (const l of linesIn) {
+      const amountSen = Math.round(Number(l.amountSen) || 0);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(l.date)) || amountSen === 0) {
+        return c.json(
+          { success: false, error: `Bad line: date must be YYYY-MM-DD and amount non-zero (got ${l.date} / ${l.amountSen})` },
+          400,
+        );
+      }
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO bank_statement_lines (id, accountCode, txnDate, description, amountSen, importedAt, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(`bsl-${crypto.randomUUID().slice(0, 10)}`, account, l.date, String(l.description ?? ""), amountSen, now, now),
+      );
+    }
+    await c.var.DB.batch(statements);
+    return c.json({ success: true, data: { imported: statements.length } }, 201);
+  } catch {
+    return c.json(
+      { success: false, error: "Import failed — is migration 0160 applied?" },
+      400,
+    );
+  }
+});
+
+app.post("/bank-reco/match", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const lineId = String(body.statementLineId || "");
+    const legId = String(body.legId || "");
+    const line = await c.var.DB.prepare(
+      "SELECT id, accountCode, amountSen, matchedLegId FROM bank_statement_lines WHERE id = ?",
+    )
+      .bind(lineId)
+      .first<{ id: string; accountCode: string; amountSen: number; matchedLegId: string | null }>();
+    if (!line) return c.json({ success: false, error: "Statement line not found" }, 404);
+    if (line.matchedLegId) return c.json({ success: false, error: "Line already matched" }, 400);
+    const leg = await c.var.DB.prepare(
+      "SELECT id, accountCode, debitSen, creditSen FROM ledger_journal_entries WHERE id = ?",
+    )
+      .bind(legId)
+      .first<{ id: string; accountCode: string; debitSen: number; creditSen: number }>();
+    if (!leg) return c.json({ success: false, error: "Ledger leg not found" }, 404);
+    const resolveM = await loadAccountResolver(c.var.DB);
+    if (resolveM(leg.accountCode) !== line.accountCode) {
+      return c.json({ success: false, error: "Leg belongs to a different account" }, 400);
+    }
+    const legAmt = (Number(leg.debitSen) || 0) - (Number(leg.creditSen) || 0);
+    if (legAmt !== Number(line.amountSen)) {
+      return c.json(
+        { success: false, error: `Amounts differ — book ${legAmt} sen vs statement ${line.amountSen} sen. Match must be exact; book the difference (bank charges etc.) first.` },
+        400,
+      );
+    }
+    const taken = await c.var.DB.prepare(
+      "SELECT id FROM bank_statement_lines WHERE matchedLegId = ? LIMIT 1",
+    )
+      .bind(legId)
+      .first();
+    if (taken) return c.json({ success: false, error: "This ledger leg is already matched to another statement line" }, 400);
+    await c.var.DB.prepare(
+      "UPDATE bank_statement_lines SET matchedLegId = ?, matchedAt = ? WHERE id = ?",
+    )
+      .bind(legId, new Date().toISOString(), lineId)
+      .run();
+    return c.json({ success: true });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.post("/bank-reco/unmatch", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const lineId = String(body.statementLineId || "");
+    await c.var.DB.prepare(
+      "UPDATE bank_statement_lines SET matchedLegId = NULL, matchedAt = NULL WHERE id = ?",
+    )
+      .bind(lineId)
+      .run();
+    return c.json({ success: true });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// Auto-match: unique exact-amount candidates within ±7 days.
+app.post("/bank-reco/automatch", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const account = String(body.accountCode || "");
+    const from = String(body.from || "");
+    const to = String(body.to || "9999-12-31");
+    const err = await bankAccountOrError(c.var.DB, account);
+    if (err) return c.json({ success: false, error: err }, 400);
+    const resolveAm = await loadAccountResolver(c.var.DB);
+    let equivalents = [account];
+    try {
+      const aliasRows = await c.var.DB.prepare(
+        "SELECT oldCode FROM account_aliases",
+      ).all<{ oldCode: string }>();
+      for (const a of aliasRows.results ?? []) {
+        if (resolveAm(a.oldCode) === account) equivalents.push(a.oldCode);
+      }
+    } catch {
+      equivalents = [account];
+    }
+    const marks = equivalents.map(() => "?").join(",");
+    const [legRes, lineRes, matchedRes] = await Promise.all([
+      c.var.DB.prepare(
+        `SELECT id, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries
+          WHERE accountCode IN (${marks})`,
+      )
+        .bind(...equivalents)
+        .all<{ id: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+      c.var.DB.prepare(
+        `SELECT id, txnDate, amountSen FROM bank_statement_lines
+          WHERE accountCode = ? AND matchedLegId IS NULL AND txnDate >= ? AND txnDate <= ?`,
+      )
+        .bind(account, from || "0000-01-01", to)
+        .all<{ id: string; txnDate: string; amountSen: number }>(),
+      c.var.DB.prepare(
+        "SELECT matchedLegId FROM bank_statement_lines WHERE accountCode = ? AND matchedLegId IS NOT NULL",
+      )
+        .bind(account)
+        .all<{ matchedLegId: string }>(),
+    ]);
+    const takenLegs = new Set((matchedRes.results ?? []).map((r) => r.matchedLegId));
+    const obDateAm = await getOpeningDate(c.var.DB);
+    const freeLegs = (legRes.results ?? [])
+      .filter((l) => !takenLegs.has(l.id))
+      .map((l) => ({
+        id: l.id,
+        day:
+          isOpeningSource(l.sourceType) && obDateAm
+            ? obDateAm
+            : String(l.postedAt ?? "").slice(0, 10),
+        amountSen: (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0),
+      }));
+    const dayMs = 86400000;
+    const updates: D1PreparedStatement[] = [];
+    const usedLeg = new Set<string>();
+    let matched = 0;
+    for (const line of lineRes.results ?? []) {
+      const lineT = Date.parse(line.txnDate);
+      const candidates = freeLegs.filter(
+        (l) =>
+          !usedLeg.has(l.id) &&
+          l.amountSen === Number(line.amountSen) &&
+          Math.abs(Date.parse(l.day) - lineT) <= 7 * dayMs,
+      );
+      // Only match when the candidate is UNAMBIGUOUS.
+      if (candidates.length === 1) {
+        usedLeg.add(candidates[0].id);
+        updates.push(
+          c.var.DB.prepare(
+            "UPDATE bank_statement_lines SET matchedLegId = ?, matchedAt = ? WHERE id = ?",
+          ).bind(candidates[0].id, new Date().toISOString(), line.id),
+        );
+        matched++;
+      }
+    }
+    if (updates.length > 0) await c.var.DB.batch(updates);
+    return c.json({ success: true, data: { matched } });
+  } catch {
+    return c.json({ success: false, error: "Auto-match failed — is migration 0160 applied?" }, 400);
+  }
+});
+
+app.delete("/bank-reco/line/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const row = await c.var.DB.prepare(
+    "SELECT id, matchedLegId FROM bank_statement_lines WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; matchedLegId: string | null }>();
+  if (!row) return c.json({ success: false, error: "Line not found" }, 404);
+  if (row.matchedLegId) {
+    return c.json({ success: false, error: "Unmatch the line before deleting it" }, 400);
+  }
+  await c.var.DB.prepare("DELETE FROM bank_statement_lines WHERE id = ?").bind(id).run();
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
 // OPENING BALANCE (Phase-5 prerequisite, 2026-06 — owner enters it himself)
 //
 // AutoCount-style split:

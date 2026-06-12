@@ -1172,7 +1172,10 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                   ) : (
                     <span className="w-3.5 shrink-0" />
                   )}
-                  <span className="text-[#6B7280] tabular-nums text-xs">{node.code}</span>
+                  {/* Fixed column width — letter codes (900-D003 vs 900-I001)
+                      vary in width under a proportional font, so without it
+                      the account names never line up. */}
+                  <span className="text-[#6B7280] tabular-nums text-xs min-w-[4.25rem] shrink-0">{node.code}</span>
                   {editCode === node.code ? (
                     <input
                       type="text"

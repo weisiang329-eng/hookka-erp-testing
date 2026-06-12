@@ -1104,7 +1104,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
                   <option value="SDC">SDC — Debtor Control (AR)</option>
                   <option value="SCC">SCC — Creditor Control (AP)</option>
                   <option value="SBK">SBK — Bank Account (Payment)</option>
-                  <option value="SCA">SCA — Cash Account (Payment)</option>
+                  <option value="SCH">SCH — Cash Account (Payment)</option>
                   <option value="SOS">SOS — Opening Stock (Mfg P&L)</option>
                   <option value="SCS">SCS — Closing Stock (Mfg P&L)</option>
                 </select>
@@ -1380,6 +1380,33 @@ function JournalsTab({
     }
   };
 
+  // Phase 3 (owner): recurring JVs — copy any entry into a fresh DRAFT
+  // dated today, same lines; edit then post.
+  const handleDuplicate = async (row: JournalEntry) => {
+    const res = await fetch("/api/accounting/journals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: new Date().toISOString().slice(0, 10),
+        description: row.description,
+        lines: row.lines.map((l) => ({
+          accountCode: l.accountCode,
+          accountName: l.accountName,
+          debitSen: l.debitSen,
+          creditSen: l.creditSen,
+          description: l.description,
+        })),
+      }),
+    });
+    if (!res.ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body: any = await res.json().catch(() => ({}));
+      alert(humanizeError({ status: res.status, message: body?.error }, "Couldn't duplicate the journal entry."));
+      return;
+    }
+    onRefresh();
+  };
+
   const columns: Column<JournalEntry>[] = [
     {
       key: "entryNo",
@@ -1436,6 +1463,7 @@ function JournalsTab({
     if (row.status === "POSTED") {
       items.push({ label: "Reverse", action: (r) => handleReverse(r.id) });
     }
+    items.push({ label: "Duplicate as draft (template)", action: (r) => handleDuplicate(r) });
     items.push({ separator: true, label: "", action: () => {} });
     items.push({ label: "Refresh", action: () => onRefresh() });
     return items;

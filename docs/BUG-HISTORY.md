@@ -34,6 +34,22 @@ Entries themselves stay newest-first.
 
 ---
 
+## BUG-2026-06-12-009 — Scan-PO OCR modal: a stray backdrop click wiped the whole scan/preview, and a wedged extract froze the modal at "0 of N done" forever
+
+**Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green; deployed to prod. Follow-up to BUG-007 after the owner hit both live.
+**Category:** ui-frontend
+
+Owner, using the Scan-PO OCR modal shipped earlier today (BUG-007), hit two problems:
+1. **Accidental close.** Clicking the dimmed margin around the modal (the backdrop) while on the Preview step closed the ENTIRE modal, discarding every extracted + hand-edited PO. BUG-007's "accidental-close guard" only suppressed the backdrop-close while a scan was *in flight* (busy); once idle (Preview), a margin click still closed everything. Owner: "应该要打叉才可以关掉" (must click the ✕ to close).
+2. **Stuck scan.** The modal sat at "Scanning 1 PDF… 0 of 1 done" indefinitely. Root cause: the per-page extract `fetch("/api/scan-po/extract")` had NO client-side timeout, so if the backend / Anthropic never responded, that one request hung forever — `Promise.allSettled` waited on it, the batch never settled, and the file stuck on "scanning" with no error surfaced.
+
+Fix (`src/components/scan-po-modal.tsx`, frontend-only — OCR backend/concurrency untouched):
+- `handleOverlayClick` is now an inert no-op — the modal closes ONLY via the header ✕ (`requestClose`, which still confirms when a scan is running). A backdrop click can no longer wipe a scan/preview, busy or idle.
+- Each extract attempt is wrapped in an `AbortController` with a 90s timeout (a slow OCR page legitimately takes ~30-60s). On abort/network-drop the attempt is treated as a retryable failure (existing 3-attempt 5s/15s/35s backoff), so a hung request becomes a graceful "failed" instead of an eternal hang.
+- Multi-file upload was already supported (the file input is `multiple`, each file gets its own progress row that flips to done/failed once all its pages settle) — verified, not changed.
+
+---
+
 ## BUG-2026-06-12-008 — Production "Overdue" chips miscounted: bedframe counted by SO not piece, and pieces already on a shipped DO still counted overdue
 
 **Status:** 🟢 Fixed (2026-06-12). tsc 0; full suite green (+10 new tests, `tests/production-overdue-counts.test.mjs`); deployed to prod + verified live (endpoint 200 → bedframe 39 / sofa 21; chips render; SO-2605-175 — owner's example — correctly flagged).

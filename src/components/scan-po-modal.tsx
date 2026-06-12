@@ -219,13 +219,13 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     handleClose();
   };
 
-  // Click on the dimmed overlay margin. While busy this is almost always
-  // accidental, so do nothing rather than wipe in-flight work — the
-  // operator must use the explicit ✕ (which confirms) to bail out. When
-  // idle, a margin click closes normally.
+  // Click on the dimmed overlay margin is INERT — never closes the modal,
+  // busy or idle. A stray margin click used to wipe the entire scan/preview
+  // (the operator would lose every extracted+edited PO to one misclick).
+  // Owner 2026-06-12: "应该要打叉才可以关掉" — the modal closes ONLY via the
+  // explicit header ✕ (requestClose, which confirms while a scan is running).
   const handleOverlayClick = () => {
-    if (isBusy) return;
-    handleClose();
+    /* intentional no-op — closing is ✕-only, see comment above */
   };
 
   const handleFiles = useCallback(async (fileList: FileList | null) => {
@@ -309,8 +309,39 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       const BASE_DELAYS = [5, 15, 35]; // seconds between attempts
       const MAX_ATTEMPTS = 3;
       let lastError = "";
+      // A wedged extract (backend or Anthropic never responds) used to freeze
+      // the whole scan at "0 of N done" forever — fetch has no built-in
+      // timeout, so one hung page froze the batch and the file stuck on
+      // "scanning". Abort each attempt past 90s (a slow OCR page legitimately
+      // takes ~30-60s) so a hung request becomes a retryable failure instead
+      // of an eternal hang (owner 2026-06-12: "卡住了").
+      const PER_ATTEMPT_TIMEOUT_MS = 90_000;
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const res = await fetch("/api/scan-po/extract", { method: "POST", body: fd });
+        let res: Response;
+        const controller = new AbortController();
+        const abortTimer = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
+        try {
+          res = await fetch("/api/scan-po/extract", {
+            method: "POST",
+            body: fd,
+            signal: controller.signal,
+          });
+        } catch (err) {
+          clearTimeout(abortTimer);
+          // Timed-out (aborted) or a transient network drop — back off and
+          // retry like a 5xx rather than hanging the scan on one wedged page.
+          lastError = controller.signal.aborted
+            ? `extract timed out after ${PER_ATTEMPT_TIMEOUT_MS / 1000}s`
+            : err instanceof Error
+              ? err.message
+              : "network error";
+          if (attempt < MAX_ATTEMPTS - 1) {
+            await new Promise((r) => setTimeout(r, BASE_DELAYS[attempt] * 1000));
+            continue;
+          }
+          return { kind: "fail", job, error: lastError };
+        }
+        clearTimeout(abortTimer);
         const data = await res
           .json()
           .catch(() => ({ success: false, error: `HTTP ${res.status} (non-JSON body)` }))

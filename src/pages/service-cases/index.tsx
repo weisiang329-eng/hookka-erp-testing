@@ -52,6 +52,22 @@ const ROOT_CAUSE_COLOR: Record<string, string> = {
   OTHER: "bg-[#F0ECE9] text-[#5A5550]",
 };
 
+// Human labels for the (possibly several) root-cause categories on a case.
+// Mirrors detail.tsx's ROOT_CAUSE_LABELS — kept local so the list page has no
+// cross-page import. The joined label feeds the Category column's badges,
+// sort, value filter and CSV export.
+const ROOT_CAUSE_LABELS: Record<string, string> = {
+  PRODUCTION: "Production / workmanship",
+  DESIGN: "Design / R&D",
+  MATERIAL: "Material / supplier",
+  PROCESS: "Process / SOP gap",
+  CUSTOMER: "Customer (not our fault)",
+  TRANSPORT: "Transport / 3PL",
+  SALES: "Sales / order-taking error",
+  PICKING: "Picking / packing error",
+  OTHER: "Other",
+};
+
 // Stage chip tint, indexed by Case Pipeline stage. Early stages are warm/
 // neutral, the in-production stretch is blue, Delivered/Closed go green/grey
 // — a coarse at-a-glance read of where the case sits. Falls back by index.
@@ -89,6 +105,11 @@ type ServiceCaseListItem = {
   // pipeline stage. "" / null until the case is first marked In Progress.
   investigatingAt?: string | null;
   rootCauseCategory: string | null;
+  // Multi root causes (migration 0169) — a case can have several. Always
+  // present (the GET synthesizes a one-element array from the legacy single
+  // category for old cases). The Category column joins these labels; the
+  // legacy rootCauseCategory above stays for back-compat.
+  rootCauses?: Array<{ category: string; details?: Record<string, unknown> }>;
   // Per-category structured RCA fields (JSON). The Department column reads
   // whichever dept-name field the active category stored (see deptForCase).
   rootCauseDetails?: Record<string, unknown> | null;
@@ -145,6 +166,33 @@ function deptForCase(details: Record<string, unknown> | null | undefined): strin
   return "";
 }
 
+// A case can have several root-cause categories (migration 0169). Returns the
+// distinct, valid category CODES in order. Falls back to the legacy single
+// rootCauseCategory when the multi array is absent (old cases the GET didn't
+// synthesize, or a stale client). Order preserved, duplicates dropped.
+function categoryCodesForCase(c: ServiceCaseListItem): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (code: string | null | undefined) => {
+    if (!code || !(code in ROOT_CAUSE_LABELS) || seen.has(code)) return;
+    seen.add(code);
+    out.push(code);
+  };
+  if (Array.isArray(c.rootCauses) && c.rootCauses.length > 0) {
+    for (const rc of c.rootCauses) push(rc?.category);
+  } else {
+    push(c.rootCauseCategory);
+  }
+  return out;
+}
+
+// Joined human labels for the case's categories — "Design / R&D, Material /
+// supplier". Empty → "". Shared by the Category column's sort key, value
+// filter and CSV export so all three read exactly like the grid.
+function categoriesLabel(codes: string[]): string {
+  return codes.map((code) => ROOT_CAUSE_LABELS[code] ?? code).join(", ");
+}
+
 // Grid row = the API case + flat precomputed fields. DataGrid resolves
 // sort / per-column filter / global-search values by column key, so every
 // displayed value needs to live ON the row (not be derived inside render)
@@ -152,7 +200,9 @@ function deptForCase(details: Record<string, unknown> | null | undefined): strin
 // export so the download matches the grid exactly.
 type CaseRow = ServiceCaseListItem & {
   source: string; // "SO-2605-198" / "EXTERNAL"
-  rootCause: string; // rootCauseCategory or "" (badge text)
+  rootCause: string; // legacy single rootCauseCategory or "" (back-compat)
+  categoryCodes: string[]; // all category codes on the case (multi)
+  categoriesText: string; // joined human labels (sort / filter / CSV / search)
   department: string; // responsible dept name or "" (— )
   stageLabel: string; // Case Pipeline stage label (the owner's "status")
   stageIndex: number; // 0..7 — sort key so Stage sorts in pipeline order
@@ -266,12 +316,15 @@ export default function ServiceCasesListPage() {
       // closedAt freezes both durations for closed / cancelled cases.
       const frozenClose =
         c.status === "CLOSED" || c.status === "CANCELLED" ? c.closedAt || null : null;
+      const categoryCodes = categoryCodesForCase(c);
       return {
         ...c,
         // sourceNo already carries its own prefix (SO-…, CO-…), so show it
         // alone for SO/CO; EXTERNAL has no number → show the type word.
         source: c.sourceNo || (c.sourceType === "EXTERNAL" ? "EXTERNAL" : c.sourceType),
         rootCause: c.rootCauseCategory ?? "",
+        categoryCodes,
+        categoriesText: categoriesLabel(categoryCodes),
         department: deptForCase(c.rootCauseDetails),
         stageLabel: pipe.label,
         stageIndex: pipe.index,
@@ -316,22 +369,42 @@ export default function ServiceCasesListPage() {
       },
       {
         // Root Cause category, relabelled "Category" (owner: the category is
-        // the root cause). Same badge as before.
-        key: "rootCause",
+        // the root cause). A case can now have several (migration 0169) —
+        // show the first 2 as badges + "+N" for the rest. Sort / value-filter
+        // / global-search all key off the joined human label (categoriesText)
+        // so the dropdown reads like the grid.
+        key: "categoriesText",
         label: "Category",
-        width: "120px",
+        width: "170px",
         sortable: true,
-        filterAccessor: (row) => row.rootCause || "—",
-        render: (_value, row) =>
-          row.rootCauseCategory ? (
-            <span
-              className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[row.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
-            >
-              {row.rootCauseCategory}
-            </span>
-          ) : (
-            <span className="text-[#9CA3AF]">—</span>
-          ),
+        filterAccessor: (row) => row.categoriesText || "—",
+        render: (_value, row) => {
+          const codes = row.categoryCodes;
+          if (codes.length === 0) return <span className="text-[#9CA3AF]">—</span>;
+          const shown = codes.slice(0, 2);
+          const extra = codes.length - shown.length;
+          return (
+            <div className="flex flex-wrap items-center gap-1">
+              {shown.map((code) => (
+                <span
+                  key={code}
+                  className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[code] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
+                  title={ROOT_CAUSE_LABELS[code] ?? code}
+                >
+                  {code}
+                </span>
+              ))}
+              {extra > 0 ? (
+                <span
+                  className="text-[10px] text-[#6B7280]"
+                  title={categoriesLabel(codes)}
+                >
+                  +{extra}
+                </span>
+              ) : null}
+            </div>
+          );
+        },
       },
       {
         // Responsible department — parsed from the per-category RCA detail
@@ -437,7 +510,8 @@ export default function ServiceCasesListPage() {
         { header: "Case No", accessor: (r) => r.caseNo },
         { header: "Customer", accessor: (r) => r.customerName },
         { header: "Source", accessor: (r) => r.source },
-        { header: "Category", accessor: (r) => r.rootCause },
+        // Joined human labels for all the case's categories (multi).
+        { header: "Category", accessor: (r) => r.categoriesText },
         { header: "Department", accessor: (r) => r.department },
         { header: "Stage", accessor: (r) => r.stageLabel },
         // Numeric so the spreadsheet can sort / average; blank = cancelled.

@@ -1,0 +1,25 @@
+-- ============================================================================
+-- 0169 — Multi root cause on Service Cases.
+--
+-- service_cases.rootcauses:
+--   JSON array of the case's root causes, owner request 2026-06-12 (a case can
+--   have several — e.g. Design AND Material AND Transport). Shape:
+--     [{ "category": "DESIGN", "details": { ... } }, ...]
+--   where category is one of the 9 VALID_ROOT_CAUSE values and details is the
+--   per-category structured JSON object (same shapes as the single
+--   root_cause_details column documented in migration 0076).
+--
+-- Backward compatible: the legacy single columns root_cause_category /
+--   root_cause_details stay and are kept in sync — PUT mirrors the FIRST entry
+--   of rootcauses into them, so the list "Category" column and any legacy
+--   reader keep working. GET synthesizes rootcauses = [{category, details}]
+--   from the legacy columns when this column is empty, so old single-category
+--   cases render as one block.
+--
+-- ⚠ ADAPTER RULE: also self-applied at runtime (service-cases.ts
+-- ensureCaseLinkColumns) with the lowercase name, so a tool apply is a no-op
+-- on databases where the runtime already created it. Reads are dual-key
+-- (row.rootCauses ?? row.rootcauses).
+-- ============================================================================
+
+ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS rootcauses TEXT;

@@ -86,6 +86,10 @@ type ServiceCaseRow = {
   // read dual-key. ISO timestamp the case first hit IN_PROGRESS.
   investigatingAt?: string | null;
   investigatingat?: string | null;
+  // rootcauses is a runtime-added lowercase column (migration 0169) — read
+  // dual-key. JSON array [{category, details}, ...] of the case's root causes.
+  rootCauses?: string | null;
+  rootcauses?: string | null;
   affectedProductIds: string | null;
   preventionAction: string | null;
   preventionStatus: PreventionStatus | null;
@@ -156,6 +160,68 @@ function sanitizeAffectedProductsJson(raw: unknown): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// rootCauses sanitizer (PUT). A case can have several root causes (owner
+// 2026-06-12) — the body sends an array of {category, details}. We keep only
+// entries whose category is a real VALID_ROOT_CAUSE, coerce details to a plain
+// object (anything else → {}), and cap the array length so a bad client can't
+// bloat the JSON column. Returns a normalised array (NOT a string) so callers
+// can both mirror entries[0] to the legacy columns and serialise once.
+//
+// Exported for tests (tests/service-cases-rootcauses.test.mjs) — same as the
+// pure helpers in src/lib/repair-scope.ts.
+// ---------------------------------------------------------------------------
+const ROOT_CAUSES_MAX = 12;
+export function sanitizeRootCauses(
+  raw: unknown,
+): Array<{ category: RootCauseCategory; details: Record<string, unknown> }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ category: RootCauseCategory; details: Record<string, unknown> }> = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const category = (entry as { category?: unknown }).category;
+    if (typeof category !== "string") continue;
+    if (!VALID_ROOT_CAUSE.includes(category as RootCauseCategory)) continue;
+    const rawDetails = (entry as { details?: unknown }).details;
+    const details =
+      rawDetails && typeof rawDetails === "object" && !Array.isArray(rawDetails)
+        ? (rawDetails as Record<string, unknown>)
+        : {};
+    out.push({ category: category as RootCauseCategory, details });
+    if (out.length >= ROOT_CAUSES_MAX) break;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// rootCauses GET reader. Parses the stored JSON array; if it's empty/missing
+// but the legacy single root_cause_category is set, synthesizes a one-element
+// array [{category, details}] so old single-category cases render as one block
+// on the redesigned (multi) detail panel. Each entry is re-sanitized so a
+// hand-edited / legacy-malformed column can't surface a junk category.
+//
+// Exported for tests.
+// ---------------------------------------------------------------------------
+export function synthesizeRootCauses(
+  rawRootCauses: string | null | undefined,
+  legacyCategory: RootCauseCategory | null | undefined,
+  legacyDetails: Record<string, unknown>,
+): Array<{ category: RootCauseCategory; details: Record<string, unknown> }> {
+  if (rawRootCauses) {
+    try {
+      const parsed = JSON.parse(rawRootCauses);
+      const cleaned = sanitizeRootCauses(parsed);
+      if (cleaned.length > 0) return cleaned;
+    } catch {
+      // tolerate malformed JSON — fall through to legacy synthesis
+    }
+  }
+  if (legacyCategory && VALID_ROOT_CAUSE.includes(legacyCategory)) {
+    return [{ category: legacyCategory, details: legacyDetails }];
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------------
 // SV Service Orders (sales_orders rows with is_service_order=TRUE) created
 // from /service-order/create?fromCase=… carry the parent case id in the
 // runtime-added lowercase column sales_orders.caseid (migration 0165). The
@@ -189,6 +255,17 @@ function ensureCaseLinkColumns(db: D1Database): Promise<void> {
       // stage (the only stage without another native timestamp).
       await db
         .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS investigatingat TEXT")
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+    try {
+      // rootcauses (migration 0169) — JSON array of the case's root causes; a
+      // case can have several (owner 2026-06-12). The FIRST entry is mirrored
+      // into the legacy root_cause_category / root_cause_details columns so
+      // the list "Category" column + any legacy reader keep working.
+      await db
+        .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS rootcauses TEXT")
         .run();
     } catch {
       // ignore — column may already exist or DDL transiently rejected
@@ -296,6 +373,15 @@ function rowToApi(
       /* tolerate */
     }
   }
+  // root causes (migration 0169): array [{category, details}, ...]. Dual-key
+  // read of the runtime-added lowercase column. Falls back to a one-element
+  // array synthesized from the legacy single category/details so old
+  // single-category cases render as one block on the multi detail panel.
+  const rootCauses = synthesizeRootCauses(
+    row.rootCauses ?? row.rootcauses,
+    row.rootCauseCategory,
+    rootCauseDetails,
+  );
   return {
     id: row.id,
     caseNo: row.caseNo,
@@ -309,6 +395,11 @@ function rowToApi(
     issuePhotos: photos,
     actionLog,
     rootCauseDetails,
+    // Multi root causes (migration 0169). Always present (synthesized from the
+    // legacy single column for old cases) so the detail panel can render
+    // uniformly. The legacy rootCauseCategory / rootCauseDetails fields below
+    // stay for the list "Category" column + any legacy reader.
+    rootCauses,
     affectedProducts,
     rootCauseCategory: row.rootCauseCategory,
     // Dual-key read — the column is runtime-added lowercase (migration 0166).
@@ -602,7 +693,7 @@ app.put("/:id", async (c) => {
           ? JSON.stringify((body.issuePhotos as unknown[]).map(String))
           : null;
 
-    const rcNext =
+    let rcNext =
       body.rootCauseCategory === undefined
         ? existing.rootCauseCategory
         : ((body.rootCauseCategory as RootCauseCategory | null) ?? null);
@@ -639,13 +730,30 @@ app.put("/:id", async (c) => {
           ? JSON.stringify(body.actionLog)
           : null;
 
-    // rootCauseDetails — JSON object with category-specific fields.
-    const rcDetailsJson =
+    // rootCauseDetails — JSON object with category-specific fields. (May be
+    // overwritten just below by the rootCauses[0] mirror when the multi-cause
+    // array is sent.)
+    let rcDetailsJson =
       body.rootCauseDetails === undefined
         ? existing.rootCauseDetails
         : body.rootCauseDetails === null
           ? null
           : JSON.stringify(body.rootCauseDetails);
+
+    // rootCauses (migration 0169) — the multi-cause array. Undefined = keep the
+    // stored column AND the legacy mirror untouched. When sent, it WINS: we
+    // sanitize, store the array as JSON, and mirror entries[0] into the legacy
+    // root_cause_category / root_cause_details columns so the list "Category"
+    // column + any legacy reader keep working. Empty array → both legacy
+    // fields NULL + rootcauses '[]'.
+    let rootCausesJson: string | null = existing.rootCauses ?? existing.rootcauses ?? null;
+    if (body.rootCauses !== undefined) {
+      const cleaned = sanitizeRootCauses(body.rootCauses);
+      rootCausesJson = JSON.stringify(cleaned);
+      const first = cleaned[0];
+      rcNext = first ? first.category : null;
+      rcDetailsJson = first ? JSON.stringify(first.details) : null;
+    }
 
     // affectedProducts — JSON array of {productId, code, name, qty?,
     // components?}. Migration 0077. Optional, undefined = keep existing;
@@ -670,6 +778,7 @@ app.put("/:id", async (c) => {
         `UPDATE service_cases SET
            issueDescription = ?, issuePhotos = ?, notes = ?,
            rootCauseCategory = ?, responsibleunit = ?, rootCauseNotes = ?, rootCauseDetails = ?,
+           rootcauses = ?,
            affectedProductIds = ?,
            preventionAction = ?, preventionStatus = ?, preventionOwner = ?,
            externalRef = ?, actionLog = ?,
@@ -690,6 +799,7 @@ app.put("/:id", async (c) => {
           ? ((body.rootCauseNotes as string) ?? null)
           : existing.rootCauseNotes,
         rcDetailsJson,
+        rootCausesJson,
         affectedProductsJson,
         body.preventionAction !== undefined
           ? ((body.preventionAction as string) ?? null)

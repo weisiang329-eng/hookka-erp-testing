@@ -113,6 +113,11 @@ type ServiceCaseDetail = {
   responsibleUnit: string | null;
   rootCauseNotes: string;
   rootCauseDetails: RootCauseDetails;
+  // Multi root causes (migration 0169) — a case can have several. Always
+  // provided by the GET (synthesized from the legacy single category/details
+  // for old cases). The legacy rootCauseCategory / rootCauseDetails above stay
+  // as a mirror of the first entry for the list "Category" column.
+  rootCauses: Array<{ category: string; details: RootCauseDetails }>;
   preventionAction: string;
   preventionStatus: PreventionStatus;
   preventionOwner: string;
@@ -642,8 +647,17 @@ function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
 }
 
 // ===========================================================================
-// RootCausePanel — inline editor, auto-saves on blur.
+// RootCausePanel — multi root cause editor with explicit Add / Save.
 // ===========================================================================
+// A case can have several root causes (owner 2026-06-12) — e.g. Design AND
+// Material AND Transport. Each is a bordered block: a category <select> + the
+// per-category CategoryDetailsForm. "+ Add root cause" appends a blank block;
+// each block has a Remove (×). Edits no longer auto-save per keystroke — they
+// set a dirty flag and the Save button at the bottom persists the whole panel
+// (root causes + prevention action + owner) in one PUT. The first block is
+// mirrored into the legacy category column by the backend.
+type RootCauseBlock = { category: string; details: RootCauseDetails };
+
 function RootCausePanel({
   caseDetail,
   onSaved,
@@ -652,23 +666,60 @@ function RootCausePanel({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const [category, setCategory] = useState(caseDetail.rootCauseCategory ?? "");
-  const [details, setDetails] = useState<RootCauseDetails>(caseDetail.rootCauseDetails ?? {});
+  // Seed from the GET's rootCauses (always present — synthesized from the
+  // legacy single column for old cases).
+  const [blocks, setBlocks] = useState<RootCauseBlock[]>(
+    () =>
+      (caseDetail.rootCauses ?? []).map((rc) => ({
+        category: rc.category ?? "",
+        details: rc.details ?? {},
+      })),
+  );
   const [action, setAction] = useState(caseDetail.preventionAction);
   // status no longer edited from this panel — see Prevention Tracker portal.
   const [owner, setOwner] = useState(caseDetail.preventionOwner);
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  async function save(patch: Record<string, unknown>) {
+  function addBlock() {
+    setBlocks((prev) => [...prev, { category: "", details: {} }]);
+    setDirty(true);
+  }
+  function removeBlock(idx: number) {
+    setBlocks((prev) => prev.filter((_, i) => i !== idx));
+    setDirty(true);
+  }
+  function setBlockCategory(idx: number, category: string) {
+    // Changing the category resets that block's details — the per-category
+    // fields are different shapes.
+    setBlocks((prev) =>
+      prev.map((b, i) => (i === idx ? { category, details: {} } : b)),
+    );
+    setDirty(true);
+  }
+  function setBlockDetails(idx: number, details: RootCauseDetails) {
+    setBlocks((prev) => prev.map((b, i) => (i === idx ? { ...b, details } : b)));
+    setDirty(true);
+  }
+
+  async function handleSave() {
     setSaving(true);
     try {
       const res = await fetch(`/api/service-cases/${caseDetail.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify({
+          // Drop blank (category-less) blocks before sending; the backend
+          // sanitizer also rejects them, this just keeps the payload clean.
+          rootCauses: blocks.filter((b) => b.category),
+          preventionAction: action || null,
+          preventionOwner: owner || null,
+        }),
       });
       const data = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      setDirty(false);
+      toast.success("Saved");
       onSaved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
@@ -687,56 +738,94 @@ function RootCausePanel({
             per-category department picker covers the responsible department
             in finer detail. */}
 
-        {/* Category — drives reporting / categorisation of recurrence.
-            Changing the category resets the details JSON since the per-
-            category fields are different shapes. */}
-        <select
-          value={category}
-          onChange={(e) => {
-            const next = e.target.value;
-            setCategory(next);
-            // Reset details when category changes — old fields don't apply.
-            setDetails({});
-            save({ rootCauseCategory: next || null, rootCauseDetails: {} });
-          }}
-          disabled={saving}
-          className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
-        >
-          <option value="">Category — not yet assigned</option>
-          {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
-            <option key={v} value={v}>{t}</option>
-          ))}
-        </select>
-
-        {/* Per-category structured detail fields. Renders different inputs
-            based on the category — depts for PRODUCTION, supplier+RM for
-            MATERIAL, 3PL company for TRANSPORT, etc. */}
-        {category && (
-          <CategoryDetailsForm
-            category={category as RootCauseCategory}
-            value={details}
-            onChange={(next) => {
-              setDetails(next);
-            }}
-            onPersist={(next) => save({ rootCauseDetails: next })}
-            disabled={saving}
-          />
+        {/* One bordered block per root cause. A case can have several. */}
+        {blocks.length === 0 ? (
+          <p className="text-xs text-[#9CA3AF]">No root cause assigned yet.</p>
+        ) : (
+          blocks.map((block, idx) => (
+            <div
+              key={idx}
+              className="space-y-2 rounded border border-[#E2DDD8] bg-[#FCFBF9] p-2.5"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium uppercase text-[#6B7280]">
+                  Root cause #{idx + 1}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeBlock(idx)}
+                  disabled={saving}
+                  className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                  title="Remove this root cause"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              {/* Category — drives reporting / categorisation of recurrence. */}
+              <select
+                value={block.category}
+                onChange={(e) => setBlockCategory(idx, e.target.value)}
+                disabled={saving}
+                className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+              >
+                <option value="">Category — not yet assigned</option>
+                {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
+                  <option key={v} value={v}>{t}</option>
+                ))}
+              </select>
+              {/* Per-category structured detail fields. Renders different
+                  inputs based on the category — depts for PRODUCTION,
+                  supplier+RM for MATERIAL, 3PL company for TRANSPORT, etc.
+                  No longer auto-saves; onChange + onPersist both just update
+                  this block's local details (the Save button persists). */}
+              {block.category && (
+                <CategoryDetailsForm
+                  category={block.category as RootCauseCategory}
+                  value={block.details}
+                  onChange={(next) => setBlockDetails(idx, next)}
+                  onPersist={(next) => setBlockDetails(idx, next)}
+                  disabled={saving}
+                />
+              )}
+            </div>
+          ))
         )}
-        {/* rootCauseNotes textarea removed 2026-04-28 — duplicate of Issue
-            Description (the 5W story lives there now). */}
+
+        {/* Add another root cause. */}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={addBlock}
+          disabled={saving}
+          className="w-full border-dashed"
+        >
+          <Plus className="h-4 w-4" /> Add root cause
+        </Button>
+
+        {/* Prevention action + owner — route through the same dirty/Save flow
+            (no auto-save on blur anymore). rootCauseNotes textarea removed
+            2026-04-28 — duplicate of Issue Description (the 5W story lives
+            there now). */}
         <textarea
           rows={2}
           value={action}
-          onBlur={() => save({ preventionAction: action || null })}
-          onChange={(e) => setAction(e.target.value)}
+          onChange={(e) => {
+            setAction(e.target.value);
+            setDirty(true);
+          }}
+          disabled={saving}
           placeholder="What's the action so the next batch doesn't repeat this?"
           className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
         />
         <Input
           type="text"
           value={owner}
-          onBlur={() => save({ preventionOwner: owner || null })}
-          onChange={(e) => setOwner(e.target.value)}
+          onChange={(e) => {
+            setOwner(e.target.value);
+            setDirty(true);
+          }}
+          disabled={saving}
           placeholder="Owner of follow-up (name)"
           className="h-8 text-sm"
         />
@@ -748,6 +837,25 @@ function RootCausePanel({
           Once the action + owner are set, the prevention task is opened. Progress
           tracking will live in the Prevention Tracker portal (coming soon).
         </p>
+
+        {/* Save bar — explicit persist (the panel no longer auto-saves). */}
+        <div className="flex items-center justify-between gap-2 border-t border-[#F0ECE9] pt-3">
+          <span
+            className={`text-[11px] ${dirty ? "text-[#8A6D1E]" : "text-[#9CA3AF]"}`}
+          >
+            {dirty ? "Unsaved changes" : "All changes saved"}
+          </span>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            onClick={handleSave}
+            disabled={!dirty || saving}
+            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

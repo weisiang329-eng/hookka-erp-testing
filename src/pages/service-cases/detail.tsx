@@ -1215,25 +1215,8 @@ function CategoryDetailsForm({
               )}
             </div>
           )}
-          {/* Department — which dept can't fulfill this design (so R&D
-              knows who to talk to about the spec change). */}
-          <select
-            value={(value.designDeptCode as string) ?? ""}
-            onChange={(e) => {
-              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
-              patch({
-                designDeptCode: e.target.value || null,
-                designDeptName: dept?.name ?? null,
-              });
-            }}
-            disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">Which department can't follow the design? — pick one</option>
-            {ALL_DEPTS.map((d) => (
-              <option key={d.code} value={d.code}>{d.name}</option>
-            ))}
-          </select>
+          {/* Department sub-picker removed (owner 2026-06-12) — the
+              case-level Responsible Unit now covers "who is responsible". */}
           <textarea
             value={(value.notes as string) ?? ""}
             onChange={(e) => patchOnly({ notes: e.target.value })}

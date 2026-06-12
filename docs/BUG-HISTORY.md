@@ -28,9 +28,28 @@ Entries themselves stay newest-first.
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
 - `data-migration` (6) — [BUG-2026-06-10-001](#bug-2026-06-10-001--punch-selfie-photo-endpoint-500d-an-explicit-camelcase-select-projection-isnt-translated-by-the-d1-compat-adapter)
 - `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
-- `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
+- `auth-rbac` (3) — [BUG-2026-06-12-010](#bug-2026-06-12-010--any-admin-could-disable-or-delete-other-peoples-accounts-no-admin-tier-below-super-admin)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-06-12-010 — Any Admin could disable or delete other people's accounts; no Admin tier below Super Admin (+ "SO SO" double-prefix on the case Source line)
+
+**Status:** 🟢 Fixed (2026-06-12). tsc 0; build:strict 0; full suite green (893 pass); deployed to prod + verified live.
+**Category:** auth-rbac
+
+Two issues shipped together off the Service-Case + User-Management screens (owner 2026-06-12):
+
+1. **No middle role — every privileged user could manage accounts.** The legacy role map gave both `SUPER_ADMIN` and `ADMIN` a `*:*` wildcard, and the user-account routes gated only on `users:create`/`users:update`/`users:delete` — all of which `*:*` satisfies. So anyone with a privileged role could disable, delete, role-change, or reset-password *any* account, including the owner's. Owner: "随便来个人就 disable 掉我的户口了" — he wanted an Admin who runs the whole business but **cannot** touch user accounts.
+   Fix: new hard gate `requireSuperAdmin(c)` in `src/api/lib/rbac.ts` — rejects any role `!== "SUPER_ADMIN"` regardless of the permission set (even a `*:*` Admin). Wired into all 7 user-account mutations in `src/api/routes/users.ts` (create, update, delete, reset-password, invite, invite-resend, invite-revoke). GET routes stay on `users:read` so an Admin can still view the team.
+   Frontend (`src/pages/settings/Users.tsx`): "Admin (full access, cannot manage users)" added to the role dropdown; the per-row Disable/Reset/Delete buttons, the invite Resend/Revoke buttons, and the entire Send-Invite card are hidden unless the signed-in user is `SUPER_ADMIN` ("Super Admin only" shown instead) — the UI never offers an action that would 403 server-side.
+
+2. **"SO SO-2605-198" on the case Source line.** `src/pages/service-cases/detail.tsx` rendered `{sourceType} {sourceNo}`, but `sourceNo` already carries its `SO-`/`CO-` prefix, so the type doubled. Fixed by rendering `sourceNo` alone.
+
+Shipped in the same commit (feature, not a bug): the Affected-Products panel can now attach lines straight from the source SO/CO — a "From <orderNo>" chooser lists the order's own not-yet-attached lines as one-tap adds (+ "Add all"), beside the existing catalog search. Field names verified against both detail endpoints (`productId`/`productCode`/`productName`/`quantity`; path `data.items`).
+
+**Defense-in-depth note:** this is belt-and-suspenders — `requireSuperAdmin` is independent of the permission set, so even if a future role edit hands someone `*:*`, the user-management routes stay Super-Admin-only.
 
 ---
 

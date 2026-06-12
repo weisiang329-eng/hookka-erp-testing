@@ -48,6 +48,8 @@ Fix (`src/components/scan-po-modal.tsx`, frontend-only — OCR backend/concurren
 - Each extract attempt is wrapped in an `AbortController` with a 90s timeout (a slow OCR page legitimately takes ~30-60s). On abort/network-drop the attempt is treated as a retryable failure (existing 3-attempt 5s/15s/35s backoff), so a hung request becomes a graceful "failed" instead of an eternal hang.
 - Multi-file upload was already supported (the file input is `multiple`, each file gets its own progress row that flips to done/failed once all its pages settle) — verified, not changed.
 
+**Follow-up (same day) — page-level progress so a slow scan stops *reading* as stuck.** The scan UI only showed a per-FILE bar ("0 of 1 done"), which sits frozen while a multi-page PDF's pages process one by one (~10–60s each) — indistinguishable from a hang. Added `pageProgress {done,total}`: total fixed once PDFs are split, `done` ticks up after each CONCURRENCY-sized batch settles, surfaced as "N / total pages scanned" + a one-line "AI reads each page… it isn't stuck" hint. Owner 2026-06-12 ("以为是卡住了"). Pure display; scan logic unchanged.
+
 ---
 
 ## BUG-2026-06-12-008 — Production "Overdue" chips miscounted: bedframe counted by SO not piece, and pieces already on a shipped DO still counted overdue

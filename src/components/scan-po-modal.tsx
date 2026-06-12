@@ -149,6 +149,10 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   // generic "Parsing..." spinner. Display-only — does not affect the
   // upload/queue/OCR logic.
   const [fileProgress, setFileProgress] = useState<Record<string, "queued" | "scanning" | "done" | "failed">>({});
+  // Page-level progress so a multi-page PDF shows movement ("3 / 8 pages")
+  // instead of sitting at "0 of 1 file" — the per-FILE bar only flips once
+  // every page of that file finishes, which reads as stuck (owner 2026-06-12).
+  const [pageProgress, setPageProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
   const [parseResult, setParseResult] = useState<POParseResult | null>(null);
   const [claudeRows, setClaudeRows] = useState<ClaudeScanRow[]>([]);
   const [usedClaude, setUsedClaude] = useState(false);
@@ -185,6 +189,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setFiles([]);
     setParsing(false);
     setFileProgress({});
+    setPageProgress({ done: 0, total: 0 });
     setParseResult(null);
     setClaudeRows([]);
     setUsedClaude(false);
@@ -281,6 +286,10 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         setFileProgress((prev) => ({ ...prev, [uf.id]: "failed" }));
       }
     }
+    // Every successfully-split page is one unit of scan progress. Total is
+    // fixed here; `done` ticks up as each batch settles (below) so the
+    // operator watches "N / total pages" climb instead of a frozen file bar.
+    setPageProgress({ done: 0, total: allJobs.length });
 
     // Concurrency limiter — Anthropic tier-1 caps at 30K input tokens / min
     // (~2 of our catalog-injected requests in flight at once). Going wider
@@ -412,6 +421,10 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       });
       const settled = await Promise.allSettled(batch.map(runOne));
       claudeResults.push(...settled);
+      // Tick page progress up by this batch so "N / total pages" climbs after
+      // every CONCURRENCY-sized chunk settles — visible movement on a slow,
+      // multi-page scan (owner 2026-06-12: stop it reading as "stuck").
+      setPageProgress((p) => ({ ...p, done: Math.min(p.total, p.done + batch.length) }));
       // After the batch settles, decrement each file's outstanding page
       // count and flip it to done/failed once all its pages are accounted
       // for. A rejected promise counts as a failure for its file.
@@ -869,6 +882,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               files={files}
               parsing={parsing}
               fileProgress={fileProgress}
+              pageProgress={pageProgress}
               errors={errors}
               fileInputRef={fileInputRef}
               onFiles={handleFiles}
@@ -930,11 +944,12 @@ function StepDot({ active, done, label }: { active: boolean; done: boolean; labe
 }
 
 function UploadStep({
-  files, parsing, fileProgress, errors, fileInputRef, onFiles, onDrop,
+  files, parsing, fileProgress, pageProgress, errors, fileInputRef, onFiles, onDrop,
 }: {
   files: UploadedFile[];
   parsing: boolean;
   fileProgress: Record<string, "queued" | "scanning" | "done" | "failed">;
+  pageProgress: { done: number; total: number };
   errors: string[];
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onFiles: (files: FileList | null) => void;
@@ -962,7 +977,19 @@ function UploadStep({
               Scanning {files.length} PDF{files.length > 1 ? "s" : ""}...
             </p>
             <p className="text-sm text-[#6B7280]">
-              {doneCount} of {files.length} done — extracting items, fabric, config
+              {pageProgress.total > 0
+                ? `${pageProgress.done} / ${pageProgress.total} pages scanned`
+                : "Preparing pages…"}{" "}
+              — extracting items, fabric, config
+            </p>
+            {files.length > 1 && (
+              <p className="text-xs text-[#9CA3AF]">
+                {doneCount} of {files.length} files complete
+              </p>
+            )}
+            <p className="text-xs text-[#9CA3AF]">
+              AI reads each page (~10–60s) — a large or multi-page PO just takes
+              a little longer, it isn’t stuck.
             </p>
           </div>
         ) : (

@@ -3891,6 +3891,313 @@ app.post("/official-receipts/:id/void", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// FIXED ASSETS + STRAIGHT-LINE DEPRECIATION (Phase 3.5, 2026-06)
+//
+// Register maintained by the owner (asset / accum / expense accounts,
+// cost, life). Monthly run = preview → check → Post: per active asset
+// DR expense_account CR accum_account, amount = (cost − residual) /
+// useful_life_months capped at the remaining book value. One posted run
+// per month per asset (UNIQUE(asset_id, month)); opening_accum_sen
+// carries depreciation taken before the opening date, so the register's
+// NBV never needs to read the shared GL account.
+// ---------------------------------------------------------------------------
+
+type FixedAssetRow = {
+  id: string; name: string; assetAccount: string; accumAccount: string;
+  expenseAccount: string; purchaseDate: string; costSen: number;
+  residualSen: number; usefulLifeMonths: number; openingAccumSen: number;
+  disposedAt: string | null; remarks: string | null;
+};
+
+function monthlyDepSen(a: FixedAssetRow, accumToDateSen: number): number {
+  const base = Math.max(0, (Number(a.costSen) || 0) - (Number(a.residualSen) || 0));
+  if (base === 0 || a.usefulLifeMonths <= 0) return 0;
+  const monthly = Math.round(base / a.usefulLifeMonths);
+  const remaining = Math.max(0, base - accumToDateSen);
+  return Math.min(monthly, remaining);
+}
+
+async function loadAssetsWithAccum(db: Env["Variables"]["DB"]): Promise<{
+  assets: (FixedAssetRow & { accumSen: number; lastMonth: string | null })[];
+}> {
+  const [aRes, dRes] = await Promise.all([
+    db.prepare("SELECT * FROM fixed_assets ORDER BY purchaseDate, name").all<FixedAssetRow>(),
+    db.prepare("SELECT assetId, month, amountSen FROM fixed_asset_depreciation").all<{ assetId: string; month: string; amountSen: number }>(),
+  ]);
+  const byAsset = new Map<string, { sum: number; last: string | null }>();
+  for (const d of dRes.results ?? []) {
+    const cur = byAsset.get(d.assetId) ?? { sum: 0, last: null };
+    cur.sum += Number(d.amountSen) || 0;
+    if (!cur.last || d.month > cur.last) cur.last = d.month;
+    byAsset.set(d.assetId, cur);
+  }
+  return {
+    assets: (aRes.results ?? []).map((a) => ({
+      ...a,
+      accumSen: (Number(a.openingAccumSen) || 0) + (byAsset.get(a.id)?.sum ?? 0),
+      lastMonth: byAsset.get(a.id)?.last ?? null,
+    })),
+  };
+}
+
+app.get("/fixed-assets", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  try {
+    const { assets } = await loadAssetsWithAccum(c.var.DB);
+    return c.json({ success: true, data: assets });
+  } catch {
+    return c.json({ success: true, data: [], migrationMissing: true });
+  }
+});
+
+app.post("/fixed-assets", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const b = await c.req.json();
+    const name = String(b.name || "").trim();
+    const costSen = Math.round(Number(b.costSen) || 0);
+    const residualSen = Math.round(Number(b.residualSen) || 0);
+    const life = Math.round(Number(b.usefulLifeMonths) || 0);
+    const openingAccumSen = Math.round(Number(b.openingAccumSen) || 0);
+    if (!name || costSen <= 0 || life <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(String(b.purchaseDate || ""))) {
+      return c.json({ success: false, error: "name, purchaseDate, positive costSen and usefulLifeMonths are required" }, 400);
+    }
+    if (residualSen < 0 || residualSen >= costSen || openingAccumSen < 0 || openingAccumSen > costSen - residualSen) {
+      return c.json({ success: false, error: "residual must be below cost; opening accumulated must not exceed (cost − residual)" }, 400);
+    }
+    const coaRes = await c.var.DB.prepare(
+      "SELECT code, type, isPostable FROM chart_of_accounts WHERE code IN (?, ?, ?)",
+    )
+      .bind(String(b.assetAccount || ""), String(b.accumAccount || ""), String(b.expenseAccount || ""))
+      .all<{ code: string; type: CoaRow["type"]; isPostable: number | null }>();
+    const coa = new Map((coaRes.results ?? []).map((a) => [a.code, a] as const));
+    const asset = coa.get(String(b.assetAccount));
+    const accum = coa.get(String(b.accumAccount));
+    const exp = coa.get(String(b.expenseAccount));
+    if (!asset || asset.type !== "ASSET" || (asset.isPostable ?? 1) !== 1) {
+      return c.json({ success: false, error: "Asset (cost) account must be a postable ASSET account" }, 400);
+    }
+    if (!accum || accum.type !== "ASSET" || (accum.isPostable ?? 1) !== 1) {
+      return c.json({ success: false, error: "Accumulated-depreciation account must be a postable ASSET account (credit-balance contra)" }, 400);
+    }
+    if (!exp || !["EXPENSE", "COST"].includes(exp.type) || (exp.isPostable ?? 1) !== 1) {
+      return c.json({ success: false, error: "Depreciation expense account must be a postable EXPENSE/COST account (780-x or 900-D001)" }, 400);
+    }
+    const id = `fa-${crypto.randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+    await c.var.DB.prepare(
+      `INSERT INTO fixed_assets (
+         id, name, assetAccount, accumAccount, expenseAccount, purchaseDate,
+         costSen, residualSen, usefulLifeMonths, openingAccumSen, disposedAt,
+         remarks, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+    )
+      .bind(id, name, b.assetAccount, b.accumAccount, b.expenseAccount, b.purchaseDate, costSen, residualSen, life, openingAccumSen, String(b.remarks ?? ""), now, now)
+      .run();
+    return c.json({ success: true, data: { id } }, 201);
+  } catch {
+    return c.json({ success: false, error: "Failed — is migration 0161 applied?" }, 400);
+  }
+});
+
+app.put("/fixed-assets/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const id = c.req.param("id");
+    const b = await c.req.json();
+    const row = await c.var.DB.prepare("SELECT * FROM fixed_assets WHERE id = ?")
+      .bind(id)
+      .first<FixedAssetRow>();
+    if (!row) return c.json({ success: false, error: "Asset not found" }, 404);
+    if (b.dispose === true) {
+      await c.var.DB.prepare(
+        "UPDATE fixed_assets SET disposedAt = ?, updated_at = ? WHERE id = ?",
+      )
+        .bind(new Date().toISOString(), new Date().toISOString(), id)
+        .run();
+      return c.json({ success: true });
+    }
+    const name = b.name === undefined ? row.name : String(b.name).trim();
+    const life = b.usefulLifeMonths === undefined ? row.usefulLifeMonths : Math.round(Number(b.usefulLifeMonths) || 0);
+    const residualSen = b.residualSen === undefined ? row.residualSen : Math.round(Number(b.residualSen) || 0);
+    if (!name || life <= 0) {
+      return c.json({ success: false, error: "name and a positive usefulLifeMonths are required" }, 400);
+    }
+    await c.var.DB.prepare(
+      "UPDATE fixed_assets SET name = ?, usefulLifeMonths = ?, residualSen = ?, remarks = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(name, life, residualSen, b.remarks === undefined ? row.remarks : String(b.remarks ?? ""), new Date().toISOString(), id)
+      .run();
+    return c.json({ success: true });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.delete("/fixed-assets/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const dep = await c.var.DB.prepare(
+    "SELECT id FROM fixed_asset_depreciation WHERE assetId = ? LIMIT 1",
+  )
+    .bind(id)
+    .first();
+  if (dep) {
+    return c.json(
+      { success: false, error: "This asset already has posted depreciation — dispose it instead of deleting" },
+      400,
+    );
+  }
+  await c.var.DB.prepare("DELETE FROM fixed_assets WHERE id = ?").bind(id).run();
+  return c.json({ success: true });
+});
+
+// Preview the month's run: per active asset, what WOULD post.
+app.get("/fixed-assets/depreciation-preview", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const month = c.req.query("month") || "";
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+  }
+  try {
+    const { assets } = await loadAssetsWithAccum(c.var.DB);
+    const doneRes = await c.var.DB.prepare(
+      "SELECT assetId FROM fixed_asset_depreciation WHERE month = ?",
+    )
+      .bind(month)
+      .all<{ assetId: string }>();
+    const done = new Set((doneRes.results ?? []).map((r) => r.assetId));
+    const rows = assets
+      .filter(
+        (a) =>
+          !a.disposedAt &&
+          !done.has(a.id) &&
+          String(a.purchaseDate).slice(0, 7) <= month,
+      )
+      .map((a) => ({
+        assetId: a.id,
+        name: a.name,
+        expenseAccount: a.expenseAccount,
+        accumAccount: a.accumAccount,
+        accumSen: a.accumSen,
+        amountSen: monthlyDepSen(a, a.accumSen),
+      }))
+      .filter((r) => r.amountSen > 0);
+    return c.json({
+      success: true,
+      data: {
+        month,
+        rows,
+        totalSen: rows.reduce((s, r) => s + r.amountSen, 0),
+        alreadyRun: done.size > 0,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: "Preview failed — is migration 0161 applied?" }, 400);
+  }
+});
+
+app.post("/fixed-assets/depreciation-run", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const month = String(body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    }
+    const today = new Date().toISOString().slice(0, 7);
+    if (month > today) {
+      return c.json({ success: false, error: `Cannot depreciate a future month (${month})` }, 400);
+    }
+    const { assets } = await loadAssetsWithAccum(c.var.DB);
+    const doneRes = await c.var.DB.prepare(
+      "SELECT assetId FROM fixed_asset_depreciation WHERE month = ?",
+    )
+      .bind(month)
+      .all<{ assetId: string }>();
+    const done = new Set((doneRes.results ?? []).map((r) => r.assetId));
+    const rows = assets
+      .filter(
+        (a) =>
+          !a.disposedAt &&
+          !done.has(a.id) &&
+          String(a.purchaseDate).slice(0, 7) <= month,
+      )
+      .map((a) => ({ asset: a, amountSen: monthlyDepSen(a, a.accumSen) }))
+      .filter((r) => r.amountSen > 0);
+    if (rows.length === 0) {
+      return c.json(
+        { success: false, error: `Nothing to post for ${month} — already run, all disposed, or fully depreciated.` },
+        400,
+      );
+    }
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const sourceId = `dep-${month}-${Date.now()}`;
+    const legs: LedgerEntryInput[] = [];
+    let legNo = 1;
+    for (const r of rows) {
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "depreciation",
+        sourceId,
+        legNo: legNo++,
+        accountCode: r.asset.expenseAccount,
+        debitSen: r.amountSen,
+        creditSen: 0,
+        description: `Depreciation ${month} · ${r.asset.name}`,
+        actorUserId,
+        orgId,
+      });
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "depreciation",
+        sourceId,
+        legNo: legNo++,
+        accountCode: r.asset.accumAccount,
+        debitSen: 0,
+        creditSen: r.amountSen,
+        description: `Depreciation ${month} · ${r.asset.name}`,
+        actorUserId,
+        orgId,
+      });
+    }
+    const { statements: ledgerStmts } = await buildJournalEntryStatements(
+      c.var.DB,
+      orgId,
+      legs,
+    );
+    const now = new Date().toISOString();
+    await c.var.DB.batch([
+      ...rows.map((r) =>
+        c.var.DB.prepare(
+          `INSERT INTO fixed_asset_depreciation (id, assetId, month, amountSen, postedAt)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).bind(`fad-${crypto.randomUUID().slice(0, 8)}`, r.asset.id, month, r.amountSen, now),
+      ),
+      ...ledgerStmts,
+    ]);
+    return c.json({
+      success: true,
+      data: {
+        month,
+        assets: rows.length,
+        totalSen: rows.reduce((s, r) => s + r.amountSen, 0),
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: "Run failed — is migration 0161 applied?" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // CASH BOOK / BANK RECONCILIATION (Phase 3.4, 2026-06)
 //
 // The owner imports a monthly bank statement (CSV paste, column-mapped

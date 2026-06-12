@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -179,6 +179,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "payments", label: "Payments", icon: <BookOpen className="h-4 w-4" /> },
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" /> },
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" /> },
+  { key: "assets", label: "Fixed Assets", icon: <Building2 className="h-4 w-4" /> },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
@@ -255,6 +256,7 @@ export default function AccountingPage() {
           {tab === "payments" && <PaymentsTab accounts={accounts} />}
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "cashbook" && <CashBookTab accounts={accounts} />}
+          {tab === "assets" && <FixedAssetsTab accounts={accounts} />}
           {tab === "opening" && <OpeningBalanceTab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "maint" && (
             <div className="space-y-4">
@@ -4184,6 +4186,293 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
                 ))}
                 {rows.length === 0 && (
                   <tr><td colSpan={7} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No receipts yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// =============== TAB: FIXED ASSETS + DEPRECIATION (Phase 3.5) ===============
+//
+// Owner-maintained register (asset / accum / expense accounts, cost,
+// life in months). Monthly straight-line run: preview → check → Post
+// (DR expense, CR accumulated; capped at remaining book value).
+
+type FaRow = {
+  id: string; name: string; assetAccount: string; accumAccount: string;
+  expenseAccount: string; purchaseDate: string; costSen: number;
+  residualSen: number; usefulLifeMonths: number; openingAccumSen: number;
+  disposedAt: string | null; remarks: string | null;
+  accumSen: number; lastMonth: string | null;
+};
+
+function FixedAssetsTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [rows, setRows] = useState<FaRow[] | null>(null);
+  const [migrationMissing, setMigrationMissing] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    name: "", assetAccount: "", accumAccount: "", expenseAccount: "",
+    purchaseDate: "", cost: "", residual: "", lifeMonths: "", openingAccum: "",
+  });
+  const [runMonth, setRunMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [preview, setPreview] = useState<{ rows: { assetId: string; name: string; expenseAccount: string; accumAccount: string; amountSen: number }[]; totalSen: number } | null>(null);
+  const [posting, setPosting] = useState(false);
+
+  const ncaAccounts = accounts.filter((a) => a.type === "ASSET" && a.isPostable !== false);
+  const expAccounts = accounts.filter((a) => (a.type === "EXPENSE" || a.type === "COST") && a.isPostable !== false);
+
+  const load = useCallback(() => {
+    fetch("/api/accounting/fixed-assets")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: FaRow[]; migrationMissing?: boolean }>)
+      .then((j) => {
+        if (j?.success) {
+          setRows(j.data ?? []);
+          setMigrationMissing(!!j.migrationMissing);
+        }
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const toSen = (s: string) => {
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? Math.round(v * 100) : 0;
+  };
+
+  const handleAdd = async () => {
+    setSaving(true);
+    try {
+      const res = await fetch("/api/accounting/fixed-assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: form.name,
+          assetAccount: form.assetAccount,
+          accumAccount: form.accumAccount,
+          expenseAccount: form.expenseAccount,
+          purchaseDate: form.purchaseDate,
+          costSen: toSen(form.cost),
+          residualSen: toSen(form.residual),
+          usefulLifeMonths: parseInt(form.lifeMonths, 10) || 0,
+          openingAccumSen: toSen(form.openingAccum),
+        }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success("Asset added");
+        setShowForm(false);
+        setForm({ name: "", assetAccount: "", accumAccount: "", expenseAccount: "", purchaseDate: "", cost: "", residual: "", lifeMonths: "", openingAccum: "" });
+        load();
+      } else toast.error(j?.error || "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDispose = async (row: FaRow) => {
+    if (!window.confirm(`Dispose ${row.name}? Depreciation stops; the disposal gain/loss entry stays a manual JV for now.`)) return;
+    const res = await fetch(`/api/accounting/fixed-assets/${row.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dispose: true }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Dispose failed");
+  };
+
+  const handleDelete = async (row: FaRow) => {
+    if (!window.confirm(`Delete ${row.name}? Only possible while it has no posted depreciation.`)) return;
+    const res = await fetch(`/api/accounting/fixed-assets/${row.id}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load();
+    else toast.error(j?.error || "Delete failed");
+  };
+
+  const handlePreview = async () => {
+    setPreview(null);
+    const res = await fetch(`/api/accounting/fixed-assets/depreciation-preview?month=${runMonth}`);
+    const j = await res.json() as { success?: boolean; data?: NonNullable<typeof preview>; error?: string };
+    if (j?.success && j.data) setPreview(j.data);
+    else toast.error(j?.error || "Preview failed");
+  };
+
+  const handleRun = async () => {
+    setPosting(true);
+    try {
+      const res = await fetch("/api/accounting/fixed-assets/depreciation-run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month: runMonth }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { assets: number; totalSen: number }; error?: string };
+      if (j?.success && j.data) {
+        toast.success(`Depreciation ${runMonth} posted — ${j.data.assets} assets, ${formatCurrency(j.data.totalSen)}`);
+        setPreview(null);
+        load();
+      } else toast.error(j?.error || "Run failed");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+  const nbv = (r: FaRow) => r.costSen - r.accumSen;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Fixed Assets · Depreciation</h2>
+        <Button variant="primary" size="sm" onClick={() => setShowForm(!showForm)}>
+          <Plus className="h-4 w-4" /> Add Asset
+        </Button>
+      </div>
+      {migrationMissing && (
+        <Card><CardContent className="p-4 text-sm text-[#9A3A2D]">Migration 0161 not applied yet — run the paste-version SQL first.</CardContent></Card>
+      )}
+
+      {showForm && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Asset name</label>
+                <input type="text" placeholder="e.g. CNC Cutting Machine" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={`${selCls} w-64`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Purchase date</label>
+                <input type="date" value={form.purchaseDate} onChange={(e) => setForm({ ...form, purchaseDate: e.target.value })} className={selCls} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Cost (RM)</label>
+                <input type="text" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className={`${selCls} w-28 text-right tabular-nums`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Residual (RM)</label>
+                <input type="text" placeholder="0" value={form.residual} onChange={(e) => setForm({ ...form, residual: e.target.value })} className={`${selCls} w-24 text-right tabular-nums`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Life (months)</label>
+                <input type="text" placeholder="e.g. 60" value={form.lifeMonths} onChange={(e) => setForm({ ...form, lifeMonths: e.target.value })} className={`${selCls} w-20 text-center`} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Accum. depn b/f (RM)</label>
+                <input type="text" placeholder="0" value={form.openingAccum} onChange={(e) => setForm({ ...form, openingAccum: e.target.value })} className={`${selCls} w-28 text-right tabular-nums`} title="Depreciation already taken before the opening date" />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="w-72">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Asset (cost) account</label>
+                <AccountPicker accounts={ncaAccounts} value={form.assetAccount} onChange={(code) => setForm({ ...form, assetAccount: code })} placeholder="e.g. 200-1001…" />
+              </div>
+              <div className="w-72">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Accumulated depn account</label>
+                <AccountPicker accounts={ncaAccounts} value={form.accumAccount} onChange={(code) => setForm({ ...form, accumAccount: code })} placeholder="e.g. 200-1005…" />
+              </div>
+              <div className="w-72">
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Depreciation expense account</label>
+                <AccountPicker accounts={expAccounts} value={form.expenseAccount} onChange={(code) => setForm({ ...form, expenseAccount: code })} placeholder="780-0080 / 780-0090 / 900-D001…" />
+              </div>
+              <Button variant="primary" size="sm" disabled={saving} onClick={handleAdd}>{saving ? "Saving…" : "Save asset"}</Button>
+              <Button variant="outline" size="sm" onClick={() => setShowForm(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Monthly run */}
+      <Card>
+        <CardContent className="p-4 space-y-3 bg-[#F7F4EF] rounded-lg">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Depreciation month</label>
+              <input type="month" value={runMonth} onChange={(e) => { setRunMonth(e.target.value); setPreview(null); }} className={selCls} />
+            </div>
+            <Button variant="outline" size="sm" onClick={handlePreview}>Preview</Button>
+            {preview && preview.rows.length > 0 && (
+              <Button variant="primary" size="sm" disabled={posting} onClick={handleRun}>
+                {posting ? "Posting…" : `Post ${formatCurrency(preview.totalSen)} (${preview.rows.length} assets)`}
+              </Button>
+            )}
+          </div>
+          {preview && (
+            preview.rows.length === 0 ? (
+              <p className="text-sm text-[#6B7280]">Nothing to depreciate for {runMonth} — already run, disposed, or fully depreciated.</p>
+            ) : (
+              <table className="w-full text-sm bg-white rounded">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Asset</th>
+                    <th className="px-3 py-2 text-left">DR expense</th>
+                    <th className="px-3 py-2 text-left">CR accum.</th>
+                    <th className="px-3 py-2 text-right">This month</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.rows.map((r) => (
+                    <tr key={r.assetId} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5">{r.name}</td>
+                      <td className="px-3 py-1.5 text-xs tabular-nums">{r.expenseAccount}</td>
+                      <td className="px-3 py-1.5 text-xs tabular-nums">{r.accumAccount}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
+                    </tr>
+                  ))}
+                  <tr className="bg-[#F0ECE9]/60 font-semibold">
+                    <td className="px-3 py-2" colSpan={3}>TOTAL</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(preview.totalSen)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            )
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Register */}
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {rows === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Asset</th>
+                  <th className="px-3 py-2 text-left">Accounts (cost / accum / expense)</th>
+                  <th className="px-3 py-2 text-left">Purchased</th>
+                  <th className="px-3 py-2 text-right">Cost</th>
+                  <th className="px-3 py-2 text-right">Accum. depn</th>
+                  <th className="px-3 py-2 text-right">NBV</th>
+                  <th className="px-3 py-2 text-left">Life</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id} className={`border-b border-[#F0ECE9] ${r.disposedAt ? "opacity-50" : ""}`}>
+                    <td className="px-3 py-1.5">{r.name}{r.disposedAt ? " (disposed)" : ""}</td>
+                    <td className="px-3 py-1.5 text-xs tabular-nums text-[#6B7280]">{r.assetAccount} / {r.accumAccount} / {r.expenseAccount}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280] whitespace-nowrap">{r.purchaseDate}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.costSen)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.accumSen)}{r.lastMonth ? <span className="text-[11px] text-[#9CA3AF]"> (to {r.lastMonth})</span> : null}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(nbv(r))}</td>
+                    <td className="px-3 py-1.5 text-xs text-[#6B7280]">{r.usefulLifeMonths} mo</td>
+                    <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                      {!r.disposedAt && (
+                        <button onClick={() => handleDispose(r)} className="text-[#6B7280] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer mr-3">dispose</button>
+                      )}
+                      <button onClick={() => handleDelete(r)} className="text-[#9CA3AF] hover:text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer">del</button>
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr><td colSpan={8} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No assets yet — add the register here (or hand me the list and I will seed it)</td></tr>
                 )}
               </tbody>
             </table>

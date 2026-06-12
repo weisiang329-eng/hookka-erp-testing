@@ -51,7 +51,19 @@ export type DOPrintExtras = {
   >;
 };
 
-type ItemExtra = NonNullable<DOPrintExtras["items"]>[string];
+// The minimal per-item config the build-spec line (`describe`) needs. Exported
+// so the CN PDF (generate-cn-pdf.ts) can call the SAME describe() and the
+// fabric / DIVAN+LEG+GAP+T.Heights / special line can't drift between the two
+// documents. The full DO per-item extra (DOPrintExtras["items"][string]) is a
+// structural superset of this, so the DO call sites pass it unchanged.
+export type BuildSpecExtra = {
+  itemCategory?: string | null;
+  specialOrder?: string | null;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  totalHeightInches: number | null;
+};
 
 // Greyscale only — colour ink is expensive on the floor printer, so the
 // whole document is black + greys (Wei Siang).
@@ -65,7 +77,9 @@ const num = (v?: number | null) =>
   v == null || Number(v) === 0 ? null : `${v}"`;
 
 // "2 DIVAN + 1 HB" -> { text: "1 HB  +  2 DIVAN", total: 3 } (HB first).
-function fmtPieces(pieces?: string | null): { text: string; total: number } {
+// Exported so the CN PDF renders the identical pieces breakdown (Quantity
+// column) — one formatter, no drift between DO and CN.
+export function fmtPieces(pieces?: string | null): { text: string; total: number } {
   const parts = String(pieces || "")
     .split(" + ")
     .map((s) => s.trim())
@@ -103,7 +117,8 @@ function fmtPieces(pieces?: string | null): { text: string; total: number } {
 // themselves (rack_locations catalog: "Rack 1"…"Rack 20"), so strip it per
 // value and print it once per group — "Rack 3, 20", never "Rack Rack 3".
 // Legacy bare numbers ("3") group the same way; anything else prints raw.
-function fmtComponentRacks(
+// Exported so the CN PDF prints the identical per-component rack manifest.
+export function fmtComponentRacks(
   componentRacks?: { label: string; racks: string[] }[] | null,
 ): string {
   if (!componentRacks || componentRacks.length === 0) return "";
@@ -188,14 +203,17 @@ const uomOf = (cat?: string | null) =>
 //   line 3  build spec               BF : PC151-02 / DIVAN 12" + 2" LEG / TH 14"
 //                                     SOFA: BO315-21 / 35
 // (PO / SO / Reference are their own columns now, not in the description.)
-function describe(
+// Exported (and typed on the minimal BuildSpecExtra) so the CN PDF renders the
+// SAME stacked code / name / build-spec cell — the fabric / DIVAN+LEG+GAP+
+// T.Heights / special line can never drift between DO and CN.
+export function describe(
   it: {
     productCode: string;
     productName: string;
     fabricCode: string;
     sizeLabel: string;
   },
-  ex: ItemExtra | undefined,
+  ex: BuildSpecExtra | undefined,
 ): string {
   const lines: string[] = [];
   if (it.productCode) lines.push(it.productCode);

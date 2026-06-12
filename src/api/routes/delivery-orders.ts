@@ -33,10 +33,10 @@ import {
   buildJournalEntryStatements,
 } from "../lib/journal-hash";
 import {
-  breakBomIntoWips,
-  type BomVariantContext,
-} from "../lib/bom-wip-breakdown";
-import { isHeadboardOnlySpecial } from "./fg-units";
+  selectBestBomByCode,
+  piecesFor as piecesForShared,
+  deriveComponentRacks,
+} from "../lib/print-extras-shared";
 import { createPackingListCore } from "./packing-lists";
 import {
   groupPosByCustomerHub,
@@ -4065,39 +4065,10 @@ app.get("/:id/print-extras", async (c) => {
         versionStatus: string | null;
         effectiveFrom: string | null;
       }>();
-    const best = new Map<
-      string,
-      {
-        wipComponents: string | null;
-        baseModel: string | null;
-        active: boolean;
-        eff: string;
-      }
-    >();
-    for (const b of bomRes.results ?? []) {
-      const pc = (b.productCode || "").trim();
-      if (!pc) continue;
-      const active = (b.versionStatus || "").toUpperCase() === "ACTIVE";
-      const eff = b.effectiveFrom || "";
-      const prev = best.get(pc);
-      // Prefer ACTIVE, then the latest effectiveFrom.
-      const better =
-        !prev ||
-        (active && !prev.active) ||
-        (active === prev.active && eff > prev.eff);
-      if (better)
-        best.set(pc, {
-          wipComponents: b.wipComponents,
-          baseModel: b.baseModel,
-          active,
-          eff,
-        });
-    }
-    for (const [pc, v] of best)
-      bomByCode.set(pc, {
-        wipComponents: v.wipComponents,
-        baseModel: v.baseModel,
-      });
+    // Prefer ACTIVE, then the latest effectiveFrom — shared with the CN
+    // print-extras so both pick the same BOM version per product code.
+    for (const [pc, v] of selectBestBomByCode(bomRes.results ?? []))
+      bomByCode.set(pc, v);
   }
   // Reliable customer PO / SO / Ref via the SALES ORDER — the same path
   // the on-screen items table uses. The arbitrary multi-join aliases
@@ -4208,8 +4179,9 @@ app.get("/:id/print-extras", async (c) => {
   }
 
   // Per-line set composition string, e.g. "1 HB + 2 DIVAN" (bedframe)
-  // or "1 1A + 1 2A + 1 STOOL" (sofa set). Mirrors production-builder's
-  // headboard-only / divan-only filters. null when there's no real BOM.
+  // or "1 1A + 1 2A + 1 STOOL" (sofa set). Shared with the CN print-extras
+  // (src/api/lib/print-extras-shared.ts) so both documents produce the
+  // identical pieces string — positional shim over the shared object-arg fn.
   const piecesFor = (
     code: string,
     baseModel: string | null,
@@ -4222,73 +4194,20 @@ app.get("/:id/print-extras", async (c) => {
     d: number | null,
     l: number | null,
     qty: number,
-  ): string | null => {
-    const C = (cat || "").toUpperCase();
-    const cu = code.toUpperCase();
-    const isBedframe = C === "BEDFRAME" || cu.startsWith("DIVAN");
-    // A sofa "1A" / a stool / an accessory IS one finished set — it is
-    // NOT broken into Base / Cushion / Arm WIP pieces on a delivery
-    // order. Count it as its own FG unit, labelled by its variant so
-    // the roll-up can list "2 1A(LHF) + 1 STOOL".
-    if (!isBedframe) {
-      // Label by the sofa TYPE (product-code variant, e.g. "1A(LHF)",
-      // "STOOL") — that's what "一套沙发" means — not the seat size.
-      const dash = code.indexOf("-");
-      const variant =
-        (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
-        (sizeLabel && sizeLabel.trim()) ||
-        code ||
-        "SET";
-      return `${qty || 1} ${variant}`;
-    }
-    if (!wipComponents) return null;
-    const variants: BomVariantContext = {
-      productCode: code,
-      model: baseModel || code,
+  ): string | null =>
+    piecesForShared({
+      code,
+      baseModel,
+      wipComponents,
+      cat,
+      special,
       sizeLabel,
-      sizeCode: "",
       fabricCode,
+      gapInches: g,
       divanHeightInches: d,
       legHeightInches: l,
-      gapInches: g,
-    };
-    let wips = breakBomIntoWips(wipComponents, code, variants);
-    if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
-    // What actually ships = what reaches PACKING. Count only the WIPs
-    // that have a PACKING process so the figure matches the loaded
-    // pieces ("packing 有多少东西就是多少东西"). Keep all if the BOM
-    // never marks packing (don't zero the line out).
-    const packed = wips.filter((w) =>
-      (w.processes || []).some(
-        (p) => String(p.deptCode || "").toUpperCase() === "PACKING",
-      ),
-    );
-    if (packed.length) wips = packed;
-    if (cu.startsWith("DIVAN")) {
-      wips = wips.filter((w) => w.wipType.toUpperCase() === "DIVAN");
-    } else if (C === "BEDFRAME" && isHeadboardOnlySpecial(special)) {
-      wips = wips.filter((w) => w.wipType.toUpperCase() !== "DIVAN");
-    }
-    if (wips.length === 0) return null;
-    const agg = new Map<string, number>();
-    const order: string[] = [];
-    for (const w of wips) {
-      const t = w.wipType.toUpperCase();
-      const label =
-        t === "HEADBOARD"
-          ? "HB"
-          : t === "DIVAN"
-            ? "DIVAN"
-            : (w.wipLabel || w.wipType || "PC").trim();
-      if (!agg.has(label)) order.push(label);
-      agg.set(
-        label,
-        (agg.get(label) || 0) +
-          (Number(w.quantityMultiplier) || 1) * (qty || 1),
-      );
-    }
-    return order.map((lab) => `${agg.get(lab)} ${lab}`).join(" + ");
-  };
+      qty,
+    });
 
   let customerRef = "";
   const items: Record<
@@ -4364,63 +4283,12 @@ app.get("/:id/print-extras", async (c) => {
     // every PACKING card done ⇒ latest completedDate; any open card ⇒ null.
     // HB-only BEDFRAME specials ignore stranded DIVAN packing cards (and
     // their racks — a component that isn't shipping has no load location).
-    let packedDate: string | null = null;
-    const componentRacks: { label: string; racks: string[] }[] = [];
-    const packJcs = packingJcsByPo.get(diPoById.get(r.id) || "") ?? [];
-    if (packJcs.length > 0) {
-      const hbOnly =
-        (itemCategory || "").toUpperCase() === "BEDFRAME" &&
-        isHeadboardOnlySpecial(specialOrder);
-      const pk = packJcs.filter(
-        (j) => !hbOnly || (j.wipType || "").toUpperCase() !== "DIVAN",
-      );
-      if (
-        pk.length > 0 &&
-        pk.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")
-      ) {
-        const dates = pk
-          .map((j) => j.completedDate)
-          .filter((dd): dd is string => !!dd);
-        packedDate = dates.length > 0 ? dates.sort().reverse()[0] : null;
-      }
-      // Group distinct racks by component label — the same label mapping
-      // piecesFor uses (HEADBOARD→HB, DIVAN→DIVAN, else wipLabel/wipType).
-      const racksByLabel = new Map<string, string[]>();
-      const labelOrder: string[] = [];
-      for (const j of pk) {
-        const rack = (j.rackingNumber || "").trim();
-        if (!rack) continue;
-        const t = (j.wipType || "").toUpperCase();
-        const label =
-          t === "HEADBOARD"
-            ? "HB"
-            : t === "DIVAN"
-              ? "DIVAN"
-              : (j.wipLabel || j.wipType || "PC").trim();
-        let bucket = racksByLabel.get(label);
-        if (!bucket) {
-          bucket = [];
-          racksByLabel.set(label, bucket);
-          labelOrder.push(label);
-        }
-        if (!bucket.includes(rack)) bucket.push(rack);
-      }
-      // HB first, DIVAN second, the rest in first-seen order — matches the
-      // pieces-string ordering fmtPieces prints. Racks sort numerically so
-      // "Rack 3" lands before "Rack 20".
-      const labRank = (lab: string) =>
-        lab === "HB" ? 0 : lab === "DIVAN" ? 1 : 2;
-      labelOrder.sort((a, b) => labRank(a) - labRank(b));
-      const rackNum = (s: string) => {
-        const mm = s.match(/\d+/);
-        return mm ? Number(mm[0]) : Number.POSITIVE_INFINITY;
-      };
-      for (const label of labelOrder) {
-        const racks = racksByLabel.get(label)!;
-        racks.sort((a, b) => rackNum(a) - rackNum(b) || a.localeCompare(b));
-        componentRacks.push({ label, racks });
-      }
-    }
+    // Shared with the CN print-extras (src/api/lib/print-extras-shared.ts).
+    const { packedDate, componentRacks } = deriveComponentRacks(
+      packingJcsByPo.get(diPoById.get(r.id) || "") ?? [],
+      itemCategory,
+      specialOrder,
+    );
     items[r.id] = {
       itemCategory,
       customerPOId,

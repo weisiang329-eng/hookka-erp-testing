@@ -2,6 +2,17 @@ import jsPDF from "jspdf";
 import autoTable, { type RowInput } from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
 import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
+// REUSE the DO PDF's exported formatting helpers so the two documents render
+// the SAME per-item detail and can never drift (CN/DO FE parity P3): the
+// stacked build-spec Description cell (describe), the "1 HB + 2 DIVAN" pieces
+// breakdown (fmtPieces), and the per-component rack manifest
+// (fmtComponentRacks). The config shape (BuildSpecExtra) is shared too.
+import {
+  describe,
+  fmtPieces,
+  fmtComponentRacks,
+  type BuildSpecExtra,
+} from "@/lib/generate-do-pdf";
 
 // ---------------------------------------------------------------------------
 // Consignment Note PDF — the CN twin of generate-do-pdf.ts (owner asked for
@@ -39,17 +50,39 @@ export type CNPdfData = {
   driverPhone?: string;
   vehicleNo?: string;
   vehicleType?: string;
-  items: {
-    productCode?: string;
-    productName?: string;
-    sizeLabel?: string;
-    fabricCode?: string;
-    quantity: number;
-    // Per-unit m³ (joined from products.unitM3); line total = itemM3 × qty.
-    itemM3?: number;
-    // Parent CO number for the line (joined from the linked PO).
-    consignmentOrderNo?: string;
-  }[];
+  items: CNPdfItem[];
+};
+
+// One CN line. The base columns (code / name / size / fabric / qty / m³ / CO
+// No.) are resolved client-side by the CN page. The rich print-extras fields
+// (config + pieces + per-component racks) come from GET
+// /api/consignment-notes/:id/print-extras and are merged in by buildCnPdfData
+// — all optional so a CN that hasn't been enriched still renders its base row.
+export type CNPdfItem = {
+  // Line id (consignment_items.id) — the merge key for /print-extras data.
+  id?: string;
+  productCode?: string;
+  productName?: string;
+  sizeLabel?: string;
+  fabricCode?: string;
+  quantity: number;
+  // Per-unit m³ (joined from products.unitM3); line total = itemM3 × qty.
+  itemM3?: number;
+  // Parent CO number for the line (joined from the linked PO).
+  consignmentOrderNo?: string;
+  // ----- Rich detail (from /print-extras) — mirrors the DO PDF -----
+  itemCategory?: string | null; // SOFA / BEDFRAME / ACCESSORY
+  specialOrder?: string | null; // e.g. "Headboard Only" / "DIVAN CURVE"
+  // BOM set composition, e.g. "1 HB + 2 DIVAN" (Quantity column via fmtPieces).
+  pieces?: string | null;
+  gapInches?: number | null;
+  divanHeightInches?: number | null;
+  legHeightInches?: number | null;
+  totalHeightInches?: number | null;
+  // Warehouse rack per component type, racks pre-sorted numerically, e.g.
+  // [{ label: "HB", racks: ["Rack 3"] },
+  //  { label: "DIVAN", racks: ["Rack 3", "Rack 20"] }].
+  componentRacks?: { label: string; racks: string[] }[];
 };
 
 // Greyscale only — colour ink is expensive on the floor printer, so the
@@ -165,46 +198,126 @@ export function renderCnInto(doc: jsPDF, data: CNPdfData) {
   };
 
   // Totals for the table footer row.
-  const totalQty = data.items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+  const totalSets = data.items.reduce(
+    (s, it) => s + (Number(it.quantity) || 0),
+    0,
+  );
   const totalM3 = data.items.reduce(
     (s, it) => s + (Number(it.itemM3) || 0) * (Number(it.quantity) || 0),
     0,
   );
+  // Grand piece breakdown across the whole CN (HB first, then DIVAN, then a
+  // single collapsed SOFA tally) + total pieces — identical math + format to
+  // the DO PDF's footer so the two documents reconcile.
+  let totalPcsAll = 0;
+  const grand = new Map<string, number>();
+  for (const it of data.items) {
+    const fp = fmtPieces(it.pieces);
+    totalPcsAll += fp.total || Number(it.quantity) || 0;
+    if (it.pieces) {
+      for (const part of String(it.pieces).split(" + ")) {
+        const mm = part.trim().match(/^(\d+)\s+(.+)$/);
+        if (!mm) continue;
+        const raw = mm[2].trim().toUpperCase();
+        const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
+        grand.set(lab, (grand.get(lab) || 0) + Number(mm[1]));
+      }
+    }
+  }
+  const rankL = (lab: string) => {
+    const u = lab.toUpperCase();
+    return u === "HB" ? 0 : u === "DIVAN" ? 1 : 2;
+  };
+  const grandBreakdown =
+    Array.from(grand.entries())
+      .sort((a, b) => rankL(a[0]) - rankL(b[0]))
+      .map(([lab, n]) => `${n} ${lab}`)
+      .join("  +  ") || "-";
 
+  // Build the Description (stacked code / name / build-spec) via the DO PDF's
+  // describe(): fabric / DIVAN + LEG / GAP / T.Heights / special — the same
+  // cell the DO prints. The pieces breakdown ("1 HB + 2 DIVAN") goes in the
+  // Quantity column, the line m³ in the M³ column.
   const body: RowInput[] = data.items.map((it, i) => {
     const lineM3 = (Number(it.itemM3) || 0) * (Number(it.quantity) || 0);
+    const ex: BuildSpecExtra = {
+      itemCategory: it.itemCategory ?? null,
+      specialOrder: it.specialOrder ?? null,
+      gapInches: it.gapInches ?? null,
+      divanHeightInches: it.divanHeightInches ?? null,
+      legHeightInches: it.legHeightInches ?? null,
+      totalHeightInches: it.totalHeightInches ?? null,
+    };
+    const desc = describe(
+      {
+        productCode: it.productCode || "",
+        productName: it.productName || "",
+        fabricCode: it.fabricCode || "",
+        sizeLabel: it.sizeLabel || "",
+      },
+      ex,
+    );
+    const fp = fmtPieces(it.pieces);
     return [
       String(i + 1),
       it.consignmentOrderNo || "-",
-      it.productCode || "-",
-      it.productName || "-",
-      it.sizeLabel || "-",
-      it.fabricCode || "-",
+      desc,
       String(it.quantity ?? 0),
+      fp.text || String(it.quantity ?? 0),
+      String(fp.total || it.quantity || 0),
       lineM3 > 0 ? lineM3.toFixed(2) : "-",
     ];
+  });
+
+  // Per-row rack sub-line for the Quantity cell ("HB: Rack 3 · DIVAN: Rack 3,
+  // 20"). autotable cells are single-font, so the small grey line is drawn by
+  // hand — didParseCell reserves the extra height, didDrawCell draws it
+  // bottom-anchored under the pieces text. Same technique as the DO packing-
+  // list manifest's Quantity column.
+  const QTY_COL_W = 40;
+  const QTY_WRAP_W = QTY_COL_W - 3.6; // col width minus L/R padding
+  const LH_MAIN = 3.05; // 7.5pt × 1.15 line height, in mm
+  const LH_RACK = 2.55; // 6.2pt × 1.15 line height, in mm
+  const rowExtras = data.items.map((it) => {
+    const rackTxt = fmtComponentRacks(it.componentRacks);
+    if (!rackTxt) return null;
+    const rackLines = doc.splitTextToSize(rackTxt, QTY_WRAP_W, {
+      fontSize: 6.2,
+    }) as string[];
+    const fp = fmtPieces(it.pieces);
+    const qtyTxt = fp.text || String(it.quantity ?? 0);
+    const piecesLines = (
+      doc.splitTextToSize(qtyTxt, QTY_WRAP_W, { fontSize: 7.5 }) as string[]
+    ).length;
+    return {
+      rackLines,
+      minH: 2.4 + piecesLines * LH_MAIN + rackLines.length * LH_RACK + 0.8,
+    };
   });
 
   drawHeader();
 
   autoTable(doc, {
+    // Header halign per column matches the body (Set centred, Quantity /
+    // Total Qty / M³ right) so nothing looks crooked.
     head: [
       [
         { content: "#", styles: { halign: "center" } },
         { content: "CO No." },
-        { content: "Product Code" },
         { content: "Description" },
-        { content: "Size" },
-        { content: "Fabric" },
-        { content: "Qty", styles: { halign: "right" } },
+        { content: "Set", styles: { halign: "center" } },
+        { content: "Quantity", styles: { halign: "right" } },
+        { content: "Total Qty", styles: { halign: "right" } },
         { content: "M³", styles: { halign: "right" } },
       ],
     ],
     body,
     foot: [
       [
-        { content: "Total", colSpan: 6, styles: { halign: "right" } },
-        { content: `${totalQty} PCS`, styles: { halign: "right" } },
+        { content: "Total", colSpan: 3, styles: { halign: "right" } },
+        { content: `${totalSets} SETS`, styles: { halign: "center" } },
+        { content: grandBreakdown, styles: { halign: "right" } },
+        { content: `${totalPcsAll} ITEMS`, styles: { halign: "right" } },
         { content: totalM3.toFixed(2), styles: { halign: "right" } },
       ],
     ],
@@ -232,24 +345,61 @@ export function renderCnInto(doc: jsPDF, data: CNPdfData) {
     },
     footStyles: {
       fontStyle: "bold",
-      fontSize: 7,
+      fontSize: 6.6,
+      overflow: "visible",
       lineWidth: { top: 0.5, bottom: 0, left: 0, right: 0 },
       lineColor: RULE,
     },
     columnStyles: {
       0: { cellWidth: 8, halign: "center" }, // #
       1: { cellWidth: 26 }, // CO No.
-      2: { cellWidth: 30 }, // Product Code
-      3: { cellWidth: "auto" }, // Description (product name)
-      4: { cellWidth: 16 }, // Size
-      5: { cellWidth: 22 }, // Fabric
-      6: { cellWidth: 14, halign: "right" }, // Qty
-      7: { cellWidth: 16, halign: "right" }, // M³ (line total)
+      2: { cellWidth: "auto" }, // Description (code / name / build spec)
+      3: { cellWidth: 14, halign: "center" }, // Set (no. of sets)
+      4: { cellWidth: QTY_COL_W, halign: "right" }, // Quantity (piece breakdown)
+      5: { cellWidth: 18, halign: "right" }, // Total Qty (pcs)
+      6: { cellWidth: 16, halign: "right" }, // M³ (line total)
+    },
+    didParseCell: (d) => {
+      // Description is column 2 — nudge it up a touch like the DO does.
+      if (
+        d.section === "body" &&
+        d.column.index === 2 &&
+        typeof d.cell.raw === "string"
+      ) {
+        d.cell.styles.fontSize = 7.6;
+      }
+      // Reserve room under the pieces text (Quantity, col 4) for the small
+      // rack line so it never collides with the pieces above.
+      if (d.section === "body" && d.column.index === 4) {
+        const rx = rowExtras[d.row.index];
+        if (rx) {
+          d.cell.styles.minCellHeight = Math.max(
+            d.cell.styles.minCellHeight || 0,
+            rx.minH,
+          );
+        }
+      }
     },
     didDrawCell: (d) => {
-      // Thin dashed separator under every item row (drawn once per row,
-      // on the last column) so rows are easy to read across.
-      if (d.section === "body" && d.column.index === 7) {
+      // Rack location line, small + grey, bottom-anchored in the Quantity
+      // cell (col 4) under the pieces text.
+      if (d.section === "body" && d.column.index === 4) {
+        const rx = rowExtras[d.row.index];
+        if (rx && rx.rackLines.length > 0) {
+          const x = d.cell.x + 1.8;
+          const yLast = d.cell.y + d.cell.height - 1.8;
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(6.2);
+          doc.setTextColor(...FAINT);
+          rx.rackLines.forEach((ln, i) =>
+            doc.text(ln, x, yLast - (rx.rackLines.length - 1 - i) * LH_RACK),
+          );
+          doc.setTextColor(...INK);
+        }
+      }
+      // Thin dashed separator under every item row (drawn once per row, on
+      // the last column) so rows are easy to read across.
+      if (d.section === "body" && d.column.index === 6) {
         const y = d.cell.y + d.cell.height;
         doc.setDrawColor(...HAIR);
         doc.setLineWidth(0.1);

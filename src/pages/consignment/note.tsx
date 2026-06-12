@@ -59,7 +59,24 @@ import { Badge } from "@/components/ui/badge";
 import type { ConsignmentNote, Customer } from "@/types";
 // Type-only — erased at compile time, so the jsPDF module still loads
 // lazily (its own chunk) via the await import() in the print handlers.
-import type { CNPdfData } from "@/lib/generate-cn-pdf";
+import type { CNPdfData, CNPdfItem } from "@/lib/generate-cn-pdf";
+
+// Per-line rich detail from GET /api/consignment-notes/:id/print-extras —
+// the CN twin of DO's print-extras. Keyed by consignment_items.id, merged
+// into the CNPdfData payload by buildCnPdfData so the CN PDF prints the same
+// build-spec / pieces / per-component racking the DO PDF does. Subset of
+// CNPdfItem (the FE-resolved base columns stay client-side).
+type CnPrintExtraItem = Pick<
+  CNPdfItem,
+  | "itemCategory"
+  | "specialOrder"
+  | "pieces"
+  | "gapInches"
+  | "divanHeightInches"
+  | "legHeightInches"
+  | "totalHeightInches"
+  | "componentRacks"
+>;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1326,12 +1343,52 @@ export default function ConsignmentNotePage() {
     toast,
   ]);
 
+  // Cache of per-CN /print-extras payloads, keyed by CN id. A REF (not state)
+  // so buildCnPdfData — which stays a 1-arg function, used directly as a
+  // .map() callback by the packing-list print — reads the freshest data
+  // synchronously without a stale-closure race after ensureCnExtras() fetches.
+  const cnExtrasRef = useRef<Record<string, Record<string, CnPrintExtraItem>>>(
+    {},
+  );
+
+  // Fetch /print-extras for any CN ids not already cached, then populate the
+  // ref. The CN twin of the DO print flow's print-extras fetch (DO calls
+  // GET /api/delivery-orders/:id/print-extras before generating). Failures
+  // are swallowed per CN — the document still prints its base rows, the rich
+  // build-spec / pieces / racking detail just stays blank for that CN.
+  const ensureCnExtras = useCallback(async (ids: string[]) => {
+    const missing = Array.from(new Set(ids)).filter(
+      (cid) => cid && !cnExtrasRef.current[cid],
+    );
+    if (missing.length === 0) return;
+    await Promise.all(
+      missing.map(async (cid) => {
+        try {
+          const res = await fetch(
+            `/api/consignment-notes/${encodeURIComponent(cid)}/print-extras`,
+          );
+          if (!res.ok) return;
+          const json = (await res.json()) as {
+            success?: boolean;
+            data?: { items?: Record<string, CnPrintExtraItem> };
+          };
+          cnExtrasRef.current[cid] = json?.data?.items ?? {};
+        } catch {
+          // Network/parse failure — leave uncached so a later print retries.
+        }
+      }),
+    );
+  }, []);
+
   // buildCnPdfData is the SINGLE print-payload assembler — the single-CN
   // print, the consolidated packing-list print AND the emailed dispatch-
   // notice PDF all go through it so the hub address/contact/state/
   // transport resolution can never drift between the documents. Declared
   // here (above the dispatch-notice sender) because the sender closes
-  // over it; the Print handlers further down reuse it.
+  // over it; the Print handlers further down reuse it. The rich per-item
+  // detail (build spec / pieces / racking) is overlaid from cnExtrasRef when
+  // the caller pre-fetched it via ensureCnExtras (the Print handlers do; the
+  // dispatch-email path may not, which is fine — it prints base rows).
   const buildCnPdfData = useCallback(
     (row: ConsignmentNoteRow): CNPdfData => {
       const cust = customersData.find((c) => c.id === row.customerId);
@@ -1347,6 +1404,9 @@ export default function ConsignmentNotePage() {
         providers.find((p) => p.id === row.driverId)?.name ||
         row.driverCompany ||
         "";
+      // Rich per-item detail for this CN (build spec / pieces / racks), keyed
+      // by consignment_items.id — empty until ensureCnExtras has fetched it.
+      const extras = cnExtrasRef.current[row.id] ?? {};
       return {
         cnNo: row.cnNo,
         customerName: row.customerName,
@@ -1361,15 +1421,29 @@ export default function ConsignmentNotePage() {
         driverPhone: row.driverPhone,
         vehicleNo: row.vehicleNo,
         vehicleType: row.vehicleType,
-        items: row.items.map((it) => ({
-          productCode: it.productCode,
-          productName: it.productName,
-          sizeLabel: it.sizeLabel,
-          fabricCode: it.fabricCode,
-          quantity: it.quantity,
-          itemM3: it.itemM3,
-          consignmentOrderNo: it.consignmentOrderNo,
-        })),
+        items: row.items.map((it) => {
+          const ex = extras[it.id];
+          return {
+            id: it.id,
+            productCode: it.productCode,
+            productName: it.productName,
+            sizeLabel: it.sizeLabel,
+            fabricCode: it.fabricCode,
+            quantity: it.quantity,
+            itemM3: it.itemM3,
+            consignmentOrderNo: it.consignmentOrderNo,
+            // Overlay the print-extras detail when present (DO-parity rich
+            // line); absent ⇒ undefined ⇒ the PDF falls back to base rows.
+            itemCategory: ex?.itemCategory ?? null,
+            specialOrder: ex?.specialOrder ?? null,
+            pieces: ex?.pieces ?? null,
+            gapInches: ex?.gapInches ?? null,
+            divanHeightInches: ex?.divanHeightInches ?? null,
+            legHeightInches: ex?.legHeightInches ?? null,
+            totalHeightInches: ex?.totalHeightInches ?? null,
+            componentRacks: ex?.componentRacks,
+          };
+        }),
       };
     },
     [customersData, providers],
@@ -1399,6 +1473,9 @@ export default function ConsignmentNotePage() {
             let pdfBase64: string | undefined;
             let pdfFilename: string | undefined;
             try {
+              // Same /print-extras the Print buttons fetch, so the emailed CN
+              // PDF carries the identical build-spec / pieces / racking detail.
+              await ensureCnExtras([row.id]);
               const { generateCnPdfBase64 } = await import(
                 "@/lib/generate-cn-pdf"
               );
@@ -1446,7 +1523,7 @@ export default function ConsignmentNotePage() {
         }
       })();
     },
-    [buildCnPdfData, toast],
+    [buildCnPdfData, ensureCnExtras, toast],
   );
 
   // ---------- Mark Dispatched — confirm handler ----------
@@ -1937,10 +2014,11 @@ export default function ConsignmentNotePage() {
   );
 
   // ---------- Print / View CN PDF ----------
-  // Mirrors DO's printDOPdf: lazy-import the PDF lib so jsPDF stays out of
-  // the page bundle, build the print payload from the row plus the cached
-  // customer-hub + provider lookups (CN has no /print-extras endpoint —
-  // everything the document needs is already client-side), then download
+  // Mirrors DO's printDOPdf: fetch this CN's /print-extras (build spec /
+  // pieces / per-component racking — the DO-parity rich detail), lazy-import
+  // the PDF lib so jsPDF stays out of the page bundle, build the print payload
+  // (hub address/contact/state/transport resolved client-side, the rich
+  // per-item detail overlaid from the just-fetched extras), then download
   // ("download") or open on screen ("view"). Replaces the old "Print CN —
   // coming soon" toast (owner 2026-06-11: CN documents must match DO).
   //
@@ -1952,10 +2030,11 @@ export default function ConsignmentNotePage() {
       row: ConsignmentNoteRow,
       mode: "download" | "view" = "download",
     ) => {
+      await ensureCnExtras([row.id]);
       const { generateCNPdf } = await import("@/lib/generate-cn-pdf");
       generateCNPdf(buildCnPdfData(row), mode);
     },
-    [buildCnPdfData],
+    [buildCnPdfData, ensureCnExtras],
   );
 
   // ---------- Consolidated Packing List print (owner decision "2B") ----------
@@ -1968,6 +2047,9 @@ export default function ConsignmentNotePage() {
     const selected = cnList
       .filter((c) => selectedCNIds.has(c.id))
       .sort((a, b) => a.cnNo.localeCompare(b.cnNo));
+    // Pre-fetch every selected CN's /print-extras so each rendered CN carries
+    // the same build-spec / pieces / racking detail the single-CN print does.
+    await ensureCnExtras(selected.map((c) => c.id));
     const { printCnPackingList } = await import("@/lib/generate-cn-pdf");
     printCnPackingList(selected.map(buildCnPdfData));
   };

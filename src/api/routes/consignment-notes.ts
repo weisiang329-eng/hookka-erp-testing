@@ -36,6 +36,13 @@ import {
   cnDispatchNoticeTemplate,
   resolveDispatchRecipient,
 } from "../lib/customer-notify";
+import {
+  selectBestBomByCode,
+  piecesFor,
+  deriveComponentRacks,
+  type BomForCode,
+  type PackingJcRow,
+} from "../lib/print-extras-shared";
 
 const app = new Hono<Env>();
 
@@ -216,6 +223,241 @@ app.get("/stats", async (c) => {
     },
   );
   return c.json({ success: true, ...data });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/consignment-notes/:id/print-extras
+//
+// CN twin of GET /api/delivery-orders/:id/print-extras (CN/DO FE parity P3,
+// 2026-06-12). Returns the per-CN-item rich detail the CN PDF prints exactly
+// like the DO PDF: itemCategory + the bedframe build spec (gap / divan / leg
+// height, total derived as their sum), specialOrder, the BOM `pieces`
+// breakdown ("1 HB + 2 DIVAN"), and per-component warehouse racks
+// (componentRacks) + packedDate from the line's PACKING job cards.
+//
+// `items` is keyed by consignment_items.id (the same id the FE row carries),
+// mirroring how the DO endpoint keys by delivery_order_items.id, so the print
+// page can merge this into its CNPdfData payload per line.
+//
+// Config source per line (first hit wins, identical precedence to DO):
+//   1. production_orders (via consignment_items.productionOrderId)
+//   2. the parent CO line  (consignment_order_items matched by the CN's
+//      consignmentOrderId + productCode) — fallback for POs that never had
+//      itemCategory / divan / leg / gap / special copied onto them.
+// pieces + componentRacks come from the SAME shared helpers the DO endpoint
+// uses (src/api/lib/print-extras-shared.ts), so the two documents can't drift.
+//
+// Registered as a GET, so it never collides with the PUT /:id mutation below
+// (Hono matches on method + path). Reuses the consignment-notes:read scope.
+app.get("/:id/print-extras", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "read");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const cnRow = await c.var.DB.prepare(
+    "SELECT id, consignmentOrderId FROM consignment_notes WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; consignmentOrderId: string | null }>();
+  if (!cnRow) {
+    return c.json({ success: false, error: "Consignment note not found" }, 404);
+  }
+
+  // CN line items + their production order (config + BOM + racking join key).
+  const itRes = await c.var.DB.prepare(
+    `SELECT ci.id,
+            ci.productCode,
+            ci.quantity,
+            ci.productionOrderId,
+            po.itemCategory AS itemCategory,
+            po.specialOrder AS specialOrder,
+            po.gapInches AS gapInches,
+            po.divanHeightInches AS divanHeightInches,
+            po.legHeightInches AS legHeightInches,
+            po.fabricCode AS fabricCode,
+            po.sizeLabel AS sizeLabel
+       FROM consignment_items ci
+       LEFT JOIN production_orders po ON po.id = ci.productionOrderId
+      WHERE ci.consignmentNoteId = ?`,
+  )
+    .bind(id)
+    .all<{
+      id: string;
+      productCode: string | null;
+      quantity: number | null;
+      productionOrderId: string | null;
+      itemCategory: string | null;
+      specialOrder: string | null;
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+      fabricCode: string | null;
+      sizeLabel: string | null;
+    }>();
+
+  // Config fallback from the parent CO line, keyed by productCode (the CN's
+  // consignmentOrderId is the parent CO). Mirrors DO's sales_order_items
+  // fallback: prefer the production order, fill every blank from the CO line.
+  // consignment_order_items has no totalHeightInches column (same as the SO
+  // table) — total height is derived as gap + divan + leg below.
+  type CoSpec = {
+    itemCategory: string | null;
+    gapInches: number | null;
+    divanHeightInches: number | null;
+    legHeightInches: number | null;
+    specialOrder: string | null;
+  };
+  const coSpecByCode = new Map<string, CoSpec>();
+  if (cnRow.consignmentOrderId) {
+    const coiRes = await c.var.DB.prepare(
+      `SELECT productCode, itemCategory, gapInches, divanHeightInches,
+              legHeightInches, specialOrder
+         FROM consignment_order_items
+        WHERE consignmentOrderId = ?`,
+    )
+      .bind(cnRow.consignmentOrderId)
+      .all<{
+        productCode: string | null;
+        itemCategory: string | null;
+        gapInches: number | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        specialOrder: string | null;
+      }>();
+    for (const s of coiRes.results ?? []) {
+      const pc = (s.productCode || "").trim();
+      if (!pc) continue;
+      // First line per product code wins; fill any blank from later lines.
+      const prev = coSpecByCode.get(pc);
+      coSpecByCode.set(pc, {
+        itemCategory: prev?.itemCategory ?? s.itemCategory ?? null,
+        gapInches: prev?.gapInches ?? s.gapInches ?? null,
+        divanHeightInches: prev?.divanHeightInches ?? s.divanHeightInches ?? null,
+        legHeightInches: prev?.legHeightInches ?? s.legHeightInches ?? null,
+        specialOrder: prev?.specialOrder ?? s.specialOrder ?? null,
+      });
+    }
+  }
+
+  // Piece breakdown straight from the product BOM — same source production
+  // uses (bom_templates.wipComponents → breakBomIntoWips), shared with DO.
+  const codes = Array.from(
+    new Set(
+      (itRes.results ?? [])
+        .map((r) => (r.productCode || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const bomByCode = new Map<string, BomForCode>();
+  if (codes.length > 0) {
+    const ph = codes.map(() => "?").join(",");
+    const bomRes = await c.var.DB.prepare(
+      `SELECT productCode, baseModel, wipComponents, versionStatus, effectiveFrom
+         FROM bom_templates WHERE productCode IN (${ph})`,
+    )
+      .bind(...codes)
+      .all<{
+        productCode: string | null;
+        baseModel: string | null;
+        wipComponents: string | null;
+        versionStatus: string | null;
+        effectiveFrom: string | null;
+      }>();
+    for (const [pc, v] of selectBestBomByCode(bomRes.results ?? []))
+      bomByCode.set(pc, v);
+  }
+
+  // Per-component PACKING job cards for the CN's production orders — the ONLY
+  // place the per-component rack + packing completion live (one PACKING JC per
+  // top-level component). Same bulk read + grouping as the DO endpoint.
+  const diPoById = new Map<string, string>();
+  for (const r of itRes.results ?? []) {
+    if (r.id && r.productionOrderId) diPoById.set(r.id, r.productionOrderId);
+  }
+  const packingJcsByPo = new Map<string, PackingJcRow[]>();
+  {
+    const poIds = Array.from(new Set(diPoById.values()));
+    if (poIds.length > 0) {
+      const ph = poIds.map(() => "?").join(",");
+      const jcRes = await c.var.DB.prepare(
+        `SELECT productionOrderId, wipType, wipLabel, rackingNumber,
+                completedDate, status
+           FROM job_cards
+          WHERE departmentCode = 'PACKING' AND productionOrderId IN (${ph})`,
+      )
+        .bind(...poIds)
+        .all<PackingJcRow>();
+      for (const jc of jcRes.results ?? []) {
+        const pid = jc.productionOrderId || "";
+        if (!pid) continue;
+        const list = packingJcsByPo.get(pid);
+        if (list) list.push(jc);
+        else packingJcsByPo.set(pid, [jc]);
+      }
+    }
+  }
+
+  const items: Record<
+    string,
+    {
+      itemCategory: string | null;
+      specialOrder: string | null;
+      pieces: string | null;
+      gapInches: number | null;
+      divanHeightInches: number | null;
+      legHeightInches: number | null;
+      totalHeightInches: number | null;
+      packedDate: string | null;
+      componentRacks: { label: string; racks: string[] }[];
+    }
+  > = {};
+  for (const r of itRes.results ?? []) {
+    const pc = (r.productCode || "").trim();
+    const fb = coSpecByCode.get(pc);
+    // production order first; CO line fills every blank.
+    const g = r.gapInches ?? fb?.gapInches ?? null;
+    const d = r.divanHeightInches ?? fb?.divanHeightInches ?? null;
+    const l = r.legHeightInches ?? fb?.legHeightInches ?? null;
+    const itemCategory = r.itemCategory ?? fb?.itemCategory ?? null;
+    const specialOrder = r.specialOrder ?? fb?.specialOrder ?? null;
+    const total =
+      g == null && d == null && l == null
+        ? null
+        : (Number(g) || 0) + (Number(d) || 0) + (Number(l) || 0);
+    const bom = bomByCode.get(pc);
+    const pieces = bom
+      ? piecesFor({
+          code: r.productCode || "",
+          baseModel: bom.baseModel,
+          wipComponents: bom.wipComponents,
+          cat: itemCategory,
+          special: specialOrder,
+          sizeLabel: r.sizeLabel || "",
+          fabricCode: r.fabricCode || "",
+          gapInches: g,
+          divanHeightInches: d,
+          legHeightInches: l,
+          qty: Number(r.quantity) || 1,
+        })
+      : null;
+    const { packedDate, componentRacks } = deriveComponentRacks(
+      packingJcsByPo.get(diPoById.get(r.id) || "") ?? [],
+      itemCategory,
+      specialOrder,
+    );
+    items[r.id] = {
+      itemCategory,
+      specialOrder,
+      pieces,
+      gapInches: g,
+      divanHeightInches: d,
+      legHeightInches: l,
+      totalHeightInches: total,
+      packedDate,
+      componentRacks,
+    };
+  }
+
+  return c.json({ success: true, data: { items } });
 });
 
 // POST /api/consignment-notes

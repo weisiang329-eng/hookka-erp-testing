@@ -115,7 +115,14 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-// Shared clean-HTML wrapper: white card, dark header band, simple
+// Company logo shown at the top of every customer email (owner 2026-06-12).
+// Hosted on the prod app (public/hookka-logo.png) — a hosted <img> keeps the
+// email small and lets a future logo swap (replace that one file) update all
+// past-and-future mail renders too. Sits on its own WHITE strip because the
+// header band below is dark and the logo artwork is dark-on-transparent.
+const EMAIL_LOGO_URL = "https://erp.hookka.com/hookka-logo.png";
+
+// Shared clean-HTML wrapper: white logo strip, dark header band, simple
 // label/value table — same inline-styled family as the invite / supplier-PO
 // templates in email.ts.
 function wrapHtml(args: {
@@ -135,6 +142,11 @@ function wrapHtml(args: {
       <tr>
         <td align="center">
           <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:12px;border:1px solid #E2DDD8;overflow:hidden;">
+            <tr>
+              <td align="center" style="padding:22px 32px 16px;background-color:#ffffff;">
+                <img src="${EMAIL_LOGO_URL}" alt="Hookka Industries" height="42" style="height:42px;width:auto;display:block;border:0;" />
+              </td>
+            </tr>
             <tr>
               <td style="padding:28px 32px;background-color:#1F1D1B;color:#ffffff;">
                 <div style="font-size:12px;letter-spacing:3px;text-transform:uppercase;color:#8B7A4E;font-weight:600;">${escapeHtml(args.headerKicker)}</div>

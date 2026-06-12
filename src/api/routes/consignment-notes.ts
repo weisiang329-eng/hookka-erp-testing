@@ -28,6 +28,7 @@ import {
 import { cascadeCNCompletionToCO, cascadeCNReversalToCO } from "./production-orders";
 import { nextInvoiceNo } from "./invoices";
 import { getOrgId } from "../lib/tenant";
+import { loadCnValueMap, loadCnCustomerRefMap } from "../lib/cn-value";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
 import { enqueueEmail } from "../lib/email-outbox";
@@ -101,13 +102,28 @@ app.get("/", async (c) => {
     listSql += ` LIMIT ${limit} OFFSET ${offset}`;
   }
 
-  const [notesRes, itemsRes] = await Promise.all([
+  // valueSen + parent-CO customer refs bring the CN list row to parity with
+  // the DO list row (delivery-orders.ts wires loadDoValueMap the same way).
+  // Both are whole-org bulk loads (no N+1) resolved per CN below — see
+  // api/lib/cn-value.ts. These ADD fields only; existing columns
+  // (status / M³ / carrier / items) are untouched.
+  const orgId = getOrgId(c);
+  const [notesRes, itemsRes, valueMap, custRefMap] = await Promise.all([
     c.var.DB.prepare(listSql).bind(...listParams).all<ConsignmentNoteRow>(),
     c.var.DB.prepare("SELECT * FROM consignment_items").all<ConsignmentItemRow>(),
+    loadCnValueMap(c.var.DB, orgId),
+    loadCnCustomerRefMap(c.var.DB, orgId),
   ]);
-  const data = (notesRes.results ?? []).map((r) =>
-    rowToConsignmentNote(r, itemsRes.results ?? []),
-  );
+  const data = (notesRes.results ?? []).map((r) => {
+    const ref = custRefMap.get(r.id);
+    return {
+      ...rowToConsignmentNote(r, itemsRes.results ?? []),
+      valueSen: valueMap.get(r.id) ?? 0,
+      customerPOId: ref?.customerPOId ?? "",
+      customerCO: ref?.customerCO ?? "",
+      reference: ref?.reference ?? "",
+    };
+  });
   return c.json({
     success: true,
     data,

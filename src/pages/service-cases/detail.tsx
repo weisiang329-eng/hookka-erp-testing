@@ -978,10 +978,6 @@ function CategoryDetailsForm({
     data?: Array<{ id: string; name: string; empNo?: string; departmentCode?: string }>;
   }>(needsWorkers ? "/api/workers" : null);
 
-  const { data: prodResp } = useCachedJson<{
-    data?: Array<{ id: string; code: string; name: string }>;
-  }>(category === "DESIGN" ? "/api/products" : null);
-
   const { data: rmResp } = useCachedJson<{
     data?: Array<{
       id: string;
@@ -1015,7 +1011,6 @@ function CategoryDetailsForm({
   // Wrap each derived list in useMemo so the empty-array fallback doesn't
   // create a new identity every render (would invalidate downstream useMemos).
   const workers = useMemo(() => workersResp?.data ?? [], [workersResp]);
-  const products = useMemo(() => prodResp?.data ?? [], [prodResp]);
   const rawMaterials = useMemo(() => rmResp?.data ?? [], [rmResp]);
   const suppliers = useMemo(() => supplierResp?.data ?? [], [supplierResp]);
 
@@ -1053,17 +1048,6 @@ function CategoryDetailsForm({
       .filter((n): n is string => !!n);
     return Array.from(new Set(names)).sort();
   }, [providersResp]);
-
-  // Product search box state for DESIGN — empty query shows nothing
-  // (avoids dumping the full SKU list).
-  const [productSearch, setProductSearch] = useState("");
-  const productMatches = useMemo(() => {
-    const q = productSearch.trim().toLowerCase();
-    if (!q) return [];
-    return products
-      .filter((p) => p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
-      .slice(0, 10);
-  }, [productSearch, products]);
 
   // Worker typeahead — empty query shows nothing so the operator gets a
   // clean input rather than a 200-row scroll. Match on name OR empNo so
@@ -1206,62 +1190,8 @@ function CategoryDetailsForm({
     case "DESIGN":
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
-          {/* Product search-then-pick. Once picked, shows the chosen
-              product as a chip with × to clear. */}
-          {value.productId ? (
-            <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs">
-              <span>
-                <span className="text-[#6B5C32]">{(value.productCode as string) ?? ""}</span>
-                <span className="text-[#9CA3AF]"> — </span>
-                <span>{(value.productName as string) ?? ""}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() =>
-                  patch({ productId: null, productCode: null, productName: null })
-                }
-                disabled={disabled}
-                className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                title="Clear product"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ) : (
-            <div className="relative">
-              <Input
-                type="text"
-                value={productSearch}
-                onChange={(e) => setProductSearch(e.target.value)}
-                disabled={disabled}
-                placeholder="Search product by code or name (e.g. SOFA-3S, BED-Q)"
-                className="h-8 text-xs"
-              />
-              {productMatches.length > 0 && (
-                <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
-                  {productMatches.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        setProductSearch("");
-                        patch({
-                          productId: p.id,
-                          productCode: p.code,
-                          productName: p.name,
-                        });
-                      }}
-                      className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
-                    >
-                      <span className="text-[#6B5C32]">{p.code}</span>
-                      <span className="text-[#9CA3AF]"> — </span>
-                      <span>{p.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+          {/* Product picker removed (owner 2026-06-12) — the case's Affected
+              Products section above already records which SKUs are involved. */}
           {/* Department — which dept can't fulfill this design (so R&D
               knows who to talk to about the spec change). */}
           <select

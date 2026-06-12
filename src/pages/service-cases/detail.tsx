@@ -292,7 +292,9 @@ export default function ServiceCaseDetailPage() {
             Source:{" "}
             {sourceHref ? (
               <Link to={sourceHref} className="text-[#6B5C32] hover:underline">
-                {caseDetail.sourceType} {caseDetail.sourceNo || caseDetail.sourceId}
+                {/* sourceNo already carries its SO-/CO- prefix — don't prepend
+                    the type again (was "SO SO-2605-198"). */}
+                {caseDetail.sourceNo || caseDetail.sourceId}
               </Link>
             ) : (
               <span>
@@ -1513,6 +1515,32 @@ function AffectedProductsPanel({
   }>("/api/products");
   const products = useMemo(() => prodResp?.data ?? [], [prodResp]);
 
+  // Pull-from-source-order: a case spawned off a SO/CO can attach the order's
+  // own lines directly instead of searching the whole catalog (owner
+  // 2026-06-12). Fetch the source order's items; show the ones not already
+  // attached as one-tap adds.
+  const sourceDetailUrl =
+    (caseDetail.sourceType === "SO" || caseDetail.sourceType === "CO") && caseDetail.sourceId
+      ? caseDetail.sourceType === "SO"
+        ? `/api/sales-orders/${caseDetail.sourceId}`
+        : `/api/consignment-orders/${caseDetail.sourceId}`
+      : null;
+  const { data: srcResp } = useCachedJson<{
+    data?: { items?: Array<{ productId?: string; productCode?: string; productName?: string; quantity?: number }> };
+  }>(sourceDetailUrl);
+  const sourceItems = useMemo(() => {
+    const already = new Set(caseDetail.affectedProducts.map((p) => p.productId));
+    const seen = new Set<string>();
+    return (srcResp?.data?.items ?? [])
+      .filter((it) => !!it.productId && !already.has(it.productId!))
+      .filter((it) => {
+        // De-dup multi-line orders by product so the chooser stays clean.
+        if (seen.has(it.productId!)) return false;
+        seen.add(it.productId!);
+        return true;
+      });
+  }, [srcResp, caseDetail.affectedProducts]);
+
   // Filter products that are NOT already attached, and match the search
   // term (operator types a few chars; no result dump until they search).
   const matches = useMemo(() => {
@@ -1553,6 +1581,29 @@ function AffectedProductsPanel({
       { productId: p.id, code: p.code, name: p.name, qty: null },
     ];
     setSearch("");
+    void persist(next);
+  }
+
+  // Add a line straight from the source order (carries its qty).
+  function addFromSource(it: { productId?: string; productCode?: string; productName?: string; quantity?: number }) {
+    if (!it.productId) return;
+    const next = [
+      ...caseDetail.affectedProducts,
+      { productId: it.productId, code: it.productCode ?? "", name: it.productName ?? "", qty: it.quantity ?? null },
+    ];
+    void persist(next);
+  }
+
+  function addAllFromSource() {
+    const next = [
+      ...caseDetail.affectedProducts,
+      ...sourceItems.map((it) => ({
+        productId: it.productId!,
+        code: it.productCode ?? "",
+        name: it.productName ?? "",
+        qty: it.quantity ?? null,
+      })),
+    ];
     void persist(next);
   }
 
@@ -1603,6 +1654,42 @@ function AffectedProductsPanel({
             </div>
           )}
         </div>
+
+        {/* Pull from the source order — one tap to attach a line the order
+            already has, instead of searching the whole catalog. */}
+        {sourceItems.length > 0 && (
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs font-medium text-[#6B5C32]">
+                From {caseDetail.sourceNo || "the source order"}
+              </span>
+              <button
+                type="button"
+                onClick={addAllFromSource}
+                disabled={saving}
+                className="text-[11px] rounded border border-[#6B5C32] px-2 py-0.5 text-[#6B5C32] hover:bg-[#F4EFE3] disabled:opacity-50"
+              >
+                + Add all
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {sourceItems.map((it) => (
+                <button
+                  key={it.productId}
+                  type="button"
+                  onClick={() => addFromSource(it)}
+                  disabled={saving}
+                  className="inline-flex items-center gap-1 rounded-full border border-[#E2DDD8] bg-white px-2 py-1 text-[11px] text-[#1F1D1B] hover:bg-[#F4EFE3] disabled:opacity-50"
+                  title={it.productName ?? ""}
+                >
+                  <Plus className="h-3 w-3 text-[#6B5C32]" />
+                  {it.productCode}
+                  {it.quantity ? <span className="text-[#9CA3AF]">×{it.quantity}</span> : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {caseDetail.affectedProducts.length === 0 ? (
           <p className="text-[10px] text-[#9CA3AF]">

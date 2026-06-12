@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
+import { requirePermission, requireSuperAdmin } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
 import { inviteEmailTemplate, sendMail } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
@@ -97,6 +97,10 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — users:create.
   const denied = await requirePermission(c, "users", "create");
   if (denied) return denied;
+  // SUPER_ADMIN-only (owner 2026-06-12): an Admin can run the business but
+  // not create accounts (which would let them mint a Super Admin + escalate).
+  const su = requireSuperAdmin(c);
+  if (su) return su;
   try {
     const body = await c.req.json();
     const { email, password, displayName, role } = body as {
@@ -170,6 +174,11 @@ app.put("/:id", async (c) => {
   // fires on a role flip already records the high-impact intent.
   const denied = await requirePermission(c, "users", "update");
   if (denied) return denied;
+  // SUPER_ADMIN-only (owner 2026-06-12): enable/disable, role-change and
+  // profile edits of an account are Super-Admin actions — an Admin must not
+  // be able to disable or delete other people's accounts.
+  const su = requireSuperAdmin(c);
+  if (su) return su;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
@@ -254,6 +263,10 @@ app.put("/:id", async (c) => {
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "users", "delete");
   if (denied) return denied;
+  // SUPER_ADMIN-only (owner 2026-06-12): deleting an account is the most
+  // destructive user action — never available to a plain Admin.
+  const su = requireSuperAdmin(c);
+  if (su) return su;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
@@ -284,6 +297,10 @@ app.post("/:id/reset-password", async (c) => {
   // RBAC gate (P3.3-followup) — admin password reset is a users:update.
   const denied = await requirePermission(c, "users", "update");
   if (denied) return denied;
+  // SUPER_ADMIN-only (owner 2026-06-12): resetting another account's password
+  // is an account-takeover vector — Super Admin only.
+  const su = requireSuperAdmin(c);
+  if (su) return su;
   const id = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
   const { newPassword } = body as { newPassword?: string };
@@ -425,6 +442,10 @@ app.post("/invite", async (c) => {
   // RBAC gate (P3.3-followup) — invite is a users:create flow.
   const denied = await requirePermission(c, "users", "create");
   if (denied) return denied;
+  // SUPER_ADMIN-only (owner 2026-06-12) — inviting a new account is account
+  // creation; only a Super Admin onboards users.
+  const su = requireSuperAdmin(c);
+  if (su) return su;
   try {
     const body = await c.req.json();
     const { email, role, displayName } = body as {
@@ -586,6 +607,8 @@ app.get("/invites", async (c) => {
 app.post("/invites/:token/resend", async (c) => {
   const denied = await requirePermission(c, "users", "create");
   if (denied) return denied;
+  const su = requireSuperAdmin(c); // SUPER_ADMIN-only (owner 2026-06-12)
+  if (su) return su;
   const token = c.req.param("token");
   const nowIso = new Date().toISOString();
 
@@ -639,6 +662,8 @@ app.post("/invites/:token/resend", async (c) => {
 app.delete("/invites/:token", async (c) => {
   const denied = await requirePermission(c, "users", "delete");
   if (denied) return denied;
+  const su = requireSuperAdmin(c); // SUPER_ADMIN-only (owner 2026-06-12)
+  if (su) return su;
   const token = c.req.param("token");
   const existing = await c.var.DB.prepare(
     "SELECT token, acceptedAt FROM user_invites WHERE token = ?",

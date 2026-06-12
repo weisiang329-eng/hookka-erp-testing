@@ -205,6 +205,34 @@ export async function requirePermission(
 }
 
 /**
+ * Hard SUPER_ADMIN-only gate (owner 2026-06-12). Independent of the
+ * permission set: even an ADMIN with a `*:*` grant is rejected. Used to
+ * fence USER-ACCOUNT management (create / disable / delete / role-change /
+ * reset-password / invite) so a regular Admin can run the business but
+ * cannot disable or delete other people's accounts — "otherwise anyone
+ * could just disable my account". Returns null when allowed, else a 403.
+ */
+export function requireSuperAdmin(c: Context<Env>): Response | null {
+  const role = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userRole")?.toUpperCase();
+  if (!role) {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+  if (role !== "SUPER_ADMIN") {
+    return c.json(
+      {
+        success: false,
+        error: "Only a Super Admin can manage user accounts.",
+        role,
+      },
+      403,
+    );
+  }
+  return null;
+}
+
+/**
  * Invalidate the cached permission set for a role.  Call after admin edits
  * role_permissions for that role so the change is visible within seconds
  * instead of waiting out the 5-minute TTL.

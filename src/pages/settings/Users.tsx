@@ -107,6 +107,12 @@ function fmtRelativeExpiry(iso: string): string {
 
 export default function UsersPage() {
   const currentUser = getCurrentUser();
+  // Only a Super Admin may enable/disable, delete, reset a password, or send/
+  // revoke invites. An Admin can open this page and SEE everyone (users:read),
+  // but the account-management controls are hidden for them — mirrors the
+  // requireSuperAdmin gate on every user-management route server-side, so a
+  // stray Admin can never disable the owner's account. (owner 2026-06-12)
+  const canManageUsers = currentUser?.role?.toUpperCase() === "SUPER_ADMIN";
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
@@ -506,41 +512,47 @@ export default function UsersPage() {
                         {fmtDateTime(u.createdAt)}
                       </Td>
                       <Td className="text-right pr-2">
-                        <div className="inline-flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => toggleActive(u)}
-                            title={u.isActive ? "Disable" : "Enable"}
-                          >
-                            {u.isActive ? (
-                              <Ban className="h-3.5 w-3.5" />
-                            ) : (
-                              <Check className="h-3.5 w-3.5" />
-                            )}
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              setResetForUser(u);
-                              setResetPassword("");
-                              setResetError(null);
-                            }}
-                            title="Reset password"
-                          >
-                            <KeyRound className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => deleteUser(u)}
-                            title="Delete"
-                            disabled={u.id === currentUser?.id}
-                          >
-                            <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                          </Button>
-                        </div>
+                        {canManageUsers ? (
+                          <div className="inline-flex gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => toggleActive(u)}
+                              title={u.isActive ? "Disable" : "Enable"}
+                            >
+                              {u.isActive ? (
+                                <Ban className="h-3.5 w-3.5" />
+                              ) : (
+                                <Check className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setResetForUser(u);
+                                setResetPassword("");
+                                setResetError(null);
+                              }}
+                              title="Reset password"
+                            >
+                              <KeyRound className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => deleteUser(u)}
+                              title="Delete"
+                              disabled={u.id === currentUser?.id}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                            </Button>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-[#9C8F7A]">
+                            Super Admin only
+                          </span>
+                        )}
                       </Td>
                     </tr>
                   ))
@@ -636,30 +648,34 @@ export default function UsersPage() {
                           >
                             <Copy className="h-3.5 w-3.5" />
                           </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => resendInvite(inv)}
-                            disabled={resendingToken === inv.token}
-                            title="Resend email"
-                          >
-                            <RefreshCw
-                              className={
-                                "h-3.5 w-3.5" +
-                                (resendingToken === inv.token
-                                  ? " animate-spin"
-                                  : "")
-                              }
-                            />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => revokeInvite(inv)}
-                            title="Revoke"
-                          >
-                            <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                          </Button>
+                          {canManageUsers && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => resendInvite(inv)}
+                                disabled={resendingToken === inv.token}
+                                title="Resend email"
+                              >
+                                <RefreshCw
+                                  className={
+                                    "h-3.5 w-3.5" +
+                                    (resendingToken === inv.token
+                                      ? " animate-spin"
+                                      : "")
+                                  }
+                                />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => revokeInvite(inv)}
+                                title="Revoke"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </Td>
                     </tr>
@@ -672,8 +688,10 @@ export default function UsersPage() {
       </Card>
 
       {/* =========================================================== */}
-      {/* 3. SEND NEW INVITE */}
+      {/* 3. SEND NEW INVITE — Super Admin only (POST /invite is gated by
+          requireSuperAdmin). An Admin never sees the form. */}
       {/* =========================================================== */}
+      {canManageUsers && (
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
@@ -727,7 +745,13 @@ export default function UsersPage() {
                   onChange={(e) => setInviteRole(e.target.value)}
                   className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm text-[#1F1D1B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
                 >
-                  <option value="SUPER_ADMIN">SUPER_ADMIN</option>
+                  <option value="SUPER_ADMIN">Super Admin (full access + manage users)</option>
+                  {/* Admin (owner 2026-06-12): runs the whole business but
+                      CANNOT manage user accounts — no enable/disable, delete,
+                      role-change, reset-password or invite. Enforced server-
+                      side by requireSuperAdmin on the user-management routes,
+                      so a stray Admin can never disable the owner. */}
+                  <option value="ADMIN">Admin (full access, cannot manage users)</option>
                   {/* Viewer = the built-in READ_ONLY role (maps to *:read in
                       rbac.ts LEGACY_ROLE_DEFAULTS): can SEE everything, every
                       mutation is blocked 403 server-side. For demos / tours.
@@ -801,6 +825,7 @@ export default function UsersPage() {
           </form>
         </CardContent>
       </Card>
+      )}
 
       {/* =========================================================== */}
       {/* Manual-copy fallback modal — fires when both navigator.clipboard

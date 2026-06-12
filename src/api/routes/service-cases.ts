@@ -42,6 +42,16 @@ const VALID_PREVENTION_STATUS: PreventionStatus[] = [
   "PENDING", "IN_PROGRESS", "DONE", "NOT_NEEDED",
 ];
 
+// Responsible Unit — which business unit caused the issue (owner-level
+// attribution, set from the case detail's Root Cause & Prevention card).
+// Stored on the runtime-added lowercase column service_cases.responsibleunit
+// (migration 0166). PUT accepts exactly these values or empty/null → NULL;
+// anything else is a 400. The frontend select mirrors the same 5 values.
+type ResponsibleUnit = "PRODUCTION" | "QC" | "R_AND_D" | "OFFICE" | "TRANSPORT";
+const VALID_RESPONSIBLE_UNITS: ResponsibleUnit[] = [
+  "PRODUCTION", "QC", "R_AND_D", "OFFICE", "TRANSPORT",
+];
+
 // Adjacency for case status. Cases close on a separate timeline from any
 // attached service_orders — operator can close a case while orders are
 // still in flight (rare but allowed; reports treat that as the operator's
@@ -68,6 +78,10 @@ type ServiceCaseRow = {
   rootCauseCategory: RootCauseCategory | null;
   rootCauseNotes: string | null;
   rootCauseDetails: string | null;
+  // responsibleunit is a runtime-added lowercase column (migration 0166) —
+  // read dual-key like sales_orders.caseid below.
+  responsibleUnit?: ResponsibleUnit | null;
+  responsibleunit?: ResponsibleUnit | null;
   affectedProductIds: string | null;
   preventionAction: string | null;
   preventionStatus: PreventionStatus | null;
@@ -143,6 +157,9 @@ function sanitizeAffectedProductsJson(raw: unknown): string | null {
 // runtime-added lowercase column sales_orders.caseid (migration 0165). The
 // case's "Service Orders" panel merges them with the legacy service_orders
 // rows so production-backed SV orders show up on the case either way.
+//
+// service_cases.responsibleunit (migration 0166) piggybacks on the same
+// ensure — which business unit caused the issue, written by PUT /:id.
 // ---------------------------------------------------------------------------
 let caseLinkColumns: Promise<void> | null = null;
 function ensureCaseLinkColumns(db: D1Database): Promise<void> {
@@ -151,6 +168,13 @@ function ensureCaseLinkColumns(db: D1Database): Promise<void> {
     try {
       await db
         .prepare("ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS caseid TEXT")
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+    try {
+      await db
+        .prepare("ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS responsibleunit TEXT")
         .run();
     } catch {
       // ignore — column may already exist or DDL transiently rejected
@@ -273,6 +297,8 @@ function rowToApi(
     rootCauseDetails,
     affectedProducts,
     rootCauseCategory: row.rootCauseCategory,
+    // Dual-key read — the column is runtime-added lowercase (migration 0166).
+    responsibleUnit: row.responsibleUnit ?? row.responsibleunit ?? null,
     rootCauseNotes: row.rootCauseNotes ?? "",
     preventionAction: row.preventionAction ?? "",
     preventionStatus: row.preventionStatus ?? "PENDING",
@@ -540,6 +566,9 @@ app.put("/:id", async (c) => {
   if (denied) return denied;
   const id = c.req.param("id");
   try {
+    // responsibleunit is runtime-added (migration 0166) — make sure the
+    // column exists before the UPDATE below references it.
+    await ensureCaseLinkColumns(c.var.DB);
     const existing = await c.var.DB
       .prepare("SELECT * FROM service_cases WHERE id = ?")
       .bind(id)
@@ -571,6 +600,19 @@ app.put("/:id", async (c) => {
       return c.json({ success: false, error: "preventionStatus invalid" }, 400);
     }
 
+    // responsibleUnit — one of the 5 units, empty string / null clears to
+    // NULL, anything else is rejected. Undefined = keep existing (dual-key
+    // read since the stored column is lowercase).
+    const ruNext =
+      body.responsibleUnit === undefined
+        ? (existing.responsibleUnit ?? existing.responsibleunit ?? null)
+        : body.responsibleUnit === null || body.responsibleUnit === ""
+          ? null
+          : (body.responsibleUnit as ResponsibleUnit);
+    if (ruNext != null && !VALID_RESPONSIBLE_UNITS.includes(ruNext)) {
+      return c.json({ success: false, error: "responsibleUnit invalid" }, 400);
+    }
+
     // actionLog is JSON array on the row. Body sends it as an array; we
     // serialise here. Undefined = keep existing.
     const actionLogJson =
@@ -600,7 +642,7 @@ app.put("/:id", async (c) => {
       .prepare(
         `UPDATE service_cases SET
            issueDescription = ?, issuePhotos = ?, notes = ?,
-           rootCauseCategory = ?, rootCauseNotes = ?, rootCauseDetails = ?,
+           rootCauseCategory = ?, responsibleunit = ?, rootCauseNotes = ?, rootCauseDetails = ?,
            affectedProductIds = ?,
            preventionAction = ?, preventionStatus = ?, preventionOwner = ?,
            externalRef = ?, actionLog = ?
@@ -615,6 +657,7 @@ app.put("/:id", async (c) => {
           ? ((body.notes as string) ?? null)
           : existing.notes,
         rcNext,
+        ruNext,
         body.rootCauseNotes !== undefined
           ? ((body.rootCauseNotes as string) ?? null)
           : existing.rootCauseNotes,

@@ -52,6 +52,18 @@ const ROOT_CAUSE_LABELS: Record<string, string> = {
   OTHER: "Other",
 };
 
+// Responsible Unit — which business unit caused the issue (owner-level
+// attribution, coarser than the root-cause category). Stored on the
+// runtime-added lowercase column service_cases.responsibleunit (migration
+// 0166); the PUT validator accepts exactly these 5 values or null.
+const RESPONSIBLE_UNIT_LABELS: Record<string, string> = {
+  PRODUCTION: "Production",
+  QC: "QC",
+  R_AND_D: "R&D",
+  OFFICE: "Office — order entry",
+  TRANSPORT: "Transport / 3PL",
+};
+
 // 8 production-line departments (from src/lib/mock-data.ts seed). Hardcoded
 // here because the dept master is mock-data, not a /api/* endpoint, and
 // these don't change often. WAREHOUSING / REPAIR / MAINTENANCE / etc.
@@ -106,6 +118,9 @@ type ServiceCaseDetail = {
   // status tracking moves to a future Prevention Tracker portal — the
   // case detail just OPENS the prevention task.
   rootCauseCategory: RootCauseCategory | null;
+  // Responsible Unit — owner-level attribution of which business unit
+  // caused the issue. NULL until assigned (migration 0166).
+  responsibleUnit: string | null;
   rootCauseNotes: string;
   rootCauseDetails: RootCauseDetails;
   preventionAction: string;
@@ -292,7 +307,7 @@ export default function ServiceCaseDetailPage() {
             {caseDetail.createdByName ? ` by ${caseDetail.createdByName}` : ""}
           </p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
+        <div className="flex items-center gap-2 justify-end shrink-0">
           {allowedTransitions.includes("IN_PROGRESS") && (
             <Button
               variant="outline"
@@ -328,6 +343,11 @@ export default function ServiceCaseDetailPage() {
         </div>
       </div>
 
+      {/* Case pipeline — auto-computed progress stepper, display-only.
+          Derived from the case status + attached orders + their delivery
+          orders; nothing here writes. */}
+      <CasePipeline caseDetail={caseDetail} />
+
       {/* Issue (editable) + photos.
           Issue Description carries the 5W story (what / when / who / where /
           result). It used to coexist with a separate "Why did this happen?"
@@ -353,39 +373,6 @@ export default function ServiceCaseDetailPage() {
           specific product). For SO/CO-sourced cases the operator can
           quickly add lines that match the source order's products. */}
       <AffectedProductsPanel
-        caseDetail={caseDetail}
-        onSaved={() => {
-          invalidateCachePrefix("/api/service-cases");
-          refresh();
-        }}
-      />
-
-      {/* Stock-only replacement parts (missing legs etc.) — deducts stock
-          via the standard stock-adjustments path, no production order. */}
-      <ReplacementPartsPanel
-        caseDetail={caseDetail}
-        onSaved={() => {
-          invalidateCachePrefix("/api/service-cases");
-          refresh();
-        }}
-      />
-
-      {/* Service-agent action log — chronological entries the agent logs
-          over the case's lifetime (called customer, scheduled inspection,
-          sent missing parts, etc.). Keyed by entry count so an append from
-          the Replacement Parts panel re-seeds this panel's local state
-          (it captures caseDetail.actionLog once on mount). */}
-      <ActionLogPanel
-        key={`actions-${caseDetail.actionLog.length}`}
-        caseDetail={caseDetail}
-        onSaved={() => {
-          invalidateCachePrefix("/api/service-cases");
-          refresh();
-        }}
-      />
-
-      {/* Root cause + prevention (open here; track elsewhere) */}
-      <RootCausePanel
         caseDetail={caseDetail}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
@@ -465,6 +452,40 @@ export default function ServiceCaseDetailPage() {
         </CardContent>
       </Card>
 
+      {/* Stock top-up — short-shipped or missing parts (legs, woven fabric
+          etc.); deducts stock via the standard stock-adjustments path, no
+          production order. */}
+      <StockTopUpPanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+
+      {/* Root cause + prevention (open here; track elsewhere) */}
+      <RootCausePanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+
+      {/* Service-agent action log — chronological entries the agent logs
+          over the case's lifetime (called customer, scheduled inspection,
+          sent missing parts, etc.). Keyed by entry count so an append from
+          the Stock Top-Up panel re-seeds this panel's local state
+          (it captures caseDetail.actionLog once on mount). */}
+      <ActionLogPanel
+        key={`actions-${caseDetail.actionLog.length}`}
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+
       {caseDetail.notes && (
         <Card>
           <CardHeader className="pb-2">
@@ -499,6 +520,139 @@ export default function ServiceCaseDetailPage() {
 }
 
 // ===========================================================================
+// CasePipeline — auto-computed, display-only progress stepper.
+// ===========================================================================
+// Seven fixed steps: Opened → Investigating → Service Order → Repair done →
+// Delivery arranged → Delivered → Closed. Completion is DERIVED from data
+// already on the page plus one cached fetch of /api/delivery-orders (matched
+// by salesOrderId against the case's SV order ids) — no new endpoints, no
+// writes, no stored step state.
+//
+// Status sets (from the authoritative route enums):
+// • SV orders are sales_orders rows (src/api/routes/sales-orders.ts):
+//   READY_TO_SHIP and beyond = production finished (repair done);
+//   SHIPPED and beyond = delivery arranged; DELIVERED/INVOICED/CLOSED =
+//   delivered. Their DOs (delivery_orders DRAFT→LOADED→IN_TRANSIT→
+//   DELIVERED→INVOICED) refine that: any DO = arranged, DO
+//   DELIVERED/INVOICED = delivered.
+// • Legacy service_orders (src/api/routes/service-orders.ts lifecycle
+//   OPEN→IN_PRODUCTION/RESERVED/IN_REPAIR→READY_TO_SHIP→DELIVERED→CLOSED):
+//   READY_TO_SHIP+ = repair done, DELIVERED/CLOSED = delivered (they have
+//   no delivery_orders rows).
+// Later steps imply earlier ones along the fulfilment chain (delivered ⇒
+// arranged ⇒ repair done), and Investigating lights up once the case left
+// OPEN or any later step completed.
+const SV_REPAIR_DONE_STATUSES = new Set([
+  "READY_TO_SHIP", "SHIPPED", "DELIVERED", "INVOICED", "CLOSED",
+]);
+const SV_DISPATCHED_STATUSES = new Set(["SHIPPED", "DELIVERED", "INVOICED", "CLOSED"]);
+const SV_DELIVERED_STATUSES = new Set(["DELIVERED", "INVOICED", "CLOSED"]);
+const LEGACY_REPAIR_DONE_STATUSES = new Set(["READY_TO_SHIP", "DELIVERED", "CLOSED"]);
+const LEGACY_DELIVERED_STATUSES = new Set(["DELIVERED", "CLOSED"]);
+const DO_DELIVERED_STATUSES = new Set(["DELIVERED", "INVOICED"]);
+
+const PIPELINE_STEPS = [
+  "Opened",
+  "Investigating",
+  "Service Order",
+  "Repair done",
+  "Delivery arranged",
+  "Delivered",
+  "Closed",
+] as const;
+
+function CasePipeline({ caseDetail }: { caseDetail: ServiceCaseDetail }) {
+  const svOrderIds = useMemo(
+    () => new Set(caseDetail.orders.filter((o) => o.isSv).map((o) => o.id)),
+    [caseDetail.orders],
+  );
+
+  // One extra fetch (cached) — only when the case actually has SV orders;
+  // legacy-only cases derive everything from the statuses already loaded.
+  const { data: doResp } = useCachedJson<{
+    data?: Array<{ id: string; salesOrderId?: string; status?: string }>;
+  }>(svOrderIds.size > 0 ? "/api/delivery-orders" : null);
+
+  const stepsDone = useMemo(() => {
+    const svOrders = caseDetail.orders.filter((o) => o.isSv);
+    const legacyOrders = caseDetail.orders.filter((o) => !o.isSv);
+    const caseDos = (doResp?.data ?? []).filter(
+      (d) => !!d.salesOrderId && svOrderIds.has(d.salesOrderId),
+    );
+
+    const delivered =
+      caseDos.some((d) => DO_DELIVERED_STATUSES.has(d.status ?? "")) ||
+      svOrders.some((o) => SV_DELIVERED_STATUSES.has(o.status)) ||
+      legacyOrders.some((o) => LEGACY_DELIVERED_STATUSES.has(o.status));
+    const arranged =
+      delivered ||
+      caseDos.length > 0 ||
+      svOrders.some((o) => SV_DISPATCHED_STATUSES.has(o.status));
+    const repairDone =
+      arranged ||
+      svOrders.some((o) => SV_REPAIR_DONE_STATUSES.has(o.status)) ||
+      legacyOrders.some((o) => LEGACY_REPAIR_DONE_STATUSES.has(o.status));
+    const hasOrder = caseDetail.orders.length > 0;
+    const closed = caseDetail.status === "CLOSED";
+    const investigating =
+      caseDetail.status !== "OPEN" || hasOrder || repairDone || closed;
+
+    return [true, investigating, hasOrder, repairDone, arranged, delivered, closed];
+  }, [caseDetail.orders, caseDetail.status, doResp, svOrderIds]);
+
+  // "Current" = the first step not yet done (outlined dot); everything
+  // after it renders muted. -1 = all seven done.
+  const currentIdx = stepsDone.findIndex((d) => !d);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Case Pipeline</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap items-center gap-y-2">
+          {PIPELINE_STEPS.map((label, i) => {
+            const done = stepsDone[i];
+            const current = i === currentIdx;
+            return (
+              <div key={label} className="flex items-center">
+                <span
+                  className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-medium ${
+                    done
+                      ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                      : current
+                        ? "border-[#6B5C32] bg-white text-[#6B5C32]"
+                        : "border-[#E2DDD8] bg-white text-[#9CA3AF]"
+                  }`}
+                >
+                  {i + 1}
+                </span>
+                <span
+                  className={`ml-1.5 text-xs whitespace-nowrap ${
+                    done
+                      ? "text-[#1F1D1B]"
+                      : current
+                        ? "text-[#6B5C32] font-medium"
+                        : "text-[#9CA3AF]"
+                  }`}
+                >
+                  {label}
+                </span>
+                {i < PIPELINE_STEPS.length - 1 && (
+                  <span
+                    className={`mx-2 h-px w-5 ${done ? "bg-[#6B5C32]" : "bg-[#E2DDD8]"}`}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ===========================================================================
 // RootCausePanel — inline editor, auto-saves on blur.
 // ===========================================================================
 function RootCausePanel({
@@ -509,6 +663,7 @@ function RootCausePanel({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
+  const [responsibleUnit, setResponsibleUnit] = useState(caseDetail.responsibleUnit ?? "");
   const [category, setCategory] = useState(caseDetail.rootCauseCategory ?? "");
   const [details, setDetails] = useState<RootCauseDetails>(caseDetail.rootCauseDetails ?? {});
   const [action, setAction] = useState(caseDetail.preventionAction);
@@ -540,6 +695,28 @@ function RootCausePanel({
         <CardTitle className="text-sm">Root Cause &amp; Prevention</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        {/* Responsible Unit — owner-level attribution of which business
+            unit caused the issue. Coarser than the category below; saves
+            on change like the neighbouring fields. */}
+        <div>
+          <label className="block text-xs text-[#6B7280] mb-1">Responsible Unit</label>
+          <select
+            value={responsibleUnit}
+            onChange={(e) => {
+              const next = e.target.value;
+              setResponsibleUnit(next);
+              save({ responsibleUnit: next || null });
+            }}
+            disabled={saving}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+          >
+            <option value="">— not set —</option>
+            {Object.entries(RESPONSIBLE_UNIT_LABELS).map(([v, t]) => (
+              <option key={v} value={v}>{t}</option>
+            ))}
+          </select>
+        </div>
+
         {/* Category — drives reporting / categorisation of recurrence.
             Changing the category resets the details JSON since the per-
             category fields are different shapes. */}
@@ -668,7 +845,7 @@ function IssueDescriptionPanel({
             "  What  — what they did (e.g. dropped the sofa during unloading)",
             "  Result — what problem was caused (e.g. frame cracked at left armrest)",
           ].join("\n")}
-          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm font-mono"
+          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
         />
       </CardContent>
     </Card>
@@ -1484,12 +1661,13 @@ function AffectedProductsPanel({
 }
 
 // ===========================================================================
-// ReplacementPartsPanel — stock-only part top-ups recorded against the case.
+// StockTopUpPanel — stock-only part top-ups recorded against the case.
 // ===========================================================================
-// For "missing legs" style fixes: deducts RM / WIP / FG stock through the
-// standard POST /api/stock-adjustments write path (reason
-// SERVICE_REPLACEMENT, tagged with this case's id — migration 0164) and
-// lists this case's issues below. No production order, no service order.
+// The owner's "stock top-up" concept: short-shipped or missing parts (legs,
+// woven fabric, etc.). Deducts RM / WIP / FG stock through the standard
+// POST /api/stock-adjustments write path (reason SERVICE_REPLACEMENT,
+// tagged with this case's id — migration 0164) and lists this case's
+// issues below. No production order, no service order.
 // Item sources mirror the Stock Adjustments page (inventory/adjustments.tsx):
 // RM = /api/raw-materials, WIP = /api/inventory/wip, FG = /api/inventory
 // finishedProducts; unit cost prefill mirrors the same page (RM unitCostSen,
@@ -1514,7 +1692,7 @@ type ReplacementAdjRow = {
   notes: string;
 };
 
-function ReplacementPartsPanel({
+function StockTopUpPanel({
   caseDetail,
   onSaved,
 }: {
@@ -1657,13 +1835,14 @@ function ReplacementPartsPanel({
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">
-          Replacement Parts (stock only)
+          Stock Top-Up
           {issued.length > 0 ? ` (${issued.length})` : ""}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
         <p className="text-[10px] text-[#9CA3AF]">
-          For top-ups like missing legs — deducts stock and keeps a record; no production order.
+          Short-shipped or missing parts — legs, woven fabric, etc. Deducts stock
+          (RM / WIP / FG) and keeps a record; no production order.
         </p>
         <div className="flex flex-wrap items-start gap-2">
           <select

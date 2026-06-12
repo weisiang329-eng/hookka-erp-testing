@@ -43,6 +43,17 @@ const ROOT_CAUSE_COLOR: Record<string, string> = {
   OTHER: "bg-[#F0ECE9] text-[#5A5550]",
 };
 
+// Responsible Unit — set from the case detail's Root Cause & Prevention
+// card (service_cases.responsibleunit, migration 0166). Shown here as a
+// small muted badge next to the root-cause badge when assigned.
+const RESPONSIBLE_UNIT_LABELS: Record<string, string> = {
+  PRODUCTION: "Production",
+  QC: "QC",
+  R_AND_D: "R&D",
+  OFFICE: "Office — order entry",
+  TRANSPORT: "Transport / 3PL",
+};
+
 // Service CASES can be opened against any source order status — a customer
 // might complain about an order that hasn't shipped yet ("where is it?",
 // "I want to change colour before it ships", "cancel my order"). Only
@@ -63,6 +74,7 @@ type ServiceCaseListItem = {
   createdAt: string;
   closedAt: string;
   rootCauseCategory: string | null;
+  responsibleUnit: string | null;
   issueDescription: string;
   affectedProducts: Array<{ productId: string; code: string; name: string; qty?: number | null }>;
   orders: { id: string; serviceOrderNo: string; status: string; mode: string | null }[];
@@ -223,11 +235,20 @@ export default function ServiceCasesListPage() {
                         {c.sourceType} {c.sourceNo}
                       </td>
                       <td className="py-2 px-3">
-                        {c.rootCauseCategory ? (
-                          <span
-                            className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[c.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
-                          >
-                            {c.rootCauseCategory}
+                        {c.rootCauseCategory || c.responsibleUnit ? (
+                          <span className="inline-flex flex-wrap items-center gap-1">
+                            {c.rootCauseCategory && (
+                              <span
+                                className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[c.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
+                              >
+                                {c.rootCauseCategory}
+                              </span>
+                            )}
+                            {c.responsibleUnit && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#6B7280]">
+                                {RESPONSIBLE_UNIT_LABELS[c.responsibleUnit] ?? c.responsibleUnit}
+                              </span>
+                            )}
                           </span>
                         ) : (
                           <span className="text-[#9CA3AF]">—</span>
@@ -245,7 +266,7 @@ export default function ServiceCasesListPage() {
                       </td>
                       <td className="py-2 px-3 text-xs">
                         {c.affectedProducts && c.affectedProducts.length > 0 ? (
-                          <span className="font-mono text-[10px] text-[#6B5C32]">
+                          <span className="text-[10px] text-[#6B5C32]">
                             {c.affectedProducts.length} SKU{c.affectedProducts.length === 1 ? "" : "s"}
                           </span>
                         ) : (
@@ -271,7 +292,7 @@ export default function ServiceCasesListPage() {
                         {c.orders.length === 0 ? (
                           <span className="text-[#9CA3AF]">none</span>
                         ) : (
-                          <span className="font-mono text-[10px] text-[#6B5C32]">
+                          <span className="text-[10px] text-[#6B5C32]">
                             {c.orders.length} order{c.orders.length === 1 ? "" : "s"}
                           </span>
                         )}
@@ -864,7 +885,7 @@ export function CreateServiceCaseModal({
                 "  What  — what they did (e.g. dropped the sofa during unloading)",
                 "  Result — what problem was caused (e.g. frame cracked at left armrest)",
               ].join("\n")}
-              className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm font-mono"
+              className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
             />
           </div>
 

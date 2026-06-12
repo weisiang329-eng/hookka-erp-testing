@@ -118,8 +118,9 @@ const REASON_OPTIONS: { value: AdjustmentReason; label: string }[] = [
   { value: "COUNT_CORRECTION", label: "Count Corr." },
   { value: "WRITE_OFF", label: "Write-Off" },
   // Stock-only part top-ups issued from a Service Case (the case detail's
-  // "Replacement Parts" card posts with this reason + a caseId backlink).
-  { value: "SERVICE_REPLACEMENT", label: "Service replacement" },
+  // "Stock Top-Up" card posts with this reason + a caseId backlink). The
+  // stored value stays SERVICE_REPLACEMENT; only the label was renamed.
+  { value: "SERVICE_REPLACEMENT", label: "Service top-up" },
   { value: "OTHER", label: "Other" },
 ];
 

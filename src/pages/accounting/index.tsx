@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -176,6 +176,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
   { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
   { key: "odc", label: "Other D/C", icon: <Users className="h-4 w-4" /> },
+  { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
 
@@ -248,6 +249,7 @@ export default function AccountingPage() {
           {tab === "ar" && <ARTab arData={arData} onRefresh={fetchAll} />}
           {tab === "ap" && <APTab apData={apData} onRefresh={fetchAll} />}
           {tab === "odc" && <OtherPartiesTab />}
+          {tab === "opening" && <OpeningBalanceTab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "maint" && (
             <div className="space-y-4">
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
@@ -3651,6 +3653,410 @@ function GeneralLedgerTab({ accounts }: { accounts: ChartOfAccount[] }) {
           ) : null}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// =============== TAB: OPENING BALANCE (Phase-5 prerequisite, owner-entered) ===============
+//
+// AutoCount-style split: AR/AP one opening invoice per customer/supplier
+// (subledger only — aging/statements/three-card recon all flow); GL one
+// balanced 'opening_balance' batch over BALANCE SHEET accounts, with the
+// debtor/creditor control legs locked to the per-party sums. Re-posting
+// reverses the prior batch (immutable ledger).
+
+type ObState = {
+  openingDate: string | null;
+  posted: boolean;
+  migrationMissing: boolean;
+  glRows: { accountCode: string; debitSen: number; creditSen: number }[];
+  arInvoices: { id: string; invoiceNo: string; customerId: string; customerName: string; invoiceDate: string | null; dueDate: string | null; totalSen: number; paidAmount: number; status: string }[];
+  apInvoices: { id: string; piNo: string; supplierId: string; supplierName: string; invoiceDate: string | null; dueDate: string | null; amountSen: number; status: string }[];
+  arByControl: Record<string, number>;
+  arTotalSen: number;
+  apTotalSen: number;
+};
+
+function OpeningBalanceTab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh: () => void }) {
+  const { toast } = useToast();
+  const [data, setData] = useState<ObState | null>(null);
+  const [openingDate, setOpeningDate] = useState("");
+  // GL grid — raw RM strings per account so typing never reformats.
+  const [amounts, setAmounts] = useState<Record<string, { dr: string; cr: string }>>({});
+  const [posting, setPosting] = useState(false);
+  const [customers, setCustomers] = useState<{ id: string; name: string }[]>([]);
+  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
+  const [arForm, setArForm] = useState({ customerId: "", invoiceNo: "", invoiceDate: "", amount: "" });
+  const [apForm, setApForm] = useState({ supplierId: "", piNo: "", invoiceDate: "", amount: "" });
+
+  const load = useCallback((hydrate: boolean) => {
+    fetch("/api/accounting/opening-balance")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: ObState }>)
+      .then((j) => {
+        if (!j?.success || !j.data) return;
+        const d = j.data;
+        setData(d);
+        if (d.openingDate) setOpeningDate((prev) => prev || d.openingDate!);
+        if (hydrate) {
+          // Pre-fill the grid from the posted batch — control rows are
+          // derived live, so skip them here.
+          const next: Record<string, { dr: string; cr: string }> = {};
+          const isControl = (code: string) => {
+            const a = accounts.find((x) => x.code === code);
+            return a?.specialAccountType === "SDC" || a?.specialAccountType === "SCC";
+          };
+          for (const r of d.glRows) {
+            if (isControl(r.accountCode)) continue;
+            next[r.accountCode] = {
+              dr: r.debitSen ? (r.debitSen / 100).toFixed(2) : "",
+              cr: r.creditSen ? (r.creditSen / 100).toFixed(2) : "",
+            };
+          }
+          setAmounts(next);
+        }
+      })
+      .catch(() => {});
+  }, [accounts]);
+
+  useEffect(() => {
+    load(true);
+    fetch("/api/customers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
+      .then((j) => { if (j?.success) setCustomers((j.data ?? []).map((x) => ({ id: x.id, name: x.name }))); })
+      .catch(() => {});
+    fetch("/api/suppliers")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { id: string; name: string }[] }>)
+      .then((j) => { if (j?.success) setSuppliers((j.data ?? []).map((x) => ({ id: x.id, name: x.name }))); })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toSen = (s: string): number => {
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? Math.round(v * 100) : 0;
+  };
+
+  // BALANCE SHEET accounts only; controls are derived rows.
+  const glAccounts = accounts
+    .filter(
+      (a) =>
+        ["ASSET", "LIABILITY", "EQUITY"].includes(a.type) &&
+        a.isPostable !== false &&
+        a.specialAccountType !== "SDC" &&
+        a.specialAccountType !== "SCC",
+    )
+    .sort((a, b) => a.code.localeCompare(b.code));
+
+  const userDr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.dr ?? ""), 0);
+  const userCr = glAccounts.reduce((s, a) => s + toSen(amounts[a.code]?.cr ?? ""), 0);
+  const totalDr = userDr + (data?.arTotalSen ?? 0);
+  const totalCr = userCr + (data?.apTotalSen ?? 0);
+  const diff = totalDr - totalCr;
+
+  const handlePost = async () => {
+    if (!openingDate) {
+      toast.error("Set the opening date first");
+      return;
+    }
+    setPosting(true);
+    try {
+      const rows = glAccounts
+        .map((a) => ({
+          code: a.code,
+          debitSen: toSen(amounts[a.code]?.dr ?? ""),
+          creditSen: toSen(amounts[a.code]?.cr ?? ""),
+        }))
+        .filter((r) => r.debitSen !== 0 || r.creditSen !== 0);
+      const res = await fetch("/api/accounting/opening-balance/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openingDate, rows }),
+      });
+      const j = asMutationResponse(await res.json());
+      if (j?.success) {
+        toast.success(`Opening balance posted as at ${openingDate}`);
+        load(false);
+        onRefresh();
+      } else toast.error(j?.error || "Post failed");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const handleAddAr = async () => {
+    const amountSen = toSen(arForm.amount);
+    if (!arForm.customerId || !arForm.invoiceNo.trim() || !arForm.invoiceDate || amountSen <= 0) {
+      toast.error("Customer, invoice no, date and a positive amount are required");
+      return;
+    }
+    const res = await fetch("/api/accounting/opening-balance/ar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customerId: arForm.customerId,
+        invoiceNo: arForm.invoiceNo.trim(),
+        invoiceDate: arForm.invoiceDate,
+        amountSen,
+      }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      setArForm({ customerId: "", invoiceNo: "", invoiceDate: "", amount: "" });
+      load(false);
+    } else toast.error(j?.error || "Failed to add opening invoice");
+  };
+
+  const handleAddAp = async () => {
+    const amountSen = toSen(apForm.amount);
+    if (!apForm.supplierId || !apForm.piNo.trim() || !apForm.invoiceDate || amountSen <= 0) {
+      toast.error("Supplier, PI no, date and a positive amount are required");
+      return;
+    }
+    const res = await fetch("/api/accounting/opening-balance/ap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        supplierId: apForm.supplierId,
+        piNo: apForm.piNo.trim(),
+        invoiceDate: apForm.invoiceDate,
+        amountSen,
+      }),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) {
+      setApForm({ supplierId: "", piNo: "", invoiceDate: "", amount: "" });
+      load(false);
+    } else toast.error(j?.error || "Failed to add opening PI");
+  };
+
+  const handleDelete = async (kind: "ar" | "ap", id: string) => {
+    const res = await fetch(`/api/accounting/opening-balance/${kind}/${id}`, { method: "DELETE" });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) load(false);
+    else toast.error(j?.error || "Delete failed");
+  };
+
+  const inputCls =
+    "w-full rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm text-right tabular-nums focus:outline-none focus:ring-1 focus:ring-[#6B5C32]";
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold text-[#1F1D1B]">Opening Balance</h2>
+
+      {data?.migrationMissing && (
+        <Card>
+          <CardContent className="p-4 text-sm text-[#9A3A2D]">
+            Migration 0158 (isOpening column) has not been applied yet — the AR/AP opening
+            sections will not work until it runs. Ask for the paste-version SQL.
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Opening date + balance check + Post */}
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-end gap-4">
+          <div>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Opening date (开账日)</label>
+            <input
+              type="date"
+              value={openingDate}
+              onChange={(e) => setOpeningDate(e.target.value)}
+              className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="text-sm">
+            <span className="text-[#6B7280] mr-2">Total DR</span>
+            <span className="font-medium tabular-nums">{formatCurrency(totalDr)}</span>
+            <span className="text-[#6B7280] mx-2">· Total CR</span>
+            <span className="font-medium tabular-nums">{formatCurrency(totalCr)}</span>
+            <span className={`ml-3 inline-flex items-center rounded-full px-3 py-1 text-xs font-medium border ${diff === 0 ? "bg-[#EAF3DE] text-[#27500A] border-[#C0DD97]" : "bg-[#FCEBEB] text-[#791F1F] border-[#F7C1C1]"}`}>
+              {diff === 0 ? "Balanced ✓" : `Difference ${formatCurrency(Math.abs(diff))} ${diff > 0 ? "DR" : "CR"}`}
+            </span>
+          </div>
+          <Button variant="primary" size="sm" disabled={posting || diff !== 0 || !openingDate} onClick={handlePost}>
+            {posting ? "Posting…" : data?.posted ? "Re-post opening balance" : "Post opening balance"}
+          </Button>
+          {data?.posted && (
+            <span className="text-xs text-[#6B7280]">
+              Already posted{data.openingDate ? ` as at ${data.openingDate}` : ""} — re-posting reverses the
+              previous figures first (the ledger keeps both, nothing is deleted).
+            </span>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* AR opening invoices */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-[#1F1D1B]">
+              Debtor opening invoices <span className="font-normal text-[#6B7280]">(per customer — feeds aging, statements and the control account)</span>
+            </h3>
+            <span className="text-sm text-[#6B7280]">Total <span className="font-medium text-[#1F1D1B] tabular-nums">{formatCurrency(data?.arTotalSen ?? 0)}</span> DR</span>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <select value={arForm.customerId} onChange={(e) => setArForm({ ...arForm, customerId: e.target.value })} className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm w-56">
+              <option value="">— customer —</option>
+              {customers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <input type="text" placeholder="Old invoice no" value={arForm.invoiceNo} onChange={(e) => setArForm({ ...arForm, invoiceNo: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-40" />
+            <input type="date" value={arForm.invoiceDate} onChange={(e) => setArForm({ ...arForm, invoiceDate: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+            <input type="text" placeholder="Amount (RM)" value={arForm.amount} onChange={(e) => setArForm({ ...arForm, amount: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-32 text-right tabular-nums" />
+            <Button variant="outline" size="sm" onClick={handleAddAr}><Plus className="h-4 w-4" /> Add</Button>
+          </div>
+          {(data?.arInvoices.length ?? 0) > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-2 py-1.5 text-left">Customer</th>
+                  <th className="px-2 py-1.5 text-left">Invoice No</th>
+                  <th className="px-2 py-1.5 text-left">Date</th>
+                  <th className="px-2 py-1.5 text-right">Amount</th>
+                  <th className="px-2 py-1.5 text-right">Paid</th>
+                  <th className="px-2 py-1.5" />
+                </tr>
+              </thead>
+              <tbody>
+                {data!.arInvoices.map((r) => (
+                  <tr key={r.id} className="border-b border-[#F0ECE9]">
+                    <td className="px-2 py-1.5">{r.customerName}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-xs">{r.invoiceNo}</td>
+                    <td className="px-2 py-1.5 text-xs text-[#6B7280]">{r.invoiceDate ?? ""}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{formatCurrency(r.totalSen)}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-xs text-[#6B7280]">{r.paidAmount ? formatCurrency(r.paidAmount) : "-"}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      <button onClick={() => handleDelete("ar", r.id)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">remove</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* AP opening invoices */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-[#1F1D1B]">
+              Creditor opening invoices <span className="font-normal text-[#6B7280]">(per supplier — feeds aging, statements and 400-0000)</span>
+            </h3>
+            <span className="text-sm text-[#6B7280]">Total <span className="font-medium text-[#1F1D1B] tabular-nums">{formatCurrency(data?.apTotalSen ?? 0)}</span> CR</span>
+          </div>
+          <div className="flex flex-wrap items-end gap-2">
+            <select value={apForm.supplierId} onChange={(e) => setApForm({ ...apForm, supplierId: e.target.value })} className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm w-56">
+              <option value="">— supplier —</option>
+              {suppliers.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+            <input type="text" placeholder="Old PI no" value={apForm.piNo} onChange={(e) => setApForm({ ...apForm, piNo: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-40" />
+            <input type="date" value={apForm.invoiceDate} onChange={(e) => setApForm({ ...apForm, invoiceDate: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm" />
+            <input type="text" placeholder="Amount (RM)" value={apForm.amount} onChange={(e) => setApForm({ ...apForm, amount: e.target.value })} className="rounded-md border border-[#E2DDD8] px-2 py-1.5 text-sm w-32 text-right tabular-nums" />
+            <Button variant="outline" size="sm" onClick={handleAddAp}><Plus className="h-4 w-4" /> Add</Button>
+          </div>
+          {(data?.apInvoices.length ?? 0) > 0 && (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-2 py-1.5 text-left">Supplier</th>
+                  <th className="px-2 py-1.5 text-left">PI No</th>
+                  <th className="px-2 py-1.5 text-left">Date</th>
+                  <th className="px-2 py-1.5 text-right">Amount</th>
+                  <th className="px-2 py-1.5" />
+                </tr>
+              </thead>
+              <tbody>
+                {data!.apInvoices.map((r) => (
+                  <tr key={r.id} className="border-b border-[#F0ECE9]">
+                    <td className="px-2 py-1.5">{r.supplierName}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-xs">{r.piNo}</td>
+                    <td className="px-2 py-1.5 text-xs text-[#6B7280]">{r.invoiceDate ?? ""}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{formatCurrency(r.amountSen)}</td>
+                    <td className="px-2 py-1.5 text-right">
+                      <button onClick={() => handleDelete("ap", r.id)} className="text-[#9A3A2D] hover:text-[#791F1F] text-xs underline decoration-dotted cursor-pointer">remove</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* GL grid — balance-sheet accounts; controls are derived read-only rows */}
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                <th className="px-3 py-2 text-left">Balance-sheet account</th>
+                <th className="px-3 py-2 text-right w-40">Debit (RM)</th>
+                <th className="px-3 py-2 text-right w-40">Credit (RM)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(data?.arByControl ?? {}).map(([ctl, amt]) => (
+                <tr key={ctl} className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5">
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">{ctl}</span>
+                    {accounts.find((a) => a.code === ctl)?.name ?? ""}
+                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ debtor opening invoices</span>
+                  </td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(amt)}</td>
+                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
+                </tr>
+              ))}
+              {(data?.apTotalSen ?? 0) !== 0 && (
+                <tr className="border-b border-[#F0ECE9] bg-[#F7F4EF]">
+                  <td className="px-3 py-1.5">
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">400-0000</span>
+                    {accounts.find((a) => a.code === "400-0000")?.name ?? "TRADE CREDITORS"}
+                    <span className="ml-2 text-[11px] text-[#9CA3AF]">auto — Σ creditor opening invoices</span>
+                  </td>
+                  <td className="px-3 py-1.5 text-right text-[#9CA3AF]">—</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data!.apTotalSen)}</td>
+                </tr>
+              )}
+              {glAccounts.map((a) => (
+                <tr key={a.code} className="border-b border-[#F0ECE9]">
+                  <td className="px-3 py-1.5">
+                    <span className="tabular-nums text-xs text-[#6B7280] mr-1">{a.code}</span>
+                    <span className="text-[#1F1D1B]">{a.name}</span>
+                  </td>
+                  <td className="px-3 py-1">
+                    <input
+                      type="text"
+                      value={amounts[a.code]?.dr ?? ""}
+                      onChange={(e) => setAmounts({ ...amounts, [a.code]: { dr: e.target.value, cr: "" } })}
+                      placeholder=""
+                      className={inputCls}
+                    />
+                  </td>
+                  <td className="px-3 py-1">
+                    <input
+                      type="text"
+                      value={amounts[a.code]?.cr ?? ""}
+                      onChange={(e) => setAmounts({ ...amounts, [a.code]: { dr: "", cr: e.target.value } })}
+                      placeholder=""
+                      className={inputCls}
+                    />
+                  </td>
+                </tr>
+              ))}
+              <tr className="bg-[#F0ECE9]/60 font-semibold text-[#1F1D1B]">
+                <td className="px-3 py-2">TOTAL (incl. auto control rows)</td>
+                <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(totalDr)}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(totalCr)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+      <p className="text-[11px] text-[#9CA3AF]">
+        P&L accounts are deliberately absent — prior years' results belong in retained earnings /
+        capital, not in this year's P&L. The difference line, if any, usually goes to 150-0000
+        RETAINED EARNING or the capital account.
+      </p>
     </div>
   );
 }

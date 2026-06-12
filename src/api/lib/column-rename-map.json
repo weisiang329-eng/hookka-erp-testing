@@ -419,6 +419,7 @@
   "isGroupCompany": "is_group_company",
   "isMainSupplier": "is_main_supplier",
   "isMandatory": "is_mandatory",
+  "isOpening": "is_opening",
   "isParent": "is_parent",
   "isPostable": "is_postable",
   "isProduction": "is_production",

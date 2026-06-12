@@ -15,7 +15,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
-import { monthsOverdue } from "../../lib/terms";
+import { monthsOverdue, nextMonthDueDate } from "../../lib/terms";
 import { getOrgId } from "../lib/tenant";
 import {
   buildJournalEntryStatements,
@@ -24,6 +24,7 @@ import {
 } from "../lib/journal-hash";
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
+import { parseDebtorCode } from "../../lib/debtor";
 
 const app = new Hono<Env>();
 
@@ -2296,12 +2297,13 @@ app.get("/trial-balance", async (c) => {
   const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
   const [legRes, coaRes] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT accountCode, debitSen, creditSen, postedAt FROM ledger_journal_entries",
+      "SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries",
     ).all<{
       accountCode: string;
       debitSen: number;
       creditSen: number;
       postedAt: string;
+      sourceType: string;
     }>(),
     c.var.DB.prepare(
       "SELECT code, name, type FROM chart_of_accounts",
@@ -2311,8 +2313,13 @@ app.get("/trial-balance", async (c) => {
   const dr = new Map<string, number>();
   const cr = new Map<string, number>();
   const resolveTb = await loadAccountResolver(c.var.DB);
+  const obDateTb = await getOpeningDate(c.var.DB);
   for (const l of legRes.results ?? []) {
-    if (String(l.postedAt ?? "").slice(0, 10) > asOf) continue;
+    const d10 =
+      isOpeningSource(l.sourceType) && obDateTb
+        ? obDateTb
+        : String(l.postedAt ?? "").slice(0, 10);
+    if (d10 > asOf) continue;
     const code = resolveTb(l.accountCode);
     dr.set(code, (dr.get(code) ?? 0) + (Number(l.debitSen) || 0));
     cr.set(code, (cr.get(code) ?? 0) + (Number(l.creditSen) || 0));
@@ -2414,20 +2421,36 @@ app.get("/gl", async (c) => {
       }
     };
     const resolveGl = await loadAccountResolver(c.var.DB);
+    // Opening-balance legs are DATED at the kv opening date on every read
+    // surface (their postedAt is the posting timestamp — backdating would
+    // break the hash-chain walk order).
+    const obDateAll = await getOpeningDate(c.var.DB);
+    const legDay = (l: { postedAt: string; sourceType: string }) =>
+      isOpeningSource(l.sourceType) && obDateAll
+        ? obDateAll
+        : String(l.postedAt ?? "").slice(0, 10);
     const all = (legRes.results ?? []).filter((l) => {
-      const d10 = String(l.postedAt ?? "").slice(0, 10);
+      const d10 = legDay(l);
       if (d10 < from || d10 > to) return false;
       const code = resolveGl(l.accountCode);
       if (accountSet && !accountSet.has(code)) return false;
       if (!inScope(code)) return false;
       return true;
     });
+    // Newest-first by EFFECTIVE day (opening legs sort at the opening date,
+    // not at their insert timestamp).
+    all.sort(
+      (a, b) =>
+        legDay(b).localeCompare(legDay(a)) ||
+        String(b.postedAt).localeCompare(String(a.postedAt)) ||
+        b.id.localeCompare(a.id),
+    );
     const CAP = 1000;
     const rows = all.slice(0, CAP).map((l) => {
       const code = resolveGl(l.accountCode);
       return {
         id: l.id,
-        postedAt: l.postedAt,
+        postedAt: isOpeningSource(l.sourceType) && obDateAll ? obDateAll : l.postedAt,
         accountCode: code,
         accountName: names.get(code) ?? "",
         description: l.description ?? "",
@@ -2529,8 +2552,21 @@ app.get("/gl", async (c) => {
     creditSen: number;
     runningSen: number;
   }[] = [];
-  for (const l of legRes.results ?? []) {
-    const d10 = String(l.postedAt ?? "").slice(0, 10);
+  const obDateOne = await getOpeningDate(c.var.DB);
+  const effDay = (l: { postedAt: string; sourceType: string }) =>
+    isOpeningSource(l.sourceType) && obDateOne
+      ? obDateOne
+      : String(l.postedAt ?? "").slice(0, 10);
+  // Re-sort by EFFECTIVE day — opening legs carry today's insert timestamp
+  // but belong at the opening date, ahead of everything that follows.
+  const ordered = [...(legRes.results ?? [])].sort(
+    (a, b) =>
+      effDay(a).localeCompare(effDay(b)) ||
+      String(a.postedAt).localeCompare(String(b.postedAt)) ||
+      a.id.localeCompare(b.id),
+  );
+  for (const l of ordered) {
+    const d10 = effDay(l);
     const delta = debitNormal
       ? (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0)
       : (Number(l.creditSen) || 0) - (Number(l.debitSen) || 0);
@@ -2544,7 +2580,7 @@ app.get("/gl", async (c) => {
     totalCreditSen += Number(l.creditSen) || 0;
     rows.push({
       id: l.id,
-      postedAt: l.postedAt,
+      postedAt: isOpeningSource(l.sourceType) && obDateOne ? obDateOne : l.postedAt,
       description: l.description ?? "",
       sourceType: l.sourceType,
       sourceId: l.sourceId,
@@ -3067,12 +3103,20 @@ app.get("/pl", async (c) => {
   const bsDr = new Map<string, number>();
   const bsCr = new Map<string, number>();
   const resolveAcct = await loadAccountResolver(c.var.DB);
+  // Opening-balance legs (BS accounts only) are dated at the kv opening
+  // date and are bookkeeping, not trading — the P&L view skips them like
+  // year_close; the BS view counts them at the opening month.
+  const obDatePl = await getOpeningDate(c.var.DB);
   for (const l of legRes.results ?? []) {
-    const ym = String(l.postedAt ?? "").slice(0, 7);
+    const opening = isOpeningSource(l.sourceType);
+    const ym =
+      opening && obDatePl
+        ? obDatePl.slice(0, 7)
+        : String(l.postedAt ?? "").slice(0, 7);
     const d = Number(l.debitSen) || 0;
     const cr = Number(l.creditSen) || 0;
     const code = resolveAcct(l.accountCode);
-    if (l.sourceType !== "year_close" && ymInPeriod(ym, period)) {
+    if (l.sourceType !== "year_close" && !opening && ymInPeriod(ym, period)) {
       plDr.set(code, (plDr.get(code) ?? 0) + d);
       plCr.set(code, (plCr.get(code) ?? 0) + cr);
     }
@@ -3367,6 +3411,481 @@ app.get("/pl", async (c) => {
       },
     },
   });
+});
+
+// ---------------------------------------------------------------------------
+// OPENING BALANCE (Phase-5 prerequisite, 2026-06 — owner enters it himself)
+//
+// AutoCount-style split:
+//   · AR/AP — one opening invoice per customer/supplier (invoices /
+//     purchase_invoices rows flagged isOpening=1). They feed aging,
+//     statements, the outstanding counters and the three-card recon, but
+//     NEVER post GL legs themselves — no revenue/SST re-recognition.
+//   · GL — one balanced batch of 'opening_balance' legs covering BALANCE
+//     SHEET accounts only. The debtor/creditor control legs are derived
+//     server-side from the opening-invoice sums, so control == subledger
+//     by construction. Re-posting reverses the prior batch first
+//     ('opening_balance_reversal') — the immutable ledger never updates.
+//
+// Dating: backdating postedAt would break the hash-chain walk order
+// (verifyJournalChain orders by postedAt), so opening legs carry the
+// normal insert timestamp and EVERY date-filtered read surface treats
+// them as dated at kv 'opening_date' (see openingLegDay below).
+// ---------------------------------------------------------------------------
+const OPENING_DATE_KV_KEY = "opening_date";
+
+async function getOpeningDate(
+  db: Env["Variables"]["DB"],
+): Promise<string | null> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = ?")
+      .bind(OPENING_DATE_KV_KEY)
+      .first<{ value: string | null }>();
+    if (!row?.value) return null;
+    const v = String(row.value).replace(/^"|"$/g, "");
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOpeningSource(sourceType: string | null | undefined): boolean {
+  return (
+    sourceType === "opening_balance" ||
+    sourceType === "opening_balance_reversal"
+  );
+}
+
+// Per-control-account sums of the opening invoices: AR per parseDebtorCode
+// control (300-x / 305-x), AP all into 400-0000. These become the locked
+// control legs of the GL opening batch.
+async function openingControlSums(db: Env["Variables"]["DB"]): Promise<{
+  arByControl: Map<string, number>;
+  arTotalSen: number;
+  apTotalSen: number;
+}> {
+  const arByControl = new Map<string, number>();
+  let arTotalSen = 0;
+  let apTotalSen = 0;
+  try {
+    const inv = await db
+      .prepare(
+        `SELECT i.totalSen AS totalSen, c.code AS custCode
+           FROM invoices i LEFT JOIN customers c ON c.id = i.customerId
+          WHERE i.isOpening = 1 AND i.status NOT IN ('DRAFT','CANCELLED')`,
+      )
+      .all<{ totalSen: number; custCode: string | null }>();
+    for (const r of inv.results ?? []) {
+      const amt = Number(r.totalSen) || 0;
+      const parsed = parseDebtorCode(r.custCode);
+      const ctl = parsed.ok ? parsed.controlCode : "300-0000";
+      arByControl.set(ctl, (arByControl.get(ctl) ?? 0) + amt);
+      arTotalSen += amt;
+    }
+    const pi = await db
+      .prepare(
+        `SELECT COALESCE(SUM(amountSen),0) AS s FROM purchase_invoices
+          WHERE isOpening = 1 AND status != 'DRAFT'`,
+      )
+      .first<{ s: number }>();
+    apTotalSen = Number(pi?.s) || 0;
+  } catch {
+    /* isOpening column missing — migration 0158 not applied yet */
+  }
+  return { arByControl, arTotalSen, apTotalSen };
+}
+
+app.get("/opening-balance", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const openingDate = await getOpeningDate(db);
+  // Net existing opening legs per account (posted minus reversed).
+  const glNet = new Map<string, number>(); // +ve = DR
+  let posted = false;
+  const legRes = await db
+    .prepare(
+      `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+        WHERE sourceType IN ('opening_balance','opening_balance_reversal')`,
+    )
+    .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+  const resolveOb = await loadAccountResolver(db);
+  for (const l of legRes.results ?? []) {
+    const code = resolveOb(l.accountCode);
+    glNet.set(
+      code,
+      (glNet.get(code) ?? 0) +
+        (Number(l.debitSen) || 0) -
+        (Number(l.creditSen) || 0),
+    );
+  }
+  const glRows = [...glNet.entries()]
+    .filter(([, net]) => net !== 0)
+    .map(([code, net]) => ({
+      accountCode: code,
+      debitSen: net > 0 ? net : 0,
+      creditSen: net < 0 ? -net : 0,
+    }))
+    .sort((a, b) => a.accountCode.localeCompare(b.accountCode));
+  posted = glRows.length > 0;
+
+  let migrationMissing = false;
+  let arInvoices: unknown[] = [];
+  let apInvoices: unknown[] = [];
+  try {
+    const ar = await db
+      .prepare(
+        `SELECT id, invoiceNo, customerId, customerName, invoiceDate, dueDate,
+                totalSen, paidAmount, status
+           FROM invoices
+          WHERE isOpening = 1 AND status NOT IN ('DRAFT','CANCELLED')
+          ORDER BY customerName, invoiceDate, invoiceNo`,
+      )
+      .all();
+    arInvoices = ar.results ?? [];
+    const ap = await db
+      .prepare(
+        `SELECT id, piNo, supplierId, supplierName, invoiceDate, dueDate,
+                amountSen, status
+           FROM purchase_invoices
+          WHERE isOpening = 1 AND status != 'DRAFT'
+          ORDER BY supplierName, invoiceDate, piNo`,
+      )
+      .all();
+    apInvoices = ap.results ?? [];
+  } catch {
+    migrationMissing = true;
+  }
+  const sums = await openingControlSums(db);
+  return c.json({
+    success: true,
+    data: {
+      openingDate,
+      posted,
+      migrationMissing,
+      glRows,
+      arInvoices,
+      apInvoices,
+      arByControl: Object.fromEntries(sums.arByControl),
+      arTotalSen: sums.arTotalSen,
+      apTotalSen: sums.apTotalSen,
+    },
+  });
+});
+
+// Add ONE opening invoice (AR). Subledger only — no GL legs, no SST.
+app.post("/opening-balance/ar", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const { customerId, invoiceNo, invoiceDate } = body;
+    const amountSen = Math.round(Number(body.amountSen) || 0);
+    if (!customerId || !invoiceNo || !invoiceDate || amountSen <= 0) {
+      return c.json(
+        { success: false, error: "customerId, invoiceNo, invoiceDate and a positive amountSen are required" },
+        400,
+      );
+    }
+    const cust = await c.var.DB.prepare(
+      "SELECT id, name, code FROM customers WHERE id = ?",
+    )
+      .bind(customerId)
+      .first<{ id: string; name: string; code: string | null }>();
+    if (!cust) {
+      return c.json({ success: false, error: "Customer not found" }, 404);
+    }
+    const dup = await c.var.DB.prepare(
+      "SELECT id FROM invoices WHERE invoiceNo = ?",
+    )
+      .bind(invoiceNo)
+      .first();
+    if (dup) {
+      return c.json({ success: false, error: `Invoice number ${invoiceNo} already exists` }, 400);
+    }
+    const now = new Date().toISOString();
+    const id = `inv-ob-${crypto.randomUUID().slice(0, 8)}`;
+    const dueDate = body.dueDate || nextMonthDueDate(invoiceDate);
+    await c.var.DB.batch([
+      c.var.DB.prepare(
+        `INSERT INTO invoices (
+           id, invoiceNo, customerId, customerName, subtotalSen, taxSen,
+           totalSen, status, invoiceDate, dueDate, paidAmount, notes,
+           isOpening, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 0, ?, 'SENT', ?, ?, 0, 'Opening balance', 1, ?, ?)`,
+      ).bind(id, invoiceNo, cust.id, cust.name, amountSen, amountSen, invoiceDate, dueDate, now, now),
+      c.var.DB.prepare(
+        "UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?",
+      ).bind(amountSen, cust.id),
+    ]);
+    return c.json({ success: true, data: { id } }, 201);
+  } catch {
+    return c.json(
+      { success: false, error: "Failed — is migration 0158 (isOpening column) applied?" },
+      400,
+    );
+  }
+});
+
+app.delete("/opening-balance/ar/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const row = await c.var.DB.prepare(
+    "SELECT id, customerId, totalSen, paidAmount, isOpening FROM invoices WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; customerId: string; totalSen: number; paidAmount: number; isOpening: number | null }>();
+  if (!row || (row.isOpening ?? 0) !== 1) {
+    return c.json({ success: false, error: "Opening invoice not found" }, 404);
+  }
+  if ((Number(row.paidAmount) || 0) !== 0) {
+    return c.json(
+      { success: false, error: "This opening invoice already has payments — it can no longer be removed" },
+      400,
+    );
+  }
+  await c.var.DB.batch([
+    c.var.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id),
+    c.var.DB.prepare(
+      "UPDATE customers SET outstandingSen = outstandingSen - ? WHERE id = ?",
+    ).bind(Number(row.totalSen) || 0, row.customerId),
+  ]);
+  return c.json({ success: true });
+});
+
+// Add ONE opening purchase invoice (AP). Subledger only — no GL legs.
+app.post("/opening-balance/ap", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const { supplierId, piNo, invoiceDate } = body;
+    const amountSen = Math.round(Number(body.amountSen) || 0);
+    if (!supplierId || !piNo || !invoiceDate || amountSen <= 0) {
+      return c.json(
+        { success: false, error: "supplierId, piNo, invoiceDate and a positive amountSen are required" },
+        400,
+      );
+    }
+    const sup = await c.var.DB.prepare(
+      "SELECT id, name FROM suppliers WHERE id = ?",
+    )
+      .bind(supplierId)
+      .first<{ id: string; name: string }>();
+    if (!sup) {
+      return c.json({ success: false, error: "Supplier not found" }, 404);
+    }
+    const dup = await c.var.DB.prepare(
+      "SELECT id FROM purchase_invoices WHERE piNo = ?",
+    )
+      .bind(piNo)
+      .first();
+    if (dup) {
+      return c.json({ success: false, error: `PI number ${piNo} already exists` }, 400);
+    }
+    const now = new Date().toISOString();
+    const id = `pi-ob-${crypto.randomUUID().slice(0, 8)}`;
+    const dueDate = body.dueDate || nextMonthDueDate(invoiceDate);
+    await c.var.DB.batch([
+      c.var.DB.prepare(
+        `INSERT INTO purchase_invoices (
+           id, piNo, supplierId, supplierName, invoiceDate, dueDate,
+           amountSen, status, remarks, isOpening, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'APPROVED', 'Opening balance', 1, ?, ?)`,
+      ).bind(id, piNo, sup.id, sup.name, invoiceDate, dueDate, amountSen, now, now),
+      c.var.DB.prepare(
+        "UPDATE suppliers SET outstandingSen = outstandingSen + ? WHERE id = ?",
+      ).bind(amountSen, sup.id),
+    ]);
+    return c.json({ success: true, data: { id } }, 201);
+  } catch {
+    return c.json(
+      { success: false, error: "Failed — is migration 0158 (isOpening column) applied?" },
+      400,
+    );
+  }
+});
+
+app.delete("/opening-balance/ap/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const row = await c.var.DB.prepare(
+    "SELECT id, supplierId, amountSen, status, isOpening FROM purchase_invoices WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; supplierId: string; amountSen: number; status: string; isOpening: number | null }>();
+  if (!row || (row.isOpening ?? 0) !== 1) {
+    return c.json({ success: false, error: "Opening PI not found" }, 404);
+  }
+  if (row.status === "PAID") {
+    return c.json(
+      { success: false, error: "This opening PI is already paid — it can no longer be removed" },
+      400,
+    );
+  }
+  await c.var.DB.batch([
+    c.var.DB.prepare("DELETE FROM purchase_invoices WHERE id = ?").bind(id),
+    c.var.DB.prepare(
+      "UPDATE suppliers SET outstandingSen = outstandingSen - ? WHERE id = ?",
+    ).bind(Number(row.amountSen) || 0, row.supplierId),
+  ]);
+  return c.json({ success: true });
+});
+
+// Post (or re-post) the GL opening batch. Balance-sheet accounts only;
+// debtor/creditor control legs are derived from the opening invoices so
+// control == subledger by construction. Re-posting reverses the previous
+// net first — the ledger is append-only.
+app.post("/opening-balance/post", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const openingDate = String(body.openingDate || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(openingDate)) {
+      return c.json({ success: false, error: "openingDate must be YYYY-MM-DD" }, 400);
+    }
+    const rowsIn: { code: string; debitSen?: number; creditSen?: number }[] =
+      Array.isArray(body.rows) ? body.rows : [];
+    const db = c.var.DB;
+    const coaRes = await db
+      .prepare("SELECT code, name, type, specialAccountType FROM chart_of_accounts")
+      .all<{ code: string; name: string; type: CoaRow["type"]; specialAccountType: string | null }>();
+    const coa = new Map(
+      (coaRes.results ?? []).map((a) => [a.code, a] as const),
+    );
+    const cleaned: { code: string; debitSen: number; creditSen: number }[] = [];
+    for (const r of rowsIn) {
+      const dr = Math.round(Number(r.debitSen) || 0);
+      const cr = Math.round(Number(r.creditSen) || 0);
+      if (dr === 0 && cr === 0) continue;
+      if (dr < 0 || cr < 0 || (dr > 0 && cr > 0)) {
+        return c.json(
+          { success: false, error: `${r.code}: enter a positive amount on ONE side only` },
+          400,
+        );
+      }
+      const acct = coa.get(r.code);
+      if (!acct) {
+        return c.json({ success: false, error: `Account ${r.code} not found` }, 400);
+      }
+      if (!["ASSET", "LIABILITY", "EQUITY"].includes(acct.type)) {
+        return c.json(
+          { success: false, error: `${r.code} is a P&L account — opening balances cover BALANCE SHEET accounts only (P&L history belongs to prior years' retained earnings)` },
+          400,
+        );
+      }
+      if (acct.specialAccountType === "SDC" || acct.specialAccountType === "SCC") {
+        return c.json(
+          { success: false, error: `${r.code} is a debtor/creditor control account — its opening comes from the per-customer/supplier opening invoices automatically` },
+          400,
+        );
+      }
+      cleaned.push({ code: r.code, debitSen: dr, creditSen: cr });
+    }
+    // Derived control legs from the opening invoices.
+    const sums = await openingControlSums(db);
+    for (const [ctl, amt] of sums.arByControl) {
+      if (amt !== 0) cleaned.push({ code: ctl, debitSen: amt, creditSen: 0 });
+    }
+    if (sums.apTotalSen !== 0) {
+      cleaned.push({ code: "400-0000", debitSen: 0, creditSen: sums.apTotalSen });
+    }
+    if (cleaned.length === 0) {
+      return c.json({ success: false, error: "Nothing to post — every line is zero" }, 400);
+    }
+    const totalDr = cleaned.reduce((s, r) => s + r.debitSen, 0);
+    const totalCr = cleaned.reduce((s, r) => s + r.creditSen, 0);
+    if (totalDr !== totalCr) {
+      return c.json(
+        {
+          success: false,
+          error: `Opening balances do not balance: DR ${totalDr} vs CR ${totalCr} (difference ${totalDr - totalCr} sen). Adjust — typically the difference belongs in capital/retained earnings.`,
+        },
+        400,
+      );
+    }
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const stamp = Date.now();
+    const legs: LedgerEntryInput[] = [];
+    let legNo = 1;
+    // Reverse the prior opening net (if any) in the same batch.
+    const prior = await db
+      .prepare(
+        `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+          WHERE sourceType IN ('opening_balance','opening_balance_reversal') AND orgId = ?`,
+      )
+      .bind(orgId)
+      .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+    const priorNet = new Map<string, number>();
+    for (const l of prior.results ?? []) {
+      priorNet.set(
+        l.accountCode,
+        (priorNet.get(l.accountCode) ?? 0) +
+          (Number(l.debitSen) || 0) -
+          (Number(l.creditSen) || 0),
+      );
+    }
+    for (const [code, net] of priorNet) {
+      if (net === 0) continue;
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "opening_balance_reversal",
+        sourceId: `ob-rev-${stamp}`,
+        legNo: legNo++,
+        accountCode: code,
+        debitSen: net < 0 ? -net : 0,
+        creditSen: net > 0 ? net : 0,
+        description: `Opening balance re-entry — prior figures reversed`,
+        actorUserId,
+        orgId,
+      });
+    }
+    for (const r of cleaned) {
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "opening_balance",
+        sourceId: `ob-${stamp}`,
+        legNo: legNo++,
+        accountCode: r.code,
+        debitSen: r.debitSen,
+        creditSen: r.creditSen,
+        description: `Opening balance as at ${openingDate}`,
+        actorUserId,
+        orgId,
+      });
+    }
+    const { statements } = await buildJournalEntryStatements(db, orgId, legs);
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO kv_config (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             updated_at = excluded.updated_at`,
+        )
+        .bind(OPENING_DATE_KV_KEY, JSON.stringify(openingDate), new Date().toISOString()) as unknown as D1PreparedStatement,
+    );
+    await db.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: `ob-${stamp}`,
+      action: "create",
+      after: { openingDate, lines: cleaned.length, totalSen: totalDr },
+    });
+    return c.json({
+      success: true,
+      data: { openingDate, lines: cleaned.length, totalSen: totalDr },
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
 });
 
 export default app;

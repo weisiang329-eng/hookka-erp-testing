@@ -175,6 +175,24 @@ app.post("/", async (c) => {
         400,
       );
     }
+    // Phase 3 follow-up (owner): the receipt deposits into a SPECIFIC
+    // bank/cash account picked in the dialog, not a method-derived
+    // default. Falls back to bankAcct(method) for older clients.
+    let depositAcct = bankAcct(method);
+    if (body.bankAccount) {
+      const acct = await c.var.DB.prepare(
+        "SELECT specialAccountType FROM chart_of_accounts WHERE code = ?",
+      )
+        .bind(String(body.bankAccount))
+        .first<{ specialAccountType: string | null }>();
+      if (!acct || (acct.specialAccountType !== "SBK" && acct.specialAccountType !== "SCH")) {
+        return c.json(
+          { success: false, error: "bankAccount must be a bank (SBK) or cash (SCH) account" },
+          400,
+        );
+      }
+      depositAcct = String(body.bankAccount);
+    }
 
     const customer = await c.var.DB.prepare(
       "SELECT id, name, code FROM customers WHERE id = ?",
@@ -493,7 +511,7 @@ app.post("/", async (c) => {
               sourceType: "payment",
               sourceId: id,
               legNo: 1,
-              accountCode: bankAcct(method),
+              accountCode: depositAcct,
               debitSen: amtSen,
               creditSen: 0,
               description: `Receipt ${receiptNumber} · ${customer.name}`,
@@ -713,6 +731,17 @@ app.put("/:id", async (c) => {
             .first<{ code: string }>();
           const ctl = parseDebtorCode(cust?.code);
           const controlCode = ctl.ok ? ctl.controlCode : "300-0000";
+          // Reverse the EXACT bank/cash account the receipt was posted to
+          // (the dialog may have picked a non-default account) — fall back
+          // to the method mapping only for legacy legs.
+          const origLeg = await c.var.DB.prepare(
+            `SELECT accountCode FROM ledger_journal_entries
+              WHERE sourceType = 'payment' AND sourceId = ? AND orgId = ? AND debitSen > 0
+              LIMIT 1`,
+          )
+            .bind(id, orgId)
+            .first<{ accountCode: string }>();
+          const reverseBankAcct = origLeg?.accountCode ?? bankAcct(existing.method);
           const { statements: revStmts } = await buildJournalEntryStatements(
             c.var.DB,
             orgId,
@@ -734,7 +763,7 @@ app.put("/:id", async (c) => {
                 sourceType: "payment_bounce",
                 sourceId: id,
                 legNo: 2,
-                accountCode: bankAcct(existing.method),
+                accountCode: reverseBankAcct,
                 debitSen: 0,
                 creditSen: amtSen,
                 description: `REVERSAL · bounced receipt ${existing.receiptNumber}`,

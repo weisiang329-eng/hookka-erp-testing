@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,10 +43,32 @@ export default function PaymentsPage() {
   // Create form state
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [amount, setAmount] = useState<number>(0);
+  // Raw string the operator is typing — NEVER re-format mid-keystroke
+  // (the toFixed(2) round-trip made "12" impossible to type; same fix as
+  // the CN/DN/JV inputs).
+  const [amountStr, setAmountStr] = useState("");
   const [method, setMethod] = useState<PaymentRecord["method"]>("BANK_TRANSFER");
   const [reference, setReference] = useState("");
+  // Owner: the receipt deposits into a SPECIFIC bank/cash account, not a
+  // method-derived default. Options = SBK/SCH accounts from the COA.
+  const [bankAccount, setBankAccount] = useState("");
+  const [bankOptions, setBankOptions] = useState<{ code: string; name: string }[]>([]);
   const [allocations, setAllocations] = useState<{ invoiceId: string; amount: number }[]>([]);
   const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/accounting/coa")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { code: string; name: string; specialAccountType?: string }[] }>)
+      .then((j) => {
+        if (!j?.success) return;
+        const opts = (j.data ?? [])
+          .filter((a) => a.specialAccountType === "SBK" || a.specialAccountType === "SCH")
+          .map((a) => ({ code: a.code, name: a.name }));
+        setBankOptions(opts);
+        setBankAccount((prev) => prev || opts[0]?.code || "");
+      })
+      .catch(() => {});
+  }, []);
 
   const openCreate = () => {
     refreshCustomers();
@@ -102,6 +124,7 @@ export default function PaymentsPage() {
           amount,
           method,
           reference,
+          bankAccount,
           allocations,
         },
       });
@@ -109,6 +132,7 @@ export default function PaymentsPage() {
         setShowCreateModal(false);
         setSelectedCustomerId("");
         setAmount(0);
+        setAmountStr("");
         setMethod("BANK_TRANSFER");
         setReference("");
         setAllocations([]);
@@ -327,29 +351,44 @@ export default function PaymentsPage() {
                 </select>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                {/* Amount */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {/* Amount — raw string while typing; sen derived per keystroke
+                    but the FIELD never re-formats (the old toFixed(2)
+                    round-trip made amounts impossible to type). */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Amount (RM)</label>
-                  {/* Operator types RM (e.g. "1000.00"); we convert to sen on every
-                      keystroke (× 100, rounded). API + storage stay in sen. */}
                   <input
-                    type="number" onFocus={(e) => e.currentTarget.select()}
-                    step="0.01"
+                    type="text"
                     inputMode="decimal"
-                    min="0"
-                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                    value={amount ? (amount / 100).toFixed(2) : ""}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm text-right tabular-nums"
+                    value={amountStr}
                     onChange={(e) => {
+                      setAmountStr(e.target.value);
                       const rm = parseFloat(e.target.value);
-                      const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
-                      setAmount(sen);
+                      setAmount(Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0);
                     }}
                     placeholder="e.g. 1000.00"
                   />
                   {amount > 0 && (
                     <p className="text-xs text-gray-500 mt-1">= {formatCurrency(amount)}</p>
                   )}
+                </div>
+
+                {/* Deposit To — the actual bank/cash account the money lands
+                    in (drives the GL bank leg; Method stays as metadata). */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Deposit To</label>
+                  <select
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                    value={bankAccount}
+                    onChange={(e) => setBankAccount(e.target.value)}
+                  >
+                    {bankOptions.length === 0 && <option value="">— bank/cash —</option>}
+                    {bankOptions.map((a) => (
+                      <option key={a.code} value={a.code}>{a.code} {a.name}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* Method */}

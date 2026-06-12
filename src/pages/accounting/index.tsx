@@ -967,96 +967,125 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       {SECTIONS.map((section) => {
         const type = section.type;
         const typeAccounts = accounts.filter((a) => sectionOf(a) === section.key);
-        const children = (parentCode: string) => typeAccounts.filter((a) => a.parentCode === parentCode);
-        // Phase 1 — real hierarchy (migration 0154): top-level accounts
-        // with children (or flagged non-postable) render as section
-        // headers; standalone postable top-level accounts render as
-        // normal rows (previously EVERY parentless account rendered as a
-        // bare header with no balance or actions).
-        const topLevel = typeAccounts.filter((a) => !a.parentCode);
-        const headers = topLevel.filter(
-          (a) => a.isPostable === false || children(a.code).length > 0,
-        );
-        const standalone = topLevel.filter(
-          (a) => a.isPostable !== false && children(a.code).length === 0,
-        );
-        // Owner: within a section everything sorts by account code, with
-        // the PARENT's code as the anchor — parents and standalone
-        // accounts interleave in code order, children follow their parent
-        // (also code-sorted).
+        // Owner (round 3) — the COA is a REAL multi-level tree, e.g.
+        // 700-0000 MANUFACTURING ACCOUNT → 701-0000 PURCHASE - FABRIC →
+        // 701-0010 PURCHASE - B.M FABRIC. Render it RECURSIVELY (any
+        // depth), AutoCount-style: every node with children gets a caret
+        // and collapses; code-sorted at every level. Postable parents
+        // (e.g. 410-0000 ACCRUALS) keep their balance + actions alongside
+        // the caret; non-postable headers show the sub-account count.
         const byCode = (x: ChartOfAccount, y: ChartOfAccount) =>
           x.code.localeCompare(y.code);
-        const topNodes = [...headers, ...standalone].sort(byCode);
-        const headerSet = new Set(headers.map((h) => h.code));
+        const kidsOf = (code: string) =>
+          typeAccounts.filter((a) => a.parentCode === code).sort(byCode);
+        const codesInSection = new Set(typeAccounts.map((a) => a.code));
+        const treeTops = typeAccounts
+          .filter((a) => !a.parentCode || !codesInSection.has(a.parentCode))
+          .sort(byCode);
         const isExpanded = expanded[section.key];
 
-        const renderRow = (child: ChartOfAccount, indent: boolean) => (
-          <div
-            key={child.code}
-            className={`flex items-center justify-between py-2 px-2 ${indent ? "pl-8" : ""} text-sm border-b border-[#F0ECE9] hover:bg-[#F0ECE9]/30 group`}
-          >
-            <div className="flex items-center gap-3">
-              <span className="text-[#6B7280] font-mono text-xs">{child.code}</span>
-              {editCode === child.code ? (
-                <input
-                  type="text"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleEdit(child.code)}
-                  className="rounded border border-[#E2DDD8] px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
-                  autoFocus
-                />
-              ) : (
-                <span className="text-[#1F1D1B]">{child.name}</span>
-              )}
-            </div>
-            <div className="flex items-center gap-3">
-              {(child.type === "EXPENSE" || child.type === "COST") && (
-                <select
-                  value={child.pnlCategory ?? ""}
-                  onChange={(e) => handleSetPnl(child.code, e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] text-[#6B7280] focus:outline-none"
-                  title="P&L category (Fixed / Variable / Others)"
-                >
-                  <option value="">P&L: —</option>
-                  <option value="FIXED">Fixed</option>
-                  <option value="VARIABLE">Variable</option>
-                  <option value="OTHERS">Others</option>
-                </select>
-              )}
-              <span className={`font-medium ${child.balance < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
-                {formatCurrency(Math.abs(child.balance))}
-                {child.balance < 0 ? " CR" : ""}
-              </span>
-              <div className="flex gap-1">
-                {editCode === child.code ? (
-                  <>
-                    <button onClick={() => handleEdit(child.code)} className="text-[#4F7C3A] hover:text-[#3D6329] p-1 cursor-pointer"><Check className="h-3.5 w-3.5" /></button>
-                    <button onClick={() => setEditCode(null)} className="text-[#6B7280] hover:text-[#1F1D1B] p-1 cursor-pointer"><X className="h-3.5 w-3.5" /></button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setEditCode(child.code); setEditName(child.name); }}
-                      className="text-[#6B7280] hover:text-[#6B5C32] p-1 cursor-pointer"
-                      title="Edit"
-                    >
-                      <FileText className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDeactivate(child.code); }}
-                      className="text-[#6B7280] hover:text-[#9A3A2D] p-1 cursor-pointer"
-                      title="Deactivate"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </>
-                )}
+        const renderNode = (node: ChartOfAccount, depth: number): React.ReactNode => {
+          const kids = kidsOf(node.code);
+          const hasKids = kids.length > 0;
+          const open = !collapsedParents[node.code];
+          const isHeader = node.isPostable === false;
+          return (
+            <div key={node.code}>
+              <div
+                className={`flex items-center justify-between py-2 pr-2 text-sm border-b ${isHeader ? "bg-[#F0ECE9]/60 border-[#E2DDD8] font-semibold text-[#1F1D1B]" : "border-[#F0ECE9] hover:bg-[#F0ECE9]/30"} ${hasKids ? "cursor-pointer" : ""} group`}
+                style={{ paddingLeft: `${8 + depth * 22}px` }}
+                onClick={
+                  hasKids
+                    ? () =>
+                        setCollapsedParents({
+                          ...collapsedParents,
+                          [node.code]: open,
+                        })
+                    : undefined
+                }
+              >
+                <div className="flex items-center gap-2">
+                  {hasKids ? (
+                    open ? (
+                      <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#6B5C32]" />
+                    )
+                  ) : (
+                    <span className="w-3.5 shrink-0" />
+                  )}
+                  <span className="text-[#6B7280] font-mono text-xs">{node.code}</span>
+                  {editCode === node.code ? (
+                    <input
+                      type="text"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && handleEdit(node.code)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="rounded border border-[#E2DDD8] px-2 py-0.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                      autoFocus
+                    />
+                  ) : (
+                    <span className={isHeader ? "" : "text-[#1F1D1B]"}>{node.name}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3" onClick={(e) => e.stopPropagation()}>
+                  {isHeader ? (
+                    <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">
+                      {kids.length} sub-accounts
+                    </span>
+                  ) : (
+                    <>
+                      {(node.type === "EXPENSE" || node.type === "COST") && (
+                        <select
+                          value={node.pnlCategory ?? ""}
+                          onChange={(e) => handleSetPnl(node.code, e.target.value)}
+                          className="rounded border border-[#E2DDD8] bg-white px-1 py-0.5 text-[11px] text-[#6B7280] focus:outline-none"
+                          title="P&L category (Fixed / Variable / Others)"
+                        >
+                          <option value="">P&L: —</option>
+                          <option value="FIXED">Fixed</option>
+                          <option value="VARIABLE">Variable</option>
+                          <option value="OTHERS">Others</option>
+                        </select>
+                      )}
+                      <span className={`font-medium ${node.balance < 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                        {formatCurrency(Math.abs(node.balance))}
+                        {node.balance < 0 ? " CR" : ""}
+                      </span>
+                      <div className="flex gap-1">
+                        {editCode === node.code ? (
+                          <>
+                            <button onClick={() => handleEdit(node.code)} className="text-[#4F7C3A] hover:text-[#3D6329] p-1 cursor-pointer"><Check className="h-3.5 w-3.5" /></button>
+                            <button onClick={() => setEditCode(null)} className="text-[#6B7280] hover:text-[#1F1D1B] p-1 cursor-pointer"><X className="h-3.5 w-3.5" /></button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => { setEditCode(node.code); setEditName(node.name); }}
+                              className="text-[#6B7280] hover:text-[#6B5C32] p-1 cursor-pointer"
+                              title="Edit"
+                            >
+                              <FileText className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeactivate(node.code)}
+                              className="text-[#6B7280] hover:text-[#9A3A2D] p-1 cursor-pointer"
+                              title="Deactivate"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
+              {hasKids && open && kids.map((k) => renderNode(k, depth + 1))}
             </div>
-          </div>
-        );
+          );
+        };
 
         return (
           <Card key={section.key}>
@@ -1078,50 +1107,7 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
             {isExpanded && (
               <CardContent className="pt-0 pb-2">
                 <div className="border-t border-[#E2DDD8]">
-                  {topNodes.map((node) => {
-                    if (!headerSet.has(node.code)) {
-                      // Standalone postable top-level account — code-sorted
-                      // alongside the parents.
-                      return renderRow(node, false);
-                    }
-                    const parent = node;
-                    const open = !collapsedParents[parent.code];
-                    const kids = children(parent.code).sort(byCode);
-                    return (
-                    <div key={parent.code}>
-                      {/* PARENT row — visually distinct (tinted, bold),
-                          click to expand/collapse its sub-accounts */}
-                      <div
-                        className="flex items-center justify-between py-2 px-2 text-sm font-semibold text-[#1F1D1B] bg-[#F0ECE9]/60 border-b border-[#E2DDD8] cursor-pointer hover:bg-[#F0ECE9]"
-                        onClick={() =>
-                          setCollapsedParents({
-                            ...collapsedParents,
-                            [parent.code]: open,
-                          })
-                        }
-                      >
-                        <span className="flex items-center gap-1.5">
-                          {open ? <ChevronDownIcon className="h-3.5 w-3.5 text-[#6B5C32]" /> : <ChevronRight className="h-3.5 w-3.5 text-[#6B5C32]" />}
-                          <span className="font-mono text-xs text-[#6B7280]">{parent.code}</span>
-                          {parent.name}
-                        </span>
-                        <span className="text-[11px] uppercase tracking-wide text-[#9CA3AF]">
-                          {kids.length} sub-accounts
-                        </span>
-                      </div>
-                      {open && (
-                        <div className="border-l-2 border-[#E2DDD8] ml-3">
-                          {kids.map((child) => renderRow(child, true))}
-                        </div>
-                      )}
-                    </div>
-                    );
-                  })}
-                  {/* Orphans — parentCode points outside this section's headers */}
-                  {typeAccounts
-                    .filter((a) => a.parentCode && !headerSet.has(a.parentCode))
-                    .sort(byCode)
-                    .map((child) => renderRow(child, false))}
+                  {treeTops.map((node) => renderNode(node, 0))}
                 </div>
               </CardContent>
             )}

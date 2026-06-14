@@ -194,6 +194,17 @@ export default function DocumentFlowDiagram({
     }
   };
 
+  // Only label edge types actually drawn in THIS graph. Inter-node arrows are
+  // all "full"; cross-row links carry their own type. Without this the legend
+  // advertised Partial / Value / Payment lines that never appear.
+  const usedTypes = useMemo(() => {
+    const s = new Set<LinkType>();
+    if (salesFlow.length > 1) s.add("full");
+    if ((purchaseFlow?.length ?? 0) > 1) s.add("full");
+    for (const l of crossLinks ?? []) s.add(l.type);
+    return s;
+  }, [salesFlow, purchaseFlow, crossLinks]);
+
   return (
     <div className="bg-white rounded-xl border border-[#E2DDD8] shadow-lg overflow-hidden">
       {/* Header */}
@@ -301,14 +312,15 @@ export default function DocumentFlowDiagram({
         </svg>
       </div>
 
-      {/* Legend */}
-      <div className="flex items-center gap-6 px-5 py-2.5 border-t border-[#E2DDD8] bg-[#FAFAF8]">
+      {/* Legend — only the edge types present in THIS graph */}
+      {usedTypes.size > 0 && (
+        <div className="flex items-center gap-6 px-5 py-2.5 border-t border-[#E2DDD8] bg-[#FAFAF8]">
         {[
           { type: "full" as LinkType, label: "Full Transfer" },
           { type: "partial" as LinkType, label: "Partial Transfer" },
           { type: "value" as LinkType, label: "Value Transfer" },
           { type: "payment" as LinkType, label: "Payment" },
-        ].map(({ type, label }) => (
+        ].filter((it) => usedTypes.has(it.type)).map(({ type, label }) => (
           <div key={type} className="flex items-center gap-1.5">
             <svg width="24" height="10">
               <line
@@ -327,7 +339,8 @@ export default function DocumentFlowDiagram({
             </span>
           </div>
         ))}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

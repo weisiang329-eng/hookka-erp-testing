@@ -1209,6 +1209,48 @@ app.get("/stats", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/sales-orders/delivery-progress — per-SO delivered quantity.
+//
+// Returns { delivered: { [companySOId]: qty } } = Σ quantity of this SO's line
+// items sitting on a DELIVERED (or INVOICED, i.e. delivered-then-invoiced) DO.
+// The Sales list pairs it with each SO's own total qty to show real partial-
+// delivery progress ("3/10 delivered") instead of flipping the whole order to
+// one misleading label the moment a single line ships. Item→SO is via
+// delivery_order_items.sales_order_no because a DO can span several SOs.
+//
+// Isolated, read-only, and best-effort: if it ever errors the Sales list still
+// renders (the frontend just omits the partial indicator). Registered BEFORE
+// /:id so Hono's router picks this handler.
+// ---------------------------------------------------------------------------
+app.get("/delivery-progress", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const res = await c.var.DB
+    .prepare(
+      `SELECT di.sales_order_no AS "so", COALESCE(SUM(di.quantity), 0) AS "qty"
+         FROM delivery_order_items di
+        WHERE di.orgId = ?
+          AND di.sales_order_no IS NOT NULL
+          AND di.sales_order_no <> ''
+          AND EXISTS (
+                SELECT 1 FROM delivery_orders d
+                 WHERE d.id = di.deliveryOrderId
+                   AND d.orgId = ?
+                   AND d.status IN ('DELIVERED', 'INVOICED')
+              )
+        GROUP BY di.sales_order_no`,
+    )
+    .bind(orgId, orgId)
+    .all<{ so: string; qty: number }>();
+  const delivered: Record<string, number> = {};
+  for (const r of res.results ?? []) {
+    if (r.so) delivered[r.so] = Number(r.qty) || 0;
+  }
+  return c.json({ success: true, delivered });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/sales-orders/repair-components — the pickable repair components
 // for one product line (Component-level Repair Scope).
 //

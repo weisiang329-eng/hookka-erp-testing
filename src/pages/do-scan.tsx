@@ -11,7 +11,6 @@ import { useParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
-  ExternalLink,
   PackageX,
   Send,
   Truck,
@@ -290,11 +289,6 @@ export default function DoScanPage() {
     }
   };
 
-  const erpHref =
-    payload?.kind === "DO" && payload.dos[0]
-      ? `/delivery/${payload.dos[0].id}`
-      : "/delivery";
-
   return (
     <div className="min-h-screen bg-[#F0ECE9]">
       {/* Header */}
@@ -482,18 +476,8 @@ export default function DoScanPage() {
               </div>
             )}
 
-            {/* Office link — edits (remove/add items) happen in the ERP,
-                login required there. */}
-            <a
-              href={erpHref}
-              className="block text-center text-sm text-[#6B5C32] font-medium py-2"
-            >
-              <span className="inline-flex items-center gap-1">
-                <ExternalLink className="h-4 w-4" /> Open in Hookka ERP (staff
-                login)
-              </span>
-            </a>
-
+            {/* No staff-ERP link here — this is the public driver page
+                (Wei Siang 2026-06-15: a driver shouldn't see a staff login). */}
             <p className="text-[10px] text-center text-gray-400">
               Need a change to the load? Contact the Hookka office — this page
               only updates delivery status.

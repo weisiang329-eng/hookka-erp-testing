@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { useTimeout } from "@/lib/scheduler";
 import { humanizeError } from "@/lib/humanize-error";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
+import { SoDocumentRelationship } from "@/components/ui/so-document-relationship";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1199,6 +1200,15 @@ export default function InvoiceDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Document Relationship — same chain graph as the SO page, so you can
+          see how THIS invoice connects to its SO / DO / payments from here. */}
+      {invoice?.salesOrderId && (
+        <SoDocumentRelationship
+          soId={invoice.salesOrderId}
+          currentDocNo={invoice.invoiceNo}
+        />
       )}
 
       {/* Audit trail for this invoice */}

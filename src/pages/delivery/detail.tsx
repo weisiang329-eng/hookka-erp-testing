@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";
+import { SoDocumentRelationship } from "@/components/ui/so-document-relationship";
 import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import {
   User,
@@ -859,6 +860,13 @@ export default function DeliveryDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Document Relationship — the same chain graph as the SO page, so you
+          can see how THIS delivery order connects to its SO / invoice / payment
+          right from here. */}
+      {order?.salesOrderId && (
+        <SoDocumentRelationship soId={order.salesOrderId} currentDocNo={order.doNo} />
+      )}
 
       {/* POD Capture Dialog */}
       <PODDialog

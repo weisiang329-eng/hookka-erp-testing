@@ -133,9 +133,17 @@ export async function verifiedSave<T>(args: VerifiedSaveArgs<T>): Promise<SaveRe
   const diffs: Array<{ field: string; expected: unknown; actual: unknown }> = [];
   for (const [field, expected] of Object.entries(args.expect)) {
     const actual = (data as Record<string, unknown>)[field];
+    // An ARRAY of expected values means "one of" — pass when the actual matches
+    // any of them. Used for transitions that legitimately settle on more than
+    // one valid end-state: e.g. marking a DO DELIVERED auto-creates its invoice
+    // and immediately bumps it to INVOICED, so both DELIVERED and INVOICED are
+    // a successful delivery. Otherwise it's an exact (loose) match.
     // Normalise null/undefined/"" so a backend that returns "" for a cleared
     // field doesn't trip the comparison when caller expected null.
-    if (!equalLoose(actual, expected)) {
+    const ok = Array.isArray(expected)
+      ? expected.some((e) => equalLoose(actual, e))
+      : equalLoose(actual, expected);
+    if (!ok) {
       diffs.push({ field, expected, actual });
     }
   }

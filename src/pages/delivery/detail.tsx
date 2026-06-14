@@ -189,7 +189,11 @@ export default function DeliveryDetailPage() {
           const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
           return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
         },
-        expect: { status: target },
+        // Delivering auto-creates the invoice and bumps the DO straight to
+        // INVOICED, so a DELIVERED advance may settle on either — accept both.
+        expect: {
+          status: target === "DELIVERED" ? ["DELIVERED", "INVOICED"] : target,
+        },
       });
       if (!result.ok) {
         if (result.reason === "mismatch") {
@@ -311,7 +315,14 @@ export default function DeliveryDetailPage() {
           const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
           return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
         },
-        expect: { status: expectStatus },
+        // Delivering auto-creates the invoice and bumps the DO to INVOICED, so
+        // accept either when the POD transitions the DO to DELIVERED.
+        expect: {
+          status:
+            expectStatus === "DELIVERED"
+              ? ["DELIVERED", "INVOICED"]
+              : expectStatus,
+        },
       });
       if (!result.ok) {
         if (result.reason === "mismatch") {

@@ -2739,7 +2739,9 @@ export default function DeliveryPage() {
           const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
           return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
         },
-        expect: { status: "DELIVERED" },
+        // DELIVERED auto-creates the invoice and bumps the DO straight to
+        // INVOICED — both are a successful delivery, so accept either.
+        expect: { status: ["DELIVERED", "INVOICED"] },
       });
       if (result.ok) {
         // Invoice notice (fire-and-forget) — the DELIVERED cascade just

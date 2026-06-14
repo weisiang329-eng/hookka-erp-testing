@@ -3161,11 +3161,141 @@ async function stockSummary(
   return { rows: list, wip, fg, totals };
 }
 
+// Build the closing-stock journal legs for a month (shared by preview +
+// post). Periodic-inventory pair per group/WIP/FG: take up closing
+// (DR 330 stock · CR SCS) + bring down opening (DR SOS · CR 330 stock).
+// Net 330 = closing − opening (the asset), net P&L = opening − closing
+// (the stock movement into COGS). The /pl manufacturing section reads
+// opening/closing LIVE and overrides these SOS/SCS legs, so there is no
+// double count — the legs exist to put inventory on the Balance Sheet
+// and keep the trial balance whole.
+async function buildClosingStockLegs(
+  db: Env["Variables"]["DB"],
+  month: string,
+  orgId: string,
+  actorUserId: string | null,
+  sourceId: string,
+): Promise<{ legs: LedgerEntryInput[]; closingTotalSen: number }> {
+  const { rows, wip, fg } = await stockSummary(db, month);
+  const map = await getStockMap(db);
+  const legs: LedgerEntryInput[] = [];
+  let legNo = 1;
+  let closingTotalSen = 0;
+  const pair = (stock: string, sos: string, scs: string, openingSen: number, closingSen: number, label: string) => {
+    if (closingSen !== 0) {
+      legs.push({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "closing_stock", sourceId, legNo: legNo++, accountCode: stock, debitSen: closingSen, creditSen: 0, description: `Closing stock ${month} · ${label}`, actorUserId, orgId });
+      legs.push({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "closing_stock", sourceId, legNo: legNo++, accountCode: scs, debitSen: 0, creditSen: closingSen, description: `Closing stock ${month} · ${label}`, actorUserId, orgId });
+      closingTotalSen += closingSen;
+    }
+    if (openingSen !== 0) {
+      legs.push({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "closing_stock", sourceId, legNo: legNo++, accountCode: sos, debitSen: openingSen, creditSen: 0, description: `Opening stock ${month} · ${label}`, actorUserId, orgId });
+      legs.push({ id: `lje-${crypto.randomUUID().slice(0, 12)}`, sourceType: "closing_stock", sourceId, legNo: legNo++, accountCode: stock, debitSen: 0, creditSen: openingSen, description: `Opening stock ${month} · ${label}`, actorUserId, orgId });
+    }
+  };
+  for (const r of rows) {
+    const m = map.rm[r.group] ?? map.rmDefault;
+    pair(m.stock, m.opening, m.closing, Math.round(r.openingSen), Math.round(r.closingSen), r.group);
+  }
+  pair(map.wip.stock, map.wip.opening, map.wip.closing, Math.round(wip.openingSen), Math.round(wip.closingSen), "WIP");
+  pair(map.fg.stock, map.fg.opening, map.fg.closing, Math.round(fg.openingSen), Math.round(fg.closingSen), "FG");
+  return { legs, closingTotalSen };
+}
+
+app.post("/stock/close-post", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const month = String(body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    }
+    const today = new Date().toISOString().slice(0, 7);
+    if (month > today) {
+      return c.json({ success: false, error: `Cannot close stock for a future month (${month})` }, 400);
+    }
+    const db = c.var.DB;
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const stamp = Date.now();
+    // Reverse the prior closing-stock net (any month) so a re-post or the
+    // next month always lands the 330 stock accounts at THIS month's
+    // closing — history-independent, like the opening-balance re-post.
+    const prior = await db
+      .prepare(
+        `SELECT accountCode, debitSen, creditSen FROM ledger_journal_entries
+          WHERE sourceType IN ('closing_stock','closing_stock_reversal') AND orgId = ?`,
+      )
+      .bind(orgId)
+      .all<{ accountCode: string; debitSen: number; creditSen: number }>();
+    const priorNet = new Map<string, number>();
+    for (const l of prior.results ?? []) {
+      priorNet.set(l.accountCode, (priorNet.get(l.accountCode) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+    }
+    const legs: LedgerEntryInput[] = [];
+    let legNo = 1;
+    for (const [code, net] of priorNet) {
+      if (net === 0) continue;
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "closing_stock_reversal",
+        sourceId: `cs-rev-${stamp}`,
+        legNo: legNo++,
+        accountCode: code,
+        debitSen: net < 0 ? -net : 0,
+        creditSen: net > 0 ? net : 0,
+        description: `Prior closing-stock reversed`,
+        actorUserId,
+        orgId,
+      });
+    }
+    const { legs: freshLegs, closingTotalSen } = await buildClosingStockLegs(
+      db,
+      month,
+      orgId,
+      actorUserId,
+      `cs-${month}-${stamp}`,
+    );
+    if (freshLegs.length === 0 && legs.length === 0) {
+      return c.json({ success: false, error: `No stock movements for ${month} — nothing to post.` }, 400);
+    }
+    legs.push(...freshLegs);
+    const { statements } = await buildJournalEntryStatements(db, orgId, legs);
+    await db.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: `cs-${month}`,
+      action: "create",
+      after: { month, closingTotalSen },
+    });
+    return c.json({ success: true, data: { month, closingTotalSen } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
 app.get("/stock-summary", async (c) => {
   const denied = await requirePermission(c, "accounting", "read");
   if (denied) return denied;
   const period = c.req.query("period") || undefined;
   const { rows, wip, fg, totals } = await stockSummary(c.var.DB, period);
+  // Has this month's closing stock been posted? (informational for the UI)
+  let posted = false;
+  if (period && /^\d{4}-\d{2}$/.test(period)) {
+    try {
+      const orgId = getOrgId(c);
+      const row = await c.var.DB.prepare(
+        `SELECT 1 AS x FROM ledger_journal_entries
+          WHERE sourceType = 'closing_stock' AND sourceId LIKE ? AND orgId = ? LIMIT 1`,
+      )
+        .bind(`cs-${period}-%`, orgId)
+        .first<{ x: number }>();
+      posted = !!row;
+    } catch {
+      /* ignore */
+    }
+  }
   // Attach the group description + mapped COA accounts for display.
   const stockMap = await getStockMap(c.var.DB);
   return c.json({
@@ -3181,6 +3311,7 @@ app.get("/stock-summary", async (c) => {
       wip,
       fg,
       totals,
+      posted,
     },
   });
 });

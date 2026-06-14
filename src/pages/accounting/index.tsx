@@ -4616,12 +4616,16 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
 // posting build on.
 
 function StockSummaryTab() {
+  const { toast } = useToast();
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [reloadKey, setReloadKey] = useState(0);
+  const [posting, setPosting] = useState(false);
   const [data, setData] = useState<{
     rows: { group: string; description: string; openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number; balanced: boolean; accounts: { stock: string; opening: string; closing: string } }[];
     wip: { openingSen: number; closingSen: number };
     fg: { openingSen: number; closingSen: number };
     totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
+    posted: boolean;
   } | null>(null);
 
   useEffect(() => {
@@ -4631,9 +4635,28 @@ function StockSummaryTab() {
       .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
       .catch(() => {});
     return () => { stale = true; };
-  }, [month]);
+  }, [month, reloadKey]);
 
   const anyUnbalanced = (data?.rows ?? []).some((r) => !r.balanced);
+
+  const handlePost = async () => {
+    if (!window.confirm(`Post closing stock for ${month}? This takes the period's stock onto the balance-sheet stock accounts (DR 330-x · CR closing-stock) and brings down opening; re-posting/next month re-bases automatically.`)) return;
+    setPosting(true);
+    try {
+      const res = await fetch("/api/accounting/stock/close-post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { closingTotalSen: number }; error?: string };
+      if (j?.success && j.data) {
+        toast.success(`Closing stock ${month} posted — ${formatCurrency(j.data.closingTotalSen)} on the balance sheet`);
+        setReloadKey((k) => k + 1);
+      } else toast.error(j?.error || "Post failed");
+    } finally {
+      setPosting(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -4644,6 +4667,14 @@ function StockSummaryTab() {
             <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Month</label>
             <input type="month" value={month} onChange={(e) => { setData(null); setMonth(e.target.value); }} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm" />
           </div>
+          {data && (
+            <>
+              <Button variant="primary" size="sm" disabled={posting || data.totals.closingSen === 0} onClick={handlePost}>
+                {posting ? "Posting…" : data.posted ? "Re-post closing stock" : "Post closing stock to GL"}
+              </Button>
+              {data.posted && <span className="text-xs text-[#27500A] pb-2">Posted ✓ — on the balance sheet</span>}
+            </>
+          )}
           <p className="text-[11px] text-[#9CA3AF] pb-1">Opening + Purchases − Consumption = Closing, per material group, live from the cost ledger.</p>
         </CardContent>
       </Card>

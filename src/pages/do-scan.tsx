@@ -6,12 +6,13 @@
 // "Mark Dispatched" / "Mark Delivered" buttons perform. Mirrors the public
 // /track page's mounting + visual style.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
+  PackageX,
   Send,
   Truck,
 } from "lucide-react";
@@ -25,6 +26,8 @@ type PublicDoSummary = {
   status: string;
   itemCount: number;
   productNames: string[];
+  // Delivered "with issues" — paperwork incomplete, invoice on hold.
+  incomplete?: boolean;
 };
 
 type PublicPayload =
@@ -38,6 +41,11 @@ type AdvanceResult = {
   to?: string;
   note?: string;
 };
+
+// The button the crew tapped. DISPATCH = 1st scan. The 2nd scan splits into
+// two outcomes: DELIVER_OK (complete → auto-invoice + receipt) and
+// DELIVER_ISSUE (delivered but paperwork incomplete → invoice held back).
+type ActionMode = "DISPATCH" | "DELIVER_OK" | "DELIVER_ISSUE";
 
 type AdvanceResponse = {
   success?: boolean;
@@ -113,7 +121,53 @@ function DoCard({ d }: { d: PublicDoSummary }) {
           )}
         </p>
       </div>
+      {d.incomplete && (
+        <div className="flex items-start gap-1.5 rounded-lg bg-[#FBF1DF] px-2.5 py-2 text-xs text-[#9C6F1E]">
+          <PackageX className="h-4 w-4 shrink-0 mt-px" />
+          <span>
+            Delivered with issues — paperwork incomplete, the office will
+            invoice once resolved.
+          </span>
+        </div>
+      )}
     </div>
+  );
+}
+
+// Big confirm-on-second-tap button. Spinner shows only on the button actually
+// firing (its mode is the armed one); the others just disable while busy.
+function ActionButton({
+  mode,
+  armed,
+  busy,
+  onTap,
+  tone,
+  icon,
+  label,
+}: {
+  mode: ActionMode;
+  armed: ActionMode | null;
+  busy: boolean;
+  onTap: (m: ActionMode) => void;
+  tone: string;
+  icon: ReactNode;
+  label: string;
+}) {
+  const isArmed = armed === mode;
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => onTap(mode)}
+      className={`w-full rounded-xl ${tone} py-4 text-lg font-bold shadow-sm flex items-center justify-center gap-2 disabled:opacity-60`}
+    >
+      {busy && isArmed ? (
+        <span className="h-5 w-5 rounded-full border-2 border-current border-t-transparent animate-spin" />
+      ) : (
+        icon
+      )}
+      {isArmed ? `Tap again to confirm — ${label}` : label}
+    </button>
   );
 }
 
@@ -123,12 +177,13 @@ export default function DoScanPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // armed = first tap happened, waiting for the confirm tap.
-  const [armed, setArmed] = useState(false);
+  // armed = which button got its first tap, waiting for the confirm tap. The
+  // deliver step offers two outcomes so we track the specific mode, not a bool.
+  const [armed, setArmed] = useState<ActionMode | null>(null);
   const [busy, setBusy] = useState(false);
   const [advanceError, setAdvanceError] = useState<string | null>(null);
   const [lastResults, setLastResults] = useState<AdvanceResult[] | null>(null);
-  const [justCompleted, setJustCompleted] = useState<"DISPATCH" | "DELIVER" | null>(null);
+  const [justCompleted, setJustCompleted] = useState<ActionMode | null>(null);
 
   // No synchronous setState before the first await — `loading` starts true
   // and every write below lands in the async continuation, so the mount
@@ -181,12 +236,22 @@ export default function DoScanPage() {
     [payload],
   );
 
-  const handleAdvance = async () => {
-    if (!token || !action || busy) return;
-    if (!armed) {
-      setArmed(true);
+  const anyIncomplete = useMemo(
+    () => !!payload && payload.dos.some((d) => d.incomplete),
+    [payload],
+  );
+
+  const handleAdvance = async (mode: ActionMode) => {
+    if (!token || busy) return;
+    // First tap arms THIS button; a second tap on the same button confirms.
+    // Tapping the other button re-arms it instead of firing.
+    if (armed !== mode) {
+      setArmed(mode);
       return;
     }
+    const apiAction: "DISPATCH" | "DELIVER" =
+      mode === "DISPATCH" ? "DISPATCH" : "DELIVER";
+    const incomplete = mode === "DELIVER_ISSUE";
     setBusy(true);
     setAdvanceError(null);
     try {
@@ -198,7 +263,7 @@ export default function DoScanPage() {
           // a logged-in staff phone DOES carry the session cookie, and the
           // backend then requires the CSRF echo — include it so both work.
           headers: csrfHeaders(),
-          body: JSON.stringify({ action }),
+          body: JSON.stringify({ action: apiAction, incomplete }),
         },
       );
       const j = (await r.json().catch(() => ({}))) as AdvanceResponse;
@@ -210,7 +275,7 @@ export default function DoScanPage() {
       if (j.data.summary) setPayload(j.data.summary);
       else await load();
       if (j.data.done > 0) {
-        setJustCompleted(j.data.action);
+        setJustCompleted(mode);
       } else if (j.data.failed > 0) {
         setAdvanceError(
           j.data.results.find((x) => x.outcome === "FAILED")?.note ||
@@ -220,7 +285,7 @@ export default function DoScanPage() {
     } catch {
       setAdvanceError("Network error. Please check your connection and try again.");
     } finally {
-      setArmed(false);
+      setArmed(null);
       setBusy(false);
     }
   };
@@ -229,12 +294,6 @@ export default function DoScanPage() {
     payload?.kind === "DO" && payload.dos[0]
       ? `/delivery/${payload.dos[0].id}`
       : "/delivery";
-
-  const actionLabel = action === "DISPATCH" ? "Mark Dispatched" : "Mark Delivered";
-  const actionColor =
-    action === "DISPATCH"
-      ? "bg-[#9C6F1E] active:bg-[#835D19]"
-      : "bg-[#4F7C3A] active:bg-[#426832]";
 
   return (
     <div className="min-h-screen bg-[#F0ECE9]">
@@ -289,7 +348,16 @@ export default function DoScanPage() {
             )}
 
             {/* Success state */}
-            {justCompleted && (
+            {justCompleted === "DELIVER_ISSUE" ? (
+              <div className="rounded-xl bg-[#9C6F1E] text-white p-6 text-center shadow-sm">
+                <PackageX className="h-14 w-14 mx-auto" strokeWidth={2.5} />
+                <p className="text-2xl font-bold mt-2">Delivered with issues</p>
+                <p className="text-sm opacity-90 mt-1">
+                  Delivery recorded. The office will sort the paperwork and
+                  invoice — nothing more to do here.
+                </p>
+              </div>
+            ) : justCompleted ? (
               <div className="rounded-xl bg-[#4F7C3A] text-white p-6 text-center shadow-sm">
                 <CheckCircle2 className="h-14 w-14 mx-auto" strokeWidth={2.5} />
                 <p className="text-2xl font-bold mt-2">
@@ -301,21 +369,25 @@ export default function DoScanPage() {
                     : "Delivery confirmed. Thank you!"}
                 </p>
               </div>
-            )}
+            ) : null}
 
             {/* Already-done state (no forward action remains) */}
             {!justCompleted && !action && !allCancelled && payload.dos.length > 0 && (
-              <div className="rounded-xl bg-white p-6 text-center shadow-sm border border-[#E6E0D9]">
-                <CheckCircle2
-                  className="h-12 w-12 mx-auto text-[#4F7C3A]"
-                  strokeWidth={2.5}
-                />
+              <div
+                className={`rounded-xl bg-white p-6 text-center shadow-sm border ${anyIncomplete ? "border-[#E8D3A1]" : "border-[#E6E0D9]"}`}
+              >
+                {anyIncomplete ? (
+                  <PackageX className="h-12 w-12 mx-auto text-[#9C6F1E]" strokeWidth={2.5} />
+                ) : (
+                  <CheckCircle2 className="h-12 w-12 mx-auto text-[#4F7C3A]" strokeWidth={2.5} />
+                )}
                 <p className="text-xl font-bold text-[#1F1D1B] mt-2">
-                  Already delivered
+                  {anyIncomplete ? "Delivered — paperwork pending" : "Already delivered"}
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
-                  Nothing left to do here — every delivery order on this document
-                  is delivered.
+                  {anyIncomplete
+                    ? "Delivery is recorded. The office still needs to resolve the paperwork before this can be invoiced."
+                    : "Nothing left to do here — every delivery order on this document is delivered."}
                 </p>
               </div>
             )}
@@ -357,32 +429,51 @@ export default function DoScanPage() {
               </div>
             )}
 
-            {/* THE one action button */}
+            {/* Action buttons. Dispatch = one button; deliver = two outcomes
+                (complete vs with-issues), each confirm-on-second-tap. */}
             {action && !justCompleted && (
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void handleAdvance()}
-                  className={`w-full rounded-xl ${actionColor} text-white py-4 text-lg font-bold shadow-sm flex items-center justify-center gap-2 disabled:opacity-60`}
-                >
-                  {busy ? (
-                    <span className="h-5 w-5 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                  ) : action === "DISPATCH" ? (
-                    <Send className="h-5 w-5" />
-                  ) : (
-                    <CheckCircle2 className="h-5 w-5" />
-                  )}
-                  {busy
-                    ? "Updating..."
-                    : armed
-                      ? `Tap again to confirm — ${actionLabel}`
-                      : actionLabel}
-                </button>
+              <div className="space-y-3">
+                {action === "DISPATCH" ? (
+                  <ActionButton
+                    mode="DISPATCH"
+                    armed={armed}
+                    busy={busy}
+                    onTap={(m) => void handleAdvance(m)}
+                    tone="bg-[#9C6F1E] active:bg-[#835D19] text-white"
+                    icon={<Send className="h-5 w-5" />}
+                    label="Mark Dispatched"
+                  />
+                ) : (
+                  <>
+                    <ActionButton
+                      mode="DELIVER_OK"
+                      armed={armed}
+                      busy={busy}
+                      onTap={(m) => void handleAdvance(m)}
+                      tone="bg-[#4F7C3A] active:bg-[#426832] text-white"
+                      icon={<CheckCircle2 className="h-5 w-5" />}
+                      label="Mark Delivered"
+                    />
+                    <ActionButton
+                      mode="DELIVER_ISSUE"
+                      armed={armed}
+                      busy={busy}
+                      onTap={(m) => void handleAdvance(m)}
+                      tone="bg-white border-2 border-[#D9A441] text-[#9C6F1E] active:bg-[#FBF1DF]"
+                      icon={<PackageX className="h-5 w-5" />}
+                      label="Delivered with issues"
+                    />
+                    <p className="text-xs text-center text-gray-500 px-2">
+                      Use <span className="font-medium">Delivered with issues</span>{" "}
+                      when goods are damaged or returning to the office — delivery
+                      is recorded but the invoice is held until staff resolve it.
+                    </p>
+                  </>
+                )}
                 {armed && !busy && (
                   <button
                     type="button"
-                    onClick={() => setArmed(false)}
+                    onClick={() => setArmed(null)}
                     className="w-full rounded-xl bg-white border border-[#E6E0D9] text-gray-600 py-2.5 text-sm font-medium"
                   >
                     Cancel

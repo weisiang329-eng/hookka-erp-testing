@@ -402,6 +402,11 @@ export type DeliveryOrder = {
   lorryName?: string;
   // Optional proof of delivery (set once SIGNED)
   proofOfDelivery?: ProofOfDelivery;
+  // Delivered "with issues" — goods physically delivered but paperwork
+  // incomplete (e.g. damaged units returning), so the invoice is WITHHELD
+  // until an operator resolves it (POST /api/delivery-orders/:id/
+  // resolve-incomplete). Server-set; absent/false on every normal DO.
+  deliveryIncomplete?: boolean;
 };
 
 // --- Invoice Types ---

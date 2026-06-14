@@ -44,6 +44,7 @@ import { ensureQrTokenColumns } from "../lib/do-qr-token";
 import {
   applyDeliveryOrderUpdate,
   queueDoCustomerNotice,
+  ensureDeliveryIncompleteColumn,
 } from "./delivery-orders";
 
 const app = new Hono<Env>();
@@ -71,6 +72,7 @@ type PublicDoRow = {
   status: string;
   totalItems: number | null;
   orgId: string | null;
+  delivery_incomplete: number | null;
 };
 
 // Minimal per-DO summary — the ONLY fields the public page ever sees.
@@ -82,10 +84,13 @@ type PublicDoSummary = {
   status: string;
   itemCount: number;
   productNames: string[];
+  // Delivered "with issues" — goods arrived but paperwork incomplete, invoice
+  // on hold. Lets the scan page badge it instead of plain "Delivered".
+  incomplete: boolean;
 };
 
 const DO_SUMMARY_COLS =
-  "id, doNo, customerName, customerState, hubName, status, totalItems, orgId";
+  "id, doNo, customerName, customerState, hubName, status, totalItems, orgId, delivery_incomplete";
 
 async function summarizeDos(
   db: D1Database,
@@ -124,6 +129,7 @@ async function summarizeDos(
       status: r.status,
       itemCount: slot?.count || Number(r.totalItems) || 0,
       productNames: slot?.names ?? [],
+      incomplete: !!Number(r.delivery_incomplete),
     };
   });
 }
@@ -144,6 +150,7 @@ async function resolveToken(
   | null
 > {
   await ensureQrTokenColumns(db);
+  await ensureDeliveryIncompleteColumn(db);
   const doRow = await db
     .prepare(`SELECT ${DO_SUMMARY_COLS} FROM delivery_orders WHERE qrtoken = ?`)
     .bind(token)
@@ -273,7 +280,10 @@ app.post("/:token/advance", async (c) => {
   const token = (c.req.param("token") || "").trim();
   if (!TOKEN_RE.test(token)) return unknownToken(c);
 
-  const body = (await c.req.json().catch(() => ({}))) as { action?: string };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    action?: string;
+    incomplete?: boolean;
+  };
   const action =
     body.action === "DISPATCH" || body.action === "DELIVER"
       ? body.action
@@ -284,6 +294,10 @@ app.post("/:token/advance", async (c) => {
       400,
     );
   }
+  // "Delivered with issues" — only meaningful on the deliver step. Goods are
+  // marked delivered (SO/fg_units/COGS cascade) but the invoice + customer
+  // notice are WITHHELD until the office resolves the paperwork.
+  const incomplete = action === "DELIVER" && body.incomplete === true;
 
   try {
     const resolved = await resolveToken(c.var.DB, token);
@@ -341,9 +355,11 @@ app.post("/:token/advance", async (c) => {
         orgId,
       );
 
-      // THE office transition path — identical guards + cascades.
+      // THE office transition path — identical guards + cascades. On a
+      // "with issues" deliver, deliveryIncomplete withholds the invoice.
       const res = await applyDeliveryOrderUpdate(c, d.id, {
         status: step.to,
+        ...(incomplete ? { deliveryIncomplete: true } : {}),
       });
       let ok = false;
       let errMsg = "";
@@ -364,6 +380,11 @@ app.post("/:token/advance", async (c) => {
         continue;
       }
       results.push({ doNo: d.doNo, outcome: "DONE", from, to: step.to });
+
+      // Delivered "with issues" → no invoice was created, so there is no
+      // invoice notice to send. The office sends it later on resolve. Dispatch
+      // notices and complete deliveries fall through to the normal queue.
+      if (incomplete) continue;
 
       // Queue the SAME customer notice the office click queues (dispatch
       // notice / invoice notice). Best-effort — the transition is already

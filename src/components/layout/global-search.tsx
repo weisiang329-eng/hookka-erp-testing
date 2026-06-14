@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import {
   Search,
@@ -251,6 +252,12 @@ interface ApiRecord {
   customerPO?: string;
   doNo?: string;
   invoiceNo?: string;
+  // DO rows expose these aggregated linkage fields (a DO can span several SOs):
+  // the comma-joined SO numbers it ships, plus the customer's own SO / Ref.
+  salesOrderNos?: string;
+  customerSO?: string;
+  customerRef?: string;
+  reference?: string;
   // Consignment note rows (/api/consignment-notes payload).
   noteNumber?: string;
   // Lifecycle status (SO/DO/invoice all carry one) — drives the result pill.
@@ -318,12 +325,19 @@ function useApiSearch(query: string) {
               // Real field is companySOId (the SO number). soNumber/orderNumber
               // never existed on the payload, so labels were blank before.
               const num = item.companySOId || item.soNumber || item.orderNumber || item.id || "";
-              const po = item.customerPOId || item.customerPO || "";
               const meta = statusMeta("sales_orders", item.status);
               collected.push({
                 id: `so-${item.id}`,
                 label: num,
-                description: [item.customerName || item.company, po && `PO ${po}`].filter(Boolean).join(" · "),
+                // Show every identifier the search can match (customer PO / customer
+                // SO / reference) so the linkage is visible AND the matched term is
+                // highlighted on whichever field it hit — no more "PO PO" doubling.
+                description: [
+                  item.customerName || item.company,
+                  item.customerPOId || item.customerPO,
+                  item.customerSOId,
+                  item.reference,
+                ].filter(Boolean).join(" · "),
                 href: `/sales/${item.id}`,
                 icon: ShoppingCart,
                 category: "sales_orders",
@@ -381,7 +395,16 @@ function useApiSearch(query: string) {
               collected.push({
                 id: `do-${item.id}`,
                 label: num,
-                description: item.customerName || item.company || "",
+                // A DO is only meaningful with its linkage — the SO numbers it
+                // ships plus the customer PO / Ref. Showing them also makes the
+                // matched term visible + highlighted (e.g. searching an SO number
+                // surfaces the DO that carries it, with that SO bolded).
+                description: [
+                  item.customerName || item.company,
+                  item.salesOrderNos,
+                  item.customerPOId,
+                  item.customerRef,
+                ].filter(Boolean).join(" · "),
                 href: `/delivery/${item.id}`,
                 icon: Truck,
                 category: "delivery_orders",
@@ -638,8 +661,11 @@ export function GlobalSearch() {
         <Search className="h-5 w-5" />
       </button>
 
-      {/* Modal overlay */}
-      {open && (
+      {/* Modal overlay — portalled to <body> so its z-[100] lives in the ROOT
+          stacking context. Rendered inside the Topbar (sticky z-30) it was
+          otherwise trapped at z-30, and the DataGrid sticky header (also z-30,
+          later in the DOM) painted on top of it. */}
+      {open && createPortal(
         <div
           className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh] sm:pt-[12vh]"
           onClick={() => setOpen(false)}
@@ -766,7 +792,8 @@ export function GlobalSearch() {
               </span>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
@@ -807,7 +834,7 @@ function ResultItem({
       <div className="flex-1 min-w-0">
         <div className="truncate font-medium">{highlightMatch(result.label, query)}</div>
         {result.description && (
-          <div className="truncate text-xs text-[#9CA3AF]">{highlightMatch(result.description, query)}</div>
+          <div className="line-clamp-2 text-xs text-[#9CA3AF]">{highlightMatch(result.description, query)}</div>
         )}
       </div>
       {result.statusText && (

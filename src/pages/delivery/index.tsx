@@ -1925,6 +1925,19 @@ export default function DeliveryPage() {
     return entries;
   }, [deliveryOrders, searchResults, search, readyPOs, planningPOs]);
 
+  // Per-tab match counts for the active search — powers the "found in other
+  // stages" bar so a search that matches DOs on another tab never looks dead
+  // (e.g. searching an SO that's already dispatched while on Pending Delivery).
+  const searchTabCounts = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return null;
+    const counts: Record<string, number> = {};
+    for (const e of searchJumpIndex) {
+      if (e.haystack.includes(term)) counts[e.tab] = (counts[e.tab] ?? 0) + 1;
+    }
+    return counts;
+  }, [search, searchJumpIndex]);
+
   // Follow the record to its tab (Wei Siang 2026-06-02): a matching record is
   // surfaced no matter which tab it sits on, but the tab header should follow
   // so the page context matches what the operator searched. We look at where
@@ -4182,6 +4195,33 @@ export default function DeliveryPage() {
       {/* ============================================================== */}
       {/* Tab Content                                                     */}
       {/* ============================================================== */}
+
+      {/* Cross-stage match bar — while searching, show which stages the term
+          hits (with counts) so a match on another tab is never hidden behind
+          an empty grid. Tap a chip to jump there. */}
+      {search.trim() && searchTabCounts && Object.values(searchTabCounts).some((n) => n > 0) && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm">
+          <span className="text-[#6B7280]">
+            Matches for <span className="font-semibold text-[#1F1D1B]">&ldquo;{search.trim()}&rdquo;</span>:
+          </span>
+          {ALL_TABS.filter((t) => (searchTabCounts[t.key] ?? 0) > 0).map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setActiveTab(t.key)}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors",
+                activeTab === t.key
+                  ? "border-[#6B5C32] bg-[#6B5C32] text-white"
+                  : "border-[#E2DDD8] bg-white text-[#4B5563] hover:border-[#6B5C32]/40",
+              )}
+            >
+              {t.label}
+              <span className="tabular-nums opacity-80">{searchTabCounts[t.key]}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ---- Planning Tab ---- */}
       {activeTab === "planning" && (

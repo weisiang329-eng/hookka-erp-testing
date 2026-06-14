@@ -14,6 +14,9 @@ import {
   parseStickerData,
   generateStickerData,
   generateCompartmentStickerData,
+  parseJobCardBarcode,
+  jobCardBarcodeValue,
+  JC_BARCODE_PREFIX,
 } from '../src/lib/qr-utils.ts';
 import QRCode from 'qrcode';
 
@@ -117,6 +120,30 @@ test('Packing FG sticker stays phone-scannable (QR <= v5)', () => {
   const url = onProd(generateStickerData(WORST_PO, 'PACKING', 'FG-PACKING', '/worker/scan', 2, 2));
   const v = qrVersion(url);
   assert.ok(v <= 5, `packing sticker QR is v${v} (must stay <=5 to scan reliably): ${url}`);
+});
+
+// --- Code 128 WIP barcode (the linear-scan twin of the QR) ------------------
+test('jobCardBarcodeValue round-trips through parseJobCardBarcode', () => {
+  const v = jobCardBarcodeValue('jc-abc-123');
+  assert.equal(v, `${JC_BARCODE_PREFIX}jc-abc-123`);
+  assert.equal(parseJobCardBarcode(v), 'jc-abc-123');
+});
+
+test('parseJobCardBarcode tolerates surrounding whitespace from the scanner', () => {
+  assert.equal(parseJobCardBarcode('  HKJC:jc-xyz \n'), 'jc-xyz');
+});
+
+test('parseJobCardBarcode rejects non-ours: no prefix, wrong shape, our QR URLs', () => {
+  // Stray courier / GTIN barcode — no prefix.
+  assert.equal(parseJobCardBarcode('1234567890128'), null);
+  // Prefixed but not a jc- id.
+  assert.equal(parseJobCardBarcode('HKJC:PO-2605-001'), null);
+  // Our own QR URL never carries the prefix → must not be taken as a barcode id.
+  assert.equal(
+    parseJobCardBarcode('https://erp.hookka.com/worker/scan?op=jc-abc&po=SO-X'),
+    null,
+  );
+  assert.equal(parseJobCardBarcode(''), null);
 });
 
 test('the short compartment form is much less dense than the legacy wk= form it replaced', () => {

@@ -5868,22 +5868,13 @@ app.post("/:id/scan-complete", async (c) => {
   if (!scannedJc) {
     return c.json({ success: false, error: "Job card not found" }, 404);
   }
-  // Worker-token scan-complete is limited to PACKING (its per-piece sticker is
-  // the only one routed here from the phone). Dashboard users keep scanning any
-  // dept; a worker scanning a non-PACKING sticker is rejected.
-  if (
-    !ctxUserId &&
-    (scannedJc.departmentCode || "").toUpperCase() !== "PACKING"
-  ) {
-    return c.json(
-      {
-        success: false,
-        code: "DEPT_NOT_ALLOWED",
-        error: "Worker scan via this sticker is only enabled for Packing.",
-      },
-      403,
-    );
-  }
+  // Worker-token scan-complete is open to ALL departments (Wei Siang
+  // 2026-06-14). The Code 128 printed on the Production Schedule lets every
+  // dept — including the no-sticker ones (Woodcutting / Framing / Webbing) —
+  // complete its WIP by scanning, not just Packing. Auth is still enforced
+  // (the worker token was bound to workerId above); PO ON_HOLD/CANCELLED and
+  // the JC BLOCKED/CANCELLED gates still apply. The per-piece QR flow for
+  // Fab Cut/Sew/Uph keeps routing to scan-complete-dept / -shared.
   const worker = await db
     .prepare("SELECT id, name FROM workers WHERE id = ?")
     .bind(workerId)
@@ -5978,8 +5969,20 @@ app.post("/:id/scan-complete", async (c) => {
   const target: { po: ProductionOrderRow; jc: JobCardRow; slot: PiecePicRow } =
     { po: scannedPo, jc: scannedJc, slot: targetSlot };
 
+  // completeWholeCard (Code 128 schedule scan): finish the ENTIRE WIP in one
+  // scan — PIC1 of every still-open piece becomes the scanning worker — instead
+  // of one piece per scan. The 2-PIC co-sign / debounce / PIC_FULL guards are
+  // per-piece QR-sticker concepts and are skipped for the whole-card path. The
+  // rollup + cascades below are shared by both paths. Timestamps + assignedSlot
+  // are hoisted here so both fill branches and the rollup share them.
+  const wholeCard = body?.completeWholeCard === true;
+  const nowIso = new Date().toISOString();
+  const today = nowIso.split("T")[0];
+  let assignedSlot: 1 | 2 = 1;
+  let newCompletedAt: string | null = target.slot.completedAt ?? null;
+
   // Same-worker guard.
-  if (target.slot.pic1Id === worker.id) {
+  if (!wholeCard && target.slot.pic1Id === worker.id) {
     const freshJc = await fetchPO(db, target.po.id);
     const jcOut = freshJc?.jobCards.find((j) => j.id === target.jc.id);
     return c.json(
@@ -5997,7 +6000,7 @@ app.post("/:id/scan-complete", async (c) => {
       409,
     );
   }
-  if (target.slot.pic2Id === worker.id) {
+  if (!wholeCard && target.slot.pic2Id === worker.id) {
     const freshJc = await fetchPO(db, target.po.id);
     const jcOut = freshJc?.jobCards.find((j) => j.id === target.jc.id);
     return c.json(
@@ -6017,7 +6020,7 @@ app.post("/:id/scan-complete", async (c) => {
   }
 
   // 3-second piece-level debounce.
-  if (target.slot.lastScanAt) {
+  if (!wholeCard && target.slot.lastScanAt) {
     const elapsedMs = Date.now() - new Date(target.slot.lastScanAt).getTime();
     if (elapsedMs < 3000) {
       return c.json(
@@ -6032,7 +6035,7 @@ app.post("/:id/scan-complete", async (c) => {
     }
   }
 
-  if (target.slot.pic1Id && target.slot.pic2Id) {
+  if (!wholeCard && target.slot.pic1Id && target.slot.pic2Id) {
     const freshJc = await fetchPO(db, target.po.id);
     const jcOut = freshJc?.jobCards.find((j) => j.id === target.jc.id);
     return c.json(
@@ -6046,42 +6049,56 @@ app.post("/:id/scan-complete", async (c) => {
     );
   }
 
-  // Fill the slot.
-  const nowIso = new Date().toISOString();
-  const today = nowIso.split("T")[0];
-  let assignedSlot: 1 | 2;
-  let newPic1Id = target.slot.pic1Id;
-  let newPic1Name = target.slot.pic1Name ?? "";
-  let newPic2Id = target.slot.pic2Id;
-  let newPic2Name = target.slot.pic2Name ?? "";
-  let newCompletedAt = target.slot.completedAt;
-
-  if (!target.slot.pic1Id) {
-    newPic1Id = worker.id;
-    newPic1Name = worker.name;
+  // Fill the piece slot(s).
+  if (wholeCard) {
+    // Whole-WIP completion: PIC1 of every still-open piece → the scanning
+    // worker. Idempotent — a piece already signed off keeps its existing PIC.
+    for (const s of slots) {
+      if (!s.pic1Id) {
+        await db
+          .prepare(
+            `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?`,
+          )
+          .bind(worker.id, worker.name, nowIso, nowIso, s.id)
+          .run();
+      }
+    }
     newCompletedAt = nowIso;
     assignedSlot = 1;
   } else {
-    newPic2Id = worker.id;
-    newPic2Name = worker.name;
-    assignedSlot = 2;
-  }
+    // Per-piece (QR sticker) fill — one slot per scan, 2-PIC co-sign.
+    let newPic1Id = target.slot.pic1Id;
+    let newPic1Name = target.slot.pic1Name ?? "";
+    let newPic2Id = target.slot.pic2Id;
+    let newPic2Name = target.slot.pic2Name ?? "";
 
-  await db
-    .prepare(
-      `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?,
-         completedAt = ?, lastScanAt = ? WHERE id = ?`,
-    )
-    .bind(
-      newPic1Id,
-      newPic1Name,
-      newPic2Id,
-      newPic2Name,
-      newCompletedAt,
-      nowIso,
-      target.slot.id,
-    )
-    .run();
+    if (!target.slot.pic1Id) {
+      newPic1Id = worker.id;
+      newPic1Name = worker.name;
+      newCompletedAt = nowIso;
+      assignedSlot = 1;
+    } else {
+      newPic2Id = worker.id;
+      newPic2Name = worker.name;
+      assignedSlot = 2;
+    }
+
+    await db
+      .prepare(
+        `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?,
+           completedAt = ?, lastScanAt = ? WHERE id = ?`,
+      )
+      .bind(
+        newPic1Id,
+        newPic1Name,
+        newPic2Id,
+        newPic2Name,
+        newCompletedAt,
+        nowIso,
+        target.slot.id,
+      )
+      .run();
+  }
 
   // Rollup: all slots for this JC have pic1 → mark JC COMPLETED.
   const allSlots = await db

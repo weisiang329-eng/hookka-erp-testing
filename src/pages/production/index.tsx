@@ -9,7 +9,11 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData, jobCardBarcodeValue } from "@/lib/qr-utils";
+// Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
+// print click gesture — an await before window.open would trip the pop-up
+// blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
+import JsBarcode from "jsbarcode";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -92,6 +96,30 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
+// Render a WIP's Code 128 (HKJC:<jobCardId>) to a PNG data URL, SYNCHRONOUSLY,
+// for the Production Schedule print. Scanning it on the phone marks the WIP
+// complete — the linear-scan twin of the QR, for the no-sticker depts
+// (Woodcutting / Framing / Webbing). Returns "" on any failure so a bad row
+// never blocks the print. jobCardBarcodeValue() is the single source of the
+// encoded string (shared with the scanner's parseJobCardBarcode).
+function jobCardCode128DataUrl(jobCardId: string): string {
+  try {
+    const canvas = document.createElement("canvas");
+    JsBarcode(canvas, jobCardBarcodeValue(jobCardId), {
+      format: "CODE128",
+      height: 28,
+      width: 1.5, // narrow-bar px — keeps a ~16-char id scannable but compact
+      margin: 4,
+      displayValue: true,
+      fontSize: 11,
+      textMargin: 1,
+    });
+    return canvas.toDataURL("image/png");
+  } catch {
+    return "";
+  }
+}
+
 const OVERVIEW_FIXED_COLS = ["soId", "product", "customer", "customerPO", "specialOrder", "qty", "customerDD", "ourExpectedDD"] as const;
 const OVERVIEW_COL_KEYS: string[] = [...OVERVIEW_FIXED_COLS, ...DEPARTMENTS.map((d) => d.code)];
 const OVERVIEW_DEFAULT_WIDTHS: Record<string, number> = {
@@ -5532,9 +5560,22 @@ export default function ProductionPage({
         if (col.key === "soId") return "so";
         return "";
       };
-      const headerCellsHtml = orderedColumns
-        .map((c) => `<th${cellClassFor(c) ? ` class="${cellClassFor(c)}"` : ""}>${escapeHtml(c.label)}</th>`)
-        .join("");
+      // Pre-render one Code 128 per WIP row (synchronously — see
+      // jobCardCode128DataUrl). Scanning it on the phone marks that WIP
+      // complete, so the no-sticker depts (Woodcutting / Framing / Webbing)
+      // get a scannable code that travels WITH the printed schedule instead
+      // of on a sticker. Keyed by jobCardId; rows without one (shouldn't
+      // happen on a dept tab) just get a blank cell.
+      const barcodeByJc = new Map<string, string>();
+      for (const r of printRows) {
+        if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
+          barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(r.jobCardId));
+        }
+      }
+      const headerCellsHtml =
+        orderedColumns
+          .map((c) => `<th${cellClassFor(c) ? ` class="${cellClassFor(c)}"` : ""}>${escapeHtml(c.label)}</th>`)
+          .join("") + `<th class="bc">Scan to complete</th>`;
       const rowsHtml = printRows.map((r) => {
         const cells = orderedColumns
           .map((c) => {
@@ -5542,14 +5583,17 @@ export default function ProductionPage({
             return `<td${cls ? ` class="${cls}"` : ""}>${renderCell(c, r)}</td>`;
           })
           .join("");
-        return `<tr>${cells}</tr>`;
+        const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
+        const bcCell = `<td class="bc">${bc ? `<img src="${bc}" alt="${escapeHtml(r.jobCardId || "")}" />` : ""}</td>`;
+        return `<tr>${cells}${bcCell}</tr>`;
       }).join("");
       body = `
         <table class="schedule">
           <thead><tr>${headerCellsHtml}</tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
-      columnCount = orderedColumns.length;
+      // +1 for the trailing Scan-to-complete (Code 128) column.
+      columnCount = orderedColumns.length + 1;
     }
 
     // Build the final filter chip strip. Constructed AFTER the body
@@ -5640,6 +5684,9 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
+    /* Code 128 "Scan to complete" column — one barcode per WIP row. */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 150px; }
+    table.schedule td.bc img { height: 34px; width: auto; max-width: 144px; image-rendering: crisp-edges; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,
     table.schedule tbody small { color: #555; font-size: ${sizes.small}px; }

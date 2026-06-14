@@ -41,7 +41,7 @@ import {
 import jsQR from "jsqr";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
-import { parseStickerData } from "@/lib/qr-utils";
+import { parseStickerData, parseJobCardBarcode } from "@/lib/qr-utils";
 import { deriveWipName } from "@/lib/wip-name";
 import { z } from "zod";
 
@@ -180,6 +180,9 @@ type Result =
       // set, Complete routes to scan-complete-shared with this wipKey and the
       // server decides FAB_SEW vs UPHOLSTERY from the worker's own section.
       wipKey?: string;
+      // Code 128 schedule scan: complete the WHOLE WIP (every piece) in one
+      // tap via /scan-complete + completeWholeCard, dept-agnostic.
+      wholeCard?: boolean;
     }
   // When manual entry by PO number, or a QR whose opId went stale, yields
   // multiple matching job cards (e.g. a bedframe PO produces both Divan
@@ -268,6 +271,55 @@ export default function WorkerScanPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // ZXing decoder for the fallback path (iOS Safari / no BarcodeDetector).
+  // jsQR reads QR only; ZXing reads QR + Code 128. Loaded lazily (dynamic
+  // import, scoped to this route) the first time a camera/upload scan runs;
+  // until ready the ref is null and jsQR carries QR. The ref holds a closure
+  // that turns an ImageData into the decoded text (or null) so no ZXing types
+  // leak into the hot tick loop.
+  const zxingRef = useRef<((img: ImageData) => string | null) | null>(null);
+  const zxingLoadingRef = useRef<Promise<void> | null>(null);
+  const ensureZxing = useCallback((): Promise<void> => {
+    if (zxingRef.current) return Promise.resolve();
+    if (zxingLoadingRef.current) return zxingLoadingRef.current;
+    zxingLoadingRef.current = import("@zxing/library")
+      .then((zx) => {
+        const reader = new zx.MultiFormatReader();
+        const hints = new Map<number, unknown>();
+        hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
+          zx.BarcodeFormat.QR_CODE,
+          zx.BarcodeFormat.CODE_128,
+        ]);
+        hints.set(zx.DecodeHintType.TRY_HARDER, true);
+        reader.setHints(hints);
+        zxingRef.current = (img: ImageData) => {
+          // RGBA → BT.601 luma (RGBLuminanceSource wants precomputed luminance
+          // for a Uint8ClampedArray, not RGBA).
+          const { data, width, height } = img;
+          const gray = new Uint8ClampedArray(width * height);
+          for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
+            gray[j] = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+          }
+          try {
+            const res = reader.decodeWithState(
+              new zx.BinaryBitmap(
+                new zx.HybridBinarizer(
+                  new zx.RGBLuminanceSource(gray, width, height),
+                ),
+              ),
+            );
+            return res ? res.getText() : null;
+          } catch {
+            return null; // NotFoundException — no code in this frame
+          }
+        };
+      })
+      .catch(() => {
+        // Load failed — leave jsQR (QR-only) as the fallback; retry next call.
+        zxingLoadingRef.current = null;
+      });
+    return zxingLoadingRef.current;
+  }, []);
 
   // Batch-upload path — worker snaps a bunch of QR stickers during the
   // shift, then uploads them all at once from the gallery. Files are
@@ -500,6 +552,39 @@ export default function WorkerScanPage() {
           }
         } catch {
           setResult({ kind: "error", message: t("common.error") });
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+      // Code 128 WIP barcode (HKJC:<jobCardId>) printed on the Production
+      // Schedule — the linear-scan twin of the QR for the no-sticker depts
+      // (Woodcutting / Framing / Webbing). It's a bare id, not a URL, so it's
+      // handled before parseStickerData. One scan completes the WHOLE WIP
+      // (every piece → the scanning worker), matching the owner's "mark this
+      // item complete" intent and the no-sticker batch workflow.
+      const barcodeJcId = parseJobCardBarcode(raw);
+      if (barcodeJcId) {
+        setInput(barcodeJcId);
+        setLoading(true);
+        setResult({ kind: "idle" });
+        setRackChoice("");
+        setRackSaved(false);
+        try {
+          const matches = await findMatches(barcodeJcId);
+          const hit =
+            matches.find((m) => m.jobCard.id === barcodeJcId) ?? matches[0];
+          if (hit) {
+            setResult({ kind: "lookup", ...hit, wholeCard: true });
+          } else {
+            setResult({
+              kind: "error",
+              message: `Not found: ${barcodeJcId}`,
+              decoded: raw,
+            });
+          }
+        } catch {
+          setResult({ kind: "error", message: t("common.error"), decoded: raw });
         } finally {
           setLoading(false);
         }
@@ -756,11 +841,24 @@ export default function WorkerScanPage() {
     let nativeDetector: BarcodeDetectorLike | null = null;
     if (typeof window !== "undefined" && window.BarcodeDetector) {
       try {
-        nativeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        // Read BOTH the square QR and the Code 128 printed on the Production
+        // Schedule. On Android Chrome this is the fast hardware path for both.
+        nativeDetector = new window.BarcodeDetector({
+          formats: ["qr_code", "code_128"],
+        });
       } catch {
-        nativeDetector = null;
+        // A device that rejects code_128 still gets QR via the native detector;
+        // Code 128 then falls to the ZXing path below.
+        try {
+          nativeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        } catch {
+          nativeDetector = null;
+        }
       }
     }
+    // iOS Safari / older browsers have no BarcodeDetector. jsQR reads QR only,
+    // so kick off the ZXing loader (reads QR + Code 128) for the fallback path.
+    void ensureZxing();
 
     let stopped = false;
     let lastDecode = 0;
@@ -826,6 +924,16 @@ export default function WorkerScanPage() {
                 onHit(code.data);
                 return;
               }
+              // jsQR is QR-only — ZXing adds Code 128 (and QR) on the fallback
+              // path (iOS/older browsers). Loaded lazily; null until ready.
+              const zxDecode = zxingRef.current;
+              if (zxDecode) {
+                const zxText = zxDecode(imageData);
+                if (zxText) {
+                  onHit(zxText);
+                  return;
+                }
+              }
             }
           }
         }
@@ -841,7 +949,7 @@ export default function WorkerScanPage() {
         rafRef.current = null;
       }
     };
-  }, [liveScanning, handleDecoded, stopLiveScan]);
+  }, [liveScanning, handleDecoded, stopLiveScan, ensureZxing]);
 
   // Make sure we tear down the stream if the component unmounts mid-scan.
   useEffect(() => {
@@ -897,18 +1005,25 @@ export default function WorkerScanPage() {
         const code = jsQR(imageData.data, imageData.width, imageData.height, {
           inversionAttempts: "attemptBoth",
         });
-        if (!code || !code.data) {
+        let decoded: string | null = code?.data || null;
+        if (!decoded) {
+          // jsQR is QR-only — try ZXing (QR + Code 128) for an uploaded
+          // barcode photo (the Code 128 printed on the Production Schedule).
+          await ensureZxing();
+          decoded = zxingRef.current ? zxingRef.current(imageData) : null;
+        }
+        if (!decoded) {
           setResult({ kind: "error", message: t("scan.decodeFail") });
           return;
         }
-        await handleDecoded(code.data);
+        await handleDecoded(decoded);
       } catch {
         setResult({ kind: "error", message: t("scan.decodeFail") });
       } finally {
         setDecoding(false);
       }
     },
-    [handleDecoded, t],
+    [handleDecoded, t, ensureZxing],
   );
 
   // Pop the next file from the queue and decode it. Called after each
@@ -954,7 +1069,13 @@ export default function WorkerScanPage() {
   async function handleConfirmScan(
     opts?: {
       force?: boolean;
-      ctx?: { order: Order; jobCard: JobCard; piece?: PieceInfo; wipKey?: string };
+      ctx?: {
+        order: Order;
+        jobCard: JobCard;
+        piece?: PieceInfo;
+        wipKey?: string;
+        wholeCard?: boolean;
+      };
     },
   ) {
     // Accept either a caller-supplied ctx (auto-submit path right after
@@ -970,6 +1091,7 @@ export default function WorkerScanPage() {
             jobCard: result.jobCard,
             piece: result.piece,
             wipKey: result.wipKey,
+            wholeCard: result.wholeCard,
           }
         : null);
     if (!ctx) return;
@@ -1017,14 +1139,27 @@ export default function WorkerScanPage() {
         cardDept === "FAB_SEW" ||
         cardDept === "UPHOLSTERY";
       const isFabCut = fgDept === "FAB_CUT" || cardDept === "FAB_CUT";
+      // Code 128 schedule scan → complete the WHOLE WIP via the per-card
+      // /scan-complete (dept-agnostic): the barcode is per job card, so we know
+      // the exact card and don't need the shared/dept fan-out resolution.
+      const wholeCard = !!ctx.wholeCard;
       const endpoint =
-        isShared
-          ? `/api/production-orders/${ctx.order.id}/scan-complete-shared`
-          : isFabCut
-            ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
-            : `/api/production-orders/${ctx.order.id}/scan-complete`;
+        wholeCard
+          ? `/api/production-orders/${ctx.order.id}/scan-complete`
+          : isShared
+            ? `/api/production-orders/${ctx.order.id}/scan-complete-shared`
+            : isFabCut
+              ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
+              : `/api/production-orders/${ctx.order.id}/scan-complete`;
       const payload =
-        isShared
+        wholeCard
+          ? {
+              jobCardId: ctx.jobCard.id,
+              workerId,
+              completeWholeCard: true,
+              ...(opts?.force ? { force: true } : {}),
+            }
+          : isShared
           ? {
               workerId,
               // wipKey: complete only THIS compartment (Divan, not Headboard); a

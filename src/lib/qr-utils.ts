@@ -28,6 +28,45 @@ export async function getQRCodeDataURL(data: string, size: number = 300): Promis
   });
 }
 
+// ============================================================
+// Code 128 barcodes — the linear-scan twin of the square QR.
+//
+// Some departments (Woodcutting / Framing / Webbing) can't keep a QR sticker
+// WITH the WIP, so a Code 128 is printed on the Production Schedule listing
+// instead. Scanning it marks the same WIP complete as the QR would. The
+// barcode encodes the job_card id (compact — a full URL becomes too wide to
+// scan reliably on a printed row), guarded by a short sentinel prefix so a
+// stray courier / GTIN barcode in the camera view is never mistaken for ours.
+// ============================================================
+
+/** Sentinel prefix on every WIP Code 128 — `HKJC:` + job_card.id. */
+export const JC_BARCODE_PREFIX = "HKJC:";
+
+// Code 128 IMAGE generation lives at its single consumer — the Production
+// Schedule print in src/pages/production/index.tsx — which statically imports
+// `jsbarcode` and renders SYNCHRONOUSLY inside the print click gesture (an
+// async generator would force an `await` before window.open and trip the
+// browser pop-up blocker). Keeping jsbarcode out of qr-utils also keeps it out
+// of the scanner / PDF chunks that import this module only to DECODE or for QR.
+
+/** The string to ENCODE in a WIP's Code 128 (prefix + job card id). */
+export function jobCardBarcodeValue(jobCardId: string): string {
+  return `${JC_BARCODE_PREFIX}${jobCardId}`;
+}
+
+/**
+ * Parse a scanned Code 128 back to a bare job_card id, or null when it isn't
+ * one of ours. Requires the `HKJC:` prefix AND a `jc-` shaped id so random
+ * barcodes (and our own QR URLs, which never carry this prefix) are ignored.
+ */
+export function parseJobCardBarcode(value: string): string | null {
+  if (!value) return null;
+  const v = value.trim();
+  if (!v.startsWith(JC_BARCODE_PREFIX)) return null;
+  const id = v.slice(JC_BARCODE_PREFIX.length).trim();
+  return /^jc-/.test(id) ? id : null;
+}
+
 /**
  * Generate the scan URL that a QR code should encode.
  * When scanned, it takes the worker to the scan page with the operation pre-filled.

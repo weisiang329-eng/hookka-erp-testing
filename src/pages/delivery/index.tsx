@@ -888,20 +888,19 @@ export default function DeliveryPage() {
   // Drives cross-status search: while non-empty, filteredOrders spans every
   // status instead of just the active tab, so a DO is findable regardless of
   // which stage/tab it sits on.
-  const [doGridSearch, setDoGridSearch] = useState("");
-  // Mirrors the Pending Delivery (PO) grid's global search box, the same way
-  // doGridSearch mirrors the DO grid. Feeds the unified auto-jump index below
-  // so searching from the Pending Delivery tab can hop to a DO tab (and vice
-  // versa) — all 4 delivery tabs share one search-to-tab jump.
-  const [poGridSearch, setPoGridSearch] = useState("");
+  // ONE search state shared by every delivery tab (Planning, Pending Delivery,
+  // and the three DO tabs). Unified so a term typed on any tab drives the same
+  // server fetch + cross-tab jump, and clearing the box on ANY tab fully resets
+  // the page. (The old split poGridSearch/doGridSearch left the server fetch
+  // stuck filtered when you cleared on a tab different from where you typed.)
+  const [search, setSearch] = useState("");
 
   // ---------- Fetch ----------
   // When the operator is searching, hit the server with the term (and a high
   // limit) so matches come back from the WHOLE table across every status — not
-  // just the current 200-row page. Mirrors the Sales Order list pattern. Falls
-  // back to poGridSearch so a term typed on a PO tab still pulls the matching
-  // DOs (needed for the cross-tab jump). Empty search = normal paginated browse.
-  const doServerSearch = doGridSearch.trim() || poGridSearch.trim();
+  // just the current 200-row page. Mirrors the Sales Order list pattern.
+  // Empty search = normal paginated browse.
+  const doServerSearch = search.trim();
   const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
     success?: boolean;
     data?: DeliveryOrder[];
@@ -1824,10 +1823,11 @@ export default function DeliveryPage() {
     // which stage/tab it's on — searching an SO number must surface its DO
     // even if that DO sits on another tab. The DataGrid then narrows these by
     // the search term. Empty search keeps the normal tab-scoped view.
-    // (Covers the loaded page — newest 200 DOs across all statuses.)
-    if (doGridSearch.trim()) return deliveryOrders;
+    // While searching, deliveryOrders already holds the server's whole-table
+    // matches across every status (see the fetch above), so show them all.
+    if (search.trim()) return deliveryOrders;
     return deliveryOrders.filter((d) => statuses.includes(d.status));
-  }, [deliveryOrders, activeTab, doGridSearch]);
+  }, [deliveryOrders, activeTab, search]);
 
   // Unified search index (Wei Siang 2026-06-02): one record-type-agnostic
   // index so the auto-jump below works for all 4 delivery tabs, not just the
@@ -1899,13 +1899,10 @@ export default function DeliveryPage() {
   // so the page context matches what the operator searched. We look at where
   // the matches actually live across the unified index: if every match sits on
   // ONE tab, hop to that tab. Matches spanning several tabs leave the tab
-  // alone. Fires for whichever search box changed — the DO grid (doGridSearch)
-  // or the Pending Delivery grid (poGridSearch); they're mutually exclusive in
-  // practice since only one grid is mounted at a time. The active tab is read
-  // OUTSIDE the deps on purpose so a manual tab click during an active search
-  // is respected, not yanked back.
+  // alone. The active tab is read OUTSIDE the deps on purpose so a manual tab
+  // click during an active search is respected, not yanked back.
   useEffect(() => {
-    const term = (doGridSearch.trim() || poGridSearch.trim()).toLowerCase();
+    const term = search.trim().toLowerCase();
     if (!term) return;
     const tabsHit = new Set<string>();
     for (const entry of searchJumpIndex) {
@@ -1917,7 +1914,7 @@ export default function DeliveryPage() {
     }
     // activeTab intentionally excluded — see comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doGridSearch, poGridSearch, searchJumpIndex]);
+  }, [search, searchJumpIndex]);
 
   // ---------- Summary counts (unique DOs, not rows) ----------
   // Read from /api/delivery-orders/stats so counts reflect the whole
@@ -4170,8 +4167,8 @@ export default function DeliveryPage() {
               emptyMessage="No items in planning."
               groupBy="customerState"
               autoGroup={false}
-              initialSearch={doGridSearch || poGridSearch}
-              onSearchChange={setPoGridSearch}
+              initialSearch={search}
+              onSearchChange={setSearch}
               alwaysSearchKeys={PO_SEARCH_KEYS}
             />
           </CardContent>
@@ -4234,8 +4231,8 @@ export default function DeliveryPage() {
               groupBy="customerState"
               autoGroup={false}
               selectable
-              initialSearch={doGridSearch || poGridSearch}
-              onSearchChange={setPoGridSearch}
+              initialSearch={search}
+              onSearchChange={setSearch}
               alwaysSearchKeys={PO_SEARCH_KEYS}
               onSelectionChange={(rows) =>
                 // Drop incomplete SOFA sets defensively — even if the user
@@ -4308,8 +4305,8 @@ export default function DeliveryPage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No delivery orders found."
               onDoubleClick={(row) => setDetailDO(row)}
-              initialSearch={doGridSearch || poGridSearch}
-              onSearchChange={setDoGridSearch}
+              initialSearch={search}
+              onSearchChange={setSearch}
               alwaysSearchKeys={DO_SEARCH_KEYS}
               contextMenuItems={getContextMenuItems}
             />

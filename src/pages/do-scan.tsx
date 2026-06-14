@@ -342,16 +342,7 @@ export default function DoScanPage() {
             )}
 
             {/* Success state */}
-            {justCompleted === "DELIVER_ISSUE" ? (
-              <div className="rounded-xl bg-[#9C6F1E] text-white p-6 text-center shadow-sm">
-                <PackageX className="h-14 w-14 mx-auto" strokeWidth={2.5} />
-                <p className="text-2xl font-bold mt-2">Delivered with issues</p>
-                <p className="text-sm opacity-90 mt-1">
-                  Delivery recorded. The office will sort the paperwork and
-                  invoice — nothing more to do here.
-                </p>
-              </div>
-            ) : justCompleted ? (
+            {justCompleted && (
               <div className="rounded-xl bg-[#4F7C3A] text-white p-6 text-center shadow-sm">
                 <CheckCircle2 className="h-14 w-14 mx-auto" strokeWidth={2.5} />
                 <p className="text-2xl font-bold mt-2">
@@ -363,7 +354,7 @@ export default function DoScanPage() {
                     : "Delivery confirmed. Thank you!"}
                 </p>
               </div>
-            ) : null}
+            )}
 
             {/* Already-done state (no forward action remains) */}
             {!justCompleted && !action && !allCancelled && payload.dos.length > 0 && (
@@ -423,8 +414,9 @@ export default function DoScanPage() {
               </div>
             )}
 
-            {/* Action buttons. Dispatch = one button; deliver = two outcomes
-                (complete vs with-issues), each confirm-on-second-tap. */}
+            {/* Action button — one forward step: Mark Dispatched, then Mark
+                Delivered. (The "Delivered with issues" outcome is parked — no
+                downstream process yet; office handles problems manually.) */}
             {action && !justCompleted && (
               <div className="space-y-3">
                 {action === "DISPATCH" ? (
@@ -438,31 +430,15 @@ export default function DoScanPage() {
                     label="Mark Dispatched"
                   />
                 ) : (
-                  <>
-                    <ActionButton
-                      mode="DELIVER_OK"
-                      armed={armed}
-                      busy={busy}
-                      onTap={(m) => void handleAdvance(m)}
-                      tone="bg-[#4F7C3A] active:bg-[#426832] text-white"
-                      icon={<CheckCircle2 className="h-5 w-5" />}
-                      label="Mark Delivered"
-                    />
-                    <ActionButton
-                      mode="DELIVER_ISSUE"
-                      armed={armed}
-                      busy={busy}
-                      onTap={(m) => void handleAdvance(m)}
-                      tone="bg-white border-2 border-[#D9A441] text-[#9C6F1E] active:bg-[#FBF1DF]"
-                      icon={<PackageX className="h-5 w-5" />}
-                      label="Delivered with issues"
-                    />
-                    <p className="text-xs text-center text-gray-500 px-2">
-                      Use <span className="font-medium">Delivered with issues</span>{" "}
-                      when goods are damaged or returning to the office — delivery
-                      is recorded but the invoice is held until staff resolve it.
-                    </p>
-                  </>
+                  <ActionButton
+                    mode="DELIVER_OK"
+                    armed={armed}
+                    busy={busy}
+                    onTap={(m) => void handleAdvance(m)}
+                    tone="bg-[#4F7C3A] active:bg-[#426832] text-white"
+                    icon={<CheckCircle2 className="h-5 w-5" />}
+                    label="Mark Delivered"
+                  />
                 )}
                 {armed && !busy && (
                   <button

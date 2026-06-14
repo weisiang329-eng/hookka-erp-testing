@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -181,6 +181,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" /> },
   { key: "assets", label: "Fixed Assets", icon: <Building2 className="h-4 w-4" /> },
   { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" /> },
+  { key: "stock", label: "Stock", icon: <List className="h-4 w-4" /> },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
@@ -264,6 +265,7 @@ export default function AccountingPage() {
           {tab === "cashbook" && <CashBookTab accounts={accounts} />}
           {tab === "assets" && <FixedAssetsTab accounts={accounts} />}
           {tab === "labor" && <LaborTab accounts={accounts} />}
+          {tab === "stock" && <StockSummaryTab />}
           {tab === "opening" && <OpeningBalanceTab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "maint" && (
             <div className="space-y-4">
@@ -4601,6 +4603,108 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// =============== TAB: STOCK SUMMARY (Phase 4.2) ===============
+//
+// Per material-group, for the chosen month: opening + purchases −
+// consumption = closing (a real cross-check — closing is recomputed from
+// the cost ledger, not opening±deltas). WIP and FG roll up too. This is
+// the read layer the Phase-5 Cost Structure report and the closing-stock
+// posting build on.
+
+function StockSummaryTab() {
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [data, setData] = useState<{
+    rows: { group: string; description: string; openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number; balanced: boolean; accounts: { stock: string; opening: string; closing: string } }[];
+    wip: { openingSen: number; closingSen: number };
+    fg: { openingSen: number; closingSen: number };
+    totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
+  } | null>(null);
+
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/stock-summary?period=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [month]);
+
+  const anyUnbalanced = (data?.rows ?? []).some((r) => !r.balanced);
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold text-[#1F1D1B]">Stock Summary</h2>
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-end gap-4 bg-[#F7F4EF] rounded-lg">
+          <div>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Month</label>
+            <input type="month" value={month} onChange={(e) => { setData(null); setMonth(e.target.value); }} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm" />
+          </div>
+          <p className="text-[11px] text-[#9CA3AF] pb-1">Opening + Purchases − Consumption = Closing, per material group, live from the cost ledger.</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-0 overflow-x-auto">
+          {data === null ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">Material group</th>
+                  <th className="px-3 py-2 text-right">Opening</th>
+                  <th className="px-3 py-2 text-right">Purchases</th>
+                  <th className="px-3 py-2 text-right">Consumption</th>
+                  <th className="px-3 py-2 text-right">Closing</th>
+                  <th className="px-3 py-2 text-center">✓</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map((r) => (
+                  <tr key={r.group} className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5"><span className="tabular-nums text-xs text-[#6B7280] mr-1">{r.accounts.stock}</span>{r.description}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.openingSen)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.purchasesSen)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(r.consumptionSen)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(r.closingSen)}</td>
+                    <td className="px-3 py-1.5 text-center">{r.balanced ? <span className="text-[#27500A]">✓</span> : <span className="text-[#9A3A2D]" title="opening+purchases−consumption ≠ closing">!</span>}</td>
+                  </tr>
+                ))}
+                <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                  <td className="px-3 py-1.5">330-8000 WORK IN PROGRESS</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data.wip.openingSen)}</td>
+                  <td className="px-3 py-1.5 text-right" colSpan={2} />
+                  <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(data.wip.closingSen)}</td>
+                  <td className="px-3 py-1.5" />
+                </tr>
+                <tr className="border-b border-[#F0ECE9] text-[#6B7280]">
+                  <td className="px-3 py-1.5">330-9000 FINISHED GOODS</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data.fg.openingSen)}</td>
+                  <td className="px-3 py-1.5 text-right" colSpan={2} />
+                  <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(data.fg.closingSen)}</td>
+                  <td className="px-3 py-1.5" />
+                </tr>
+                <tr className="bg-[#F0ECE9]/60 font-semibold">
+                  <td className="px-3 py-2">RAW MATERIAL TOTAL</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.openingSen)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.purchasesSen)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.consumptionSen)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totals.closingSen)}</td>
+                  <td className="px-3 py-2" />
+                </tr>
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+      {anyUnbalanced && (
+        <p className="text-[11px] text-[#9A3A2D]">Some groups show "!" — opening + purchases − consumption ≠ closing. This usually means an ADJUSTMENT or non-receipt/issue movement in the period; check the cost ledger.</p>
+      )}
     </div>
   );
 }

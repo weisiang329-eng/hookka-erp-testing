@@ -3001,6 +3001,30 @@ const GROUP_DESCRIPTIONS: Record<string, string> = {
 // (null = now / all time). RM is netted on-hand (receipts − issues) per
 // item_group; WIP = issued + labour − completed; FG = completed −
 // delivered. No double-count — RM=on-hand, WIP=in-production, FG=unshipped.
+// The effective stock map = built-in defaults overlaid with the owner's
+// kv_config `coa_stock_map` override (same shape). Single reader so the
+// P&L, stock summary and closing-stock posting all see one truth.
+async function getStockMap(
+  db: Env["Variables"]["DB"],
+): Promise<typeof DEFAULT_STOCK_MAP> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'coa_stock_map'")
+      .first<{ value: string | null }>();
+    const parsed = JSON.parse(row?.value ?? "null");
+    if (parsed && typeof parsed === "object") {
+      return {
+        ...DEFAULT_STOCK_MAP,
+        ...parsed,
+        rm: { ...DEFAULT_STOCK_MAP.rm, ...(parsed.rm ?? {}) },
+      };
+    }
+  } catch {
+    /* absent / malformed — defaults */
+  }
+  return DEFAULT_STOCK_MAP;
+}
+
 async function liveInventory(
   db: Env["Variables"]["DB"],
   cutoffYm: string | null,
@@ -3051,6 +3075,115 @@ async function liveInventory(
     Object.values(rmByGroup).reduce((s, n) => s + n, 0) + wip + fg;
   return { rmByGroup, wip, fg, total };
 }
+
+// ---------------------------------------------------------------------------
+// STOCK SUMMARY (Phase 4.2, 2026-06) — per material-group, for any period:
+// opening (as-of prior month-end), purchases (RM_RECEIPT IN in period),
+// consumption (RM_ISSUE OUT in period), closing (as-of period end). The
+// identity opening + purchases − consumption = closing holds per group by
+// construction (closing is recomputed from the same cost-ledger movements,
+// not opening±deltas, so it's a real cross-check). WIP and FG roll up the
+// same way. This is the read layer the Closing-Stock posting (4.4) and the
+// Phase-5 Cost Structure report consume.
+// ---------------------------------------------------------------------------
+type StockGroupRow = {
+  group: string;
+  openingSen: number;
+  purchasesSen: number;
+  consumptionSen: number;
+  closingSen: number;
+};
+
+async function stockSummary(
+  db: Env["Variables"]["DB"],
+  period?: string,
+): Promise<{
+  rows: StockGroupRow[];
+  wip: { openingSen: number; closingSen: number };
+  fg: { openingSen: number; closingSen: number };
+  totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
+}> {
+  const startYm = periodStartYm(period);
+  const endYm = periodEndYm(period);
+  const openCut = prevYm(startYm); // null when period is all-time
+  const [clRes, rmRes] = await Promise.all([
+    db
+      .prepare(
+        "SELECT type, itemType, itemId, direction, totalCostSen, date FROM cost_ledger",
+      )
+      .all<{ type: string; itemType: string; itemId: string; direction: string; totalCostSen: number; date: string }>(),
+    db.prepare("SELECT id, itemGroup FROM raw_materials").all<{ id: string; itemGroup: string }>(),
+  ]);
+  const grp = new Map<string, string>();
+  for (const r of rmRes.results ?? []) grp.set(r.id, r.itemGroup || "OTHER");
+  const rows = new Map<string, StockGroupRow>();
+  const ensure = (g: string) => {
+    let r = rows.get(g);
+    if (!r) { r = { group: g, openingSen: 0, purchasesSen: 0, consumptionSen: 0, closingSen: 0 }; rows.set(g, r); }
+    return r;
+  };
+  const wip = { openingSen: 0, closingSen: 0 };
+  const fg = { openingSen: 0, closingSen: 0 };
+  for (const l of clRes.results ?? []) {
+    const ym = String(l.date ?? "").slice(0, 7);
+    if (endYm && ym > endYm) continue; // beyond the period end — ignore entirely
+    const v = Number(l.totalCostSen) || 0;
+    const signed = l.direction === "IN" ? v : -v;
+    const inOpening = !openCut || ym <= openCut;
+    const inPeriod = ymInPeriod(ym, period);
+    if (l.itemType === "RM") {
+      const g = grp.get(l.itemId) || "OTHER";
+      const row = ensure(g);
+      if (inOpening) row.openingSen += signed;
+      row.closingSen += signed; // cumulative to period end (endYm filter above)
+      if (inPeriod) {
+        if (l.type === "RM_RECEIPT") row.purchasesSen += v;
+        else if (l.type === "RM_ISSUE") row.consumptionSen += v;
+        else row.purchasesSen += signed; // ADJUSTMENT etc. — net into purchases line
+      }
+    }
+    // WIP / FG cumulative balances (opening vs closing).
+    const wipDelta = l.type === "RM_ISSUE" || l.type === "LABOR_POSTED" ? v : l.type === "FG_COMPLETED" ? -v : 0;
+    const fgDelta = l.type === "FG_COMPLETED" ? v : l.type === "FG_DELIVERED" ? -v : 0;
+    if (inOpening) { wip.openingSen += wipDelta; fg.openingSen += fgDelta; }
+    wip.closingSen += wipDelta;
+    fg.closingSen += fgDelta;
+  }
+  const list = [...rows.values()]
+    .filter((r) => r.openingSen !== 0 || r.purchasesSen !== 0 || r.consumptionSen !== 0 || r.closingSen !== 0)
+    .sort((a, b) => a.group.localeCompare(b.group));
+  const totals = {
+    openingSen: list.reduce((s, r) => s + r.openingSen, 0),
+    purchasesSen: list.reduce((s, r) => s + r.purchasesSen, 0),
+    consumptionSen: list.reduce((s, r) => s + r.consumptionSen, 0),
+    closingSen: list.reduce((s, r) => s + r.closingSen, 0),
+  };
+  return { rows: list, wip, fg, totals };
+}
+
+app.get("/stock-summary", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const period = c.req.query("period") || undefined;
+  const { rows, wip, fg, totals } = await stockSummary(c.var.DB, period);
+  // Attach the group description + mapped COA accounts for display.
+  const stockMap = await getStockMap(c.var.DB);
+  return c.json({
+    success: true,
+    data: {
+      period: period ?? "all",
+      rows: rows.map((r) => ({
+        ...r,
+        description: GROUP_DESCRIPTIONS[r.group] ?? r.group,
+        accounts: stockMap.rm[r.group] ?? stockMap.rmDefault,
+        balanced: r.openingSen + r.purchasesSen - r.consumptionSen === r.closingSen,
+      })),
+      wip,
+      fg,
+      totals,
+    },
+  });
+});
 
 function bsCategory(
   type: string,

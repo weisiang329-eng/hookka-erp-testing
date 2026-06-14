@@ -1805,6 +1805,9 @@ function StockTopUpPanel({
   const [qty, setQtyInput] = useState("1");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  // Focus drives the browsable dropdown — clicking the box shows the stock
+  // list (first N) so the operator can browse without blind-typing.
+  const [focused, setFocused] = useState(false);
 
   // Only the active type's list is fetched (null URL = skip).
   const { data: rmResp } = useCachedJson<{
@@ -1845,14 +1848,15 @@ function StockTopUpPanel({
     }));
   }, [type, rmResp, wipResp, invResp]);
 
-  // Search-then-pick — empty query shows nothing, results capped at 10
-  // (same pattern as every other picker on this page).
+  // Browse-then-pick — an EMPTY query shows the first chunk of the stock list
+  // (so clicking the box reveals what's in stock to pick from); typing filters.
+  // Capped so a huge RM list can't render thousands of rows at once.
   const matches = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return [];
+    if (!q) return itemOptions.slice(0, 30);
     return itemOptions
       .filter((o) => o.code.toLowerCase().includes(q) || o.name.toLowerCase().includes(q))
-      .slice(0, 10);
+      .slice(0, 30);
   }, [search, itemOptions]);
 
   const selected = itemOptions.find((o) => o.id === itemId) ?? null;
@@ -1933,14 +1937,16 @@ function StockTopUpPanel({
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">
-          Stock Top-Up
+          Issue Replacement Parts
           {issued.length > 0 ? ` (${issued.length})` : ""}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
-        <p className="text-[10px] text-[#9CA3AF]">
-          Short-shipped or missing parts — legs, woven fabric, etc. Deducts stock
-          (RM / WIP / FG) and keeps a record; no production order.
+        <p className="text-xs text-[#4B5563]">
+          Customer is missing or short-shipped a part (legs, woven fabric, a
+          damaged divan base, etc.). Issue it from stock here — it deducts
+          <span className="font-medium"> RM / WIP / FG</span> inventory and logs
+          it against this case. No production order is created.
         </p>
         <div className="flex flex-wrap items-start gap-2">
           <select
@@ -1987,19 +1993,25 @@ function StockTopUpPanel({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
+                  onFocus={() => setFocused(true)}
+                  // Hide on blur so a click outside closes it; the options use
+                  // onMouseDown-preventDefault so selecting still fires first.
+                  onBlur={() => setFocused(false)}
                   disabled={saving}
-                  placeholder={`Search ${type} item by code or name…`}
+                  placeholder={`Click to browse ${type} stock, or type to filter…`}
                   className="h-8 text-xs"
                 />
-                {matches.length > 0 && (
+                {focused && matches.length > 0 && (
                   <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
                     {matches.map((o) => (
                       <button
                         key={o.id}
                         type="button"
+                        onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
                           setItemId(o.id);
                           setSearch("");
+                          setFocused(false);
                         }}
                         className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
                       >

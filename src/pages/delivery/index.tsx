@@ -369,7 +369,11 @@ const ALL_TABS = [
 const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
   pending_dispatch: ["DRAFT"],
   dispatched: ["LOADED", "IN_TRANSIT"],
-  delivered: ["DELIVERED"],
+  // "Delivered" keeps INVOICED rows too (Wei Siang 2026-06-15): once a
+  // delivered DO is converted to an invoice it flips to INVOICED — without
+  // this it vanished from the Delivered tab, losing the delivery record. A
+  // delivered-AND-invoiced DO is still a delivered DO, so it stays here.
+  delivered: ["DELIVERED", "INVOICED"],
 };
 
 // PO-based tabs (show production orders, not delivery orders)
@@ -400,8 +404,8 @@ const PO_SEARCH_KEYS = [
 ];
 
 // Reverse of TAB_DO_STATUSES: which DO tab a given status lives on. Derived
-// from the one map above so the two can never drift apart. INVOICED has no
-// tab (not in TAB_DO_STATUSES) and so never triggers an auto-jump.
+// from the one map above so the two can never drift apart. INVOICED now maps
+// to the "delivered" tab (see above), so searching an invoiced DO jumps there.
 const TAB_FOR_STATUS: Partial<Record<DOStatus, string>> = (() => {
   const m: Partial<Record<DOStatus, string>> = {};
   for (const [tab, statuses] of Object.entries(TAB_DO_STATUSES)) {
@@ -1974,7 +1978,9 @@ export default function DeliveryPage() {
       // return 0 and the card would silently misreport the dashboard.
       dispatched: byStatus.LOADED ?? 0,
       inTransit: byStatus.IN_TRANSIT ?? 0,
-      delivered: byStatus.DELIVERED ?? 0,
+      // Delivered count = DELIVERED + INVOICED so the badge matches the tab
+      // list (which now keeps invoiced DOs — see TAB_DO_STATUSES).
+      delivered: (byStatus.DELIVERED ?? 0) + (byStatus.INVOICED ?? 0),
     };
   }, [doStatsRaw]);
   // Wei Siang 2026-05-16: RM value per DO-status bucket so the tab
@@ -1985,7 +1991,7 @@ export default function DeliveryPage() {
       draft: v.DRAFT ?? 0,
       dispatched: v.LOADED ?? 0,
       inTransit: v.IN_TRANSIT ?? 0,
-      delivered: v.DELIVERED ?? 0,
+      delivered: (v.DELIVERED ?? 0) + (v.INVOICED ?? 0),
     };
   }, [doStatsRaw]);
   const pendingDispatchCount = uniqueDOsByStatus.draft;

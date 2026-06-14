@@ -4637,6 +4637,25 @@ function StockSummaryTab() {
     return () => { stale = true; };
   }, [month, reloadKey]);
 
+  const [byLine, setByLine] = useState<{
+    sofa: { materialSen: number; labourSen: number };
+    bedframe: { materialSen: number; labourSen: number };
+    unallocated: { materialSen: number; labourSen: number };
+    totalMaterialSen: number;
+    totalLabourSen: number;
+    salesByLine: { sofa: number; bedframe: number };
+    salesRatio: { sofa: number; bedframe: number };
+  } | null>(null);
+
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/cost-by-line?period=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof byLine> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setByLine(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [month, reloadKey]);
+
   const anyUnbalanced = (data?.rows ?? []).some((r) => !r.balanced);
 
   const handlePost = async () => {
@@ -4736,6 +4755,57 @@ function StockSummaryTab() {
       {anyUnbalanced && (
         <p className="text-[11px] text-[#9A3A2D]">Some groups show "!" — opening + purchases − consumption ≠ closing. This usually means an ADJUSTMENT or non-receipt/issue movement in the period; check the cost ledger.</p>
       )}
+
+      {/* Phase 4.5 — consumption + labour split by product line, following
+          the RM_ISSUE / LABOR_POSTED → production-order category. */}
+      {byLine && (
+        <Card>
+          <CardContent className="p-0 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="px-3 py-2 text-left">By product line (this month)</th>
+                  <th className="px-3 py-2 text-right">Material consumed</th>
+                  <th className="px-3 py-2 text-right">Labour</th>
+                  <th className="px-3 py-2 text-right">Sales</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-[#F0ECE9]">
+                  <td className="px-3 py-1.5">Sofa <span className="text-[11px] text-[#9CA3AF]">(incl. Accessory)</span></td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.sofa.materialSen)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.sofa.labourSen)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.salesByLine.sofa)}</td>
+                </tr>
+                <tr className="border-b border-[#F0ECE9]">
+                  <td className="px-3 py-1.5">Bedframe</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.bedframe.materialSen)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.bedframe.labourSen)}</td>
+                  <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.salesByLine.bedframe)}</td>
+                </tr>
+                {(byLine.unallocated.materialSen !== 0 || byLine.unallocated.labourSen !== 0) && (
+                  <tr className="border-b border-[#F0ECE9] text-[#9A3A2D]">
+                    <td className="px-3 py-1.5">Unallocated <span className="text-[11px]">(issue/labour with no PO category — fix the PO)</span></td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.unallocated.materialSen)}</td>
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(byLine.unallocated.labourSen)}</td>
+                    <td className="px-3 py-1.5 text-right" />
+                  </tr>
+                )}
+                <tr className="bg-[#F0ECE9]/60 font-semibold">
+                  <td className="px-3 py-2">TOTAL</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(byLine.totalMaterialSen)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(byLine.totalLabourSen)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(byLine.salesByLine.sofa + byLine.salesByLine.bedframe)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+      <p className="text-[11px] text-[#9CA3AF]">
+        Sofa material + Bedframe material + Unallocated = total consumption (the COGS material part). Shared/indirect
+        costs (no-issue factory materials, SST, admin) are apportioned by the sales ratio shown, in the Phase-5 split P&L.
+      </p>
     </div>
   );
 }

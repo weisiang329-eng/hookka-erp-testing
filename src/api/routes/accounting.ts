@@ -3316,6 +3316,108 @@ app.get("/stock-summary", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// PRODUCT-LINE COST AGGREGATION (Phase 4.5, 2026-06) — split the
+// manufacturing cost into Sofa vs Bedframe by FOLLOWING ACTUAL ACTIVITY
+// (owner rule, 2026-06-10): material consumption follows the RM_ISSUE →
+// production-order category; labour follows LABOR_POSTED → production-order
+// category. SOFA + ACCESSORY → Sofa, BEDFRAME → Bedframe; issues with no
+// category / no PO land in "unallocated" (surfaced so they can be fixed —
+// the Phase-4.7 cleanup report). Shared/indirect costs (no-issue factory
+// materials, SST, admin) are apportioned by net-sales ratio in the report
+// layer (Phase 4.6) — this engine returns the DIRECT split + the sales
+// ratio so the report can do the apportionment.
+// ---------------------------------------------------------------------------
+type LineBucket = { materialSen: number; labourSen: number };
+
+async function costByLine(
+  db: Env["Variables"]["DB"],
+  period?: string,
+): Promise<{
+  sofa: LineBucket;
+  bedframe: LineBucket;
+  unallocated: LineBucket;
+  totalMaterialSen: number;
+  totalLabourSen: number;
+  salesRatio: { sofa: number; bedframe: number };
+  salesByLine: { sofa: number; bedframe: number };
+}> {
+  const [clRes, poRes] = await Promise.all([
+    db
+      .prepare(
+        `SELECT type, itemId, refType, refId, totalCostSen, date
+           FROM cost_ledger WHERE type IN ('RM_ISSUE','LABOR_POSTED')`,
+      )
+      .all<{ type: string; itemId: string; refType: string | null; refId: string | null; totalCostSen: number; date: string }>(),
+    db.prepare("SELECT id, itemCategory FROM production_orders").all<{ id: string; itemCategory: string | null }>(),
+  ]);
+  const poCat = new Map<string, string>();
+  for (const p of poRes.results ?? []) poCat.set(p.id, String(p.itemCategory ?? "").toUpperCase());
+  const sofa: LineBucket = { materialSen: 0, labourSen: 0 };
+  const bedframe: LineBucket = { materialSen: 0, labourSen: 0 };
+  const unallocated: LineBucket = { materialSen: 0, labourSen: 0 };
+  const lineOf = (poId: string | null): LineBucket => {
+    const cat = poId ? poCat.get(poId) : undefined;
+    if (cat === "SOFA" || cat === "ACCESSORY") return sofa;
+    if (cat === "BEDFRAME") return bedframe;
+    return unallocated;
+  };
+  for (const l of clRes.results ?? []) {
+    if (!ymInPeriod(String(l.date ?? "").slice(0, 7), period)) continue;
+    const v = Number(l.totalCostSen) || 0;
+    // RM_ISSUE → refId is the PO; LABOR_POSTED → itemId is the PO.
+    const poId = l.type === "RM_ISSUE" ? l.refId : l.itemId;
+    const bucket = lineOf(poId);
+    if (l.type === "RM_ISSUE") bucket.materialSen += v;
+    else bucket.labourSen += v;
+  }
+  // Sales by line (invoice items → product category), for the ratio.
+  let sofaSales = 0;
+  let bedSales = 0;
+  try {
+    const [invRes, itemRes, prodRes] = await Promise.all([
+      db.prepare(`SELECT id, invoiceDate, status FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ id: string; invoiceDate: string | null; status: string }>(),
+      db.prepare(`SELECT invoiceId, productCode, totalSen FROM invoice_items`).all<{ invoiceId: string; productCode: string | null; totalSen: number }>(),
+      db.prepare(`SELECT code, category FROM products`).all<{ code: string; category: string | null }>(),
+    ]);
+    const invYm = new Map<string, string>();
+    for (const i of invRes.results ?? []) invYm.set(i.id, String(i.invoiceDate ?? "").slice(0, 7));
+    const cat = new Map<string, string>();
+    for (const p of prodRes.results ?? []) cat.set(p.code, String(p.category ?? "").toUpperCase());
+    for (const it of itemRes.results ?? []) {
+      const ym = invYm.get(it.invoiceId);
+      if (ym === undefined || !ymInPeriod(ym, period)) continue;
+      const c2 = cat.get(it.productCode ?? "") ?? "";
+      const v = Number(it.totalSen) || 0;
+      if (c2 === "BEDFRAME") bedSales += v;
+      else sofaSales += v; // SOFA + ACCESSORY + anything else → Sofa
+    }
+  } catch {
+    /* invoices/products absent — ratio stays 0 */
+  }
+  const salesTotal = sofaSales + bedSales;
+  const salesRatio = salesTotal > 0
+    ? { sofa: sofaSales / salesTotal, bedframe: bedSales / salesTotal }
+    : { sofa: 0.5, bedframe: 0.5 };
+  return {
+    sofa,
+    bedframe,
+    unallocated,
+    totalMaterialSen: sofa.materialSen + bedframe.materialSen + unallocated.materialSen,
+    totalLabourSen: sofa.labourSen + bedframe.labourSen + unallocated.labourSen,
+    salesRatio,
+    salesByLine: { sofa: sofaSales, bedframe: bedSales },
+  };
+}
+
+app.get("/cost-by-line", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const period = c.req.query("period") || undefined;
+  const data = await costByLine(c.var.DB, period);
+  return c.json({ success: true, data: { period: period ?? "all", ...data } });
+});
+
 function bsCategory(
   type: string,
   code: string,

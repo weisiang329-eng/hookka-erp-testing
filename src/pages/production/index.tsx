@@ -107,12 +107,14 @@ function jobCardCode128DataUrl(jobCardId: string): string {
     const canvas = document.createElement("canvas");
     JsBarcode(canvas, jobCardBarcodeValue(jobCardId), {
       format: "CODE128",
-      height: 28,
-      width: 1.5, // narrow-bar px — keeps a ~16-char id scannable but compact
-      margin: 4,
+      height: 46,
+      // Wider narrow-bar (2.4px) = more pixels per bar → crisp + reliably
+      // scannable when printed (the 1.5px version printed blurry/dense).
+      width: 2.4,
+      margin: 6,
       displayValue: true,
-      fontSize: 11,
-      textMargin: 1,
+      fontSize: 15,
+      textMargin: 2,
     });
     return canvas.toDataURL("image/png");
   } catch {
@@ -5684,9 +5686,10 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
-    /* Code 128 "Scan to complete" column — one barcode per WIP row. */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 150px; }
-    table.schedule td.bc img { height: 34px; width: auto; max-width: 144px; image-rendering: crisp-edges; }
+    /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
+       generously so it prints crisp and scans reliably (not dense/blurry). */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 188px; }
+    table.schedule td.bc img { height: 46px; width: auto; max-width: 182px; image-rendering: crisp-edges; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,
     table.schedule tbody small { color: #555; font-size: ${sizes.small}px; }

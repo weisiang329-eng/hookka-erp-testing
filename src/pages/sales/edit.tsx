@@ -25,6 +25,7 @@ import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 import { LockBanner } from "@/components/ui/lock-banner";
+import { RepairScopePicker, RepairScopeBadge } from "@/components/sales/repair-scope-picker";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
@@ -252,6 +253,7 @@ export default function EditSalesOrderPage() {
         specialOrders: it.specialOrders,
         customSpecials: it.customSpecials,
         notes: it.notes,
+        repairScope: it.repairScope ?? null,
       })),
     }),
     [
@@ -1058,6 +1060,7 @@ export default function EditSalesOrderPage() {
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-[#6B5C32]">Line {idx + 1}</span>
                     {item.itemCategory && <Badge>{item.itemCategory}</Badge>}
+                    {isServiceOrderMode && <RepairScopeBadge repairScope={item.repairScope} />}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold amount">{formatCurrency(getLineTotal(item))}</span>
@@ -1443,6 +1446,16 @@ export default function EditSalesOrderPage() {
                   <label className="block text-xs text-[#9CA3AF] mb-1">Line Notes</label>
                   <Input value={item.notes} onChange={(e) => updateItem(idx, { notes: e.target.value })} placeholder="Optional notes for this line..." className="h-8" />
                 </div>
+
+                {/* Repair Scope (0160) — service-order mode only. Same shared
+                    picker the create page uses, so the two can't drift. Editing
+                    here is already gated by the page-level eligibility lock
+                    (edits allowed only before any department completes and
+                    within the production window), so a line's repair scope can
+                    only change before its job cards are built. */}
+                {isServiceOrderMode && (
+                  <RepairScopePicker item={item} idx={idx} onUpdate={updateItem} />
+                )}
 
                 {/* WIP Preview (Bedframe) */}
                 {item.itemCategory === "BEDFRAME" && item.productCode && (() => {

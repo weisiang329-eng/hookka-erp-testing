@@ -4134,6 +4134,229 @@ app.post("/contra", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// LABOUR MONTH-END POSTING (Phase 4.1, 2026-06) — accrue the month's
+// labour cost to the Manufacturing Account / expenses, by department.
+//
+// Per the owner's "real-time preview + month-end Post button" model:
+// the per-worker EMPLOYER cost (gross pay + employer EPF/SOCSO/EIS) is
+// grouped by the payslip's department_code, each department mapped to a
+// COST/EXPENSE account (production → 750-0010, maintenance/warehouse →
+// 780-x, office → 900-x; Repair / Shortfall show as their own preview
+// rows). Post writes DR each account · CR 410-0010 ACCRUAL - SALARY, so
+// paying salaries later through Payment/Expense clears the accrual.
+// Idempotent per month (sourceId labor-YYYY-MM). The map lives in
+// kv_config 'labor_account_map' and is editable in Maintenance.
+// ---------------------------------------------------------------------------
+const LABOUR_ACCRUAL_ACCT = "410-0010"; // ACCRUAL - SALARY
+const DEFAULT_LABOUR_MAP = {
+  fallback: "750-0010", // PRODUCTION - SALARIES (any unmapped dept)
+  byDept: {
+    MAINTENANCE: "780-0030", // UPKEEP OF FACTORY
+    WAREHOUSING: "780-0000", // FACTORY OVERHEAD
+  } as Record<string, string>,
+};
+
+async function getLabourMap(
+  db: Env["Variables"]["DB"],
+): Promise<{ fallback: string; byDept: Record<string, string> }> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'labor_account_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as { fallback?: string; byDept?: Record<string, string> };
+      return {
+        fallback: parsed.fallback || DEFAULT_LABOUR_MAP.fallback,
+        byDept: { ...DEFAULT_LABOUR_MAP.byDept, ...(parsed.byDept ?? {}) },
+      };
+    }
+  } catch {
+    /* table/row absent — use defaults */
+  }
+  return DEFAULT_LABOUR_MAP;
+}
+
+type LabourDeptAgg = {
+  departmentCode: string;
+  account: string;
+  workers: number;
+  grossSen: number;
+  employerSen: number;
+  costSen: number;
+};
+
+async function aggregateLabour(
+  db: Env["Variables"]["DB"],
+  month: string,
+  orgId: string,
+): Promise<{ byDept: LabourDeptAgg[]; totalSen: number; map: { fallback: string; byDept: Record<string, string> } }> {
+  const map = await getLabourMap(db);
+  const res = await db
+    .prepare(
+      `SELECT departmentCode, grossPaySen, epfEmployerSen, socsoEmployerSen, eisEmployerSen
+         FROM payslips WHERE orgId = ? AND period = ? AND status != 'CANCELLED'`,
+    )
+    .bind(orgId, month)
+    .all<{ departmentCode: string | null; grossPaySen: number; epfEmployerSen: number; socsoEmployerSen: number; eisEmployerSen: number }>();
+  const agg = new Map<string, LabourDeptAgg>();
+  for (const p of res.results ?? []) {
+    const dept = String(p.departmentCode ?? "").trim() || "(unassigned)";
+    const account = map.byDept[dept] ?? map.fallback;
+    const gross = Number(p.grossPaySen) || 0;
+    const employer =
+      (Number(p.epfEmployerSen) || 0) +
+      (Number(p.socsoEmployerSen) || 0) +
+      (Number(p.eisEmployerSen) || 0);
+    const cur = agg.get(dept) ?? { departmentCode: dept, account, workers: 0, grossSen: 0, employerSen: 0, costSen: 0 };
+    cur.workers += 1;
+    cur.grossSen += gross;
+    cur.employerSen += employer;
+    cur.costSen += gross + employer;
+    agg.set(dept, cur);
+  }
+  const byDept = [...agg.values()].sort((a, b) => a.departmentCode.localeCompare(b.departmentCode));
+  const totalSen = byDept.reduce((s, d) => s + d.costSen, 0);
+  return { byDept, totalSen, map };
+}
+
+app.get("/labor/preview", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const month = c.req.query("month") || "";
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+  }
+  try {
+    const orgId = getOrgId(c);
+    const { byDept, totalSen } = await aggregateLabour(c.var.DB, month, orgId);
+    const posted = await ledgerHasSource(c.var.DB, orgId, "labor_post", `labor-${month}`);
+    // Roll the per-dept rows up to the account level for the GL preview.
+    const byAccount = new Map<string, number>();
+    for (const d of byDept) byAccount.set(d.account, (byAccount.get(d.account) ?? 0) + d.costSen);
+    const coaRes = await c.var.DB.prepare(
+      "SELECT code, name FROM chart_of_accounts",
+    ).all<{ code: string; name: string }>();
+    const names = new Map((coaRes.results ?? []).map((a) => [a.code, a.name] as const));
+    return c.json({
+      success: true,
+      data: {
+        month,
+        posted,
+        byDept: byDept.map((d) => ({ ...d, accountName: names.get(d.account) ?? "" })),
+        accounts: [...byAccount.entries()]
+          .map(([code, sen]) => ({ code, name: names.get(code) ?? "", costSen: sen }))
+          .sort((a, b) => a.code.localeCompare(b.code)),
+        accrualAccount: LABOUR_ACCRUAL_ACCT,
+        totalSen,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: "Preview failed — is the payslips table available?" }, 400);
+  }
+});
+
+app.post("/labor/post", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const month = String(body.month || "");
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return c.json({ success: false, error: "month must be YYYY-MM" }, 400);
+    }
+    const today = new Date().toISOString().slice(0, 7);
+    if (month > today) {
+      return c.json({ success: false, error: `Cannot post labour for a future month (${month})` }, 400);
+    }
+    const orgId = getOrgId(c);
+    const sourceId = `labor-${month}`;
+    if (await ledgerHasSource(c.var.DB, orgId, "labor_post", sourceId)) {
+      return c.json({ success: false, error: `Labour for ${month} is already posted (idempotent — nothing re-posted).` }, 400);
+    }
+    const { byDept, totalSen } = await aggregateLabour(c.var.DB, month, orgId);
+    if (totalSen <= 0) {
+      return c.json({ success: false, error: `No payslips found for ${month} — generate payslips first.` }, 400);
+    }
+    const byAccount = new Map<string, number>();
+    for (const d of byDept) byAccount.set(d.account, (byAccount.get(d.account) ?? 0) + d.costSen);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get("userId") ?? null;
+    const legs: LedgerEntryInput[] = [];
+    let legNo = 1;
+    for (const [account, sen] of byAccount) {
+      if (sen === 0) continue;
+      legs.push({
+        id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+        sourceType: "labor_post",
+        sourceId,
+        legNo: legNo++,
+        accountCode: account,
+        debitSen: sen,
+        creditSen: 0,
+        description: `Labour ${month}`,
+        actorUserId,
+        orgId,
+      });
+    }
+    legs.push({
+      id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+      sourceType: "labor_post",
+      sourceId,
+      legNo: legNo++,
+      accountCode: LABOUR_ACCRUAL_ACCT,
+      debitSen: 0,
+      creditSen: totalSen,
+      description: `Labour ${month} · accrued wages payable`,
+      actorUserId,
+      orgId,
+    });
+    const { statements } = await buildJournalEntryStatements(c.var.DB, orgId, legs);
+    await c.var.DB.batch(statements);
+    await emitAudit(c, {
+      resource: "accounting",
+      resourceId: sourceId,
+      action: "create",
+      after: { month, totalSen, accounts: byAccount.size },
+    });
+    return c.json({ success: true, data: { month, totalSen, accounts: byAccount.size } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/labor/map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const map = await getLabourMap(c.var.DB);
+  return c.json({ success: true, data: map });
+});
+
+app.put("/labor/map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const fallback = String(body.fallback || DEFAULT_LABOUR_MAP.fallback);
+    const byDept: Record<string, string> = {};
+    if (body.byDept && typeof body.byDept === "object") {
+      for (const [k, v] of Object.entries(body.byDept)) {
+        if (typeof v === "string" && v.trim()) byDept[k] = v.trim();
+      }
+    }
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at)
+       VALUES ('labor_account_map', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    )
+      .bind(JSON.stringify({ fallback, byDept }), new Date().toISOString())
+      .run();
+    return c.json({ success: true, data: { fallback, byDept } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // LANDED COST (Phase 3.7, 2026-06) — allocate import charges (freight /
 // duty / clearance; the owner gets BOTH separate forwarder PIs and FEE
 // lines on the goods PI) onto a GRN's rm_batches, proportional to batch

@@ -45,7 +45,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -180,6 +180,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" /> },
   { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" /> },
   { key: "assets", label: "Fixed Assets", icon: <Building2 className="h-4 w-4" /> },
+  { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" /> },
   { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
   { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
 ];
@@ -262,6 +263,7 @@ export default function AccountingPage() {
           {tab === "receipts" && <ReceiptsTab accounts={accounts} />}
           {tab === "cashbook" && <CashBookTab accounts={accounts} />}
           {tab === "assets" && <FixedAssetsTab accounts={accounts} />}
+          {tab === "labor" && <LaborTab accounts={accounts} />}
           {tab === "opening" && <OpeningBalanceTab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "maint" && (
             <div className="space-y-4">
@@ -4599,6 +4601,230 @@ function ReceiptsTab({ accounts }: { accounts: ChartOfAccount[] }) {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// =============== TAB: LABOUR MONTH-END POSTING (Phase 4.1) ===============
+//
+// Accrue the month's labour cost by department: per-worker employer cost
+// (gross + employer EPF/SOCSO/EIS) grouped by department, each mapped to a
+// COST/EXPENSE account. Preview → Post (DR accounts · CR 410-0010). The
+// department→account map is editable inline.
+
+function LaborTab({ accounts }: { accounts: ChartOfAccount[] }) {
+  const { toast } = useToast();
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [data, setData] = useState<{
+    posted: boolean;
+    totalSen: number;
+    accrualAccount: string;
+    byDept: { departmentCode: string; account: string; accountName: string; workers: number; grossSen: number; employerSen: number; costSen: number }[];
+    accounts: { code: string; name: string; costSen: number }[];
+  } | null>(null);
+  const [posting, setPosting] = useState(false);
+  const [showMap, setShowMap] = useState(false);
+  const [map, setMap] = useState<{ fallback: string; byDept: Record<string, string> }>({ fallback: "750-0010", byDept: {} });
+
+  const costAccounts = accounts.filter(
+    (a) => (a.type === "COST" || a.type === "EXPENSE") && a.isPostable !== false,
+  );
+
+  const load = useCallback(() => {
+    fetch(`/api/accounting/labor/preview?month=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data>; error?: string }>)
+      .then((j) => { if (j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+  }, [month]);
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/labor/preview?month=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data>; error?: string }>)
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [month]);
+  useEffect(() => {
+    fetch("/api/accounting/labor/map")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: { fallback: string; byDept: Record<string, string> } }>)
+      .then((j) => { if (j?.success && j.data) setMap(j.data); })
+      .catch(() => {});
+  }, []);
+
+  const handlePost = async () => {
+    setPosting(true);
+    try {
+      const res = await fetch("/api/accounting/labor/post", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ month }),
+      });
+      const j = await res.json() as { success?: boolean; data?: { totalSen: number }; error?: string };
+      if (j?.success && j.data) {
+        toast.success(`Labour ${month} posted — ${formatCurrency(j.data.totalSen)}`);
+        load();
+      } else toast.error(j?.error || "Post failed");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const saveMap = async () => {
+    const res = await fetch("/api/accounting/labor/map", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(map),
+    });
+    const j = asMutationResponse(await res.json());
+    if (j?.success) { toast.success("Mapping saved"); setShowMap(false); load(); }
+    else toast.error(j?.error || "Save failed");
+  };
+
+  const selCls = "rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Labour — Month-end Posting</h2>
+        <Button variant="outline" size="sm" onClick={() => setShowMap(!showMap)}>Department → Account map</Button>
+      </div>
+
+      {showMap && (
+        <Card>
+          <CardContent className="p-4 space-y-3">
+            <p className="text-xs text-[#6B7280]">Each department's labour posts to the chosen account. Departments not listed use the fallback. Add a row by typing the department code exactly as it appears in the preview.</p>
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="text-xs font-medium text-[#6B7280] mb-1 block">Fallback (all unlisted depts)</label>
+                <select value={map.fallback} onChange={(e) => setMap({ ...map, fallback: e.target.value })} className={`${selCls} w-72`}>
+                  {costAccounts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                </select>
+              </div>
+            </div>
+            {Object.entries(map.byDept).map(([dept, acct]) => (
+              <div key={dept} className="flex flex-wrap items-end gap-2">
+                <span className="text-sm tabular-nums w-44 pb-2">{dept}</span>
+                <select value={acct} onChange={(e) => setMap({ ...map, byDept: { ...map.byDept, [dept]: e.target.value } })} className={`${selCls} w-72`}>
+                  {costAccounts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+                </select>
+                <button onClick={() => { const b = { ...map.byDept }; delete b[dept]; setMap({ ...map, byDept: b }); }} className="text-[#9A3A2D] text-xs underline decoration-dotted cursor-pointer pb-2">remove</button>
+              </div>
+            ))}
+            <AddDeptMapRow onAdd={(dept) => setMap({ ...map, byDept: { ...map.byDept, [dept]: map.fallback } })} />
+            <div className="flex gap-2">
+              <Button variant="primary" size="sm" onClick={saveMap}>Save mapping</Button>
+              <Button variant="outline" size="sm" onClick={() => setShowMap(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardContent className="p-4 flex flex-wrap items-end gap-4 bg-[#F7F4EF] rounded-lg">
+          <div>
+            <label className="text-xs font-semibold text-[#1F1D1B] mb-1 block">Month</label>
+            <input type="month" value={month} onChange={(e) => { setData(null); setMonth(e.target.value); }} className={selCls} />
+          </div>
+          {data && (
+            <>
+              <span className="text-sm text-[#6B7280] pb-1">Total labour cost <span className="font-semibold text-[#1F1D1B] tabular-nums">{formatCurrency(data.totalSen)}</span></span>
+              {data.posted ? (
+                <span className="text-xs text-[#27500A] pb-2">Already posted ✓ (DR accounts · CR {data.accrualAccount})</span>
+              ) : (
+                <Button variant="primary" size="sm" disabled={posting || data.totalSen <= 0} onClick={handlePost}>
+                  {posting ? "Posting…" : `Post ${formatCurrency(data.totalSen)} to GL`}
+                </Button>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {data && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <Card>
+            <CardContent className="p-0 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">Department</th>
+                    <th className="px-3 py-2 text-left">→ Account</th>
+                    <th className="px-3 py-2 text-right">Workers</th>
+                    <th className="px-3 py-2 text-right">Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.byDept.map((d) => (
+                    <tr key={d.departmentCode} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5">{d.departmentCode}</td>
+                      <td className="px-3 py-1.5 text-xs"><span className="tabular-nums text-[#6B7280] mr-1">{d.account}</span>{d.accountName}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{d.workers}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(d.costSen)}</td>
+                    </tr>
+                  ))}
+                  {data.byDept.length === 0 && (
+                    <tr><td colSpan={4} className="px-3 py-8 text-center text-sm text-[#9CA3AF]">No payslips for {month}</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-0 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                    <th className="px-3 py-2 text-left">GL posting preview</th>
+                    <th className="px-3 py-2 text-right">Debit</th>
+                    <th className="px-3 py-2 text-right">Credit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.accounts.map((a) => (
+                    <tr key={a.code} className="border-b border-[#F0ECE9]">
+                      <td className="px-3 py-1.5"><span className="tabular-nums text-xs text-[#6B7280] mr-1">{a.code}</span>{a.name}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(a.costSen)}</td>
+                      <td className="px-3 py-1.5 text-right" />
+                    </tr>
+                  ))}
+                  <tr className="border-b border-[#F0ECE9]">
+                    <td className="px-3 py-1.5"><span className="tabular-nums text-xs text-[#6B7280] mr-1">{data.accrualAccount}</span>ACCRUAL - SALARY</td>
+                    <td className="px-3 py-1.5 text-right" />
+                    <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(data.totalSen)}</td>
+                  </tr>
+                  <tr className="bg-[#F0ECE9]/60 font-semibold">
+                    <td className="px-3 py-2">TOTAL</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totalSen)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(data.totalSen)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      <p className="text-[11px] text-[#9CA3AF]">
+        Cost basis = gross pay + employer EPF/SOCSO/EIS (the full company cost). Posting credits 410-0010 ACCRUAL - SALARY;
+        when you later pay salaries via Payments, debit 410-0010 to clear it. Net pay vs statutory split is handled at payment time.
+      </p>
+    </div>
+  );
+}
+
+function AddDeptMapRow({ onAdd }: { onAdd: (dept: string) => void }) {
+  const [v, setV] = useState("");
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="text"
+        value={v}
+        onChange={(e) => setV(e.target.value)}
+        placeholder="Department code (e.g. MAINTENANCE)"
+        className="rounded-md border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm w-72"
+      />
+      <Button variant="outline" size="sm" disabled={!v.trim()} onClick={() => { onAdd(v.trim()); setV(""); }}>
+        <Plus className="h-4 w-4" /> Add dept
+      </Button>
     </div>
   );
 }

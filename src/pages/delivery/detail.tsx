@@ -43,6 +43,7 @@ import { verifiedSave, formatMismatchError } from "@/lib/verified-save";
 type DeliveryOrderItem = {
   id: string;
   productionOrderId: string;
+  salesOrderNo?: string;
   poNo: string;
   productCode: string;
   productName: string;
@@ -864,9 +865,19 @@ export default function DeliveryDetailPage() {
       {/* Document Relationship — the same chain graph as the SO page, so you
           can see how THIS delivery order connects to its SO / invoice / payment
           right from here. */}
-      {order?.salesOrderId && (
-        <SoDocumentRelationship soId={order.salesOrderId} currentDocNo={order.doNo} />
-      )}
+      {(() => {
+        // Anchor the chain on this DO's SO. Many DOs are consolidated (no
+        // salesOrderId/companySOId on the header) — fall back to the first
+        // line's SO number, which /api/sales-orders/:id now resolves.
+        const anchor =
+          order?.salesOrderId ||
+          order?.companySOId ||
+          order?.items?.find((i) => i.salesOrderNo)?.salesOrderNo ||
+          "";
+        return anchor ? (
+          <SoDocumentRelationship soId={anchor} currentDocNo={order.doNo} />
+        ) : null;
+      })()}
 
       {/* POD Capture Dialog */}
       <PODDialog

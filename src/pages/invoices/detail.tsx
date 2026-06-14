@@ -1204,9 +1204,9 @@ export default function InvoiceDetailPage() {
 
       {/* Document Relationship — same chain graph as the SO page, so you can
           see how THIS invoice connects to its SO / DO / payments from here. */}
-      {invoice?.salesOrderId && (
+      {invoice && (invoice.salesOrderId || invoice.companySOId) && (
         <SoDocumentRelationship
-          soId={invoice.salesOrderId}
+          soId={invoice.salesOrderId || invoice.companySOId}
           currentDocNo={invoice.invoiceNo}
         />
       )}

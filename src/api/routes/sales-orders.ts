@@ -2693,7 +2693,19 @@ async function pushNewlyCreatedJobCardsToSheet(
 // GET /api/sales-orders/:id — SO + items + statusHistory + priceOverrides
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
-  const id = c.req.param("id");
+  let id = c.req.param("id");
+  // Doc-chain callers (the DO / Invoice relationship graph, incl. consolidated
+  // DOs that carry no salesOrderId) may anchor on the SO NUMBER rather than its
+  // primary id. SO ids are "so-…"; treat anything else as a companySOId and
+  // resolve it. The SO detail page always passes a real id, so its path is
+  // untouched; a number that resolves to nothing falls through to the 404.
+  if (id && !id.startsWith("so-")) {
+    const byNo = await c.var.DB
+      .prepare("SELECT id FROM sales_orders WHERE company_so_id = ? LIMIT 1")
+      .bind(id)
+      .first<{ id: string }>();
+    if (byNo?.id) id = byNo.id;
+  }
   const [so, itemsRes, statusRes, overridesRes, posRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM sales_orders WHERE id = ?")
       .bind(id)

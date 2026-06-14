@@ -2523,10 +2523,13 @@ export function DataGrid<T extends Record<string, any>>({
         </span>
       </div>
 
-      {/* Table */}
+      {/* Table — no own border/rounding: the grid is wrapped in a Card on every
+          list page, so a border here just drew a second frame inside the Card
+          ("box in a box"). A thin top divider keeps the header separated from
+          the toolbar above. */}
       <div
         ref={scrollRef}
-        className="overflow-auto border border-[#E2DDD8] rounded-b"
+        className="overflow-auto border-t border-[#E2DDD8]"
         style={{ maxHeight: maxHeight || "calc(100vh - 240px)" }}
       >
         <table

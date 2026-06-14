@@ -678,6 +678,10 @@ export default function DeliveryPage() {
   // both keep the user where they were.
   const [pageTab, setPageTab] = useUrlState<"orders" | "3pl">("section", "orders");
   const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrderRow[]>([]);
+  // Whole-table search matches (across every status), populated only while a
+  // search is active. Separate from deliveryOrders so the browse-derived
+  // counts/lists stay correct during a search.
+  const [searchResults, setSearchResults] = useState<DeliveryOrderRow[]>([]);
   const [planningPOs, setPlanningPOs] = useState<ReadyPORow[]>([]);
   const [readyPOs, setReadyPOs] = useState<ReadyPORow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -896,21 +900,31 @@ export default function DeliveryPage() {
   const [search, setSearch] = useState("");
 
   // ---------- Fetch ----------
-  // When the operator is searching, hit the server with the term (and a high
-  // limit) so matches come back from the WHOLE table across every status — not
-  // just the current 200-row page. Mirrors the Sales Order list pattern.
-  // Empty search = normal paginated browse.
-  const doServerSearch = search.trim();
+  // Browse load — ALWAYS paginated, NEVER search-filtered. This is the set the
+  // page derives from: linkedPOIds (→ Pending Delivery / readyPOs), deliveredMTD,
+  // tab counts. It must stay whole regardless of search, or POs already on
+  // other DOs wrongly resurface as "ready" the moment you type a search term.
   const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
     success?: boolean;
     data?: DeliveryOrder[];
     page?: number;
     limit?: number;
     total?: number;
+  }>(`/api/delivery-orders?page=${page}&limit=${PAGE_SIZE}`);
+  // Search load — SEPARATE from the browse load so it never disturbs the
+  // derivations above. When the operator is searching, hit the server with the
+  // term (high limit) so matches come from the WHOLE table across every status,
+  // not just the current 200-row browse page. Skipped entirely when not
+  // searching (null URL → no fetch). Feeds only the grid + cross-tab jump.
+  const doServerSearch = search.trim();
+  const { data: doSearchRaw } = useCachedJson<{
+    success?: boolean;
+    data?: DeliveryOrder[];
+    total?: number;
   }>(
     doServerSearch
       ? `/api/delivery-orders?search=${encodeURIComponent(doServerSearch)}&limit=2000`
-      : `/api/delivery-orders?page=${page}&limit=${PAGE_SIZE}`,
+      : null,
   );
   // Whole-dataset status bucket counts — summary cards and tab badges read
   // from this so counts reflect the full table, not just the current
@@ -1027,6 +1041,7 @@ export default function DeliveryPage() {
     const anyLoading = doLoading || poLoading || soLoading || custLoading || prodLoading;
     setLoading(anyLoading);
     const dRes = doRaw || { success: false };
+    const sRes = doSearchRaw || { success: false };
     const poRes = poRaw || { success: false };
     const soRes = soRaw || { success: false };
     const custRes = custRaw || { success: false };
@@ -1091,6 +1106,18 @@ export default function DeliveryPage() {
             .filter((d) => !d.id.startsWith("virt-"))
             .map((d) => mapDOToRow(d, soRefMap));
           setDeliveryOrders(realRows);
+        }
+
+        // Map the separate search payload with the SAME row mapper so the grid
+        // and the cross-tab jump see fully-formed rows. Empty when not searching.
+        if (sRes.success && Array.isArray(sRes.data)) {
+          setSearchResults(
+            (sRes.data as DeliveryOrder[])
+              .filter((d) => !d.id.startsWith("virt-"))
+              .map((d) => mapDOToRow(d, soRefMap)),
+          );
+        } else {
+          setSearchResults([]);
         }
 
         if (poRes.success && Array.isArray(poRes.data)) {
@@ -1273,7 +1300,7 @@ export default function DeliveryPage() {
         }
       }
     }
-  }, [doRaw, poRaw, soRaw, poValRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
+  }, [doRaw, doSearchRaw, poRaw, soRaw, poValRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ----- 3PL Provider helpers -----
@@ -1823,11 +1850,12 @@ export default function DeliveryPage() {
     // which stage/tab it's on — searching an SO number must surface its DO
     // even if that DO sits on another tab. The DataGrid then narrows these by
     // the search term. Empty search keeps the normal tab-scoped view.
-    // While searching, deliveryOrders already holds the server's whole-table
-    // matches across every status (see the fetch above), so show them all.
-    if (search.trim()) return deliveryOrders;
+    // While searching, show the server's whole-table matches across every
+    // status (searchResults is a separate set so the browse-derived counts/
+    // lists above stay correct). Empty search = normal tab-scoped view.
+    if (search.trim()) return searchResults;
     return deliveryOrders.filter((d) => statuses.includes(d.status));
-  }, [deliveryOrders, activeTab, search]);
+  }, [deliveryOrders, searchResults, activeTab, search]);
 
   // Unified search index (Wei Siang 2026-06-02): one record-type-agnostic
   // index so the auto-jump below works for all 4 delivery tabs, not just the
@@ -1838,7 +1866,10 @@ export default function DeliveryPage() {
   // silently drops the customer-ref match.
   const searchJumpIndex = useMemo(() => {
     const entries: { tab: string; haystack: string }[] = [];
-    for (const d of deliveryOrders) {
+    // While searching, the DOs that matter live in searchResults (whole-table
+    // matches); the browse-page deliveryOrders may not contain the hit at all.
+    const doSource = search.trim() ? searchResults : deliveryOrders;
+    for (const d of doSource) {
       const tab = TAB_FOR_STATUS[d.status];
       if (!tab) continue; // status with no tab (e.g. INVOICED) — never a jump target
       entries.push({
@@ -1892,7 +1923,7 @@ export default function DeliveryPage() {
       });
     }
     return entries;
-  }, [deliveryOrders, readyPOs, planningPOs]);
+  }, [deliveryOrders, searchResults, search, readyPOs, planningPOs]);
 
   // Follow the record to its tab (Wei Siang 2026-06-02): a matching record is
   // surfaced no matter which tab it sits on, but the tab header should follow

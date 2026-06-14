@@ -3294,6 +3294,9 @@ type OtherParty = {
   contactPerson: string;
   phone: string;
   email: string;
+  tin: string;
+  registrationNo: string;
+  address: string;
   notes: string;
   isActive: boolean;
 };
@@ -3309,6 +3312,9 @@ function OtherPartiesTab() {
     contactPerson: "",
     phone: "",
     email: "",
+    tin: "",
+    registrationNo: "",
+    address: "",
     notes: "",
   });
   const [controls, setControls] = useState<{ od: number; oc: number } | null>(null);
@@ -3344,7 +3350,7 @@ function OtherPartiesTab() {
     const j = asMutationResponse(await res.json());
     if (j?.success) {
       setShowForm(false);
-      setForm({ type: "CREDITOR", name: "", contactPerson: "", phone: "", email: "", notes: "" });
+      setForm({ type: "CREDITOR", name: "", contactPerson: "", phone: "", email: "", tin: "", registrationNo: "", address: "", notes: "" });
       load();
     } else toast.error(j?.error || "Failed to create party");
   };
@@ -3427,6 +3433,18 @@ function OtherPartiesTab() {
               <input type="text" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
             </div>
             <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">TIN (税号)</label>
+              <input type="text" value={form.tin} onChange={(e) => setForm({ ...form, tin: e.target.value })} placeholder="e.g. C12345678900 / IG…" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Registration No (SSM)</label>
+              <input type="text" value={form.registrationNo} onChange={(e) => setForm({ ...form, registrationNo: e.target.value })} placeholder="e.g. 202301012345" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div className="sm:col-span-3">
+              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Address</label>
+              <textarea value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} rows={2} placeholder="Full address for statements / e-Invoice" className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
+            </div>
+            <div className="sm:col-span-2">
               <label className="text-xs font-medium text-[#6B7280] mb-1 block">Notes</label>
               <input type="text" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]" />
             </div>
@@ -3450,6 +3468,7 @@ function OtherPartiesTab() {
                 <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
                   <th className="px-4 py-2 text-left">Type</th>
                   <th className="px-4 py-2 text-left">Name</th>
+                  <th className="px-4 py-2 text-left">TIN / Reg No</th>
                   <th className="px-4 py-2 text-left">Contact</th>
                   <th className="px-4 py-2 text-left">Phone</th>
                   <th className="px-4 py-2 text-left">Notes</th>
@@ -3464,7 +3483,8 @@ function OtherPartiesTab() {
                         {p.type === "DEBTOR" ? "Other Debtor" : "Other Creditor"}
                       </span>
                     </td>
-                    <td className="px-4 py-1.5 text-[#1F1D1B] font-medium">{p.name}</td>
+                    <td className="px-4 py-1.5 text-[#1F1D1B] font-medium">{p.name}{p.address ? <span className="block text-[11px] font-normal text-[#9CA3AF]">{p.address}</span> : null}</td>
+                    <td className="px-4 py-1.5 text-[#6B7280] text-xs tabular-nums">{[p.tin, p.registrationNo].filter(Boolean).join(" / ")}</td>
                     <td className="px-4 py-1.5 text-[#6B7280]">{p.contactPerson}</td>
                     <td className="px-4 py-1.5 text-[#6B7280]">{p.phone}</td>
                     <td className="px-4 py-1.5 text-[#6B7280] text-xs">{p.notes}</td>

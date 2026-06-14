@@ -2049,6 +2049,9 @@ type OtherPartyRow = {
   contactPerson: string | null;
   phone: string | null;
   email: string | null;
+  tin: string | null;
+  registrationNo: string | null;
+  address: string | null;
   notes: string | null;
   isActive: number;
 };
@@ -2061,6 +2064,9 @@ function rowToOtherParty(r: OtherPartyRow) {
     contactPerson: r.contactPerson ?? "",
     phone: r.phone ?? "",
     email: r.email ?? "",
+    tin: r.tin ?? "",
+    registrationNo: r.registrationNo ?? "",
+    address: r.address ?? "",
     notes: r.notes ?? "",
     isActive: r.isActive === 1,
   };
@@ -2097,6 +2103,9 @@ app.post("/other-parties", async (c) => {
       contactPerson?: string;
       phone?: string;
       email?: string;
+      tin?: string;
+      registrationNo?: string;
+      address?: string;
       notes?: string;
     };
     if (body.type !== "DEBTOR" && body.type !== "CREDITOR") {
@@ -2114,8 +2123,8 @@ app.post("/other-parties", async (c) => {
     const now = new Date().toISOString();
     await c.var.DB.prepare(
       `INSERT INTO other_parties
-         (id, type, name, contactPerson, phone, email, notes, isActive, orgId, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+         (id, type, name, contactPerson, phone, email, tin, registrationNo, address, notes, isActive, orgId, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
     )
       .bind(
         id,
@@ -2124,6 +2133,9 @@ app.post("/other-parties", async (c) => {
         body.contactPerson ?? null,
         body.phone ?? null,
         body.email ?? null,
+        body.tin ?? null,
+        body.registrationNo ?? null,
+        body.address ?? null,
         body.notes ?? null,
         orgId,
         now,
@@ -2158,6 +2170,9 @@ app.put("/other-parties/:id", async (c) => {
       contactPerson: string;
       phone: string;
       email: string;
+      tin: string;
+      registrationNo: string;
+      address: string;
       notes: string;
       isActive: boolean;
       type: string;
@@ -2176,6 +2191,10 @@ app.put("/other-parties/:id", async (c) => {
         body.contactPerson !== undefined ? body.contactPerson : existing.contactPerson,
       phone: body.phone !== undefined ? body.phone : existing.phone,
       email: body.email !== undefined ? body.email : existing.email,
+      tin: body.tin !== undefined ? body.tin : existing.tin,
+      registrationNo:
+        body.registrationNo !== undefined ? body.registrationNo : existing.registrationNo,
+      address: body.address !== undefined ? body.address : existing.address,
       notes: body.notes !== undefined ? body.notes : existing.notes,
       isActive:
         body.isActive === undefined ? existing.isActive : body.isActive ? 1 : 0,
@@ -2185,7 +2204,7 @@ app.put("/other-parties/:id", async (c) => {
     }
     await c.var.DB.prepare(
       `UPDATE other_parties
-          SET name = ?, contactPerson = ?, phone = ?, email = ?, notes = ?, isActive = ?, updatedAt = ?
+          SET name = ?, contactPerson = ?, phone = ?, email = ?, tin = ?, registrationNo = ?, address = ?, notes = ?, isActive = ?, updatedAt = ?
         WHERE id = ?`,
     )
       .bind(
@@ -2193,6 +2212,9 @@ app.put("/other-parties/:id", async (c) => {
         merged.contactPerson,
         merged.phone,
         merged.email,
+        merged.tin,
+        merged.registrationNo,
+        merged.address,
         merged.notes,
         merged.isActive,
         new Date().toISOString(),

@@ -242,11 +242,23 @@ function asObj(v: unknown): Record<string, unknown> | null {
 export function Sidebar({
   collapsed,
   onToggleCollapsed,
+  mobileOpen = false,
+  onMobileClose,
 }: {
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  // On phones the rail is hidden and the sidebar becomes a slide-over drawer
+  // controlled by DashboardLayout (opened from the bottom-nav "More" slot).
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }) {
   const { pathname } = useLocation();
+  // Close the mobile drawer whenever the route changes (tapping a nav item).
+  useEffect(() => {
+    onMobileClose?.();
+    // onMobileClose is stable (useCallback in parent); re-run only on navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
   // Auto-expand only the menu group matching the current route. Per user
   // 2026-04-28: Consignment was hard-coded to always-open which made the
   // sidebar feel cluttered when the user was working in another module.
@@ -553,12 +565,26 @@ export function Sidebar({
   };
 
   return (
-    <aside
-      className={cn(
-        "fixed left-0 top-0 z-40 h-screen bg-[#1F1D1B] text-white transition-all duration-300 flex flex-col",
-        collapsed ? "w-14" : "w-60"
+    <>
+      {/* Phone drawer backdrop — tap to close. Hidden at md+. */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
+          onClick={onMobileClose}
+          aria-hidden
+        />
       )}
-    >
+      <aside
+        className={cn(
+          "fixed left-0 top-0 z-50 h-screen bg-[#1F1D1B] text-white flex flex-col",
+          "transition-transform duration-300 md:transition-all",
+          // Phone: off-canvas drawer unless opened. md+: always-on rail.
+          mobileOpen ? "translate-x-0" : "-translate-x-full",
+          "md:translate-x-0",
+          // Full width as a phone drawer; honour the collapsed rail at md+.
+          collapsed ? "w-60 md:w-14" : "w-60"
+        )}
+      >
       {/* Brand / Logo — h-16 header (taller than the rest of the sidebar
           rows) gives the wide-aspect lockup more breathing room so the
           HOOKKA letters and 合家 hanjis stay legible at sidebar width. */}
@@ -866,6 +892,7 @@ export function Sidebar({
           )}
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

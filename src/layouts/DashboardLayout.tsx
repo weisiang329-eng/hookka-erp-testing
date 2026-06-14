@@ -9,6 +9,7 @@ import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
 import { DASHBOARD_ROUTE_ELEMENTS } from "@/dashboard-routes";
 import { FloatingChatButton } from "@/components/assistant/FloatingChatButton";
+import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";
 
 // Lives inside ToastProvider so it can pop a toast when a new deploy lands.
 // Polls for a new bundle hash every 5 min + on focus; on change, surfaces a
@@ -62,6 +63,13 @@ export default function DashboardLayout() {
       return next;
     });
   }, []);
+
+  // Phone shell: below md the sidebar rail is hidden and becomes a slide-over
+  // drawer (opened from the bottom-nav "More" slot). On phones we render the
+  // sidebar full (not the icons-only rail) so the drawer is readable.
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), []);
 
   // Auto-collapse on narrow / portrait viewports — the always-on 240px
   // sidebar eats 31% of an iPad portrait window (768×1024). Collapse to the
@@ -132,14 +140,23 @@ export default function DashboardLayout() {
     <ToastProvider>
       <NewVersionWatcher />
       <div className="h-full">
-        <Sidebar collapsed={sidebarCollapsed} onToggleCollapsed={toggleSidebar} />
-        <div className={`${sidebarCollapsed ? "pl-14" : "pl-60"} transition-all duration-300`}>
+        <Sidebar
+          collapsed={isMobile ? false : sidebarCollapsed}
+          onToggleCollapsed={toggleSidebar}
+          mobileOpen={mobileNavOpen}
+          onMobileClose={closeMobileNav}
+        />
+        {/* Full-width on phones (no rail); rail-padded at md+. */}
+        <div className={`pl-0 ${sidebarCollapsed ? "md:pl-14" : "md:pl-60"} transition-all duration-300`}>
           <Topbar />
           <Breadcrumbs />
-          <main className="p-6">
+          {/* Extra bottom padding on phones so content clears the bottom nav. */}
+          <main className="p-4 pb-24 md:p-6">
             <Routes>{DASHBOARD_ROUTE_ELEMENTS}</Routes>
           </main>
         </div>
+        {/* Phone-only bottom navigation; "More" opens the sidebar drawer. */}
+        <MobileBottomNav onMore={() => setMobileNavOpen(true)} />
         {/* Hookka AI launch button + slide-over panel. SUPER_ADMIN-only.
             Mounted here so the same instance overlays every authenticated
             dashboard route (state survives in-page navigation). */}

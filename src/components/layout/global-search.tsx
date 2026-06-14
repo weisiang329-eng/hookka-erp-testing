@@ -548,6 +548,15 @@ export function GlobalSearch() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // Open on demand from elsewhere (e.g. the mobile bottom-nav Search button),
+  // which has no Ctrl+K to press. Fires a custom event so no shared state is
+  // needed across the layout tree.
+  useEffect(() => {
+    const open = () => setOpen(true);
+    document.addEventListener("hookka:open-search", open);
+    return () => document.removeEventListener("hookka:open-search", open);
+  }, []);
+
   // Reset selected index when results change.
   /* eslint-disable react-hooks/set-state-in-effect -- derived: keyboard cursor reset on query/result change */
   useEffect(() => {

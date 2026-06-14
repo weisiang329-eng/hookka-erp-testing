@@ -314,7 +314,7 @@ function useApiSearch(query: string) {
 
       const fetchers = [
         // Sales Orders
-        fetch(`/api/sales-orders?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
+        fetch(`/api/sales-orders?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
             // Every list endpoint wraps records as {success, data:[...]} —
@@ -349,7 +349,7 @@ function useApiSearch(query: string) {
           .catch(() => {}),
 
         // Customers
-        fetch(`/api/customers?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
+        fetch(`/api/customers?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
             const items = pickRecords(data, "data", "customers");
@@ -367,7 +367,7 @@ function useApiSearch(query: string) {
           .catch(() => {}),
 
         // Products
-        fetch(`/api/products?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
+        fetch(`/api/products?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
             const items = pickRecords(data, "data", "products");
@@ -385,7 +385,7 @@ function useApiSearch(query: string) {
           .catch(() => {}),
 
         // Delivery Orders
-        fetch(`/api/delivery-orders?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
+        fetch(`/api/delivery-orders?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
             const items = pickRecords(data, "data", "deliveryOrders", "orders");
@@ -416,7 +416,7 @@ function useApiSearch(query: string) {
           .catch(() => {}),
 
         // Invoices
-        fetch(`/api/invoices?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
+        fetch(`/api/invoices?search=${encodeURIComponent(query)}&limit=10`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
             const items = pickRecords(data, "data", "invoices");
@@ -460,6 +460,21 @@ function useApiSearch(query: string) {
       ];
 
       await Promise.allSettled(fetchers);
+
+      // Rank so the most obvious matches surface first: the term in the doc
+      // NUMBER (label) beats a term that only hit a secondary field (customer
+      // PO / Ref in the description), and an earlier position beats a later
+      // one. Stable sort keeps the server's recency order within a tie. The
+      // grouping below preserves this order within each category, so searching
+      // a short fragment like "249" reliably floats SO-..-249 to the top.
+      const qlow = query.toLowerCase();
+      const score = (r: SearchResult) => {
+        const inLabel = r.label.toLowerCase().indexOf(qlow);
+        if (inLabel === 0) return 0; // label starts with the term
+        if (inLabel > 0) return 1; // term elsewhere in the label/number
+        return 2; // matched only via the description (PO / Ref / customer)
+      };
+      collected.sort((a, b) => score(a) - score(b));
 
       if (!controller.signal.aborted) {
         setResults(collected);

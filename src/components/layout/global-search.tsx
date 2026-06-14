@@ -45,6 +45,8 @@ import { cn } from "@/lib/utils";
 
 type ResultCategory = "pages" | "actions" | "sales_orders" | "customers" | "products" | "delivery_orders" | "invoices" | "consignment_notes";
 
+type StatusTone = "green" | "amber" | "blue" | "red" | "neutral";
+
 interface SearchResult {
   id: string;
   label: string;
@@ -52,7 +54,77 @@ interface SearchResult {
   href: string;
   icon: LucideIcon;
   category: ResultCategory;
+  // Lifecycle status of the underlying record (shown as a pill), so a search
+  // surfaces WHERE an order is across its documents at a glance — e.g. the SO
+  // is "Ready to Ship" while its DO is already "Delivered".
+  statusText?: string;
+  statusTone?: StatusTone;
 }
+
+// Human label + colour tone for a record's lifecycle status. Delivery stores
+// LOADED internally but the operator-facing word is "Dispatched"; SO uses its
+// own vocabulary — map both so the pill reads the way the rest of the app does.
+function titleCase(s: string): string {
+  return s.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function statusMeta(
+  category: ResultCategory,
+  raw?: string,
+): { label: string; tone: StatusTone } | null {
+  if (!raw) return null;
+  const s = raw.toUpperCase();
+  const tone: StatusTone = ["DELIVERED", "PAID", "CLOSED", "COMPLETED"].includes(s)
+    ? "green"
+    : ["CANCELLED", "ON_HOLD", "VOID", "OVERDUE"].includes(s)
+      ? "red"
+      : ["LOADED", "DISPATCHED", "IN_TRANSIT", "SHIPPED", "SENT"].includes(s)
+        ? "blue"
+        : "amber";
+  const doLabels: Record<string, string> = {
+    DRAFT: "Pending Dispatch", LOADED: "Dispatched", IN_TRANSIT: "In Transit",
+    DELIVERED: "Delivered", INVOICED: "Invoiced", CANCELLED: "Cancelled",
+  };
+  const soLabels: Record<string, string> = {
+    DRAFT: "Draft", CONFIRMED: "In Production", IN_PRODUCTION: "In Production",
+    READY_TO_SHIP: "Ready to Ship", SHIPPED: "Shipped", DELIVERED: "Delivered",
+    INVOICED: "Invoiced", CLOSED: "Closed", ON_HOLD: "On Hold", CANCELLED: "Cancelled",
+  };
+  const map = category === "delivery_orders" ? doLabels : category === "sales_orders" ? soLabels : null;
+  return { label: map?.[s] ?? titleCase(raw), tone };
+}
+
+// Bold every occurrence of the search term inside a result label/description so
+// the matched part is obvious when several rows look alike.
+function highlightMatch(text: string, query: string): React.ReactNode {
+  const q = query.trim();
+  if (!q || !text) return text;
+  const lower = text.toLowerCase();
+  const ql = q.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let from = 0;
+  let i = lower.indexOf(ql, from);
+  if (i === -1) return text;
+  while (i !== -1) {
+    if (i > from) parts.push(text.slice(from, i));
+    parts.push(
+      <mark key={i} className="rounded-[2px] bg-[#FBEFB8] px-0.5 font-semibold text-inherit">
+        {text.slice(i, i + q.length)}
+      </mark>,
+    );
+    from = i + q.length;
+    i = lower.indexOf(ql, from);
+  }
+  if (from < text.length) parts.push(text.slice(from));
+  return <>{parts}</>;
+}
+
+const STATUS_TONE_CLASS: Record<StatusTone, string> = {
+  green: "bg-[#E7F0E3] text-[#4F7C3A]",
+  amber: "bg-[#FBF1DA] text-[#9C6F1E]",
+  blue: "bg-[#E2EEF0] text-[#3E6570]",
+  red: "bg-[#F6E3E0] text-[#9A3A2D]",
+  neutral: "bg-[#F0ECE9] text-[#6B7280]",
+};
 
 // ---------------------------------------------------------------------------
 // Static data: Pages
@@ -181,6 +253,8 @@ interface ApiRecord {
   invoiceNo?: string;
   // Consignment note rows (/api/consignment-notes payload).
   noteNumber?: string;
+  // Lifecycle status (SO/DO/invoice all carry one) — drives the result pill.
+  status?: string;
 }
 
 type UnknownObj = Record<string, unknown>;
@@ -245,6 +319,7 @@ function useApiSearch(query: string) {
               // never existed on the payload, so labels were blank before.
               const num = item.companySOId || item.soNumber || item.orderNumber || item.id || "";
               const po = item.customerPOId || item.customerPO || "";
+              const meta = statusMeta("sales_orders", item.status);
               collected.push({
                 id: `so-${item.id}`,
                 label: num,
@@ -252,6 +327,8 @@ function useApiSearch(query: string) {
                 href: `/sales/${item.id}`,
                 icon: ShoppingCart,
                 category: "sales_orders",
+                statusText: meta?.label,
+                statusTone: meta?.tone,
               });
             });
           })
@@ -300,6 +377,7 @@ function useApiSearch(query: string) {
             const items = pickRecords(data, "data", "deliveryOrders", "orders");
             items.forEach((item) => {
               const num = item.doNo || item.doNumber || item.orderNumber || item.id || "";
+              const meta = statusMeta("delivery_orders", item.status);
               collected.push({
                 id: `do-${item.id}`,
                 label: num,
@@ -307,6 +385,8 @@ function useApiSearch(query: string) {
                 href: `/delivery/${item.id}`,
                 icon: Truck,
                 category: "delivery_orders",
+                statusText: meta?.label,
+                statusTone: meta?.tone,
               });
             });
           })
@@ -319,6 +399,7 @@ function useApiSearch(query: string) {
             const items = pickRecords(data, "data", "invoices");
             items.forEach((item) => {
               const num = item.invoiceNo || item.invoiceNumber || item.id || "";
+              const meta = statusMeta("invoices", item.status);
               collected.push({
                 id: `inv-${item.id}`,
                 label: num,
@@ -326,6 +407,8 @@ function useApiSearch(query: string) {
                 href: `/invoices/${item.id}`,
                 icon: FileText,
                 category: "invoices",
+                statusText: meta?.label,
+                statusTone: meta?.tone,
               });
             });
           })
@@ -632,6 +715,7 @@ export function GlobalSearch() {
                               result={item}
                               selected={flatIdx === selectedIndex}
                               onClick={() => goTo(item)}
+                              query={query}
                             />
                           );
                         })}
@@ -688,11 +772,13 @@ function ResultItem({
   selected,
   onClick,
   icon,
+  query = "",
 }: {
   result: SearchResult;
   selected: boolean;
   onClick: () => void;
   icon?: React.ReactNode;
+  query?: string;
 }) {
   const Icon = result.icon;
   return (
@@ -710,11 +796,21 @@ function ResultItem({
         {icon || <Icon className="h-4 w-4 text-[#6B5C32]" />}
       </span>
       <div className="flex-1 min-w-0">
-        <div className="truncate font-medium">{result.label}</div>
+        <div className="truncate font-medium">{highlightMatch(result.label, query)}</div>
         {result.description && (
-          <div className="truncate text-xs text-[#9CA3AF]">{result.description}</div>
+          <div className="truncate text-xs text-[#9CA3AF]">{highlightMatch(result.description, query)}</div>
         )}
       </div>
+      {result.statusText && (
+        <span
+          className={cn(
+            "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap",
+            STATUS_TONE_CLASS[result.statusTone ?? "neutral"],
+          )}
+        >
+          {result.statusText}
+        </span>
+      )}
       {selected && (
         <ArrowRight className="h-3.5 w-3.5 shrink-0 text-[#9CA3AF]" />
       )}

@@ -128,6 +128,12 @@ export type DataGridProps<T> = {
   // the new grid opens already filtered instead of with an empty box. Read once
   // on mount; later changes don't re-apply (the operator owns the box after).
   initialSearch?: string;
+  // Column keys that are ALWAYS included in the global search, even when the
+  // column is hidden via the "Columns" menu. Without this, hiding a column
+  // makes its values unsearchable — an order can become unfindable by an
+  // identifier the operator simply collapsed off-screen. Pass the stable
+  // identifier keys (SO no., customer PO/SO/ref, DO no., vehicle, etc.).
+  alwaysSearchKeys?: string[];
   // Opt-in row virtualization (windowed rendering via @tanstack/react-virtual).
   // Off by default to keep the table-layout-driven column widths working for
   // small grids; turn on for large data sets (~500+ rows) where the DOM
@@ -1369,6 +1375,11 @@ function DefaultCellRenderer<T>({
 // DataGrid Component
 // ---------------------------------------------------------------------------
 
+// Stable empty default for the optional `alwaysSearchKeys` prop. Defined at
+// module scope so the destructure default keeps the same array reference every
+// render (a fresh `[]` literal would bust the filteredData useMemo each time).
+const EMPTY_SEARCH_KEYS: string[] = [];
+
 export function DataGrid<T extends Record<string, any>>({
   columns,
   data,
@@ -1391,6 +1402,7 @@ export function DataGrid<T extends Record<string, any>>({
   onFilteredDataChange,
   onSearchChange,
   initialSearch,
+  alwaysSearchKeys = EMPTY_SEARCH_KEYS,
   virtualize = false,
   defaultExcludedValues,
   valueFilterKey,
@@ -2030,12 +2042,17 @@ export function DataGrid<T extends Record<string, any>>({
     // Global search (deferred — see deferredSearch above)
     if (deferredSearch) {
       const lower = deferredSearch.toLowerCase();
-      result = result.filter(row =>
-        visibleColumns.some(col => {
-          const val = getNestedValue(row, col.key);
-          return String(val ?? "").toLowerCase().includes(lower);
-        })
-      );
+      // Search visible columns PLUS any alwaysSearchKeys, so an identifier
+      // stays findable even when its column is hidden via the "Columns" menu.
+      const searchKeys = new Set<string>(visibleColumns.map(c => c.key));
+      for (const k of alwaysSearchKeys) searchKeys.add(k);
+      result = result.filter(row => {
+        for (const key of searchKeys) {
+          const val = getNestedValue(row, key);
+          if (String(val ?? "").toLowerCase().includes(lower)) return true;
+        }
+        return false;
+      });
     }
 
     // Per-column text filters
@@ -2063,7 +2080,7 @@ export function DataGrid<T extends Record<string, any>>({
     }
 
     return result;
-  }, [data, deferredSearch, columnFilters, columnValueFilters, visibleColumns]);
+  }, [data, deferredSearch, columnFilters, columnValueFilters, visibleColumns, alwaysSearchKeys]);
 
   // All unique group values (for group filter dropdown)
   const allGroupValues = useMemo(() => {

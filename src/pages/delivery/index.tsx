@@ -375,6 +375,30 @@ const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
 // PO-based tabs (show production orders, not delivery orders)
 const PO_TABS = new Set(["planning", "pending_delivery"]);
 
+// Identifier keys that must stay searchable on every delivery grid even when
+// the operator hides that column via the "Columns" menu. Passed to DataGrid's
+// `alwaysSearchKeys` so a DO/PO is always findable by SO no., customer
+// PO/SO/Ref, DO no., customer name, or vehicle plate. Module-scoped so the
+// array reference is stable across renders (keeps DataGrid's filter memo warm).
+const DO_SEARCH_KEYS = [
+  "doNo",
+  "companySO",
+  "salesOrderNos",
+  "customerPOId",
+  "customerSO",
+  "customerRef",
+  "customerName",
+  "vehicleNo",
+];
+const PO_SEARCH_KEYS = [
+  "salesOrderNo",
+  "poNo",
+  "customerPOId",
+  "customerReference",
+  "customerSO",
+  "customerName",
+];
+
 // Reverse of TAB_DO_STATUSES: which DO tab a given status lives on. Derived
 // from the one map above so the two can never drift apart. INVOICED has no
 // tab (not in TAB_DO_STATUSES) and so never triggers an auto-jump.
@@ -872,13 +896,23 @@ export default function DeliveryPage() {
   const [poGridSearch, setPoGridSearch] = useState("");
 
   // ---------- Fetch ----------
+  // When the operator is searching, hit the server with the term (and a high
+  // limit) so matches come back from the WHOLE table across every status — not
+  // just the current 200-row page. Mirrors the Sales Order list pattern. Falls
+  // back to poGridSearch so a term typed on a PO tab still pulls the matching
+  // DOs (needed for the cross-tab jump). Empty search = normal paginated browse.
+  const doServerSearch = doGridSearch.trim() || poGridSearch.trim();
   const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
     success?: boolean;
     data?: DeliveryOrder[];
     page?: number;
     limit?: number;
     total?: number;
-  }>(`/api/delivery-orders?page=${page}&limit=${PAGE_SIZE}`);
+  }>(
+    doServerSearch
+      ? `/api/delivery-orders?search=${encodeURIComponent(doServerSearch)}&limit=2000`
+      : `/api/delivery-orders?page=${page}&limit=${PAGE_SIZE}`,
+  );
   // Whole-dataset status bucket counts — summary cards and tab badges read
   // from this so counts reflect the full table, not just the current
   // paginated page.
@@ -1823,6 +1857,25 @@ export default function DeliveryPage() {
           .toLowerCase(),
       });
     }
+    // Planning POs (still in production) — previously omitted entirely, which
+    // made an order whose lines were still being made invisible to the
+    // cross-tab search/jump. Tag them to the "planning" tab so a search can
+    // surface (and jump to) work that hasn't reached Pending Delivery yet.
+    for (const po of planningPOs) {
+      entries.push({
+        tab: "planning",
+        haystack: [
+          po.salesOrderNo,
+          po.poNo,
+          po.customerPOId,
+          po.customerReference,
+          po.customerSO,
+          po.customerName,
+        ]
+          .join(" ")
+          .toLowerCase(),
+      });
+    }
     for (const po of readyPOs) {
       entries.push({
         tab: "pending_delivery",
@@ -1839,7 +1892,7 @@ export default function DeliveryPage() {
       });
     }
     return entries;
-  }, [deliveryOrders, readyPOs]);
+  }, [deliveryOrders, readyPOs, planningPOs]);
 
   // Follow the record to its tab (Wei Siang 2026-06-02): a matching record is
   // surfaced no matter which tab it sits on, but the tab header should follow
@@ -3771,7 +3824,7 @@ export default function DeliveryPage() {
         width: "110px",
         sortable: true,
         render: (_value, row) => (
-          <span className="font-mono text-[#1F1D1B]">{row.vehicleNo || <span className="text-[#9CA3AF]">—</span>}</span>
+          <span className="doc-number text-[#1F1D1B]">{row.vehicleNo || <span className="text-[#9CA3AF]">—</span>}</span>
         ),
       },
     ],
@@ -4118,6 +4171,8 @@ export default function DeliveryPage() {
               groupBy="customerState"
               autoGroup={false}
               initialSearch={doGridSearch || poGridSearch}
+              onSearchChange={setPoGridSearch}
+              alwaysSearchKeys={PO_SEARCH_KEYS}
             />
           </CardContent>
         </Card>
@@ -4181,6 +4236,7 @@ export default function DeliveryPage() {
               selectable
               initialSearch={doGridSearch || poGridSearch}
               onSearchChange={setPoGridSearch}
+              alwaysSearchKeys={PO_SEARCH_KEYS}
               onSelectionChange={(rows) =>
                 // Drop incomplete SOFA sets defensively — even if the user
                 // clicks the row's checkbox, an incomplete set can't make
@@ -4254,6 +4310,7 @@ export default function DeliveryPage() {
               onDoubleClick={(row) => setDetailDO(row)}
               initialSearch={doGridSearch || poGridSearch}
               onSearchChange={setDoGridSearch}
+              alwaysSearchKeys={DO_SEARCH_KEYS}
               contextMenuItems={getContextMenuItems}
             />
 

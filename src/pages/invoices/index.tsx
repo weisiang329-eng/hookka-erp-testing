@@ -36,11 +36,27 @@ type AgingRow = {
 // enough to fit typical working set in one go.
 const PAGE_SIZE = 200;
 
+// Identifier keys kept searchable on the invoices grid even when their column
+// is hidden via the "Columns" menu. Module-scoped for a stable array reference
+// (keeps DataGrid's filter memo from re-running every render).
+const INVOICE_SEARCH_KEYS = [
+  "invoiceNo",
+  "doNo",
+  "companySOId",
+  "customerPOId",
+  "customerName",
+];
+
 export default function InvoicesPage() {
   const navigate = useNavigate();
 
   // Pagination — server-side. Filter changes reset to page 1 (see effect below).
   const [page, setPage] = useState(1);
+  // Mirrors the grid's global search box. While non-empty, the fetch below
+  // switches to a server search across the WHOLE table (every page) instead of
+  // the current 200-row page — so an invoice is findable by invoice no, DO no,
+  // our SO, customer PO or customer name no matter which page it sits on.
+  const [gridSearch, setGridSearch] = useState("");
 
   const { data: invResp, loading, refresh: refreshInvoices } = useCachedJson<{
     success?: boolean;
@@ -48,7 +64,11 @@ export default function InvoicesPage() {
     page?: number;
     limit?: number;
     total?: number;
-  }>(`/api/invoices?page=${page}&limit=${PAGE_SIZE}`);
+  }>(
+    gridSearch.trim()
+      ? `/api/invoices?search=${encodeURIComponent(gridSearch.trim())}&limit=2000`
+      : `/api/invoices?page=${page}&limit=${PAGE_SIZE}`,
+  );
   // Whole-dataset KPI numbers — bucket counts AND money aggregates.
   // 2026-05-26 audit: outstandingSen / paidMTDSen were previously
   // computed on the current 200-row page only, so the KPI cards
@@ -594,6 +614,9 @@ export default function InvoicesPage() {
                 contextMenuItems={invoiceGridContextMenu}
                 maxHeight="calc(100vh - 300px)"
                 emptyMessage="No invoices found."
+                initialSearch={gridSearch}
+                onSearchChange={setGridSearch}
+                alwaysSearchKeys={INVOICE_SEARCH_KEYS}
               />
 
               {/* Pagination footer */}

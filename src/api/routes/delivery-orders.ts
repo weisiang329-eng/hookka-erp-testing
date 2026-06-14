@@ -969,15 +969,33 @@ app.get("/", async (c) => {
 
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
   const rawLimit = parseInt(limitParam ?? "50", 10) || 50;
-  const limit = Math.min(500, Math.max(1, rawLimit));
+  // Search term resolved before `limit` so an active search can lift the page
+  // cap and return every match in one shot (the delivery page sends a high
+  // limit while searching so results aren't trapped on page 2/3).
+  const dq = (c.req.query("search") || c.req.query("q") || "").trim();
+  const limit = Math.min(dq ? 2000 : 500, Math.max(1, rawLimit));
   const offset = (page - 1) * limit;
 
-  // Optional index-backed search (global Ctrl+K palette, ?search=). Partial
-  // match on DO number + customer name; fires only when present, so the
-  // Delivery list page (no search param) is untouched.
-  const dq = (c.req.query("search") || c.req.query("q") || "").trim();
-  const dWhere = dq ? " AND (do_no ILIKE ? OR customer_name ILIKE ?)" : "";
-  const dBinds = dq ? [`%${dq}%`, `%${dq}%`] : [];
+  // Optional search (?search= / ?q=). Matches the operator's real lookup keys,
+  // not just DO no. + customer name: our company SO, customer PO, and vehicle
+  // plate live on delivery_orders; the per-line SO numbers and the customer's
+  // own SO / Reference live on the items and their sales_orders (a DO can span
+  // several SOs), so those go through an EXISTS subquery. Fires only when a
+  // term is present, so the unsearched list path is byte-identical to before.
+  let dWhere = "";
+  let dBinds: string[] = [];
+  if (dq) {
+    const like = `%${dq}%`;
+    dWhere =
+      " AND (do_no ILIKE ? OR customer_name ILIKE ? OR company_so ILIKE ?" +
+      " OR company_so_id ILIKE ? OR customer_po_id ILIKE ? OR vehicle_no ILIKE ?" +
+      " OR EXISTS (SELECT 1 FROM delivery_order_items di" +
+      " LEFT JOIN sales_orders so2 ON so2.company_so_id = di.sales_order_no" +
+      " WHERE di.delivery_order_id = delivery_orders.id" +
+      " AND (di.sales_order_no ILIKE ? OR so2.customer_po_id ILIKE ?" +
+      " OR so2.customer_so_id ILIKE ? OR so2.reference ILIKE ?)))";
+    dBinds = [like, like, like, like, like, like, like, like, like, like];
+  }
 
   const [countRes, pageRes] = await Promise.all([
     db

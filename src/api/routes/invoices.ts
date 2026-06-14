@@ -829,8 +829,13 @@ app.get("/", async (c) => {
   // Invoices list page (no search param) is untouched.
   const q = (c.req.query("search") || c.req.query("q") || "").trim();
   if (q) {
-    where.push("(invoiceNo ILIKE ? OR COALESCE(customerName, '') ILIKE ?)");
-    params.push(`%${q}%`, `%${q}%`);
+    // Match the operator's real lookup keys: invoice no, customer name, the
+    // linked DO no, our company SO, and the customer's PO. All live on the
+    // invoices row (camelCase columns). Fires only when a term is present.
+    where.push(
+      "(invoiceNo ILIKE ? OR COALESCE(customerName, '') ILIKE ? OR COALESCE(doNo, '') ILIKE ? OR COALESCE(companySOId, '') ILIKE ? OR COALESCE(customerPOId, '') ILIKE ?)",
+    );
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
   const clause = `WHERE ${where.join(" AND ")}`;
 

@@ -94,10 +94,14 @@ function soStageLabel(status: string): string {
     case "CONFIRMED":
     case "IN_PRODUCTION":
       return "In production";
+    // Vocabulary aligned with the Delivery module tabs so the same real-world
+    // stage reads the same word everywhere: READY_TO_SHIP = production done,
+    // not yet on a DO = "Pending Delivery"; SHIPPED = on a loaded DO (left the
+    // warehouse) = "Dispatched" (NOT "Delivered" — it isn't delivered yet).
     case "READY_TO_SHIP":
-      return "To dispatch";
+      return "Pending Delivery";
     case "SHIPPED":
-      return "To deliver";
+      return "Dispatched";
     case "DELIVERED":
       return "Delivered";
     case "INVOICED":
@@ -183,6 +187,14 @@ export default function SalesPage() {
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
+  // Per-SO delivered quantity (items on a DELIVERED/INVOICED DO), keyed by
+  // companySOId. Paired with each SO's own total qty to show partial-delivery
+  // progress in the Outstanding column. Best-effort: empty map if it fails.
+  const { data: deliveryProgressResp } = useCachedJson<{ success?: boolean; delivered?: Record<string, number> }>("/api/sales-orders/delivery-progress");
+  const deliveredQtyMap = useMemo<Record<string, number>>(
+    () => (deliveryProgressResp?.success ? deliveryProgressResp.delivered ?? {} : {}),
+    [deliveryProgressResp],
+  );
   const orders: SalesOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
     [ordersResp]
@@ -513,7 +525,7 @@ export default function SalesPage() {
       key: "outstanding",
       label: "Outstanding",
       type: "text",
-      width: "110px",
+      width: "140px",
       sortable: true,
       // The dropdown reads this (real, enumerable pipeline stages)
       // instead of the non-existent "outstanding" field — which is why
@@ -526,14 +538,6 @@ export default function SalesPage() {
         }
         if (row.status === "CANCELLED") {
           return <span className="text-[#9CA3AF]">Cancelled</span>;
-        }
-        // Past the warehouse door — show the true stage, not a "—".
-        if (
-          row.status === "DELIVERED" ||
-          row.status === "INVOICED" ||
-          row.status === "CLOSED"
-        ) {
-          return <span className="text-[#4F7C3A]">{stage}</span>;
         }
         // Still being made — keep the production-progress detail
         // operators rely on (filter still buckets it as "In production").
@@ -561,29 +565,53 @@ export default function SalesPage() {
           }
           return <span className="text-[#4F7C3A]">Done</span>;
         }
-        // Wei Siang 2026-05-16: this column = the NEXT outstanding
-        // action. READY_TO_SHIP = made, not yet dispatched → "To
-        // dispatch". SHIPPED = dispatched, not yet delivered → "To
-        // deliver". ON_HOLD = paused, still owed.
+        if (row.status === "ON_HOLD") {
+          return <span className="font-semibold text-[#9A3A2D]">On hold</span>;
+        }
+        // Past production — show REAL delivery progress so a partially-delivered
+        // order isn't shown as if the whole thing already went out (the SO flips
+        // to SHIPPED the moment ONE line ships). deliveredQty = pieces already on
+        // a delivered DO; totalQty = the order's own quantity.
+        const totalQty = row.items.reduce((s, i) => s + i.quantity, 0);
+        const deliveredQty = deliveredQtyMap[row.companySOId] ?? 0;
+        if (row.status === "INVOICED") {
+          return <span className="text-[#4F7C3A]">Invoiced</span>;
+        }
+        if (row.status === "CLOSED") {
+          return <span className="text-[#4F7C3A]">Closed</span>;
+        }
+        if (totalQty > 0 && deliveredQty >= totalQty) {
+          return <span className="text-[#4F7C3A]">Delivered</span>;
+        }
+        if (deliveredQty > 0) {
+          // PARTIALLY delivered — show how many pieces are actually out.
+          return (
+            <span
+              className="font-semibold text-[#3E6570]"
+              title={`${deliveredQty} of ${totalQty} pcs delivered`}
+            >
+              {deliveredQty}/{totalQty} delivered
+            </span>
+          );
+        }
+        // Nothing delivered yet — words aligned with the Delivery module tabs.
         if (row.status === "READY_TO_SHIP") {
           return (
-            <span className="font-semibold text-[#9C6F1E]">To dispatch</span>
+            <span className="font-semibold text-[#9C6F1E]">Pending Delivery</span>
           );
         }
         if (row.status === "SHIPPED") {
-          return (
-            <span className="font-semibold text-[#3E6570]">To deliver</span>
-          );
+          return <span className="font-semibold text-[#3E6570]">Dispatched</span>;
         }
-        if (row.status === "ON_HOLD") {
-          return <span className="font-semibold text-[#9A3A2D]">On hold</span>;
+        if (row.status === "DELIVERED") {
+          return <span className="text-[#4F7C3A]">Delivered</span>;
         }
         return <span className="text-[#6B7280]">{stage}</span>;
       },
     },
     { key: "totalSen", label: "Total", type: "currency", width: "100px", sortable: true },
     { key: "status", label: "Status", type: "status", width: "100px", sortable: true },
-  ], [linkedPOMap]);
+  ], [linkedPOMap, deliveredQtyMap]);
 
   const getContextMenuItems = (row: SalesOrder): ContextMenuItem[] => [
     {

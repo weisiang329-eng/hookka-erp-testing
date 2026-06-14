@@ -252,12 +252,14 @@ interface ApiRecord {
   customerPO?: string;
   doNo?: string;
   invoiceNo?: string;
-  // DO rows expose these aggregated linkage fields (a DO can span several SOs):
-  // the comma-joined SO numbers it ships, plus the customer's own SO / Ref.
-  salesOrderNos?: string;
+  // DO rows expose these linkage fields (a DO can span several SOs): the
+  // customer's own SO / Ref, plus an `items` array whose salesOrderNo values
+  // are the SO numbers the DO actually ships (used to show + highlight the
+  // matched SO, e.g. searching "249" reveals the DO ships SO-2605-249).
   customerSO?: string;
   customerRef?: string;
   reference?: string;
+  items?: { salesOrderNo?: string }[];
   // Consignment note rows (/api/consignment-notes payload).
   noteNumber?: string;
   // Lifecycle status (SO/DO/invoice all carry one) — drives the result pill.
@@ -392,6 +394,12 @@ function useApiSearch(query: string) {
             items.forEach((item) => {
               const num = item.doNo || item.doNumber || item.orderNumber || item.id || "";
               const meta = statusMeta("delivery_orders", item.status);
+              // The SO numbers this DO ships — the real reason a DO matches an SO
+              // search. Joined + deduped from the items array (the list payload
+              // doesn't return a ready-made salesOrderNos string).
+              const soNos = Array.from(
+                new Set((item.items || []).map((i) => i.salesOrderNo).filter(Boolean)),
+              ).join(", ");
               collected.push({
                 id: `do-${item.id}`,
                 label: num,
@@ -401,7 +409,7 @@ function useApiSearch(query: string) {
                 // surfaces the DO that carries it, with that SO bolded).
                 description: [
                   item.customerName || item.company,
-                  item.salesOrderNos,
+                  soNos,
                   item.customerPOId,
                   item.customerRef,
                 ].filter(Boolean).join(" · "),

@@ -1658,10 +1658,11 @@ function AffectedProductsPanel({
         {/* Pull from the source order — one tap to attach a line the order
             already has, instead of searching the whole catalog. */}
         {sourceItems.length > 0 && (
-          <div className="rounded-lg border border-[#E2DDD8] bg-[#FBFAF8] p-2">
+          <div className="rounded-lg border border-dashed border-[#C9B98A] bg-[#FCFBF7] p-2">
             <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-xs font-medium text-[#6B5C32]">
-                From {caseDetail.sourceNo || "the source order"}
+              <span className="text-xs font-medium text-[#9C6F1E]">
+                Suggestions from {caseDetail.sourceNo || "the source order"} — tap to add
+                <span className="ml-1 font-normal text-[#9CA3AF]">(not added yet)</span>
               </span>
               <button
                 type="button"

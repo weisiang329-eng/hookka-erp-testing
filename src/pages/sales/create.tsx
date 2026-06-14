@@ -3316,16 +3316,25 @@ function LineItemCard({
         }),
       });
     } else if (v === "CUSTOM") {
-      // Start with no depts ticked — Save is blocked by the shared
-      // validator until at least one is chosen. Components start absent
-      // (= all pieces ticked at full qty).
-      onUpdate(idx, { repairScope: JSON.stringify({ preset: "CUSTOM", depts: [] }) });
+      // Partial repair ALWAYS includes Upholstery + Packing (Wei Siang
+      // 2026-06-15): every repair has to be re-upholstered and re-packed, so
+      // they start ticked and are locked on (see toggleScopeDept + the
+      // disabled checkboxes). The operator adds whichever other depts the
+      // repair needs. Components start absent (= all pieces, full qty).
+      onUpdate(idx, {
+        repairScope: JSON.stringify({
+          preset: "CUSTOM",
+          depts: ["UPHOLSTERY", "PACKING"],
+        }),
+      });
     } else {
       onUpdate(idx, { repairScope: null });
     }
   };
 
   const toggleScopeDept = (code: RepairDeptCode) => {
+    // Upholstery + Packing are mandatory on every partial repair — locked on.
+    if (code === "UPHOLSTERY" || code === "PACKING") return;
     const next = scopeCustomDepts.includes(code)
       ? scopeCustomDepts.filter((d) => d !== code)
       : [...scopeCustomDepts, code];
@@ -3830,25 +3839,27 @@ function LineItemCard({
           </select>
           {scopePresetValue === "CUSTOM" && (
             <div className="mt-2 grid grid-cols-2 gap-1.5 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2">
-              {REPAIR_DEPT_CODES.map((code) => (
-                <label
-                  key={code}
-                  className="flex items-center gap-2 text-xs text-[#374151] cursor-pointer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={scopeCustomDepts.includes(code)}
-                    onChange={() => toggleScopeDept(code)}
-                    className="h-3.5 w-3.5 accent-[#6B5C32]"
-                  />
-                  {REPAIR_DEPT_LABELS[code]}
-                </label>
-              ))}
-              {scopeCustomDepts.length === 0 && (
-                <div className="col-span-2 text-[11px] text-[#9A3A2D]">
-                  Pick at least one department, or switch back to Full remake.
-                </div>
-              )}
+              {REPAIR_DEPT_CODES.map((code) => {
+                // Upholstery + Packing always apply to a repair → shown ticked
+                // and locked (disabled) so they can't be unticked by mistake.
+                const locked = code === "UPHOLSTERY" || code === "PACKING";
+                return (
+                  <label
+                    key={code}
+                    className={`flex items-center gap-2 text-xs ${locked ? "text-[#9CA3AF] cursor-default" : "text-[#374151] cursor-pointer"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={locked || scopeCustomDepts.includes(code)}
+                      disabled={locked}
+                      onChange={() => toggleScopeDept(code)}
+                      className="h-3.5 w-3.5 accent-[#6B5C32]"
+                    />
+                    {REPAIR_DEPT_LABELS[code]}
+                    {locked ? " (always)" : ""}
+                  </label>
+                );
+              })}
             </div>
           )}
           {/* Component-level Repair Scope — which BOM pieces get repaired

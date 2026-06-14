@@ -17,7 +17,6 @@ import {
   BarChart3,
   Wrench,
   Bell,
-  FileText,
   BookOpen,
   Calendar,
   Building2,
@@ -45,6 +44,12 @@ import {
   FolderOpen,
   ClipboardCheck,
   Scissors,
+  Sofa,
+  Axe,
+  Frame,
+  Grid3x3,
+  Box,
+  Receipt,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -80,7 +85,7 @@ const navigationGroups: NavGroup[] = [
     items: [
       { name: "Sales Orders", href: "/sales", icon: ShoppingCart },
       { name: "Delivery Order", href: "/delivery", icon: Truck },
-      { name: "Invoices", href: "/invoices", icon: FileText },
+      { name: "Invoices", href: "/invoices", icon: Receipt },
       { name: "Consignment", href: "/consignment", icon: Package, children: [
         { name: "Consignment Order", href: "/consignment", icon: Package },
         { name: "Consignment Note", href: "/consignment/note", icon: ClipboardList },
@@ -98,13 +103,13 @@ const navigationGroups: NavGroup[] = [
       // payload drops ~8× vs. the old monolithic page.
       { name: "Production", href: "/production", icon: Factory, children: [
         { name: "Overview", href: "/production", icon: Layers },
-        { name: "Fab Cut", href: "/production/fab-cut", icon: Shirt },
+        { name: "Fab Cut", href: "/production/fab-cut", icon: Scissors },
         { name: "Fab Sew", href: "/production/fab-sew", icon: Shirt },
-        { name: "Foam", href: "/production/foam", icon: Package },
-        { name: "Wood Cut", href: "/production/wood-cut", icon: Wrench },
-        { name: "Framing", href: "/production/framing", icon: Wrench },
-        { name: "Webbing", href: "/production/webbing", icon: Wrench },
-        { name: "Upholstery", href: "/production/upholstery", icon: Shirt },
+        { name: "Foam", href: "/production/foam", icon: Box },
+        { name: "Wood Cut", href: "/production/wood-cut", icon: Axe },
+        { name: "Framing", href: "/production/framing", icon: Frame },
+        { name: "Webbing", href: "/production/webbing", icon: Grid3x3 },
+        { name: "Upholstery", href: "/production/upholstery", icon: Sofa },
         { name: "Packing", href: "/production/packing", icon: Package },
       ]},
       { name: "Planning", href: "/planning", icon: Calendar },

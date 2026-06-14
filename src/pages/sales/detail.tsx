@@ -38,6 +38,20 @@ type LinkedPO = {
   status: string;
   progress: number;
   currentDepartment: string;
+  completedDate?: string | null;
+  // Per-line delivery: the DO this PO shipped on + that DO's raw status.
+  deliveryDoNo?: string;
+  deliveryStatus?: string;
+};
+
+// Operator-facing words for a DO's raw status, matching the Delivery module
+// tabs (LOADED reads as "Dispatched", DRAFT as "Pending Dispatch").
+const DO_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "Pending Dispatch",
+  LOADED: "Dispatched",
+  IN_TRANSIT: "In Transit",
+  DELIVERED: "Delivered",
+  INVOICED: "Invoiced",
 };
 
 // SO ID display rule (mirrors src/pages/production/index.tsx):
@@ -1271,6 +1285,9 @@ export default function SalesOrderDetailPage() {
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Current Dept</th>
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Progress</th>
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Status</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Completed</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Delivery</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1295,6 +1312,21 @@ export default function SalesOrderDetailPage() {
                         </div>
                       </td>
                       <td className="px-3 py-3"><Badge variant="status" status={po.status} /></td>
+                      <td className="px-3 py-3 doc-number whitespace-nowrap text-[#4B5563]">
+                        {po.completedDate ? formatDate(po.completedDate) : <span className="text-[#9CA3AF]">—</span>}
+                      </td>
+                      <td className="px-3 py-3">
+                        {po.deliveryDoNo ? (
+                          <div className="flex flex-col leading-tight">
+                            <span className="doc-number text-[#1F1D1B]">{po.deliveryDoNo}</span>
+                            <span className="text-xs text-[#6B7280]">
+                              {DO_STATUS_LABEL[po.deliveryStatus ?? ""] ?? po.deliveryStatus}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-[#9CA3AF]">Not on a DO</span>
+                        )}
+                      </td>
                       <td className="px-3 py-3">
                         <div className="flex items-center gap-1 justify-end">
                           {/* Hold — only PENDING / IN_PROGRESS. ON_HOLD POs

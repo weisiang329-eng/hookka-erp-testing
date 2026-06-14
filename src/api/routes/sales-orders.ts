@@ -2717,7 +2717,7 @@ app.get("/:id", async (c) => {
     // (BF/ACC) or the parent companySOId without the -NN suffix (SOFA).
     c.var.DB.prepare(
       `SELECT id, poNo, productName, productCode, itemCategory, quantity,
-              status, progress, currentDepartment
+              status, progress, currentDepartment, completedDate
          FROM production_orders
         WHERE salesOrderId = ?
         ORDER BY poNo`,
@@ -2733,6 +2733,7 @@ app.get("/:id", async (c) => {
         status: string | null;
         progress: number | null;
         currentDepartment: string | null;
+        completedDate: string | null;
       }>(),
   ]);
   if (!so) {
@@ -2773,6 +2774,29 @@ app.get("/:id", async (c) => {
     status: d.status ?? "",
   }));
   const doIds = linkedDOs.map((d) => d.id);
+
+  // Per-PO delivery: which DO each production-order line shipped on + that DO's
+  // status. Lets the Linked Production Orders table show a real per-line
+  // delivery state (DO no. + Delivered/Dispatched/…) instead of the operator
+  // cross-checking the Delivery page. Reuses the DOs already fetched above.
+  const poDeliveryMap = new Map<string, { doNo: string; status: string }>();
+  if (doIds.length > 0) {
+    const diRes = await c.var.DB.prepare(
+      `SELECT productionOrderId, deliveryOrderId
+         FROM delivery_order_items
+        WHERE deliveryOrderId IN (${doIds.map(() => "?").join(",")})
+          AND productionOrderId IS NOT NULL AND productionOrderId <> ''`,
+    )
+      .bind(...doIds)
+      .all<{ productionOrderId: string; deliveryOrderId: string }>();
+    const doById = new Map(linkedDOs.map((d) => [d.id, d]));
+    for (const di of diRes.results ?? []) {
+      const d = doById.get(di.deliveryOrderId);
+      if (d && !poDeliveryMap.has(di.productionOrderId)) {
+        poDeliveryMap.set(di.productionOrderId, { doNo: d.doNo, status: d.status });
+      }
+    }
+  }
 
   // Invoices: by SO link OR by any of this SO's DOs. A consolidated invoice
   // anchors its salesOrderId/companySOId to the FIRST SO in the DO, so a
@@ -2856,6 +2880,9 @@ app.get("/:id", async (c) => {
       status: p.status ?? "",
       progress: p.progress ?? 0,
       currentDepartment: p.currentDepartment ?? "",
+      completedDate: p.completedDate ?? null,
+      deliveryDoNo: poDeliveryMap.get(p.id)?.doNo ?? "",
+      deliveryStatus: poDeliveryMap.get(p.id)?.status ?? "",
     })),
     statusHistory: (statusRes.results ?? []).map(rowToStatusChange),
     priceOverrides: (overridesRes.results ?? []).map(rowToPriceOverride),

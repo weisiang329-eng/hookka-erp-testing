@@ -50,6 +50,7 @@ import {
   Grid3x3,
   Box,
   Receipt,
+  List,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -186,12 +187,56 @@ const navigationGroups: NavGroup[] = [
   {
     label: "FINANCE",
     items: [
-      { name: "Accounting", href: "/accounting", icon: BookOpen },
-      { name: "Cash Flow", href: "/accounting/cash-flow", icon: Wallet },
-      { name: "Credit Notes", href: "/invoices/credit-notes", icon: FileX },
-      { name: "Debit Notes", href: "/invoices/debit-notes", icon: FilePlus },
-      { name: "Payments", href: "/invoices/payments", icon: CreditCard },
+      // Owner UI reorg (2026-06): seven expandable groups. Accounting
+      // reports/screens deep-link via /accounting?tab=<key>; standalone
+      // pages (Supplier Payment, Credit/Debit Notes, e-Invoice, Reports)
+      // keep their own routes.
+      {
+        name: "Monthly Report", href: "/accounting?tab=overview", icon: BarChart3, children: [
+          { name: "Overview", href: "/accounting?tab=overview", icon: LayoutDashboard },
+          { name: "P&L", href: "/accounting?tab=pl", icon: BarChart3 },
+          { name: "Cost Structure", href: "/accounting?tab=coststruct", icon: Layers },
+          { name: "Cash Flow", href: "/accounting?tab=cashflow", icon: Wallet },
+          { name: "Balance Sheet", href: "/accounting?tab=bs", icon: Scale },
+          { name: "Trial Balance", href: "/accounting?tab=tb", icon: Scale },
+          { name: "General Ledger", href: "/accounting?tab=gl", icon: BookOpen },
+          { name: "Monthly Trend", href: "/accounting?tab=trend", icon: TrendingUp },
+          { name: "Cost / Expense Classes", href: "/accounting?tab=ceclass", icon: BarChart3 },
+        ],
+      },
+      {
+        name: "Daily Operation", href: "/accounting?tab=payments", icon: Wallet, children: [
+          { name: "Expense Payment", href: "/accounting?tab=payments", icon: Wallet },
+          { name: "Receipts", href: "/accounting?tab=receipts", icon: Receipt },
+          { name: "Supplier Payment", href: "/invoices/payments", icon: CreditCard },
+          { name: "Credit Notes", href: "/invoices/credit-notes", icon: FileX },
+          { name: "Debit Notes", href: "/invoices/debit-notes", icon: FilePlus },
+        ],
+      },
+      {
+        name: "Monthly Operation", href: "/accounting?tab=journals", icon: Calculator, children: [
+          { name: "Journal Entries", href: "/accounting?tab=journals", icon: BookOpen },
+          { name: "Cash Book", href: "/accounting?tab=cashbook", icon: Wallet },
+          { name: "Fixed Assets", href: "/accounting?tab=assets", icon: Building2 },
+        ],
+      },
+      {
+        name: "Debtor / Creditor", href: "/accounting?tab=ar", icon: Users, children: [
+          { name: "Debtor Aging", href: "/accounting?tab=ar", icon: Users },
+          { name: "Creditor Aging", href: "/accounting?tab=ap", icon: Building2 },
+          { name: "Other Debtor / Creditor", href: "/accounting?tab=odc", icon: Users },
+        ],
+      },
       { name: "e-Invoice", href: "/invoices/e-invoice", icon: FileCheck },
+      {
+        name: "Maintenance", href: "/accounting?tab=coa", icon: Settings, children: [
+          { name: "Chart of Accounts", href: "/accounting?tab=coa", icon: List },
+          { name: "Labour", href: "/accounting?tab=labor", icon: Users },
+          { name: "Stock", href: "/accounting?tab=stock", icon: Boxes },
+          { name: "Opening Balance", href: "/accounting?tab=opening", icon: Scale },
+          { name: "Settings", href: "/accounting?tab=maint", icon: Wrench },
+        ],
+      },
       { name: "Reports", href: "/reports", icon: BarChart3 },
     ],
   },
@@ -257,7 +302,7 @@ export function Sidebar({
   mobileOpen?: boolean;
   onMobileClose?: () => void;
 }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   // Close the mobile drawer whenever the route changes (tapping a nav item).
   useEffect(() => {
     onMobileClose?.();
@@ -462,6 +507,14 @@ export function Sidebar({
   });
 
   const isItemActive = (href: string) => {
+    // Query-string deep links (e.g. /accounting?tab=pl) — match pathname
+    // AND the tab param against the current URL so the right child lights up.
+    if (href.includes("?")) {
+      const [hp, hq] = href.split("?");
+      const wantTab = new URLSearchParams(hq).get("tab");
+      const curTab = new URLSearchParams(search).get("tab") ?? "overview";
+      return pathname === hp && (wantTab ?? "overview") === curTab;
+    }
     if (href === "/production/scan") {
       return pathname === "/production/scan" || pathname.startsWith("/production/scan/");
     }

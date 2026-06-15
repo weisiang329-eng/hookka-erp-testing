@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { humanizeError } from "@/lib/humanize-error";
 import { useToast } from "@/components/ui/toast";
@@ -43,7 +44,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "coststruct" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "coststruct" | "cashflow" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -163,34 +164,55 @@ function AccountPicker({
   );
 }
 
-const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
-  { key: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
-  { key: "pl", label: "P&L Report", icon: <BarChart3 className="h-4 w-4" /> },
-  { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" /> },
-  { key: "ceclass", label: "Cost/Exp Classes", icon: <BarChart3 className="h-4 w-4" /> },
-  { key: "coststruct", label: "Cost Structure", icon: <List className="h-4 w-4" /> },
-  { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" /> },
-  { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" /> },
-  { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" /> },
-  { key: "tb", label: "Trial Balance", icon: <Scale className="h-4 w-4" /> },
-  { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" /> },
-  { key: "ar", label: "Accounts Receivable", icon: <Users className="h-4 w-4" /> },
-  { key: "ap", label: "Accounts Payable", icon: <Building2 className="h-4 w-4" /> },
-  { key: "odc", label: "Other D/C", icon: <Users className="h-4 w-4" /> },
-  { key: "payments", label: "Payments", icon: <BookOpen className="h-4 w-4" /> },
-  { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" /> },
-  { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" /> },
-  { key: "assets", label: "Fixed Assets", icon: <Building2 className="h-4 w-4" /> },
-  { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" /> },
-  { key: "stock", label: "Stock", icon: <List className="h-4 w-4" /> },
-  { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" /> },
-  { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" /> },
+// Grouped per the owner's 2026-06 UI reorg (sidebar drives navigation; the
+// in-page bar mirrors the same grouping). Standalone-page items (Supplier
+// Payment, Credit/Debit Notes, e-Invoice, Reports) live in the sidebar, not
+// here.
+const TABS: { key: TabKey; label: string; icon: React.ReactNode; group: string }[] = [
+  // Monthly Report
+  { key: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "pl", label: "P&L", icon: <BarChart3 className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "coststruct", label: "Cost Structure", icon: <List className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "cashflow", label: "Cash Flow", icon: <TrendingUp className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "tb", label: "Trial Balance", icon: <Scale className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "gl", label: "General Ledger", icon: <FileText className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" />, group: "Monthly Report" },
+  { key: "ceclass", label: "Cost / Expense Classes", icon: <BarChart3 className="h-4 w-4" />, group: "Monthly Report" },
+  // Daily Operation
+  { key: "payments", label: "Expense Payment", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
+  { key: "receipts", label: "Receipts", icon: <BookOpen className="h-4 w-4" />, group: "Daily Operation" },
+  // Monthly Operation
+  { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
+  { key: "cashbook", label: "Cash Book", icon: <BookOpen className="h-4 w-4" />, group: "Monthly Operation" },
+  { key: "assets", label: "Fixed Assets", icon: <Building2 className="h-4 w-4" />, group: "Monthly Operation" },
+  // Debtor / Creditor
+  { key: "ar", label: "Debtor Aging", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "ap", label: "Creditor Aging", icon: <Building2 className="h-4 w-4" />, group: "Debtor / Creditor" },
+  { key: "odc", label: "Other Debtor / Creditor", icon: <Users className="h-4 w-4" />, group: "Debtor / Creditor" },
+  // Maintenance
+  { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" />, group: "Maintenance" },
+  { key: "labor", label: "Labour", icon: <Users className="h-4 w-4" />, group: "Maintenance" },
+  { key: "stock", label: "Stock", icon: <List className="h-4 w-4" />, group: "Maintenance" },
+  { key: "opening", label: "Opening Balance", icon: <Scale className="h-4 w-4" />, group: "Maintenance" },
+  { key: "maint", label: "Maintenance", icon: <List className="h-4 w-4" />, group: "Maintenance" },
 ];
 
 // =============== MAIN PAGE ===============
 
 export default function AccountingPage() {
-  const [tab, setTab] = useState<TabKey>("overview");
+  // The sidebar deep-links each report via /accounting?tab=<key>; keep the
+  // selected tab in the URL so those links land on the right screen and the
+  // tab is shareable/bookmarkable.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlTab = searchParams.get("tab");
+  // The URL is the source of truth — derive the active tab, no mirror state.
+  const tab: TabKey = (TABS.some((t) => t.key === urlTab) ? urlTab : "overview") as TabKey;
+  const setTab = (k: TabKey) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", k);
+    setSearchParams(next, { replace: true });
+  };
   const { data: coaResp, loading: coaLoading, refresh: refreshCoa } = useCachedJson<{ success?: boolean; data?: ChartOfAccount[] }>("/api/accounting/coa");
   const { data: jeResp, loading: jeLoading, refresh: refreshJe } = useCachedJson<{ success?: boolean; data?: JournalEntry[] }>("/api/accounting/journals");
   const { data: agingResp, loading: agingLoading, refresh: refreshAging } = useCachedJson<{ success?: boolean; data?: { ar: ARAgingEntry[]; ap: APAgingEntry[] } }>("/api/accounting/aging");
@@ -218,21 +240,27 @@ export default function AccountingPage() {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-[#E2DDD8]">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors cursor-pointer ${
-              tab === t.key
-                ? "border-[#6B5C32] text-[#6B5C32]"
-                : "border-transparent text-[#6B7280] hover:text-[#1F1D1B] hover:border-[#E2DDD8]"
-            }`}
-          >
-            {t.icon}
-            {t.label}
-          </button>
+      {/* Tabs — grouped (sidebar drives navigation; this mirrors it). Each
+          group on its own row with a small heading. */}
+      <div className="space-y-2">
+        {[...new Set(TABS.map((t) => t.group))].map((g) => (
+          <div key={g} className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF] w-32 shrink-0">{g}</span>
+            {TABS.filter((t) => t.group === g).map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium border transition-colors cursor-pointer ${
+                  tab === t.key
+                    ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                    : "bg-white text-[#6B7280] border-[#E2DDD8] hover:text-[#1F1D1B] hover:bg-[#F0ECE9]"
+                }`}
+              >
+                {t.icon}
+                {t.label}
+              </button>
+            ))}
+          </div>
         ))}
       </div>
 
@@ -250,6 +278,7 @@ export default function AccountingPage() {
           {tab === "ceclass" && <CostExpenseClassesTab />}
           {tab === "coststruct" && <CostStructureTab />}
           {tab === "bs" && <BalanceSheetTab />}
+          {tab === "cashflow" && <CashFlowTab />}
           {tab === "coa" && <COATab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "journals" && (
             <JournalsTab journals={journals} accounts={accounts} onRefresh={fetchAll} />
@@ -6313,7 +6342,6 @@ function BalanceSheetTab() {
     () => (bsResp?.success && bsResp.data?.balanceSheet ? bsResp.data.balanceSheet : []),
     [bsResp]
   );
-  const cashFlow = bsResp?.success ? bsResp.data?.cashFlow : undefined;
 
   if (bsLoading) {
     return (
@@ -6458,36 +6486,59 @@ function BalanceSheetTab() {
           </div>
         </CardContent>
       </Card>
+    </div>
+  );
+}
 
-      {/* Phase 5.4 — Cash Flow (Operating / Investing / Financing), a
-          categorised P&L-result view by each account's O/I/F tag (not a
-          full IAS7 working-capital statement — see note). */}
-      {cashFlow && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <TrendingUp className="h-5 w-5 text-[#6B5C32]" /> Cash Flow — Operating / Investing / Financing
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <table className="w-full text-sm max-w-md">
-              <tbody>
-                {([["Operating", cashFlow.operating], ["Investing", cashFlow.investing], ["Financing", cashFlow.financing]] as const).map(([label, val]) => (
-                  <tr key={label} className="border-b border-[#F0ECE9]">
-                    <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
-                    <td className={`px-2 py-1.5 text-right tabular-nums ${val >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(val)}</td>
+// Phase 5.4 — Cash Flow (Operating / Investing / Financing), pulled out as
+// its own report (owner UI reorg). Categorised P&L-result view by each
+// account's O/I/F tag — not a full IAS7 working-capital statement. The
+// fuller cash-flow template the owner is preparing will replace this.
+function CashFlowTab() {
+  const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const months: string[] = [];
+  {
+    const now = new Date();
+    for (let i = 0; i < 18; i++) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      months.push(d.toISOString().slice(0, 7));
+    }
+  }
+  const { data: resp } = useCachedJson<{ success?: boolean; data?: { cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
+  const cashFlow = resp?.success ? resp.data?.cashFlow : undefined;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Cash Flow</h2>
+        <select value={period} onChange={(e) => setPeriod(e.target.value)} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+          {months.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+      <Card>
+        <CardContent className="p-4">
+          {!cashFlow ? (
+            <div className="py-8 text-center text-[#6B7280] text-sm">No cash-flow data for {period}.</div>
+          ) : (
+            <>
+              <table className="w-full text-sm max-w-md">
+                <tbody>
+                  {([["Operating", cashFlow.operating], ["Investing", cashFlow.investing], ["Financing", cashFlow.financing]] as const).map(([label, val]) => (
+                    <tr key={label} className="border-b border-[#F0ECE9]">
+                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
+                      <td className={`px-2 py-1.5 text-right tabular-nums ${val >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(val)}</td>
+                    </tr>
+                  ))}
+                  <tr className="font-semibold">
+                    <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
+                    <td className={`px-2 py-2 text-right tabular-nums ${cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(cashFlow.netChange)}</td>
                   </tr>
-                ))}
-                <tr className="font-semibold">
-                  <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
-                  <td className={`px-2 py-2 text-right tabular-nums ${cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(cashFlow.netChange)}</td>
-                </tr>
-              </tbody>
-            </table>
-            <p className="text-[11px] text-[#9CA3AF] mt-2">{cashFlow.note}</p>
-          </CardContent>
-        </Card>
-      )}
+                </tbody>
+              </table>
+              <p className="text-[11px] text-[#9CA3AF] mt-2">{cashFlow.note}</p>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

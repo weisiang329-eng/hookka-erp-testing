@@ -34,7 +34,12 @@ export async function getQRCodeDataURL(
     // which printed an edge-to-edge QR with no quiet zone at all. 2 modules is the
     // practical minimum; callers can pass more if a layout needs extra breathing.
     margin,
-    errorCorrectionLevel: "M",
+    // Q = ~25% damage recovery (was M = ~15%). Shop-floor labels get wrinkled,
+    // smudged, and printed near a printer's clip margin — Q lets the scanner
+    // rebuild the code even when a corner is shaved off or dirty (Wei Siang
+    // 2026-06-16). Q over H to keep the module count — and the print density —
+    // sane on the small 50x75mm job-card stickers.
+    errorCorrectionLevel: "Q",
   });
 }
 

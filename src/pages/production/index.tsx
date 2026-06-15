@@ -8187,7 +8187,11 @@ export default function ProductionPage({
                   // 2026-06-06: the /track tracking page isn't used; this sticker
                   // is scanned at Packing to mark the unit done + assign a rack).
                   // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
-                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
+                  // Drop the redundant &dept=PACKING — the FG-PACKING sentinel
+                  // already encodes the dept (parseStickerData derives it), so
+                  // omitting it shortens the payload → fewer QR modules → bigger,
+                  // more scannable cells that survive a clipped/dirty corner.
+                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
                   // Wei Siang 2026-05-15: drop the parent customer name
                   // when a hub is set — "Houzs Century (Houzs KL)" wrapped
                   // to two lines on the 100mm-wide sticker and ate too
@@ -8664,7 +8668,11 @@ export default function ProductionPage({
                   // 2026-06-06: the /track tracking page isn't used; this sticker
                   // is scanned at Packing to mark the unit done + assign a rack).
                   // FG-PACKING sentinel resolves to the PO's PACKING card on scan.
-                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&dept=PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
+                  // Drop the redundant &dept=PACKING — the FG-PACKING sentinel
+                  // already encodes the dept (parseStickerData derives it), so
+                  // omitting it shortens the payload → fewer QR modules → bigger,
+                  // more scannable cells that survive a clipped/dirty corner.
+                  const trackUrl = `${origin}/worker/scan?op=FG-PACKING&po=${encodeURIComponent(s.poNo)}&p=${s.pieceNo}&t=${s.totalPieces}&pn=${encodeURIComponent(s.pieceName)}`;
               // Hub-only when set — see on-screen tile comment above.
               const customerLine = s.customerHub || s.customerName;
               // Legs / Pillow render INSIDE their primary's print page —
@@ -8749,7 +8757,12 @@ export default function ProductionPage({
                         by-side. Same 100×150mm physical card. */}
                     <div className="mt-auto pt-[2mm] border-t border-dashed border-black">
                       <div className="flex items-end gap-[2mm] pt-[2mm]">
-                        <QRImg eager data={trackUrl} size={pillowPair ? 98 : 150} alt="FG unit QR" className="block" />
+                        {/* Slightly smaller + its OWN left/bottom margin (on top
+                            of the page's 6mm padding) so the QR sits further from
+                            the edge than the text — the text can lose a sliver,
+                            the QR must survive. With the quiet zone + Q-level
+                            error correction it scans even if a corner is shaved. */}
+                        <QRImg eager data={trackUrl} size={pillowPair ? 88 : 132} alt="FG unit QR" className="block ml-[2mm] mb-[1.5mm]" />
                         <div className="flex-1 text-center min-w-0">
                           {legsPair && (
                             <>

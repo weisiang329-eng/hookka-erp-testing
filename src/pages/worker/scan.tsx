@@ -984,11 +984,16 @@ export default function WorkerScanPage() {
               const band = video.videoHeight * 0.18;
               let best: { v: string; d: number } | null = null;
               for (const c of codes) {
+                if (!c.rawValue) continue;
+                const fmt = (c as { format?: string }).format;
+                // Be tolerant: some phone detectors don't report format OR
+                // boundingBox. Dropping every such code was the "完全没反应" bug.
+                // Reject only a code we KNOW is a QR; a missing box → treat as
+                // centred so it still fires.
+                if (fmt && fmt !== "code_128") continue;
                 const bb = (c as { boundingBox?: { y: number; height: number } })
                   .boundingBox;
-                const fmt = (c as { format?: string }).format;
-                if (!c.rawValue || fmt !== "code_128" || !bb) continue;
-                const d = Math.abs(bb.y + bb.height / 2 - cy);
+                const d = bb ? Math.abs(bb.y + bb.height / 2 - cy) : 0;
                 if (d <= band && (!best || d < best.d)) best = { v: c.rawValue, d };
               }
               if (best) {

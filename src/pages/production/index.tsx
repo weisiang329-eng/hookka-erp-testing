@@ -14,7 +14,7 @@ import { deriveJobCardId, isShortJobCardToken } from "@/lib/job-card-id";
 // Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
 // print click gesture — an await before window.open would trip the pop-up
 // blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
-import QRCode from "qrcode";
+import JsBarcode from "jsbarcode";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -97,39 +97,25 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
-// Render the SAME scan string (HKJC:<token>) as a small QR for the Production
-// Schedule print. A QR is far easier to scan on a phone than the wide 1D Code
-// 128 was (2D, compact, error-corrected) AND it scans in the worker app's
-// DEFAULT mode — no Barcode-mode switch (Wei Siang 2026-06-16: the 1D barcode
-// "完全没反应" on real phones, and it was too wide). Same encoded string, so the
-// scanner's parseJobCardBarcode path resolves it identically. SYNC (QRCode.create
-// + manual canvas draw) so the print's data-URL prebuild stays synchronous and
-// window.open isn't popup-blocked by an await.
-function jobCardQrDataUrl(value: string): string {
+// Render a WIP's scan code as a Code 128 (HKJC:<token>) PNG data URL,
+// SYNCHRONOUSLY, for the Production Schedule print. The schedule's rows are thin
+// and many — a square QR there is too small to see/scan (Wei Siang 2026-06-16:
+// "QR 放在 production schedule 裏面看不到"), so a wide-but-short 1D barcode fits the
+// row. jobCardBarcodeValue() is the single source of the encoded string (shared
+// with the scanner's parseJobCardBarcode). Returns "" on failure so a bad row
+// never blocks the print.
+function jobCardCode128DataUrl(token: string): string {
   try {
-    // errorCorrectionLevel M (not Q): the payload is short (~25 chars → 25×25
-    // modules), so M keeps the module count low → bigger, easier-to-scan cells
-    // at the small printed size.
-    const qr = QRCode.create(value, { errorCorrectionLevel: "M" });
-    const n = qr.modules.size;
-    const quiet = 2; // quiet-zone modules
-    const scale = 6; // px per module in the source canvas
-    const dim = (n + quiet * 2) * scale;
     const canvas = document.createElement("canvas");
-    canvas.width = dim;
-    canvas.height = dim;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return "";
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, dim, dim);
-    ctx.fillStyle = "#000000";
-    for (let row = 0; row < n; row++) {
-      for (let col = 0; col < n; col++) {
-        if (qr.modules.get(row, col)) {
-          ctx.fillRect((col + quiet) * scale, (row + quiet) * scale, scale, scale);
-        }
-      }
-    }
+    JsBarcode(canvas, jobCardBarcodeValue(token), {
+      format: "CODE128",
+      height: 38,
+      // 3px/module source → crisp; the token is short (~20 chars hashed) so the
+      // canvas stays modest and prints at a fat, scannable X-dimension.
+      width: 3,
+      margin: 4,
+      displayValue: false, // the human WIP name is printed as crisp HTML below
+    });
     return canvas.toDataURL("image/png");
   } catch {
     return "";
@@ -5605,24 +5591,21 @@ export default function ProductionPage({
             const token = isShortJobCardToken(r.jobCardId)
               ? r.jobCardId
               : deriveJobCardId(r.poId, r.wipKey ?? "", activeTab);
-            barcodeByJc.set(
-              r.jobCardId,
-              jobCardQrDataUrl(jobCardBarcodeValue(token)),
-            );
+            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(token));
           }
         }
       }
       const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
         const key = col.key;
-        // "Scan to complete" column: a small QR (image) + the human WIP name
+        // "Scan to complete" column: the Code 128 (image) + the human WIP name
         // below it.
         if (key === "scanCode") {
           const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
           if (!bc) return "";
           // Caption = the human WIP name (token-stripped), NOT the cryptic id —
-          // the worker reads it to confirm the QR matches the piece in hand. Any
-          // stray __SIZE__/__MODEL__ template token is stripped defensively; the
-          // scannable token lives in the QR + the img alt.
+          // the worker reads it to confirm the code matches the piece in hand.
+          // Any stray __SIZE__/__MODEL__ template token is stripped defensively;
+          // the scannable token lives in the bars + the img alt.
           const wipRaw = String(
             (r as unknown as Record<string, unknown>).wip ?? "",
           );
@@ -5760,15 +5743,14 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
-    /* "Scan to complete" column — one small QR per WIP row (was a wide Code 128;
-       the 1D barcode was too wide and wouldn't scan on a phone). A QR is compact
-       and scans in the worker app's default mode. */
-    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 96px; }
-    /* ~21mm square at print — its short payload (~25 chars, 25×25 modules) gives
-       fat ~0.8mm cells, so a phone locks on instantly. */
-    table.schedule td.bc img { width: 80px; height: 80px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
-    /* The human WIP name printed below the QR so the worker can confirm the code
-       matches the piece. Wraps on word breaks (it's a readable name, not an id). */
+    /* "Scan to complete" column — one Code 128 per WIP row. Wide-but-short so it
+       fits the schedule's thin rows (a square QR there is too small to scan —
+       Wei Siang "QR 放在 schedule 看不到"). 240px cap is narrower than before so it's
+       less "夸张" while staying a scannable X-dimension. */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 248px; }
+    table.schedule td.bc img { height: 32px; width: auto; max-width: 240px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* The human WIP name printed below the bars so the worker can confirm the
+       code matches the piece. Wraps on word breaks (it's a readable name). */
     table.schedule td.bc .bccode { display: block; font-family: Arial, sans-serif; font-size: 9px; line-height: 1.1; color: #000; margin-top: 1px; word-break: normal; overflow-wrap: anywhere; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,

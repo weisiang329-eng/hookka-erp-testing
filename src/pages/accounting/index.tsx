@@ -6515,49 +6515,124 @@ function BalanceSheetTab() {
 // its own report (owner UI reorg). Categorised P&L-result view by each
 // account's O/I/F tag — not a full IAS7 working-capital statement. The
 // fuller cash-flow template the owner is preparing will replace this.
+type CfApiRow = {
+  kind: "section" | "group" | "line" | "subtotal" | "result" | "total" | "bf" | "cf" | "gap";
+  label: string;
+  section?: string;
+  depth: number;
+  groupId?: string;
+  values: (number | null)[];
+};
+type CfApiData = { period: string; columns: { key: string; label: string; accum?: boolean }[]; rows: CfApiRow[] };
+
 function CashFlowTab() {
   const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
-  const months: string[] = [];
-  {
-    const now = new Date();
-    for (let i = 0; i < 18; i++) {
-      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
-      months.push(d.toISOString().slice(0, 7));
+  const [level, setLevel] = useState(3);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const { data: resp } = useCachedJson<{ success?: boolean; data?: CfApiData }>(
+    `/api/accounting/cashflow-statement?period=${period}`,
+  );
+  const data = resp?.success ? resp.data : undefined;
+  const cols = data?.columns ?? [];
+  const rows = data?.rows ?? [];
+
+  const cfCollapseForLevel = (rs: CfApiRow[], L: number): Set<string> => {
+    const s = new Set<string>();
+    if (L >= 3) return s;
+    for (const r of rs) if (r.kind === "group" && r.groupId) {
+      if (L <= 1) s.add(r.groupId);
     }
-  }
-  const { data: resp } = useCachedJson<{ success?: boolean; data?: { cashFlow?: CashFlowResp } }>(`/api/accounting/pl?period=${period}`);
-  const cashFlow = resp?.success ? resp.data?.cashFlow : undefined;
+    return s;
+  };
+  const applyLevel = (L: number) => { setCollapsed(cfCollapseForLevel(rows, L)); setLevel(L); };
+  // Reset collapse state to the active L-level when fresh data arrives. Intentional
+  // set-state-in-effect (one-shot sync on data change); `level`/`rows` excluded so
+  // the effect keys only off the new payload — see docs/KNOWN-ISSUES.md §1.
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+  useEffect(() => { setCollapsed(cfCollapseForLevel(rows, level)); }, [data]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+
+  const fmt = (v: number | null): string => {
+    if (v === null || v === undefined) return "";
+    if (v === 0) return "-";
+    const a = Math.abs(v / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return v < 0 ? `(${a})` : a;
+  };
+  const months: string[] = [];
+  { const now = new Date(); for (let i = 0; i < 18; i++) { const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)); months.push(d.toISOString().slice(0, 7)); } }
+  const yrNow = new Date().getUTCFullYear(); const years = [yrNow, yrNow - 1];
+
+  const visibleRows = rows.filter((r) =>
+    r.depth <= (level >= 3 ? 9 : level) && (!r.groupId || r.kind === "group" || !collapsed.has(r.groupId)),
+  );
+
+  const buildExport = (): Aoa => {
+    const head: (string | number)[] = ["ITEM", ...cols.map((c) => c.label)];
+    const aoa: Aoa = [head];
+    for (const r of rows) {
+      if (r.kind === "gap") { aoa.push([]); continue; }
+      const indent = "  ".repeat(r.depth) + (r.kind === "group" ? "› " : "");
+      aoa.push([indent + r.label, ...r.values.map((v) => (v === null ? "" : (v / 100).toFixed(2)))]);
+    }
+    return aoa;
+  };
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h2 className="text-lg font-semibold text-[#1F1D1B]">Cash Flow</h2>
-        <select value={period} onChange={(e) => setPeriod(e.target.value)} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
-          {months.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-semibold text-[#1F1D1B]">Statement of Cash Flow</h2>
+        <span className="text-xs text-[#9CA3AF]">cash basis · full detail</span>
+        <div className="ml-auto flex items-center gap-2">
+          {[1, 2, 3].map((L) => (
+            <button key={L} onClick={() => applyLevel(L)}
+              className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
+          ))}
+          <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+            <optgroup label="Monthly">{months.map((m) => <option key={m} value={m}>{m}</option>)}</optgroup>
+            <optgroup label="Quarter">{years.flatMap((yr) => [1, 2, 3, 4].map((q) => <option key={`${yr}-Q${q}`} value={`${yr}-Q${q}`}>Q{q} {yr}</option>))}</optgroup>
+            <optgroup label="Full year">{years.map((yr) => <option key={`${yr}`} value={`${yr}`}>Full Year {yr}</option>)}</optgroup>
+          </select>
+          <ExportButtons build={buildExport} filenameBase={`CashFlow-${period}`} title="Statement of Cash Flow" subtitle={`Period: ${period}`} />
+        </div>
       </div>
       <Card>
-        <CardContent className="p-4">
-          {!cashFlow ? (
+        <CardContent className="p-4 overflow-x-auto">
+          {!data ? (
             <div className="py-8 text-center text-[#6B7280] text-sm">No cash-flow data for {period}.</div>
           ) : (
-            <>
-              <table className="w-full text-sm max-w-md">
-                <tbody>
-                  {([["Operating", cashFlow.operating], ["Investing", cashFlow.investing], ["Financing", cashFlow.financing]] as const).map(([label, val]) => (
-                    <tr key={label} className="border-b border-[#F0ECE9]">
-                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
-                      <td className={`px-2 py-1.5 text-right tabular-nums ${val >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(val)}</td>
+            <table className="text-[13px]" style={{ minWidth: 760 }}>
+              <thead>
+                <tr className="text-[12px] text-[#6B7280]">
+                  <td />
+                  {cols.map((c) => <td key={c.key} className="text-right px-2 pb-1 whitespace-nowrap">{c.label}</td>)}
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((r, i) => {
+                  if (r.kind === "gap") return <tr key={i}><td colSpan={cols.length + 1} className="py-1.5" /></tr>;
+                  const pad = { paddingLeft: `${8 + r.depth * 16}px` };
+                  const isGroup = r.kind === "group";
+                  const isOpen = isGroup && r.groupId ? !collapsed.has(r.groupId) : false;
+                  const strong = r.kind === "subtotal" || r.kind === "result" || r.kind === "total" || r.kind === "cf" || r.kind === "section" || isGroup;
+                  const rowCls =
+                    r.kind === "result" ? "bg-[#F0ECE9]/60 font-semibold" :
+                    r.kind === "total" ? "border-t-2 border-[#6B5C32] font-semibold" :
+                    r.kind === "cf" ? "border-b-2 border-[#6B5C32] bg-[#F0ECE9]/40 font-semibold" :
+                    r.kind === "section" ? "font-semibold text-[#1F1D1B]" : "";
+                  return (
+                    <tr key={i} className={`${rowCls} ${isGroup ? "cursor-pointer hover:bg-[#F7F4EF] bg-[#F0ECE9]/30 font-semibold" : ""}`}
+                      onClick={isGroup ? () => { const n = new Set(collapsed); if (n.has(r.groupId!)) n.delete(r.groupId!); else n.add(r.groupId!); setCollapsed(n); } : undefined}>
+                      <td className="py-1 whitespace-nowrap" style={pad}>{isGroup ? (isOpen ? "▾ " : "▸ ") : ""}{r.label}</td>
+                      {r.values.map((v, j) => (
+                        <td key={j} className={`text-right px-2 tabular-nums whitespace-nowrap ${typeof v === "number" && v < 0 ? "text-[#9A3A2D]" : ""} ${strong ? "font-semibold" : ""}`}>{fmt(v)}</td>
+                      ))}
                     </tr>
-                  ))}
-                  <tr className="font-semibold">
-                    <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
-                    <td className={`px-2 py-2 text-right tabular-nums ${cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(cashFlow.netChange)}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <p className="text-[11px] text-[#9CA3AF] mt-2">{cashFlow.note}</p>
-            </>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
+          <p className="text-[11px] text-[#9CA3AF] mt-3">Cash basis · classified from bank/cash ledger movements · Raw Materials traced to PI stock groups · Bank c/f = b/f + Cash Surplus.</p>
         </CardContent>
       </Card>
     </div>

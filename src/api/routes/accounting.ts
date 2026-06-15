@@ -5465,23 +5465,33 @@ app.put("/cashflow/map", async (c) => {
       map?: Record<string, { section?: string; order?: number }>;
       stockGroupMap?: Record<string, string>;
     };
-    const map: Record<string, { section: string; order: number }> = {};
-    for (const [code, v] of Object.entries(body.map ?? {})) {
-      if (v && typeof v.section === "string")
-        map[code] = { section: v.section, order: Number(v.order) || 0 };
-    }
-    const sg: Record<string, string> = {};
-    for (const [g, line] of Object.entries(body.stockGroupMap ?? {}))
-      if (typeof line === "string" && line.trim()) sg[g] = line.trim();
     const now = new Date().toISOString();
-    await c.var.DB.prepare(
-      `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_account_map', ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    ).bind(JSON.stringify(map), now).run();
-    await c.var.DB.prepare(
-      `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_stockgroup_map', ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    ).bind(JSON.stringify(sg), now).run();
+    // Each map is updated independently — a body that omits one key must NOT
+    // wipe the other (the account-map editor only sends `map`, so an
+    // unconditional write of stockGroupMap would erase the stock-group
+    // override on every save).
+    let map: Record<string, { section: string; order: number }> | undefined;
+    if (body.map !== undefined) {
+      map = {};
+      for (const [code, v] of Object.entries(body.map ?? {})) {
+        if (v && typeof v.section === "string")
+          map[code] = { section: v.section, order: Number(v.order) || 0 };
+      }
+      await c.var.DB.prepare(
+        `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_account_map', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).bind(JSON.stringify(map), now).run();
+    }
+    let sg: Record<string, string> | undefined;
+    if (body.stockGroupMap !== undefined) {
+      sg = {};
+      for (const [g, line] of Object.entries(body.stockGroupMap ?? {}))
+        if (typeof line === "string" && line.trim()) sg[g] = line.trim();
+      await c.var.DB.prepare(
+        `INSERT INTO kv_config (key, value, updated_at) VALUES ('cashflow_stockgroup_map', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).bind(JSON.stringify(sg), now).run();
+    }
     return c.json({ success: true, data: { map, stockGroupMap: sg } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

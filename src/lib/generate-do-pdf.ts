@@ -160,7 +160,19 @@ function tallyComponents(
         const mm = part.trim().match(/^(\d+)\s+(.+)$/);
         if (!mm) continue;
         const raw = mm[2].trim().toUpperCase();
-        const lab = raw === "HB" || raw === "DIVAN" ? raw : "SOFA";
+        // HB / DIVAN and the partial-repair part labels (BC / ARM / HR / BASE)
+        // keep their OWN manifest subtotal so a repair DO shows the real part;
+        // sofa variants, the complete-sofa "Sofa", and accessories roll up
+        // under SOFA so a normal manifest stays short.
+        const lab =
+          raw === "HB" ||
+          raw === "DIVAN" ||
+          raw === "BC" ||
+          raw === "ARM" ||
+          raw === "HR" ||
+          raw === "BASE"
+            ? raw
+            : "SOFA";
         map.set(lab, (map.get(lab) || 0) + Number(mm[1]));
       }
     } else {
@@ -171,8 +183,24 @@ function tallyComponents(
 }
 
 function formatComponents(map: Map<string, number>): string {
-  const rank = (l: string) =>
-    l === "HB" ? 0 : l === "DIVAN" ? 1 : l === "SOFA" ? 2 : 3;
+  const rank = (l: string) => {
+    const u = l.toUpperCase();
+    return u === "HB"
+      ? 0
+      : u === "DIVAN"
+        ? 1
+        : u === "BC"
+          ? 2
+          : u === "ARM"
+            ? 3
+            : u === "HR"
+              ? 4
+              : u === "BASE"
+                ? 5
+                : u === "SOFA"
+                  ? 6
+                  : 7;
+  };
   return (
     Array.from(map.entries())
       .sort((a, b) => rank(a[0]) - rank(b[0]))

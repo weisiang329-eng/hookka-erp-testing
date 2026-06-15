@@ -6798,7 +6798,24 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const cards = cardsRes.results ?? [];
   if (cards.length === 0) {
     // No open cards of THIS worker's dept on this compartment → it's already
-    // done. Report it for the worker's own dept (never advance to the next).
+    // done. Report it for the worker's own dept (never advance to the next),
+    // AND look up WHO did it from the finished cards' PIC slots so the amber
+    // "already done" card still says by-whom (Wei Siang 2026-06-16).
+    const doneRes = await db
+      .prepare(
+        wipKey
+          ? "SELECT pp.pic1Name, pp.pic2Name FROM piece_pics pp JOIN job_cards jc ON jc.id = pp.jobCardId WHERE jc.productionOrderId = ? AND jc.departmentCode = ? AND jc.wipKey = ?"
+          : "SELECT pp.pic1Name, pp.pic2Name FROM piece_pics pp JOIN job_cards jc ON jc.id = pp.jobCardId WHERE jc.productionOrderId = ? AND jc.departmentCode = ?",
+      )
+      .bind(...(wipKey ? [poId, targetDept, wipKey] : [poId, targetDept]))
+      .all<{ pic1Name: string | null; pic2Name: string | null }>();
+    const doneBy: string[] = [];
+    for (const r of doneRes.results ?? []) {
+      for (const nm of [r.pic1Name, r.pic2Name]) {
+        const t = (nm || "").trim();
+        if (t && !doneBy.includes(t)) doneBy.push(t);
+      }
+    }
     const freshEmpty = await fetchPO(db, poId);
     return c.json({
       success: true,
@@ -6807,6 +6824,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
         deptLabel: targetDeptLabel,
         completedJcIds: [],
         alreadyComplete: true,
+        completedBy: doneBy,
         workerName: worker.name,
         po: freshEmpty,
       },

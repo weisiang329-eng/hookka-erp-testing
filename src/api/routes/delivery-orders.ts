@@ -408,8 +408,9 @@ function rowToOrderList(
   items: DeliveryOrderItemRow[] = [],
   productM3Map?: Map<string, number>,
   hubStateMap?: Map<string, string>,
+  repairScopeByPo?: Map<string, string | null>,
 ): Record<string, unknown> {
-  const full = rowToOrder(row, items, productM3Map, hubStateMap);
+  const full = rowToOrder(row, items, productM3Map, hubStateMap, repairScopeByPo);
   return {
     ...full,
     proofOfDelivery: null,
@@ -428,6 +429,11 @@ function rowToOrderList(
         quantity: it.quantity,
         itemM3: pickItemM3(it, productM3Map),
         rackingNumber: it.rackingNumber ?? "",
+        // So the DO detail/view modal (opened from the list) shows the repair
+        // badge without waiting for a save round-trip (review M1).
+        repairScope: it.productionOrderId
+          ? repairScopeByPo?.get(it.productionOrderId) ?? null
+          : null,
       })),
   };
 }
@@ -1017,10 +1023,11 @@ app.get("/", async (c) => {
     ]);
     const itemRows = items.results ?? [];
     const orderRows = orders.results ?? [];
-    const [m3Map, hubStateMap, invoiceMap] = await Promise.all([
+    const [m3Map, hubStateMap, invoiceMap, repairScopeByPo] = await Promise.all([
       loadProductM3Map(db, itemRows.map((i) => i.productCode)),
       loadHubStateMap(db, orderRows.map((o) => o.hubId)),
       loadDoInvoiceMap(db, orgId),
+      loadRepairScopeByPo(db, itemRows.map((i) => i.productionOrderId)),
     ]);
     // De-quadratic (2026-06-04): group items by deliveryOrderId ONCE so each
     // rowToOrderList gets only its own items instead of re-scanning ALL items
@@ -1035,7 +1042,7 @@ app.get("/", async (c) => {
       else itemsByDO.set(it.deliveryOrderId, [it]);
     }
     const data = orderRows.map((o) => {
-      const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap);
+      const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap, repairScopeByPo);
       order.valueSen = valueMap.get(o.id) ?? 0;
       order.invoiceNo = invoiceMap.get(o.id) ?? "";
       return order;
@@ -1100,12 +1107,14 @@ app.get("/", async (c) => {
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const [m3Map, hubStateMap, valueMap, invoiceMap] = await Promise.all([
-    loadProductM3Map(db, items.map((i) => i.productCode)),
-    loadHubStateMap(db, orderRows.map((o) => o.hubId)),
-    loadDoValueMap(db, orgId),
-    loadDoInvoiceMap(db, orgId),
-  ]);
+  const [m3Map, hubStateMap, valueMap, invoiceMap, repairScopeByPo] =
+    await Promise.all([
+      loadProductM3Map(db, items.map((i) => i.productCode)),
+      loadHubStateMap(db, orderRows.map((o) => o.hubId)),
+      loadDoValueMap(db, orgId),
+      loadDoInvoiceMap(db, orgId),
+      loadRepairScopeByPo(db, items.map((i) => i.productionOrderId)),
+    ]);
   // De-quadratic: same per-DO grouping as the full-list branch above.
   const itemsByDO = new Map<string, DeliveryOrderItemRow[]>();
   for (const it of items) {
@@ -1114,7 +1123,7 @@ app.get("/", async (c) => {
     else itemsByDO.set(it.deliveryOrderId, [it]);
   }
   const data = orderRows.map((o) => {
-    const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap);
+    const order = rowToOrderList(o, itemsByDO.get(o.id) ?? [], m3Map, hubStateMap, repairScopeByPo);
     order.valueSen = valueMap.get(o.id) ?? 0;
     order.invoiceNo = invoiceMap.get(o.id) ?? "";
     return order;

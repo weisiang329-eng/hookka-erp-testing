@@ -633,6 +633,90 @@ async function stampPunchPhoto(
     .run();
 }
 
+// ── Forgotten clock-out auto-close ──────────────────────────────────────────
+// A worker who clocks IN but never OUT leaves an open punch. Per Wei Siang
+// 2026-06-16: once it's past midnight with no clock-out it counts as a forgotten
+// punch — that day STILL pays as a NORMAL shift (standard hours, NO overtime, NO
+// short-hour dock; a missed punch isn't a real short/long day) and is FLAGGED in
+// Attendance so the office sees it. Two triggers close these, sharing this one
+// helper so the rule never drifts:
+//   1. The worker's NEXT clock-in (self-heal in POST /clock) — but only fires if
+//      they actually return the next day.
+//   2. The midnight cron (autoCloseStalePunches) — closes them even when the
+//      worker is absent the next day.
+// Idempotent via the `clockOut IS NULL` guard, so the two can never double-close.
+async function autoCloseForgottenPunch(
+  db: D1Database,
+  row: AttendanceRow,
+  payRules: Awaited<ReturnType<typeof loadPayRuleVersions>>,
+  workingHoursPerDay: number,
+): Promise<void> {
+  if (!row.clockIn || row.clockOut) return;
+  const rules = toAttendanceRules(
+    resolvePayRulesAsOf(payRules, (row.date || "").slice(0, 10)),
+  );
+  const endMin = rules.endMin;
+  const outTime = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
+  const stdMin = (workingHoursPerDay || 9) * 60;
+  const prodMin = Math.max(0, Math.round(stdMin * 0.85));
+  const effPct = stdMin > 0 ? Math.round((prodMin / stdMin) * 100) : 0;
+  await db
+    .prepare(
+      `UPDATE attendance_records
+         SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
+             efficiencyPct = ?, overtimeMinutes = 0,
+             notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes END
+       WHERE id = ? AND clockOut IS NULL`,
+    )
+    .bind(
+      outTime,
+      stdMin,
+      prodMin,
+      effPct,
+      "Forgot to punch out — auto-counted as a normal shift",
+      row.id,
+    )
+    .run();
+}
+
+// Midnight cron entry: close EVERY worker's prior-day open punch (date < today
+// MYT, clocked in, never out) — even workers who don't return the next day, the
+// gap the per-clock-in self-heal can't cover. Joins `workers` for each one's
+// standard shift length. Best-effort per row so one bad row never aborts the
+// batch; returns a small tally for the cron log. Exposed via the CRON_SECRET-
+// gated POST /api/internal/auto-clockout in worker.ts (the app entry).
+export async function autoCloseStalePunches(
+  db: D1Database,
+): Promise<{ scanned: number; closed: number }> {
+  const today = malaysiaNow().toISOString().slice(0, 10);
+  const stale = await db
+    .prepare(
+      `SELECT a.*, COALESCE(w.workingHoursPerDay, 9) AS whpd
+         FROM attendance_records a
+         LEFT JOIN workers w ON w.id = a.employeeId
+        WHERE a.date < ? AND a.clockIn IS NOT NULL AND a.clockOut IS NULL`,
+    )
+    .bind(today)
+    .all<AttendanceRow & { whpd: number }>();
+  const rows = stale.results ?? [];
+  let payRules: Awaited<ReturnType<typeof loadPayRuleVersions>> = [];
+  try {
+    payRules = await loadPayRuleVersions(db);
+  } catch {
+    payRules = [];
+  }
+  let closed = 0;
+  for (const r of rows) {
+    try {
+      await autoCloseForgottenPunch(db, r, payRules, Number(r.whpd) || 9);
+      closed++;
+    } catch (e) {
+      console.warn("[auto-clockout] skip row", r.id, e);
+    }
+  }
+  return { scanned: rows.length, closed };
+}
+
 app.post("/clock", async (c) => {
   const auth = await getWorker(c);
   if (!auth.ok) return auth.response;
@@ -687,37 +771,15 @@ app.post("/clock", async (c) => {
         } catch {
           payRules = [];
         }
+        // Same rule as the midnight cron — close each at shift end, normal
+        // hours, flagged. Shared helper so the two paths can never drift.
         for (const s of staleRows) {
-          if (!s.clockIn) continue;
-          const rules = toAttendanceRules(
-            resolvePayRulesAsOf(payRules, (s.date || "").slice(0, 10)),
+          await autoCloseForgottenPunch(
+            c.var.DB,
+            s,
+            payRules,
+            worker.workingHoursPerDay || 9,
           );
-          const endMin = rules.endMin;
-          const outTime = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
-          // Forgotten clock-out → count the day as the NORMAL shift (Wei Siang
-          // 2026-06-16: just the standard hours — 9h / 7.5h — with NO overtime
-          // and NO short-hour dock; a missed punch isn't a real short/long day)
-          // and FLAG it so the office sees they forgot to punch out. No
-          // working-hours autofill either (nothing to reconcile).
-          const stdMin = (worker.workingHoursPerDay || 9) * 60;
-          const prodMin = Math.max(0, Math.round(stdMin * 0.85));
-          const effPct = stdMin > 0 ? Math.round((prodMin / stdMin) * 100) : 0;
-          await c.var.DB.prepare(
-            `UPDATE attendance_records
-               SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
-                   efficiencyPct = ?, overtimeMinutes = 0,
-                   notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes END
-             WHERE id = ? AND clockOut IS NULL`,
-          )
-            .bind(
-              outTime,
-              stdMin,
-              prodMin,
-              effPct,
-              "Forgot to punch out — auto-counted as a normal shift",
-              s.id,
-            )
-            .run();
         }
       }
     } catch (e) {

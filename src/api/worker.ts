@@ -548,6 +548,34 @@ app.post("/api/qc-pending/trigger", async (c) => {
   }
 });
 
+// Midnight auto-clockout cron entry. CRON_SECRET-gated, registered BEFORE
+// authMiddleware so the GitHub Actions runner can hit it without a worker
+// session — the same pattern as /api/qc-pending/trigger above. Closes every
+// prior-day forgotten punch (clocked in, never out) at shift end as a NORMAL
+// shift, flagged in Attendance — even for workers who are absent the next day
+// (the per-clock-in self-heal in routes/worker.ts can't reach those). Idempotent
+// via the `clockOut IS NULL` guard. Workflow: .github/workflows/auto-clockout.yml
+// (~00:30 MYT). Runtime logic is autoCloseStalePunches in routes/worker.ts.
+app.post("/api/internal/auto-clockout", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[auto-clockout] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { autoCloseStalePunches } = await import("./routes/worker");
+    const result = await autoCloseStalePunches(c.var.DB);
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[auto-clockout] error:", err);
+    return c.json({ ok: false, error: "trigger failed" }, 500);
+  }
+});
+
 // Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
 // PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
 // MUST be registered BEFORE any route that touches business data.

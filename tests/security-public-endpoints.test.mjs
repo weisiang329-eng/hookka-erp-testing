@@ -134,7 +134,9 @@ test("invite preflight prefix is still public", () => {
 // failed audit_events / job_card_events batches),
 // /api/internal/distill-ocr-rules (weekly cron, gated by CRON_SECRET —
 // regenerates per-customer OCR rules from gold-marked scan samples),
-// /api/qc-pending/trigger (cron, gated by CRON_SECRET).
+// /api/internal/auto-clockout (midnight cron, gated by CRON_SECRET — closes
+// prior-day forgotten clock-outs at shift end), /api/qc-pending/trigger (cron,
+// gated by CRON_SECRET).
 //
 // The catch-all `app.all("/api/*", ...)` at the bottom of worker.ts is
 // registered AFTER the middleware, so it doesn't appear here — the
@@ -147,6 +149,7 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   "POST /api/internal/process-email-outbox",
   "POST /api/internal/replay-audit-dlq",
   "POST /api/internal/distill-ocr-rules",
+  "POST /api/internal/auto-clockout",
   "POST /api/qc-pending/trigger",
 ];
 

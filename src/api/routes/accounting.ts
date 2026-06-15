@@ -4016,6 +4016,8 @@ app.get("/pl-statement", async (c) => {
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const lineParam = (c.req.query("line") || "all").toLowerCase();
   const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" ? "sofa" : lineParam === "bedframe" ? "bedframe" : "all";
+  const editable = c.req.query("editable") === "1";
+  const pnlOverride = await getPnlSectionMap(c.var.DB);
   const startYm = periodStartYm(period);
   const endYm = periodEndYm(period);
   // FY-YTD window = FY start (per fye_month) → period end.
@@ -4024,8 +4026,8 @@ app.get("/pl-statement", async (c) => {
   const fyWin = fyWindowFor(endForFy, fyeMonth);
   const fyStartYm = fyWin.startIso.slice(0, 7);
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, startYm, endYm, line),
-    computePnlWindow(c.var.DB, fyStartYm, endYm, line),
+    computePnlWindow(c.var.DB, startYm, endYm, line, pnlOverride),
+    computePnlWindow(c.var.DB, fyStartYm, endYm, line, pnlOverride),
   ]);
   return c.json({
     success: true,
@@ -4035,7 +4037,7 @@ app.get("/pl-statement", async (c) => {
       periodLabel: period,
       fyLabel: fyWin.label,
       netSalesSen: p.netSalesSen,
-      rows: buildPnlRows(p, y),
+      rows: buildPnlRows(p, y, editable),
     },
   });
 });
@@ -5276,6 +5278,18 @@ async function getCashflowStockGroupMap(
   return {};
 }
 
+async function getPnlSectionMap(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, string>> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'pnl_section_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as Record<string, string>;
+  } catch { /* absent → empty */ }
+  return {};
+}
+
 type LabourDeptAgg = {
   departmentCode: string;
   account: string;
@@ -5500,6 +5514,32 @@ app.put("/cashflow/map", async (c) => {
       ).bind(JSON.stringify(sg), now).run();
     }
     return c.json({ success: true, data: { map, stockGroupMap: sg } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/pnl/section-map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const map = await getPnlSectionMap(c.var.DB);
+  return c.json({ success: true, data: { map } });
+});
+
+app.put("/pnl/section-map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as { map?: Record<string, string> };
+    if (body.map === undefined) return c.json({ success: false, error: "map required" }, 400);
+    const valid = new Set(["REVENUE", "OTHER_INCOME", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "OPERATING_EXPENSE", "OPEX_SALARIES"]);
+    const map: Record<string, string> = {};
+    for (const [code, b] of Object.entries(body.map)) if (typeof b === "string" && valid.has(b)) map[code] = b;
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('pnl_section_map', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(map), new Date().toISOString()).run();
+    return c.json({ success: true, data: { map } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

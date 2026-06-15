@@ -1730,11 +1730,15 @@ function AffectedProductsPanel({
                 <div className="flex shrink-0 items-center gap-2">
                   <Input
                     type="number" onFocus={(e) => e.currentTarget.select()}
-                    min={0}
+                    min={1}
                     value={p.qty ?? ""}
                     onChange={(e) => {
-                      const n = e.target.value === "" ? null : Number(e.target.value);
-                      setQty(p.productId, Number.isFinite(n as number) ? n : null);
+                      // Whole units, at least 1 (empty clears). Prevents 0 /
+                      // negative / fractional affected quantities.
+                      const raw = e.target.value;
+                      if (raw === "") return setQty(p.productId, null);
+                      const n = Math.floor(Number(raw));
+                      setQty(p.productId, Number.isFinite(n) && n >= 1 ? n : 1);
                     }}
                     disabled={saving}
                     placeholder="Qty"
@@ -2612,7 +2616,19 @@ function SpawnServiceOrderModal({
                               <Input
                                 type="number" onFocus={(e) => e.currentTarget.select()} min="1" max={it.quantity}
                                 value={pick?.qty ?? ""}
-                                onChange={(e) => patchPick(it.id, { qty: e.target.value })}
+                                onChange={(e) => {
+                                  // Clamp to [1, ordered qty]. The max attribute alone
+                                  // doesn't stop typing/pasting a bigger number, which
+                                  // then submitted (Wei Siang 2026-06-15: "设定只有 2 却
+                                  // 能上到 3"). Empty is allowed mid-edit.
+                                  const raw = e.target.value;
+                                  if (raw === "") return patchPick(it.id, { qty: "" });
+                                  const n = Math.floor(Number(raw));
+                                  const clamped = Number.isFinite(n)
+                                    ? Math.min(Math.max(1, n), it.quantity)
+                                    : 1;
+                                  patchPick(it.id, { qty: String(clamped) });
+                                }}
                                 disabled={!picked}
                                 className="h-7 text-xs px-2"
                               />

@@ -142,9 +142,12 @@ async function safeAll<T>(db: D1Database, sql: string): Promise<T[]> {
 // GET /api/cash-flow
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
-  const [accountsRes, txsRes, entriesRes, linesRes, invoices, pos] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM bank_accounts").all<BankAccountRow>(),
-    c.var.DB.prepare("SELECT * FROM bank_transactions ORDER BY date DESC").all<BankTxRow>(),
+  // bank_accounts / bank_transactions are a legacy-only pair that was never
+  // created in the Supabase schema — guard them like the rest so the page
+  // loads (empty bank data) instead of 500-ing the whole response.
+  const [accounts, txs, entriesRes, linesRes, invoices, pos] = await Promise.all([
+    safeAll<BankAccountRow>(c.var.DB, "SELECT * FROM bank_accounts"),
+    safeAll<BankTxRow>(c.var.DB, "SELECT * FROM bank_transactions ORDER BY date DESC"),
     safeAll<JournalEntryRow>(
       c.var.DB,
       "SELECT id, entryNo, date, description, status FROM journal_entries ORDER BY date DESC",
@@ -160,8 +163,8 @@ app.get("/", async (c) => {
     ),
   ]);
 
-  const bankAccounts = (accountsRes.results ?? []).map(rowToBankAccount);
-  const bankTransactions = (txsRes.results ?? []).map(rowToBankTx);
+  const bankAccounts = accounts.map(rowToBankAccount);
+  const bankTransactions = txs.map(rowToBankTx);
 
   const journalEntries = entriesRes.map((e) => ({
     id: e.id,

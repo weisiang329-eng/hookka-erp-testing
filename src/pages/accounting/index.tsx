@@ -2871,6 +2871,8 @@ type PnlStmtRow = {
   groupId?: string;
   totalLabel?: string;
   badge?: string;
+  accountCode?: string;
+  bucket?: string;
 };
 
 // Phase 5.6 — Cost Structure: a FY, per material group, months as rows,
@@ -3244,6 +3246,13 @@ function PLStatementTab() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [data, setData] = useState<{ rows: PnlStmtRow[]; netSalesSen: number; fyLabel: string; periodLabel: string } | null>(null);
   const loading = data === null;
+  const { toast } = useToast();
+  const [edit, setEdit] = useState(false);
+  const [pmap, setPmap] = useState<Record<string, string>>({});
+  const [dragCode, setDragCode] = useState<string | null>(null);
+  const [dragClass, setDragClass] = useState<"income" | "cost" | null>(null);
+  const [dragOverBucket, setDragOverBucket] = useState<string | null>(null);
+  const classOfBucket = (b?: string) => (b === "REVENUE" || b === "OTHER_INCOME" ? "income" : "cost");
 
   const collapseForLevel = (stmtRows: PnlStmtRow[], L: number) => {
     const next = new Set<string>();
@@ -3251,21 +3260,26 @@ function PLStatementTab() {
     return next;
   };
 
-  useEffect(() => {
-    let stale = false;
-    fetch(`/api/accounting/pl-statement?period=${period}&line=${line}`)
+  const load = () => {
+    fetch(`/api/accounting/pl-statement?period=${period}&line=${line}${edit ? "&editable=1" : ""}`)
       .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
-      .then((j) => {
-        if (stale || !j?.success || !j.data) return;
-        setData(j.data);
-        setCollapsed(collapseForLevel(j.data.rows, level));
-      })
+      .then((j) => { if (!j?.success || !j.data) return; setData(j.data); setCollapsed(collapseForLevel(j.data.rows, level)); })
       .catch(() => {});
-    return () => { stale = true; };
-    // level intentionally excluded — re-collapsing on level change is the
-    // L-button's job; refetching on level change would be wasteful.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period, line]);
+  };
+  /* eslint-disable react-hooks/exhaustive-deps */
+  useEffect(() => { load(); }, [period, line, edit]);
+  useEffect(() => { if (edit) fetch("/api/accounting/pnl/section-map").then((r) => r.json() as Promise<{ data?: { map?: Record<string, string> } }>).then((j) => setPmap(j?.data?.map ?? {})).catch(() => {}); }, [edit]);
+  /* eslint-enable react-hooks/exhaustive-deps */
+
+  const moveTo = async (code: string, bucket: string) => {
+    const next = { ...pmap, [code]: bucket };
+    setPmap(next);
+    try {
+      const res = await fetch("/api/accounting/pnl/section-map", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ map: next }) });
+      const j = (await res.json()) as { success?: boolean };
+      if (j?.success) { toast.success("P&L mapping updated"); load(); } else toast.error("Save failed");
+    } catch { toast.error("Save failed"); }
+  };
 
   // L-level button: collapse every group whose depth >= L-1.
   const applyLevel = (stmtRows: PnlStmtRow[], L: number) => {
@@ -3349,6 +3363,10 @@ function PLStatementTab() {
               {years.map((yr) => <option key={`${yr}`} value={`${yr}`}>Full Year {yr}</option>)}
             </optgroup>
           </select>
+          <button onClick={() => { const ne = !edit; setEdit(ne); if (ne) { setLevel(4); setCollapsed(new Set()); } }}
+            className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
+            {edit ? "Done" : "Edit"}
+          </button>
           {[1, 2, 3, 4].map((L) => (
             <button key={L} onClick={() => applyLevel(rows, L)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
           ))}
@@ -3357,6 +3375,7 @@ function PLStatementTab() {
           )}
         </div>
       </div>
+      {edit && <p className="text-[11px] text-[#6B5C32]">拖科目行到目标组改归类（同类内：收入↔其他收入；人工/制造费用/营业费用/薪资互拖）· 所有月份按新规则现算 · Net Profit 不变 · 拖回可还原</p>}
 
       <Card>
         <CardContent className="p-4">
@@ -3406,9 +3425,14 @@ function PLStatementTab() {
                     );
                   }
                   if (row.kind === "group") {
+                    const dropOk = edit && !!row.bucket && dragClass !== null && classOfBucket(row.bucket) === dragClass;
                     return (
-                      <tr key={i} className="cursor-pointer hover:bg-[#F7F4EF] font-semibold text-[#1F1D1B] bg-[#F0ECE9]/40" onClick={() => { const n = new Set(collapsed); if (n.has(row.groupId!)) n.delete(row.groupId!); else n.add(row.groupId!); setCollapsed(n); }}>
-                        <td className="py-1" style={pad}>{isOpen ? "▾" : "▸"} {row.label}</td>
+                      <tr key={i} className={`font-semibold text-[#1F1D1B] bg-[#F0ECE9]/40 ${!edit ? "cursor-pointer hover:bg-[#F7F4EF]" : ""} ${dropOk && dragOverBucket === row.bucket ? "ring-2 ring-inset ring-[#6B5C32]" : ""}`}
+                        onClick={!edit ? () => { const n = new Set(collapsed); if (n.has(row.groupId!)) n.delete(row.groupId!); else n.add(row.groupId!); setCollapsed(n); } : undefined}
+                        onDragOver={dropOk ? (e) => { e.preventDefault(); setDragOverBucket(row.bucket!); } : undefined}
+                        onDragLeave={dropOk ? () => { if (dragOverBucket === row.bucket) setDragOverBucket(null); } : undefined}
+                        onDrop={dropOk ? (e) => { e.preventDefault(); const src = e.dataTransfer.getData("text/plain"); setDragOverBucket(null); setDragCode(null); setDragClass(null); if (src && row.bucket) void moveTo(src, row.bucket); } : undefined}>
+                        <td className="py-1" style={pad}>{!edit ? (isOpen ? "▾" : "▸") : "•"} {row.label}</td>
                         <td className="text-right px-2 tabular-nums">{numCell(row.ytdSen)}</td>
                         <td className="text-right px-2 text-[#6B7280]">{pct(row.ytdSen)}</td>
                         <td className="text-right px-2 tabular-nums">{numCell(row.periodSen)}</td>
@@ -3416,10 +3440,13 @@ function PLStatementTab() {
                       </tr>
                     );
                   }
-                  // line
+                  const draggable = edit && !!row.accountCode;
                   return (
-                    <tr key={i} className="hover:bg-[#F7F4EF]">
-                      <td className="py-0.5 text-[#4B5563]" style={pad}>{row.label}{row.badge ? <span className="ml-1 text-[10px] text-[#9CA3AF]">[{row.badge}]</span> : null}</td>
+                    <tr key={i} className={`hover:bg-[#F7F4EF] ${draggable ? "cursor-move" : ""} ${dragCode === row.accountCode ? "opacity-40" : ""}`}
+                      draggable={draggable}
+                      onDragStart={draggable ? (e) => { setDragCode(row.accountCode!); setDragClass(classOfBucket(row.bucket)); e.dataTransfer.setData("text/plain", row.accountCode!); e.dataTransfer.effectAllowed = "move"; } : undefined}
+                      onDragEnd={draggable ? () => { setDragCode(null); setDragClass(null); setDragOverBucket(null); } : undefined}>
+                      <td className="py-0.5 text-[#4B5563]" style={pad}>{draggable ? "⠿ " : ""}{row.label}{row.badge ? <span className="ml-1 text-[10px] text-[#9CA3AF]">[{row.badge}]</span> : null}</td>
                       <td className="text-right px-2 tabular-nums">{numCell(row.ytdSen)}</td>
                       <td className="text-right px-2 text-[#6B7280]">{pct(row.ytdSen)}</td>
                       <td className="text-right px-2 tabular-nums">{numCell(row.periodSen)}</td>

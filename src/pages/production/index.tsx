@@ -5529,13 +5529,18 @@ export default function ProductionPage({
           }
         }
       } catch { /* ignore — don't block print on storage errors */ }
+      // "Save as Production Schedule" print preset wins (Wei Siang #25) — a
+      // curated print layout independent of the on-screen view; then the user's
+      // personal layout, then the org default.
       const visibleSetRaw =
+        readJson(`datagrid-cols-${gridId}-print`) ??
         readJson(`datagrid-cols-${gridId}-${userEmailLc}`) ??
         readJson(`datagrid-cols-${gridId}-org-default`);
       const visibleSet = Array.isArray(visibleSetRaw)
         ? new Set<string>(visibleSetRaw as string[])
         : new Set<string>(deptColumns.filter((c) => !c.hidden && !c.defaultHidden).map((c) => c.key));
       const orderRaw =
+        readJson(`datagrid-colorder-${gridId}-print`) ??
         readJson(`datagrid-colorder-${gridId}-${userEmailLc}`) ??
         readJson(`datagrid-colorder-${gridId}-org-default`);
       const order: string[] = Array.isArray(orderRaw)
@@ -6796,6 +6801,10 @@ export default function ProductionPage({
               },
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
+            // "Save as Production Schedule" in the Columns popover → snapshots
+            // the current columns into a print preset the schedule printout uses
+            // (independent of the on-screen view). Wei Siang #25.
+            printPresetLabel="Production Schedule"
             // Roll out the newly-added Customer SO column to existing users
             // whose saved column layout predates it (one-time per user/grid).
             ensureColumns={["customerSO"]}

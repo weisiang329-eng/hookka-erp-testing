@@ -3418,6 +3418,116 @@ app.get("/cost-by-line", async (c) => {
   return c.json({ success: true, data: { period: period ?? "all", ...data } });
 });
 
+// ---------------------------------------------------------------------------
+// WIP DETAIL (Phase 4.3, 2026-06) — WIP is already valued as issued
+// materials + posted labour − completed (RM_ISSUE fires at FAB_CUT, not
+// at PO completion, so an in-progress order already carries its material
+// part). This surfaces that valuation per open production order so it's
+// auditable: materialSen + labourSen − completedSen = wipSen, listed for
+// every order still carrying WIP.
+// ---------------------------------------------------------------------------
+app.get("/wip-detail", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const asOf = c.req.query("asOf") || ""; // YYYY-MM cutoff, optional
+  const [clRes, poRes] = await Promise.all([
+    c.var.DB
+      .prepare(
+        `SELECT type, itemId, refType, refId, totalCostSen, date
+           FROM cost_ledger WHERE type IN ('RM_ISSUE','LABOR_POSTED','FG_COMPLETED')`,
+      )
+      .all<{ type: string; itemId: string; refType: string | null; refId: string | null; totalCostSen: number; date: string }>(),
+    c.var.DB.prepare("SELECT id, poNumber, itemCategory, status FROM production_orders").all<{ id: string; poNumber: string | null; itemCategory: string | null; status: string | null }>(),
+  ]);
+  const po = new Map<string, { poNumber: string; category: string; status: string }>();
+  for (const p of poRes.results ?? []) po.set(p.id, { poNumber: p.poNumber ?? p.id, category: String(p.itemCategory ?? "").toUpperCase(), status: p.status ?? "" });
+  type Wip = { poId: string; poNumber: string; category: string; status: string; materialSen: number; labourSen: number; completedSen: number };
+  const byPo = new Map<string, Wip>();
+  const ensure = (poId: string): Wip => {
+    let w = byPo.get(poId);
+    if (!w) {
+      const meta = po.get(poId);
+      w = { poId, poNumber: meta?.poNumber ?? poId, category: meta?.category ?? "", status: meta?.status ?? "", materialSen: 0, labourSen: 0, completedSen: 0 };
+      byPo.set(poId, w);
+    }
+    return w;
+  };
+  for (const l of clRes.results ?? []) {
+    if (asOf && String(l.date ?? "").slice(0, 7) > asOf) continue;
+    const v = Number(l.totalCostSen) || 0;
+    // RM_ISSUE → refId is the PO; LABOR_POSTED → itemId is PO; FG_COMPLETED → refId is PO.
+    const poId = l.type === "LABOR_POSTED" ? l.itemId : l.refId;
+    if (!poId) continue;
+    const w = ensure(poId);
+    if (l.type === "RM_ISSUE") w.materialSen += v;
+    else if (l.type === "LABOR_POSTED") w.labourSen += v;
+    else w.completedSen += v;
+  }
+  const rows = [...byPo.values()]
+    .map((w) => ({ ...w, wipSen: w.materialSen + w.labourSen - w.completedSen }))
+    .filter((w) => Math.round(w.wipSen) !== 0)
+    .sort((a, b) => b.wipSen - a.wipSen);
+  const totalSen = rows.reduce((s, w) => s + w.wipSen, 0);
+  return c.json({ success: true, data: { asOf: asOf || null, rows, totalSen } });
+});
+
+// ---------------------------------------------------------------------------
+// CLEANUP REPORT (Phase 4.7, 2026-06) — surface data that can't be
+// allocated to a material group or product line, so the owner can fix it
+// before trusting the split reports:
+//   · production orders with cost activity but no/unknown itemCategory
+//     (their material + labour land in "unallocated")
+//   · raw materials with a blank itemGroup (fall to the generic RM stock
+//     account)
+//   · itemGroups in use that have no stock-map entry (fall to rmDefault)
+// ---------------------------------------------------------------------------
+app.get("/cleanup-report", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const [clRes, poRes, rmRes] = await Promise.all([
+    db.prepare(
+      `SELECT type, itemId, refType, refId, totalCostSen FROM cost_ledger WHERE type IN ('RM_ISSUE','LABOR_POSTED')`,
+    ).all<{ type: string; itemId: string; refType: string | null; refId: string | null; totalCostSen: number }>(),
+    db.prepare("SELECT id, poNumber, itemCategory FROM production_orders").all<{ id: string; poNumber: string | null; itemCategory: string | null }>(),
+    db.prepare("SELECT id, itemCode, name, itemGroup FROM raw_materials").all<{ id: string; itemCode: string | null; name: string | null; itemGroup: string | null }>(),
+  ]);
+  const poCat = new Map<string, { poNumber: string; category: string }>();
+  for (const p of poRes.results ?? []) poCat.set(p.id, { poNumber: p.poNumber ?? p.id, category: String(p.itemCategory ?? "").toUpperCase() });
+  // POs with cost activity but no usable category.
+  const badPo = new Map<string, { poNumber: string; costSen: number }>();
+  for (const l of clRes.results ?? []) {
+    const poId = l.type === "LABOR_POSTED" ? l.itemId : l.refId;
+    if (!poId) continue;
+    const meta = poCat.get(poId);
+    const cat = meta?.category ?? "";
+    if (cat === "SOFA" || cat === "BEDFRAME" || cat === "ACCESSORY") continue;
+    const cur = badPo.get(poId) ?? { poNumber: meta?.poNumber ?? poId, costSen: 0 };
+    cur.costSen += Number(l.totalCostSen) || 0;
+    badPo.set(poId, cur);
+  }
+  // Raw materials with no group + the set of groups actually in use.
+  const map = await getStockMap(db);
+  const mappedGroups = new Set(Object.keys(map.rm));
+  const rmNoGroup: { itemCode: string; name: string }[] = [];
+  const usedGroups = new Set<string>();
+  for (const r of rmRes.results ?? []) {
+    const g = String(r.itemGroup ?? "").trim();
+    if (!g) rmNoGroup.push({ itemCode: r.itemCode ?? r.id, name: r.name ?? "" });
+    else usedGroups.add(g);
+  }
+  const unmappedGroups = [...usedGroups].filter((g) => !mappedGroups.has(g)).sort();
+  return c.json({
+    success: true,
+    data: {
+      posWithoutCategory: [...badPo.values()].sort((a, b) => b.costSen - a.costSen),
+      rmWithoutGroup: rmNoGroup.sort((a, b) => a.itemCode.localeCompare(b.itemCode)),
+      unmappedGroups,
+      defaultRmAccount: map.rmDefault,
+    },
+  });
+});
+
 function bsCategory(
   type: string,
   code: string,

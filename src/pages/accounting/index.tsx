@@ -272,6 +272,7 @@ export default function AccountingPage() {
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Account Maintenance</h2>
               <GstRateCard />
               <FyeCard />
+              <CleanupReportCard />
               <LandedCostCard />
               <StockMapCard accounts={accounts} />
             </div>
@@ -283,6 +284,74 @@ export default function AccountingPage() {
 }
 
 // =============== TAB 1: OVERVIEW ===============
+
+// Phase 4.7 — cleanup report: data that can't be allocated to a material
+// group / product line, so the owner can fix it before trusting the split
+// reports.
+function CleanupReportCard() {
+  const [data, setData] = useState<{
+    posWithoutCategory: { poNumber: string; costSen: number }[];
+    rmWithoutGroup: { itemCode: string; name: string }[];
+    unmappedGroups: string[];
+    defaultRmAccount: { stock: string; opening: string; closing: string };
+  } | null>(null);
+  useEffect(() => {
+    let stale = false;
+    fetch("/api/accounting/cleanup-report")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, []);
+  const clean = data && data.posWithoutCategory.length === 0 && data.rmWithoutGroup.length === 0 && data.unmappedGroups.length === 0;
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-[#1F1D1B]">
+          Unallocated data cleanup <span className="font-normal text-[#6B7280]">— fix these so the split P&L and stock reports are complete</span>
+        </h3>
+        {!data ? (
+          <p className="text-sm text-[#6B7280]">Loading…</p>
+        ) : clean ? (
+          <p className="text-sm text-[#27500A]">All clean ✓ — every production order has a product line, every material has a group, every group is mapped.</p>
+        ) : (
+          <div className="space-y-3 text-sm">
+            {data.posWithoutCategory.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-[#9A3A2D] mb-1">Production orders with cost but no product line ({data.posWithoutCategory.length}) — set Sofa/Bedframe on the order:</p>
+                <div className="flex flex-wrap gap-2">
+                  {data.posWithoutCategory.slice(0, 40).map((p) => (
+                    <span key={p.poNumber} className="inline-flex items-center gap-1.5 rounded-full border border-[#F7C1C1] bg-[#FCEBEB] px-2 py-0.5 text-xs tabular-nums">{p.poNumber} · {formatCurrency(p.costSen)}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {data.rmWithoutGroup.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-[#9A3A2D] mb-1">Raw materials with no stock group ({data.rmWithoutGroup.length}) — fall to {data.defaultRmAccount.stock}; set itemGroup:</p>
+                <div className="flex flex-wrap gap-2">
+                  {data.rmWithoutGroup.slice(0, 40).map((r) => (
+                    <span key={r.itemCode} className="inline-flex items-center rounded-full border border-[#E2DDD8] bg-white px-2 py-0.5 text-xs"><span className="tabular-nums text-[#6B7280] mr-1">{r.itemCode}</span>{r.name}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {data.unmappedGroups.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-[#9A3A2D] mb-1">Stock groups in use but not mapped ({data.unmappedGroups.length}) — fall to {data.defaultRmAccount.stock}; add them in the Stock-Group map:</p>
+                <div className="flex flex-wrap gap-2">
+                  {data.unmappedGroups.map((g) => (
+                    <span key={g} className="inline-flex items-center rounded-full border border-[#FAC775] bg-[#FAEEDA] px-2 py-0.5 text-xs tabular-nums">{g}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 // Phase 3.8 — Contra: a customer who is ALSO a supplier — offset ticked
 // APPROVED PIs against their oldest unpaid invoices via the 490-0000
@@ -4806,7 +4875,57 @@ function StockSummaryTab() {
         Sofa material + Bedframe material + Unallocated = total consumption (the COGS material part). Shared/indirect
         costs (no-issue factory materials, SST, admin) are apportioned by the sales ratio shown, in the Phase-5 split P&L.
       </p>
+
+      <WipDetailCard month={month} reloadKey={reloadKey} />
     </div>
+  );
+}
+
+// Phase 4.3 — WIP per open production order: material + labour − completed.
+function WipDetailCard({ month, reloadKey }: { month: string; reloadKey: number }) {
+  const [wip, setWip] = useState<{ rows: { poId: string; poNumber: string; category: string; status: string; materialSen: number; labourSen: number; completedSen: number; wipSen: number }[]; totalSen: number } | null>(null);
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/wip-detail?asOf=${month}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof wip> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setWip(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [month, reloadKey]);
+  if (!wip || wip.rows.length === 0) return null;
+  return (
+    <Card>
+      <CardContent className="p-0 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+              <th className="px-3 py-2 text-left">Work in progress — by production order (as of {month})</th>
+              <th className="px-3 py-2 text-left">Line</th>
+              <th className="px-3 py-2 text-right">Material</th>
+              <th className="px-3 py-2 text-right">Labour</th>
+              <th className="px-3 py-2 text-right">Completed</th>
+              <th className="px-3 py-2 text-right">WIP value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {wip.rows.slice(0, 200).map((w) => (
+              <tr key={w.poId} className="border-b border-[#F0ECE9]">
+                <td className="px-3 py-1.5 tabular-nums text-xs">{w.poNumber}{w.status ? <span className="text-[#9CA3AF]"> · {w.status}</span> : null}</td>
+                <td className="px-3 py-1.5 text-xs text-[#6B7280]">{w.category || "—"}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(w.materialSen)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{formatCurrency(w.labourSen)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums text-[#9CA3AF]">{w.completedSen ? formatCurrency(w.completedSen) : "—"}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums font-medium">{formatCurrency(w.wipSen)}</td>
+              </tr>
+            ))}
+            <tr className="bg-[#F0ECE9]/60 font-semibold">
+              <td className="px-3 py-2" colSpan={5}>TOTAL WIP{wip.rows.length > 200 ? ` (showing top 200 of ${wip.rows.length})` : ""}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{formatCurrency(wip.totalSen)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
   );
 }
 

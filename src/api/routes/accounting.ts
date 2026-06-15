@@ -3807,6 +3807,98 @@ function buildPnlRows(p: PnlWindow, y: PnlWindow) {
   return rows;
 }
 
+// Phase 5.6 — Cost Structure: a financial year, per material group, each of
+// the 12 months showing O/P Stock · Purchase · C/L Stock · Cost Spend
+// (consumed = opening + purchase − closing), with the line's monthly sales
+// and cost-spend % of sales. Opening carries across months (and from the
+// prior FY). One pass over the cost ledger.
+app.get("/cost-structure", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const fyParam = c.req.query("fy");
+  const fyeMonth = await getFyeMonth(db);
+  const anchorDate = fyParam ? new Date(Date.UTC(parseInt(fyParam, 10), fyeMonth % 12, 15)) : new Date();
+  const fyWin = fyWindowFor(anchorDate, fyeMonth);
+  const startYm = fyWin.startIso.slice(0, 7);
+  const endYm = fyWin.endIso.slice(0, 7);
+  const cols: string[] = [];
+  {
+    let [y, m] = startYm.split("-").map((n) => parseInt(n, 10));
+    for (let i = 0; i < 12; i++) { cols.push(`${y}-${String(m).padStart(2, "0")}`); m += 1; if (m > 12) { m = 1; y += 1; } }
+  }
+  const [clRes, rmRes] = await Promise.all([
+    db.prepare("SELECT type, itemType, itemId, direction, totalCostSen, date FROM cost_ledger").all<{ type: string; itemType: string; itemId: string; direction: string; totalCostSen: number; date: string }>(),
+    db.prepare("SELECT id, itemGroup FROM raw_materials").all<{ id: string; itemGroup: string }>(),
+  ]);
+  const grp = new Map<string, string>();
+  for (const r of rmRes.results ?? []) grp.set(r.id, r.itemGroup || "OTHER");
+  // group → { openingBeforeFy, perMonth: [{purchase,consumed}] }
+  type GM = { openingBeforeFy: number; purchase: number[]; consumed: number[] };
+  const groups = new Map<string, GM>();
+  const ensure = (g: string): GM => {
+    let x = groups.get(g);
+    if (!x) { x = { openingBeforeFy: 0, purchase: new Array(12).fill(0), consumed: new Array(12).fill(0) }; groups.set(g, x); }
+    return x;
+  };
+  for (const l of clRes.results ?? []) {
+    if (l.itemType !== "RM") continue;
+    const g = grp.get(l.itemId) || "OTHER";
+    const x = ensure(g);
+    const ym = String(l.date ?? "").slice(0, 7);
+    const v = Number(l.totalCostSen) || 0;
+    const signed = l.direction === "IN" ? v : -v;
+    if (ym < startYm) { x.openingBeforeFy += signed; continue; }
+    if (ym > endYm) continue;
+    const idx = cols.indexOf(ym);
+    if (idx < 0) continue;
+    if (l.type === "RM_RECEIPT") x.purchase[idx] += v;
+    else if (l.type === "RM_ISSUE") x.consumed[idx] += v;
+    else x.purchase[idx] += signed; // ADJUSTMENT etc.
+  }
+  // Sales per month by line.
+  const salesSofa = new Array(12).fill(0);
+  const salesBed = new Array(12).fill(0);
+  try {
+    const [invRes, itemRes, prodRes] = await Promise.all([
+      db.prepare(`SELECT id, invoiceDate, status FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ id: string; invoiceDate: string | null; status: string }>(),
+      db.prepare(`SELECT invoiceId, productCode, totalSen FROM invoice_items`).all<{ invoiceId: string; productCode: string | null; totalSen: number }>(),
+      db.prepare(`SELECT code, category FROM products`).all<{ code: string; category: string | null }>(),
+    ]);
+    const invYm = new Map<string, string>();
+    for (const i of invRes.results ?? []) invYm.set(i.id, String(i.invoiceDate ?? "").slice(0, 7));
+    const cat = new Map<string, string>();
+    for (const p of prodRes.results ?? []) cat.set(p.code, String(p.category ?? "").toUpperCase());
+    for (const it of itemRes.results ?? []) {
+      const ym = invYm.get(it.invoiceId);
+      if (!ym) continue;
+      const idx = cols.indexOf(ym);
+      if (idx < 0) continue;
+      const v = Number(it.totalSen) || 0;
+      if (cat.get(it.productCode ?? "") === "BEDFRAME") salesBed[idx] += v;
+      else salesSofa[idx] += v;
+    }
+  } catch { /* absent */ }
+  // Build per-group rows with running opening/closing.
+  const out = [...groups.entries()].map(([g, x]) => {
+    let running = x.openingBeforeFy;
+    const months = cols.map((_, i) => {
+      const opening = running;
+      const purchase = x.purchase[i];
+      const consumed = x.consumed[i];
+      const closing = opening + purchase - consumed;
+      running = closing;
+      return { opening, purchase, closing, spend: consumed };
+    });
+    return { group: g, description: GROUP_DESCRIPTIONS[g] ?? g, months };
+  }).filter((r) => r.months.some((m) => m.opening || m.purchase || m.closing || m.spend))
+    .sort((a, b) => a.group.localeCompare(b.group));
+  return c.json({
+    success: true,
+    data: { fyLabel: fyWin.label, cols, groups: out, salesSofa, salesBed, salesAll: cols.map((_, i) => salesSofa[i] + salesBed[i]) },
+  });
+});
+
 // Phase 5.9 — Cost & Expense classes: for a financial year, COST (mfg) and
 // EXPENSE (operating) accounts laid out months-as-columns, grouped by
 // pnl_category (FIXED / VARIABLE / OTHERS). This report is the ONLY thing

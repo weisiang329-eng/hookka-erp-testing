@@ -42,7 +42,7 @@ import type {
 
 // =============== TYPES ===============
 
-type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
+type TabKey = "overview" | "coa" | "journals" | "tb" | "gl" | "ar" | "ap" | "odc" | "pl" | "trend" | "ceclass" | "coststruct" | "bs" | "payments" | "receipts" | "cashbook" | "assets" | "labor" | "stock" | "opening" | "maint";
 
 type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
 
@@ -167,6 +167,7 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "pl", label: "P&L Report", icon: <BarChart3 className="h-4 w-4" /> },
   { key: "trend", label: "Monthly Trend", icon: <TrendingUp className="h-4 w-4" /> },
   { key: "ceclass", label: "Cost/Exp Classes", icon: <BarChart3 className="h-4 w-4" /> },
+  { key: "coststruct", label: "Cost Structure", icon: <List className="h-4 w-4" /> },
   { key: "bs", label: "Balance Sheet", icon: <Scale className="h-4 w-4" /> },
   { key: "coa", label: "Chart of Accounts", icon: <List className="h-4 w-4" /> },
   { key: "journals", label: "Journal Entries", icon: <BookOpen className="h-4 w-4" /> },
@@ -246,6 +247,7 @@ export default function AccountingPage() {
           {tab === "pl" && <PLStatementTab />}
           {tab === "trend" && <MonthlyTrendTab />}
           {tab === "ceclass" && <CostExpenseClassesTab />}
+          {tab === "coststruct" && <CostStructureTab />}
           {tab === "bs" && <BalanceSheetTab />}
           {tab === "coa" && <COATab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "journals" && (
@@ -2834,6 +2836,105 @@ type PnlStmtRow = {
   totalLabel?: string;
   badge?: string;
 };
+
+// Phase 5.6 — Cost Structure: a FY, per material group, months as rows,
+// each group a block of O/P · Purchase · C/L · Spend; leading SALES column
+// and a Spend % of sales. Line filter by group prefix (B.* Bedframe,
+// S.* Sofa); shared groups (no prefix) appear under Overall only.
+type CsGroup = { group: string; description: string; months: { opening: number; purchase: number; closing: number; spend: number }[] };
+
+function CostStructureTab() {
+  const yrNow = new Date().getUTCFullYear();
+  const [fy, setFy] = useState(yrNow);
+  const [line, setLine] = useState<"all" | "sofa" | "bedframe">("all");
+  const [data, setData] = useState<{ fyLabel: string; cols: string[]; groups: CsGroup[]; salesSofa: number[]; salesBed: number[]; salesAll: number[] } | null>(null);
+  const loading = data === null;
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/cost-structure?fy=${fy}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
+      .then((j) => { if (!stale && j?.success && j.data) setData(j.data); })
+      .catch(() => {});
+    return () => { stale = true; };
+  }, [fy]);
+
+  const shown = (data?.groups ?? []).filter((g) => {
+    if (line === "bedframe") return g.group.startsWith("B.");
+    if (line === "sofa") return g.group.startsWith("S.");
+    return true;
+  });
+  const sales = data ? (line === "sofa" ? data.salesSofa : line === "bedframe" ? data.salesBed : data.salesAll) : [];
+  const f = (v: number) => (v === 0 ? "-" : formatCurrency(v));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {([["all", "Overall"], ["sofa", "Sofa"], ["bedframe", "Bedframe"]] as const).map(([k, lbl]) => (
+          <button key={k} onClick={() => setLine(k)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${line === k ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{lbl}</button>
+        ))}
+        <select value={fy} onChange={(e) => setFy(parseInt(e.target.value, 10))} className="ml-auto rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+          {[yrNow, yrNow - 1, yrNow - 2].map((y) => <option key={y} value={y}>FY {y}</option>)}
+        </select>
+      </div>
+      {loading ? (
+        <Card><CardContent className="py-12 text-center text-[#6B7280] text-sm">Loading…</CardContent></Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0 overflow-x-auto">
+            <div className="px-3 py-2 bg-[#6B5C32] text-white text-sm font-semibold">{line === "all" ? "OVERALL" : line === "sofa" ? "SOFA" : "BEDFRAME"} COST STRUCTURE · {data!.fyLabel}</div>
+            <table className="text-[11.5px] whitespace-nowrap">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-[10px] text-[#6B7280]">
+                  <th className="px-2 py-1 text-left sticky left-0 bg-white">MONTH</th>
+                  <th className="px-2 py-1 text-right">SALES</th>
+                  {shown.map((g) => (
+                    <th key={g.group} colSpan={4} className="px-2 py-1 text-center border-l border-[#E2DDD8]">{g.description}</th>
+                  ))}
+                  <th className="px-2 py-1 text-right border-l border-[#E2DDD8]">SPEND % SALES</th>
+                </tr>
+                <tr className="border-b border-[#E2DDD8] text-[9px] text-[#9CA3AF]">
+                  <th className="sticky left-0 bg-white" /><th />
+                  {shown.map((g) => (
+                    <React.Fragment key={g.group}>
+                      <th className="px-1 py-0.5 text-right border-l border-[#E2DDD8]">O/P</th>
+                      <th className="px-1 py-0.5 text-right">PUR</th>
+                      <th className="px-1 py-0.5 text-right">C/L</th>
+                      <th className="px-1 py-0.5 text-right">SPEND</th>
+                    </React.Fragment>
+                  ))}
+                  <th className="border-l border-[#E2DDD8]" />
+                </tr>
+              </thead>
+              <tbody>
+                {data!.cols.map((m, i) => {
+                  const monthSpend = shown.reduce((s, g) => s + g.months[i].spend, 0);
+                  const s = sales[i] || 0;
+                  const pctTxt = s > 0 ? `${((monthSpend / s) * 100).toFixed(1)}%` : "-";
+                  return (
+                    <tr key={m} className="border-b border-[#F0ECE9]">
+                      <td className="px-2 py-0.5 text-left sticky left-0 bg-white">{m}</td>
+                      <td className="px-2 py-0.5 text-right tabular-nums">{f(s)}</td>
+                      {shown.map((g) => (
+                        <React.Fragment key={g.group}>
+                          <td className="px-1 py-0.5 text-right tabular-nums border-l border-[#F0ECE9]">{f(g.months[i].opening)}</td>
+                          <td className="px-1 py-0.5 text-right tabular-nums">{f(g.months[i].purchase)}</td>
+                          <td className="px-1 py-0.5 text-right tabular-nums">{f(g.months[i].closing)}</td>
+                          <td className="px-1 py-0.5 text-right tabular-nums font-medium">{f(g.months[i].spend)}</td>
+                        </React.Fragment>
+                      ))}
+                      <td className="px-2 py-0.5 text-right tabular-nums text-[#9A3A2D] border-l border-[#F0ECE9]">{pctTxt}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+      <p className="text-[11px] text-[#9CA3AF]">O/P = opening stock, PUR = purchases, C/L = closing stock, SPEND = consumed (O/P + PUR − C/L). % = month spend ÷ that line's sales. Shared materials (no B./S. prefix) show under Overall only.</p>
+    </div>
+  );
+}
 
 // Phase 5.9 — Cost & Expense classes: a FY's COST and EXPENSE accounts
 // laid out months-as-columns + TOTAL, grouped by pnl_category

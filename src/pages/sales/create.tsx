@@ -448,7 +448,15 @@ function CreateSalesOrderPage() {
       productCode: it.productCode || "",
       productName: it.productName || "",
       itemCategory: it.itemCategory || "BEDFRAME",
-      baseModel: "",
+      // SOFA lines need a baseModel so the Model dropdown isn't blank (Wei
+      // Siang 2026-06-15: "为什么 model 不会自己跑出来"). The copy draft carries
+      // no baseModel, so derive it from the product catalog by id/code. Bedframe
+      // lines don't use baseModel (they key on productCode), so leave them "".
+      baseModel:
+        (it.itemCategory || "") === "SOFA"
+          ? (products.find((p) => p.id === it.productId) ??
+              products.find((p) => p.code === it.productCode))?.baseModel || ""
+          : "",
       sizeCode: it.sizeCode || "",
       sizeLabel: it.sizeLabel || "",
       fabricCode: it.fabricCode || "",

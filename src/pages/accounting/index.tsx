@@ -961,23 +961,26 @@ function CashflowMapCard({ accounts }: { accounts: ChartOfAccount[] }) {
       .finally(() => setLoaded(true));
   }, []);
 
-  const cfSectionOf = (code: string): string => {
-    if (map[code]?.section) return map[code].section;
-    const b = parseInt(code.split("-")[0] ?? "0", 10) || 0;
-    if (b === 300 || b === 305 || b === 350) return "REVENUE_COLLECTION";
-    if (b === 400 || b === 405) return "RAW_MATERIALS";
+  // Mirrors the backend defaultSectionFor (cashflow-engine.ts) so an
+  // unmapped account shows in the same default bucket the report uses.
+  const cfSectionOf = (a: ChartOfAccount): string => {
+    if (map[a.code]?.section) return map[a.code].section;
+    const b = parseInt(a.code.split("-")[0] ?? "0", 10) || 0;
+    if (a.specialAccountType === "SDC" || b === 300 || b === 305) return "REVENUE_COLLECTION";
+    if (b === 350) return "REVENUE_COLLECTION";
+    if (a.specialAccountType === "SCC" || b === 400 || b === 405) return "RAW_MATERIALS";
     if (b === 750) return "DIRECT_LABOUR";
     if (b === 780 || (b >= 700 && b <= 705)) return "FACTORY_OVERHEAD";
     if (b >= 200 && b <= 299) return "CAPEX";
     if (b >= 450 && b <= 459) return "LOAN";
-    if (b === 900) return "GENERAL_EXPENSE";
+    if (a.type === "EXPENSE" || b === 900) return "GENERAL_EXPENSE";
     return "UNALLOCATED";
   };
   const orderOf = (code: string): number => map[code]?.order ?? 9999;
 
   const postable = accounts.filter((a) => a.isPostable !== false && a.isActive !== false);
   const bySection = (sec: string) =>
-    postable.filter((a) => cfSectionOf(a.code) === sec)
+    postable.filter((a) => cfSectionOf(a) === sec)
       .sort((x, y) => orderOf(x.code) - orderOf(y.code) || x.code.localeCompare(y.code));
 
   const moveTo = (code: string, sec: string, beforeCode?: string) => {

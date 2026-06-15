@@ -26,7 +26,6 @@ import {
   deriveComponentRacks,
   selectBestBomByCode,
 } from "../src/api/lib/print-extras-shared.ts";
-import { breakBomIntoWips } from "../src/api/lib/bom-wip-breakdown.ts";
 
 // A minimal King-bedframe BOM: one HEADBOARD node + one DIVAN node, both with
 // a PACKING process so they survive the "what reaches packing ships" filter.
@@ -103,23 +102,11 @@ test("piecesFor: a sofa variant is ONE labelled set, not WIP pieces", () => {
   assert.equal(out, "2 1A(LHF)");
 });
 
-// --- Partial-repair component filter (DO compartment-aware print) ----------
-// Derive the REAL wipKeys from the same breakdown the filter matches on, so
-// the test pins behaviour without hard-coding the key format.
-const BF_VARIANTS = {
-  productCode: "TRION-K",
-  model: "TRION",
-  sizeLabel: "6FT",
-  sizeCode: "",
-  fabricCode: "PC151-02",
-  divanHeightInches: 12,
-  legHeightInches: 2,
-  gapInches: 2,
-};
-const bfWips = breakBomIntoWips(KING_BF_BOM, "TRION-K", BF_VARIANTS);
-const HB_KEY = bfWips.find((w) => w.wipType.toUpperCase() === "HEADBOARD").wipKey;
-const DIVAN_KEY = bfWips.find((w) => w.wipType.toUpperCase() === "DIVAN").wipKey;
-const baseArgs = {
+// --- Partial-repair component listing (DO compartment-aware print) ---------
+// A partial repair lists ONLY the repaired components, by their own picker
+// labels (Headboard / Divan / Base / Back Cushion / Armrest / Headrest), so the
+// DO shows exactly what's delivered for repair — sofa sub-components included.
+const BF_BASE = {
   code: "TRION-K",
   baseModel: "TRION",
   wipComponents: KING_BF_BOM,
@@ -132,58 +119,74 @@ const baseArgs = {
   legHeightInches: 2,
   qty: 1,
 };
+const scope = (components) => ({ preset: "CUSTOM", depts: ["UPHOLSTERY"], components });
 
-test("piecesFor: partial repair (HB only) narrows '1 HB + 2 DIVAN' → '1 HB'", () => {
+test("piecesFor: bedframe partial repair (HB only) → '1 HB'", () => {
   const out = piecesFor({
-    ...baseArgs,
-    repairScope: {
-      preset: "CUSTOM",
-      depts: ["UPHOLSTERY"],
-      components: [{ key: HB_KEY, label: "Headboard", qty: 1 }],
-    },
+    ...BF_BASE,
+    repairScope: scope([{ key: "k1", label: "HB", qty: 1 }]),
   });
   assert.equal(out, "1 HB");
 });
 
-test("piecesFor: partial repair clamps a reduced qty (1 of 2 DIVAN) → '1 DIVAN'", () => {
+test("piecesFor: SOFA partial repair lists sub-components (was the whole set)", () => {
+  // The key fix: a sofa normally ships as ONE labelled set ("1 1A(LHF)"), but a
+  // partial repair must list the repaired sub-components by their picker labels.
   const out = piecesFor({
-    ...baseArgs,
-    repairScope: {
-      preset: "CUSTOM",
-      depts: ["UPHOLSTERY"],
-      components: [{ key: DIVAN_KEY, label: "Divan", qty: 1 }],
-    },
+    code: "BO315-1A(LHF)",
+    baseModel: "BO315",
+    wipComponents: KING_BF_BOM, // irrelevant — repair scope drives the listing
+    cat: "SOFA",
+    special: null,
+    sizeLabel: "35",
+    fabricCode: "FAB-1",
+    gapInches: null,
+    divanHeightInches: null,
+    legHeightInches: null,
+    qty: 1,
+    repairScope: scope([
+      { key: "k1", label: "Back Cushion", qty: 1 },
+      { key: "k2", label: "Armrest", qty: 1 },
+      { key: "k3", label: "Headrest", qty: 1 },
+    ]),
   });
-  assert.equal(out, "1 DIVAN");
+  assert.equal(out, "1 Back Cushion + 1 Armrest + 1 Headrest");
+});
+
+test("piecesFor: component qty × line set-qty (2 sets, 1 HB each → '2 HB')", () => {
+  const out = piecesFor({
+    ...BF_BASE,
+    qty: 2,
+    repairScope: scope([{ key: "k1", label: "HB", qty: 1 }]),
+  });
+  assert.equal(out, "2 HB");
+});
+
+test("piecesFor: picked component qty is respected (2 of 2 Divan → '2 Divan')", () => {
+  const out = piecesFor({
+    ...BF_BASE,
+    repairScope: scope([{ key: "k2", label: "Divan", qty: 2 }]),
+  });
+  assert.equal(out, "2 Divan");
 });
 
 test("piecesFor: no repairScope → full set unchanged", () => {
-  assert.equal(piecesFor({ ...baseArgs }), "1 HB + 2 DIVAN");
+  assert.equal(piecesFor({ ...BF_BASE }), "1 HB + 2 DIVAN");
+  assert.equal(piecesFor({ ...BF_BASE, repairScope: null }), "1 HB + 2 DIVAN");
+  // A dept-only scope (no component picks) is NOT a narrowing → full set.
   assert.equal(
-    piecesFor({ ...baseArgs, repairScope: null }),
+    piecesFor({ ...BF_BASE, repairScope: { preset: "FABRIC", depts: ["UPHOLSTERY"] } }),
     "1 HB + 2 DIVAN",
   );
 });
 
-test("piecesFor: a STALE component pick never blanks the line — falls back to full", () => {
-  // BOM changed since the operator picked: the key no longer exists. For a
-  // delivery note we must still print something, so it falls back to the full
-  // set rather than an empty line.
-  const out = piecesFor({
-    ...baseArgs,
-    repairScope: {
-      preset: "CUSTOM",
-      depts: ["UPHOLSTERY"],
-      components: [{ key: "TRION-K::9::GONE::GONE", label: "Gone", qty: 1 }],
-    },
-  });
-  assert.equal(out, "1 HB + 2 DIVAN");
-});
-
-test("buildRepairNote: strips counts, dedupes, English 'Repair: X only'", () => {
+test("buildRepairNote: strips counts, multi-word labels, English 'Repair: X only'", () => {
   assert.equal(buildRepairNote("1 HB"), "Repair: HB only");
-  assert.equal(buildRepairNote("1 HB + 1 DIVAN"), "Repair: HB + DIVAN only");
-  assert.equal(buildRepairNote("2 DIVAN"), "Repair: DIVAN only");
+  assert.equal(
+    buildRepairNote("1 Back Cushion + 1 Armrest"),
+    "Repair: Back Cushion + Armrest only",
+  );
+  assert.equal(buildRepairNote("2 Divan"), "Repair: Divan only");
   assert.equal(buildRepairNote(null), null);
   assert.equal(buildRepairNote(""), null);
 });

@@ -25,6 +25,7 @@ import {
 import { getFyeMonth, fyWindowFor } from "../lib/fiscal";
 import { emitAudit } from "../lib/audit";
 import { parseDebtorCode } from "../../lib/debtor";
+import { pnlBucketFor } from "../../lib/pnl-bucket";
 import { buildStatement, rawMaterialLineFor } from "../../lib/cashflow-engine";
 import type { CfMap, ClassifiedLeg, BankLeg, RmSplit, CoaLite } from "../../lib/cashflow-engine";
 
@@ -3599,6 +3600,7 @@ async function computePnlWindow(
   startYm: string | null,
   endYm: string | null,
   line: "all" | "sofa" | "bedframe",
+  override: Record<string, string> = {},
 ) {
   const [stock, gl, ratio] = await Promise.all([
     stockSummaryRange(db, startYm, endYm),
@@ -3617,7 +3619,6 @@ async function computePnlWindow(
     }
     return s;
   };
-  const codeBand = (code: string) => parseInt(code.split("-")[0], 10) || 0;
 
   // --- Sales (revenue < 530), net (credit-normal so sign −1 on DR−CR) ---
   const revLines: { code: string; name: string; amountSen: number }[] = [];
@@ -3625,10 +3626,11 @@ async function computePnlWindow(
   const otherIncomeLines: { code: string; name: string; amountSen: number }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || meta.type !== "REVENUE") continue;
-    const amt = -v; // credit-normal
-    if (codeBand(code) >= 530) { otherIncomeSen += amt; otherIncomeLines.push({ code, name: meta.name, amountSen: amt }); }
-    else revLines.push({ code, name: meta.name, amountSen: amt });
+    if (!meta) continue;
+    const bucket = pnlBucketFor(code, meta.type, override);
+    const amt = -v; // credit-normal (income class)
+    if (bucket === "REVENUE") revLines.push({ code, name: meta.name, amountSen: amt });
+    else if (bucket === "OTHER_INCOME") { otherIncomeSen += amt; otherIncomeLines.push({ code, name: meta.name, amountSen: amt }); }
   }
   const grossSalesSen = revLines.reduce((s, r) => s + r.amountSen, 0);
   // For a line, scale sales by the line's share (sofa = sofa+accessory).
@@ -3652,7 +3654,8 @@ async function computePnlWindow(
   const labourLines: { code: string; name: string; amountSen: number }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || codeBand(code) !== 750) continue;
+    if (!meta) continue;
+    if (pnlBucketFor(code, meta.type, override) !== "DIRECT_LABOUR") continue;
     labourLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)) });
   }
   const labourSen = labourLines.reduce((s, l) => s + l.amountSen, 0);
@@ -3661,7 +3664,8 @@ async function computePnlWindow(
   const overheadLines: { code: string; name: string; amountSen: number }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || codeBand(code) !== 780) continue;
+    if (!meta) continue;
+    if (pnlBucketFor(code, meta.type, override) !== "FACTORY_OVERHEAD") continue;
     overheadLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)) });
   }
   const overheadSen = overheadLines.reduce((s, l) => s + l.amountSen, 0);
@@ -3681,8 +3685,10 @@ async function computePnlWindow(
   const expenseLines: { code: string; name: string; amountSen: number; salary: boolean }[] = [];
   for (const [code, v] of gl.net) {
     const meta = gl.coa.get(code);
-    if (!meta || meta.type !== "EXPENSE") continue;
-    expenseLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)), salary: /^900-S0/.test(code) });
+    if (!meta) continue;
+    const bucket = pnlBucketFor(code, meta.type, override);
+    if (bucket !== "OPERATING_EXPENSE" && bucket !== "OPEX_SALARIES") continue;
+    expenseLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)), salary: bucket === "OPEX_SALARIES" });
   }
   const expenseSen = expenseLines.reduce((s, l) => s + l.amountSen, 0);
   const netProfitSen = grossProfitSen + otherIncomeSen * (isAll ? 1 : R) - expenseSen;
@@ -3747,17 +3753,17 @@ async function costByLineWindow(
 }
 
 // Assemble the statement row tree from a period window + the FY-YTD window.
-function buildPnlRows(p: PnlWindow, y: PnlWindow) {
-  type Row = { kind: "group" | "line" | "total" | "grandtotal" | "gap"; depth: number; label: string; periodSen?: number; ytdSen?: number; groupId?: string; totalLabel?: string; badge?: string };
+function buildPnlRows(p: PnlWindow, y: PnlWindow, editable = false) {
+  type Row = { kind: "group" | "line" | "total" | "grandtotal" | "gap"; depth: number; label: string; periodSen?: number; ytdSen?: number; groupId?: string; totalLabel?: string; badge?: string; accountCode?: string; bucket?: string };
   const rows: Row[] = [];
   let gid = 0;
-  const g = (label: string, depth: number, periodSen: number, ytdSen: number, totalLabel: string) => { const id = `g${gid++}`; rows.push({ kind: "group", depth, label, periodSen, ytdSen, groupId: id, totalLabel }); return id; };
-  const line = (label: string, depth: number, ps: number, ys: number, badge?: string) => rows.push({ kind: "line", depth, label, periodSen: ps, ytdSen: ys, badge });
+  const g = (label: string, depth: number, periodSen: number, ytdSen: number, totalLabel: string, bucket?: string) => { const id = `g${gid++}`; rows.push({ kind: "group", depth, label, periodSen, ytdSen, groupId: id, totalLabel, bucket }); return id; };
+  const line = (label: string, depth: number, ps: number, ys: number, accountCode?: string, bucket?: string) => rows.push({ kind: "line", depth, label, periodSen: ps, ytdSen: ys, accountCode, bucket });
   const tot = (label: string, depth: number, ps: number, ys: number) => rows.push({ kind: "total", depth, label, periodSen: ps, ytdSen: ys });
 
   // SALES
-  g("SALES", 0, p.netSalesSen, y.netSalesSen, "NET SALES");
-  for (let i = 0; i < p.revLines.length; i++) line(p.revLines[i].name, 1, p.revLines[i].amountSen, y.revLines[i]?.amountSen ?? 0);
+  g("SALES", 0, p.netSalesSen, y.netSalesSen, "NET SALES", "REVENUE");
+  for (let i = 0; i < p.revLines.length; i++) line(p.revLines[i].name, 1, p.revLines[i].amountSen, y.revLines[i]?.amountSen ?? 0, p.revLines[i].code, "REVENUE");
   rows.push({ kind: "gap", depth: 0, label: "" });
 
   // COST OF GOODS SOLD
@@ -3776,11 +3782,11 @@ function buildPnlRows(p: PnlWindow, y: PnlWindow) {
   line("CARRIAGE INWARDS", 1, p.carriageSen, y.carriageSen);
   line("SST CHARGES", 1, p.sstSen, y.sstSen);
   // Direct labour
-  g("DIRECT LABOUR", 1, p.labourSen, y.labourSen, "TOTAL DIRECT LABOUR");
-  for (let i = 0; i < p.labourLines.length; i++) line(p.labourLines[i].name, 2, p.labourLines[i].amountSen, y.labourLines.find((x) => x.code === p.labourLines[i].code)?.amountSen ?? 0);
+  g("DIRECT LABOUR", 1, p.labourSen, y.labourSen, "TOTAL DIRECT LABOUR", "DIRECT_LABOUR");
+  for (let i = 0; i < p.labourLines.length; i++) line(p.labourLines[i].name, 2, p.labourLines[i].amountSen, y.labourLines.find((x) => x.code === p.labourLines[i].code)?.amountSen ?? 0, p.labourLines[i].code, "DIRECT_LABOUR");
   // Factory overhead
-  g("FACTORY OVERHEAD", 1, p.overheadSen, y.overheadSen, "TOTAL FACTORY OVERHEAD");
-  for (let i = 0; i < p.overheadLines.length; i++) line(p.overheadLines[i].name, 2, p.overheadLines[i].amountSen, y.overheadLines.find((x) => x.code === p.overheadLines[i].code)?.amountSen ?? 0);
+  g("FACTORY OVERHEAD", 1, p.overheadSen, y.overheadSen, "TOTAL FACTORY OVERHEAD", "FACTORY_OVERHEAD");
+  for (let i = 0; i < p.overheadLines.length; i++) line(p.overheadLines[i].name, 2, p.overheadLines[i].amountSen, y.overheadLines.find((x) => x.code === p.overheadLines[i].code)?.amountSen ?? 0, p.overheadLines[i].code, "FACTORY_OVERHEAD");
   // WIP movement
   g("WORK IN PROGRESS", 1, p.wipOpen - p.wipClose, y.wipOpen - y.wipClose, "WIP MOVEMENT (net)");
   line("WIP - OPENING", 2, p.wipOpen, y.wipOpen);
@@ -3791,20 +3797,20 @@ function buildPnlRows(p: PnlWindow, y: PnlWindow) {
   rows.push({ kind: "gap", depth: 0, label: "" });
 
   // OTHER INCOME
-  if (p.otherIncomeLines.length > 0 || p.otherIncomeSen !== 0) {
-    g("OTHER INCOME", 0, p.otherIncomeSen, y.otherIncomeSen, "TOTAL OTHER INCOME");
-    for (let i = 0; i < p.otherIncomeLines.length; i++) line(p.otherIncomeLines[i].name, 1, p.otherIncomeLines[i].amountSen, y.otherIncomeLines.find((x) => x.code === p.otherIncomeLines[i].code)?.amountSen ?? 0);
+  if (editable || p.otherIncomeLines.length > 0 || p.otherIncomeSen !== 0) {
+    g("OTHER INCOME", 0, p.otherIncomeSen, y.otherIncomeSen, "TOTAL OTHER INCOME", "OTHER_INCOME");
+    for (let i = 0; i < p.otherIncomeLines.length; i++) line(p.otherIncomeLines[i].name, 1, p.otherIncomeLines[i].amountSen, y.otherIncomeLines.find((x) => x.code === p.otherIncomeLines[i].code)?.amountSen ?? 0, p.otherIncomeLines[i].code, "OTHER_INCOME");
   }
 
   // OPERATING EXPENSES — Salaries & Contribution grouped, rest as lines.
-  g("OPERATING EXPENSES", 0, p.expenseSen, y.expenseSen, "TOTAL EXPENSES");
+  g("OPERATING EXPENSES", 0, p.expenseSen, y.expenseSen, "TOTAL EXPENSES", "OPERATING_EXPENSE");
   const pSal = p.expenseLines.filter((l) => l.salary);
   const ySalSum = y.expenseLines.filter((l) => l.salary).reduce((s, l) => s + l.amountSen, 0);
-  if (pSal.length > 0) {
-    g("SALARIES & CONTRIBUTION", 1, pSal.reduce((s, l) => s + l.amountSen, 0), ySalSum, "TOTAL SALARIES & CONTRIBUTION");
-    for (const l of pSal) line(l.name, 2, l.amountSen, y.expenseLines.find((x) => x.code === l.code)?.amountSen ?? 0);
+  if (editable || pSal.length > 0) {
+    g("SALARIES & CONTRIBUTION", 1, pSal.reduce((s, l) => s + l.amountSen, 0), ySalSum, "TOTAL SALARIES & CONTRIBUTION", "OPEX_SALARIES");
+    for (const l of pSal) line(l.name, 2, l.amountSen, y.expenseLines.find((x) => x.code === l.code)?.amountSen ?? 0, l.code, "OPEX_SALARIES");
   }
-  for (const l of p.expenseLines.filter((x) => !x.salary)) line(l.name, 1, l.amountSen, y.expenseLines.find((x) => x.code === l.code)?.amountSen ?? 0);
+  for (const l of p.expenseLines.filter((x) => !x.salary)) line(l.name, 1, l.amountSen, y.expenseLines.find((x) => x.code === l.code)?.amountSen ?? 0, l.code, "OPERATING_EXPENSE");
   rows.push({ kind: "grandtotal", depth: 0, label: "NET PROFIT / (LOSS)", periodSen: p.netProfitSen, ytdSen: y.netProfitSen });
   return rows;
 }
@@ -4010,6 +4016,8 @@ app.get("/pl-statement", async (c) => {
   const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
   const lineParam = (c.req.query("line") || "all").toLowerCase();
   const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" ? "sofa" : lineParam === "bedframe" ? "bedframe" : "all";
+  const editable = c.req.query("editable") === "1";
+  const pnlOverride = await getPnlSectionMap(c.var.DB);
   const startYm = periodStartYm(period);
   const endYm = periodEndYm(period);
   // FY-YTD window = FY start (per fye_month) → period end.
@@ -4018,8 +4026,8 @@ app.get("/pl-statement", async (c) => {
   const fyWin = fyWindowFor(endForFy, fyeMonth);
   const fyStartYm = fyWin.startIso.slice(0, 7);
   const [p, y] = await Promise.all([
-    computePnlWindow(c.var.DB, startYm, endYm, line),
-    computePnlWindow(c.var.DB, fyStartYm, endYm, line),
+    computePnlWindow(c.var.DB, startYm, endYm, line, pnlOverride),
+    computePnlWindow(c.var.DB, fyStartYm, endYm, line, pnlOverride),
   ]);
   return c.json({
     success: true,
@@ -4029,7 +4037,7 @@ app.get("/pl-statement", async (c) => {
       periodLabel: period,
       fyLabel: fyWin.label,
       netSalesSen: p.netSalesSen,
-      rows: buildPnlRows(p, y),
+      rows: buildPnlRows(p, y, editable),
     },
   });
 });
@@ -5270,6 +5278,18 @@ async function getCashflowStockGroupMap(
   return {};
 }
 
+async function getPnlSectionMap(
+  db: Env["Variables"]["DB"],
+): Promise<Record<string, string>> {
+  try {
+    const row = await db
+      .prepare("SELECT value FROM kv_config WHERE key = 'pnl_section_map'")
+      .first<{ value: string | null }>();
+    if (row?.value) return JSON.parse(row.value) as Record<string, string>;
+  } catch { /* absent → empty */ }
+  return {};
+}
+
 type LabourDeptAgg = {
   departmentCode: string;
   account: string;
@@ -5494,6 +5514,32 @@ app.put("/cashflow/map", async (c) => {
       ).bind(JSON.stringify(sg), now).run();
     }
     return c.json({ success: true, data: { map, stockGroupMap: sg } });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+app.get("/pnl/section-map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const map = await getPnlSectionMap(c.var.DB);
+  return c.json({ success: true, data: { map } });
+});
+
+app.put("/pnl/section-map", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
+  try {
+    const body = (await c.req.json()) as { map?: Record<string, string> };
+    if (body.map === undefined) return c.json({ success: false, error: "map required" }, 400);
+    const valid = new Set(["REVENUE", "OTHER_INCOME", "DIRECT_LABOUR", "FACTORY_OVERHEAD", "OPERATING_EXPENSE", "OPEX_SALARIES"]);
+    const map: Record<string, string> = {};
+    for (const [code, b] of Object.entries(body.map)) if (typeof b === "string" && valid.has(b)) map[code] = b;
+    await c.var.DB.prepare(
+      `INSERT INTO kv_config (key, value, updated_at) VALUES ('pnl_section_map', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(map), new Date().toISOString()).run();
+    return c.json({ success: true, data: { map } });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

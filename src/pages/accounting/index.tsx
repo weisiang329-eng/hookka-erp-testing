@@ -6623,7 +6623,7 @@ function CashFlowTab() {
         <h2 className="text-lg font-semibold text-[#1F1D1B]">Statement of Cash Flow</h2>
         <span className="text-xs text-[#9CA3AF]">cash basis · full detail</span>
         <div className="ml-auto flex items-center gap-2">
-          <button onClick={() => setEdit((e) => !e)}
+          <button onClick={() => { const ne = !edit; setEdit(ne); if (ne) { setLevel(3); setCollapsed(new Set()); } }}
             className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${edit ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>
             {edit ? "Done" : "Edit"}
           </button>

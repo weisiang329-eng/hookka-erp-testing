@@ -230,8 +230,11 @@ function stageDaysLabel(row: CaseRow): string {
 }
 
 function ordersLabel(row: CaseRow): string {
-  if (row.ordersCount <= 0) return "none";
-  return `${row.ordersCount} order${row.ordersCount === 1 ? "" : "s"}`;
+  // Owner 2026-06-16: show WHICH service order(s) the case spawned (their
+  // SV numbers), not just the count — so you can see it at a glance.
+  const nos = (row.orders ?? []).map((o) => o.serviceOrderNo).filter(Boolean);
+  if (nos.length === 0) return "none";
+  return nos.join(", ");
 }
 
 export default function ServiceCasesListPage() {
@@ -483,12 +486,14 @@ export default function ServiceCasesListPage() {
       {
         key: "ordersCount",
         label: "Orders",
-        width: "90px",
+        width: "150px",
         sortable: true,
         filterAccessor: (row) => ordersLabel(row),
         render: (_value, row) =>
           row.ordersCount > 0 ? (
-            <span className="text-[#6B5C32]">{ordersLabel(row)}</span>
+            <span className="text-[#6B5C32] whitespace-normal break-words">
+              {ordersLabel(row)}
+            </span>
           ) : (
             <span className="text-[#9CA3AF]">none</span>
           ),

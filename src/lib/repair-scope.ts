@@ -664,6 +664,12 @@ export function normalizePartLabel(label: string): string {
     case "BC":
     case "BACK CUSHION":
       return "BC";
+    case "RIGHT ARM":
+    case "R ARM":
+      return "R Arm";
+    case "LEFT ARM":
+    case "L ARM":
+      return "L Arm";
     case "ARM":
     case "ARMREST":
       return "Arm";
@@ -677,6 +683,29 @@ export function normalizePartLabel(label: string): string {
   }
 }
 
+// Clean short part label from a repair component's wipKey. The stored `label`
+// is the VERBOSE BOM wipLabel ("5531-2A(RHF) -Base 28"); the KEY encodes the
+// wipType (productCode::idx::WIPTYPE::rawCode), which is clean — so map the
+// wipType to its short form (BASE→Base, BACK_CUSHION→BC, RIGHT_ARM→R Arm, …).
+// An unknown wipType title-cases ("SEAT_CUSHION" → "Seat Cushion"); a key with
+// no wipType segment falls back to normalizing the stored label.
+export function partLabelFromKey(
+  key: string | undefined | null,
+  fallbackLabel?: string | null,
+): string {
+  const seg = String(key || "").split("::");
+  if (seg.length >= 4 && seg[2]) {
+    const wipType = seg[2].replace(/_/g, " ").trim();
+    const mapped = normalizePartLabel(wipType);
+    if (mapped.toUpperCase() === wipType.toUpperCase()) {
+      // Unknown type — title-case it so it reads "Seat Cushion", not "SEAT CUSHION".
+      return wipType.toLowerCase().replace(/\b\w/g, (ch) => ch.toUpperCase());
+    }
+    return mapped;
+  }
+  return normalizePartLabel(String(fallbackLabel || ""));
+}
+
 // Parts-only summary for the delivery "Repair: …" badge — just the repaired
 // component labels in full words ("Headboard + Armrest", or "Headboard + 2
 // Armrest" when a part's picked qty > 1). Returns null when the scope has no
@@ -687,7 +716,7 @@ export function repairPartsLabel(scope: RepairScope | null): string | null {
   if (!comps || comps.length === 0) return null;
   const parts = comps
     .map((c) => {
-      const lab = normalizePartLabel(String(c.label || c.key || ""));
+      const lab = partLabelFromKey(c.key, c.label);
       if (!lab) return "";
       return c.qty > 1 ? `${c.qty} ${lab}` : lab;
     })

@@ -26,7 +26,7 @@ import {
   type BomVariantContext,
 } from "./bom-wip-breakdown";
 import { isHeadboardOnlySpecial } from "../routes/fg-units";
-import { normalizePartLabel, type RepairScope } from "../../lib/repair-scope";
+import { partLabelFromKey, type RepairScope } from "../../lib/repair-scope";
 
 // One BOM template per product code, already collapsed to the version we
 // print from (ACTIVE preferred, then latest effectiveFrom).
@@ -138,44 +138,17 @@ export function piecesFor(args: {
     qty,
     repairScope,
   } = args;
-  // Partial repair takes precedence over the normal set composition: list ONLY
-  // the repaired components by their own picker labels (Headboard / Divan /
-  // Base / Back Cushion / Armrest / Headrest / …), so the DO shows exactly what
-  // is being delivered for repair — sofa sub-components included, not just
-  // bedframe HB/Divan. Labels come straight from the operator's pick; qty is the
-  // picked per-set count × the line's set quantity. English only (the DO/CN PDF
-  // font carries no CJK glyphs).
-  if (repairScope?.components && repairScope.components.length > 0) {
-    const parts = repairScope.components
-      .filter((cmp) => cmp && String(cmp.label || "").trim())
-      .map(
-        (cmp) =>
-          `${(Number(cmp.qty) || 1) * (qty || 1)} ${normalizePartLabel(String(cmp.label))}`,
-      );
-    if (parts.length > 0) return parts.join(" + ");
-  }
   const C = (cat || "").toUpperCase();
   const cu = code.toUpperCase();
   const isBedframe = C === "BEDFRAME" || cu.startsWith("DIVAN");
-  // A sofa "1A" / a stool / an accessory IS one finished set — it is NOT
-  // broken into Base / Cushion / Arm WIP pieces on a delivery/consignment
-  // note. Count it as its own FG unit, labelled by its variant so the
-  // roll-up can list "2 1A(LHF) + 1 STOOL".
-  if (!isBedframe) {
-    // A complete SOFA set (any variant — 1A / 2A / 1L1A / 2L / …) is counted as
-    // one "Sofa" piece on the DO (Wei Siang 2026-06-16); the specific variant
-    // still rides the Description's product name. Non-sofa accessories keep
-    // their own variant label.
-    if (C === "SOFA") return `${qty || 1} Sofa`;
-    const dash = code.indexOf("-");
-    const variant =
-      (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
-      (sizeLabel && sizeLabel.trim()) ||
-      code ||
-      "SET";
-    return `${qty || 1} ${variant}`;
-  }
-  if (!wipComponents) return null;
+  const hasRepairComponents = !!(
+    repairScope?.components && repairScope.components.length > 0
+  );
+
+  // Break the BOM once when we'll actually need it — a bedframe's HB/Divan
+  // pieces, or a repair's full-SKU check + component listing. A sofa BOM breaks
+  // into its Base / Cushion / Arm sub-components, used ONLY for repairs (a
+  // normal whole-sofa line never breaks).
   const variants: BomVariantContext = {
     productCode: code,
     model: baseModel || code,
@@ -186,7 +159,60 @@ export function piecesFor(args: {
     legHeightInches: l,
     gapInches: g,
   };
-  let wips = breakBomIntoWips(wipComponents, code, variants);
+  const allWips =
+    (isBedframe || hasRepairComponents) && wipComponents
+      ? breakBomIntoWips(wipComponents, code, variants)
+      : [];
+  const isFgMain = allWips.length === 1 && allWips[0].wipCode === "FG_MAIN";
+
+  // Partial repair: list ONLY the repaired components, by clean short labels
+  // derived from each component's wipKey (Headboard→HB, Back Cushion→BC, Right
+  // Arm→R Arm, …); qty is the picked per-set count × the line's set quantity.
+  // BUT if the picks cover EVERY top-level BOM component at full qty, it's the
+  // WHOLE unit — fall through to the normal complete-unit pieces ("1 Sofa" /
+  // "1 HB + 2 Divan"), don't break it apart (Wei Siang 2026-06-16).
+  if (hasRepairComponents) {
+    const comps = repairScope!.components!;
+    const bomQtyByKey = new Map(
+      (isFgMain ? [] : allWips).map((w) => [
+        w.wipKey,
+        Number(w.quantityMultiplier) || 1,
+      ]),
+    );
+    const coversWholeSku =
+      bomQtyByKey.size > 0 &&
+      [...bomQtyByKey.entries()].every(([k, bomQty]) => {
+        const pick = comps.find((cmp) => cmp.key === k);
+        return !!pick && (Number(pick.qty) || 1) >= bomQty;
+      });
+    if (!coversWholeSku) {
+      const parts = comps
+        .filter((cmp) => cmp && (cmp.key || cmp.label))
+        .map(
+          (cmp) =>
+            `${(Number(cmp.qty) || 1) * (qty || 1)} ${partLabelFromKey(cmp.key, cmp.label)}`,
+        );
+      if (parts.length > 0) return parts.join(" + ");
+    }
+    // coversWholeSku → fall through to the complete-unit pieces below.
+  }
+
+  // A sofa / stool / accessory IS one finished set — NOT broken into pieces on
+  // a normal delivery/consignment note.
+  if (!isBedframe) {
+    // A complete SOFA set (any variant — 1A / 2A / 1L1A / 2L / …) counts as one
+    // "Sofa" piece (Wei Siang 2026-06-16); the variant rides the product name.
+    if (C === "SOFA") return `${qty || 1} Sofa`;
+    const dash = code.indexOf("-");
+    const variant =
+      (dash >= 0 ? code.slice(dash + 1).trim() : "") ||
+      (sizeLabel && sizeLabel.trim()) ||
+      code ||
+      "SET";
+    return `${qty || 1} ${variant}`;
+  }
+  if (!wipComponents) return null;
+  let wips = allWips;
   if (wips.length === 1 && wips[0].wipCode === "FG_MAIN") return null;
   // What actually ships = what reaches PACKING. Count only the WIPs that have
   // a PACKING process so the figure matches the loaded pieces ("packing 有多

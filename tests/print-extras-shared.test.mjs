@@ -26,6 +26,19 @@ import {
   deriveComponentRacks,
   selectBestBomByCode,
 } from "../src/api/lib/print-extras-shared.ts";
+import { breakBomIntoWips } from "../src/api/lib/bom-wip-breakdown.ts";
+import { partLabelFromKey } from "../src/lib/repair-scope.ts";
+
+const BF_VARIANTS_CTX = {
+  productCode: "TRION-K",
+  model: "TRION",
+  sizeLabel: "6FT",
+  sizeCode: "",
+  fabricCode: "PC151-02",
+  divanHeightInches: 12,
+  legHeightInches: 2,
+  gapInches: 2,
+};
 
 // A minimal King-bedframe BOM: one HEADBOARD node + one DIVAN node, both with
 // a PACKING process so they survive the "what reaches packing ships" filter.
@@ -179,6 +192,42 @@ test("piecesFor: no repairScope → full set unchanged", () => {
     piecesFor({ ...BF_BASE, repairScope: { preset: "FABRIC", depts: ["UPHOLSTERY"] } }),
     "1 HB + 2 Divan",
   );
+});
+
+test("partLabelFromKey: clean short label from the wipKey (not the verbose label)", () => {
+  assert.equal(
+    partLabelFromKey("5531-2A(RHF)::0::BACK_CUSHION::BC", "5531 -Back Cushion 28"),
+    "BC",
+  );
+  assert.equal(partLabelFromKey("5531::1::RIGHT_ARM::RA", "5531 -Right Arm"), "R Arm");
+  assert.equal(partLabelFromKey("X::0::BASE::B", "X -Base 28"), "Base");
+  assert.equal(partLabelFromKey("X::0::HEADBOARD::HB", "x"), "HB");
+  // Unknown wipType → title-cased; no key segments → fall back to the label.
+  assert.equal(partLabelFromKey("X::0::SEAT_CUSHION::SC", "x"), "Seat Cushion");
+  assert.equal(partLabelFromKey("k1", "Back Cushion"), "BC");
+});
+
+test("piecesFor: FULL-SKU repair (all components at full qty) → complete unit, not parts", () => {
+  // Pick BOTH bedframe components at their full BOM qty → it's the WHOLE bed,
+  // so it prints as the complete unit, NOT a broken-out repair parts list.
+  const wips = breakBomIntoWips(KING_BF_BOM, "TRION-K", BF_VARIANTS_CTX);
+  const components = wips.map((w) => ({
+    key: w.wipKey,
+    label: w.wipLabel,
+    qty: w.quantityMultiplier,
+  }));
+  const out = piecesFor({ ...BF_BASE, repairScope: scope(components) });
+  assert.equal(out, "1 HB + 2 Divan");
+});
+
+test("piecesFor: partial repair by REAL key (only HB) → '1 HB'", () => {
+  const wips = breakBomIntoWips(KING_BF_BOM, "TRION-K", BF_VARIANTS_CTX);
+  const hb = wips.find((w) => w.wipType.toUpperCase() === "HEADBOARD");
+  const out = piecesFor({
+    ...BF_BASE,
+    repairScope: scope([{ key: hb.wipKey, label: hb.wipLabel, qty: 1 }]),
+  });
+  assert.equal(out, "1 HB");
 });
 
 test("buildRepairNote: strips counts, multi-word labels, English 'Repair: X only'", () => {

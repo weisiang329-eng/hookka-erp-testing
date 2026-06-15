@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
-import { COA_TYPE_COLOR, SUCCESS, DANGER, INFO, WARNING, ACCENT_PLUM } from "@/lib/design-tokens";
+import { COA_TYPE_COLOR, SUCCESS, DANGER, INFO, ACCENT_PLUM } from "@/lib/design-tokens";
 import {
   BookOpen,
   TrendingUp,
@@ -29,9 +29,6 @@ import {
   Building2,
   BarChart3,
   Scale,
-  Download,
-  Filter,
-  PieChart,
 } from "lucide-react";
 import type {
   ChartOfAccount,
@@ -39,7 +36,6 @@ import type {
   JournalLine,
   ARAgingEntry,
   APAgingEntry,
-  PLEntry,
   BalanceSheetEntry,
 } from "@/types";
 
@@ -244,7 +240,7 @@ export default function AccountingPage() {
           {tab === "overview" && (
             <OverviewTab accounts={accounts} journals={journals} arData={arData} apData={apData} />
           )}
-          {tab === "pl" && <PLReportTab />}
+          {tab === "pl" && <PLStatementTab />}
           {tab === "bs" && <BalanceSheetTab />}
           {tab === "coa" && <COATab accounts={accounts} onRefresh={fetchAll} />}
           {tab === "journals" && (
@@ -2819,535 +2815,188 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
 
 // =============== TAB 6: P&L REPORT ===============
 
-type PLData = {
-  entries: PLEntry[];
-  totals: {
-    revenue: number;
-    cogs: number;
-    grossProfit: number;
-    grossProfitPct: number;
-    operatingExpenses: number;
-    netProfit: number;
-    netProfitPct: number;
-  };
-  revenueByProduct: Record<string, number>;
-  revenueByCustomer: Record<string, number>;
-  cogsByAccount: Record<string, number>;
-  opexByAccount: Record<string, number>;
-  manufacturing?: {
-    openingStock: number;
-    purchases: number;
-    directLabour: number;
-    factoryOverhead: number;
-    otherMfg: number;
-    closingStock: number;
-    costOfProduction: number;
-    inventoryBreakdown?: {
-      bucket: string;
-      value: number;
-      stockAcct: string;
-      openingAcct: string;
-      closingAcct: string;
-    }[];
-    stockNote?: string;
-  };
-  cashFlow?: {
-    operating: number;
-    investing: number;
-    financing: number;
-    netChange: number;
-    note: string;
-  };
+
+// Phase 5.1/5.2 — manufacturing-account P&L statement (owner workbook
+// format): Overall / Sofa / Bedframe, L1–L4 expand, columns
+// ITEM | FY YTD | YTD % | <period> | %  (% = of net sales).
+type PnlStmtRow = {
+  kind: "group" | "line" | "total" | "grandtotal" | "gap";
+  depth: number;
+  label: string;
+  periodSen?: number;
+  ytdSen?: number;
+  groupId?: string;
+  totalLabel?: string;
+  badge?: string;
 };
 
-function PLReportTab() {
-  const [period, setPeriod] = useState("2026-Q1");
-  const [productCategory, setProductCategory] = useState("");
-  const [customerId, setCustomerId] = useState("");
-  const [stateFilter, setStateFilter] = useState("");
+function PLStatementTab() {
+  const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [line, setLine] = useState<"all" | "sofa" | "bedframe">("all");
+  const [level, setLevel] = useState(4);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [data, setData] = useState<{ rows: PnlStmtRow[]; netSalesSen: number; fyLabel: string; periodLabel: string } | null>(null);
+  const loading = data === null;
 
-  const periods = [
-    { value: "2026-01", label: "January 2026" },
-    { value: "2026-02", label: "February 2026" },
-    { value: "2026-03", label: "March 2026" },
-    { value: "2026-Q1", label: "Q1 2026" },
-    { value: "2026", label: "Full Year 2026" },
-  ];
-
-  const productCategories = [
-    { value: "", label: "All Products" },
-    { value: "BEDFRAME", label: "Bedframe" },
-    { value: "SOFA", label: "Sofa" },
-    { value: "ACCESSORY", label: "Accessories" },
-  ];
-
-  const customerOptions = [
-    { value: "", label: "All Customers" },
-    { value: "hub-houzs-kl", label: "Houzs KL" },
-    { value: "hub-houzs-pg", label: "Houzs PG" },
-    { value: "hub-houzs-srw", label: "Houzs SRW" },
-    { value: "hub-houzs-sbh", label: "Houzs SBH" },
-    { value: "hub-carress", label: "Carress" },
-    { value: "hub-conts", label: "The Conts" },
-  ];
-
-  const stateOptions = [
-    { value: "", label: "All States" },
-    { value: "KL", label: "KL" },
-    { value: "PG", label: "Penang" },
-    { value: "SRW", label: "Sarawak" },
-    { value: "SBH", label: "Sabah" },
-    { value: "JB", label: "Johor" },
-  ];
-
-  const plUrl = useMemo(() => {
-    const params = new URLSearchParams();
-    if (period) params.set("period", period);
-    if (productCategory) params.set("productCategory", productCategory);
-    if (customerId) params.set("customerId", customerId);
-    if (stateFilter) params.set("state", stateFilter);
-    return `/api/accounting/pl?${params.toString()}`;
-  }, [period, productCategory, customerId, stateFilter]);
-
-  const { data: plResp, loading: plLoading } = useCachedJson<{ success?: boolean; data?: PLData }>(plUrl);
-  const plData: PLData | null = useMemo(() => (plResp?.success ? plResp.data ?? null : null), [plResp]);
-
-  const handleExportCSV = () => {
-    if (!plData) return;
-    const rows: string[][] = [
-      ["HOOKKA Industries Sdn Bhd"],
-      [`Profit & Loss Statement - ${periods.find((p) => p.value === period)?.label || period}`],
-      [],
-      ["Section", "Account", "Amount (RM)"],
-    ];
-    Object.entries(plData.revenueByProduct).forEach(([k, v]) => {
-      rows.push(["Revenue", k, (v / 100).toFixed(2)]);
-    });
-    rows.push(["", "Total Revenue", (plData.totals.revenue / 100).toFixed(2)]);
-    rows.push([]);
-    Object.entries(plData.cogsByAccount).forEach(([k, v]) => {
-      rows.push(["COGS", k, (v / 100).toFixed(2)]);
-    });
-    rows.push(["", "Total COGS", (plData.totals.cogs / 100).toFixed(2)]);
-    rows.push(["", "Gross Profit", (plData.totals.grossProfit / 100).toFixed(2)]);
-    rows.push(["", "GP %", `${plData.totals.grossProfitPct}%`]);
-    rows.push([]);
-    Object.entries(plData.opexByAccount).forEach(([k, v]) => {
-      rows.push(["Operating Expenses", k, (v / 100).toFixed(2)]);
-    });
-    rows.push(["", "Total Operating Expenses", (plData.totals.operatingExpenses / 100).toFixed(2)]);
-    rows.push(["", "Net Profit", (plData.totals.netProfit / 100).toFixed(2)]);
-    rows.push(["", "Net Margin %", `${plData.totals.netProfitPct}%`]);
-
-    const csv = rows.map((r) => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `PL-${period}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const collapseForLevel = (stmtRows: PnlStmtRow[], L: number) => {
+    const next = new Set<string>();
+    for (const r of stmtRows) if (r.kind === "group" && r.groupId && r.depth >= L - 1) next.add(r.groupId);
+    return next;
   };
 
-  if (plLoading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="text-[#6B7280]">Loading P&L data...</div>
-      </div>
-    );
+  useEffect(() => {
+    let stale = false;
+    fetch(`/api/accounting/pl-statement?period=${period}&line=${line}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: NonNullable<typeof data> }>)
+      .then((j) => {
+        if (stale || !j?.success || !j.data) return;
+        setData(j.data);
+        setCollapsed(collapseForLevel(j.data.rows, level));
+      })
+      .catch(() => {});
+    return () => { stale = true; };
+    // level intentionally excluded — re-collapsing on level change is the
+    // L-button's job; refetching on level change would be wasteful.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, line]);
+
+  // L-level button: collapse every group whose depth >= L-1.
+  const applyLevel = (stmtRows: PnlStmtRow[], L: number) => {
+    setCollapsed(collapseForLevel(stmtRows, L));
+    setLevel(L);
+  };
+
+  const rows = data?.rows ?? [];
+  const net = data?.netSalesSen || 0;
+  const pct = (v: number | undefined) => (net > 0 && v !== undefined ? `${((v / net) * 100).toFixed(1)}%` : "");
+
+  // Walk rows honouring collapsed groups: when a group is collapsed, skip
+  // its descendants and render the group row WITH its total; when open,
+  // render the group header (no amount) + children + a TOTAL line.
+  const visible: { row: PnlStmtRow; showGroupTotal?: boolean }[] = [];
+  let skipDepth: number | null = null;
+  for (const r of rows) {
+    if (skipDepth !== null) {
+      if (r.depth > skipDepth) continue;
+      skipDepth = null;
+    }
+    visible.push({ row: r });
+    if (r.kind === "group" && r.groupId && collapsed.has(r.groupId)) skipDepth = r.depth;
   }
 
-  if (!plData) return null;
+  const numCell = (v: number | undefined) =>
+    v === undefined ? "" : v < 0 ? `(${formatCurrency(Math.abs(v))})` : formatCurrency(v);
 
-  const maxRevenue = Math.max(...Object.values(plData.revenueByProduct), 1);
-  const maxCustomerRev = Math.max(...Object.values(plData.revenueByCustomer), 1);
+  const lineTabs: { k: "all" | "sofa" | "bedframe"; label: string }[] = [
+    { k: "all", label: "Overall" },
+    { k: "sofa", label: "Sofa P&L" },
+    { k: "bedframe", label: "Bedframe P&L" },
+  ];
+
+  const months: string[] = [];
+  {
+    const now = new Date();
+    for (let i = 0; i < 18; i++) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      months.push(d.toISOString().slice(0, 7));
+    }
+  }
 
   return (
-    <div className="space-y-6">
-      {/* Filter Bar */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Filter className="h-4 w-4 text-[#6B5C32]" />
-            <span className="text-sm font-medium text-[#1F1D1B]">Multi-Dimensional Filters</span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <div>
-              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Period</label>
-              <select
-                value={period}
-                onChange={(e) => setPeriod(e.target.value)}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32] bg-white"
-              >
-                {periods.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Product Category</label>
-              <select
-                value={productCategory}
-                onChange={(e) => setProductCategory(e.target.value)}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32] bg-white"
-              >
-                {productCategories.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-[#6B7280] mb-1 block">Customer</label>
-              <select
-                value={customerId}
-                onChange={(e) => setCustomerId(e.target.value)}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32] bg-white"
-              >
-                {customerOptions.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-[#6B7280] mb-1 block">State</label>
-              <select
-                value={stateFilter}
-                onChange={(e) => setStateFilter(e.target.value)}
-                className="w-full rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32] bg-white"
-              >
-                {stateOptions.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          {(productCategory || customerId || stateFilter) && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-[#6B5C32]">
-              <span>Active filters:</span>
-              {productCategory && <Badge variant="status" status="CONFIRMED">{productCategory}</Badge>}
-              {customerId && <Badge variant="status" status="CONFIRMED">{customerOptions.find((c) => c.value === customerId)?.label}</Badge>}
-              {stateFilter && <Badge variant="status" status="CONFIRMED">{stateFilter}</Badge>}
-              <button onClick={() => { setProductCategory(""); setCustomerId(""); setStateFilter(""); }} className="text-[#9A3A2D] hover:text-[#7A2E24] ml-2 underline cursor-pointer">Clear all</button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* KPI Cards */}
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Revenue</p>
-            <p className="text-xl font-bold text-[#4F7C3A]">{formatCurrency(plData.totals.revenue)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">COGS</p>
-            <p className="text-xl font-bold text-[#9A3A2D]">{formatCurrency(plData.totals.cogs)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Gross Profit</p>
-            <p className="text-xl font-bold text-[#6B5C32]">{formatCurrency(plData.totals.grossProfit)}</p>
-            <p className="text-xs text-[#6B7280] mt-1">GP: {plData.totals.grossProfitPct}%</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-[#6B7280]">Net Profit</p>
-            <p className={`text-xl font-bold ${plData.totals.netProfit >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
-              {formatCurrency(plData.totals.netProfit)}
-            </p>
-            <p className="text-xs text-[#6B7280] mt-1">Margin: {plData.totals.netProfitPct}%</p>
-          </CardContent>
-        </Card>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        {lineTabs.map((t) => (
+          <button key={t.k} onClick={() => setLine(t.k)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${line === t.k ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>{t.label}</button>
+        ))}
+        <div className="ml-auto flex items-center gap-2">
+          <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
+            {months.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+          {[1, 2, 3, 4].map((L) => (
+            <button key={L} onClick={() => applyLevel(rows, L)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
+          ))}
+        </div>
       </div>
 
-      {/* P&L Statement */}
       <Card>
-        <CardHeader className="pb-3 flex flex-row items-center justify-between">
-          <CardTitle className="flex items-center gap-2">
-            <BarChart3 className="h-5 w-5 text-[#6B5C32]" />
-            Profit & Loss Statement
-          </CardTitle>
-          <Button variant="outline" size="sm" onClick={handleExportCSV}>
-            <Download className="h-4 w-4 mr-1" /> Export CSV
-          </Button>
-        </CardHeader>
-        <CardContent>
-          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
+        <CardContent className="p-4">
+          <div className="text-center mb-3">
+            <div className="font-semibold text-[15px] text-[#1F1D1B]">HOOKKA MANUFACTURING SDN BHD</div>
+            <div className="text-[13px] text-[#6B7280] mt-0.5">{line === "all" ? "Manufacturing & Profit-and-Loss Account (Overall)" : line === "sofa" ? "Profit-and-Loss Account — SOFA" : "Profit-and-Loss Account — BEDFRAME"}</div>
+            <div className="text-[12px] text-[#9CA3AF] mt-0.5">Period: {data?.periodLabel ?? period} · {data?.fyLabel ?? ""} · % = of net sales</div>
+          </div>
+          {loading ? (
+            <div className="py-12 text-center text-[#6B7280] text-sm">Loading…</div>
+          ) : (
+            <table className="w-full text-[13px]">
               <thead>
-                <tr className="bg-[#F0ECE9]">
-                  <th className="text-left px-4 py-2 font-semibold text-[#1F1D1B]">Account</th>
-                  <th className="text-right px-4 py-2 font-semibold text-[#1F1D1B]">Amount (RM)</th>
+                <tr className="text-[12px] text-[#6B7280]">
+                  <td />
+                  <td className="text-right px-2 pb-1">FY YTD (RM)</td>
+                  <td className="text-right px-2 pb-1 w-14">YTD %</td>
+                  <td className="text-right px-2 pb-1">{data?.periodLabel ?? period} (RM)</td>
+                  <td className="text-right px-2 pb-1 w-14">%</td>
                 </tr>
               </thead>
               <tbody>
-                {/* Revenue Section — SUCCESS (green) tint */}
-                <tr className={SUCCESS.bg}>
-                  <td colSpan={2} className={`px-4 py-2 font-semibold ${SUCCESS.text}`}>Revenue</td>
-                </tr>
-                {Object.entries(plData.revenueByProduct).map(([name, amount]) => (
-                  <tr key={name} className="border-t border-[#E2DDD8]/50">
-                    <td className="px-4 py-1.5 pl-8 text-[#4B5563]">Sales - {name}</td>
-                    <td className="px-4 py-1.5 text-right font-medium text-[#1F1D1B]">{formatCurrency(amount)}</td>
-                  </tr>
-                ))}
-                <tr className={`border-t border-[#E2DDD8] font-semibold ${SUCCESS.bg}`}>
-                  <td className={`px-4 py-2 ${SUCCESS.text}`}>Total Revenue</td>
-                  <td className={`px-4 py-2 text-right ${SUCCESS.text}`}>{formatCurrency(plData.totals.revenue)}</td>
-                </tr>
-
-                {/* COGS Section — DANGER (red) tint, money leaving */}
-                <tr className={`${DANGER.bg} border-t-2 border-[#E2DDD8]`}>
-                  <td colSpan={2} className={`px-4 py-2 font-semibold ${DANGER.text}`}>Less: Cost of Goods Sold</td>
-                </tr>
-                {Object.entries(plData.cogsByAccount).map(([name, amount]) => (
-                  <tr key={name} className="border-t border-[#E2DDD8]/50">
-                    <td className="px-4 py-1.5 pl-8 text-[#4B5563]">{name}</td>
-                    <td className={`px-4 py-1.5 text-right font-medium ${DANGER.text}`}>({formatCurrency(amount)})</td>
-                  </tr>
-                ))}
-                <tr className={`border-t border-[#E2DDD8] font-semibold ${DANGER.bg}`}>
-                  <td className={`px-4 py-2 ${DANGER.text}`}>Total COGS</td>
-                  <td className={`px-4 py-2 text-right ${DANGER.text}`}>({formatCurrency(plData.totals.cogs)})</td>
-                </tr>
-
-                {/* Gross Profit */}
-                <tr className="border-t-2 border-[#6B5C32] bg-[#F0ECE9] font-bold">
-                  <td className="px-4 py-3 text-[#6B5C32]">
-                    Gross Profit
-                    <span className="ml-2 text-xs font-normal text-[#6B7280]">
-                      (GP: {plData.totals.grossProfitPct}%)
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right text-[#6B5C32]">{formatCurrency(plData.totals.grossProfit)}</td>
-                </tr>
-
-                {/* Operating Expenses — WARNING (amber) tint */}
-                <tr className={`${WARNING.bg} border-t-2 border-[#E2DDD8]`}>
-                  <td colSpan={2} className={`px-4 py-2 font-semibold ${WARNING.text}`}>Less: Operating Expenses</td>
-                </tr>
-                {Object.entries(plData.opexByAccount).map(([name, amount]) => (
-                  <tr key={name} className="border-t border-[#E2DDD8]/50">
-                    <td className="px-4 py-1.5 pl-8 text-[#4B5563]">{name}</td>
-                    <td className={`px-4 py-1.5 text-right font-medium ${WARNING.text}`}>({formatCurrency(amount)})</td>
-                  </tr>
-                ))}
-                <tr className={`border-t border-[#E2DDD8] font-semibold ${WARNING.bg}`}>
-                  <td className={`px-4 py-2 ${WARNING.text}`}>Total Operating Expenses</td>
-                  <td className={`px-4 py-2 text-right ${WARNING.text}`}>({formatCurrency(plData.totals.operatingExpenses)})</td>
-                </tr>
-
-                {/* Net Profit */}
-                <tr className="border-t-2 border-[#1F1D1B] bg-[#1F1D1B] text-white font-bold">
-                  <td className="px-4 py-3">
-                    Net Profit
-                    <span className="ml-2 text-xs font-normal text-gray-300">
-                      (Margin: {plData.totals.netProfitPct}%)
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right">{formatCurrency(plData.totals.netProfit)}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Charts Row */}
-      <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
-        {/* Revenue by Product */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <PieChart className="h-5 w-5 text-[#6B5C32]" />
-              Revenue by Product Category
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {Object.entries(plData.revenueByProduct).map(([name, amount]) => {
-                const pct = plData.totals.revenue > 0 ? Math.round((amount / plData.totals.revenue) * 100) : 0;
-                const colors: Record<string, string> = {
-                  BEDFRAME: "bg-[#6B5C32]",
-                  SOFA: "bg-[#8B7A4A]",
-                  ACCESSORY: "bg-[#A99B6A]",
-                };
-                return (
-                  <div key={name} className="space-y-1">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-[#4B5563]">{name}</span>
-                      <span className="font-medium text-[#1F1D1B]">{formatCurrency(amount)} ({pct}%)</span>
-                    </div>
-                    <div className="h-3 bg-[#F0ECE9] rounded-full overflow-hidden">
-                      <div
-                        className={`h-full ${colors[name] || "bg-[#6B5C32]"} rounded-full transition-all`}
-                        style={{ width: `${Math.round((amount / maxRevenue) * 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Revenue by Customer */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Users className="h-5 w-5 text-[#6B5C32]" />
-              Revenue by Customer
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {Object.entries(plData.revenueByCustomer)
-                .sort(([, a], [, b]) => b - a)
-                .map(([name, amount]) => {
-                  const pct = plData.totals.revenue > 0 ? Math.round((amount / plData.totals.revenue) * 100) : 0;
+                {visible.map(({ row }, i) => {
+                  if (row.kind === "gap") return <tr key={i}><td colSpan={5} className="py-1.5" /></tr>;
+                  const isOpen = row.kind === "group" && row.groupId ? !collapsed.has(row.groupId) : false;
+                  const pad = { paddingLeft: `${8 + row.depth * 18}px` };
+                  if (row.kind === "grandtotal") {
+                    return (
+                      <tr key={i} className="border-t-2 border-[#1F1D1B] font-bold text-[#1F1D1B]">
+                        <td className="py-2" style={pad}>{row.label}</td>
+                        <td className="text-right px-2 tabular-nums">{numCell(row.ytdSen)}</td>
+                        <td className="text-right px-2 text-[#6B7280]">{pct(row.ytdSen)}</td>
+                        <td className="text-right px-2 tabular-nums">{numCell(row.periodSen)}</td>
+                        <td className="text-right px-2 text-[#6B7280]">{pct(row.periodSen)}</td>
+                      </tr>
+                    );
+                  }
+                  if (row.kind === "total") {
+                    return (
+                      <tr key={i} className="border-t border-[#9CA3AF] font-semibold bg-[#F0ECE9]/40">
+                        <td className="py-1" style={pad}>{row.label}</td>
+                        <td className="text-right px-2 tabular-nums">{numCell(row.ytdSen)}</td>
+                        <td className="text-right px-2 text-[#6B7280]">{pct(row.ytdSen)}</td>
+                        <td className="text-right px-2 tabular-nums">{numCell(row.periodSen)}</td>
+                        <td className="text-right px-2 text-[#6B7280]">{pct(row.periodSen)}</td>
+                      </tr>
+                    );
+                  }
+                  if (row.kind === "group") {
+                    return (
+                      <tr key={i} className="cursor-pointer hover:bg-[#F7F4EF] font-semibold text-[#1F1D1B] bg-[#F0ECE9]/40" onClick={() => { const n = new Set(collapsed); if (n.has(row.groupId!)) n.delete(row.groupId!); else n.add(row.groupId!); setCollapsed(n); }}>
+                        <td className="py-1" style={pad}>{isOpen ? "▾" : "▸"} {row.label}</td>
+                        <td className="text-right px-2 tabular-nums">{numCell(row.ytdSen)}</td>
+                        <td className="text-right px-2 text-[#6B7280]">{pct(row.ytdSen)}</td>
+                        <td className="text-right px-2 tabular-nums">{numCell(row.periodSen)}</td>
+                        <td className="text-right px-2 text-[#6B7280]">{pct(row.periodSen)}</td>
+                      </tr>
+                    );
+                  }
+                  // line
                   return (
-                    <div key={name} className="space-y-1">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-[#4B5563]">{name}</span>
-                        <span className="font-medium text-[#1F1D1B]">{formatCurrency(amount)} ({pct}%)</span>
-                      </div>
-                      <div className="h-3 bg-[#F0ECE9] rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-[#6B5C32] rounded-full transition-all"
-                          style={{ width: `${Math.round((amount / maxCustomerRev) * 100)}%` }}
-                        />
-                      </div>
-                    </div>
+                    <tr key={i} className="hover:bg-[#F7F4EF]">
+                      <td className="py-0.5 text-[#4B5563]" style={pad}>{row.label}{row.badge ? <span className="ml-1 text-[10px] text-[#9CA3AF]">[{row.badge}]</span> : null}</td>
+                      <td className="text-right px-2 tabular-nums">{numCell(row.ytdSen)}</td>
+                      <td className="text-right px-2 text-[#6B7280]">{pct(row.ytdSen)}</td>
+                      <td className="text-right px-2 tabular-nums">{numCell(row.periodSen)}</td>
+                      <td className="text-right px-2 text-[#6B7280]">{pct(row.periodSen)}</td>
+                    </tr>
                   );
                 })}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Manufacturing Account + Cash Flow (O/I/F) */}
-      <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
-        {plData.manufacturing && (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Manufacturing Account</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <table className="w-full text-sm">
-                <tbody>
-                  {[
-                    ["Opening Stock", plData.manufacturing.openingStock],
-                    ["Add: Purchases", plData.manufacturing.purchases],
-                    ["Add: Direct Labour", plData.manufacturing.directLabour],
-                    [
-                      "Add: Factory Overhead",
-                      plData.manufacturing.factoryOverhead,
-                    ],
-                    ["Add: Other Mfg Cost", plData.manufacturing.otherMfg],
-                    [
-                      "Less: Closing Stock",
-                      -plData.manufacturing.closingStock,
-                    ],
-                  ].map(([label, val]) => (
-                    <tr key={label as string} className="border-b border-[#F0ECE9]">
-                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
-                      <td className="px-2 py-1.5 text-right tabular-nums text-[#1F1D1B]">
-                        {formatCurrency(Math.abs(val as number))}
-                      </td>
-                    </tr>
-                  ))}
-                  <tr className="font-semibold">
-                    <td className="px-2 py-2 text-[#1F1D1B]">
-                      Cost of Production
-                    </td>
-                    <td className="px-2 py-2 text-right tabular-nums text-[#1F1D1B]">
-                      {formatCurrency(plData.manufacturing.costOfProduction)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              {plData.manufacturing.inventoryBreakdown &&
-                plData.manufacturing.inventoryBreakdown.length > 0 && (
-                  <div className="mt-3 border-t border-[#F0ECE9] pt-2">
-                    <p className="text-[11px] font-semibold text-[#6B7280] mb-1">
-                      Closing stock — live from cost ledger
-                    </p>
-                    <table className="w-full text-xs">
-                      <tbody>
-                        {plData.manufacturing.inventoryBreakdown.map((b) => (
-                          <tr
-                            key={b.bucket}
-                            className="border-b border-[#F7F4EF]"
-                          >
-                            <td className="px-2 py-1 text-[#4B5563]">
-                              {b.bucket}
-                            </td>
-                            <td className="px-2 py-1 text-[#9CA3AF] tabular-nums">
-                              {b.closingAcct}
-                            </td>
-                            <td className="px-2 py-1 text-right tabular-nums text-[#1F1D1B]">
-                              {formatCurrency(b.value)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              <p className="text-[11px] text-[#9CA3AF] mt-2">
-                {plData.manufacturing.stockNote ??
-                  "Opening + Purchases + Labour + Overhead + Other − Closing."}
-              </p>
-            </CardContent>
-          </Card>
-        )}
-        {plData.cashFlow && (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">
-                Cash Flow — Operating / Investing / Financing
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <table className="w-full text-sm">
-                <tbody>
-                  {[
-                    ["Operating", plData.cashFlow.operating],
-                    ["Investing", plData.cashFlow.investing],
-                    ["Financing", plData.cashFlow.financing],
-                  ].map(([label, val]) => (
-                    <tr key={label as string} className="border-b border-[#F0ECE9]">
-                      <td className="px-2 py-1.5 text-[#4B5563]">{label}</td>
-                      <td
-                        className={`px-2 py-1.5 text-right tabular-nums ${(val as number) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}
-                      >
-                        {formatCurrency(val as number)}
-                      </td>
-                    </tr>
-                  ))}
-                  <tr className="font-semibold">
-                    <td className="px-2 py-2 text-[#1F1D1B]">Net Change</td>
-                    <td
-                      className={`px-2 py-2 text-right tabular-nums ${plData.cashFlow.netChange >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}
-                    >
-                      {formatCurrency(plData.cashFlow.netChange)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <p className="text-[11px] text-[#9CA3AF] mt-2">
-                {plData.cashFlow.note}
-              </p>
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
+              </tbody>
+            </table>
+          )}
+          <p className="text-[11px] text-[#9CA3AF] mt-3">
+            Stock (raw material / WIP / FG) is live from the cost ledger; labour, overhead, carriage, SST, revenue and
+            expenses from the GL. Sofa = Sofa + Accessory. For Sofa/Bedframe, directly-attributable material &amp; labour
+            follow the production order; shared/indirect costs are apportioned by the net-sales ratio.
+          </p>
+        </CardContent>
+      </Card>
     </div>
   );
 }

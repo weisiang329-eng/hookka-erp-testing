@@ -3103,9 +3103,21 @@ async function stockSummary(
   fg: { openingSen: number; closingSen: number };
   totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
 }> {
-  const startYm = periodStartYm(period);
-  const endYm = periodEndYm(period);
-  const openCut = prevYm(startYm); // null when period is all-time
+  return stockSummaryRange(db, periodStartYm(period), periodEndYm(period));
+}
+
+// Window form (FY-YTD and arbitrary spans for the Phase-5 statement).
+async function stockSummaryRange(
+  db: Env["Variables"]["DB"],
+  startYm: string | null,
+  endYm: string | null,
+): Promise<{
+  rows: StockGroupRow[];
+  wip: { openingSen: number; closingSen: number };
+  fg: { openingSen: number; closingSen: number };
+  totals: { openingSen: number; purchasesSen: number; consumptionSen: number; closingSen: number };
+}> {
+  const openCut = prevYm(startYm); // null when window starts at the beginning
   const [clRes, rmRes] = await Promise.all([
     db
       .prepare(
@@ -3130,7 +3142,7 @@ async function stockSummary(
     const v = Number(l.totalCostSen) || 0;
     const signed = l.direction === "IN" ? v : -v;
     const inOpening = !openCut || ym <= openCut;
-    const inPeriod = ymInPeriod(ym, period);
+    const inPeriod = (!startYm || ym >= startYm) && (!endYm || ym <= endYm);
     if (l.itemType === "RM") {
       const g = grp.get(l.itemId) || "OTHER";
       const row = ensure(g);
@@ -3537,6 +3549,293 @@ function bsCategory(
   if (type === "LIABILITY") return "CURRENT_LIABILITY";
   return "EQUITY";
 }
+
+// ---------------------------------------------------------------------------
+// MANUFACTURING-ACCOUNT P&L STATEMENT (Phase 5.1/5.2, 2026-06) — the
+// owner's workbook format, computed for a date window. Raw-material,
+// WIP and FG come from the cost-ledger stock summary (the validated
+// opening+purchase−closing identity); labour / overhead / carriage / SST
+// / revenue / other-income / expenses come from the GL window. For a
+// product line (sofa/bedframe) the directly-attributable material &
+// labour follow the production-order category (costByLine) and the
+// shared/indirect costs are apportioned by the net-sales ratio (4.6).
+// ---------------------------------------------------------------------------
+type GlWindow = Map<string, number>; // accountCode → signed (DR−CR) sen
+
+async function glWindowSigned(
+  db: Env["Variables"]["DB"],
+  startYm: string | null,
+  endYm: string | null,
+): Promise<{ net: GlWindow; coa: Map<string, { name: string; type: CoaRow["type"] }> }> {
+  const [legRes, coaRes] = await Promise.all([
+    db.prepare("SELECT accountCode, debitSen, creditSen, postedAt, sourceType FROM ledger_journal_entries")
+      .all<{ accountCode: string; debitSen: number; creditSen: number; postedAt: string; sourceType: string }>(),
+    db.prepare("SELECT code, name, type FROM chart_of_accounts").all<{ code: string; name: string; type: CoaRow["type"] }>(),
+  ]);
+  const resolve = await loadAccountResolver(db);
+  const obDate = await getOpeningDate(db);
+  const net: GlWindow = new Map();
+  for (const l of legRes.results ?? []) {
+    // Opening-balance and closing-stock legs are bookkeeping, not trading —
+    // exclude from the P&L window (the stock summary already supplies stock).
+    if (isOpeningSource(l.sourceType) || l.sourceType === "closing_stock" || l.sourceType === "closing_stock_reversal") continue;
+    const ym = String(l.postedAt ?? "").slice(0, 7);
+    if (startYm && ym < startYm) continue;
+    if (endYm && ym > endYm) continue;
+    const code = resolve(l.accountCode);
+    net.set(code, (net.get(code) ?? 0) + (Number(l.debitSen) || 0) - (Number(l.creditSen) || 0));
+  }
+  void obDate;
+  const coa = new Map((coaRes.results ?? []).map((a) => [a.code, { name: a.name, type: a.type }] as const));
+  return { net, coa };
+}
+
+type PnlWindow = Awaited<ReturnType<typeof computePnlWindow>>;
+
+async function computePnlWindow(
+  db: Env["Variables"]["DB"],
+  startYm: string | null,
+  endYm: string | null,
+  line: "all" | "sofa" | "bedframe",
+) {
+  const [stock, gl, ratio] = await Promise.all([
+    stockSummaryRange(db, startYm, endYm),
+    glWindowSigned(db, startYm, endYm),
+    costByLineWindow(db, startYm, endYm),
+  ]);
+  const isAll = line === "all";
+  const R = isAll ? 1 : line === "sofa" ? ratio.salesRatio.sofa : ratio.salesRatio.bedframe;
+  // Helpers to read GL sums for an account band/predicate.
+  const bandSum = (pred: (code: string, type: CoaRow["type"]) => boolean, sign: 1 | -1) => {
+    let s = 0;
+    for (const [code, v] of gl.net) {
+      const meta = gl.coa.get(code);
+      if (!meta) continue;
+      if (pred(code, meta.type)) s += sign * v;
+    }
+    return s;
+  };
+  const codeBand = (code: string) => parseInt(code.split("-")[0], 10) || 0;
+
+  // --- Sales (revenue < 530), net (credit-normal so sign −1 on DR−CR) ---
+  const revLines: { code: string; name: string; amountSen: number }[] = [];
+  let otherIncomeSen = 0;
+  const otherIncomeLines: { code: string; name: string; amountSen: number }[] = [];
+  for (const [code, v] of gl.net) {
+    const meta = gl.coa.get(code);
+    if (!meta || meta.type !== "REVENUE") continue;
+    const amt = -v; // credit-normal
+    if (codeBand(code) >= 530) { otherIncomeSen += amt; otherIncomeLines.push({ code, name: meta.name, amountSen: amt }); }
+    else revLines.push({ code, name: meta.name, amountSen: amt });
+  }
+  const grossSalesSen = revLines.reduce((s, r) => s + r.amountSen, 0);
+  // For a line, scale sales by the line's share (sofa = sofa+accessory).
+  const netSalesSen = isAll ? grossSalesSen : Math.round(grossSalesSen * R);
+
+  // --- Raw materials (per group, opening+purchase−closing = consumed) ---
+  const rmGroups = stock.rows.map((r) => ({
+    group: r.group,
+    description: GROUP_DESCRIPTIONS[r.group] ?? r.group,
+    openingSen: isAll ? r.openingSen : Math.round(r.openingSen * R),
+    purchasesSen: isAll ? r.purchasesSen : Math.round(r.purchasesSen * R),
+    closingSen: isAll ? r.closingSen : Math.round(r.closingSen * R),
+  }));
+  const rmConsumedSen = rmGroups.reduce((s, g) => s + g.openingSen + g.purchasesSen - g.closingSen, 0);
+
+  // --- Carriage (700-1015), SST (706-0000) ---
+  const carriageSen = Math.round(bandSum((code) => code === "700-1015", 1) * (isAll ? 1 : R));
+  const sstSen = Math.round(bandSum((code) => code === "706-0000", 1) * (isAll ? 1 : R));
+
+  // --- Direct labour (750-x) ---
+  const labourLines: { code: string; name: string; amountSen: number }[] = [];
+  for (const [code, v] of gl.net) {
+    const meta = gl.coa.get(code);
+    if (!meta || codeBand(code) !== 750) continue;
+    labourLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)) });
+  }
+  const labourSen = labourLines.reduce((s, l) => s + l.amountSen, 0);
+
+  // --- Factory overhead (780-x) ---
+  const overheadLines: { code: string; name: string; amountSen: number }[] = [];
+  for (const [code, v] of gl.net) {
+    const meta = gl.coa.get(code);
+    if (!meta || codeBand(code) !== 780) continue;
+    overheadLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)) });
+  }
+  const overheadSen = overheadLines.reduce((s, l) => s + l.amountSen, 0);
+
+  // --- WIP / FG movements ---
+  const wipOpen = isAll ? stock.wip.openingSen : Math.round(stock.wip.openingSen * R);
+  const wipClose = isAll ? stock.wip.closingSen : Math.round(stock.wip.closingSen * R);
+  const fgOpen = isAll ? stock.fg.openingSen : Math.round(stock.fg.openingSen * R);
+  const fgClose = isAll ? stock.fg.closingSen : Math.round(stock.fg.closingSen * R);
+
+  const manufacturingSen = rmConsumedSen + carriageSen + sstSen + labourSen + overheadSen + (wipOpen - wipClose);
+  const cogsSen = fgOpen + manufacturingSen - fgClose;
+  const grossProfitSen = netSalesSen - cogsSen;
+
+  // --- Operating expenses (EXPENSE type, 900-x). Salaries & Contribution
+  //     (900-S00x) grouped; product-line-tagged PV lines stay on their line. ---
+  const expenseLines: { code: string; name: string; amountSen: number; salary: boolean }[] = [];
+  for (const [code, v] of gl.net) {
+    const meta = gl.coa.get(code);
+    if (!meta || meta.type !== "EXPENSE") continue;
+    expenseLines.push({ code, name: meta.name, amountSen: Math.round(v * (isAll ? 1 : R)), salary: /^900-S0/.test(code) });
+  }
+  const expenseSen = expenseLines.reduce((s, l) => s + l.amountSen, 0);
+  const netProfitSen = grossProfitSen + otherIncomeSen * (isAll ? 1 : R) - expenseSen;
+
+  return {
+    netSalesSen,
+    revLines: isAll ? revLines : revLines.map((r) => ({ ...r, amountSen: Math.round(r.amountSen * R) })),
+    rmGroups,
+    rmConsumedSen,
+    carriageSen,
+    sstSen,
+    labourLines,
+    labourSen,
+    overheadLines,
+    overheadSen,
+    wipOpen, wipClose, fgOpen, fgClose,
+    manufacturingSen,
+    cogsSen,
+    grossProfitSen,
+    otherIncomeSen: Math.round(otherIncomeSen * (isAll ? 1 : R)),
+    otherIncomeLines: otherIncomeLines.map((r) => ({ ...r, amountSen: Math.round(r.amountSen * (isAll ? 1 : R)) })),
+    expenseLines,
+    expenseSen,
+    netProfitSen,
+  };
+}
+
+// Window form of costByLine for sales ratio (period-string version exists
+// for the public endpoint; this one takes an explicit window).
+async function costByLineWindow(
+  db: Env["Variables"]["DB"],
+  startYm: string | null,
+  endYm: string | null,
+): Promise<{ salesRatio: { sofa: number; bedframe: number } }> {
+  let sofaSales = 0;
+  let bedSales = 0;
+  try {
+    const [invRes, itemRes, prodRes] = await Promise.all([
+      db.prepare(`SELECT id, invoiceDate, status FROM invoices WHERE status NOT IN ('DRAFT','CANCELLED')`).all<{ id: string; invoiceDate: string | null; status: string }>(),
+      db.prepare(`SELECT invoiceId, productCode, totalSen FROM invoice_items`).all<{ invoiceId: string; productCode: string | null; totalSen: number }>(),
+      db.prepare(`SELECT code, category FROM products`).all<{ code: string; category: string | null }>(),
+    ]);
+    const invYm = new Map<string, string>();
+    for (const i of invRes.results ?? []) invYm.set(i.id, String(i.invoiceDate ?? "").slice(0, 7));
+    const cat = new Map<string, string>();
+    for (const p of prodRes.results ?? []) cat.set(p.code, String(p.category ?? "").toUpperCase());
+    for (const it of itemRes.results ?? []) {
+      const ym = invYm.get(it.invoiceId);
+      if (ym === undefined) continue;
+      if (startYm && ym < startYm) continue;
+      if (endYm && ym > endYm) continue;
+      const c2 = cat.get(it.productCode ?? "") ?? "";
+      const v = Number(it.totalSen) || 0;
+      if (c2 === "BEDFRAME") bedSales += v;
+      else sofaSales += v;
+    }
+  } catch {
+    /* absent */
+  }
+  const tot = sofaSales + bedSales;
+  return { salesRatio: tot > 0 ? { sofa: sofaSales / tot, bedframe: bedSales / tot } : { sofa: 0.5, bedframe: 0.5 } };
+}
+
+// Assemble the statement row tree from a period window + the FY-YTD window.
+function buildPnlRows(p: PnlWindow, y: PnlWindow) {
+  type Row = { kind: "group" | "line" | "total" | "grandtotal" | "gap"; depth: number; label: string; periodSen?: number; ytdSen?: number; groupId?: string; totalLabel?: string; badge?: string };
+  const rows: Row[] = [];
+  let gid = 0;
+  const g = (label: string, depth: number, periodSen: number, ytdSen: number, totalLabel: string) => { const id = `g${gid++}`; rows.push({ kind: "group", depth, label, periodSen, ytdSen, groupId: id, totalLabel }); return id; };
+  const line = (label: string, depth: number, ps: number, ys: number, badge?: string) => rows.push({ kind: "line", depth, label, periodSen: ps, ytdSen: ys, badge });
+  const tot = (label: string, depth: number, ps: number, ys: number) => rows.push({ kind: "total", depth, label, periodSen: ps, ytdSen: ys });
+
+  // SALES
+  g("SALES", 0, p.netSalesSen, y.netSalesSen, "NET SALES");
+  for (let i = 0; i < p.revLines.length; i++) line(p.revLines[i].name, 1, p.revLines[i].amountSen, y.revLines[i]?.amountSen ?? 0);
+  rows.push({ kind: "gap", depth: 0, label: "" });
+
+  // COST OF GOODS SOLD
+  g("COST OF GOODS SOLD", 0, p.cogsSen, y.cogsSen, "TOTAL COST OF GOODS SOLD");
+  line("OPENING STOCK - FINISHED GOODS", 1, p.fgOpen, y.fgOpen);
+  // Raw materials sub-group
+  g("RAW MATERIALS", 1, p.rmConsumedSen, y.rmConsumedSen, "TOTAL RAW MATERIALS");
+  for (let i = 0; i < p.rmGroups.length; i++) {
+    const pg = p.rmGroups[i];
+    const yg = y.rmGroups.find((x) => x.group === pg.group);
+    g(pg.description, 2, pg.openingSen + pg.purchasesSen - pg.closingSen, yg ? yg.openingSen + yg.purchasesSen - yg.closingSen : 0, `TOTAL ${pg.description}`);
+    line("OPENING STOCK", 3, pg.openingSen, yg?.openingSen ?? 0);
+    line("PURCHASE", 3, pg.purchasesSen, yg?.purchasesSen ?? 0);
+    line("CLOSING STOCK", 3, -pg.closingSen, yg ? -yg.closingSen : 0);
+  }
+  line("CARRIAGE INWARDS", 1, p.carriageSen, y.carriageSen);
+  line("SST CHARGES", 1, p.sstSen, y.sstSen);
+  // Direct labour
+  g("DIRECT LABOUR", 1, p.labourSen, y.labourSen, "TOTAL DIRECT LABOUR");
+  for (let i = 0; i < p.labourLines.length; i++) line(p.labourLines[i].name, 2, p.labourLines[i].amountSen, y.labourLines.find((x) => x.code === p.labourLines[i].code)?.amountSen ?? 0);
+  // Factory overhead
+  g("FACTORY OVERHEAD", 1, p.overheadSen, y.overheadSen, "TOTAL FACTORY OVERHEAD");
+  for (let i = 0; i < p.overheadLines.length; i++) line(p.overheadLines[i].name, 2, p.overheadLines[i].amountSen, y.overheadLines.find((x) => x.code === p.overheadLines[i].code)?.amountSen ?? 0);
+  // WIP movement
+  g("WORK IN PROGRESS", 1, p.wipOpen - p.wipClose, y.wipOpen - y.wipClose, "WIP MOVEMENT (net)");
+  line("WIP - OPENING", 2, p.wipOpen, y.wipOpen);
+  line("WIP - CLOSING", 2, -p.wipClose, -y.wipClose);
+  tot("MANUFACTURING COST", 1, p.manufacturingSen, y.manufacturingSen);
+  line("CLOSING STOCK - FINISHED GOODS", 1, -p.fgClose, -y.fgClose);
+  rows.push({ kind: "grandtotal", depth: 0, label: "GROSS PROFIT / (LOSS)", periodSen: p.grossProfitSen, ytdSen: y.grossProfitSen });
+  rows.push({ kind: "gap", depth: 0, label: "" });
+
+  // OTHER INCOME
+  if (p.otherIncomeLines.length > 0 || p.otherIncomeSen !== 0) {
+    g("OTHER INCOME", 0, p.otherIncomeSen, y.otherIncomeSen, "TOTAL OTHER INCOME");
+    for (let i = 0; i < p.otherIncomeLines.length; i++) line(p.otherIncomeLines[i].name, 1, p.otherIncomeLines[i].amountSen, y.otherIncomeLines.find((x) => x.code === p.otherIncomeLines[i].code)?.amountSen ?? 0);
+  }
+
+  // OPERATING EXPENSES — Salaries & Contribution grouped, rest as lines.
+  g("OPERATING EXPENSES", 0, p.expenseSen, y.expenseSen, "TOTAL EXPENSES");
+  const pSal = p.expenseLines.filter((l) => l.salary);
+  const ySalSum = y.expenseLines.filter((l) => l.salary).reduce((s, l) => s + l.amountSen, 0);
+  if (pSal.length > 0) {
+    g("SALARIES & CONTRIBUTION", 1, pSal.reduce((s, l) => s + l.amountSen, 0), ySalSum, "TOTAL SALARIES & CONTRIBUTION");
+    for (const l of pSal) line(l.name, 2, l.amountSen, y.expenseLines.find((x) => x.code === l.code)?.amountSen ?? 0);
+  }
+  for (const l of p.expenseLines.filter((x) => !x.salary)) line(l.name, 1, l.amountSen, y.expenseLines.find((x) => x.code === l.code)?.amountSen ?? 0);
+  rows.push({ kind: "grandtotal", depth: 0, label: "NET PROFIT / (LOSS)", periodSen: p.netProfitSen, ytdSen: y.netProfitSen });
+  return rows;
+}
+
+app.get("/pl-statement", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
+  const period = c.req.query("period") || new Date().toISOString().slice(0, 7);
+  const lineParam = (c.req.query("line") || "all").toLowerCase();
+  const line: "all" | "sofa" | "bedframe" = lineParam === "sofa" ? "sofa" : lineParam === "bedframe" ? "bedframe" : "all";
+  const startYm = periodStartYm(period);
+  const endYm = periodEndYm(period);
+  // FY-YTD window = FY start (per fye_month) → period end.
+  const fyeMonth = await getFyeMonth(c.var.DB);
+  const endForFy = new Date(`${endYm ?? new Date().toISOString().slice(0, 7)}-15T00:00:00Z`);
+  const fyWin = fyWindowFor(endForFy, fyeMonth);
+  const fyStartYm = fyWin.startIso.slice(0, 7);
+  const [p, y] = await Promise.all([
+    computePnlWindow(c.var.DB, startYm, endYm, line),
+    computePnlWindow(c.var.DB, fyStartYm, endYm, line),
+  ]);
+  return c.json({
+    success: true,
+    data: {
+      period,
+      line,
+      periodLabel: period,
+      fyLabel: fyWin.label,
+      netSalesSen: p.netSalesSen,
+      rows: buildPnlRows(p, y),
+    },
+  });
+});
 
 // GL-truth P&L + Balance Sheet, computed from the immutable
 // ledger_journal_entries ⨝ chart_of_accounts (Phase 3, Option C). The

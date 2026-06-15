@@ -6736,27 +6736,22 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const wk = { departmentCode: worker.departmentCode, departmentCodes: deptCodes };
   const isSewSection =
     workerCoversDept(wk, "FAB_SEW") || workerCoversDept(wk, "FAB_CUT");
-  const isUphSection = workerCoversDept(wk, "UPHOLSTERY");
   // Wei Siang 2026-06-08: the floor splits into a Sewing section (Fabric Cutting
   // + Fabric Sewing) and "everyone else". A shared compartment sticker completes
   // FAB_SEW when a Sewing-section worker scans it; ANY OTHER worker (Upholstery,
   // Framing, Foam, Packing, …) completes UPHOLSTERY. Previously a worker in
   // neither named section got a 403 — wrong; they should land on UPHOLSTERY.
-  let targetDept: "FAB_SEW" | "UPHOLSTERY";
-  if (isSewSection && isUphSection) {
-    // Rare dual-section worker — disambiguate by stage: Sewing first, then Uph.
-    const sewOpen = await db
-      .prepare(
-        wipKey
-          ? "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND wipKey = ? AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1"
-          : "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
-      )
-      .bind(...(wipKey ? [poId, wipKey] : [poId]))
-      .first();
-    targetDept = sewOpen ? "FAB_SEW" : "UPHOLSTERY";
-  } else {
-    targetDept = isSewSection ? "FAB_SEW" : "UPHOLSTERY";
-  }
+  // The shared sew/uph sticker resolves the department STRICTLY from the
+  // worker's own section (Wei Siang 2026-06-15): a Sewing-section worker (女工部)
+  // ONLY ever completes FAB_SEW; everyone else (男工部 — Upholstery, Framing,
+  // Foam, …) completes UPHOLSTERY. It NEVER auto-jumps to Upholstery just
+  // because FAB_SEW is already done — a sew scan on a full/finished card now
+  // reports "already done / full", not a silent jump to the next department.
+  const targetDept: "FAB_SEW" | "UPHOLSTERY" = isSewSection
+    ? "FAB_SEW"
+    : "UPHOLSTERY";
+  const targetDeptLabel =
+    targetDept === "FAB_SEW" ? "Fabric Sewing" : "Upholstery";
 
   const po = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
@@ -6802,11 +6797,14 @@ app.post("/:id/scan-complete-shared", async (c) => {
     .all<JobCardRow>();
   const cards = cardsRes.results ?? [];
   if (cards.length === 0) {
+    // No open cards of THIS worker's dept on this compartment → it's already
+    // done. Report it for the worker's own dept (never advance to the next).
     const freshEmpty = await fetchPO(db, poId);
     return c.json({
       success: true,
       data: {
         deptCode: targetDept,
+        deptLabel: targetDeptLabel,
         completedJcIds: [],
         alreadyComplete: true,
         workerName: worker.name,
@@ -6849,11 +6847,15 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const today = nowIso.split("T")[0];
   const completedJcIds: string[] = [];
   let anyFilled = false; // did this scan claim any slot on any card?
-  let anyPicFull = false; // upholstery: a card's pic1+pic2 already taken by others
+  let anyPicFull = false; // a card's pic1+pic2 already taken by other people
+  // Distinct people who have scanned these cards — for the "completed by …"
+  // message (Wei Siang 2026-06-15: completion must say BY WHOM).
+  const completedBy = new Map<string, string>();
 
   // One scan fans out across EVERY compartment card of this dept on the PO.
-  // Sewing fills pic1 (single person, no pic2); Upholstery lets a 2nd worker
-  // join as pic2 (minutes split 50/50 at read time).
+  // Both Fabric Sewing and Upholstery are 2-person: the 1st scan fills pic1,
+  // a 2nd different worker joins as pic2 (minutes split 50/50 at read time);
+  // a 3rd different worker is rejected with PIC_FULL.
   for (const card of cards) {
     await ensurePiecePicsForJc(db, card);
     const slotsRes = await db
@@ -6880,7 +6882,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
         filled = true;
       } else if (slot.pic1Id === worker.id) {
         // same worker re-scanning this slot — no-op.
-      } else if (targetDept === "UPHOLSTERY" && !slot.pic2Id) {
+      } else if (!slot.pic2Id) {
+        // 2nd worker joins as pic2. BOTH FAB_SEW and UPHOLSTERY are 2-person
+        // (Wei Siang 2026-06-15: 女工部 Fabric Sewing can be scanned by 2);
+        // minutes split 50/50 at read time.
         await db
           .prepare(
             "UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?",
@@ -6888,14 +6893,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
           .bind(worker.id, worker.name, nowIso, slot.id)
           .run();
         filled = true;
-      } else if (
-        targetDept === "UPHOLSTERY" &&
-        slot.pic2Id &&
-        slot.pic2Id !== worker.id
-      ) {
+      } else if (slot.pic2Id && slot.pic2Id !== worker.id) {
+        // Both slots taken by OTHER people → this dept's 2 places are full.
         anyPicFull = true;
       }
-      // FAB_SEW: pic1 taken by someone else → single-person, no pic2.
     }
     if (filled) anyFilled = true;
 
@@ -6941,6 +6942,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
       mergedJc.pic1Name = piecePeople[0]?.name ?? "";
       mergedJc.pic2Id = piecePeople[1]?.id ?? null;
       mergedJc.pic2Name = piecePeople[1]?.name ?? "";
+      for (const p of piecePeople) if (p.id) completedBy.set(p.id, p.name);
     }
 
     if (filled || jcJustCompleted) {
@@ -6982,13 +6984,25 @@ app.post("/:id/scan-complete-shared", async (c) => {
     }
   }
 
+  const completedByNames = [...completedBy.values()].filter(Boolean);
+
   if (!anyFilled) {
     if (anyPicFull) {
+      // Both of this dept's 2 places are already taken by other people — tell
+      // the worker which dept is full and BY WHOM, never jump to another dept.
+      const who = completedByNames.join(" + ");
       return c.json(
         {
           success: false,
           code: "PIC_FULL",
-          error: "This item's Upholstery already has 2 people.",
+          error: who
+            ? `This item's ${targetDeptLabel} already has 2 people (${who}).`
+            : `This item's ${targetDeptLabel} already has 2 people.`,
+          data: {
+            deptCode: targetDept,
+            deptLabel: targetDeptLabel,
+            completedBy: completedByNames,
+          },
         },
         409,
       );
@@ -6998,8 +7012,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
       success: true,
       data: {
         deptCode: targetDept,
+        deptLabel: targetDeptLabel,
         completedJcIds: [],
         alreadyComplete: true,
+        completedBy: completedByNames,
         workerName: worker.name,
         po: freshEmpty,
       },
@@ -7057,8 +7073,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
     success: true,
     data: {
       deptCode: targetDept,
+      deptLabel: targetDeptLabel,
       completedJcIds,
       completedCount: completedJcIds.length,
+      completedBy: completedByNames,
       workerName: worker.name,
       po: freshPo,
     },

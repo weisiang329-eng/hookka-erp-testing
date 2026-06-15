@@ -72,6 +72,11 @@ const ScanCompleteEnvelope = z
         // Shared / dept fan-out endpoints (scan-complete-shared / -dept) return
         // the department they actually completed; used to label the ✓ card.
         deptCode: z.string().optional(),
+        // Human label for that dept ("Fabric Sewing" / "Upholstery") + who's
+        // on the 2 PIC slots — shown on the ✓ / already-full card (Wei Siang
+        // 2026-06-15: completion / 已满 must say BY WHOM).
+        deptLabel: z.string().optional(),
+        completedBy: z.array(z.string()).optional(),
         jobCard: z.unknown().optional(),
         fifoRedirected: z.boolean().optional(),
         scannedPoNo: z.string().optional(),
@@ -200,6 +205,9 @@ type Result =
       // header instead of the green ✓ so the worker isn't told they just did
       // work they didn't. BUG-2026-06-08.
       alreadyComplete?: boolean;
+      // Secondary line on the ✓ / already card — e.g. "已满:2 人 (Ali + Siti)"
+      // or "完成人:Ali" so a shared scan says BY WHOM (Wei Siang 2026-06-15).
+      detail?: string;
       // Sticker-binding FIFO — when the scanned sticker's own JC wasn't
       // the oldest same-spec candidate, the server routed the completion
       // to an earlier PO. Surfaces so the worker knows "you scanned X but
@@ -345,16 +353,28 @@ export default function WorkerScanPage() {
   const [savingRack, setSavingRack] = useState(false);
   const [rackSaved, setRackSaved] = useState(false);
 
-  // Pull worker ID from cached /me so we can auto-attribute the scan.
-  const workerId = (() => {
+  // Pull worker ID + home department from cached /me so we can auto-attribute
+  // the scan AND show the card for the worker's OWN section on a shared
+  // Sew/Uph sticker (女工部 → Fabric Sewing, 男工部 → Upholstery).
+  const { workerId, workerDept } = (() => {
     try {
       const raw = localStorage.getItem(WORKER_ME_KEY);
-      if (raw) return (JSON.parse(raw) as { id?: string }).id || "";
+      if (raw) {
+        const w = JSON.parse(raw) as { id?: string; departmentCode?: string };
+        return {
+          workerId: w.id || "",
+          workerDept: (w.departmentCode || "").toUpperCase(),
+        };
+      }
     } catch {
       /* ignore */
     }
-    return "";
+    return { workerId: "", workerDept: "" };
   })();
+  // Sewing section (女工部) = Fabric Sewing + Fabric Cutting; everyone else
+  // (Upholstery, Framing, Foam, …) is treated as the upholstery/man section.
+  const isSewWorker = workerDept === "FAB_SEW" || workerDept === "FAB_CUT";
+  const isUphWorker = workerDept === "UPHOLSTERY";
 
   // Guarded — a failed today-snapshot must not break the scanner,
   // which is the primary purpose of this page.
@@ -638,7 +658,21 @@ export default function WorkerScanPage() {
               !!sew &&
               sew.jobCard.status !== "COMPLETED" &&
               sew.jobCard.status !== "TRANSFERRED";
-            const pick = (sewOpen ? sew : (uph ?? sew)) ?? wkCards[0];
+            // Show the card for the WORKER'S OWN section, NOT whichever stage is
+            // open (Wei Siang 2026-06-15): a 女工部 scan always shows Fabric
+            // Sewing — even after Sewing is done it reports "already done", it
+            // never auto-jumps to Upholstery; a 男工部 scan always shows
+            // Upholstery. The server makes the final call from the token; this
+            // only chooses which card to display. Unknown section → legacy
+            // sew-open heuristic.
+            const pick =
+              (isSewWorker
+                ? (sew ?? uph)
+                : isUphWorker
+                  ? (uph ?? sew)
+                  : sewOpen
+                    ? sew
+                    : (uph ?? sew)) ?? wkCards[0];
             if (pick) {
               setResult({
                 kind: "lookup",
@@ -719,7 +753,7 @@ export default function WorkerScanPage() {
         setLoading(false);
       }
     },
-    [findMatches, t],
+    [findMatches, t, isSewWorker, isUphWorker],
   );
 
   // If the page is opened from a sticker URL (the phone's native camera, or a
@@ -1216,6 +1250,15 @@ export default function WorkerScanPage() {
           order: ctx.order,
           piece: ctx.piece,
           alreadyComplete: !!data.data.alreadyComplete,
+          // Who's on the PIC slots — shown under the ✓ so a shared Sew/Uph
+          // completion says BY WHOM (1 or 2 names).
+          detail:
+            data.data.completedBy && data.data.completedBy.length > 0
+              ? t("scan.completedBy").replace(
+                  "{who}",
+                  data.data.completedBy.join(" + "),
+                )
+              : undefined,
           // FIFO diagnostic — server tells us if the scan was routed to a
           // DIFFERENT PO (older due date). Surfaces on the success card so
           // the worker isn't confused when the Production Sheet row they
@@ -1245,19 +1288,48 @@ export default function WorkerScanPage() {
         // amber "already complete" card (which renders the rack picker for
         // PACKING) instead of a dead-end red error screen.
         const respJc = data.data?.jobCard as JobCard | undefined;
-        const isPackingAlready =
-          (data.code === "ALREADY_PIC1" ||
-            data.code === "ALREADY_PIC2" ||
-            data.code === "PIC_FULL") &&
-          (respJc?.departmentCode || "").toUpperCase() === "PACKING";
-        if (isPackingAlready) {
+        const isAlreadyCode =
+          data.code === "ALREADY_PIC1" ||
+          data.code === "ALREADY_PIC2" ||
+          data.code === "PIC_FULL";
+        const respDept = (
+          (data.data?.deptCode as string | undefined) ||
+          respJc?.departmentCode ||
+          ""
+        ).toUpperCase();
+        const isPackingAlready = isAlreadyCode && respDept === "PACKING";
+        // Shared Sew/Uph "already done / 2 people full" is NOT a hard error —
+        // show the amber "already done" card stamped with the worker's OWN dept
+        // and WHO holds the 2 slots, never a red error / dept jump (Wei Siang
+        // 2026-06-15).
+        const isSharedFull =
+          isAlreadyCode &&
+          (respDept === "FAB_SEW" || respDept === "UPHOLSTERY");
+        if (isPackingAlready || isSharedFull) {
+          const names = (data.data?.completedBy as string[] | undefined) ?? [];
+          const deptLabel = (data.data?.deptLabel as string | undefined) || "";
+          const detail =
+            data.code === "PIC_FULL" && deptLabel
+              ? t("scan.sectionFull").replace("{dept}", deptLabel) +
+                (names.length
+                  ? " " +
+                    t("scan.completedBy").replace("{who}", names.join(" + "))
+                  : "")
+              : names.length
+                ? t("scan.completedBy").replace("{who}", names.join(" + "))
+                : undefined;
           setResult({
             kind: "success",
             slot: (data.data?.assignedSlot as 1 | 2) ?? 1,
-            jobCard: respJc ?? ctx.jobCard,
+            // Stamp the worker's resolved dept so the card never shows the
+            // other section even if we displayed its card pre-tap.
+            jobCard: isSharedFull
+              ? { ...(respJc ?? ctx.jobCard), departmentCode: respDept }
+              : (respJc ?? ctx.jobCard),
             order: ctx.order,
             piece: ctx.piece,
             alreadyComplete: true,
+            detail,
           });
           loadToday();
         } else {
@@ -1629,6 +1701,11 @@ export default function WorkerScanPage() {
           <p className="text-sm opacity-90 mt-1">
             {result.order.poNo} · {result.jobCard.departmentCode}
           </p>
+          {result.detail && (
+            <p className="text-sm font-semibold opacity-95 mt-1">
+              {result.detail}
+            </p>
+          )}
           {result.piece && (
             <p className="text-xs opacity-90 mt-1">
               {t("scan.pieceOf")

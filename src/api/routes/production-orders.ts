@@ -5868,22 +5868,13 @@ app.post("/:id/scan-complete", async (c) => {
   if (!scannedJc) {
     return c.json({ success: false, error: "Job card not found" }, 404);
   }
-  // Worker-token scan-complete is limited to PACKING (its per-piece sticker is
-  // the only one routed here from the phone). Dashboard users keep scanning any
-  // dept; a worker scanning a non-PACKING sticker is rejected.
-  if (
-    !ctxUserId &&
-    (scannedJc.departmentCode || "").toUpperCase() !== "PACKING"
-  ) {
-    return c.json(
-      {
-        success: false,
-        code: "DEPT_NOT_ALLOWED",
-        error: "Worker scan via this sticker is only enabled for Packing.",
-      },
-      403,
-    );
-  }
+  // Worker-token scan-complete is open to ALL departments (Wei Siang
+  // 2026-06-14). The Code 128 printed on the Production Schedule lets every
+  // dept — including the no-sticker ones (Woodcutting / Framing / Webbing) —
+  // complete its WIP by scanning, not just Packing. Auth is still enforced
+  // (the worker token was bound to workerId above); PO ON_HOLD/CANCELLED and
+  // the JC BLOCKED/CANCELLED gates still apply. The per-piece QR flow for
+  // Fab Cut/Sew/Uph keeps routing to scan-complete-dept / -shared.
   const worker = await db
     .prepare("SELECT id, name FROM workers WHERE id = ?")
     .bind(workerId)
@@ -5978,8 +5969,20 @@ app.post("/:id/scan-complete", async (c) => {
   const target: { po: ProductionOrderRow; jc: JobCardRow; slot: PiecePicRow } =
     { po: scannedPo, jc: scannedJc, slot: targetSlot };
 
+  // completeWholeCard (Code 128 schedule scan): finish the ENTIRE WIP in one
+  // scan — PIC1 of every still-open piece becomes the scanning worker — instead
+  // of one piece per scan. The 2-PIC co-sign / debounce / PIC_FULL guards are
+  // per-piece QR-sticker concepts and are skipped for the whole-card path. The
+  // rollup + cascades below are shared by both paths. Timestamps + assignedSlot
+  // are hoisted here so both fill branches and the rollup share them.
+  const wholeCard = body?.completeWholeCard === true;
+  const nowIso = new Date().toISOString();
+  const today = nowIso.split("T")[0];
+  let assignedSlot: 1 | 2 = 1;
+  let newCompletedAt: string | null = target.slot.completedAt ?? null;
+
   // Same-worker guard.
-  if (target.slot.pic1Id === worker.id) {
+  if (!wholeCard && target.slot.pic1Id === worker.id) {
     const freshJc = await fetchPO(db, target.po.id);
     const jcOut = freshJc?.jobCards.find((j) => j.id === target.jc.id);
     return c.json(
@@ -5997,7 +6000,7 @@ app.post("/:id/scan-complete", async (c) => {
       409,
     );
   }
-  if (target.slot.pic2Id === worker.id) {
+  if (!wholeCard && target.slot.pic2Id === worker.id) {
     const freshJc = await fetchPO(db, target.po.id);
     const jcOut = freshJc?.jobCards.find((j) => j.id === target.jc.id);
     return c.json(
@@ -6017,7 +6020,7 @@ app.post("/:id/scan-complete", async (c) => {
   }
 
   // 3-second piece-level debounce.
-  if (target.slot.lastScanAt) {
+  if (!wholeCard && target.slot.lastScanAt) {
     const elapsedMs = Date.now() - new Date(target.slot.lastScanAt).getTime();
     if (elapsedMs < 3000) {
       return c.json(
@@ -6032,7 +6035,7 @@ app.post("/:id/scan-complete", async (c) => {
     }
   }
 
-  if (target.slot.pic1Id && target.slot.pic2Id) {
+  if (!wholeCard && target.slot.pic1Id && target.slot.pic2Id) {
     const freshJc = await fetchPO(db, target.po.id);
     const jcOut = freshJc?.jobCards.find((j) => j.id === target.jc.id);
     return c.json(
@@ -6046,42 +6049,56 @@ app.post("/:id/scan-complete", async (c) => {
     );
   }
 
-  // Fill the slot.
-  const nowIso = new Date().toISOString();
-  const today = nowIso.split("T")[0];
-  let assignedSlot: 1 | 2;
-  let newPic1Id = target.slot.pic1Id;
-  let newPic1Name = target.slot.pic1Name ?? "";
-  let newPic2Id = target.slot.pic2Id;
-  let newPic2Name = target.slot.pic2Name ?? "";
-  let newCompletedAt = target.slot.completedAt;
-
-  if (!target.slot.pic1Id) {
-    newPic1Id = worker.id;
-    newPic1Name = worker.name;
+  // Fill the piece slot(s).
+  if (wholeCard) {
+    // Whole-WIP completion: PIC1 of every still-open piece → the scanning
+    // worker. Idempotent — a piece already signed off keeps its existing PIC.
+    for (const s of slots) {
+      if (!s.pic1Id) {
+        await db
+          .prepare(
+            `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, completedAt = ?, lastScanAt = ? WHERE id = ?`,
+          )
+          .bind(worker.id, worker.name, nowIso, nowIso, s.id)
+          .run();
+      }
+    }
     newCompletedAt = nowIso;
     assignedSlot = 1;
   } else {
-    newPic2Id = worker.id;
-    newPic2Name = worker.name;
-    assignedSlot = 2;
-  }
+    // Per-piece (QR sticker) fill — one slot per scan, 2-PIC co-sign.
+    let newPic1Id = target.slot.pic1Id;
+    let newPic1Name = target.slot.pic1Name ?? "";
+    let newPic2Id = target.slot.pic2Id;
+    let newPic2Name = target.slot.pic2Name ?? "";
 
-  await db
-    .prepare(
-      `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?,
-         completedAt = ?, lastScanAt = ? WHERE id = ?`,
-    )
-    .bind(
-      newPic1Id,
-      newPic1Name,
-      newPic2Id,
-      newPic2Name,
-      newCompletedAt,
-      nowIso,
-      target.slot.id,
-    )
-    .run();
+    if (!target.slot.pic1Id) {
+      newPic1Id = worker.id;
+      newPic1Name = worker.name;
+      newCompletedAt = nowIso;
+      assignedSlot = 1;
+    } else {
+      newPic2Id = worker.id;
+      newPic2Name = worker.name;
+      assignedSlot = 2;
+    }
+
+    await db
+      .prepare(
+        `UPDATE piece_pics SET pic1Id = ?, pic1Name = ?, pic2Id = ?, pic2Name = ?,
+           completedAt = ?, lastScanAt = ? WHERE id = ?`,
+      )
+      .bind(
+        newPic1Id,
+        newPic1Name,
+        newPic2Id,
+        newPic2Name,
+        newCompletedAt,
+        nowIso,
+        target.slot.id,
+      )
+      .run();
+  }
 
   // Rollup: all slots for this JC have pic1 → mark JC COMPLETED.
   const allSlots = await db
@@ -6719,27 +6736,22 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const wk = { departmentCode: worker.departmentCode, departmentCodes: deptCodes };
   const isSewSection =
     workerCoversDept(wk, "FAB_SEW") || workerCoversDept(wk, "FAB_CUT");
-  const isUphSection = workerCoversDept(wk, "UPHOLSTERY");
   // Wei Siang 2026-06-08: the floor splits into a Sewing section (Fabric Cutting
   // + Fabric Sewing) and "everyone else". A shared compartment sticker completes
   // FAB_SEW when a Sewing-section worker scans it; ANY OTHER worker (Upholstery,
   // Framing, Foam, Packing, …) completes UPHOLSTERY. Previously a worker in
   // neither named section got a 403 — wrong; they should land on UPHOLSTERY.
-  let targetDept: "FAB_SEW" | "UPHOLSTERY";
-  if (isSewSection && isUphSection) {
-    // Rare dual-section worker — disambiguate by stage: Sewing first, then Uph.
-    const sewOpen = await db
-      .prepare(
-        wipKey
-          ? "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND wipKey = ? AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1"
-          : "SELECT 1 FROM job_cards WHERE productionOrderId = ? AND departmentCode = 'FAB_SEW' AND status NOT IN ('COMPLETED','TRANSFERRED') LIMIT 1",
-      )
-      .bind(...(wipKey ? [poId, wipKey] : [poId]))
-      .first();
-    targetDept = sewOpen ? "FAB_SEW" : "UPHOLSTERY";
-  } else {
-    targetDept = isSewSection ? "FAB_SEW" : "UPHOLSTERY";
-  }
+  // The shared sew/uph sticker resolves the department STRICTLY from the
+  // worker's own section (Wei Siang 2026-06-15): a Sewing-section worker (女工部)
+  // ONLY ever completes FAB_SEW; everyone else (男工部 — Upholstery, Framing,
+  // Foam, …) completes UPHOLSTERY. It NEVER auto-jumps to Upholstery just
+  // because FAB_SEW is already done — a sew scan on a full/finished card now
+  // reports "already done / full", not a silent jump to the next department.
+  const targetDept: "FAB_SEW" | "UPHOLSTERY" = isSewSection
+    ? "FAB_SEW"
+    : "UPHOLSTERY";
+  const targetDeptLabel =
+    targetDept === "FAB_SEW" ? "Fabric Sewing" : "Upholstery";
 
   const po = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
@@ -6785,11 +6797,14 @@ app.post("/:id/scan-complete-shared", async (c) => {
     .all<JobCardRow>();
   const cards = cardsRes.results ?? [];
   if (cards.length === 0) {
+    // No open cards of THIS worker's dept on this compartment → it's already
+    // done. Report it for the worker's own dept (never advance to the next).
     const freshEmpty = await fetchPO(db, poId);
     return c.json({
       success: true,
       data: {
         deptCode: targetDept,
+        deptLabel: targetDeptLabel,
         completedJcIds: [],
         alreadyComplete: true,
         workerName: worker.name,
@@ -6832,11 +6847,15 @@ app.post("/:id/scan-complete-shared", async (c) => {
   const today = nowIso.split("T")[0];
   const completedJcIds: string[] = [];
   let anyFilled = false; // did this scan claim any slot on any card?
-  let anyPicFull = false; // upholstery: a card's pic1+pic2 already taken by others
+  let anyPicFull = false; // a card's pic1+pic2 already taken by other people
+  // Distinct people who have scanned these cards — for the "completed by …"
+  // message (Wei Siang 2026-06-15: completion must say BY WHOM).
+  const completedBy = new Map<string, string>();
 
   // One scan fans out across EVERY compartment card of this dept on the PO.
-  // Sewing fills pic1 (single person, no pic2); Upholstery lets a 2nd worker
-  // join as pic2 (minutes split 50/50 at read time).
+  // Both Fabric Sewing and Upholstery are 2-person: the 1st scan fills pic1,
+  // a 2nd different worker joins as pic2 (minutes split 50/50 at read time);
+  // a 3rd different worker is rejected with PIC_FULL.
   for (const card of cards) {
     await ensurePiecePicsForJc(db, card);
     const slotsRes = await db
@@ -6863,7 +6882,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
         filled = true;
       } else if (slot.pic1Id === worker.id) {
         // same worker re-scanning this slot — no-op.
-      } else if (targetDept === "UPHOLSTERY" && !slot.pic2Id) {
+      } else if (!slot.pic2Id) {
+        // 2nd worker joins as pic2. BOTH FAB_SEW and UPHOLSTERY are 2-person
+        // (Wei Siang 2026-06-15: 女工部 Fabric Sewing can be scanned by 2);
+        // minutes split 50/50 at read time.
         await db
           .prepare(
             "UPDATE piece_pics SET pic2Id = ?, pic2Name = ?, lastScanAt = ? WHERE id = ?",
@@ -6871,14 +6893,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
           .bind(worker.id, worker.name, nowIso, slot.id)
           .run();
         filled = true;
-      } else if (
-        targetDept === "UPHOLSTERY" &&
-        slot.pic2Id &&
-        slot.pic2Id !== worker.id
-      ) {
+      } else if (slot.pic2Id && slot.pic2Id !== worker.id) {
+        // Both slots taken by OTHER people → this dept's 2 places are full.
         anyPicFull = true;
       }
-      // FAB_SEW: pic1 taken by someone else → single-person, no pic2.
     }
     if (filled) anyFilled = true;
 
@@ -6924,6 +6942,7 @@ app.post("/:id/scan-complete-shared", async (c) => {
       mergedJc.pic1Name = piecePeople[0]?.name ?? "";
       mergedJc.pic2Id = piecePeople[1]?.id ?? null;
       mergedJc.pic2Name = piecePeople[1]?.name ?? "";
+      for (const p of piecePeople) if (p.id) completedBy.set(p.id, p.name);
     }
 
     if (filled || jcJustCompleted) {
@@ -6965,13 +6984,25 @@ app.post("/:id/scan-complete-shared", async (c) => {
     }
   }
 
+  const completedByNames = [...completedBy.values()].filter(Boolean);
+
   if (!anyFilled) {
     if (anyPicFull) {
+      // Both of this dept's 2 places are already taken by other people — tell
+      // the worker which dept is full and BY WHOM, never jump to another dept.
+      const who = completedByNames.join(" + ");
       return c.json(
         {
           success: false,
           code: "PIC_FULL",
-          error: "This item's Upholstery already has 2 people.",
+          error: who
+            ? `This item's ${targetDeptLabel} already has 2 people (${who}).`
+            : `This item's ${targetDeptLabel} already has 2 people.`,
+          data: {
+            deptCode: targetDept,
+            deptLabel: targetDeptLabel,
+            completedBy: completedByNames,
+          },
         },
         409,
       );
@@ -6981,8 +7012,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
       success: true,
       data: {
         deptCode: targetDept,
+        deptLabel: targetDeptLabel,
         completedJcIds: [],
         alreadyComplete: true,
+        completedBy: completedByNames,
         workerName: worker.name,
         po: freshEmpty,
       },
@@ -7040,8 +7073,10 @@ app.post("/:id/scan-complete-shared", async (c) => {
     success: true,
     data: {
       deptCode: targetDept,
+      deptLabel: targetDeptLabel,
       completedJcIds,
       completedCount: completedJcIds.length,
+      completedBy: completedByNames,
       workerName: worker.name,
       po: freshPo,
     },

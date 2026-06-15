@@ -98,50 +98,6 @@ export async function recordDeptScan(
     .run();
 }
 
-type CatWeight = { category: string; weight: number };
-
-// Mode A category signal for one department on one date: what that department
-// actually worked. Completed-that-day first; else its currently-open cards.
-async function categoryWeightsFor(
-  db: D1Database,
-  departmentCode: string,
-  date: string,
-): Promise<CatWeight[]> {
-  const pick = (rows: Array<{ cat: string | null; n: number }> | undefined) =>
-    (rows ?? [])
-      .map((r) => ({
-        category: String(r.cat ?? "").toUpperCase(),
-        weight: Number(r.n) || 0,
-      }))
-      .filter((r) => VALID_CATEGORIES.has(r.category) && r.weight > 0);
-
-  const done = await db
-    .prepare(
-      `SELECT po.itemCategory AS cat, COUNT(*) AS n
-         FROM job_cards jc
-         JOIN production_orders po ON po.id = jc.productionOrderId
-        WHERE jc.departmentCode = ? AND jc.completedDate = ?
-          AND jc.status IN ('COMPLETED','TRANSFERRED')
-        GROUP BY po.itemCategory`,
-    )
-    .bind(departmentCode, date)
-    .all<{ cat: string | null; n: number }>();
-  const doneW = pick(done.results);
-  if (doneW.length > 0) return doneW;
-
-  const open = await db
-    .prepare(
-      `SELECT po.itemCategory AS cat, COUNT(*) AS n
-         FROM job_cards jc
-         JOIN production_orders po ON po.id = jc.productionOrderId
-        WHERE jc.departmentCode = ? AND jc.status IN ('PENDING','WAITING','IN_PROGRESS')
-        GROUP BY po.itemCategory`,
-    )
-    .bind(departmentCode)
-    .all<{ cat: string | null; n: number }>();
-  return pick(open.results);
-}
-
 /**
  * Write the day's working_hour_entries from the punch + dept scans.
  * No-op when entries already exist, the punch window is empty, or there is
@@ -231,28 +187,22 @@ export async function autofillWorkingHoursFromPunch(
           },
         ];
       } else {
-        // No scanned category (home-default or dept-only QR) — mode A
-        // fallback: the dept's actual job-card mix that day.
-        const weights = await categoryWeightsFor(db, d.departmentCode, args.date);
-        const split = prorateHours(d.hours, weights);
-        rows =
-          split.length > 0
-            ? split.map((s) => ({
-                departmentCode: d.departmentCode,
-                category: s.category,
-                hours: s.hours,
-                notes: scanned ? "Auto from punch + dept scan" : "Auto from punch",
-              }))
-            : [
-                {
-                  departmentCode: d.departmentCode,
-                  // No job-card signal at all for this dept — flag for the
-                  // office instead of inventing a category silently.
-                  category: "SOFA",
-                  hours: d.hours,
-                  notes: "Auto from punch — category unknown, please check",
-                },
-              ];
+        // No category scanned (dept-only QR or home default). Owner
+        // 2026-06-15 ("打卡类别,remove 猜测"): do NOT guess the category from
+        // job cards — attribute strictly to what the worker scanned. Leave the
+        // category BLANK so the office sets it (the office grid requires a
+        // category on production rows, so it surfaces as "needs category"
+        // rather than a wrong guess).
+        rows = [
+          {
+            departmentCode: d.departmentCode,
+            category: "",
+            hours: d.hours,
+            notes: scanned
+              ? "Auto from punch + dept scan — set category"
+              : "Auto from punch — set category",
+          },
+        ];
       }
     } else {
       rows = [

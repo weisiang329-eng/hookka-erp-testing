@@ -9,7 +9,11 @@ import { Button } from "@/components/ui/button";
 import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
-import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData, generateCompartmentStickerData, jobCardBarcodeValue } from "@/lib/qr-utils";
+// Static import (not dynamic) so Code 128 generation is SYNCHRONOUS inside the
+// print click gesture — an await before window.open would trip the pop-up
+// blocker. jsbarcode is small and scoped to this (already heavy) page chunk.
+import JsBarcode from "jsbarcode";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // useTimeout — P4.3 effect-replacement (still referenced at L2386+).
@@ -92,6 +96,33 @@ type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
 // Wei Siang 2026-05-29: drag a header's right edge to resize; double-click to
 // reset. Widths persist per-browser in localStorage. Shared with every header
 // cell via context so we don't thread two callbacks through 15 call sites.
+// Render a WIP's Code 128 (HKJC:<jobCardId>) to a PNG data URL, SYNCHRONOUSLY,
+// for the Production Schedule print. Scanning it on the phone marks the WIP
+// complete — the linear-scan twin of the QR, for the no-sticker depts
+// (Woodcutting / Framing / Webbing). Returns "" on any failure so a bad row
+// never blocks the print. jobCardBarcodeValue() is the single source of the
+// encoded string (shared with the scanner's parseJobCardBarcode).
+function jobCardCode128DataUrl(jobCardId: string): string {
+  try {
+    const canvas = document.createElement("canvas");
+    JsBarcode(canvas, jobCardBarcodeValue(jobCardId), {
+      format: "CODE128",
+      height: 46,
+      // Wider narrow-bar (2.4px) = more pixels per bar → crisp + reliably
+      // scannable when printed (the 1.5px version printed blurry/dense).
+      width: 2.4,
+      margin: 6,
+      // The human-readable id is printed as crisp HTML below the bars (see the
+      // print cell's <span class="bccode">), NOT baked into the canvas — the
+      // baked text rasterised at bar-resolution and printed blurry. Bars only.
+      displayValue: false,
+    });
+    return canvas.toDataURL("image/png");
+  } catch {
+    return "";
+  }
+}
+
 const OVERVIEW_FIXED_COLS = ["soId", "product", "customer", "customerPO", "specialOrder", "qty", "customerDD", "ourExpectedDD"] as const;
 const OVERVIEW_COL_KEYS: string[] = [...OVERVIEW_FIXED_COLS, ...DEPARTMENTS.map((d) => d.code)];
 const OVERVIEW_DEFAULT_WIDTHS: Record<string, number> = {
@@ -3675,6 +3706,25 @@ export default function ProductionPage({
       sortable: true,
       render: (_v, row) => renderStatusCell(row),
     },
+    {
+      // Code 128 "Scan to complete" — a normal, DEFAULT-HIDDEN column toggled
+      // in the Columns menu like any other (Wei Siang 2026-06-15: "应该做在
+      // column 那边"). Off by default — the barcode isn't used on the floor yet.
+      // On screen it shows the job-card id (light); the actual scannable Code
+      // 128 is drawn by the Print Schedule output (see handlePrintSchedule).
+      key: "scanCode",
+      label: "Barcode",
+      type: "text",
+      width: "150px",
+      sortable: false,
+      defaultHidden: true,
+      render: (_v, row) =>
+        row.jobCardId ? (
+          <span className="font-mono text-[11px] text-[#6B7280]">
+            {row.jobCardId}
+          </span>
+        ) : null,
+    },
   ], [activeTab, upstreamDepts, isTablet]);
 
   const activeDept = DEPARTMENTS.find((d) => d.code === activeTab);
@@ -4249,7 +4299,7 @@ export default function ProductionPage({
         <div className="flex items-baseline gap-1">
           <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">Customer Name</span>
           <span
-            className="flex-1 break-words"
+            className="flex-1 min-w-0 truncate"
             style={{
               fontSize: "12px",
               lineHeight: 1.2,
@@ -4264,7 +4314,7 @@ export default function ProductionPage({
           <div className="flex items-baseline gap-1">
             <span className="inline-block w-[100px] font-semibold text-[#6B7280] shrink-0">WIP</span>
             <span
-              className="flex-1 break-words"
+              className="flex-1 min-w-0 truncate"
               style={{
                 fontSize: "11px",
                 lineHeight: 1.2,
@@ -4284,7 +4334,7 @@ export default function ProductionPage({
         <div className="flex items-baseline gap-1">
           <span className="inline-block w-[100px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
           <span
-            className="flex-1 break-words"
+            className="flex-1 min-w-0 truncate"
             style={{
               fontSize: "11px",
               lineHeight: 1.2,
@@ -5514,8 +5564,30 @@ export default function ProductionPage({
           : sched.due;
         return `<span class="pill ${sched.state}">${word}${date ? " " + fmt(date) : ""}</span>`;
       };
+      // Pre-render one Code 128 per WIP row ONLY when the "Scan to complete"
+      // column is visible (toggled in the Columns menu like any other column).
+      // Scanning it on the phone marks that WIP complete — the linear twin of
+      // the sticker QR for the no-sticker depts. Off by default; when hidden
+      // the schedule is byte-identical to before this feature.
+      const showScan = orderedColumns.some((c) => c.key === "scanCode");
+      const barcodeByJc = new Map<string, string>();
+      if (showScan) {
+        for (const r of printRows) {
+          if (r.jobCardId && !barcodeByJc.has(r.jobCardId)) {
+            barcodeByJc.set(r.jobCardId, jobCardCode128DataUrl(r.jobCardId));
+          }
+        }
+      }
       const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
         const key = col.key;
+        // Code 128 column: scannable bars (image) + the job-card id as crisp
+        // HTML below (sharp at print DPI; the bars carry no baked text).
+        if (key === "scanCode") {
+          const bc = (r.jobCardId && barcodeByJc.get(r.jobCardId)) || "";
+          if (!bc) return "";
+          const idText = escapeHtml(r.jobCardId || "");
+          return `<img src="${bc}" alt="${idText}" /><span class="bccode">${idText}</span>`;
+        }
         // Dept pill columns — keys look like "sched_FAB_CUT.sortKey".
         const deptMatch = key.match(/^sched_([A-Z_]+)\.sortKey$/);
         if (deptMatch) return renderPillFor(r, deptMatch[1]);
@@ -5528,6 +5600,7 @@ export default function ProductionPage({
         return escapeHtml(String(raw));
       };
       const cellClassFor = (col: Column<DeptRow>): string => {
+        if (col.key === "scanCode") return "bc";
         if (col.align === "right" || col.type === "number") return "num";
         if (col.key === "soId") return "so";
         return "";
@@ -5535,15 +5608,17 @@ export default function ProductionPage({
       const headerCellsHtml = orderedColumns
         .map((c) => `<th${cellClassFor(c) ? ` class="${cellClassFor(c)}"` : ""}>${escapeHtml(c.label)}</th>`)
         .join("");
-      const rowsHtml = printRows.map((r) => {
-        const cells = orderedColumns
-          .map((c) => {
-            const cls = cellClassFor(c);
-            return `<td${cls ? ` class="${cls}"` : ""}>${renderCell(c, r)}</td>`;
-          })
-          .join("");
-        return `<tr>${cells}</tr>`;
-      }).join("");
+      const rowsHtml = printRows
+        .map((r) => {
+          const cells = orderedColumns
+            .map((c) => {
+              const cls = cellClassFor(c);
+              return `<td${cls ? ` class="${cls}"` : ""}>${renderCell(c, r)}</td>`;
+            })
+            .join("");
+          return `<tr>${cells}</tr>`;
+        })
+        .join("");
       body = `
         <table class="schedule">
           <thead><tr>${headerCellsHtml}</tr></thead>
@@ -5640,6 +5715,13 @@ export default function ProductionPage({
     table.schedule td.m, table.schedule th.m {
       text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
+    /* Code 128 "Scan to complete" column — one barcode per WIP row. Sized
+       generously so it prints crisp and scans reliably (not dense/blurry). */
+    table.schedule td.bc, table.schedule th.bc { text-align: center; width: 188px; }
+    table.schedule td.bc img { height: 46px; width: auto; max-width: 182px; image-rendering: crisp-edges; display: block; margin: 0 auto; }
+    /* Job-card id printed as real (vector) text, NOT baked into the barcode
+       image, so it stays sharp at print DPI instead of blurring. */
+    table.schedule td.bc .bccode { display: block; font-family: "Courier New", monospace; font-size: 8px; letter-spacing: 0.3px; color: #000; margin-top: 1px; word-break: break-all; }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,
     table.schedule tbody small { color: #555; font-size: ${sizes.small}px; }
@@ -6217,6 +6299,9 @@ export default function ProductionPage({
               <option value="total">Total Listing</option>
             </select>
           </label>
+          {/* The Code 128 "Scan to complete" column is now toggled in the grid's
+              Columns menu (default hidden) like any other column — no separate
+              checkbox (Wei Siang 2026-06-15: "应该做在 column 那边"). */}
           <Button
             variant="outline"
             onClick={() =>
@@ -8116,7 +8201,7 @@ export default function ProductionPage({
                           <div className="flex items-baseline gap-1">
                             <span className="inline-block w-[72px] font-semibold text-[#6B7280] shrink-0">WIP</span>
                             <span
-                              className="flex-1 break-words"
+                              className="flex-1 min-w-0 truncate"
                               style={{
                                 fontSize: "11px",
                                 lineHeight: 1.2,
@@ -8142,7 +8227,7 @@ export default function ProductionPage({
                         <div className="flex items-baseline gap-1">
                           <span className="inline-block w-[72px] font-semibold text-[#9A3A2D] shrink-0">Notes</span>
                           <span
-                            className="flex-1 break-words"
+                            className="flex-1 min-w-0 truncate"
                             style={{
                               fontSize: "11px",
                               lineHeight: 1.2,
@@ -8306,7 +8391,7 @@ export default function ProductionPage({
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="inline-block w-[35mm] font-semibold shrink-0">Customer Name</span>
                       <span
-                        className="flex-1 break-words"
+                        className="flex-1 min-w-0 truncate"
                         style={{
                           fontSize: "11pt",
                           lineHeight: 1.2,
@@ -8321,7 +8406,7 @@ export default function ProductionPage({
                       <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "35mm" }}>WIP</span>
                         <span
-                          className="flex-1 break-words"
+                          className="flex-1 min-w-0 truncate"
                           style={{
                             fontSize: "11pt",
                             lineHeight: 1.2,
@@ -8341,7 +8426,7 @@ export default function ProductionPage({
                     <div className="flex items-baseline gap-[1mm]">
                       <span className="font-semibold shrink-0" style={{ width: "35mm", color: "#9A3A2D" }}>Notes</span>
                       <span
-                        className="flex-1 break-words"
+                        className="flex-1 min-w-0 truncate"
                         style={{
                           fontSize: "11pt",
                           lineHeight: 1.2,
@@ -8574,7 +8659,7 @@ export default function ProductionPage({
                         <div className="flex items-baseline gap-[1mm]">
                           <span className="font-semibold shrink-0" style={{ width: "30mm" }}>WIP</span>
                           <span
-                            className="flex-1 break-words"
+                            className="flex-1 min-w-0 truncate"
                             style={{
                               fontSize: "11pt",
                               lineHeight: 1.2,
@@ -8600,7 +8685,7 @@ export default function ProductionPage({
                       <div className="flex items-baseline gap-[1mm]">
                         <span className="font-semibold shrink-0" style={{ width: "30mm", color: "#9A3A2D" }}>Notes</span>
                         <span
-                          className="flex-1 break-words"
+                          className="flex-1 min-w-0 truncate"
                           style={{
                             fontSize: "11pt",
                             lineHeight: 1.2,

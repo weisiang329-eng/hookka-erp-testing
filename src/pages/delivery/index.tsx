@@ -369,7 +369,11 @@ const ALL_TABS = [
 const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
   pending_dispatch: ["DRAFT"],
   dispatched: ["LOADED", "IN_TRANSIT"],
-  delivered: ["DELIVERED"],
+  // "Delivered" keeps INVOICED rows too (Wei Siang 2026-06-15): once a
+  // delivered DO is converted to an invoice it flips to INVOICED — without
+  // this it vanished from the Delivered tab, losing the delivery record. A
+  // delivered-AND-invoiced DO is still a delivered DO, so it stays here.
+  delivered: ["DELIVERED", "INVOICED"],
 };
 
 // PO-based tabs (show production orders, not delivery orders)
@@ -400,8 +404,8 @@ const PO_SEARCH_KEYS = [
 ];
 
 // Reverse of TAB_DO_STATUSES: which DO tab a given status lives on. Derived
-// from the one map above so the two can never drift apart. INVOICED has no
-// tab (not in TAB_DO_STATUSES) and so never triggers an auto-jump.
+// from the one map above so the two can never drift apart. INVOICED now maps
+// to the "delivered" tab (see above), so searching an invoiced DO jumps there.
 const TAB_FOR_STATUS: Partial<Record<DOStatus, string>> = (() => {
   const m: Partial<Record<DOStatus, string>> = {};
   for (const [tab, statuses] of Object.entries(TAB_DO_STATUSES)) {
@@ -1974,7 +1978,9 @@ export default function DeliveryPage() {
       // return 0 and the card would silently misreport the dashboard.
       dispatched: byStatus.LOADED ?? 0,
       inTransit: byStatus.IN_TRANSIT ?? 0,
-      delivered: byStatus.DELIVERED ?? 0,
+      // Delivered count = DELIVERED + INVOICED so the badge matches the tab
+      // list (which now keeps invoiced DOs — see TAB_DO_STATUSES).
+      delivered: (byStatus.DELIVERED ?? 0) + (byStatus.INVOICED ?? 0),
     };
   }, [doStatsRaw]);
   // Wei Siang 2026-05-16: RM value per DO-status bucket so the tab
@@ -1985,7 +1991,7 @@ export default function DeliveryPage() {
       draft: v.DRAFT ?? 0,
       dispatched: v.LOADED ?? 0,
       inTransit: v.IN_TRANSIT ?? 0,
-      delivered: v.DELIVERED ?? 0,
+      delivered: (v.DELIVERED ?? 0) + (v.INVOICED ?? 0),
     };
   }, [doStatsRaw]);
   const pendingDispatchCount = uniqueDOsByStatus.draft;
@@ -2733,7 +2739,9 @@ export default function DeliveryPage() {
           const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
           return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
         },
-        expect: { status: "DELIVERED" },
+        // DELIVERED auto-creates the invoice and bumps the DO straight to
+        // INVOICED — both are a successful delivery, so accept either.
+        expect: { status: ["DELIVERED", "INVOICED"] },
       });
       if (result.ok) {
         // Invoice notice (fire-and-forget) — the DELIVERED cascade just
@@ -3714,7 +3722,7 @@ export default function DeliveryPage() {
         // Distinct SO numbers from items[]. A DO can span multiple SOs
         // (e.g. one truck trip consolidating SO-2604-326 + SO-2604-328);
         // shown comma-separated.
-        render: (_value, row) => {
+        render: (_value, row, _index, highlight) => {
           const sos = Array.from(
             new Set(
               (row.items || [])
@@ -3723,9 +3731,9 @@ export default function DeliveryPage() {
             )
           );
           if (sos.length === 0) {
-            return <span className="text-[#9CA3AF]">{row.salesOrderId || "-"}</span>;
+            return <span className="text-[#9CA3AF]">{highlight(row.salesOrderId || "-")}</span>;
           }
-          return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
+          return <span className="text-[#1F1D1B]">{highlight(sos.join(", "))}</span>;
         },
       },
       // Customer-side reference numbers (operator request 2026-05-19) — the
@@ -3742,8 +3750,8 @@ export default function DeliveryPage() {
         type: "text",
         width: "150px",
         sortable: true,
-        render: (_value, row) => row.customerPOId
-          ? <span className="text-[#1F1D1B]">{row.customerPOId}</span>
+        render: (_value, row, _index, highlight) => row.customerPOId
+          ? <span className="text-[#1F1D1B]">{highlight(row.customerPOId)}</span>
           : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
@@ -3752,8 +3760,8 @@ export default function DeliveryPage() {
         type: "text",
         width: "130px",
         sortable: true,
-        render: (_value, row) => row.customerRef
-          ? <span className="text-[#1F1D1B]">{row.customerRef}</span>
+        render: (_value, row, _index, highlight) => row.customerRef
+          ? <span className="text-[#1F1D1B]">{highlight(row.customerRef)}</span>
           : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {
@@ -3762,8 +3770,8 @@ export default function DeliveryPage() {
         type: "text",
         width: "150px",
         sortable: true,
-        render: (_value, row) => row.customerSO
-          ? <span className="text-[#1F1D1B]">{row.customerSO}</span>
+        render: (_value, row, _index, highlight) => row.customerSO
+          ? <span className="text-[#1F1D1B]">{highlight(row.customerSO)}</span>
           : <span className="text-[#9CA3AF]">{"—"}</span>,
       },
       {

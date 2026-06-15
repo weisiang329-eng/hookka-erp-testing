@@ -2371,11 +2371,19 @@ app.post("/:id/confirm", async (c) => {
     }
   }
 
-  // Customer PO uniqueness (BR-SO-010)
-  if (existing.customerPOId) {
+  // Customer PO uniqueness (BR-SO-010). SERVICE ORDERS ARE EXEMPT (Wei Siang
+  // 2026-06-15): a service order (rework/repair) reuses the ORIGINAL order's
+  // customer PO by design, so the original SO and any number of service orders
+  // spawned from the same case legitimately share one customer PO. Without
+  // this exemption a 2nd service order on the same case could never be
+  // confirmed ("Customer PO … already exists on SV-…"). So: skip the check
+  // when confirming a service order, AND exclude service orders from the dup
+  // lookup so a service order never blocks a normal sales order either.
+  if (existing.customerPOId && !existing.isServiceOrder) {
     const dup = await c.var.DB.prepare(
       `SELECT id, companySOId FROM sales_orders
          WHERE id != ? AND customerPOId = ? AND customerId = ? AND status != 'CANCELLED'
+           AND (isServiceOrder IS NULL OR isServiceOrder = false)
          LIMIT 1`,
     )
       .bind(id, existing.customerPOId, existing.customerId)

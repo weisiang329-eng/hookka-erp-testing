@@ -112,6 +112,13 @@ type DeliveryOrderRow = {
   proofOfDelivery: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  // Runtime-added flag (ensureDeliveryIncompleteColumn). 1 = the goods were
+  // physically delivered but the paperwork was incomplete (e.g. damaged
+  // items returning to the office), so the auto-invoice is WITHHELD until an
+  // operator resolves it. Lowercase snake_case so the unquoted-identifier
+  // fold can't split read/write keys. Absent (undefined) on rows read before
+  // the ALTER lands → treated as 0.
+  delivery_incomplete?: number | null;
 };
 
 type DeliveryOrderItemRow = {
@@ -177,7 +184,9 @@ function rowToItem(
 // to surface the hub's state on each row even when delivery_orders.customerState
 // is NULL (operator created the DO without typing a state but did pick a hub).
 // Frontend prefers hubState over customerState in the State column fallback chain.
-async function loadHubStateMap(
+// Exported so the public DO-QR edit flow can resolve a DO's state the same way
+// the office "Available Production Orders" picker does (same-state gate).
+export async function loadHubStateMap(
   db: D1Database,
   hubIds: Array<string | null | undefined>,
 ): Promise<Map<string, string>> {
@@ -231,8 +240,9 @@ async function loadDoInvoiceMap(
 }
 
 // Loads { productCode → unitM3 } for the given codes. Used by every DO
-// read path so legacy items (itemM3=0) get backfilled on the fly.
-async function loadProductM3Map(
+// read path so legacy items (itemM3=0) get backfilled on the fly. Exported
+// so the public DO-QR edit flow can backfill itemM3 on its addable POs too.
+export async function loadProductM3Map(
   db: D1Database,
   productCodes: Array<string | null | undefined>,
 ): Promise<Map<string, number>> {
@@ -325,6 +335,10 @@ function rowToOrder(
     signedAt: row.signedAt,
     signedByWorkerId: row.signedByWorkerId,
     signedByWorkerName: row.signedByWorkerName ?? undefined,
+    // Delivered-with-issues flag — drives the "invoice on hold" banner on the
+    // DO detail page and blocks the Convert-to-Invoice / manual-invoice paths
+    // until an operator resolves it. Folded-lowercase runtime column.
+    deliveryIncomplete: !!Number(row.delivery_incomplete),
   };
   if (pod) base.proofOfDelivery = pod;
   return base;
@@ -647,6 +661,10 @@ async function buildDoDeliveredSoAndInvoice(
   // created AND posted/SENT in the same batch, Wei Siang 2026-06-03).
   orgId: string,
   actorUserId: string | null,
+  // delivered-with-issues: still cascade the SO/fg_units/COGS to DELIVERED,
+  // but WITHHOLD the invoice (+ the SO→INVOICED and DO→INVOICED bumps) until
+  // an operator resolves it. Default false → every existing caller unchanged.
+  incomplete = false,
 ): Promise<{
   statements: D1PreparedStatement[];
   rebuildInvoiceInsert: ((no: string) => D1PreparedStatement) | null;
@@ -664,13 +682,33 @@ async function buildDoDeliveredSoAndInvoice(
 
   const soIds = await resolveDoSalesOrderIds(db, doRow.id, doRow.salesOrderId);
 
+  // SOs that should end at INVOICED once the invoice is created. Superset of
+  // soAdvanced: also includes SOs ALREADY at DELIVERED (this DO was delivered
+  // "with issues" earlier and is now being resolved, or another DO already
+  // delivered the shared SO). Excludes only the truly terminal-for-billing
+  // states (INVOICED / CLOSED / CANCELLED). Without this the resolve path —
+  // where every linked SO is already DELIVERED — would create the invoice but
+  // leave the SOs stranded at DELIVERED.
+  const soBillable: string[] = [];
+
   // 1. Advance every linked SO to DELIVERED (skip terminal/cancelled).
   for (const soId of soIds) {
     const soRow = await db
       .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
       .bind(soId)
       .first<{ id: string; status: string }>();
-    if (!soRow || SO_TERMINAL_FOR_DELIVERED.has(soRow.status)) continue;
+    if (!soRow) continue;
+    // Already billed or dead — never touch (also keeps it out of soBillable).
+    if (
+      soRow.status === "INVOICED" ||
+      soRow.status === "CLOSED" ||
+      soRow.status === "CANCELLED"
+    )
+      continue;
+    soBillable.push(soId);
+    // Only advance + write the audit row when it isn't DELIVERED yet — an
+    // already-DELIVERED SO (resolve case) is billable but needs no re-stamp.
+    if (SO_TERMINAL_FOR_DELIVERED.has(soRow.status)) continue;
     soAdvanced.push(soId);
     statements.push(
       db
@@ -703,7 +741,7 @@ async function buildDoDeliveredSoAndInvoice(
     .bind(doRow.id)
     .first<{ id: string }>();
 
-  if (!existingInvoice && soIds.length > 0) {
+  if (!existingInvoice && soIds.length > 0 && !incomplete) {
     const { invItems, computedTotal } = await computeDoInvoiceLines(
       db,
       doRow.id,
@@ -853,8 +891,9 @@ async function buildDoDeliveredSoAndInvoice(
     );
     statements.push(...ledgerStmts);
     // SOs were advanced to DELIVERED above; now that they're billed, bump to
-    // INVOICED (matches the manual post's SO cascade).
-    for (const sid of soAdvanced) {
+    // INVOICED (matches the manual post's SO cascade). soBillable, not
+    // soAdvanced, so the resolve path (SOs already DELIVERED) bills them too.
+    for (const sid of soBillable) {
       statements.push(
         db
           .prepare(
@@ -2393,7 +2432,10 @@ type DoCreateOutcome =
 // to live-deriving the hub from the source order. The hubId SELECT is
 // try/catch'd because the column self-applies on first service-order POST —
 // DO creation must keep working on isolates where it hasn't landed yet.
-async function loadServiceOrderHubMeta(
+// Exported so the public DO-QR edit flow can resolve a service-order PO's
+// customer + hub the same canonical way (production_orders has no customerId
+// column — customer is derived from the SO / service order).
+export async function loadServiceOrderHubMeta(
   db: D1Database,
   serviceOrderIds: string[],
 ): Promise<
@@ -4387,6 +4429,38 @@ function ensureNotifyEmailColumns(db: D1Database): Promise<void> {
   return notifyEmailColumns;
 }
 
+// ---------------------------------------------------------------------------
+// delivery_incomplete (2026-06-14) — the "delivered with issues" flag for the
+// QR deliver flow. 2nd scan offers two outcomes: complete (→ auto-invoice +
+// notice, the existing path) or "with issues" (goods delivered but paperwork
+// incomplete — e.g. damaged units returning to the office). The latter still
+// cascades the SO/fg_units/COGS to DELIVERED but WITHHOLDS the invoice +
+// customer notice until an operator resolves it (POST /:id/resolve-incomplete).
+//
+// INTEGER 0/1 (codebase precedent for boolean flags, e.g. po_scan_samples.
+// isGold), NOT NULL DEFAULT 0 so every pre-existing DO reads as "complete" and
+// not one current flow changes. Runtime self-applied (no manual migration),
+// same idempotent IF-NOT-EXISTS pattern as ensureNotifyEmailColumns. Exported
+// so invoices.ts (manual-invoice gate) and public-do-qr.ts (scan summary) can
+// guarantee the column exists before their own SELECTs read it.
+// ---------------------------------------------------------------------------
+let deliveryIncompleteColumn: Promise<void> | null = null;
+export function ensureDeliveryIncompleteColumn(db: D1Database): Promise<void> {
+  if (deliveryIncompleteColumn) return deliveryIncompleteColumn;
+  deliveryIncompleteColumn = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE delivery_orders ADD COLUMN IF NOT EXISTS delivery_incomplete INTEGER NOT NULL DEFAULT 0",
+        )
+        .run();
+    } catch {
+      // ignore — column may already exist or DDL transiently rejected
+    }
+  })();
+  return deliveryIncompleteColumn;
+}
+
 // Uint8Array → base64 (chunked so a multi-page PDF doesn't blow the arg
 // limit of String.fromCharCode). Workers runtime has btoa built in.
 function bytesToBase64(bytes: Uint8Array): string {
@@ -4412,6 +4486,169 @@ app.post("/:id/notify-customer", async (c) => {
     customerPOIds?: string[];
   };
   return queueDoCustomerNotice(c, id, body);
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/delivery-orders/:id/resolve-incomplete — clear the
+// "delivered with issues" flag and create the invoice that was withheld.
+//
+// A DO delivered "with issues" (2nd QR scan, or the office equivalent) sits at
+// DELIVERED with delivery_incomplete = 1 and NO invoice. Once the operator has
+// sorted the paperwork they call this to (a) clear the flag and (b) run the
+// EXACT same buildDoDeliveredSoAndInvoice cascade a complete delivery would
+// have — combined invoice across every linked SO, SO→INVOICED, DO→INVOICED,
+// ledger post, A/R — with the same invoice-number-collision retry as the PUT
+// path. Then it best-effort queues the SAME customer invoice notice. Nothing
+// is reimplemented; the only delta vs a normal delivery is the timing.
+// ---------------------------------------------------------------------------
+app.post("/:id/resolve-incomplete", async (c) => {
+  // Same gate as the delivery transition that set the flag.
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  try {
+    await ensureDeliveryIncompleteColumn(c.var.DB);
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM delivery_orders WHERE id = ?",
+    )
+      .bind(id)
+      .first<DeliveryOrderRow>();
+    if (!existing) {
+      return c.json(
+        { success: false, error: "Delivery order not found" },
+        404,
+      );
+    }
+    if (Number(existing.delivery_incomplete) !== 1) {
+      return c.json(
+        {
+          success: false,
+          error: "This delivery is not marked as delivered-with-issues.",
+        },
+        409,
+      );
+    }
+    // The flag only ever rides a DELIVERED DO; guard anyway so a stray state
+    // can't slip an INVOICED/CANCELLED row through the cascade.
+    if (existing.status !== "DELIVERED") {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot resolve: delivery order is "${existing.status}", expected DELIVERED.`,
+        },
+        409,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const orgId = getOrgId(c);
+    const actorUserId =
+      (c as unknown as { get: (k: string) => string | undefined }).get(
+        "userId",
+      ) ?? null;
+
+    // Clear the flag FIRST in the batch; the cascade's DO→INVOICED update (if
+    // any) lands after and leaves delivery_incomplete = 0 untouched.
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        "UPDATE delivery_orders SET delivery_incomplete = 0, updated_at = ? WHERE id = ?",
+      ).bind(now, id),
+    ];
+
+    // incomplete = false → create the withheld invoice + bill the SOs.
+    const dc = await buildDoDeliveredSoAndInvoice(
+      c.var.DB,
+      existing,
+      now,
+      orgId,
+      actorUserId,
+      false,
+    );
+    let invoiceStmtIdx = -1;
+    let rebuildInvoiceInsert: ((no: string) => D1PreparedStatement) | null =
+      null;
+    if (dc.statements.length > 0) {
+      const base = statements.length;
+      statements.push(...dc.statements);
+      if (dc.invoiceStmtIdx >= 0 && dc.rebuildInvoiceInsert) {
+        invoiceStmtIdx = base + dc.invoiceStmtIdx;
+        rebuildInvoiceInsert = dc.rebuildInvoiceInsert;
+      }
+    }
+
+    // Same invoice-number-collision retry as the live PUT path.
+    {
+      let attempt = 0;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          await c.var.DB.batch(statements);
+          break;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isInvoiceDup =
+            /ux_invoices_invoice_no|invoices_invoice_no|duplicate key/i.test(
+              msg,
+            );
+          if (
+            isInvoiceDup &&
+            rebuildInvoiceInsert &&
+            invoiceStmtIdx >= 0 &&
+            attempt < 5
+          ) {
+            attempt++;
+            statements[invoiceStmtIdx] = rebuildInvoiceInsert(
+              await nextInvoiceNo(c.var.DB),
+            );
+            continue;
+          }
+          throw e;
+        }
+      }
+    }
+
+    // Best-effort customer invoice notice — same one the complete path sends.
+    // Idempotent (deliveredEmailAt claim) and never blocks the resolve.
+    if (dc.createdInvoice) {
+      try {
+        const noticeRes = await queueDoCustomerNotice(c, id, {
+          kind: "DELIVERED",
+        });
+        await noticeRes.json().catch(() => undefined);
+      } catch (noticeErr) {
+        console.warn(
+          `[resolve-incomplete] ${existing.doNo}: invoice notice failed:`,
+          noticeErr instanceof Error ? noticeErr.message : noticeErr,
+        );
+      }
+    }
+
+    await emitAudit(c, {
+      resource: "delivery-orders",
+      resourceId: id,
+      action: "update",
+      before: { status: "DELIVERED", deliveryIncomplete: true },
+      after: {
+        status: dc.createdInvoice ? "INVOICED" : "DELIVERED",
+        deliveryIncomplete: false,
+      },
+    });
+
+    const updated = await fetchOrderWithItems(c.var.DB, id);
+    return c.json({
+      success: true,
+      data: updated,
+      createdInvoice: dc.createdInvoice,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/delivery-orders/:id/resolve-incomplete] failed:", msg);
+    return c.json(
+      { success: false, error: msg || "Failed to resolve delivery" },
+      500,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -4860,6 +5097,10 @@ export async function applyDeliveryOrderUpdate(
   body: Record<string, any>,
 ): Promise<Response> {
   try {
+    // Guarantee the delivered-with-issues column exists before SELECT * reads
+    // it (the office PUT and the public QR scan both land here). Cached promise
+    // → the ALTER runs at most once per worker; later calls are a no-op await.
+    await ensureDeliveryIncompleteColumn(c.var.DB);
     const existing = await c.var.DB.prepare(
       "SELECT * FROM delivery_orders WHERE id = ?",
     )
@@ -4889,11 +5130,19 @@ export async function applyDeliveryOrderUpdate(
     }
     const now = new Date().toISOString();
 
+    // delivered-with-issues request (2nd QR scan "Delivered with issues", or
+    // the office equivalent). Only meaningful on a →DELIVERED transition.
+    const wantIncomplete =
+      body.deliveryIncomplete === true || body.deliveryIncomplete === 1;
+    const wasIncomplete = Number(existing.delivery_incomplete) === 1;
+
     // --- status transition validation (same rules as mock-data) ---
     let nextStatus: string = existing.status;
     let nextDispatchedAt: string | null = existing.dispatchedAt;
     let nextDeliveredAt: string | null = existing.deliveredAt;
     let nextOverdue: string | null = existing.overdue;
+    // Carry the flag forward untouched unless a →DELIVERED transition sets it.
+    let nextDeliveryIncomplete = wasIncomplete ? 1 : 0;
 
     if (body.status && body.status !== existing.status) {
       const allowed = VALID_TRANSITIONS[existing.status];
@@ -4904,6 +5153,21 @@ export async function applyDeliveryOrderUpdate(
             error: `Invalid status transition: ${existing.status} → ${body.status}. Allowed transitions from ${existing.status}: ${allowed?.join(", ") || "none"}`,
           },
           400,
+        );
+      }
+      // Hard gate: a DO delivered "with issues" cannot be invoiced until the
+      // paperwork is resolved (POST /:id/resolve-incomplete clears the flag and
+      // creates the withheld invoice). Blocks the "Convert to Invoice" button
+      // (DELIVERED → INVOICED is a bare status flip that does NOT create an
+      // invoice row) from finalising an unbilled DO.
+      if (body.status === "INVOICED" && wasIncomplete) {
+        return c.json(
+          {
+            success: false,
+            error:
+              "This delivery was marked DELIVERED WITH ISSUES — resolve the paperwork (Mark documents complete) before it can be invoiced.",
+          },
+          409,
         );
       }
       nextStatus = body.status;
@@ -4917,8 +5181,10 @@ export async function applyDeliveryOrderUpdate(
           body.proofOfDelivery?.deliveredAt ?? existing.deliveredAt ?? now;
         nextDeliveredAt = podAt;
         nextOverdue = "COMPLETED";
-        // FIFO FG_DELIVERED COGS is emitted inside the cascadedToDelivered
-        // block below so it rides the same atomic batch as the UPDATE.
+        // Stamp the flag from THIS delivery's outcome (complete clears it,
+        // with-issues sets it). FIFO FG_DELIVERED COGS is emitted inside the
+        // cascadedToDelivered block below so it rides the same atomic batch.
+        nextDeliveryIncomplete = wantIncomplete ? 1 : 0;
       }
       if (nextStatus === "INVOICED") {
         nextOverdue = "INVOICED";
@@ -5208,7 +5474,7 @@ export async function applyDeliveryOrderUpdate(
            remarks = ?, dropPoints = ?, deliveryCostSen = ?, lorryId = ?,
            lorryName = ?, status = ?, overdue = ?, dispatchedAt = ?,
            deliveredAt = ?, proofOfDelivery = ?, totalM3 = ?, totalItems = ?,
-           updated_at = ?
+           delivery_incomplete = ?, updated_at = ?
          WHERE id = ?`,
       ).bind(
         merged.deliveryDate,
@@ -5240,6 +5506,7 @@ export async function applyDeliveryOrderUpdate(
         nextProofOfDelivery,
         nextTotalM3,
         nextTotalItems,
+        nextDeliveryIncomplete,
         now,
         id,
       ),
@@ -5615,6 +5882,8 @@ export async function applyDeliveryOrderUpdate(
           now,
           cascadeOrgId,
           cascadeActorUserId,
+          // Delivered with issues → withhold the invoice (SO/COGS still cascade).
+          nextDeliveryIncomplete === 1,
         );
         if (dc.statements.length > 0) {
           const base = statements.length;

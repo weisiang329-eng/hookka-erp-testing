@@ -166,6 +166,14 @@ export function resolveWipTokens(
     .replace(/\{TOTAL_HEIGHT\}/g, totalStr)
     .replace(/\{SEAT_SIZE\}/g, ctx.sizeCode || "")
     .replace(/\s+/g, " ")
+    // Collapse a size suffix that ended up duplicated because a BOM label
+    // template carried BOTH the variant code (which already includes the
+    // size, e.g. "1030-(Q)") AND a {SIZE} token — yielding "1030-(Q)(Q)-HB20"
+    // or "DIVAN-(K)(K)". Only an IMMEDIATELY-repeated, identical parenthesised
+    // group is collapsed, so legitimate labels are untouched. Display-only:
+    // the wipKey uses the RAW template (deriveTopLevelWipKey), so grouping /
+    // matching are unaffected.
+    .replace(/(\([^()]+\))\1+/g, "$1")
     .trim();
 }
 

@@ -748,10 +748,25 @@ export function CreateServiceCaseModal({
         ? `/api/sales-orders/${sourceId}`
         : `/api/consignment-orders/${sourceId}`;
   const { data: sourceDetail, loading: sourceItemsLoading } = useCachedJson<SourceOrderDetailApi>(sourceDetailUrl);
-  const sourceItems: SourceOrderItemApi[] = useMemo(
-    () => sourceDetail?.data?.items ?? [],
-    [sourceDetail],
-  );
+  const sourceItems: SourceOrderItemApi[] = useMemo(() => {
+    const raw = sourceDetail?.data?.items ?? [];
+    // De-dup by product so the SAME product on two order lines shows as ONE
+    // pickable card. Affected products are tracked per-product, so two cards
+    // shared one selection and ticked together (Wei Siang 2026-06-15: "一点上面
+    // 下面也跟着 tick"). Sum the quantities so the card reflects the total
+    // ordered. Items without a productId stay separate (keyed by line id).
+    const byProduct = new Map<string, SourceOrderItemApi>();
+    for (const it of raw) {
+      const key = it.productId || it.id;
+      const existing = byProduct.get(key);
+      if (existing) {
+        existing.quantity = (existing.quantity ?? 0) + (it.quantity ?? 0);
+      } else {
+        byProduct.set(key, { ...it });
+      }
+    }
+    return [...byProduct.values()];
+  }, [sourceDetail]);
 
   // Search-then-pick — empty query shows nothing (avoids dropdown of all
   // customers). Filtered by code OR name. Results capped at 10.
@@ -1443,7 +1458,10 @@ function DamagedPartsPicker({
         ? picks.filter((p) => p.key !== opt.key)
         : [
             ...picks,
-            { key: opt.key, label: opt.label, qty: Math.max(1, Math.floor(opt.qty) || 1) },
+            // Default to 1 damaged piece, not the full BOM count (Wei Siang
+            // 2026-06-15: "为什么一点就两个" — usually only one is damaged).
+            // The operator bumps it up to the /N max if more are broken.
+            { key: opt.key, label: opt.label, qty: 1 },
           ],
     );
   };

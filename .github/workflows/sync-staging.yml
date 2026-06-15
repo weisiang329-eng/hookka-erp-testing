@@ -141,3 +141,30 @@ jobs:
           psql "$PROD_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"
           echo "=== Staging row counts ==="
           psql "$STAGING_URL" -c "SELECT (SELECT COUNT(*) FROM job_cards) AS jc, (SELECT COUNT(*) FROM audit_events) AS audit, (SELECT MAX(applied_at) FROM _migrations) AS latest_migration;"
+
+      # Staging is a TEST environment — after cloning prod, set every worker's
+      # phone-portal PIN to the shared test value 123456 so the owner / test
+      # team can log into /worker/login with any empNo + 123456 (owner request
+      # 2026-06-14). Staging-only (uses STAGING_DATABASE_URL). worker_pins stores
+      # an UNSALTED SHA-256 hex of the PIN (see src/api/lib/auth-utils.ts
+      # hashPin); we compute it in-shell so there's no pgcrypto dependency.
+      # must_reset=false so the 6-digit force-reset gate (migration 0079) doesn't
+      # block login. Raw psql bypasses the camelCase→snake_case adapter, so the
+      # real snake_case columns are used (worker_id / pin / updated_at).
+      - name: Set all staging worker PINs to the shared test value (123456)
+        env:
+          STAGING_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          PGCONNECT_TIMEOUT: '30'
+        run: |
+          HASH=$(printf '123456' | sha256sum | cut -d' ' -f1)
+          echo "SHA-256(123456) = $HASH"
+          psql "$STAGING_URL" -v ON_ERROR_STOP=1 -v pinhash="$HASH" <<'SQL'
+            INSERT INTO worker_pins (worker_id, pin, updated_at, must_reset)
+            SELECT id, :'pinhash', now()::text, false FROM workers
+            ON CONFLICT (worker_id) DO UPDATE
+              SET pin = EXCLUDED.pin, updated_at = EXCLUDED.updated_at, must_reset = false;
+          SQL
+          echo "=== worker_pins rows now (= every worker, PIN 123456): ==="
+          psql "$STAGING_URL" -c "SELECT COUNT(*) AS pins FROM worker_pins;"
+          echo "=== sample ACTIVE empNos to log in with (PIN 123456): ==="
+          psql "$STAGING_URL" -c "SELECT emp_no, name, department_code FROM workers WHERE status = 'ACTIVE' ORDER BY emp_no LIMIT 10;"

@@ -989,10 +989,15 @@ app.post("/", async (c) => {
     // PR 5 (2026-05-20) — pull the full customer-contact block from the
     // source DO so invoice PDF stops showing "Address: KL" and
     // "Contact: -" (BUG-2026-05-20-009, Agent B Tier 1 findings B1/B2/B3).
+    // Guarantee the delivered-with-issues column exists before we read it
+    // (call-time import — same cycle-avoidance the line-pricing import below
+    // uses; delivery-orders already imports nextInvoiceNo from here).
+    const { ensureDeliveryIncompleteColumn } = await import("./delivery-orders");
+    await ensureDeliveryIncompleteColumn(c.var.DB);
     const doRow = await c.var.DB.prepare(
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
               customerState, deliveryAddress, contactPerson, contactPhone,
-              customerPOId, hubId, hubName, status
+              customerPOId, hubId, hubName, status, delivery_incomplete
          FROM delivery_orders WHERE id = ?`,
     )
       .bind(deliveryOrderId)
@@ -1011,6 +1016,7 @@ app.post("/", async (c) => {
         hubId: string | null;
         hubName: string | null;
         status: string;
+        delivery_incomplete: number | null;
       }>();
     if (!doRow) {
       return c.json(
@@ -1025,6 +1031,20 @@ app.post("/", async (c) => {
           error: `Cannot create invoice: Delivery Order is "${doRow.status}". Only DELIVERED delivery orders can be invoiced.`,
         },
         400,
+      );
+    }
+    // Delivered-with-issues hold: the goods arrived but the paperwork was
+    // incomplete, so billing is withheld until an operator resolves it
+    // (POST /api/delivery-orders/:id/resolve-incomplete, which itself creates
+    // the invoice). Mirrors the same block in the PUT "Convert to Invoice".
+    if (Number(doRow.delivery_incomplete) === 1) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "This delivery was marked DELIVERED WITH ISSUES — resolve the paperwork (Mark documents complete) before it can be invoiced.",
+        },
+        409,
       );
     }
 

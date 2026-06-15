@@ -353,6 +353,21 @@ const dict: Dict = {
     zh: '已达上限 —— 这件已经完成(两个 PIC 都做了)。',
     my: 'ဤကတ်တွင် PIC နှစ်နေရာလုံး ပြည့်နေပြီ။',
   },
+  // By-whom line on the ✓ / already-full card — names of the 1 or 2 people on
+  // the PIC slots (Wei Siang 2026-06-15: a shared scan must say BY WHOM).
+  'scan.completedBy': {
+    en: 'By: {who}',
+    ms: 'Oleh: {who}',
+    zh: '完成人:{who}',
+    my: 'ပြီးစီးသူ — {who}',
+  },
+  // Both places of the worker's section are taken by 2 OTHER people.
+  'scan.sectionFull': {
+    en: '{dept} already has 2 people.',
+    ms: '{dept} sudah ada 2 orang.',
+    zh: '{dept} 已经满了(2 人)。',
+    my: '{dept} တွင် လူ ၂ ဦး ပြည့်နေပြီ။',
+  },
   'scan.start': { en: 'Start', ms: 'Mula', zh: '开始', my: 'စတင်ရန်' },
   'scan.pause': { en: 'Pause', ms: 'Jeda', zh: '暂停', my: 'ခဏရပ်ရန်' },
   'scan.complete': { en: 'Complete', ms: 'Siap', zh: '完成', my: 'ပြီးပါပြီ' },

@@ -44,7 +44,17 @@ import { ensureQrTokenColumns } from "../lib/do-qr-token";
 import {
   applyDeliveryOrderUpdate,
   queueDoCustomerNotice,
+  ensureDeliveryIncompleteColumn,
+  loadProductM3Map,
+  loadHubStateMap,
+  loadServiceOrderHubMeta,
 } from "./delivery-orders";
+import {
+  poReadyForDelivery,
+  type PipelineJobCard,
+  type PipelinePO,
+} from "../../lib/delivery-pipeline";
+import { resolveStateCode } from "../../lib/malaysia-states";
 
 const app = new Hono<Env>();
 
@@ -71,6 +81,7 @@ type PublicDoRow = {
   status: string;
   totalItems: number | null;
   orgId: string | null;
+  delivery_incomplete: number | null;
 };
 
 // Minimal per-DO summary — the ONLY fields the public page ever sees.
@@ -82,10 +93,13 @@ type PublicDoSummary = {
   status: string;
   itemCount: number;
   productNames: string[];
+  // Delivered "with issues" — goods arrived but paperwork incomplete, invoice
+  // on hold. Lets the scan page badge it instead of plain "Delivered".
+  incomplete: boolean;
 };
 
 const DO_SUMMARY_COLS =
-  "id, doNo, customerName, customerState, hubName, status, totalItems, orgId";
+  "id, doNo, customerName, customerState, hubName, status, totalItems, orgId, delivery_incomplete";
 
 async function summarizeDos(
   db: D1Database,
@@ -124,6 +138,7 @@ async function summarizeDos(
       status: r.status,
       itemCount: slot?.count || Number(r.totalItems) || 0,
       productNames: slot?.names ?? [],
+      incomplete: !!Number(r.delivery_incomplete),
     };
   });
 }
@@ -144,6 +159,7 @@ async function resolveToken(
   | null
 > {
   await ensureQrTokenColumns(db);
+  await ensureDeliveryIncompleteColumn(db);
   const doRow = await db
     .prepare(`SELECT ${DO_SUMMARY_COLS} FROM delivery_orders WHERE qrtoken = ?`)
     .bind(token)
@@ -220,6 +236,352 @@ async function buildSummaryPayload(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Item-edit model (Wei Siang 2026-06-15) — the public scan page can adjust
+// which items ride on the lorry BEFORE dispatch (DRAFT only), "就跟 delivered
+// 一样" (normal-camera scan, no login). To keep the token the ONLY credential
+// while still allowing edits, the SERVER owns the trusted item set: the page
+// may KEEP any of the DO's current items and ADD any production order that is
+// independently deliverable for the SAME customer + hub (ready, not already on
+// another DO). The page sends back only a list of production-order ids; the
+// server rebuilds the items from this trusted model, so a tampered payload can
+// never inject another customer's goods or a wrong volume.
+//
+// Single-DO tokens only (a packing-list token spans many DOs — no item edit).
+// ---------------------------------------------------------------------------
+type EditItem = {
+  productionOrderId: string;
+  poNo: string;
+  productCode: string;
+  productName: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  itemM3: number;
+  rackingNumber: string;
+  packingStatus: string;
+  salesOrderNo: string;
+};
+
+type DoEditModel = {
+  doId: string;
+  doNo: string;
+  status: string;
+  customerName: string;
+  area: string;
+  editable: boolean;
+  items: EditItem[];
+  addable: EditItem[];
+  // Union of production-order ids the page is allowed to dispatch with, each
+  // mapped to its server-built item (current items ∪ addable POs).
+  allowedById: Map<string, EditItem>;
+};
+
+async function loadDoEditModel(
+  db: D1Database,
+  doId: string,
+): Promise<DoEditModel | null> {
+  const doRow = await db
+    .prepare(
+      `SELECT id, doNo, status, customerId, hubId, orgId, customerName,
+              customerState, hubName
+         FROM delivery_orders WHERE id = ?`,
+    )
+    .bind(doId)
+    .first<{
+      id: string;
+      doNo: string;
+      status: string;
+      customerId: string | null;
+      hubId: string | null;
+      orgId: string | null;
+      customerName: string | null;
+      customerState: string | null;
+      hubName: string | null;
+    }>();
+  if (!doRow) return null;
+
+  const area =
+    (doRow.customerState || "").trim() || (doRow.hubName || "").trim() || "";
+  const status = (doRow.status || "").toUpperCase();
+  // Items can only be re-arranged before the lorry leaves (DRAFT). After
+  // dispatch the set is frozen (fg_units already stamped LOADED + STOCK_OUT).
+  const editable = status === "DRAFT";
+
+  // ── Current items on the DO (shown ticked = "on the lorry") ────────────
+  const curRes = await db
+    .prepare(
+      `SELECT productionOrderId, poNo, productCode, productName, sizeLabel,
+              fabricCode, quantity, itemM3, rackingNumber, packingStatus, salesOrderNo
+         FROM delivery_order_items WHERE deliveryOrderId = ?`,
+    )
+    .bind(doId)
+    .all<{
+      productionOrderId: string | null;
+      poNo: string | null;
+      productCode: string | null;
+      productName: string | null;
+      sizeLabel: string | null;
+      fabricCode: string | null;
+      quantity: number | null;
+      itemM3: number | null;
+      rackingNumber: string | null;
+      packingStatus: string | null;
+      salesOrderNo: string | null;
+    }>();
+  const curRows = curRes.results ?? [];
+  const productCodes: Array<string | null> = curRows.map((r) => r.productCode);
+
+  // ── Addable: ready POs for the same customer + state, not yet on any DO ─
+  // Mirrors the office "Available Production Orders" picker: same customer +
+  // same STATE; the one-hub guard in validateDoComposition is the dispatch-time
+  // safety net. IMPORTANT: production_orders has NO customerId column, so the
+  // customer + hub are derived from the PO's sales order (salesOrderId →
+  // sales_orders) or service order (serviceOrderId → service_orders), the same
+  // canonical resolution validateDoComposition uses. (The previous version
+  // filtered on a non-existent production_orders.customerId, which threw → the
+  // "Could not load this delivery for editing" 500.)
+  let addable: EditItem[] = [];
+  if (editable && doRow.customerId && doRow.orgId) {
+    // Candidate POs: non-cancelled, NOT already on a (non-cancelled) DO. The
+    // NOT EXISTS bounds the set to undelivered POs (so this stays light even on
+    // a big org / high-latency DB).
+    const candRes = await db
+      .prepare(
+        `SELECT * FROM production_orders po
+          WHERE po.orgId = ? AND po.status != 'CANCELLED'
+            AND NOT EXISTS (
+              SELECT 1 FROM delivery_order_items di
+              JOIN delivery_orders d ON d.id = di.deliveryOrderId
+              WHERE di.productionOrderId = po.id AND d.status != 'CANCELLED'
+            )`,
+      )
+      .bind(doRow.orgId)
+      .all<Record<string, unknown>>();
+    const cands = candRes.results ?? [];
+
+    if (cands.length > 0) {
+      // Resolve each candidate's customer + hub from its SO / service order.
+      const soIds = [
+        ...new Set(
+          cands.map((r) => String((r.salesOrderId as string) ?? "")).filter(Boolean),
+        ),
+      ];
+      const svcIds = [
+        ...new Set(
+          cands.map((r) => String((r.serviceOrderId as string) ?? "")).filter(Boolean),
+        ),
+      ];
+      const soMeta = new Map<string, { customerId: string | null; hubId: string | null }>();
+      if (soIds.length > 0) {
+        const ph = soIds.map(() => "?").join(",");
+        const soRes = await db
+          .prepare(`SELECT id, customerId, hubId FROM sales_orders WHERE id IN (${ph})`)
+          .bind(...soIds)
+          .all<{ id: string; customerId: string | null; hubId: string | null }>();
+        for (const r of soRes.results ?? []) {
+          soMeta.set(r.id, { customerId: r.customerId, hubId: r.hubId });
+        }
+      }
+      const svcMeta =
+        svcIds.length > 0 ? await loadServiceOrderHubMeta(db, svcIds) : new Map();
+      const custOf = (r: Record<string, unknown>): string | null => {
+        const so = soMeta.get(String((r.salesOrderId as string) ?? ""));
+        if (so?.customerId) return so.customerId;
+        const sv = svcMeta.get(String((r.serviceOrderId as string) ?? ""));
+        return sv?.customerId ?? null;
+      };
+      const hubOf = (r: Record<string, unknown>): string | null => {
+        const so = soMeta.get(String((r.salesOrderId as string) ?? ""));
+        if (so?.hubId) return so.hubId;
+        const sv = svcMeta.get(String((r.serviceOrderId as string) ?? ""));
+        return sv?.hubId ?? null;
+      };
+
+      // Same-customer gate (the real one). Then same-state via the hub.
+      const sameCust = cands.filter((r) => custOf(r) === doRow.customerId);
+      const hubStateMap = await loadHubStateMap(db, [
+        doRow.hubId,
+        ...sameCust.map(hubOf),
+      ]);
+      const doState = resolveStateCode(
+        (doRow.hubId ? hubStateMap.get(doRow.hubId) : null) ||
+          doRow.customerState ||
+          null,
+      );
+      const candAfterState = sameCust.filter((r) => {
+        if (doState === null) return true;
+        const h = hubOf(r);
+        const st = resolveStateCode((h ? hubStateMap.get(h) : null) || null);
+        // Unknown candidate state → keep (validateDoComposition is the
+        // dispatch-time safety net); only drop a KNOWN different state.
+        return st === null || st === doState;
+      });
+      const candIds = candAfterState
+        .map((r) => String((r.id as string) ?? ""))
+        .filter(Boolean);
+
+      if (candIds.length > 0) {
+        const ph = candIds.map(() => "?").join(",");
+        const jcRes = await db
+          .prepare(
+            `SELECT productionOrderId, departmentCode, status, wipType, completedDate
+               FROM job_cards WHERE productionOrderId IN (${ph})`,
+          )
+          .bind(...candIds)
+          .all<{
+            productionOrderId: string | null;
+            departmentCode: string | null;
+            status: string | null;
+            wipType: string | null;
+            completedDate: string | null;
+          }>();
+        const jcByPo = new Map<string, PipelineJobCard[]>();
+        for (const j of jcRes.results ?? []) {
+          if (!j.productionOrderId) continue;
+          const list = jcByPo.get(j.productionOrderId) ?? [];
+          list.push({
+            departmentCode: j.departmentCode ?? "",
+            status: j.status ?? "",
+            completedDate: j.completedDate,
+            wipType: j.wipType ?? "",
+          });
+          jcByPo.set(j.productionOrderId, list);
+        }
+        // The NOT EXISTS already removed on-DO POs, so linkedPOIds is empty.
+        const linkedPOIds = new Set<string>();
+        const readyCands = candAfterState.filter((r) => {
+          const id = String((r.id as string) ?? "");
+          if (!id) return false;
+          const po: PipelinePO = {
+            id,
+            status: String((r.status as string) ?? ""),
+            consignmentOrderId:
+              (r.consignmentOrderId as string) ??
+              (r.consignmentorderid as string) ??
+              undefined,
+            itemCategory: (r.itemCategory as string) ?? undefined,
+            specialOrder: (r.specialOrder as string) ?? undefined,
+            repairScope:
+              (r.repairScope as string) ?? (r.repairscope as string) ?? null,
+            jobCards: jcByPo.get(id) ?? [],
+          };
+          return poReadyForDelivery(po, linkedPOIds);
+        });
+
+        productCodes.push(
+          ...readyCands.map((r) => (r.productCode as string) ?? ""),
+        );
+        addable = readyCands.map((r) => ({
+          productionOrderId: String((r.id as string) ?? ""),
+          poNo: (r.poNo as string) ?? "",
+          productCode: (r.productCode as string) ?? "",
+          productName: (r.productName as string) ?? "",
+          sizeLabel: (r.sizeLabel as string) ?? "",
+          fabricCode: (r.fabricCode as string) ?? "",
+          quantity: Number(r.quantity) || 0,
+          itemM3: 0, // backfilled below once every product code is known
+          rackingNumber: (r.rackingNumber as string) ?? "",
+          packingStatus: "PACKED",
+          salesOrderNo:
+            (r.companySOId as string) ?? (r.companysoid as string) ?? "",
+        }));
+      }
+    }
+  }
+
+  // One product→unitM3 read for both lists (the office read path's helper).
+  const m3Map = await loadProductM3Map(db, productCodes);
+  const items: EditItem[] = curRows.map((r) => ({
+    productionOrderId: r.productionOrderId ?? "",
+    poNo: r.poNo ?? "",
+    productCode: r.productCode ?? "",
+    productName: r.productName ?? "",
+    sizeLabel: r.sizeLabel ?? "",
+    fabricCode: r.fabricCode ?? "",
+    quantity: Number(r.quantity) || 0,
+    itemM3: Number(r.itemM3) || m3Map.get(r.productCode ?? "") || 0,
+    rackingNumber: r.rackingNumber ?? "",
+    packingStatus: r.packingStatus || "PACKED",
+    salesOrderNo: r.salesOrderNo ?? "",
+  }));
+  addable = addable.map((a) => ({ ...a, itemM3: m3Map.get(a.productCode) || 0 }));
+
+  const allowedById = new Map<string, EditItem>();
+  for (const it of items) {
+    if (it.productionOrderId) allowedById.set(it.productionOrderId, it);
+  }
+  for (const a of addable) {
+    if (a.productionOrderId) allowedById.set(a.productionOrderId, a);
+  }
+
+  return {
+    doId: doRow.id,
+    doNo: doRow.doNo,
+    status,
+    customerName: doRow.customerName ?? "",
+    area,
+    editable,
+    items,
+    addable,
+    allowedById,
+  };
+}
+
+// GET /api/public/do-qr/:token/edit — DRAFT-only item editor model. Works for
+// BOTH a single DO scan and a packing-list scan: returns one edit model per
+// member DO (its current items = tick to keep on the lorry, plus the addable
+// ready POs for the same customer + hub = tick to add to this trip). A PL with
+// two DOs returns two entries so the phone can show + edit each (Wei Siang
+// 2026-06-15: "扫 Packing List 也显示对应的 DO 及明细,第二张也显示").
+app.get("/:token/edit", async (c) => {
+  const token = (c.req.param("token") || "").trim();
+  if (!TOKEN_RE.test(token)) return unknownToken(c);
+  try {
+    const resolved = await resolveToken(c.var.DB, token);
+    if (!resolved) return unknownToken(c);
+    if (resolved.dos.length === 0) {
+      return c.json(
+        { success: false, error: "This code has no delivery orders." },
+        409,
+      );
+    }
+    const models = await Promise.all(
+      resolved.dos.map((d) => loadDoEditModel(c.var.DB, d.id)),
+    );
+    const dos = models
+      .filter((m): m is DoEditModel => !!m)
+      .map((m) => ({
+        doId: m.doId,
+        doNo: m.doNo,
+        status: m.status,
+        customerName: m.customerName,
+        area: m.area,
+        editable: m.editable,
+        items: m.items,
+        addable: m.addable,
+      }));
+    if (dos.length === 0) return unknownToken(c);
+    return c.json({
+      success: true,
+      data: {
+        kind: resolved.kind,
+        ...(resolved.kind === "PL" ? { packingNo: resolved.pl.packingNo } : {}),
+        dos,
+      },
+    });
+  } catch (err) {
+    console.error("[GET /api/public/do-qr/:token/edit] failed:", err);
+    return c.json(
+      {
+        success: false,
+        error: "Could not load this delivery for editing. Please try again.",
+      },
+      500,
+    );
+  }
+});
+
 // GET /api/public/do-qr/:token — document summary for the scan page.
 app.get("/:token", async (c) => {
   const token = (c.req.param("token") || "").trim();
@@ -273,7 +635,16 @@ app.post("/:token/advance", async (c) => {
   const token = (c.req.param("token") || "").trim();
   if (!TOKEN_RE.test(token)) return unknownToken(c);
 
-  const body = (await c.req.json().catch(() => ({}))) as { action?: string };
+  const body = (await c.req.json().catch(() => ({}))) as {
+    action?: string;
+    incomplete?: boolean;
+    // Optional edited item set for a DISPATCH — "adjust what's on the lorry,
+    // then dispatch". `edits` maps each DO id to the production-order ids that
+    // ride the lorry (works for a single DO or every DO under a packing list).
+    // `poIds` is the single-DO shorthand kept for backward-compat.
+    edits?: unknown;
+    poIds?: unknown;
+  };
   const action =
     body.action === "DISPATCH" || body.action === "DELIVER"
       ? body.action
@@ -284,6 +655,10 @@ app.post("/:token/advance", async (c) => {
       400,
     );
   }
+  // "Delivered with issues" — only meaningful on the deliver step. Goods are
+  // marked delivered (SO/fg_units/COGS cascade) but the invoice + customer
+  // notice are WITHHELD until the office resolves the paperwork.
+  const incomplete = action === "DELIVER" && body.incomplete === true;
 
   try {
     const resolved = await resolveToken(c.var.DB, token);
@@ -295,10 +670,97 @@ app.post("/:token/advance", async (c) => {
       );
     }
 
+    // Edited dispatch: the page sends, per DO, the production-order ids that
+    // ride the lorry. Rebuild the items from the SERVER's trusted edit model
+    // (current items ∪ same-customer/hub ready POs) so a tampered payload can
+    // never inject another customer's goods or a wrong volume. Works for a
+    // single DO (`poIds` shorthand) or every DO under a packing list (`edits`
+    // map). Ignored for DELIVER. In edit mode only the DOs the user kept items
+    // on are dispatched — a DO fully unticked is left DRAFT for the next trip.
+    let editsByDo: Map<string, EditItem[]> | null = null;
+    if (action === "DISPATCH") {
+      const editsInput: Record<string, unknown> | null =
+        body.edits && typeof body.edits === "object" && !Array.isArray(body.edits)
+          ? (body.edits as Record<string, unknown>)
+          : Array.isArray(body.poIds) && resolved.dos.length === 1
+            ? { [resolved.dos[0].id]: body.poIds }
+            : null;
+      if (editsInput) {
+        editsByDo = new Map();
+        for (const [doId, rawIds] of Object.entries(editsInput)) {
+          if (!resolved.dos.some((d) => d.id === doId)) {
+            return c.json(
+              {
+                success: false,
+                error: "An edited delivery order is not on this code.",
+              },
+              400,
+            );
+          }
+          const model = await loadDoEditModel(c.var.DB, doId);
+          if (!model) return unknownToken(c);
+          if (!model.editable) {
+            return c.json(
+              {
+                success: false,
+                error:
+                  "This delivery can no longer be edited (already dispatched).",
+              },
+              409,
+            );
+          }
+          const requested = [
+            ...new Set(
+              (Array.isArray(rawIds) ? rawIds : [])
+                .map((x) => (typeof x === "string" ? x : ""))
+                .filter(Boolean),
+            ),
+          ];
+          if (requested.length === 0) {
+            return c.json(
+              {
+                success: false,
+                error: `Pick at least one item to dispatch for ${model.doNo}.`,
+              },
+              400,
+            );
+          }
+          const built: EditItem[] = [];
+          for (const poId of requested) {
+            const it = model.allowedById.get(poId);
+            if (!it) {
+              return c.json(
+                {
+                  success: false,
+                  error:
+                    "One of the chosen items is no longer available. Please reload and try again.",
+                },
+                409,
+              );
+            }
+            built.push(it);
+          }
+          editsByDo.set(doId, built);
+        }
+      }
+    }
+
     const step = STEP[action];
     const results: AdvanceResult[] = [];
     for (const d of resolved.dos) {
       const from = (d.status || "").toUpperCase();
+      // Edit mode: only dispatch the DOs the user kept items on. A DRAFT DO not
+      // in the edits map (everything unticked) is intentionally held for a
+      // later trip — skip it instead of dispatching its original contents.
+      if (editsByDo && !editsByDo.has(d.id) && from === "DRAFT") {
+        results.push({
+          doNo: d.doNo,
+          outcome: "SKIPPED",
+          from,
+          note: "Not loaded this trip",
+        });
+        continue;
+      }
       if (step.past.includes(from)) {
         results.push({
           doNo: d.doNo,
@@ -341,9 +803,13 @@ app.post("/:token/advance", async (c) => {
         orgId,
       );
 
-      // THE office transition path — identical guards + cascades.
+      // THE office transition path — identical guards + cascades. On a
+      // "with issues" deliver, deliveryIncomplete withholds the invoice.
+      const editedItems = editsByDo?.get(d.id) ?? null;
       const res = await applyDeliveryOrderUpdate(c, d.id, {
         status: step.to,
+        ...(incomplete ? { deliveryIncomplete: true } : {}),
+        ...(editedItems ? { items: editedItems } : {}),
       });
       let ok = false;
       let errMsg = "";
@@ -364,6 +830,11 @@ app.post("/:token/advance", async (c) => {
         continue;
       }
       results.push({ doNo: d.doNo, outcome: "DONE", from, to: step.to });
+
+      // Delivered "with issues" → no invoice was created, so there is no
+      // invoice notice to send. The office sends it later on resolve. Dispatch
+      // notices and complete deliveries fall through to the normal queue.
+      if (incomplete) continue;
 
       // Queue the SAME customer notice the office click queues (dispatch
       // notice / invoice notice). Best-effort — the transition is already

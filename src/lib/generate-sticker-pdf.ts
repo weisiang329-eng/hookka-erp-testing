@@ -357,7 +357,11 @@ async function renderStickerLandscape(
   doc.setTextColor(60, 60, 60);
   const wipText = jc.wipLabel || jc.wipCode || order.sizeLabel || "";
   const pieceTag = totalPieces > 1 ? `  ${pieceNo}/${totalPieces}` : "";
-  doc.text(`${wipText}${pieceTag}`, infoX, y);
+  // Clamp long values to the first line that fits — they're single-line rows,
+  // so a long WIP/customer must not run off the right edge (overflow audit
+  // 2026-06-15). splitTextToSize[0] is the widest text that fits the column.
+  const clampW = (t: string) => doc.splitTextToSize(t, pw - infoX - 3)[0] || "";
+  doc.text(clampW(`${wipText}${pieceTag}`), infoX, y);
   y += 3.5;
 
   // SO + customer + fabric on a tighter row
@@ -365,7 +369,7 @@ async function renderStickerLandscape(
   doc.setTextColor(80, 80, 80);
   doc.text(`SO: ${order.companySOId}`, infoX, y);
   y += 3;
-  doc.text(`${order.customerName}`, infoX, y);
+  doc.text(clampW(`${order.customerName || ""}`), infoX, y);
   y += 3;
   doc.text(`Colour: ${order.fabricCode}`, infoX, y);
   y += 3;
@@ -535,7 +539,9 @@ async function renderStickerPortrait(
   const wipText = isFgLevel
     ? order.sizeLabel || order.sizeCode || order.productCode || ""
     : jc.wipLabel || jc.wipCode || "WIP";
-  const wipLines = doc.splitTextToSize(wipText, pw - rightX - 6);
+  // Cap rendered lines to the same 3 we advance `ry` by, so a long WIP can't
+  // print extra lines that overlap the serial below (overflow audit 2026-06-15).
+  const wipLines = doc.splitTextToSize(wipText, pw - rightX - 6).slice(0, 3);
   doc.text(wipLines, rightX, ry);
   ry += 3.6 * Math.min(wipLines.length, 3) + 3;
 

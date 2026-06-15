@@ -85,6 +85,9 @@ type DeliveryOrder = {
   lorryId?: string | null;
   lorryName?: string;
   proofOfDelivery?: ProofOfDelivery | null;
+  // Delivered "with issues" — goods arrived but paperwork incomplete, so the
+  // invoice is on hold until resolved (POST /:id/resolve-incomplete).
+  deliveryIncomplete?: boolean;
 };
 
 type LorryInfo = {
@@ -186,7 +189,11 @@ export default function DeliveryDetailPage() {
           const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
           return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
         },
-        expect: { status: target },
+        // Delivering auto-creates the invoice and bumps the DO straight to
+        // INVOICED, so a DELIVERED advance may settle on either — accept both.
+        expect: {
+          status: target === "DELIVERED" ? ["DELIVERED", "INVOICED"] : target,
+        },
       });
       if (!result.ok) {
         if (result.reason === "mismatch") {
@@ -223,6 +230,67 @@ export default function DeliveryDetailPage() {
     }
   };
 
+  // Resolve a delivered-with-issues DO: clear the hold and create the invoice
+  // that was withheld. Same verified-save discipline as advanceStatus (this
+  // creates an invoice + flips SO/DO to INVOICED — high-stakes billing write).
+  const resolveIncomplete = async () => {
+    if (!order) return;
+    setUpdating(true);
+    try {
+      const result = await verifiedSave<DeliveryOrder>({
+        endpoint: `/api/delivery-orders/${id}/resolve-incomplete`,
+        method: "POST",
+        body: {},
+        readback: async () => {
+          const r = await fetch(`/api/delivery-orders/${id}?_v=${Date.now()}`, {
+            credentials: "include",
+            cache: "no-store",
+          });
+          if (!r.ok) return null;
+          const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
+          return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
+        },
+        expect: { deliveryIncomplete: false },
+      });
+      if (!result.ok) {
+        if (result.reason === "mismatch") {
+          toast.error(formatMismatchError(result.diffs));
+        } else if (result.reason === "http") {
+          let parsedErr = result.body;
+          try {
+            const j = JSON.parse(result.body) as { error?: string };
+            if (j.error) parsedErr = j.error;
+          } catch {
+            /* keep raw body */
+          }
+          toast.error(parsedErr || `Failed to resolve (HTTP ${result.status})`);
+        } else {
+          toast.error(`Save failed: ${result.details}`);
+        }
+        return;
+      }
+      setOrder(result.data);
+      if (id) invalidateCache(`/api/delivery-orders/${id}`);
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/production-orders");
+      toast.success(
+        result.data.status === "INVOICED"
+          ? "Documents marked complete — invoice created."
+          : "Documents marked complete.",
+      );
+    } catch (e) {
+      if (e instanceof FetchJsonError) {
+        const body = e.body as { error?: string } | undefined;
+        toast.error(body?.error || e.message);
+      } else {
+        toast.error(e instanceof Error ? e.message : "Network error");
+      }
+    } finally {
+      setUpdating(false);
+    }
+  };
+
   const handleSubmitPOD = async (pod: ProofOfDelivery) => {
     if (!order) return;
     setUpdating(true);
@@ -247,7 +315,14 @@ export default function DeliveryDetailPage() {
           const j = (await r.json()) as { success?: boolean; data?: DeliveryOrder } | DeliveryOrder;
           return (j as { data?: DeliveryOrder })?.data ?? (j as DeliveryOrder) ?? null;
         },
-        expect: { status: expectStatus },
+        // Delivering auto-creates the invoice and bumps the DO to INVOICED, so
+        // accept either when the POD transitions the DO to DELIVERED.
+        expect: {
+          status:
+            expectStatus === "DELIVERED"
+              ? ["DELIVERED", "INVOICED"]
+              : expectStatus,
+        },
       });
       if (!result.ok) {
         if (result.reason === "mismatch") {
@@ -435,7 +510,18 @@ export default function DeliveryDetailPage() {
                 {flow.icon} {updating ? "Updating..." : flow.label}
               </Button>
             )}
-            {order.status === "DELIVERED" && (
+            {order.status === "DELIVERED" && order.deliveryIncomplete && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => resolveIncomplete()}
+                disabled={updating}
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                {updating ? "Updating..." : "Mark documents complete & invoice"}
+              </Button>
+            )}
+            {order.status === "DELIVERED" && !order.deliveryIncomplete && (
               <Button
                 variant="primary"
                 size="sm"
@@ -449,6 +535,29 @@ export default function DeliveryDetailPage() {
           </>
         }
       />
+
+      {/* Delivered-with-issues hold — goods arrived but paperwork incomplete,
+          invoice withheld until an operator resolves it. */}
+      {order.status === "DELIVERED" && order.deliveryIncomplete && (
+        <div className="flex items-start gap-3 rounded-lg border border-[#E8D3A1] bg-[#FBF1DF] px-4 py-3">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-[#9C6F1E] mt-0.5" />
+          <div className="text-sm">
+            <p className="font-semibold text-[#7A5612]">
+              Delivered with issues — invoice on hold
+            </p>
+            <p className="text-[#9C6F1E] mt-0.5">
+              The goods were delivered but the paperwork was marked incomplete
+              (e.g. damaged or returning items). The sales order and stock are
+              updated, but no invoice has been created. Once the paperwork is
+              sorted, click{" "}
+              <span className="font-medium">
+                “Mark documents complete &amp; invoice”
+              </span>{" "}
+              above to bill it.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Info Cards */}
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">

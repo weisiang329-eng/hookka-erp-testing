@@ -1443,7 +1443,10 @@ function DamagedPartsPicker({
         ? picks.filter((p) => p.key !== opt.key)
         : [
             ...picks,
-            { key: opt.key, label: opt.label, qty: Math.max(1, Math.floor(opt.qty) || 1) },
+            // Default to 1 damaged piece, not the full BOM count (Wei Siang
+            // 2026-06-15: "为什么一点就两个" — usually only one is damaged).
+            // The operator bumps it up to the /N max if more are broken.
+            { key: opt.key, label: opt.label, qty: 1 },
           ],
     );
   };

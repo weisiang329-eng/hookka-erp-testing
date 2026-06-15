@@ -274,7 +274,7 @@ export function RepairScopePicker({
     writeComponentPicks(
       has
         ? picks.filter((p) => p.key !== opt.key)
-        : [...picks, { key: opt.key, label: opt.label, qty: Math.max(1, Math.floor(opt.qty) || 1) }],
+        : [...picks, { key: opt.key, label: opt.label, qty: 1 }],
     );
   };
 

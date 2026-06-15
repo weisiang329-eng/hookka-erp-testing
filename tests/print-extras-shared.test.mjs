@@ -150,7 +150,8 @@ test("piecesFor: SOFA partial repair lists sub-components (was the whole set)", 
       { key: "k3", label: "Headrest", qty: 1 },
     ]),
   });
-  assert.equal(out, "1 Back Cushion + 1 Armrest + 1 Headrest");
+  // Abbreviated to match the WIP sticker / complete-unit style (Wei Siang).
+  assert.equal(out, "1 BC + 1 Arm + 1 HR");
 });
 
 test("piecesFor: component qty × line set-qty (2 sets, 1 HB each → '2 HB')", () => {

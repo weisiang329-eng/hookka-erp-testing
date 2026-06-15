@@ -649,16 +649,32 @@ export function repairScopeBadgeLabel(scope: RepairScope | null): string {
   return base;
 }
 
-// Normalize a repaired-component label so it matches EXACTLY how the same part
-// shows on a complete unit / the WIP stickers (Wei Siang 2026-06-16: keep "HB"
-// as "HB", never "Headboard" — the repair and the full unit must read the same).
-// "Headboard" folds back to "HB"; the other picker labels (Divan, Base, Back
-// Cushion, Armrest, Headrest) already match, so they pass through unchanged.
+// Normalize a repaired-component label to the short form printed on the DO
+// (Wei Siang 2026-06-16): the repaired part must read the SAME way as on a
+// complete unit / the WIP sticker — "1 HB", "1 BC", "1 Arm", never spelled out.
+// Maps the picker's labels to their abbreviations; an unknown label passes
+// through unchanged (and can be added here when a new component appears).
 export function normalizePartLabel(label: string): string {
-  const u = label.trim().toUpperCase();
-  if (u === "HB" || u === "HEADBOARD") return "HB";
-  if (u === "DIVAN") return "Divan";
-  return label.trim();
+  switch (label.trim().toUpperCase()) {
+    case "HB":
+    case "HEADBOARD":
+      return "HB";
+    case "DIVAN":
+      return "Divan";
+    case "BC":
+    case "BACK CUSHION":
+      return "BC";
+    case "ARM":
+    case "ARMREST":
+      return "Arm";
+    case "HR":
+    case "HEADREST":
+      return "HR";
+    case "BASE":
+      return "Base";
+    default:
+      return label.trim();
+  }
 }
 
 // Parts-only summary for the delivery "Repair: …" badge — just the repaired

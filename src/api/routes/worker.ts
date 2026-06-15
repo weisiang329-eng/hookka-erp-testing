@@ -666,6 +666,76 @@ app.post("/clock", async (c) => {
     .first<AttendanceRow>();
 
   if (action === "CLOCK_IN") {
+    // Self-heal a forgotten clock-out: close any PRIOR-day open punch (this
+    // worker, date < today, clocked in but never out) at its shift end — 18:00
+    // by the day's pay rules — running the SAME auto short-hour dock + Working-
+    // Hours autofill a manual clock-out does, so the forgotten day still counts
+    // for pay instead of sitting at 0h. The worker then clocks in fresh today
+    // (state is per calendar day, so this never blocks today's punch). Wei Siang
+    // 2026-06-16. Best-effort — a hiccup must never break the clock-in.
+    try {
+      const stale = await c.var.DB.prepare(
+        "SELECT * FROM attendance_records WHERE employeeId = ? AND date < ? AND clockIn IS NOT NULL AND clockOut IS NULL",
+      )
+        .bind(worker.id, date)
+        .all<AttendanceRow>();
+      const staleRows = stale.results ?? [];
+      if (staleRows.length > 0) {
+        let payRules: Awaited<ReturnType<typeof loadPayRuleVersions>> = [];
+        try {
+          payRules = await loadPayRuleVersions(c.var.DB);
+        } catch {
+          payRules = [];
+        }
+        for (const s of staleRows) {
+          if (!s.clockIn) continue;
+          const rules = toAttendanceRules(
+            resolvePayRulesAsOf(payRules, (s.date || "").slice(0, 10)),
+          );
+          const endMin = rules.endMin;
+          const outTime = `${String(Math.floor(endMin / 60)).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
+          const inMin = hhmmToMinutes(s.clockIn) ?? 0;
+          const total = Math.max(0, endMin - inMin);
+          const prodMin = Math.max(0, Math.round(total * 0.85));
+          const stdMin = (worker.workingHoursPerDay || 9) * 60;
+          const otMin = Math.max(0, total - stdMin);
+          const effPct = stdMin > 0 ? Math.round((prodMin / stdMin) * 100) : 0;
+          await c.var.DB.prepare(
+            `UPDATE attendance_records
+               SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
+                   efficiencyPct = ?, overtimeMinutes = ?,
+                   notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes END
+             WHERE id = ? AND clockOut IS NULL`,
+          )
+            .bind(outTime, total, prodMin, effPct, otMin, "Auto clock-out (forgot to punch out)", s.id)
+            .run();
+          try {
+            await maybeApplyAutoPunchDock(c.var.DB, {
+              workerId: s.employeeId,
+              date: s.date,
+              clockIn: s.clockIn,
+              clockOut: outTime,
+            });
+          } catch {
+            /* best-effort */
+          }
+          try {
+            await autofillWorkingHoursFromPunch(c.var.DB, {
+              attendanceId: s.id,
+              workerId: s.employeeId,
+              date: s.date,
+              clockIn: s.clockIn,
+              clockOut: outTime,
+              homeDeptCode: s.departmentCode,
+            });
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[worker/clock] prior-day auto clock-out skipped:", e);
+    }
     if (existing) {
       // Idempotent — if a clockIn already exists, leave it; just ensure
       // status is PRESENT.

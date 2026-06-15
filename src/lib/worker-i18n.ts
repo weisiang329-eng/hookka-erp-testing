@@ -261,6 +261,36 @@ const dict: Dict = {
     zh: '将摄像头对准二维码或条形码，两种都会自动识别。',
     my: 'ကင်မရာကို QR သို့မဟုတ် ဘားကုဒ်ပေါ် ချိန်ပါ — နှစ်မျိုးလုံး အလိုအလျောက် ဖတ်သည်။',
   },
+  'scan.aimHintBarcode': {
+    en: 'Line up ONE barcode inside the box — only the centred one is read.',
+    ms: 'Jajarkan SATU barkod dalam kotak — hanya yang di tengah dibaca.',
+    zh: '把一个条形码对进框里 —— 只读中间那一条。',
+    my: 'ဘားကုဒ် တစ်ခုကို ဘောင်ထဲ ချိန်ပါ — အလယ်ကသာ ဖတ်သည်။',
+  },
+  'scan.modeQr': {
+    en: 'QR mode',
+    ms: 'Mod QR',
+    zh: '二维码模式',
+    my: 'QR မုဒ်',
+  },
+  'scan.modeBarcode': {
+    en: 'Barcode mode',
+    ms: 'Mod Barkod',
+    zh: '条形码模式',
+    my: 'ဘားကုဒ် မုဒ်',
+  },
+  'scan.switchToBarcode': {
+    en: 'Barcode',
+    ms: 'Barkod',
+    zh: '切换条形码',
+    my: 'ဘားကုဒ်',
+  },
+  'scan.switchToQr': {
+    en: 'QR',
+    ms: 'QR',
+    zh: '切换二维码',
+    my: 'QR',
+  },
   'scan.cancel': {
     en: 'Cancel',
     ms: 'Batal',

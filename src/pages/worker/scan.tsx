@@ -276,6 +276,12 @@ export default function WorkerScanPage() {
   // denied, no camera) we show a message and the user can still use the
   // Take photo / Upload fallbacks.
   const [liveScanning, setLiveScanning] = useState(false);
+  // Scan mode (Wei Siang 2026-06-16): the square QR reticle framed 2-3 of the
+  // schedule's stacked Code 128 rows at once and couldn't lock onto any. A
+  // dedicated "barcode" mode draws a WIDE, short reticle and decodes ONLY the
+  // code centred in that horizontal band — so the worker aims at one barcode and
+  // the other rows are ignored. "qr" mode keeps the square full-frame behaviour.
+  const [scanMode, setScanMode] = useState<"qr" | "barcode">("qr");
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -938,6 +944,17 @@ export default function WorkerScanPage() {
       zoomRange = null;
     }
     const scanStartedAt = performance.now();
+    // Reset the lens to its widest on every (re)start so toggling modes doesn't
+    // inherit the previous mode's zoom — a zoomed-in lens crops a wide barcode.
+    if (zoomRange && zoomTrack) {
+      try {
+        void zoomTrack.applyConstraints({
+          advanced: [{ zoom: zoomRange.min } as unknown as MediaTrackConstraintSet],
+        });
+      } catch {
+        /* best-effort */
+      }
+    }
 
     const onHit = (data: string) => {
       if (stopped || !data) return;
@@ -959,7 +976,26 @@ export default function WorkerScanPage() {
           try {
             const codes = await nativeDetector.detect(video);
             if (stopped) return;
-            if (codes.length > 0 && codes[0].rawValue) {
+            if (scanMode === "barcode") {
+              // Only a Code 128 whose vertical centre sits in the aim band, and
+              // the nearest one to centre wins — so 2-3 stacked schedule barcodes
+              // in view don't all fire; the row the worker aimed at is taken.
+              const cy = video.videoHeight / 2;
+              const band = video.videoHeight * 0.18;
+              let best: { v: string; d: number } | null = null;
+              for (const c of codes) {
+                const bb = (c as { boundingBox?: { y: number; height: number } })
+                  .boundingBox;
+                const fmt = (c as { format?: string }).format;
+                if (!c.rawValue || fmt !== "code_128" || !bb) continue;
+                const d = Math.abs(bb.y + bb.height / 2 - cy);
+                if (d <= band && (!best || d < best.d)) best = { v: c.rawValue, d };
+              }
+              if (best) {
+                onHit(best.v);
+                return;
+              }
+            } else if (codes.length > 0 && codes[0].rawValue) {
               onHit(codes[0].rawValue);
               return;
             }
@@ -970,64 +1006,98 @@ export default function WorkerScanPage() {
         } else {
           const vw = video.videoWidth;
           const vh = video.videoHeight;
-          // Keep more detail than before (960px vs 640px) so small stickers
-          // held at arm's length still resolve their finder patterns.
-          const scale = Math.min(1, 960 / Math.max(vw, vh));
-          const cw = Math.max(1, Math.round(vw * scale));
-          const ch = Math.max(1, Math.round(vh * scale));
-          canvas.width = cw;
-          canvas.height = ch;
           const ctx = canvas.getContext("2d", { willReadFrequently: true });
           if (ctx) {
-            ctx.drawImage(video, 0, 0, cw, ch);
-            let imageData: ImageData | null = null;
-            try {
-              imageData = ctx.getImageData(0, 0, cw, ch);
-            } catch {
-              // CORS-tainted canvas — shouldn't happen with local video,
-              // but guard anyway so the loop doesn't die.
-              imageData = null;
-            }
-            if (imageData) {
-              // attemptBoth also reads inverted (light-on-dark) prints; the
-              // small extra cost is worth the higher hit rate on a phone.
-              const code = jsQR(imageData.data, cw, ch, {
-                inversionAttempts: "attemptBoth",
-              });
-              if (code && code.data) {
-                onHit(code.data);
-                return;
+            if (scanMode === "barcode") {
+              // Decode ONLY a wide, short central band (matches the reticle) so a
+              // single Code 128 is in view — 1D codes scan far better from a tight
+              // strip, and the other stacked rows are cropped out. Keep width
+              // detail (1280px) since Code 128 density runs horizontally.
+              const bandH = Math.max(1, Math.round(vh * 0.2));
+              const y0 = Math.round((vh - bandH) / 2);
+              const s = Math.min(1, 1280 / vw);
+              const cw = Math.max(1, Math.round(vw * s));
+              const ch = Math.max(1, Math.round(bandH * s));
+              canvas.width = cw;
+              canvas.height = ch;
+              ctx.drawImage(video, 0, y0, vw, bandH, 0, 0, cw, ch);
+              let imageData: ImageData | null = null;
+              try {
+                imageData = ctx.getImageData(0, 0, cw, ch);
+              } catch {
+                imageData = null;
               }
-              // jsQR is QR-only — ZXing adds Code 128 (and QR) on the fallback
-              // path (iOS/older browsers). Loaded lazily; null until ready.
+              // jsQR is QR-only — skip it; ZXing reads the Code 128 in the band.
               const zxDecode = zxingRef.current;
-              if (zxDecode) {
+              if (imageData && zxDecode) {
                 const zxText = zxDecode(imageData);
                 if (zxText) {
                   onHit(zxText);
                   return;
                 }
               }
+            } else {
+              // QR mode: full frame, jsQR first then ZXing (reads QR + Code 128).
+              // Keep more detail (960px) so small stickers at arm's length still
+              // resolve their finder patterns.
+              const scale = Math.min(1, 960 / Math.max(vw, vh));
+              const cw = Math.max(1, Math.round(vw * scale));
+              const ch = Math.max(1, Math.round(vh * scale));
+              canvas.width = cw;
+              canvas.height = ch;
+              ctx.drawImage(video, 0, 0, cw, ch);
+              let imageData: ImageData | null = null;
+              try {
+                imageData = ctx.getImageData(0, 0, cw, ch);
+              } catch {
+                // CORS-tainted canvas — shouldn't happen with local video,
+                // but guard anyway so the loop doesn't die.
+                imageData = null;
+              }
+              if (imageData) {
+                // attemptBoth also reads inverted (light-on-dark) prints; the
+                // small extra cost is worth the higher hit rate on a phone.
+                const code = jsQR(imageData.data, cw, ch, {
+                  inversionAttempts: "attemptBoth",
+                });
+                if (code && code.data) {
+                  onHit(code.data);
+                  return;
+                }
+                // jsQR is QR-only — ZXing adds Code 128 (and QR) on the fallback
+                // path (iOS/older browsers). Loaded lazily; null until ready.
+                const zxDecode = zxingRef.current;
+                if (zxDecode) {
+                  const zxText = zxDecode(imageData);
+                  if (zxText) {
+                    onHit(zxText);
+                    return;
+                  }
+                }
+              }
             }
           }
         }
       }
-      // Adaptive zoom-on-fail: after the worker has been pointing at a code for
-      // a while with no decode, step the lens zoom up so a small / dense Code 128
-      // fills more of the frame. Time-guarded so an easy code (decoded in the
-      // first ~1.8s) never zooms — see the zoom setup above.
+      // Adaptive zoom-on-fail — QR mode ONLY. Zoom crops a wide barcode's ends,
+      // so barcode mode never zooms (the worker fills the band by moving closer).
+      // Gentler than before (Wei Siang 2026-06-16: "zoom 过头了"): caps at 35% of
+      // range and steps 12%, so it nudges a small QR into focus without tunnelling
+      // past the code. Time-guarded so an easy code (decoded in the first ~1.8s)
+      // never zooms.
       if (
+        scanMode === "qr" &&
         zoomRange &&
         zoomTrack &&
         now - scanStartedAt > 1800 &&
         now - lastZoomAt > 1100
       ) {
-        const cap = zoomRange.min + (zoomRange.max - zoomRange.min) * 0.6;
+        const cap = zoomRange.min + (zoomRange.max - zoomRange.min) * 0.35;
         if (curZoom < cap) {
           lastZoomAt = now;
           curZoom = Math.min(
             cap,
-            curZoom + (zoomRange.max - zoomRange.min) * 0.2,
+            curZoom + (zoomRange.max - zoomRange.min) * 0.12,
           );
           try {
             void zoomTrack.applyConstraints({
@@ -1049,7 +1119,10 @@ export default function WorkerScanPage() {
         rafRef.current = null;
       }
     };
-  }, [liveScanning, handleDecoded, stopLiveScan, ensureZxing]);
+    // scanMode in deps: toggling QR<->Barcode tears down + restarts THIS loop
+    // (the stream persists — startLiveScan owns it), so the new mode's decode
+    // path + reticle take effect immediately.
+  }, [liveScanning, handleDecoded, stopLiveScan, ensureZxing, scanMode]);
 
   // Make sure we tear down the stream if the component unmounts mid-scan.
   useEffect(() => {
@@ -1877,15 +1950,32 @@ export default function WorkerScanPage() {
       {liveScanning && (
         <div className="fixed inset-0 z-50 bg-black flex flex-col">
           <div className="flex items-center justify-between px-4 py-3 text-white">
-            <span className="text-sm font-semibold">{t("scan.liveScan")}</span>
-            <button
-              type="button"
-              onClick={stopLiveScan}
-              className="h-9 w-9 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"
-              aria-label={t("scan.cancel")}
-            >
-              <X className="h-5 w-5" />
-            </button>
+            <span className="text-sm font-semibold">
+              {scanMode === "barcode" ? t("scan.modeBarcode") : t("scan.modeQr")}
+            </span>
+            <div className="flex items-center gap-2">
+              {/* Switch between the square QR scanner and the wide 1D-barcode
+                  scanner (Wei Siang 2026-06-16). */}
+              <button
+                type="button"
+                onClick={() =>
+                  setScanMode((m) => (m === "qr" ? "barcode" : "qr"))
+                }
+                className="h-9 px-3 rounded-full bg-white/15 active:bg-white/25 text-xs font-semibold"
+              >
+                {scanMode === "qr"
+                  ? t("scan.switchToBarcode")
+                  : t("scan.switchToQr")}
+              </button>
+              <button
+                type="button"
+                onClick={stopLiveScan}
+                className="h-9 w-9 rounded-full bg-white/10 active:bg-white/20 flex items-center justify-center"
+                aria-label={t("scan.cancel")}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
           </div>
           <div className="relative flex-1 overflow-hidden">
             <video
@@ -1894,21 +1984,32 @@ export default function WorkerScanPage() {
               playsInline
               muted
             />
-            {/* Aiming frame */}
+            {/* Aiming frame — square for QR, wide + short for a 1D barcode (with a
+                centre aim line). In barcode mode the decoder reads ONLY the code
+                centred in this band, so the other stacked rows are ignored. */}
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div
                 className="relative"
-                style={{ width: "min(70vw, 70vh)", aspectRatio: "1 / 1" }}
+                style={
+                  scanMode === "barcode"
+                    ? { width: "86vw", maxWidth: "440px", height: "118px" }
+                    : { width: "min(70vw, 70vh)", aspectRatio: "1 / 1" }
+                }
               >
                 <span className="absolute left-0 top-0 h-10 w-10 border-t-4 border-l-4 border-white rounded-tl-lg" />
                 <span className="absolute right-0 top-0 h-10 w-10 border-t-4 border-r-4 border-white rounded-tr-lg" />
                 <span className="absolute left-0 bottom-0 h-10 w-10 border-b-4 border-l-4 border-white rounded-bl-lg" />
                 <span className="absolute right-0 bottom-0 h-10 w-10 border-b-4 border-r-4 border-white rounded-br-lg" />
+                {scanMode === "barcode" && (
+                  <span className="absolute left-3 right-3 top-1/2 -translate-y-1/2 h-0.5 bg-red-500/80" />
+                )}
               </div>
             </div>
           </div>
           <div className="px-4 py-3 text-white/90 text-center text-sm">
-            {t("scan.aimHint")}
+            {scanMode === "barcode"
+              ? t("scan.aimHintBarcode")
+              : t("scan.aimHint")}
           </div>
         </div>
       )}

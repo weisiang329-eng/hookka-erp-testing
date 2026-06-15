@@ -3272,13 +3272,14 @@ function PLStatementTab() {
   /* eslint-enable react-hooks/exhaustive-deps */
 
   const moveTo = async (code: string, bucket: string) => {
+    const prev = pmap;
     const next = { ...pmap, [code]: bucket };
     setPmap(next);
     try {
       const res = await fetch("/api/accounting/pnl/section-map", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ map: next }) });
       const j = (await res.json()) as { success?: boolean };
-      if (j?.success) { toast.success("P&L mapping updated"); load(); } else toast.error("Save failed");
-    } catch { toast.error("Save failed"); }
+      if (j?.success) { toast.success("P&L mapping updated"); load(); } else { setPmap(prev); toast.error("Save failed"); }
+    } catch { setPmap(prev); toast.error("Save failed"); }
   };
 
   // L-level button: collapse every group whose depth >= L-1.

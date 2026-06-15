@@ -2972,6 +2972,9 @@ function PLStatementTab() {
     { k: "bedframe", label: "Bedframe P&L" },
   ];
 
+  // Phase 5.5 — grouped period selector: Monthly + Accumulated (quarters,
+  // half-years, full year). Values are the period strings the /pl-statement
+  // endpoint already understands (YYYY-MM, YYYY-Qn, YYYY).
   const months: string[] = [];
   {
     const now = new Date();
@@ -2980,6 +2983,8 @@ function PLStatementTab() {
       months.push(d.toISOString().slice(0, 7));
     }
   }
+  const yrNow = new Date().getUTCFullYear();
+  const years = [yrNow, yrNow - 1];
 
   return (
     <div className="space-y-4">
@@ -2989,7 +2994,15 @@ function PLStatementTab() {
         ))}
         <div className="ml-auto flex items-center gap-2">
           <select value={period} onChange={(e) => setPeriod(e.target.value)} className="rounded-md border border-[#E2DDD8] bg-white px-3 py-1.5 text-sm">
-            {months.map((m) => <option key={m} value={m}>{m}</option>)}
+            <optgroup label="Monthly">
+              {months.map((m) => <option key={m} value={m}>{m}</option>)}
+            </optgroup>
+            <optgroup label="Quarter">
+              {years.flatMap((yr) => [1, 2, 3, 4].map((q) => <option key={`${yr}-Q${q}`} value={`${yr}-Q${q}`}>Q{q} {yr}</option>))}
+            </optgroup>
+            <optgroup label="Full year">
+              {years.map((yr) => <option key={`${yr}`} value={`${yr}`}>Full Year {yr}</option>)}
+            </optgroup>
           </select>
           {[1, 2, 3, 4].map((L) => (
             <button key={L} onClick={() => applyLevel(rows, L)} className={`rounded-md border px-3 py-1.5 text-sm cursor-pointer ${level === L ? "bg-[#6B5C32] text-white border-[#6B5C32]" : "bg-white text-[#4B5563] border-[#E2DDD8] hover:bg-[#F0ECE9]"}`}>L{L}</button>
